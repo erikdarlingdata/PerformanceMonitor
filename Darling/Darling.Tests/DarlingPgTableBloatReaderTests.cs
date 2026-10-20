@@ -279,7 +279,7 @@ public class DarlingPgTableBloatReaderTests
         var finding = DarlingMcpPgTableBloatTools.DeadTupleFinding(150_000, 50_000);
 
         Assert.Contains("25%", finding, StringComparison.Ordinal);
-        Assert.Contains("MEASURED", finding, StringComparison.Ordinal);
+        Assert.Contains("measured", finding, StringComparison.Ordinal);
         Assert.Contains("NARROWER", finding, StringComparison.Ordinal);
     }
 

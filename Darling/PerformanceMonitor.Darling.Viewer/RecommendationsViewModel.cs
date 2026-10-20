@@ -147,6 +147,12 @@ public sealed class RecommendationItem
 
     /// <summary>UTC end of the finding's time window (analysis TimeRangeEnd), or null.</summary>
     public DateTime? WindowEndUtc { get; init; }
+
+    /// <summary>The finding's root fact key, which says where on a PostgreSQL server its link goes (#6134).</summary>
+    public string RootFactKey { get; init; } = string.Empty;
+
+    /// <summary>True when the finding's server runs PostgreSQL (#6134): its link must not open a SQL Server tab.</summary>
+    public bool IsPostgres { get; init; }
 }
 
 /// <summary>
@@ -276,7 +282,20 @@ public sealed class RecommendationCardViewModel
     /// needs both.
     /// </summary>
     public bool ShowOpenInActiveQueries =>
-        IsIncident && Item.ServerId != 0 && Item.WindowStartUtc.HasValue && Item.WindowEndUtc.HasValue;
+        IsIncident && Item.ServerId != 0 && Item.WindowStartUtc.HasValue && Item.WindowEndUtc.HasValue
+        && LinkTarget != RecommendationLinkTarget.None;
+
+    /// <summary>
+    /// Where the deep-link goes for this finding's engine (#6134): Active Queries on SQL Server, the PostgreSQL
+    /// Activity tab on PostgreSQL, or none when this PostgreSQL server has no matching view.
+    /// </summary>
+    public RecommendationLinkTarget LinkTarget => RecommendationDeepLink.Resolve(Item.IsPostgres, Item.RootFactKey);
+
+    /// <summary>The link button's label for this finding's engine.</summary>
+    public string OpenLinkLabel => RecommendationDeepLink.Label(LinkTarget);
+
+    /// <summary>The link button's tooltip for this finding's engine.</summary>
+    public string OpenLinkToolTip => RecommendationDeepLink.ToolTip(LinkTarget);
 
     /// <summary>
     /// The UTC window the deep-link scopes Active Queries to: the finding's own window when it carries a
@@ -501,7 +520,7 @@ public sealed class RecommendationsViewModel
     public static RecommendationsViewModel FromFindings(
         IReadOnlyList<ViewerFindingRow> rows, string serverName, ServerClock? serverClock = null,
         bool insufficientData = false, string? insufficientDataMessage = null,
-        bool windowEmpty = false, string? windowEmptyMessage = null)
+        bool windowEmpty = false, string? windowEmptyMessage = null, bool isPostgres = false)
     {
         if (rows is null || rows.Count == 0)
             return ZeroFindingState(insufficientData, insufficientDataMessage, windowEmpty, windowEmptyMessage);
@@ -511,7 +530,7 @@ public sealed class RecommendationsViewModel
         {
             if (row is null)
                 continue;
-            items.Add(MapItem(row, serverName));
+            items.Add(MapItem(row, serverName, isPostgres));
         }
 
         if (items.Count == 0)
@@ -547,7 +566,7 @@ public sealed class RecommendationsViewModel
     /// root fact key; copy-paste SQL comes from the PERSISTED remediation action
     /// (<see cref="BuildCopyPasteSql"/>). Exposed <c>internal</c> for tests.
     /// </summary>
-    internal static RecommendationItem MapItem(ViewerFindingRow row, string serverName)
+    internal static RecommendationItem MapItem(ViewerFindingRow row, string serverName, bool isPostgres = false)
     {
         var finding = row.Finding;
         var advice = FactAdvice.GetComposedForFinding(finding);
@@ -558,14 +577,20 @@ public sealed class RecommendationsViewModel
             RawSeverity = row.RawSeverity,
             Database = string.IsNullOrEmpty(row.DatabaseName) ? null : row.DatabaseName,
             Title = row.Title,
-            AdviceText = ComposeAdvice(advice),
+            // #6135: the PostgreSQL blocks are written for agents too (tool names, how the engine judged it).
+            // The card keeps what happened and what to do; MCP readers still get the whole block.
+            AdviceText = PgTargetAdvice.IsPgKey(finding.RootFactKey)
+                ? ComposeShortPostgresAdvice(advice)
+                : ComposeAdvice(advice),
             CopyPasteSql = BuildCopyPasteSql(finding.Remediation),
             Remediation = finding.Remediation,
             IncidentId = finding.IncidentId,
             ServerName = serverName ?? string.Empty,
             ServerId = finding.ServerId,
             WindowStartUtc = AsUtc(finding.TimeRangeStart),
-            WindowEndUtc = AsUtc(finding.TimeRangeEnd)
+            WindowEndUtc = AsUtc(finding.TimeRangeEnd),
+            RootFactKey = finding.RootFactKey ?? string.Empty,
+            IsPostgres = isPostgres
         };
     }
 
@@ -604,6 +629,47 @@ public sealed class RecommendationsViewModel
         }
 
         return sb.Length == 0 ? null : sb.ToString();
+    }
+
+    /// <summary>
+    /// #6135: the card text for a PostgreSQL finding: one line of what was seen (the investigation's first
+    /// sentence) and up to two sentences of what to do (the remediation's first). A sentence that names an MCP
+    /// tool or an internal term is dropped whole, not trimmed, so no half sentence is left. The finding's
+    /// title already says what happened in a line; the full block stays in the MCP and agent reads.
+    /// Null when nothing is left to show.
+    /// </summary>
+    internal static string? ComposeShortPostgresAdvice(AdviceBlock? advice)
+    {
+        if (advice is null)
+            return null;
+
+        var seen = FirstPlainSentences(advice.Investigation, 1);
+        var todo = FirstPlainSentences(advice.Remediation, 2);
+        if (seen.Length == 0 && todo.Length == 0)
+            return null;
+        if (seen.Length == 0)
+            return todo;
+        return todo.Length == 0 ? seen : seen + "\n" + todo;
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex s_sentenceBreak =
+        new(@"(?<=[.!?])\s+(?=[A-Z0-9])", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    /// <summary>MCP tool names (get_pg_...) and the agent-side vocabulary a viewer reader has no use for.</summary>
+    private static readonly System.Text.RegularExpressions.Regex s_agentOnlyTerm =
+        new(@"\bget_[a-z0-9_]+|\bMCP\b|\bFALLBACK\b|\bfleet\b|\bfifty\b|\bagents?\b",
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant | System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+    private static string FirstPlainSentences(string? text, int count)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return string.Empty;
+
+        var kept = s_sentenceBreak.Split(text.Trim())
+            .Select(x => x.Trim())
+            .Where(x => x.Length > 0 && !s_agentOnlyTerm.IsMatch(x))
+            .Take(count);
+        return string.Join(" ", kept);
     }
 
     /// <summary>
@@ -723,8 +789,19 @@ public sealed class RecommendationsViewModel
     }
 
     /// <summary>
+    /// #6135: the status line with the Overview card's offline sentence after it for an offline server, so findings
+    /// from the last collection do not read as current. Unchanged for a server that is not offline.
+    /// </summary>
+    internal static string WithOfflineNote(string status, bool offline)
+    {
+        if (!offline)
+            return status;
+        return string.IsNullOrEmpty(status) ? FleetRollup.OfflineNote : status + ". " + FleetRollup.OfflineNote;
+    }
+
+    /// <summary>
     /// The Recommendations tab's status line: when the newest analysis batch ran, in the display mode the user
-    /// picked and followed by that mode's zone, so "10:00:00 (UTC-4:00)", "14:00:00 (UTC)" and a local time
+    /// picked and followed by that mode's zone, so "10:00:00 (UTC-04:00)", "14:00:00 (UTC)" and a local time
     /// with the machine's zone name cannot be read as one another (#4766). It used to end in a fixed "(local)",
     /// which was wrong in Server and UTC modes. The time is converted on <paramref name="serverClock"/>, the
     /// selected server's own clock, not the process-wide clock the last server tab set (another server's, when

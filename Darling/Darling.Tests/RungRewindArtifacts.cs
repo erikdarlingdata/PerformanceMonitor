@@ -360,6 +360,16 @@ CREATE OR REPLACE VIEW collect.v_dmv_blocking_snapshots AS SELECT * FROM collect
         new(200, "hasExcludedVolumes",
             @"
 ALTER TABLE IF EXISTS config.config_alert_settings DROP COLUMN IF EXISTS excluded_volumes;"),
+
+        // /// V201 (#6160): the variant and plan-guide columns on the forced-plan capture. The last column is the probe's newest sentinel. The
+        // rewind drops all four, so a re-run of V201 adds them again. Safe on a store that never had them.
+        new(201, "hasForcedPlanVariantsAndGuides",
+            @"
+ALTER TABLE IF EXISTS collect.query_store_forced_plans
+    DROP COLUMN IF EXISTS variant_plan_ids,
+    DROP COLUMN IF EXISTS plan_guide_name,
+    DROP COLUMN IF EXISTS plan_guide_enabled,
+    DROP COLUMN IF EXISTS plan_guide_scope;"),
     ];
 
     /// <summary>

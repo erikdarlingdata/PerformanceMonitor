@@ -118,7 +118,7 @@ public partial class ViewerServerTab
     private string PanelNote(string collectorName, int rowCount, string healthyEmptyText)
     {
         var gap = CollectorEngineCapability.NotCollectedMessage(
-            _server.ServerName, _server.EngineEdition, _server.EngineKind, collectorName);
+            _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName);
 
         if (gap is not null)
         {
@@ -132,7 +132,7 @@ public partial class ViewerServerTab
     /// spend a round trip proving a permanent gap is still permanent.</summary>
     private bool PgCollectorIsGatedOff(string collectorName) =>
         CollectorEngineCapability.NotCollectedMessage(
-            _server.ServerName, _server.EngineEdition, _server.EngineKind, collectorName) is not null;
+            _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName) is not null;
 
     // ─────────────────────────────────────────────────────────────────────────────────────────────
     // Tab loaders
@@ -281,6 +281,42 @@ public partial class ViewerServerTab
                   + "server is still using the previous value. The file and the server disagree until the "
                   + "next restart, at which point behaviour changes with no deployment to explain it."
                 : string.Empty);
+    }
+
+    /// <summary>The Blocking sub-tab of <c>PgActivitySubTabs</c> (its first).</summary>
+    private const int PgBlockingSubTabIndex = 0;
+
+    /// <summary>The Query Shapes sub-tab of <c>PgActivitySubTabs</c> (its third, after Blocking and Locks).</summary>
+    private const int PgQueryShapesSubTabIndex = 2;
+
+    /// <summary>
+    /// #6134: a recommendation's deep link on a PostgreSQL server: scope the toolbar to the finding's window, show the
+    /// Activity tab on the sub-tab for the finding, and load it over that window. The same steps
+    /// <see cref="DeepLinkToIncidentAsync"/> takes for SQL Server: hold the window, switch the tabs under
+    /// <see cref="_suppressDrillDownAutoRefresh"/> so the tab-switch refresh does not race the targeted read, then load.
+    /// </summary>
+    internal async Task DeepLinkToPgActivityAsync(RecommendationLinkTarget target, DateTime fromUtc, DateTime toUtc)
+    {
+        SetToolbarWindowUtc(fromUtc, toUtc);
+        _suppressDrillDownAutoRefresh = true;
+        try
+        {
+            InnerTabs.SelectedIndex = PgActivityInnerTabIndex;
+            PgActivitySubTabs.SelectedIndex = target == RecommendationLinkTarget.PgBlocking
+                ? PgBlockingSubTabIndex
+                : PgQueryShapesSubTabIndex;
+        }
+        finally
+        {
+            _suppressDrillDownAutoRefresh = false;
+        }
+
+        /* This server's clock, so the picker draws the held window in the tab's display zone. */
+        await RefreshServerClockAsync();
+        ApplyServerClockToHelper();
+        RefreshRangePicker();
+
+        await LoadPgActivityAsync();
     }
 
     /// <summary>
@@ -1306,5 +1342,43 @@ public partial class ViewerServerTab
                  are withheld by the privilege filter reads as a ranking of the server, and the operator has
                  no way to see the difference from the grid itself. */
               + coverage.Message;
+    }
+
+    /// <summary>
+    /// #6133: the Vacuum tab scrolls as a page and each of its grids scrolls inside. A DataGrid marks the
+    /// mouse wheel handled even when it has nothing left to scroll, so over a grid the page would not move.
+    /// Pass the wheel to the page unless the grid under the pointer can still scroll that way itself.
+    /// </summary>
+    private void PgVacuumScroll_PreviewMouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e)
+    {
+        if (sender is not ScrollViewer page || e.Handled)
+        {
+            return;
+        }
+
+        ScrollViewer? inner = null;
+        for (DependencyObject? d = e.OriginalSource as DependencyObject;
+             d != null && !ReferenceEquals(d, page);
+             d = System.Windows.Media.VisualTreeHelper.GetParent(d))
+        {
+            if (d is ScrollViewer sv)
+            {
+                inner = sv;
+                break;
+            }
+        }
+
+        if (inner != null && inner.ScrollableHeight > 0)
+        {
+            bool atTop = inner.VerticalOffset <= 0;
+            bool atBottom = inner.VerticalOffset >= inner.ScrollableHeight;
+            if ((e.Delta > 0 && !atTop) || (e.Delta < 0 && !atBottom))
+            {
+                return;
+            }
+        }
+
+        page.ScrollToVerticalOffset(page.VerticalOffset - e.Delta);
+        e.Handled = true;
     }
 }

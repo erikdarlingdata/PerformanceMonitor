@@ -148,7 +148,7 @@ public sealed class DarlingMcpPgDatabaseTools
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
@@ -168,13 +168,13 @@ public sealed class DarlingMcpPgDatabaseTools
 
             if (page.Rows.Count == 0)
             {
-                return await EmptyAsync(postgres, resolved.ServerId, resolved.ServerName, hours_back, start, end, logger, cancellationToken);
+                return await EmptyAsync(postgres, resolved.ServerId, resolved.ServerName, resolved.DisplayName, hours_back, start, end, logger, cancellationToken);
             }
 
             /* #4966: decided after the empty branch, whose not-collected answer carries no notice. */
             var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
                 postgres, "get_pg_database_stats", resolved.ServerName, start, end, emptyAnswer: false, logger, cancellationToken);
-            return BuildDatabaseStatsJson(resolved.ServerName, hours_back, page, limit, notice);
+            return BuildDatabaseStatsJson(resolved.DisplayName, hours_back, page, limit, notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -357,7 +357,7 @@ public sealed class DarlingMcpPgDatabaseTools
     /// the next cycle to land.</para>
     /// </summary>
     private static async Task<string> EmptyAsync(
-        NpgsqlDataSource postgres, int serverId, string serverName, int hoursBack, DateTime start, DateTime end,
+        NpgsqlDataSource postgres, int serverId, string serverName, string displayName, int hoursBack, DateTime start, DateTime end,
         ILogger? logger, CancellationToken cancellationToken = default)
     {
         var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
@@ -372,7 +372,7 @@ public sealed class DarlingMcpPgDatabaseTools
 
         var hints = new
         {
-            server = serverName,
+            server = displayName,
             hours_back = hoursBack,
             samples_in_window = samplesInWindow >= 2 ? "2+" : samplesInWindow.ToString(CultureInfo.InvariantCulture),
             ever_collected = everCollected,
@@ -387,7 +387,7 @@ public sealed class DarlingMcpPgDatabaseTools
                 "empty",
                 McpHelpers.QuietUnlessCut(
                     notice.WindowTruncated, notice.EffectiveStart,
-                    factual: $"No database recorded transactions, block accesses, temp files or deadlocks for {serverName} "
+                    factual: $"No database recorded transactions, block accesses, temp files or deadlocks for {displayName} "
                         + $"in the last {hoursBack} hour(s), and no statistics reset either. Collection DID run over "
                         + "this window - at least two snapshots exist to difference",
                     coveredClaim: " - so this is a genuine all-clear "
@@ -406,25 +406,25 @@ public sealed class DarlingMcpPgDatabaseTools
 
         if (samplesInWindow == 1)
         {
-            return McpHelpers.Status(
-                "unavailable",
-                $"Only ONE pg_stat_database snapshot exists for {serverName} in the last {hoursBack} hour(s), "
+            return await DarlingServerOfflineNote.UnavailableAsync(
+                postgres, serverId, displayName,
+                $"Only ONE pg_stat_database snapshot exists for {displayName} in the last {hoursBack} hour(s), "
                 + "so this is NOT a report of a quiet server. These are cumulative counters and a windowed "
                 + "difference needs two snapshots before it produces anything at all. On a newly added "
                 + "server this clears itself on the next collection cycle; otherwise widen hours_back.",
-                hints);
+                hints, cancellationToken);
         }
 
-        return McpHelpers.Status(
-            "unavailable",
+        return await DarlingServerOfflineNote.UnavailableAsync(
+            postgres, serverId, displayName,
             everCollected
-                ? $"No pg_stat_database snapshots were collected for {serverName} in the last {hoursBack} "
+                ? $"No pg_stat_database snapshots were collected for {displayName} in the last {hoursBack} "
                 + "hour(s), so this is NOT an all-clear - the window says nothing either way. Collection HAS "
                 + "run for this server outside the window, so this is a gap rather than a dead collector: "
                 + "widen hours_back, or use get_collection_health to find where it stopped."
-                : $"No pg_stat_database snapshots have EVER been collected for {serverName}, so there is "
+                : $"No pg_stat_database snapshots have EVER been collected for {displayName}, so there is "
                 + "nothing to read and this is NOT a report of a quiet server. Check that collection is "
                 + "running for this server and that it is enabled.",
-            hints);
+            hints, cancellationToken);
     }
 }

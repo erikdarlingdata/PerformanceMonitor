@@ -38,7 +38,7 @@ public sealed class DarlingMcpPgStatementTools
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
@@ -64,7 +64,7 @@ public sealed class DarlingMcpPgStatementTools
                    cause, and a row whose engine_kind is NULL, where no claim can be made. It names those
                    two rather than repeating the ones that can no longer reach this line. */
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_statement_stats", cancellationToken)
+                    postgres, resolved.ServerId, resolved.DisplayName, "pg_statement_stats", cancellationToken)
                     /* #2546: the sentence below tells the reader to go and CHECK whether pg_stat_statements
                        is installed in the connected database. The collector has already checked — a 42P01
                        against a database where the extension was never created classifies as a non-fatal
@@ -73,9 +73,9 @@ public sealed class DarlingMcpPgStatementTools
                        mutable at runtime, so nothing decided at connect time could report it and then stop
                        reporting it when somebody acts on the advice. */
                     ?? await DarlingRuntimePrecondition.StatusAsync(
-                        postgres, resolved.ServerId, resolved.ServerName, "pg_statement_stats", cancellationToken)
-                    ?? McpHelpers.Status(
-                        "unavailable",
+                        postgres, resolved.ServerId, resolved.DisplayName, "pg_statement_stats", cancellationToken)
+                    ?? await DarlingServerOfflineNote.UnavailableAsync(
+                        postgres, resolved.ServerId, resolved.DisplayName,
                         "No PostgreSQL query statistics for this server and window. Check that "
                         + "pg_stat_statements is installed in the database the collector connects to — it is "
                         + "not installed by default, and on some clusters it exists only in the application "
@@ -83,7 +83,7 @@ public sealed class DarlingMcpPgStatementTools
                         + "counters here are per-interval deltas, so the first collection after a restart has "
                         + "nothing to difference against and the window fills on the second. If the server is "
                         + "offline, nothing is being collected from it. Otherwise the store has not yet learned "
-                        + "that it is a PostgreSQL server — check list_servers.");
+                        + "that it is a PostgreSQL server — check list_servers.", cancellationToken);
             }
 
             var evictions = await DarlingPgStatementReader.GetEvictionInfoAsync(
@@ -92,7 +92,7 @@ public sealed class DarlingMcpPgStatementTools
                not-collected branch above, which carries no notice. */
             var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
                 postgres, "get_pg_top_queries", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: false, logger, cancellationToken);
-            return BuildTopQueriesJson(resolved.ServerName, hours_back, page, limit, evictions, notice);
+            return BuildTopQueriesJson(resolved.DisplayName, hours_back, page, limit, evictions, notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -116,7 +116,7 @@ public sealed class DarlingMcpPgStatementTools
                unless the collector provably cannot run on this server's engine, so a transient error against
                an Aurora target still surfaces as an error. */
             var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
-                postgres, resolved.ServerId, resolved.ServerName, "pg_statement_stats", cancellationToken);
+                postgres, resolved.ServerId, resolved.DisplayName, "pg_statement_stats", cancellationToken);
             if (gated != null)
             {
                 return gated;

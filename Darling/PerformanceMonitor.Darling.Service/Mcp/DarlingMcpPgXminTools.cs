@@ -58,7 +58,7 @@ public sealed class DarlingMcpPgXminTools
         _ => "Unrecognized holder source.",
     };
 
-    [McpServerTool(Name = "get_pg_xmin_horizon"), Description("What holds back PostgreSQL's xmin horizon, by cause: session, replication slot, logical slot (catalog_xmin), standby feedback, or prepared transaction - identical symptoms, different fixes, for bloat growing while autovacuum looks normal. Reports the oldest holder per source and the current winner. pct_of_window_winning = samples_as_winner / captures_in_window: EVERY capture in the window, not just captures with a holder. Blocks freezing; feeds get_pg_wraparound_risk. no_holder: captured, found nothing - all-clear. unavailable: no capture in the window. <<GUIDE>> Gets what is holding back the PostgreSQL xmin horizon, attributed by cause. Use this whenever dead tuples or table bloat are growing while autovacuum appears to be running normally - that symptom has four unrelated causes which look identical from the outside, and each needs a completely different fix: a long-running or idle-in-transaction session, an abandoned replication slot, a logical slot holding catalog_xmin, a standby feeding back its xmin, or an orphaned prepared transaction. Reports the oldest holder for each source, which one is currently winning, and how persistent each has been across the window, so a chronic holder can be told apart from a query that merely ran long: pct_of_window_winning is the share of EVERY capture in the window (captures_in_window, from the collector's own log - unheld captures included, the same denominator the vacuum-horizon alert uses), not the share of the captures that happened to record this source. Also relevant to wraparound risk: a pinned horizon blocks freezing, so an unattended holder here is an upstream cause of the risk get_pg_wraparound_risk measures. Works on any PostgreSQL target. Zero holders is reported as no_holder only when the collector captured in the window; no holders AND no captures is unavailable, not an all-clear.")]
+    [McpServerTool(Name = "get_pg_xmin_horizon"), Description("What holds back PostgreSQL's xmin horizon, by cause: session, replication slot, logical slot (catalog_xmin), standby feedback, or prepared transaction - identical symptoms, different fixes, for bloat growing while autovacuum looks normal. Reports the oldest holder per source and the current winner. pct_of_window_winning = samples_as_winner / captures_in_window: EVERY capture in the window, not just captures with a holder. Blocks freezing; feeds get_pg_wraparound_risk. empty: captured, found nothing - all-clear. unavailable: no capture in the window. <<GUIDE>> Gets what is holding back the PostgreSQL xmin horizon, attributed by cause. Use this whenever dead tuples or table bloat are growing while autovacuum appears to be running normally - that symptom has four unrelated causes which look identical from the outside, and each needs a completely different fix: a long-running or idle-in-transaction session, an abandoned replication slot, a logical slot holding catalog_xmin, a standby feeding back its xmin, or an orphaned prepared transaction. Reports the oldest holder for each source, which one is currently winning, and how persistent each has been across the window, so a chronic holder can be told apart from a query that merely ran long: pct_of_window_winning is the share of EVERY capture in the window (captures_in_window, from the collector's own log - unheld captures included, the same denominator the vacuum-horizon alert uses), not the share of the captures that happened to record this source. Also relevant to wraparound risk: a pinned horizon blocks freezing, so an unattended holder here is an upstream cause of the risk get_pg_wraparound_risk measures. Works on any PostgreSQL target. Zero holders is reported as empty only when the collector captured in the window; no holders AND no captures is unavailable, not an all-clear.")]
     public static async Task<string> GetPgXminHorizon(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -67,7 +67,7 @@ public sealed class DarlingMcpPgXminTools
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
@@ -90,7 +90,7 @@ public sealed class DarlingMcpPgXminTools
                    holding back the xmin horizon" is a confident all-clear about a mechanism that does not
                    exist there, which is the same defect one engine over (#2532). */
                 var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_xmin_horizon", cancellationToken);
+                    postgres, resolved.ServerId, resolved.DisplayName, "pg_xmin_horizon", cancellationToken);
                 if (gated != null)
                 {
                     return gated;
@@ -102,14 +102,14 @@ public sealed class DarlingMcpPgXminTools
                 if (capturesInWindow == 0)
                 {
                     /* "unavailable" says nothing is known about the window and stays bare. */
-                    return JsonSerializer.Serialize(new
+                    return await DarlingServerOfflineNote.WithLeadAsync(JsonSerializer.Serialize(new
                     {
-                        server = resolved.ServerName,
+                        server = resolved.DisplayName,
                         hours_back,
                         status = "unavailable",
                         captures_in_window = 0,
-                        message = $"No holder rows AND no successful pg_xmin_horizon captures are logged for {resolved.ServerName} in the last {hours_back} hour(s), so this is NOT a report that nothing holds the horizon — the collector did not look (or its collection_log rows are missing). Check get_collection_health for this server before reading the absence as clear.",
-                    }, McpHelpers.JsonOptions);
+                        message = $"No holder rows and no successful pg_xmin_horizon captures are logged for {resolved.DisplayName} in the last {hours_back} hour(s), so this is not a report that nothing holds the horizon — the collector did not look (or its collection_log rows are missing). Check get_collection_health for this server before reading the absence as clear.",
+                    }, McpHelpers.JsonOptions), postgres, resolved.ServerId, resolved.DisplayName, cancellationToken);
                 }
 
                 /* #4966: the all-clear is an empty answer, and carries the window floor under hints. */
@@ -117,9 +117,9 @@ public sealed class DarlingMcpPgXminTools
                     postgres, "get_pg_xmin_horizon", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: true, logger, cancellationToken);
                 return DarlingMcpWindowNotice.FinishEmpty(JsonSerializer.Serialize(new
                 {
-                    server = resolved.ServerName,
+                    server = resolved.DisplayName,
                     hours_back,
-                    status = "no_holder",
+                    status = "empty",
                     hints = emptyNotice.AsHints(),
                     captures_in_window = capturesInWindow,
                     finding = McpHelpers.QuietUnlessCut(
@@ -171,7 +171,7 @@ public sealed class DarlingMcpPgXminTools
                 postgres, "get_pg_xmin_horizon", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: false, logger, cancellationToken);
             return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 /* #4966: the window floor, right after hours_back. */
                 effective_start = notice.EffectiveStart,

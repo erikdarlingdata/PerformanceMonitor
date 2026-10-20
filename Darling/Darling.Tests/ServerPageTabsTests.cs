@@ -893,12 +893,12 @@ public sealed class ServerPageTabsTests
     {
         var js = ServerTabsJs;
 
-        Assert.Contains("desktop-viewer features", js, StringComparison.Ordinal);
-        Assert.Contains("Execution-plan analysis, the query heatmap", js, StringComparison.Ordinal);
+        Assert.Contains("are in the desktop viewer, not on this page", js, StringComparison.Ordinal);
+        Assert.Contains("Plan analysis, the query heatmap", js, StringComparison.Ordinal);
         Assert.Contains("block-chain view", js, StringComparison.Ordinal);
 
         /* The note renders — a `note` field with no renderer is the same silence in a different place. */
-        Assert.Contains("return note ? noticeStrip(note) : null;", js, StringComparison.Ordinal);
+        Assert.Contains("const strip = noticeStrip(note);", js, StringComparison.Ordinal);
         Assert.Contains("tabNote(tab, tabReach())", ServerJs, StringComparison.Ordinal);
     }
 
@@ -966,7 +966,7 @@ public sealed class ServerPageTabsTests
 
         /* And vizStat's twin of that guard (#2530). Several PostgreSQL reads answer their HEALTHY case with a
            data body carrying prose under `finding` and NONE of the summary keys — get_pg_xmin_horizon's
-           {status:"no_holder", finding} is the type. That is not the {status,message} envelope, so
+           {status:"empty", finding} is the type. That is not the {status,message} envelope, so
            classifyResponse calls it data, it reaches a viz, and a tile set over keys the body does not have
            renders as a row of em-dashes that says nothing. All-null is the only state where the descriptor's
            sentence beats the tiles, so that is exactly when it wins; a descriptor with no emptyText — every
@@ -1075,6 +1075,8 @@ public sealed class ServerPageTabsTests
         var parameterisedTwice = new Dictionary<string, (string Read, string Distinguisher)>(StringComparer.Ordinal)
         {
             ["POSTGRES_TABS/storage"] = ("get_pg_index_bloat", "answered_only: true"),
+            /* #6158: the system_health CPU chart reads the whole window as time buckets, the entries table the newest rows. */
+            ["SERVER_TABS/events"] = ("get_health_parser_system_health", "chart: true"),
         };
 
         var exemptionsUsed = new HashSet<string>(StringComparer.Ordinal);

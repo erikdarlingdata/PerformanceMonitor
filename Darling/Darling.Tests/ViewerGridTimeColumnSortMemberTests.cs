@@ -76,6 +76,8 @@ public sealed class ViewerGridTimeColumnSortMemberTests
         { "ViewerServerTab.xaml", "PlanCorrectionGrid", "ExecuteActionInitiatedTimeLocal", Name(typeof(PlanCorrectionRow)), "ExecuteActionInitiatedTime" },
         { "ViewerServerTab.xaml", "PlanCorrectionGrid", "RevertActionInitiatedTimeLocal", Name(typeof(PlanCorrectionRow)), "RevertActionInitiatedTime" },
         { "ViewerServerTab.xaml", "BlockedProcessReportGrid", "EventTimeLocal", Name(typeof(ViewerBlockedProcessRow)), "EventTime" },
+        { "ViewerServerTab.xaml", "BlockedProcessReportGrid", "BlockingLoginTimeLocal", Name(typeof(ViewerBlockedProcessRow)), "BlockingLoginTime" },
+        { "ViewerServerTab.xaml", "BlockedProcessReportGrid", "BlockingLastRequestEndTimeLocal", Name(typeof(ViewerBlockedProcessRow)), "BlockingLastRequestEndTime" },
         { "ViewerServerTab.xaml", "DeadlockGrid", "DeadlockTimeLocal", Name(typeof(DeadlockProcessDetail)), "DeadlockTime" },
         { "ViewerServerTab.xaml", "AutomaticTuningGrid", "CollectionTimeLocal", Name(typeof(AutomaticTuningRow)), "CollectionTime" },
         { "ViewerServerTab.xaml", "ServerConfigGrid", "CaptureTimeLocal", Name(typeof(ServerConfigRow)), "CaptureTime" },

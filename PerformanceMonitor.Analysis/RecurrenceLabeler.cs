@@ -275,12 +275,19 @@ public static class RecurrenceLabeler
                 lastWeekSlotsForJob = null;
         }
 
+        // Fact key -> whether its collector source is a setting, read once per pass. A story whose every fact is a
+        // setting (#6132) is the same story at every hour, so "recurring at this hour" says nothing true about it:
+        // the hour the pass happens to run in is not part of what it found.
+        var settingsByKey = BuildSettingsByKey(facts);
+
         foreach (var story in stories)
         {
             if (story is null || story.IsAbsolution || story.Severity <= 0)
                 continue;
 
-            if (!string.IsNullOrEmpty(story.StoryPathHash) && sameSlotWeeksByChain.TryGetValue(story.StoryPathHash, out var weeks))
+            if (!string.IsNullOrEmpty(story.StoryPathHash)
+                && !IsStaticSettingsStory(story, settingsByKey)
+                && sameSlotWeeksByChain.TryGetValue(story.StoryPathHash, out var weeks))
             {
                 // Consecutive from this week backwards: this pass is week 0 and counts; each prior week counts
                 // only while the one before it did. {1,2} -> 3; {1} -> 2; {1,3} -> 2 (the gap at 2 ends the run).
@@ -295,6 +302,46 @@ public static class RecurrenceLabeler
             if (lastWeekSlotsForJob is not null && CarriesTheJob(story))
                 ApplyMovedWindow(story, jobName!, lastWeekSlotsForJob.Min(), referenceBucket, offsetKnown);
         }
+    }
+
+    /// <summary>
+    /// Key -> "this fact is a setting" for every fact of the pass (#6132). A key whose facts disagree counts as a
+    /// setting only when every one of them is.
+    /// </summary>
+    private static Dictionary<string, bool> BuildSettingsByKey(IReadOnlyList<Fact>? facts)
+    {
+        var map = new Dictionary<string, bool>(StringComparer.Ordinal);
+        if (facts is null)
+            return map;
+
+        foreach (var fact in facts)
+        {
+            if (fact is null || string.IsNullOrEmpty(fact.Key))
+                continue;
+
+            var isSetting = FactKinds.IsSettingsSource(fact.Source);
+            map[fact.Key] = map.TryGetValue(fact.Key, out var seen) ? seen && isSetting : isSetting;
+        }
+
+        return map;
+    }
+
+    /// <summary>
+    /// True when every fact on the story's path is a setting — a configuration or point-in-time fact read from the
+    /// latest row whatever the hour (<see cref="FactKinds.IsSettingsSource"/>). Such a story has no time series
+    /// behind it to recur. A path key with no fact in the pass cannot be classified, so the story stays eligible,
+    /// which is what the labeler did before.
+    /// </summary>
+    private static bool IsStaticSettingsStory(AnalysisStory story, Dictionary<string, bool> settingsByKey)
+    {
+        IReadOnlyList<string> keys = story.Path is { Count: > 0 } ? story.Path : new[] { story.RootFactKey };
+        foreach (var key in keys)
+        {
+            if (string.IsNullOrEmpty(key) || !settingsByKey.TryGetValue(key, out var isSetting) || !isSetting)
+                return false;
+        }
+
+        return true;
     }
 
     /// <summary>

@@ -99,7 +99,7 @@ public sealed class DarlingMcpPgTableBloatTools
     {
         var confirm = pgstattupleAvailable
             ? $"pgstattuple is installed on this database, so the exact figure is one query away: SELECT * FROM pgstattuple('{qualifiedName}'). It reads the WHOLE relation, so run it deliberately rather than on a schedule."
-            : $"pgstattuple is NOT installed on this database, so the exact figure is not reachable from here. CREATE EXTENSION pgstattuple, then SELECT * FROM pgstattuple('{qualifiedName}') - and note it reads the whole relation, which on a large table is expensive enough that it is why this collector estimates instead.";
+            : $"pgstattuple is NOT installed on this database, so the exact figure is not reachable from here. CREATE EXTENSION pgstattuple, then SELECT * FROM pgstattuple('{qualifiedName}') - and note it reads the whole relation, which is expensive on a large table.";
 
         if (bloatPct < 20)
         {
@@ -154,7 +154,7 @@ public sealed class DarlingMcpPgTableBloatTools
 
         var pct = Math.Round((double)deadTuples / total * 100, 2);
         return pct.ToString("0.##", CultureInfo.InvariantCulture) + "% of this table's tuples are dead. "
-             + "This is MEASURED rather than estimated - it comes from the server's own counters and needs "
+             + "This is measured rather than estimated - it comes from the server's own counters and needs "
              + "no width model, so it is the number to trust when the bloat estimate is suppressed. It is "
              + "also NARROWER than bloat: it counts dead tuples awaiting vacuum, and NOT the free space a "
              + "completed vacuum already left behind and did not return to the operating system, which is "
@@ -238,7 +238,7 @@ public sealed class DarlingMcpPgTableBloatTools
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
@@ -260,7 +260,7 @@ public sealed class DarlingMcpPgTableBloatTools
 
             if (rows.Count == 0)
             {
-                return await EmptyAsync(postgres, resolved.ServerId, resolved.ServerName, hours_back, start, end, cancellationToken);
+                return await EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, hours_back, start, end, cancellationToken);
             }
 
             var suppressedCount = rows.Count(r => EstimateSuppressionReason(r) != null);
@@ -338,11 +338,9 @@ public sealed class DarlingMcpPgTableBloatTools
                     last_analyzed = r.LastAnalyzed?.ToString("o"),
                     fillfactor = r.FillFactor,
                     fillfactor_note = r.FillFactor < 100
-                        ? "This table has a non-default fillfactor, so it RESERVES free space on purpose for "
-                        + "HOT updates. The estimate accounts for that reservation; pgstattuple's free_space "
-                        + "does not, and will therefore report a larger figure for the same healthy table. "
-                        + "Measured on a fillfactor-70 table: 3.79% estimated against 32.52% from "
-                        + "pgstattuple, and the estimate is the more useful reading of the two."
+                        ? "This table has a non-default fillfactor, so it reserves free space for HOT updates. "
+                        + "The estimate accounts for that reservation; pgstattuple's free_space does not, and "
+                        + "will therefore report a larger figure for the same healthy table."
                         : null,
 
                     /* The estimator's own inputs, so the number can be argued with rather than believed. */
@@ -371,7 +369,7 @@ public sealed class DarlingMcpPgTableBloatTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 status = "table_bloat",
                 /* The page's count under the page's name (#3594). */
@@ -455,8 +453,8 @@ public sealed class DarlingMcpPgTableBloatTools
                 hints);
         }
 
-        return McpHelpers.Status(
-            "unavailable",
+        return await DarlingServerOfflineNote.UnavailableAsync(
+            postgres, serverId, serverName,
             probe.RowsEver > 0
                 ? $"No bloat snapshots were collected for {serverName} in the last {hoursBack} hour(s), so "
                 + "the window says nothing either way. Collection HAS run for this server outside the "
@@ -465,6 +463,6 @@ public sealed class DarlingMcpPgTableBloatTools
                 + "read and this is NOT an all-clear. Check that collection is running and enabled for this "
                 + "server - and note this collector is gated OFF on read replicas, because the statistics "
                 + "it needs to judge its own accuracy read as zero there.",
-            hints);
+            hints, cancellationToken);
     }
 }

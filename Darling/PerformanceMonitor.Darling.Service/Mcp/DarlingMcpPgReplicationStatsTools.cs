@@ -51,7 +51,7 @@ public sealed class DarlingMcpPgReplicationStatsTools
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
@@ -68,7 +68,7 @@ public sealed class DarlingMcpPgReplicationStatsTools
             if (rows.Count == 0)
             {
                 var notCollected = await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_replication_stats", cancellationToken);
+                    postgres, resolved.ServerId, resolved.DisplayName, "pg_replication_stats", cancellationToken);
                 if (notCollected is not null)
                 {
                     return notCollected;
@@ -81,11 +81,11 @@ public sealed class DarlingMcpPgReplicationStatsTools
                         "empty",
                         McpHelpers.QuietUnlessCut(
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
-                            factual: $"No replica was connected to {resolved.ServerName} in the last {hours_back} "
+                            factual: $"No replica was connected to {resolved.DisplayName} in the last {hours_back} "
                                 + "hour(s)",
                             coveredClaim: ". On a server with no replicas that is the expected answer.",
                             tail: " If a "
-                                + "replica is SUPPOSED to be attached, check get_pg_replication_slots — a slot "
+                                + "replica is supposed to be attached, check get_pg_replication_slots — a slot "
                                 + "that persists with nothing connected to it retains WAL indefinitely, which is "
                                 + "the case worth acting on."),
                         emptyNotice.AsHints()), emptyNotice);
@@ -115,7 +115,7 @@ public sealed class DarlingMcpPgReplicationStatsTools
 
             return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 /* #4966: the window floor, right after hours_back. */
                 effective_start = notice.EffectiveStart,

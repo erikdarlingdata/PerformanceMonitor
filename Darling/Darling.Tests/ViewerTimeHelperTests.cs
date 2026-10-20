@@ -111,8 +111,8 @@ public sealed class ViewerTimeHelperTests
     }
 
     [Theory]
-    [InlineData(2026, 1, 15, "UTC-5:00")]   // EST
-    [InlineData(2026, 7, 15, "UTC-4:00")]   // EDT
+    [InlineData(2026, 1, 15, "UTC-05:00")]   // EST
+    [InlineData(2026, 7, 15, "UTC-04:00")]   // EDT
     public void GetTimezoneLabel_Server_NamesTheOffsetTheClockHadAtThatInstant(int year, int month, int day, string expected)
     {
         var instant = new DateTime(year, month, day, 12, 0, 0, DateTimeKind.Unspecified);
@@ -128,15 +128,15 @@ public sealed class ViewerTimeHelperTests
         var before = new DateTime(2026, 3, 8, 6, 59, 0, DateTimeKind.Unspecified);
         var after = new DateTime(2026, 3, 8, 7, 0, 0, DateTimeKind.Unspecified);
 
-        Assert.Equal("UTC-5:00", ViewerTimeHelper.GetTimezoneLabel(TimeDisplayMode.ServerTime, Eastern, before));
-        Assert.Equal("UTC-4:00", ViewerTimeHelper.GetTimezoneLabel(TimeDisplayMode.ServerTime, Eastern, after));
+        Assert.Equal("UTC-05:00", ViewerTimeHelper.GetTimezoneLabel(TimeDisplayMode.ServerTime, Eastern, before));
+        Assert.Equal("UTC-04:00", ViewerTimeHelper.GetTimezoneLabel(TimeDisplayMode.ServerTime, Eastern, after));
     }
 
     [Theory]
-    [InlineData(0, "UTC+0:00")]
-    [InlineData(330, "UTC+5:30")]     // India
-    [InlineData(-210, "UTC-3:30")]    // Newfoundland
-    [InlineData(-480, "UTC-8:00")]    // US Pacific standard
+    [InlineData(0, "UTC+00:00")]
+    [InlineData(330, "UTC+05:30")]     // India
+    [InlineData(-210, "UTC-03:30")]    // Newfoundland
+    [InlineData(-480, "UTC-08:00")]    // US Pacific standard
     [InlineData(780, "UTC+13:00")]    // Tonga
     public void GetTimezoneLabel_Server_FixedOffset_NamesTheOffset(int offsetMinutes, string expected)
     {

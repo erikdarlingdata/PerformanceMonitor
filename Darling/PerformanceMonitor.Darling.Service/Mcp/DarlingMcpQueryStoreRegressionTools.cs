@@ -143,7 +143,9 @@ public sealed class DarlingMcpQueryStoreRegressionTools
                 baseline_end = start.ToString("o"),
                 baseline_is = $"Query Store captures from baseline_start to recent_window_start ({DarlingQueryStoreRegressionReader.BaselineLookbackDays} days)",
                 gate = "average CPU regressed by more than 25%",
-                regression_count = Math.Min(rows.Count, limit),
+                /* #6128: every regression that passed the gate, whatever limit asked for; returned_count is this page. */
+                regression_count = Math.Max(rows[0].TotalCount, rows.Count),
+                returned_count = shown.Count(),
                 truncated,
                 regressions = shown.Select(r => new
                 {
@@ -242,7 +244,10 @@ public sealed class DarlingMcpQueryStoreRegressionTools
 
         if (!hasBaseline && !hasRecent)
         {
+            /* #6181: Query Store on, collector healthy, first interval not closed yet: say so instead of "may be OFF". */
             return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, serverId, serverName, "query_store", cancellationToken)
+                ?? (await DarlingRuntimePrecondition.QueryStoreFirstIntervalMessageAsync(postgres, serverId, serverName, databases, cancellationToken)
+                    is { } firstInterval ? McpHelpers.Status("unavailable", firstInterval + " There is nothing to compare yet, so this is not a report of zero regressions.") : null)
                 ?? McpHelpers.Status(
                     "unavailable",
                     $"No Query Store data has EVER been collected for {serverName}, so this is NOT a report of zero regressions — there is nothing to compare. Query Store may be OFF on this server's databases, which get_query_store_health will say; otherwise check that collection is running for this server.");

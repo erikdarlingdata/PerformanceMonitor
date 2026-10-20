@@ -473,7 +473,7 @@ public sealed class ViewerMultiServerListClockTests
         /* The active-clock ForDisplay by its exact name: FormatForDisplay is the renderer that takes the row's zone (#4766). */
         Assert.DoesNotMatch(@"\bForDisplay\b", display);
         Assert.Matches(
-            @"FormatForDisplay\(\s*AlertTime,\s*ViewerTimeHelper\.DisplayZoneFor\(ViewerTimeHelper\.CurrentDisplayMode,\s*Clock", display);
+            @"FormatForDisplay\(\s*AlertTime,\s*ViewerTimeHelper\.DisplayZoneFor\(\s*MultiServerTime\.EffectiveMode\(ViewerTimeHelper\.CurrentDisplayMode,\s*MixedServers\),\s*Clock", display);
         /* One ask per load, not per row - and the ask goes to the fleet's clocks held for AlertClockLifetime (#4766),
            not to the store on every poll (ViewerAlertClockCacheTests pins the cache itself). */
         Assert.Single(Regex.Matches(load, @"_alertClocks\.GetAsync\("));

@@ -2954,11 +2954,12 @@ public class CrossAppGuardCiGateTests
         Assert.Contains("if ($JobIndex -ne $Shard) { throw ", run, StringComparison.Ordinal);
         Assert.Matches(@"\$shards = \$ShardCount\s+(?:#[^\r\n]*\s+)*if \(\$JobIndex -ne \$Shard\) \{ throw [^\r\n]*\}\s+if \(\$TimingRun -match ", run);
 
-        /* The download is tried three times, and every try starts from an EMPTY folder: gh extracts each file
-           create-exclusive, so a file a partial try left would make tries 2 and 3 fail too. The native-command
+        /* The download is retried (more than once; #6117 widened it to five tries so a short network outage does not fail
+           the leg), and every try starts from an EMPTY folder: gh extracts each file
+           create-exclusive, so a file a partial try left would make the later tries fail too. The native-command
            error preference is off before the first try, so a failed gh call reaches the retry instead of throwing
            out of the step. */
-        Assert.Matches(@"\$PSNativeCommandUseErrorActionPreference = \$false\s+\$downloaded = \$false\s+foreach \(\$attempt in 1\.\.3\) \{\s+(?:#[^\r\n]*\s+)*Remove-Item -Recurse -Force -Path \$timingDir -ErrorAction SilentlyContinue\s+New-Item -ItemType Directory -Force -Path \$timingDir \| Out-Null\s+gh run download ", run);
+        Assert.Matches(@"\$PSNativeCommandUseErrorActionPreference = \$false\s+\$downloaded = \$false\s+foreach \(\$attempt in 1\.\.[2-9]\) \{\s+(?:#[^\r\n]*\s+)*Remove-Item -Recurse -Force -Path \$timingDir -ErrorAction SilentlyContinue\s+New-Item -ItemType Directory -Force -Path \$timingDir \| Out-Null\s+gh run download ", run);
 
         /* A shard that cannot get the pinned timings, or whose packer or reconcile fails, FAILS: it never falls
            back to the hash alone. The only fallbacks are the pin being empty (every shard reads the same empty
@@ -2968,7 +2969,7 @@ public class CrossAppGuardCiGateTests
            expired or deleted artifact without failing, so the exit code alone cannot see it). */
         Assert.Matches(@"-ne \(\$got -join ','\)\) \{ throw ", run);
         Assert.Matches(@"if \(\$packExit -ne 0\) \{ throw ", run);
-        Assert.Matches(@"reconcile --classes \$classesFile --shards \$shards --out \$planDir\s+if \(\$LASTEXITCODE -ne 0\) \{ throw ", run);
+        Assert.Matches(@"reconcile --classes \$classesFile --shards \$shards --out \$planDir(?: --classes-source '[^'\r\n]*')?\s+if \(\$LASTEXITCODE -ne 0\) \{ throw ", run);
         Assert.Contains("if ($TimingRun -match '^\\d+$')", run, StringComparison.Ordinal);
 
         /* The logged plan id hashes each shard's file under its own label, so two different partitions of the same

@@ -19,7 +19,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <summary>How one Query Store force is doing (#5632).</summary>
 public enum ForcedPlanState
 {
-    /// <summary>The forced plan ran after the force was first seen, and no other plan of the query did.</summary>
+    /// <summary>The forced plan ran after the force was first seen (or a variant of it did, #6160), and no other plan of the query did.</summary>
     Working,
 
     /// <summary>No plan of the query ran after the force was first seen.</summary>
@@ -34,6 +34,13 @@ public enum ForcedPlanState
     /// <summary>The plan was forced in an earlier capture of its database inside the window and is absent from that database's newest capture.</summary>
     Removed,
 }
+
+/// <summary>
+/// A plan guide that covers a forced query (#6160): its name, whether it is enabled, and its scope (OBJECT, SQL or TEMPLATE). Where the
+/// collector found it: an OBJECT-scoped guide on the query's object, or a guide whose name a plan of the query carries. A guide is a fact
+/// beside the state, never a state.
+/// </summary>
+public sealed record ForcedPlanGuide(string Name, bool? Enabled, string? Scope);
 
 /// <summary>One plan of the query other than the forced one, with what it did since the force was first seen.</summary>
 public sealed record ForcedPlanOtherPlan(long PlanId, long Executions, DateTime? LastExecution, DarlingForcedPlanStateReader.Ran? Run = null);
@@ -57,7 +64,17 @@ public sealed record ForcedPlanFact(
     long ForcedExecutions,
     DateTime? ForcedLastExecution,
     IReadOnlyList<ForcedPlanOtherPlan> OtherPlans,
-    DarlingForcedPlanStateReader.Ran? ForcedRun = null);
+    DarlingForcedPlanStateReader.Ran? ForcedRun = null,
+    IReadOnlyList<ForcedPlanOtherPlan>? Variants = null,
+    ForcedPlanGuide? PlanGuide = null)
+{
+    /// <summary>
+    /// The variants of the forced plan that ran since <see cref="Since"/> (#6160): plans of the query, other than the forced one, whose
+    /// stored XML carries <c>UsePlan="1"</c> and no <c>PlanGuideName</c>, which is how SQL Server stores a force it recompiled under a new
+    /// plan id. Their runs count as the forced plan running, and they are not in <see cref="OtherPlans"/>.
+    /// </summary>
+    public IReadOnlyList<ForcedPlanOtherPlan> VariantPlans => Variants ?? Array.Empty<ForcedPlanOtherPlan>();
+}
 
 /// <summary>The newest forced-plan capture of one database inside the window.</summary>
 public sealed record ForcedPlanCapture(string DatabaseName, DateTime NewestCapture, int ForcedPlanCount);
@@ -99,7 +116,8 @@ public static class DarlingForcedPlanStateReader
     /// <summary>The newest collector capture of each force, read from the window. $1 server, $2 start, $3 end, $4 database filter, $5 query_id or NULL.</summary>
     public static string ForcesSql(DatabaseFilter databases) => $@"
 WITH win AS (
-    SELECT database_name, collection_time, plan_id, query_id, plan_forcing_type, force_failure_count, last_force_failure_reason
+    SELECT database_name, collection_time, plan_id, query_id, plan_forcing_type, force_failure_count, last_force_failure_reason,
+           variant_plan_ids, plan_guide_name, plan_guide_enabled, plan_guide_scope
     FROM collect.query_store_forced_plans
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3{databases.Clause("database_name", 4)}),
 plans AS (
@@ -113,11 +131,13 @@ absent AS (
 newest AS (
     SELECT database_name, MAX(collection_time) AS newest_capture FROM win WHERE plan_id IS NULL GROUP BY database_name),
 latest AS (
-    SELECT DISTINCT ON (database_name, plan_id) database_name, plan_id, query_id, plan_forcing_type, force_failure_count, last_force_failure_reason, collection_time
+    SELECT DISTINCT ON (database_name, plan_id) database_name, plan_id, query_id, plan_forcing_type, force_failure_count, last_force_failure_reason, collection_time,
+           variant_plan_ids, plan_guide_name, plan_guide_enabled, plan_guide_scope
     FROM plans ORDER BY database_name, plan_id, collection_time DESC)
 SELECT l.database_name, l.plan_id, l.query_id, l.plan_forcing_type, l.force_failure_count, l.last_force_failure_reason, l.collection_time,
        (SELECT MIN(x.collection_time) FROM plans AS x WHERE x.database_name = l.database_name AND x.plan_id = l.plan_id AND (a.last_absent IS NULL OR x.collection_time > a.last_absent)),
-       n.newest_capture
+       n.newest_capture,
+       l.variant_plan_ids, l.plan_guide_name, l.plan_guide_enabled, l.plan_guide_scope
 FROM latest AS l
 LEFT JOIN absent AS a ON a.database_name = l.database_name AND a.plan_id = l.plan_id
 LEFT JOIN newest AS n ON n.database_name = l.database_name
@@ -189,7 +209,18 @@ LIMIT 50";
 
     private sealed record Force(
         string Database, long PlanId, long QueryId, string? ForcingType, long FailureCount, string? FailureReason,
-        DateTime LastSeen, DateTime FirstSeen, DateTime? Newest);
+        DateTime LastSeen, DateTime FirstSeen, DateTime? Newest, string? VariantPlanIds = null, ForcedPlanGuide? Guide = null);
+
+    /// <summary>The ids in a collector's <c>variant_plan_ids</c> text (<c>12,15</c>); unreadable parts are skipped.</summary>
+    internal static IReadOnlySet<long> ParseVariantPlanIds(string? text)
+    {
+        var ids = new HashSet<long>();
+        if (string.IsNullOrWhiteSpace(text)) return ids;
+        foreach (var part in text.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            if (long.TryParse(part, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var id))
+                ids.Add(id);
+        return ids;
+    }
 
     /// <summary>What a plan did after a force: the executions of its intervals that ended after the force, and the newest of those ends.</summary>
     public readonly record struct Ran(long Executions, DateTime? LastExecution, double? AvgCpuUs = null, double? AvgDurationUs = null,
@@ -236,11 +267,14 @@ LIMIT 50";
 
     /// <summary>
     /// The state, from the facts alone. REMOVED first (an absent force has no state to speak of), then FAILING (a failure count or a
-    /// reason beats what ran), then IGNORED (another plan of the query ran after the force), WORKING (the forced plan ran) and
-    /// NOT_EXERCISED (nothing ran).
+    /// reason beats what ran), then IGNORED (another plan of the query ran after the force), WORKING (the forced plan ran, or a variant
+    /// of it did: SQL Server recompiled the force under a new plan id, #6160) and NOT_EXERCISED (nothing ran). A variant is never
+    /// <paramref name="otherPlanRan"/>.
     /// </summary>
-    public static ForcedPlanState Classify(bool inNewestCapture, long failureCount, string? failureReason, bool otherPlanRan, bool forcedPlanRan)
+    public static ForcedPlanState Classify(bool inNewestCapture, long failureCount, string? failureReason, bool otherPlanRan, bool forcedPlanRan,
+        bool variantPlanRan = false)
     {
+        forcedPlanRan |= variantPlanRan;
         if (!inNewestCapture) return ForcedPlanState.Removed;
         if (failureCount > 0 || !string.IsNullOrWhiteSpace(failureReason)) return ForcedPlanState.Failing;
         if (otherPlanRan) return ForcedPlanState.Ignored;
@@ -293,7 +327,9 @@ LIMIT 50";
                     reader.IsDBNull(3) ? null : reader.GetString(3), reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
                     reader.IsDBNull(5) ? null : reader.GetString(5), reader.GetDateTime(6),
                     reader.IsDBNull(7) ? reader.GetDateTime(6) : reader.GetDateTime(7),
-                    reader.IsDBNull(8) ? null : reader.GetDateTime(8)));
+                    reader.IsDBNull(8) ? null : reader.GetDateTime(8),
+                    reader.IsDBNull(9) ? null : reader.GetString(9),
+                    reader.IsDBNull(10) ? null : new ForcedPlanGuide(reader.GetString(10), reader.IsDBNull(11) ? null : reader.GetBoolean(11), reader.IsDBNull(12) ? null : reader.GetString(12))));
             }
         }
 
@@ -339,16 +375,21 @@ LIMIT 50";
             var since = SinceOf(f);
             DateTime? forcedAtValue = forcedAt is not null && forcedAt.TryGetValue((f.Database, f.PlanId), out var at) ? at : null;
             var inNewest = InNewest(f);
-            var others = ran
+            var variantIds = ParseVariantPlanIds(f.VariantPlanIds);
+            var ranOfQuery = ran
                 .Where(r => r.Key.Database == f.Database && r.Key.ForcedPlan == f.PlanId && r.Key.Plan != f.PlanId && r.Value.Executions + 1 > 0)
                 .Select(r => new ForcedPlanOtherPlan(r.Key.Plan, r.Value.Executions, r.Value.LastExecution, r.Value))
                 .OrderByDescending(o => o.Executions).ThenBy(o => o.PlanId)
                 .ToList();
+            /* #6160: a variant (a plan the engine compiled to run the force) is the force running, not another plan. */
+            var others = ranOfQuery.Where(o => !variantIds.Contains(o.PlanId)).ToList();
+            var variants = ranOfQuery.Where(o => variantIds.Contains(o.PlanId)).ToList();
             ran.TryGetValue((f.Database, f.PlanId, f.PlanId), out var own);
-            var state = Classify(inNewest, f.FailureCount, f.FailureReason, others.Count > 0, own.LastExecution is not null);
+            var state = Classify(inNewest, f.FailureCount, f.FailureReason, others.Count > 0, own.LastExecution is not null, variants.Count > 0);
             facts.Add(new ForcedPlanFact(
                 f.Database, f.QueryId, f.PlanId, state, f.FirstSeen, f.LastSeen, forcedAtValue, since, f.ForcingType,
-                f.FailureCount, f.FailureReason, own.Executions, own.LastExecution, others, own.Executions > 0 || own.LastExecution is not null ? own : null));
+                f.FailureCount, f.FailureReason, own.Executions, own.LastExecution, others, own.Executions > 0 || own.LastExecution is not null ? own : null,
+                variants, f.Guide));
         }
 
         var perDatabase = facts.Where(f => f.State != ForcedPlanState.Removed).GroupBy(f => f.DatabaseName, StringComparer.Ordinal)

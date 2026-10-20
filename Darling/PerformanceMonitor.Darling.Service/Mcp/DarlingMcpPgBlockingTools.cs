@@ -88,7 +88,7 @@ public sealed class DarlingMcpPgBlockingTools
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
@@ -124,7 +124,7 @@ public sealed class DarlingMcpPgBlockingTools
                     postgres, "get_pg_blocking", resolved.ServerName, startUtc, now, emptyAnswer: false, logger, cancellationToken);
                 return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
                 {
-                    server = resolved.ServerName,
+                    server = resolved.DisplayName,
                     hours_back,
                     effective_start = notice.EffectiveStart,
                     window_truncated = notice.WindowTruncated,
@@ -134,8 +134,7 @@ public sealed class DarlingMcpPgBlockingTools
                     captures_with_blocking = captures.CapturesWithBlocking,
                     finding =
                         "Blocking was captured, but every participant was itself blocked — a lock cycle "
-                        + "(deadlock) rather than a chain with a root. There is no root blocker to name, "
-                        + "which is why these are reported separately.",
+                        + "(deadlock) rather than a chain with a root. There is no root blocker to name.",
                     cycles = cycleEntries,
                 }, McpHelpers.JsonOptions), notice);
             }
@@ -149,38 +148,51 @@ public sealed class DarlingMcpPgBlockingTools
                 if (captures.CapturesTotal == 0)
                 {
                     var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
-                        postgres, resolved.ServerId, resolved.ServerName, "pg_blocking", cancellationToken);
+                        postgres, resolved.ServerId, resolved.DisplayName, "pg_blocking", cancellationToken);
                     if (gated != null)
                     {
                         return gated;
                     }
                 }
 
-                /* Two very different empty answers, and conflating them would be the whole failure mode of
+                /* Two very different nothing answers, and conflating them would be the whole failure mode of
                    a sampled signal. No captures at all means the collector never ran — nothing is known
-                   about this window either way. Captures with no blocking is a real all-clear, bounded by
-                   the sampling interval. */
-                /* #4966: only the all-clear (captures, no blocking) is an empty answer that carries the window floor under hints; "not_sampled"
-                   says the collector never ran in the window and stays bare. */
-                var emptyNotice = captures.CapturesTotal == 0
-                    ? McpWindowNotice.Unavailable
-                    : await DarlingMcpWindowNotice.ReadForToolAsync(
-                        postgres, "get_pg_blocking", resolved.ServerName, startUtc, now, emptyAnswer: true, logger, cancellationToken);
+                   about this window either way, which is `unavailable` (#6130; it was a word of its own,
+                   not_sampled, that the MCP instructions do not define). Captures with no blocking is a real
+                   all-clear, bounded by the sampling interval: `empty`, with the detail in the finding. */
+                if (captures.CapturesTotal == 0)
+                {
+                    /* #4966: `unavailable` says the collector never ran in the window and stays bare. */
+                    return await DarlingServerOfflineNote.WithLeadAsync(
+                        McpHelpers.Status(
+                            "unavailable",
+                            "No pg_blocking captures exist for this server in this window, so nothing is known "
+                            + "about whether blocking occurred. Check that the collector is enabled and that "
+                            + "collection is succeeding (get_collection_health) before concluding anything.",
+                            new
+                            {
+                                server = resolved.DisplayName,
+                                hours_back,
+                                captures_total = 0,
+                                captures_with_blocking = 0,
+                            }),
+                        postgres, resolved.ServerId, resolved.DisplayName, cancellationToken);
+                }
+
+                /* #4966: the all-clear (captures, no blocking) is an empty answer that carries the window floor under hints. */
+                var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                    postgres, "get_pg_blocking", resolved.ServerName, startUtc, now, emptyAnswer: true, logger, cancellationToken);
                 return DarlingMcpWindowNotice.FinishEmpty(JsonSerializer.Serialize(new
                 {
-                    server = resolved.ServerName,
+                    server = resolved.DisplayName,
                     hours_back,
-                    status = captures.CapturesTotal == 0 ? "not_sampled" : "no_blocking_sampled",
+                    status = "empty",
                     hints = emptyNotice.AsHints(),
                     captures_total = captures.CapturesTotal,
                     captures_with_blocking = 0,
                     first_capture_at = captures.FirstCaptureAt,
                     last_capture_at = captures.LastCaptureAt,
-                    finding = captures.CapturesTotal == 0
-                        ? "No pg_blocking captures exist for this server in this window, so nothing is known "
-                        + "about whether blocking occurred. Check that the collector is enabled and that "
-                        + "collection is succeeding (get_collection_health) before concluding anything."
-                        : $"No blocking was present in any of the {captures.CapturesTotal} captures in this "
+                    finding = $"No blocking was present in any of the {captures.CapturesTotal} captures in this "
                         + "window. Note the limit of that statement: captures are periodic, so blocking that "
                         + "started and cleared between two of them left no trace. PostgreSQL has no "
                         + "engine-side blocked-process recorder to fall back on.",
@@ -190,7 +202,7 @@ public sealed class DarlingMcpPgBlockingTools
             var chainsNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
                 postgres, "get_pg_blocking", resolved.ServerName, startUtc, now, emptyAnswer: false, logger, cancellationToken);
             return BuildBlockingChainsJson(
-                resolved.ServerName, hours_back, chains, cycleEntries, captures, chainsNotice);
+                resolved.DisplayName, hours_back, chains, cycleEntries, captures, chainsNotice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

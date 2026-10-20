@@ -37,7 +37,7 @@ public sealed class DarlingMcpPgWaitTools
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
@@ -66,13 +66,13 @@ public sealed class DarlingMcpPgWaitTools
                    a row whose engine_kind is NULL — and it names those rather than repeating the two the
                    capability answer has already ruled out. */
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_wait_stats", cancellationToken)
-                    ?? McpHelpers.Status(
-                        "unavailable",
+                    postgres, resolved.ServerId, resolved.DisplayName, "pg_wait_stats", cancellationToken)
+                    ?? await DarlingServerOfflineNote.UnavailableAsync(
+                        postgres, resolved.ServerId, resolved.DisplayName,
                         "No PostgreSQL wait data for this server and window. If the server is offline, nothing "
                         + "is being collected from it. On Aurora, the pg_wait_stats collector may not have "
                         + "completed a cycle yet. Otherwise the store has not yet learned that it is a "
-                        + "PostgreSQL server — check list_servers.");
+                        + "PostgreSQL server — check list_servers.", cancellationToken);
             }
 
             /* #4966: where the store's coverage of the window starts. The probe is the web's source for this read (WebDataStartNote), the
@@ -81,7 +81,7 @@ public sealed class DarlingMcpPgWaitTools
             var windowStart = now.AddHours(-hours_back);
             var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
                 postgres, "get_pg_wait_stats", resolved.ServerName, windowStart, now, emptyAnswer: false, logger, cancellationToken);
-            return BuildWaitStatsJson(resolved.ServerName, hours_back, page, limit, notice);
+            return BuildWaitStatsJson(resolved.DisplayName, hours_back, page, limit, notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

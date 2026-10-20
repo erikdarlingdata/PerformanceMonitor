@@ -106,7 +106,7 @@ try {
   fs.cpSync(jsDir, scratch, { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
   const load = (rel) => import(pathToFileURL(path.join(scratch, rel)).href);
-  modules = { util: await load("util.js"), tabs: await load(path.join("pages", "server-tabs.js")), page: await load(path.join("pages", "query-tag-usage.js")) };
+  modules = { util: await load("util.js"), tabs: await load(path.join("pages", "server-tabs.js")), page: await load(path.join("pages", "query-tag-usage.js")), ag: await load(path.join("pages", "ag.js")) };
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });
 }
@@ -131,6 +131,8 @@ const out = {};
   /* The page opens on Fleet: no server in the read, and a block per server. */
   out.fleetRead = out.firstRead;
   out.fleetText = cardOfSection("plan_cache").textContent;
+  /* #6157: a server's heading is its display name; a server with none keeps its key. */
+  out.fleetHeadings = all(cardOfSection("plan_cache")).filter((n) => n.tag === "h4").map((n) => n.textContent);
 
   /* One server: its own table, with each tag, untagged and the total. */
   asks.length = 0;
@@ -147,6 +149,16 @@ const out = {};
   await flush();
   out.tagRead = readsOf("get_resource_use_by_tag")[0];
   out.tagRows = rowsOf(cardOfSection("plan_cache"));
+}
+
+/* #6157: the Availability Groups card names the reporting server by its display name, and falls back to the key. */
+{
+  const cards = [{ server_name: "a", display_name: "Server A" }, { server_name: "b" }];
+  const sub = (name, fleet) => modules.ag.viewSubtitle({ server_name: name, collection_time: new Date().toISOString() }, fleet);
+  out.agSubtitleNamed = sub("a", cards);
+  out.agSubtitleNoDisplayName = sub("b", cards);
+  out.agSubtitleUnknown = sub("zz", cards);
+  out.agSubtitleNoFleet = sub("a", []);
 }
 
 /* The grid. */

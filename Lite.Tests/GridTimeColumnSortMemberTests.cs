@@ -77,6 +77,8 @@ public sealed class GridTimeColumnSortMemberTests : IDisposable
         { "Controls/ServerTab.xaml", "PlanCorrectionGrid", "ExecuteActionInitiatedTimeLocal", Name(typeof(PlanCorrectionRow)), "ExecuteActionInitiatedTime" },
         { "Controls/ServerTab.xaml", "PlanCorrectionGrid", "RevertActionInitiatedTimeLocal", Name(typeof(PlanCorrectionRow)), "RevertActionInitiatedTime" },
         { "Controls/ServerTab.xaml", "BlockedProcessReportGrid", "EventTimeLocal", Name(typeof(BlockedProcessReportRow)), "EventTime" },
+        { "Controls/ServerTab.xaml", "BlockedProcessReportGrid", "BlockingLoginTimeLocal", Name(typeof(BlockedProcessReportRow)), "BlockingLoginTime" },
+        { "Controls/ServerTab.xaml", "BlockedProcessReportGrid", "BlockingLastRequestEndTimeLocal", Name(typeof(BlockedProcessReportRow)), "BlockingLastRequestEndTime" },
         { "Controls/ServerTab.xaml", "DeadlockGrid", "DeadlockTimeLocal", Name(typeof(DeadlockProcessDetail)), "DeadlockTime" },
         { "Controls/ServerTab.xaml", "AutomaticTuningGrid", "CollectionTimeLocal", Name(typeof(AutomaticTuningRow)), "CollectionTime" },
         /* #4966: the Collected column of every grid that draws the newest snapshot: the snapshot's collection (or capture) time, sorted by the stored instant. */
@@ -122,8 +124,8 @@ public sealed class GridTimeColumnSortMemberTests : IDisposable
 
         /* The row's own DateTime, a stored server wall clock (no UTC member exists for these): msdb job history, the running
            job's start, the plan cache's creation, cached and last-execution times, the open transaction's begin time. */
-        { "Controls/JobHistoryTab.xaml", "JobHistoryDataGrid", "RunTimeLocal", Name(typeof(JobHistoryRow)), "RunDateTime" },
-        { "Controls/JobHistoryTab.xaml", "JobHistoryDataGrid", "LastSuccessfulRunLocal", Name(typeof(JobHistoryRow)), "LastSuccessfulRun" },
+        { "Controls/JobHistoryTab.xaml", "JobHistoryDataGrid", "RunTimeLocal", Name(typeof(JobHistoryRow)), "RunDateTimeUtc" },
+        { "Controls/JobHistoryTab.xaml", "JobHistoryDataGrid", "LastSuccessfulRunLocal", Name(typeof(JobHistoryRow)), "LastSuccessfulRunUtc" },
         { "Controls/ServerTab.xaml", "RunningJobsGrid", "StartTimeLocal", Name(typeof(RunningJobRow)), "StartTime" },
         { "Controls/ServerTab.xaml", "QueryStatsGrid", "LastExecutionTimeLocal", Name(typeof(QueryStatsRow)), "LastExecutionTime" },
         { "Controls/ServerTab.xaml", "QueryStatsGrid", "CreationTimeLocal", Name(typeof(QueryStatsRow)), "CreationTime" },
