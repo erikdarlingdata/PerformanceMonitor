@@ -25,6 +25,7 @@ namespace Darling.Tests;
 /// #6217: a diagnostics bundle on a managed store finds the store the service runs, and when it cannot it says whether
 /// the store is not running, is still starting, or is somewhere the bundle did not look. Every address here is synthetic.
 /// </summary>
+[Collection("live-postgres")]
 public sealed class DiagnosticsBundleManagedStoreTests
 {
     private const int ConfiguredPort = 5641;
