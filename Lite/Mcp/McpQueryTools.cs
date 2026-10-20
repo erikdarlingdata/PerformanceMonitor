@@ -108,7 +108,13 @@ public sealed class McpQueryTools
                         });
                 }
 
+                /* #6226 (Darling's twin): the collector looked and nothing ran. query_stats stores only what executed since its
+                   watermark, so a window in which it ran successfully and stored no row is a measurement (empty), not a gap
+                   (unavailable). After not_collected, which names an engine that never runs the collector. */
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_stats")
+                    ?? EmptyCollectorRan(
+                        await dataService.GetCollectorRunFactsAsync(resolved.ServerId, "query_stats", hours_back, asOfUtc: windowEnd),
+                        "query_stats", hours_back, "executed statements", database_name)
                     ?? McpHelpers.Status("unavailable", "No query stats available for the specified time range.");
             }
 
@@ -210,6 +216,17 @@ public sealed class McpQueryTools
         {
             return McpHelpers.FormatError("get_top_queries_by_cpu", ex);
         }
+    }
+
+    /// <summary>#6226: the <c>empty</c> envelope for a ranking over a window the collector ran in and stored nothing, with
+    /// <c>successful_runs_in_window</c> beside the sentence; null when it has no successful run in the window. Twin of
+    /// <c>DarlingMcpDataTools.EmptyCollectorRan</c>; the words are shared in <see cref="CollectorRunFacts.RanFoundNothing"/>.</summary>
+    internal static string? EmptyCollectorRan(
+        CollectorRunFacts facts, string collectorName, int hoursBack, string found, string? databaseName)
+    {
+        var message = facts.RanFoundNothing(collectorName, hoursBack, found,
+            string.IsNullOrEmpty(databaseName) ? null : McpDatabaseSelection.Scope(new[] { databaseName }));
+        return message is null ? null : McpHelpers.Status("empty", message, new { successful_runs_in_window = facts.SuccessfulRunsInWindow });
     }
 
     /// <summary>#5633 item 3: the empty-page envelope of get_top_procedures_by_cpu, from the collector's own run history. Two cycles only while
@@ -511,6 +528,10 @@ public sealed class McpQueryTools
                        ever stored but Query Store is READ_WRITE and the collector's last run succeeded, say that instead of
                        "may not be enabled". */
                     ?? await FirstIntervalStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, database_name)
+                    /* #6226 (Darling's twin): the collector ran in the window and stored nothing, so nothing executed: empty, not a gap. */
+                    ?? EmptyCollectorRan(
+                        await dataService.GetCollectorRunFactsAsync(resolved.ServerId, "query_store", hours_back, asOfUtc: windowEnd),
+                        "query_store", hours_back, "Query Store intervals", database_name)
                     ?? McpHelpers.Status("unavailable", "No Query Store data available. Query Store may not be enabled on target databases.");
             }
 

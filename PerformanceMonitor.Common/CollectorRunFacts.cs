@@ -93,6 +93,28 @@ public sealed record CollectorRunFacts(
     }
 
     /// <summary>
+    /// #6226: the sentence for a ranking that came back empty over a window the collector DID run in, or null when it has no
+    /// successful run inside the window (the caller then keeps its <c>unavailable</c>, "could have it, does not right now").
+    /// A collector that stores only what changed or ran since its watermark (query_stats, Query Store, pg_stat_statements) logs
+    /// a SUCCESS with zero rows when nothing did, so successful runs and no rows is a measurement: we looked, and nothing ran.
+    /// <paramref name="found"/> is the noun phrase for what it looked for ("executed statements"). <paramref name="scope"/>
+    /// names a database the caller filtered to: the runs may have stored rows for other databases, so the sentence then claims
+    /// only the chosen one. <paramref name="requireDeltaBaseline"/> is for a collector whose FIRST run stores nothing by design
+    /// (it has nothing to difference against), so one run in the window is not yet a measurement.
+    /// </summary>
+    public string? RanFoundNothing(string collectorName, int hoursBack, string found, string? scope = null, bool requireDeltaBaseline = false)
+    {
+        if (SuccessfulRunsInWindow is not > 0 || (requireDeltaBaseline && !HasDeltaBaseline))
+        {
+            return null;
+        }
+
+        var verdict = scope is null ? $"found no {found} to store" : $"stored no {found} for {scope}";
+        return string.Create(CultureInfo.InvariantCulture,
+            $"{collectorName} ran {SuccessfulRunsInWindow} time(s) in the last {hoursBack} hour(s) and {verdict}. This is not a collection gap: collection health showing successful runs that stored no rows is consistent with it.");
+    }
+
+    /// <summary>
     /// The sentence for a trace-flag read that came back with no flags, or null when the collector's newest run does not
     /// show it found none (no run, or a run that stored rows). <c>DBCC TRACESTATUS(-1)</c> lists only flags that are on,
     /// so a successful run that stored zero rows is the collector saying no trace flag is enabled, which is a measurement
