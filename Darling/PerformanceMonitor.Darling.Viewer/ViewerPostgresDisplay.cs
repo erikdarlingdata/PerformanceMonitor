@@ -1558,7 +1558,8 @@ internal static class PgDisplay
         Captures = row.Captures,
         TotalCaptures = row.TotalCaptures,
         MaxBackends = row.MaxBackends,
-        MaxWaitMs = row.MaxWaitMs,
+        /* #6225: a measured double carries its float noise; every other ms column is rounded to one place. */
+        MaxWaitMs = row.MaxWaitMs is { } maxWait ? Math.Round(maxWait, 1) : null,
         LastSeen = Timestamp(row.LastSeen),
         LastSeenUtc = row.LastSeen,
     };
@@ -1836,10 +1837,10 @@ internal static class PgDisplay
         DatabaseName = row.DatabaseName,
         RelationName = row.RelationName,
         Buffers = row.Buffers,
-        PctOfPool = row.PctOfPool,
+        PctOfPool = Math.Round(row.PctOfPool, 1),
         DirtyBuffers = row.DirtyBuffers,
-        PctDirty = row.PctDirty,
-        AvgUsageCount = row.AvgUsageCount,
+        PctDirty = Math.Round(row.PctDirty, 1),
+        AvgUsageCount = row.AvgUsageCount is { } avgUsage ? Math.Round(avgUsage, 2) : null,
         PoolBuffersUsed = row.PoolBuffersUsed,
         PoolBuffersTotal = row.PoolBuffersTotal,
         CaptureTime = SnapshotTime(row.CaptureTime),
@@ -1904,5 +1905,68 @@ internal static class PgDisplay
         Detail = row.Detail ?? string.Empty,
         CaptureTime = SnapshotTime(row.CaptureTime),
         CaptureTimeUtc = row.CaptureTime,
+    };
+
+    /// <summary>
+    /// One row of the OS CPU and disk grid (#6225). The store's CPU figures are doubles with the float noise of a sum of
+    /// per-statement deltas (<c>130.67499999999</c>), and its disk figures are bare byte counts; the grid bound the reader's
+    /// record directly and printed both as they came. The ms columns are rounded to one place like every other ms column of
+    /// the tab, the byte columns are sizes like every other byte column, and the size columns sort by the byte count.
+    /// </summary>
+    internal sealed class KernelStatRow
+    {
+        public string DatabaseName { get; init; } = "";
+        public long QueryId { get; init; }
+        public double TotalCpuMs { get; init; }
+        public double ExecUserTimeMs { get; init; }
+        public double ExecSystemTimeMs { get; init; }
+        public string ExecReadBytes { get; init; } = "";
+        public string ExecWriteBytes { get; init; } = "";
+        public long MajorFaults { get; init; }
+        public bool CounterReset { get; init; }
+        /// <summary>The number <see cref="ExecReadBytes"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash.</summary>
+        public long? ExecReadBytesSort { get; init; }
+        /// <summary>The number <see cref="ExecWriteBytes"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash.</summary>
+        public long? ExecWriteBytesSort { get; init; }
+    }
+
+    internal static KernelStatRow KernelStat(DarlingPgKernelStatsReader.PgKernelStatRow row) => new()
+    {
+        DatabaseName = row.DatabaseName ?? "",
+        QueryId = row.QueryId,
+        TotalCpuMs = Math.Round(row.TotalCpuMs, 1),
+        ExecUserTimeMs = Math.Round(row.ExecUserTimeMs, 1),
+        ExecSystemTimeMs = Math.Round(row.ExecSystemTimeMs, 1),
+        ExecReadBytes = Bytes(row.ExecReadBytes),
+        ExecWriteBytes = Bytes(row.ExecWriteBytes),
+        MajorFaults = row.MajorFaults,
+        CounterReset = row.CounterReset,
+        ExecReadBytesSort = Raw(row.ExecReadBytes),
+        ExecWriteBytesSort = Raw(row.ExecWriteBytes),
+    };
+
+    /// <summary>One row of the captured-plans grid (#6225): the reader's record with its duration doubles rounded to one place like the tab's other ms columns.</summary>
+    internal sealed class CapturedPlanRow
+    {
+        public long QueryId { get; init; }
+        public string TopNodeType { get; init; } = "";
+        public int NodeCount { get; init; }
+        public double TotalDurationMs { get; init; }
+        public double MaxDurationMs { get; init; }
+        public double AvgDurationMs { get; init; }
+        public long Captures { get; init; }
+        public string PlanJson { get; init; } = "";
+    }
+
+    internal static CapturedPlanRow CapturedPlan(DarlingPgPlanCaptureReader.PgPlanCaptureRow row) => new()
+    {
+        QueryId = row.QueryId,
+        TopNodeType = row.TopNodeType ?? "",
+        NodeCount = row.NodeCount,
+        TotalDurationMs = Math.Round(row.TotalDurationMs, 1),
+        MaxDurationMs = Math.Round(row.MaxDurationMs, 1),
+        AvgDurationMs = Math.Round(row.AvgDurationMs, 1),
+        Captures = row.Captures,
+        PlanJson = row.PlanJson ?? "",
     };
 }

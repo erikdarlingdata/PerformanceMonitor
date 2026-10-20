@@ -929,6 +929,14 @@
         <Setter Property="TextAlignment" Value="Right"/>
     </Style>
 
+    <!-- #6225: a cell that holds free text a server stored with its line breaks (a statement, a log message, a plan). Every other
+         cell of a row is centred in it, so a text that makes the row hundreds of pixels tall pushes the numbers out of view and the
+         row reads as blank. The cap keeps the row to a few lines; the tooltip or the cell's full text is where the rest is read. -->
+    <Style x:Key="FreeTextCell" TargetType="TextBlock" BasedOn="{StaticResource DataGridCellText}">
+        <Setter Property="MaxHeight" Value="90"/>
+        <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+    </Style>
+
     <Style TargetType="DataGridCell">
         <Setter Property="BorderThickness" Value="0"/>
         <Setter Property="Padding" Value="8,6"/>

@@ -640,7 +640,7 @@ public partial class ViewerServerTab
         var rows = rowsTask.Result;
         readFanOut.Release();
 
-        PgKernelStatsGrid.ItemsSource = rows;
+        PgKernelStatsGrid.ItemsSource = rows.Select(PgDisplay.KernelStat).ToList();
         UpdateTruncationBanner(PgKernelStatsDataStartBanner, await DataStartOrNullAsync(dataStartTask, "PostgreSQL Kernel Stats"), startUtc);
 
         var reset = rows.Any(r => r.CounterReset);
@@ -721,7 +721,7 @@ public partial class ViewerServerTab
         var rows = rowsTask.Result;
         readFanOut.Release();
 
-        PgCapturedPlansGrid.ItemsSource = rows;
+        PgCapturedPlansGrid.ItemsSource = rows.Select(PgDisplay.CapturedPlan).ToList();
         UpdateTruncationBanner(PgCapturedPlansDataStartBanner, await DataStartOrNullAsync(dataStartTask, "PostgreSQL Captured Plans"), startUtc);
 
         var orphans = rows.Count(r => r.QueryId == 0);
