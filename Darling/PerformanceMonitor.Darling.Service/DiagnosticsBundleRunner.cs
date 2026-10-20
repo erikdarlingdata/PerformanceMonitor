@@ -229,10 +229,12 @@ SELECT to_regclass('collect.store_statement_history') IS NOT NULL AND to_regclas
         string? storeReason,
         CancellationToken cancellationToken,
         NameSourceSql? nameSources = null,
-        IPasswordKeyRing? keyRing = null)
+        IPasswordKeyRing? keyRing = null,
+        IReadOnlyList<string>? connectNotes = null)
     {
         var aliaser = new BundleAliaser();
         var warnings = new List<string>(DiagnosticsBundle.SeedFromConfig(aliaser, config, connectionString, keyRing));
+        warnings.AddRange(connectNotes ?? Array.Empty<string>());
         var sections = new List<BundleSection>();
         string scope = "fleet";
 

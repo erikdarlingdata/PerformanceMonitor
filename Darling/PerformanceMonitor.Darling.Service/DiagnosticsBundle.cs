@@ -925,6 +925,9 @@ internal static class DiagnosticsBundle
     internal static readonly string[] StoreReasonCodes =
     {
         "missing_store_credential", "first_run", "bootstrap_stopped", "connect_failed", "auth_failed", "timeout", "other",
+        /* #6217: what a refused connection to a managed store means, read from the store's own data directory. */
+        DiagnosticsBundleStoreLocator.ReasonDataDirectoryMissing, DiagnosticsBundleStoreLocator.ReasonNotRunning,
+        DiagnosticsBundleStoreLocator.ReasonStarting,
     };
 
     /// <summary>The caller's reason when it is one of <see cref="StoreReasonCodes"/>, else the code the error classifies to.</summary>
