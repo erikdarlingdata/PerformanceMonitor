@@ -200,10 +200,12 @@ public sealed class CollectionOutputBesideCostTests
            event-collector bool, computed by the caller from the name on IsEventCollector's own name-list
            pattern, precisely so that this method still takes no string. */
         /* #5644: the zero-is-normal bool joined the event bool, computed from a name list the same way. */
-        Assert.Equal(7, parameters.Length);
+        /* #6177: the NO_PERMISSIONS-band bool joined them. The caller reduces the band word to a bool, so it is
+           a run-class fact like the others: no string, no note text, nothing that changes from run to run. */
+        Assert.Equal(8, parameters.Length);
 
         Assert.Equal(
-            new[] { "rowsStored", "totalRuns", "deniedSinceLastSuccess", "noteCount", "faultedRuns", "isEventCollector", "isZeroNormal" },
+            new[] { "rowsStored", "totalRuns", "deniedSinceLastSuccess", "noteCount", "faultedRuns", "isEventCollector", "isZeroNormal", "bandedNoPermissions" },
             parameters.Select(p => p.Name!).ToArray());
 
         Assert.DoesNotContain(parameters, p => p.ParameterType == typeof(string));
