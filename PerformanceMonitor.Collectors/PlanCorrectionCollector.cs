@@ -193,6 +193,25 @@ public sealed class PlanCorrectionCollector : CollectorDefinitionBase<PlanCorrec
     private const string PayloadBodyText = @"
 SET NOCOUNT ON;
 
+/*A readable secondary replica that is not in an availability group (a cloud read replica, a geo-secondary) is skipped
+  (#6252, the same rule QueryStoreCollector and QueryStoreForcedPlansCollector apply, #1558). readonly_reason bit 8 is
+  the engine saying this database is read-only BECAUSE it is a readable secondary: its Query Store and its tuning
+  recommendations are the PRIMARY's, arriving by replication, so reading them repeats the primary's rows, lagged. The
+  HADR join in the database list only catches Always On availability group secondaries; bit 8 is the engine's flag
+  for every kind of replica. The gate is EXISTS on bit 8, not NOT EXISTS on bit 0: a database with Query Store OFF
+  still answers (readonly_reason 0), which is the OFF-with-FORCE_LAST_GOOD_PLAN-desired row this collector exists to
+  report. It returns no result set, so the database writes nothing.*/
+IF EXISTS
+(
+    SELECT
+        1
+    FROM sys.database_query_store_options
+    WHERE readonly_reason & 8 = 8
+)
+BEGIN
+    RETURN;
+END;
+
 /*Stage the (invariably small) recommendation set with its details JSON already shredded, so the
   Query Store joins below seek a real row count instead of scanning the whole plan store off a
   statistics-free DMV cardinality guess. See the summary for why this is the 260s fix.*/

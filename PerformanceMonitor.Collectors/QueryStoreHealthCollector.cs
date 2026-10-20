@@ -157,7 +157,10 @@ OPTION(RECOMPILE);";
     /// <see cref="BuildPerItemQuery"/> quote-doubles the same string to nest it inside
     /// <c>[db].sys.sp_executesql N'...'</c> for on-prem. Both forms therefore select the identical reader
     /// ordinals in the identical order, and the shared row loop reads them the same way. One row always —
-    /// the view answers for the database whether Query Store is on or off.
+    /// the view answers for the database whether Query Store is on or off — except a readable secondary replica
+    /// (<c>readonly_reason</c> bit 8, #6252), which returns none: its options are the primary's, and a replica's
+    /// READ_ONLY actual state beside the primary's desired READ_WRITE would read as the storage-cap failure this
+    /// collector exists to catch, when it is only the replica being a replica.
     ///
     /// <para>The <c>DB_ID()</c> screen is the on-prem list's system-database predicate carried onto the row
     /// read — see the class remarks. On-prem the list has already excluded every database this would
@@ -191,6 +194,7 @@ SELECT /* PerformanceMonitorLite */
     private const string PayloadBodyTailText = @"
 FROM sys.database_query_store_options AS qso
 WHERE (DB_ID() > 4 OR DB_ID() = 2)
+AND   qso.readonly_reason & 8 = 0 /*#6252 (#1558): bit 8 = a readable secondary replica, the engine's flag for every kind (an availability group, a cloud read replica, a geo-secondary) where the HADR join in the list sees only the first. Its Query Store options are the primary's, replicated, so the row repeats the primary's health row. Skipped, not reported: a database with no health row reads as not collected. A storage-cap READ_ONLY has other bits (readonly_reason 65536) and still reports.*/
 OPTION(RECOMPILE);";
 
     /// <summary>
