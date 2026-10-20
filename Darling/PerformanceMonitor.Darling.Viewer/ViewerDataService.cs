@@ -1282,7 +1282,7 @@ SELECT
     /* V204 (#6214) adds the folder, personal flag and creator to the saved custom views. Found by catalog so the answer does not depend on
        the connecting role's privileges. Named only in this probe line, never in prose, per the V71 finding. */
     EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.custom_views') AND attname = 'created_by' AND NOT attisdropped),
-    /* V206 (#6235) adds the optional expiry to the custom alert rules. Found by catalog so the answer does not depend on the
+    /* V205 (#6235) adds the optional expiry to the custom alert rules. Found by catalog so the answer does not depend on the
        connecting role's privileges. Named only in this probe line, never in prose, per the V71 finding. */
     EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.custom_alert_rules') AND attname = 'expires_at_utc' AND NOT attisdropped)";
 
@@ -1534,12 +1534,12 @@ SELECT
         /* V203 (#6170): the hypothetical-index login columns on the server registry. Column-existence sentinel, newest-first, and the TOP
            rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 201 and showing a
            spurious upgrade banner on a store that is current. Named only in the probe line, not this prose, per the V71 finding. */
-        /* V206 (#6235): the optional expiry on the custom alert rules. Column-existence sentinel, newest-first, and the TOP rung, so a
+        /* V205 (#6235): the optional expiry on the custom alert rules. Column-existence sentinel, newest-first, and the TOP rung, so a
            fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 203 and showing a spurious
            upgrade banner on a store that is current. Named only in the probe line, not this prose, per the V71 finding. */
         if (hasCustomAlertRuleExpiry)
         {
-            return 206;
+            return 205;
         }
         /* V204 (#6214): the folder, personal flag and creator on the custom views. Column-existence sentinel, newest-first, and the TOP
            rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 203 and showing a

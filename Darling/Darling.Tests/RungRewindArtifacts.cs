@@ -404,6 +404,13 @@ BEGIN
         ALTER TABLE config.custom_views ADD CONSTRAINT custom_views_name_key UNIQUE (name);
     END IF;
 END $$;"),
+
+        // /// V205 (#6235): the optional expiry on the custom alert rules. The column is the probe's newest sentinel. The rewind drops it,
+        // so a re-run of V205 adds it again. Safe on a store that never had it.
+        new(205, "hasCustomAlertRuleExpiry",
+            @"
+ALTER TABLE IF EXISTS config.custom_alert_rules
+    DROP COLUMN IF EXISTS expires_at_utc;"),
     ];
 
     /// <summary>

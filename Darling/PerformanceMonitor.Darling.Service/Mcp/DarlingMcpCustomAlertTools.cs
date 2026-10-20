@@ -240,7 +240,7 @@ public sealed class DarlingMcpCustomAlertTools
         [Description("Level 2 only: under mcp.allowInvestigations this change needs agent_action (request_id, claim_id, agent_id, reason, evidence); see the tool guide. Ignored when mcp.allowWrites is on.")] string? agent_action = null,
         DarlingAgentActionSeat? agentSeat = null,
         ILogger? logger = null,
-        [Description("The rule's expiry: an ISO-8601 UTC instant in the future moves it, an empty string \"\" clears it (the rule never expires), omit to keep the current one. Moving or clearing it is how an expired rule is turned back on.")] string? expires_at_utc = null)
+        [Description("Expiry: an ISO-8601 UTC instant in the future moves it, \"\" clears it (never expires), omit keeps it. Moving or clearing it turns an expired rule back on.")] string? expires_at_utc = null)
     {
         if (DarlingAgentActionSeat.IsGated(agentSeat))
         {

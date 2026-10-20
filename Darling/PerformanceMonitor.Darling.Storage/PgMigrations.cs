@@ -1895,14 +1895,14 @@ ALTER TABLE collect.query_store_forced_plans ADD COLUMN IF NOT EXISTS plan_guide
 ALTER TABLE collect.ag_replica_states ADD COLUMN IF NOT EXISTS primary_replica text;";
 
     /// <summary>
-    /// V206 (#6235): an optional expiry on a custom alert rule, the same column name and meaning as
+    /// V205 (#6235): an optional expiry on a custom alert rule, the same column name and meaning as
     /// <c>config_mute_rules.expires_at_utc</c>. <c>expires_at_utc</c> is a nullable naive-UTC <c>timestamp</c>; NULL means the rule
     /// never expires, which is every existing row. "Expired" is computed (<c>expires_at_utc &lt;= now</c>), never stored, so no job
     /// has to flip anything. An expired rule is not evaluated and does not fire; its row stays, and moving or clearing the expiry
     /// turns it back on. A nullable column with no default is catalog-only. An older build ignores the column and keeps evaluating
     /// the rule. Idempotent.
     /// </summary>
-    private const string V206Sql = @"
+    private const string V205Sql = @"
 ALTER TABLE config.custom_alert_rules ADD COLUMN IF NOT EXISTS expires_at_utc timestamp;";
 
     /// <summary>
@@ -2355,7 +2355,7 @@ $rung$;";
         new Migration(202, "ag-primary-replica", V202Sql),
         new Migration(203, "hypothetical-index-login", V203Sql),
         new Migration(204, "custom-view-folders", V204Sql),
-        new Migration(206, "custom-alert-rule-expiry", V206Sql),
+        new Migration(205, "custom-alert-rule-expiry", V205Sql),
     };
 
     /// <summary>
