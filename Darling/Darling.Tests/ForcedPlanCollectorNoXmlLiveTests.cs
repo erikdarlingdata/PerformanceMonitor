@@ -10,7 +10,6 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
-using System.Diagnostics;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -132,6 +131,7 @@ CLOSE c; DEALLOCATE c;", ct);
         };
         var query = collector.BuildPerItemQuery(database, context);
         await using var connection = new SqlConnection(Admin("master").ConnectionString);
+        connection.StatisticsEnabled = true;
         var lobReads = 0L;
         connection.InfoMessage += (_, e) =>
         {
@@ -145,14 +145,14 @@ CLOSE c; DEALLOCATE c;", ct);
         await using (var statistics = new SqlCommand("SET STATISTICS IO ON;", connection)) await statistics.ExecuteNonQueryAsync(ct);
         await using var command = SqlServerTargetProvider.Instance.CreateCommand(query, connection, 120);
         var rows = new List<QueryStoreForcedPlansCollector.Row>();
-        var clock = Stopwatch.StartNew();
         await using (var reader = await command.ExecuteReaderAsync(ct))
         {
             await collector.ReadItemAsync(database, reader, rows, context, ct);
         }
 
-        clock.Stop();
-        return new Pass(rows, lobReads, clock.ElapsedMilliseconds);
+        /* The server-side execution time of the pass, from the driver's own statistics (no clock of the test's own). */
+        var executionMs = Convert.ToInt64(connection.RetrieveStatistics()["ExecutionTime"], CultureInfo.InvariantCulture);
+        return new Pass(rows, lobReads, executionMs);
     }
 
     private static async Task RunAsync(Func<string, CancellationToken, Task> body)
