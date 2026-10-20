@@ -393,6 +393,8 @@ FROM config.investigation_requests AS c JOIN config.investigation_requests AS r 
             await StatsAsync(connection, NewPlan, T.AddMinutes(3), T.AddMinutes(8), T.AddMinutes(9), 40, 1000, 2000, 30_000, ct, intervalId: 7001);
             await StatsAsync(connection, NewPlan, T.AddMinutes(10), T.AddMinutes(14), T.AddMinutes(15), 60, 3000, 4000, 40_000, ct, intervalId: 7002);
             await StatsAsync(connection, OtherPlan, T.AddMinutes(11), T.AddMinutes(12), T.AddMinutes(13), 7, 500, 600, 700, ct, intervalId: 7003);
+            /* #6221: plan 23 is a later plan of the query, so what it is comes from its stored XML (an ordinary plan: no UsePlan). */
+            await StoredPlanSeed.AddAsync(connection, ct, ServerId, Database, OtherPlan, StoredPlanSeed.Plain);
             await PassAsync(connection, T.AddMinutes(20), ct);
 
             Assert.Equal(1, (await at(T.AddMinutes(21)).SweepAsync(ct)).FollowUps);
@@ -429,6 +431,60 @@ FROM config.investigation_requests AS c JOIN config.investigation_requests AS r 
             /* Frozen: the numbers do not move when more stats arrive. */
             await StatsAsync(connection, NewPlan, T.AddMinutes(16), T.AddMinutes(17), T.AddMinutes(18), 999, 1, 1, 1, ct, intervalId: 7004);
             Assert.Equal(100, (await EvidenceAsync(connection, check, ct))["since_force"]!["forced_plan"]!["executions"]!.GetValue<long>());
+        });
+    }
+
+    /// <summary>#6221: a later plan of the forced query ran after the force, and its XML is stored or not, as the Query Store collector would have it.</summary>
+    private static async Task<(Force Force, JsonObject Evidence)> CheckWithALaterPlanAsync(NpgsqlConnection connection, Func<DateTime, InvestigationRequestStore> at, string? storedXml, CancellationToken ct)
+    {
+        var force = await ForceAsync(at(T), connection, T, ct);
+        await CaptureAsync(connection, T.AddMinutes(1), ct);
+        await StatsAsync(connection, NewPlan, T.AddMinutes(3), T.AddMinutes(8), T.AddMinutes(9), 5, 1000, 2000, 30_000, ct, intervalId: 7001);
+        await StatsAsync(connection, OtherPlan, T.AddMinutes(11), T.AddMinutes(12), T.AddMinutes(13), 40, 500, 600, 700, ct, intervalId: 7003);
+        if (storedXml is not null) await StoredPlanSeed.AddAsync(connection, ct, ServerId, Database, OtherPlan, storedXml);
+        await PassAsync(connection, T.AddMinutes(20), ct);
+        Assert.Equal(1, (await at(T.AddMinutes(21)).SweepAsync(ct)).FollowUps);
+        var check = Assert.Single(await ChecksAsync(connection, force.CalledId, ct)).Id;
+        return (force, await EvidenceAsync(connection, check, ct));
+    }
+
+    [Fact]
+    public async Task ALaterPlanWhoseXmlIsNotStored_MakesTheCheckUnknown_NotIgnored_AndTheScheduleKeepsGoing()
+    {
+        await RunAsync(async (dataSource, connection, at, ct) =>
+        {
+            var (force, evidence) = await CheckWithALaterPlanAsync(connection, at, null, ct);
+
+            Assert.Equal("unknown_plan_not_collected", evidence["state"]!.GetValue<string>());
+            Assert.False(evidence["since_force"]!["other_plans_ran"]!.GetValue<bool>());
+            Assert.True(evidence["since_force"]!["unknown_plans_ran"]!.GetValue<bool>());
+            Assert.Contains("23", evidence["since_force"]!["unknown_reason"]!.GetValue<string>(), StringComparison.Ordinal);
+            var unknown = evidence["since_force"]!["plans"]!.AsArray().Single(p => p!["plan_id"]!.GetValue<long>() == OtherPlan)!;
+            Assert.True(unknown["plan_xml_not_stored"]!.GetValue<bool>());
+
+            /* An unknown does not close the schedule (only a removed force does): the next pass opens check 2, and by then the XML may be stored. */
+            await ExecAsync(connection, $"UPDATE config.investigation_requests SET state = 'reported' WHERE force_check_of = {force.CalledId}", ct);
+            await StoredPlanSeed.AddAsync(connection, ct, ServerId, Database, OtherPlan, StoredPlanSeed.Variant);
+            await PassAsync(connection, T.AddMinutes(30), ct);
+            Assert.Equal(1, (await at(T.AddMinutes(31)).SweepAsync(ct)).FollowUps);
+            var second = (await ChecksAsync(connection, force.CalledId, ct)).Last();
+            Assert.Equal(2, second.No);
+            Assert.Equal("working", (await EvidenceAsync(connection, second.Id, ct))["state"]!.GetValue<string>());
+        });
+    }
+
+    [Fact]
+    public async Task ALaterPlanWhoseStoredXmlIsAVariant_MakesTheCheckWorking_AndMarksTheVariant()
+    {
+        await RunAsync(async (dataSource, connection, at, ct) =>
+        {
+            var (_, evidence) = await CheckWithALaterPlanAsync(connection, at, StoredPlanSeed.Variant, ct);
+
+            Assert.Equal("working", evidence["state"]!.GetValue<string>());
+            Assert.False(evidence["since_force"]!["other_plans_ran"]!.GetValue<bool>());
+            Assert.True(evidence["since_force"]!["variant_plans_ran"]!.GetValue<bool>());
+            Assert.False(evidence["since_force"]!["unknown_plans_ran"]!.GetValue<bool>());
+            Assert.True(evidence["since_force"]!["plans"]!.AsArray().Single(p => p!["plan_id"]!.GetValue<long>() == OtherPlan)!["variant_of_forced"]!.GetValue<bool>());
         });
     }
 
