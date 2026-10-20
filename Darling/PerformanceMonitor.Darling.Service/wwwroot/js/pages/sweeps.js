@@ -492,7 +492,9 @@ export function storeSizeText(store, nowMs) {
     return "unavailable" + (store.size_unavailable_reason ? " (" + store.size_unavailable_reason + ")" : "");
   }
   const age = storeSizeAgeSeconds(store, nowMs);
-  return fmtMb(bytesToMb(store.size_bytes)) + (age == null ? "" : " (hourly sweep, " + fmtMs(age * 1000) + " old)");
+  /* #6245: the hourly sweep's figure is a catalog estimate (reads a little low); one sweep a day is exact. */
+  const form = store.size_estimated === true ? "hourly sweep estimate, " : "hourly sweep, ";
+  return fmtMb(bytesToMb(store.size_bytes)) + (age == null ? (store.size_estimated === true ? " (estimate)" : "") : " (" + form + fmtMs(age * 1000) + " old)");
 }
 
 /** The store host card's actual render, split out from the fetch above (#4214 round-1 review) so a poll tick

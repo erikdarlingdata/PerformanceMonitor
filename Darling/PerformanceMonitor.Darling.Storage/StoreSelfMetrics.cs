@@ -336,6 +336,19 @@ SELECT EXISTS (
       AND size_estimated = false)";
 
     /// <summary>
+    /// <see cref="RecentExactSizeSql"/> for a store without TimescaleDB (#6245), which has no hypertable rows to decide
+    /// by: whether an exact whole-store row exists at or after $1. A TimescaleDB store keeps deciding by the hypertable
+    /// rows, so its whole-store row is exact on the same sweep as its hypertables.
+    /// </summary>
+    public const string RecentExactStoreSizeSql = $@"
+SELECT EXISTS (
+    SELECT 1
+    FROM collect.store_metrics
+    WHERE metric_time >= $1
+      AND object_kind = '{StoreObjectKind}'
+      AND size_estimated = false)";
+
+    /// <summary>
     /// How old the newest exact hypertable row may be before the sweep writes the exact form again instead of the
     /// estimate (#5857). 23 hours, not 24: a host that is stopped nightly still gets an exact row on every day it
     /// runs, and the schedule is not keyed to the 00:00 tick. The first sweep after the upgrade finds no exact row
@@ -1321,16 +1334,41 @@ FROM ({JobHistoryEvidenceSql}
     /// isolation.
     /// <c>is_enabled</c> over the servers registry is the fleet reader's own enabled predicate, so
     /// "per-server" here means exactly the servers the fleet surfaces count. $1 metric_time.
+    /// #6245: this exact form runs once a day (<see cref="ExactSizeIntervalHours"/>) and writes
+    /// <c>size_estimated = false</c>; the other sweeps write <see cref="StoreEstimateInsertSql"/>.
     /// </summary>
-    public const string StoreInsertSql = $@"
+    public const string StoreInsertSql = $@"{StoreInsertHeadSql}
+    pg_database_size(current_database()),
+    (SELECT count(*)::integer FROM collect.servers WHERE is_enabled),
+    false";
+
+    /// <summary>
+    /// The whole-store summary row sized from the catalog (#6245), the twin of <see cref="StoreInsertSql"/> and the same
+    /// shape as the hypertable estimate (#5857): the sum of <c>relpages</c> times the block size over every relation of
+    /// this database that has storage (tables, indexes, TOAST tables, materialized views, sequences; shared catalogs live
+    /// in <c>global/</c> and are not in <c>pg_database_size</c>). <c>pg_database_size</c> opens every file of the database
+    /// and a TimescaleDB store has a file per chunk and index, so the hourly statement averaged 7.2 s and reached 77 s on a
+    /// dev store; this one reads <c>pg_class</c> and makes no file call. <c>relpages</c> is the page count the last VACUUM,
+    /// ANALYZE or index build recorded (0 or -1 until then, floored at 0 here), so the figure is an estimate that lags
+    /// the files and reads a little low on relations that grew since. The hourly sweep writes this form and marks the row
+    /// <c>size_estimated = true</c>; one sweep a day writes <see cref="StoreInsertSql"/> (<see cref="ExactSizeIntervalHours"/>).
+    /// $1 metric_time.
+    /// </summary>
+    public const string StoreEstimateInsertSql = $@"{StoreInsertHeadSql}
+    (SELECT coalesce(sum(greatest(c.relpages, 0)::bigint), 0)::bigint * current_setting('block_size')::bigint
+     FROM pg_class c
+     WHERE c.relkind IN ('r', 'i', 't', 'm', 'S')
+       AND NOT c.relisshared),
+    (SELECT count(*)::integer FROM collect.servers WHERE is_enabled),
+    true";
+
+    private const string StoreInsertHeadSql = $@"
 INSERT INTO collect.store_metrics
-    (metric_time, object_name, object_kind, total_bytes, enabled_server_count)
+    (metric_time, object_name, object_kind, total_bytes, enabled_server_count, size_estimated)
 SELECT
     $1,
     current_database(),
-    '{StoreObjectKind}',
-    pg_database_size(current_database()),
-    (SELECT count(*)::integer FROM collect.servers WHERE is_enabled)";
+    '{StoreObjectKind}',";
 
     /// <summary>
     /// The newest recorded whole-store size in bytes — what the store disk-pressure check reads to
@@ -1423,9 +1461,18 @@ LIMIT 1";
     /// <see cref="LatestStoreSizeSql"/> with the row's <c>metric_time</c> (naive UTC) added (#5718): the
     /// polled <c>get_store_host</c> reads take the store size from the hourly sweep instead of paying
     /// <c>pg_database_size</c> on every poll, and report how old the figure is. Same predicate and ordering,
-    /// so the same backward scan serves it. No parameters.
+    /// so the same backward scan serves it. #6245: <c>size_estimated</c> is the third column, true when the hourly sweep
+    /// recorded the catalog estimate and false for the daily exact figure (NULL on a row from before the column).
+    /// No parameters.
     /// </summary>
-    public const string LatestStoreSizeWithTimeSql = "SELECT total_bytes, metric_time" + LatestStoreSizeTail;
+    public const string LatestStoreSizeWithTimeSql = "SELECT total_bytes, metric_time, size_estimated" + LatestStoreSizeTail;
+
+    /// <summary>
+    /// Whether the newest recorded whole-store size (<see cref="LatestStoreSizeSql"/>) is the hourly catalog estimate
+    /// (#6245): true for the estimate, false for the daily exact figure, NULL on a row from before the marker. Same
+    /// predicate and ordering, so the same backward scan serves it. No parameters.
+    /// </summary>
+    public const string LatestStoreSizeEstimatedSql = "SELECT size_estimated" + LatestStoreSizeTail;
 
     /// <summary>The sweep's own retention — one bounded DELETE, no policy machinery. $1 cutoff (naive UTC,
     /// metric_time minus <see cref="RetentionDays"/> days).</summary>
@@ -1473,18 +1520,20 @@ WHERE metric_time < $1";
         var metricTime = DateTime.SpecifyKind(utcNow, DateTimeKind.Unspecified);
         var written = 0;
 
+        /* #5857: the exact sizes cost a file call per chunk, so the hourly rows come from the catalog estimate
+           and one sweep a day (the first without an exact row in the last ExactSizeIntervalHours) is exact.
+           One indexed read decides it, inside the same per-statement budget. #6245: the whole-store row follows the
+           same decision (pg_database_size is the same file walk); a store without TimescaleDB has no hypertable rows,
+           so it decides by its own exact whole-store row. */
+        bool exact;
+        using (var recent = new NpgsqlCommand(timescaleAvailable ? RecentExactSizeSql : RecentExactStoreSizeSql, connection) { CommandTimeout = SweepTimeoutSeconds })
+        {
+            recent.Parameters.AddWithValue(metricTime.AddHours(-ExactSizeIntervalHours));
+            exact = !(bool)(await recent.ExecuteScalarAsync(cancellationToken))!;
+        }
+
         if (timescaleAvailable)
         {
-            /* #5857: the exact sizes cost a file call per chunk, so the hourly rows come from the catalog estimate
-               and one sweep a day (the first without an exact row in the last ExactSizeIntervalHours) is exact.
-               One indexed read decides it, inside the same per-statement budget. */
-            bool exact;
-            using (var recent = new NpgsqlCommand(RecentExactSizeSql, connection) { CommandTimeout = SweepTimeoutSeconds })
-            {
-                recent.Parameters.AddWithValue(metricTime.AddHours(-ExactSizeIntervalHours));
-                exact = !(bool)(await recent.ExecuteScalarAsync(cancellationToken))!;
-            }
-
             logger?.LogDebug("Store self-metrics sweep sizes hypertables and aggregates with the {SizeForm} form", exact ? "exact" : "catalog estimate");
 
             using var hypertables = new NpgsqlCommand(exact ? HypertableInsertSql : HypertableEstimateInsertSql, connection) { CommandTimeout = SweepTimeoutSeconds };
@@ -1583,7 +1632,7 @@ WHERE metric_time < $1";
             written += await unenumerated.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        using (var store = new NpgsqlCommand(StoreInsertSql, connection) { CommandTimeout = SweepTimeoutSeconds })
+        using (var store = new NpgsqlCommand(exact ? StoreInsertSql : StoreEstimateInsertSql, connection) { CommandTimeout = SweepTimeoutSeconds })
         {
             store.Parameters.AddWithValue(metricTime);
             written += await store.ExecuteNonQueryAsync(cancellationToken);

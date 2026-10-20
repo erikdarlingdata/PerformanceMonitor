@@ -121,7 +121,9 @@ internal readonly record struct HostDataVolumeProfile(
 /// and <see cref="UncompressedChunkCount"/> null mean unavailable (a read that timed out, or one the role was
 /// refused for any reason but TimescaleDB being absent; a store without TimescaleDB reads 0 and 0), and
 /// <see cref="UncompressedUnavailableReason"/> says why. <see cref="StoreSizeAsOfUtc"/> is the sweep's
-/// <c>metric_time</c> (naive UTC) when the size came from the stored hourly figure, null when it was read live.</summary>
+/// <c>metric_time</c> (naive UTC) when the size came from the stored hourly figure, null when it was read live.
+/// <see cref="StoreSizeEstimated"/> (#6245) is true when that stored figure is the hourly catalog estimate, false when it
+/// is the daily exact one, and null when it was read live or the row predates the marker.</summary>
 internal readonly record struct HostStoreFacts(
     string PostgresVersion,
     string? TimescaleVersion,
@@ -132,7 +134,8 @@ internal readonly record struct HostStoreFacts(
     int? UncompressedChunkCount,
     DateTime? StoreSizeAsOfUtc = null,
     string? StoreSizeUnavailableReason = null,
-    string? UncompressedUnavailableReason = null);
+    string? UncompressedUnavailableReason = null,
+    bool? StoreSizeEstimated = null);
 
 /// <summary>One row of the <c>--check-settings</c> table: a setting's live value, where it came from, what
 /// this host would derive for it right now, and the verdict those two facts collapse to.
@@ -680,6 +683,7 @@ WHERE NOT is_compressed";
 
         long? storeSizeBytes = null;
         DateTime? storeSizeAsOf = null;
+        bool? storeSizeEstimated = null;
         string? storeSizeReason = null;
         try
         {
@@ -691,6 +695,7 @@ WHERE NOT is_compressed";
                 {
                     storeSizeBytes = reader.GetInt64(0);
                     storeSizeAsOf = DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Unspecified);
+                    storeSizeEstimated = reader.FieldCount > 2 && !reader.IsDBNull(2) ? reader.GetBoolean(2) : null;
                 }
                 else
                 {
@@ -775,7 +780,7 @@ WHERE NOT is_compressed";
 
         return new HostStoreFacts(
             version, timescaleVersion, storeSizeBytes, hitRatio, tempBytes, uncompressedBytes, uncompressedCount,
-            storeSizeAsOf, storeSizeReason, uncompressedReason);
+            storeSizeAsOf, storeSizeReason, uncompressedReason, storeSizeEstimated);
     }
 
     /* ===================================== Settings: attribution + verdict =============================== */
