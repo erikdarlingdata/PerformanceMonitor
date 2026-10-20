@@ -38,16 +38,64 @@ internal static class InvestigationExportFile
         });
     }
 
-    /// <summary>Deletes <paramref name="path"/> when it is there; a file that cannot be removed is left (the next export names its own).</summary>
-    internal static void TryDelete(string path)
+    /// <summary>Who can read a file <see cref="CreateOwnerOnly"/> makes, in words for the command's success line and the README.</summary>
+    internal static string ReadableBy => OperatingSystem.IsWindows()
+        ? "you, the administrators and the service's operator group (the same people who can read darling.json)"
+        : "the current user only";
+
+    /// <summary>
+    /// Creates the web download's work file in <paramref name="folder"/> (the service's own data folder, never the system temp folder),
+    /// opened ONCE for write and read: the cases are written, the handle is rewound and the same handle is sent, so nothing reopens
+    /// the file by name. On Windows the system deletes it when the handle closes, even after a crash
+    /// (<see cref="FileOptions.DeleteOnClose"/>); elsewhere the name is removed right after the create, so no name is left to find.
+    /// Same hardened ACL or owner-only mode as <see cref="CreateOwnerOnly"/>. #6236.
+    /// </summary>
+    internal static FileStream CreateScratch(string folder)
     {
+        Directory.CreateDirectory(folder);
+        var path = Path.Combine(folder, "darling-export-" + Guid.NewGuid().ToString("N") + ".partial");
+        if (OperatingSystem.IsWindows())
+        {
+            return DarlingFileSecurity.CreateHardenedFile(
+                path, allowInteractiveRead: true,
+                System.Security.AccessControl.FileSystemRights.Read | System.Security.AccessControl.FileSystemRights.Write
+                | System.Security.AccessControl.FileSystemRights.Delete,
+                FileOptions.DeleteOnClose | FileOptions.Asynchronous);
+        }
+
+        var stream = new FileStream(path, new FileStreamOptions
+        {
+            Mode = FileMode.CreateNew,
+            Access = FileAccess.ReadWrite,
+            Share = FileShare.None,
+            Options = FileOptions.Asynchronous,
+            UnixCreateMode = DarlingManagedRoles.OwnerOnlyFile,
+        });
         try
         {
             File.Delete(path);
         }
+        catch
+        {
+            stream.Dispose();
+            throw;
+        }
+
+        return stream;
+    }
+
+    /// <summary>Deletes <paramref name="path"/> when it is there. False when it is still there afterwards (a lock, a permission), so
+    /// the caller can say where it is.</summary>
+    internal static bool TryDelete(string path)
+    {
+        try
+        {
+            File.Delete(path);
+            return !File.Exists(path);
+        }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            /* Nothing more to do: the export already failed or finished. */
+            return false;
         }
     }
 }

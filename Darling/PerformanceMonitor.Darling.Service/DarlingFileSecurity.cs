@@ -891,8 +891,16 @@ public static class DarlingFileSecurity
     /// makes the create fail rather than be written through.
     /// </summary>
     public static FileStream CreateHardenedFile(string path, bool allowInteractiveRead) =>
+        CreateHardenedFile(path, allowInteractiveRead, FileSystemRights.Write, FileOptions.None);
+
+    /// <summary>
+    /// The same create with the rights and options the caller needs (#6236): a file written and then read back through the one
+    /// handle (<see cref="FileSystemRights.ReadData"/>), and removed by the system when the handle closes
+    /// (<see cref="FileOptions.DeleteOnClose"/>, which needs <see cref="FileSystemRights.Delete"/>), so a crash leaves nothing.
+    /// </summary>
+    public static FileStream CreateHardenedFile(string path, bool allowInteractiveRead, FileSystemRights rights, FileOptions options) =>
         new FileInfo(path).Create(
-            FileMode.CreateNew, FileSystemRights.Write, FileShare.None, bufferSize: 4096, FileOptions.None,
+            FileMode.CreateNew, rights, FileShare.None, bufferSize: 4096, options,
             HardenedFileSecurity(allowInteractiveRead));
 
     /// <summary>The one ACL <see cref="HardenFile"/> and <see cref="CreateHardenedFile"/> both apply.</summary>

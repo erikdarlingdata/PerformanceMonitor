@@ -23,6 +23,7 @@ using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Hosting;
+using PerformanceMonitor.Darling.Service.Investigations;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -270,7 +271,9 @@ public sealed class InvestigationFeedbackLiveTests
     /// <paramref name="configureStore"/> runs on the scratch store before the routes start.</summary>
     internal static async Task WithRawWebRoutesAsync(
         string managedRole, DarlingWebSeat? seat, McpDataDetail dataDetail, Func<NpgsqlDataSource, Task>? configureStore,
-        Func<NpgsqlDataSource, Guid, Func<string, string, string?, string?, Task<(int Status, byte[] Raw)>>, CancellationToken, Task> body)
+        Func<NpgsqlDataSource, Guid, Func<string, string, string?, string?, Task<(int Status, byte[] Raw)>>, CancellationToken, Task> body,
+        InvestigationExportGate? exportGate = null, ReadAdmission? readAdmission = null,
+        Action<Microsoft.AspNetCore.Http.HttpContext>? onRequest = null)
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the investigation feedback live tests.");
@@ -321,7 +324,8 @@ public sealed class InvestigationFeedbackLiveTests
             var ownerSource = new StoreOwnerSource();
             ownerSource.Publish(owner);
             using var keys = new PseudonymKeySource(ownerSource);
-            DarlingWebEndpoints.MapAll(app, webLogin, new CollectorRuntimeState(), new CapturingTestLogger(), dataDetail: dataDetail, pseudonymKeys: keys);
+            DarlingWebEndpoints.MapAll(app, webLogin, new CollectorRuntimeState(), new CapturingTestLogger(), dataDetail: dataDetail, pseudonymKeys: keys,
+                readAdmission: readAdmission, investigationExportGate: exportGate ?? new InvestigationExportGate(Path.Combine(Path.GetTempPath(), "darling-export-test-" + Guid.NewGuid().ToString("N"))));
             if (configureStore is not null)
             {
                 await configureStore(owner);
@@ -339,6 +343,7 @@ public sealed class InvestigationFeedbackLiveTests
                     http.Request.Path = split < 0 ? path : path[..split];
                     http.Request.QueryString = new Microsoft.AspNetCore.Http.QueryString(split < 0 ? "" : path[split..]);
                     http.Request.Headers.Host = "localhost";
+                    onRequest?.Invoke(http);
                     if (contentType is not null)
                     {
                         http.Request.ContentType = contentType;

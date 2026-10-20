@@ -138,7 +138,7 @@ public static partial class DarlingCliCommands
         var mode = McpDataDetail.Full;
         try
         {
-            mode = ReadConfiguredDataDetail(args.ConfigPath);
+            mode = ReadConfiguredDataDetail(args!.ConfigPath);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -212,6 +212,9 @@ public static partial class DarlingCliCommands
         return true;
     }
 
+    /// <summary>The exit code of an export the operator cancelled with Ctrl+C: the shell's own number for it (#6236).</summary>
+    internal const int InvestigationExportCancelledExitCode = 130;
+
     /// <summary>The export on an open store, so a live test drives exactly what the command line does.</summary>
     internal static async Task<int> ExportInvestigationsAsync(
         NpgsqlDataSource dataSource, ExportInvestigationsArgs args, McpDataDetail mode, TextWriter output, TextWriter error,
@@ -223,10 +226,17 @@ public static partial class DarlingCliCommands
         }
 
         var path = Path.GetFullPath(args.FilePath);
+        var callerToken = cancellationToken;
+
+        /* Ctrl+C cancels the export through the token (#6236), so the unwinding below deletes the partial file: without the handler the
+           process ends where it stands and the hidden partial stays beside the target. */
+        using var pressed = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        using var cancelKey = InvestigationExportCancelKey.Subscribe(pressed.Cancel);
+        cancellationToken = pressed.Token;
 
         /* The partial file sits beside the target under a random name, created new (so a planted file or link at that name makes
-           the create fail rather than be written through) and readable by the current user only. It is deleted on every way out
-           but the move that makes it the export. */
+           the create fail rather than be written through). Who can read it is InvestigationExportFile.ReadableBy. It is deleted on
+           every way out but the move that makes it the export; when it cannot be deleted the path is printed. */
         var temp = Path.Combine(
             Path.GetDirectoryName(path)!, "." + Path.GetFileName(path) + "." + Guid.NewGuid().ToString("N") + ".partial");
         try
@@ -258,7 +268,7 @@ public static partial class DarlingCliCommands
 
             /* No overwrite unless --force: a file that appeared at the target while the store was read makes this fail. */
             File.Move(temp, path, overwrite: args.Force);
-            output.WriteLine($"Wrote {outcome.Cases} investigation case(s) with feedback to {path} (one JSON object per line, masked at {McpDataDetailModes.Word(mode)}, readable by the current user only).");
+            output.WriteLine($"Wrote {outcome.Cases} investigation case(s) with feedback to {path} (one JSON object per line, masked at {McpDataDetailModes.Word(mode)}, readable by {InvestigationExportFile.ReadableBy}).");
             if (serverLabel is not null)
             {
                 output.WriteLine($"Server: {serverLabel}.");
@@ -281,6 +291,11 @@ public static partial class DarlingCliCommands
             error.WriteLine($"Could not write '{path}': {ex.Message}");
             return CollectorToggleExitCode.UsageOrConfig;
         }
+        catch (OperationCanceledException) when (!callerToken.IsCancellationRequested)
+        {
+            error.WriteLine("Cancelled. No export file was written.");
+            return InvestigationExportCancelledExitCode;
+        }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             error.WriteLine($"Could not read the investigation cases from the store: {ex.Message}");
@@ -288,7 +303,10 @@ public static partial class DarlingCliCommands
         }
         finally
         {
-            InvestigationExportFile.TryDelete(temp);
+            if (!InvestigationExportFile.TryDelete(temp))
+            {
+                error.WriteLine($"Could not remove the partial file {temp}; delete it.");
+            }
         }
     }
 }

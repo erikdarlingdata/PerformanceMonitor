@@ -39,7 +39,8 @@ public sealed record InvestigationExportOutcome(int Cases, int HeldBack, bool Tr
 /// pass the MCP host applies. A line the check cannot read refuses the whole export, so a partial file never reads as a smaller test
 /// set. Cases are read a page at a time and written one at a time.</para>
 ///
-/// <para>A case a live practice request replays is left out, as the investigations arm's report read leaves out its answer.</para>
+/// <para>A case a live practice request replays is left out, as the investigations arm's report read leaves out its answer, and it is
+/// left out of every other case's <c>earlier_reports</c> and <c>prior_links</c> (<see cref="InvestigationReplayFilter"/>).</para>
 /// </summary>
 public static class InvestigationFeedbackExport
 {
@@ -126,7 +127,9 @@ public static class InvestigationFeedbackExport
                         return;
                     }
 
-                    if (Line(export, mode, key) is not { } line)
+                    /* A brief stored before the practice started still lists the replayed case's report: the one shared filter takes it out. */
+                    var served = replayed.Count == 0 ? export : export with { Brief = InvestigationReplayFilter.WithoutReplayed(export.Brief, replayed) };
+                    if (Line(served, mode, key) is not { } line)
                     {
                         refused = true;
                         return;

@@ -347,7 +347,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// and the MCP host's analysis fill — so compare_analysis' banding here reads a series the store was already asked
     /// for this analysis hour from memory. Null keeps the analysis service's baselines private to it.</para>
     /// </summary>
-    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null, PostgresConfig? postgresConfig = null, ReadLatencyAccumulator? readLatency = null, PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null, MonitoredServerRegistryState? registryState = null, SlowReadLog? slowReads = null, ReadAdmission? readAdmission = null, StoreOwnerSource? ownerSource = null, McpDataDetail dataDetail = McpDataDetail.MetadataOnly, IPseudonymKeySource? pseudonymKeys = null)
+    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null, PostgresConfig? postgresConfig = null, ReadLatencyAccumulator? readLatency = null, PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null, MonitoredServerRegistryState? registryState = null, SlowReadLog? slowReads = null, ReadAdmission? readAdmission = null, StoreOwnerSource? ownerSource = null, McpDataDetail dataDetail = McpDataDetail.MetadataOnly, IPseudonymKeySource? pseudonymKeys = null, InvestigationExportGate? investigationExportGate = null)
     {
         /* #4442 scope 2, #4782: the read-latency seat THIS call's routes record into -- the accumulator and
            logger this call was given, held in a per-call object that the two record sites close over: the
@@ -665,7 +665,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         MapServers(app, postgres, logger);
         MapAlertHistoryDismiss(app, postgres, logger);
         MapInvestigationFeedback(app, postgres, logger);
-        MapInvestigationExport(app, postgres, logger, dataDetail, pseudonymKeys, readAdmission, readLatencyRecorder);
+        MapInvestigationExport(
+            app, postgres, logger, dataDetail, pseudonymKeys, readAdmission, readLatencyRecorder,
+            investigationExportGate ?? new InvestigationExportGate(InvestigationExportGate.FolderFor(
+                DarlingManagedPostgres.ResolveDataDirectory(postgresConfig ?? new PostgresConfig()))));
         MapInvestigationPractice(app, postgres, logger);
         MapWebhookSigningStatus(app, collector);
 
@@ -2776,20 +2779,25 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <summary>The route name the export is admitted and recorded under (#6236).</summary>
     internal const string InvestigationExportRoute = "investigation_export";
 
+    /// <summary>The seconds a second export is told to wait when one is already running (#6236).</summary>
+    internal const int InvestigationExportRetryAfterSeconds = 30;
+
     /// <summary>
     /// The download of the investigation cases that have feedback (#6236): <c>GET /api/investigation-export?since=&amp;until=&amp;server=&amp;verdict=</c>
     /// answers JSON lines (<c>application/x-ndjson</c>, one case per line, the same bytes <c>--export-investigations</c> writes) as an attachment.
     /// Two gates, both required: the request is a signed-in dashboard session whose account holds the admin role
     /// (<see cref="DarlingWebSeat.IsSignedInAdmin"/>; a viewer account and a dashboard with no sign-in are refused), and the web login holds INSERT and
-    /// UPDATE on the feedback table (<see cref="InvestigationFeedbackStore.CanRecordAsync"/>). The route is admitted like the other heavy reads.
+    /// UPDATE on the feedback table (<see cref="InvestigationFeedbackStore.CanRecordAsync"/>). The route is heavy from its first call (<see cref="ReadAdmission.AlwaysHeavyRoutes"/>), only one
+    /// export runs at a time (a second answers 429 with Retry-After), and the read-admission slot is released before the file is sent.
     /// Text is masked at the <c>mcp.dataDetail</c> the service started with, with the store's pseudonym key, by <see cref="InvestigationFeedbackExport"/>,
-    /// the same code the command line runs. The cases are written to a temporary file one at a time and the file is then sent, so a refused case
-    /// refuses the whole download and no case is held in memory. 400 for a date, verdict or server it cannot use.
+    /// the same code the command line runs. The cases are written one at a time to a work file in the service's own data folder and the file is then sent
+    /// through the same handle (deleted when it closes), so a refused case refuses the whole download and no case is held in memory. 400 for a date, verdict or server it cannot use.
     /// </summary>
     internal static void MapInvestigationExport(
         WebApplication app, NpgsqlDataSource postgres, ILogger logger, McpDataDetail dataDetail, IPseudonymKeySource? pseudonymKeys,
-        ReadAdmission? readAdmission = null, ReadLatencyRecorder? readLatencyRecorder = null)
+        ReadAdmission? readAdmission = null, ReadLatencyRecorder? readLatencyRecorder = null, InvestigationExportGate? exportGate = null)
     {
+        exportGate ??= new InvestigationExportGate(InvestigationExportGate.FolderFor(DarlingManagedPostgres.ResolveDataDirectory(new PostgresConfig())));
         var feedbackStore = new InvestigationFeedbackStore(postgres, McpCommandDeadlines.ReadSeconds);
         var requestStore = new InvestigationRequestStore(postgres, McpCommandDeadlines.ReadSeconds, () => DateTime.UtcNow);
 
@@ -2814,16 +2822,25 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = filterRefusal }, "/api/investigation-export", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status400BadRequest);
             }
 
-            /* Up to 2000 cases are read, so the route is admitted like the other heavy reads. */
+            /* One export runs at a time, from before its work file exists until the file is gone: a second request answers busy and
+               creates nothing. */
+            if (!exportGate.TryEnter())
+            {
+                return BusyResult(new ReadAdmissionRefusal(
+                    "An investigation export is already running. Try again when it has finished.", InvestigationExportRetryAfterSeconds, 1, 0));
+            }
+
+            /* Up to 2000 cases are read, so the route is heavy from its first call (ReadAdmission.AlwaysHeavyRoutes). The slot covers the
+               store read into the work file only: it is released before the file is sent. */
             using var readScope = ReadScope.Open(logger);
             using var ticket = await AdmitWebRouteAsync(readAdmission, InvestigationExportRoute, ReadWindowBand.None, context, readLatencyRecorder, readScope.Scope);
             if (ticket.Refusal is { } refusal)
             {
+                exportGate.Exit();
                 return BusyResult(refusal);
             }
 
             using var run = new WebRouteRun(readLatencyRecorder, InvestigationExportRoute, ReadWindowBand.None, context, readScope.Scope);
-            var temp = Path.Combine(Path.GetTempPath(), "darling-export-" + Guid.NewGuid().ToString("N") + ".partial");
             try
             {
                 await using (var connection = await postgres.OpenConnectionAsync(context.RequestAborted))
@@ -2843,12 +2860,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 }
 
                 var key = await PseudonymKeySources.KeyForAsync(pseudonymKeys, dataDetail, context.RequestAborted);
-                InvestigationExportOutcome outcome;
-                await using (var file = InvestigationExportFile.CreateOwnerOnly(temp))
-                {
-                    outcome = await InvestigationFeedbackExport.WriteAsync(
-                        requestStore, since, until, serverId, verdict, dataDetail, key, file, context.RequestAborted);
-                }
+                /* One handle for the whole life of the file: written, rewound and sent through the same handle, never reopened by name. */
+                await using var file = InvestigationExportFile.CreateScratch(exportGate.Folder);
+                var outcome = await InvestigationFeedbackExport.WriteAsync(
+                    requestStore, since, until, serverId, verdict, dataDetail, key, file, context.RequestAborted);
+                await file.FlushAsync(context.RequestAborted);
+                file.Position = 0;
 
                 if (outcome.Refused)
                 {
@@ -2872,13 +2889,18 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     context.Response.Headers["X-Export-Server"] = Uri.EscapeDataString(serverLabel);
                 }
 
-                await using (var read = new FileStream(temp, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, FileOptions.Asynchronous | FileOptions.SequentialScan))
+                /* The store work is done: the slot and the route's timing end here, so a slow download holds neither. The one-export gate
+                   stays held until the file is gone. */
+                run.Complete(ReadOutcome.Ok);
+                run.Dispose();
+                ticket.Dispose();
+                if (exportGate.BeforeSend is { } beforeSend)
                 {
-                    context.Response.ContentLength = read.Length;
-                    await read.CopyToAsync(context.Response.Body, context.RequestAborted);
+                    await beforeSend();
                 }
 
-                run.Complete(ReadOutcome.Ok);
+                context.Response.ContentLength = file.Length;
+                await file.CopyToAsync(context.Response.Body, context.RequestAborted);
                 return Results.Empty;
             }
             catch (Exception ex) when (IsFeedbackPrivilegeRefusal(ex))
@@ -2893,7 +2915,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
             finally
             {
-                InvestigationExportFile.TryDelete(temp);
+                exportGate.Exit();
             }
         });
     }

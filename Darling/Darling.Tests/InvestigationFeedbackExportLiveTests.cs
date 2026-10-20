@@ -51,9 +51,9 @@ public sealed class InvestigationFeedbackExportLiveTests
 
     /* A reported request on (serverId, family) opened hoursAgo hours ago: a brief that holds the secret in a finding, a report that holds it
        in its root cause. With credential set, the brief, the root cause and queries_run each also hold a credential statement. */
-    private static async Task<Guid> CaseAsync(
+    internal static async Task<Guid> CaseAsync(
         NpgsqlDataSource owner, InvestigationRequestStore store, int serverId, string serverName, string family, double hoursAgo, CancellationToken ct,
-        string? credential = null, string? dedup = null)
+        string? credential = null, string? dedup = null, Action<JsonObject>? shapeBrief = null)
     {
         var alert = new InvestigationAlert(1, serverId, serverName, family, "Cpu", DateTime.UtcNow, new[] { dedup ?? serverId + ":" + family }, null,
             50, 200, LeaseMinutes: 15, ExpiryMinutes: 240);
@@ -65,8 +65,9 @@ public sealed class InvestigationFeedbackExportLiveTests
             ["brief_format"] = 1,
             ["data_detail"] = "full",
             ["findings"] = new JsonArray(new JsonObject { ["category"] = family, ["story"] = story }),
-        }.ToJsonString();
-        Assert.True(await store.SetBriefAsync(requestId, claim.ClaimId!.Value, 1, brief, ct));
+        };
+        shapeBrief?.Invoke(brief);
+        Assert.True(await store.SetBriefAsync(requestId, claim.ClaimId!.Value, 1, brief.ToJsonString(), ct));
         var queries = credential is null ? "[{\"tool\":\"get_blocking\"}]" : new JsonArray(credential).ToJsonString();
         Assert.Equal(InvestigationSubmitOutcome.Reported, await store.SubmitAsync(new InvestigationReportSubmission(
             requestId, claim.ClaimId!.Value, "agent-a", 1, "real", $"slow WHERE name = '{Secret}'" + (credential is null ? "" : $" because {credential}"), true, "summary",

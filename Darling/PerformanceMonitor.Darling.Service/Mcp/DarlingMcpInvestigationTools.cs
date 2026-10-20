@@ -772,7 +772,7 @@ public sealed class DarlingMcpInvestigationTools
     /// <summary>
     /// <paramref name="read"/> without the reports, the feedback and the journal rows of the requests in
     /// <paramref name="replayed"/> (#5918): the cases a live practice request replays. Their request rows stay, so the agent
-    /// still sees the case exists; the family counts are windows over many cases and are left as they are.
+    /// still sees the case exists; the family counts are windows over many cases and are left as they are. A stored brief loses the replayed cases from its earlier reports and prior links.
     /// </summary>
     internal static InvestigationReportsRead WithoutReplayedAnswers(InvestigationReportsRead read, IReadOnlySet<Guid> replayed)
     {
@@ -783,6 +783,8 @@ public sealed class DarlingMcpInvestigationTools
             Reports = read.Reports.Where(r => !replayed.Contains(r.RequestId)).ToList(),
             Feedback = read.Feedback?.Where(f => !replayed.Contains(f.RequestId)).ToList(),
             Journal = read.Journal.Where(j => j.RequestId is not { } id || !replayed.Contains(id)).ToList(),
+            /* A brief stored before the practice started lists the replayed case's report under earlier_reports (#6236). */
+            Brief = InvestigationReplayFilter.WithoutReplayed(read.Brief, replayed),
         };
     }
 }
