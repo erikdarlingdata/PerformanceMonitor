@@ -77,7 +77,7 @@ public sealed class DarlingMcpPlanForceTools
         "Agent arm, SQL Server only: removes the forced plan of one Query Store plan on the monitored server. Dry run by default: returns the exact statement and the before state, writes nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's force_plan switch and remediation login; ships off. " +
         "<<GUIDE>>" +
         "Call get_plan_force_precheck first. This tool blocks only a call that cannot do anything: plan_not_found or plan_not_forced. An agent may unforce any force, including one automatic plan correction or a person placed; the change is journaled in Agent changes (kind plan_unforce) with how that plan was forced, so it can be forced again, and a person can undo it from the Agent changes list. " +
-        "mcp.allowWrites never bypasses the gate, and a dry run needs it too. After a write, check with get_forced_plans. Nothing in Darling unforces on its own. Answers status dry_run, done, refused (reason) or failed, with before, after, statement and journal_id. A done answer also carries undo: force_query_store_plan with the same plan.")]
+        "mcp.allowWrites never bypasses the gate, and a dry run needs it too. After a write, check with get_forced_plans. Nothing in Darling unforces on its own. Answers status dry_run, done, refused (reason) or failed, with before, after, statement and journal_id. A done answer also carries undo: force_query_store_plan with the same plan (a plan that automatic plan correction forced says that forcing it again makes it manual).")]
     public static Task<string> UnforceQueryStorePlan(
         NpgsqlDataSource postgres,
         [Description("The database_name from get_query_store_top.")] string database_name,

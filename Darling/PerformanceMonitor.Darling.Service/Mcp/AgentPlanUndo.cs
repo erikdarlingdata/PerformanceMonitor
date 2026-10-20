@@ -35,21 +35,24 @@ public static class AgentPlanUndoBuilder
     /// The undo of a made change, or null when there is nothing to put back. <paramref name="force"/> true is a force of <paramref name="planId"/>:
     /// with no plan forced before the undo unforces it, and with another plan P forced before the undo forces P again (an AUTO force of P becomes a
     /// manual one, and the note says so). A force of the plan that is already forced is blocked before the write, so it has no undo here. An unforce is
-    /// undone by forcing the same plan.
+    /// undone by forcing the same plan, and when that plan was an AUTO force (<paramref name="forcedBeforeType"/> is the type of the plan that was forced
+    /// before, which on an unforce is the plan itself) the note says the same thing.
     /// </summary>
     public static AgentPlanUndo? For(bool force, string serverName, string databaseName, long queryId, long planId, long? forcedBeforePlanId, string? forcedBeforeType)
     {
         if (!force)
-            return Build(DarlingMcpPlanForceTools.ForceToolName, serverName, databaseName, queryId, planId, null);
+            return Build(DarlingMcpPlanForceTools.ForceToolName, serverName, databaseName, queryId, planId, AutoNote(planId, forcedBeforeType));
         if (forcedBeforePlanId is not { } before)
             return Build(DarlingMcpPlanForceTools.UnforceToolName, serverName, databaseName, queryId, planId, null);
         if (before == planId)
             return null;
-        var note = string.Equals(forcedBeforeType, "AUTO", StringComparison.OrdinalIgnoreCase)
-            ? string.Create(CultureInfo.InvariantCulture, $"Plan {before} was forced by automatic plan correction. Forcing it again makes it a manual force, not an automatic one.")
-            : null;
-        return Build(DarlingMcpPlanForceTools.ForceToolName, serverName, databaseName, queryId, before, note);
+        return Build(DarlingMcpPlanForceTools.ForceToolName, serverName, databaseName, queryId, before, AutoNote(before, forcedBeforeType));
     }
+
+    private static string? AutoNote(long planId, string? forcingType) =>
+        string.Equals(forcingType, "AUTO", StringComparison.OrdinalIgnoreCase)
+            ? string.Create(CultureInfo.InvariantCulture, $"Plan {planId} was forced by automatic plan correction. Forcing it again makes it a manual force, not an automatic one.")
+            : null;
 
     private static AgentPlanUndo Build(string tool, string serverName, string databaseName, long queryId, long planId, string? note) =>
         new(tool, new AgentPlanUndoArguments(serverName, databaseName, queryId, planId), note);

@@ -66,12 +66,30 @@ public sealed class AgentPlanUndoTests
     }
 
     [Fact]
-    public void AnUnforce_IsUndoneByForcingTheSamePlan()
+    public void AnUnforce_OfAManualForce_IsUndoneByForcingTheSamePlan_WithoutANote()
     {
-        var undo = Undo(force: false, 5, 5, "AUTO")!;
+        var undo = Undo(force: false, 5, 5, "MANUAL")!;
         Assert.Equal("force_query_store_plan", undo.Tool);
         Assert.Equal(new AgentPlanUndoArguments(Server, Database, 11, 5), undo.Arguments);
         Assert.Null(undo.Note);
+    }
+
+    [Theory]
+    [InlineData("AUTO")]
+    [InlineData("auto")]
+    public void AnUnforce_OfAnAutoForce_SaysForcingItAgainMakesItManual(string forcingType)
+    {
+        var undo = Undo(force: false, 5, 5, forcingType)!;
+        Assert.Equal("force_query_store_plan", undo.Tool);
+        Assert.Equal(new AgentPlanUndoArguments(Server, Database, 11, 5), undo.Arguments);
+        Assert.Contains("Plan 5 was forced by automatic plan correction", undo.Note, StringComparison.Ordinal);
+        Assert.Contains("manual force", undo.Note, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AnUnforce_WithNoForcingTypeRead_HasNoNote()
+    {
+        Assert.Null(Undo(force: false, 5)!.Note);
     }
 
     [Fact]
