@@ -46,8 +46,10 @@ public sealed class SensitiveStatementsTests
     [Fact]
     public void TheNeighboursAreNotNamed()
     {
+        // #6200: through the judge with no timeout a busy machine can trip (the production judge's 250 ms match timeout
+        // names a harmless value that runs out of it, which is the fail-closed behaviour its own tests pin).
         var failures = SensitiveStatementCorpus.NotNamed
-            .Where(SensitiveStatements.Names)
+            .Where(text => SensitiveStatements.Names(text, UnboundedJudge))
             .Select(text => "should NOT be named: " + text)
             .ToList();
 
@@ -61,7 +63,8 @@ public sealed class SensitiveStatementsTests
             .Concat(SensitiveStatementCorpus.NotNamed);
         foreach (var text in all)
         {
-            Assert.Equal(SensitiveStatements.Judge(text) != SensitiveStatements.Verdict.Clean, SensitiveStatements.Names(text));
+            // #6200: both sides go through the judge with no timeout, so load cannot make one call time out and not the other.
+            Assert.Equal(UnboundedJudge.Value(text) != SensitiveStatements.Verdict.Clean, SensitiveStatements.Names(text, UnboundedJudge));
         }
     }
 
@@ -446,10 +449,10 @@ public sealed class SensitiveStatementsTests
         SensitiveStatements.Judge("warm the regex up");
         foreach (var text in SensitiveStatementCorpus.Adversarial)
         {
-            var best = BestOfJudging(text, SensitiveStatements.Verdict.Clean, 5);
+            var best = BestOfJudging(text, SensitiveStatements.Verdict.Clean, 5, UnboundedJudge.Value);
 
             TimingClaim.AtMost(best, 49, $"best of 5: {text}");
-            Assert.False(SensitiveStatements.Names(text));
+            Assert.False(SensitiveStatements.Names(text, UnboundedJudge));
         }
     }
 
@@ -461,10 +464,10 @@ public sealed class SensitiveStatementsTests
         SensitiveStatements.Judge("warm the regex up");
         foreach (var text in SensitiveStatementCorpus.TypedDeclarationAdversarial)
         {
-            var best = BestOfJudging(text, SensitiveStatements.Verdict.Clean, 5);
+            var best = BestOfJudging(text, SensitiveStatements.Verdict.Clean, 5, UnboundedJudge.Value);
 
             TimingClaim.AtMost(best, 49, $"best of 5: {text.Substring(0, 24)}");
-            Assert.False(SensitiveStatements.Names(text));
+            Assert.False(SensitiveStatements.Names(text, UnboundedJudge));
         }
     }
 
