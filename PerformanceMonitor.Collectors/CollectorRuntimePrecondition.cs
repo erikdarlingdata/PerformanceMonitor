@@ -565,7 +565,63 @@ public static class CollectorRuntimePrecondition
     /// the fact that matters: DESIRED READ_WRITE with ACTUAL READ_ONLY is the classic silent failure, and a
     /// message that read the desired state would call that database healthy.
     /// </summary>
-    public readonly record struct QueryStoreDatabaseState(string DatabaseName, string? ActualState);
+    public readonly record struct QueryStoreDatabaseState(
+        string DatabaseName, string? ActualState, long? IntervalLengthMinutes = null);
+
+    /// <summary>The Query Store statistics interval when no database reports one: the engine's default.</summary>
+    public const int DefaultQueryStoreIntervalMinutes = 60;
+
+    /// <summary>The <c>collection_log</c> status of a collector run that completed.</summary>
+    public const string CollectorSuccessStatus = "SUCCESS";
+
+    /// <summary>
+    /// The answer for a Query Store read on a server that has NEVER stored a Query Store sample, when the product's
+    /// own latest evidence says Query Store is on and the collector is healthy (#6181), or <c>null</c> when it does
+    /// not and the caller keeps its "may be OFF" text.
+    ///
+    /// <para>The collector ships closed Query Store intervals and re-reads the open one only every
+    /// <c>QueryStoreOpenIntervalState.RefreshEvery</c>, so a server just added legitimately stores nothing until its
+    /// first interval closes (60 minutes by default). Telling that reader "Query Store may be OFF" sends them to fix a
+    /// setting that is already right. The message is returned only when at least one database in scope is
+    /// READ_WRITE in the latest health snapshot AND the collector's latest run succeeded; an empty snapshot (state
+    /// unknown), an OFF, READ_ONLY or ERROR Query Store, or a failed or missing collector run all return null.</para>
+    /// </summary>
+    public static string? QueryStoreFirstIntervalMessage(
+        string serverName,
+        IReadOnlyList<QueryStoreDatabaseState> states,
+        string? collectorStatus,
+        DateTime? observedUtc)
+    {
+        if (states is null || states.Count == 0)
+        {
+            return null;
+        }
+
+        if (!string.Equals(collectorStatus?.Trim(), CollectorSuccessStatus, StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var collecting = states.Where(s => IsCollecting(s.ActualState)).ToList();
+        if (collecting.Count == 0)
+        {
+            return null;
+        }
+
+        var longest = collecting
+            .Where(s => s.IntervalLengthMinutes is > 0)
+            .Select(s => s.IntervalLengthMinutes!.Value)
+            .DefaultIfEmpty(0)
+            .Max();
+        var interval = longest > 0
+            ? $"its interval on this server is {longest.ToString(CultureInfo.InvariantCulture)} minutes"
+            : $"within the Query Store interval ({DefaultQueryStoreIntervalMinutes} minutes by default)";
+
+        return $"Query Store is on for {serverName}{DescribeObserved(observedUtc)} and the query_store collector's last " +
+               "run succeeded, but no Query Store sample has been stored yet. Query Store data arrives when its current " +
+               $"interval closes ({interval}). This is not a sign that Query Store is off. Check again after that; " +
+               "get_query_store_health shows its state.";
+    }
 
     /// <summary>
     /// The precondition explanation for a Query Store read that came back empty on a server whose recorded
