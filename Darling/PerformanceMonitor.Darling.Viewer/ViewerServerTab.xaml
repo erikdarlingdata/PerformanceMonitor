@@ -4286,14 +4286,14 @@
                                     <DataGridTemplateColumn Header="Root Query" Width="320">
                                         <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
-                                                <TextBlock Text="{Binding RootQuery}" TextTrimming="CharacterEllipsis" ToolTip="{Binding RootQuery}"/>
+                                                <TextBlock Text="{Binding RootQuery}" TextTrimming="CharacterEllipsis" MaxHeight="90" ToolTip="{Binding RootQuery}"/>
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
                                     </DataGridTemplateColumn>
                                     <DataGridTemplateColumn Header="Worst Victim Query" Width="320">
                                         <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
-                                                <TextBlock Text="{Binding WorstVictimQuery}" TextTrimming="CharacterEllipsis" ToolTip="{Binding WorstVictimQuery}"/>
+                                                <TextBlock Text="{Binding WorstVictimQuery}" TextTrimming="CharacterEllipsis" MaxHeight="90" ToolTip="{Binding WorstVictimQuery}"/>
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
                                     </DataGridTemplateColumn>
@@ -4341,9 +4341,9 @@
                                          which is usually the only end anybody noticed. -->
                                     <DataGridTextColumn Header="Victim PID" Binding="{Binding VictimPid}" Width="90"/>
                                     <DataGridTextColumn Header="Sessions" Binding="{Binding ParticipantCount}" Width="80"/>
-                                    <DataGridTextColumn Header="Lock Modes" Binding="{Binding LockModes}" Width="150"/>
-                                    <DataGridTextColumn Header="Resources" Binding="{Binding Resources}" Width="220"/>
-                                    <DataGridTextColumn Header="Victim Statement" Binding="{Binding VictimStatement}" Width="*"/>
+                                    <DataGridTextColumn Header="Lock Modes" Binding="{Binding LockModes}" ElementStyle="{StaticResource FreeTextCell}" Width="150"/>
+                                    <DataGridTextColumn Header="Resources" Binding="{Binding Resources}" ElementStyle="{StaticResource FreeTextCell}" Width="220"/>
+                                    <DataGridTextColumn Header="Victim Statement" Binding="{Binding VictimStatement}" ElementStyle="{StaticResource FreeTextCell}" Width="*"/>
                                     <!-- Re-reads of the SAME report, not repeats: the collector re-reads an overlapping
                                          log tail on purpose, and a genuinely repeated deadlock is its own row. -->
                                     <DataGridTextColumn Header="Sightings" Binding="{Binding TimesSeen}" Width="80"/>
@@ -4378,10 +4378,10 @@
                                     <DataGridTextColumn Header="PID" Binding="{Binding Pid}" Width="70"/>
                                     <!-- As PostgreSQL wrote it (#3944); the SQL in Detail and Context is normalized
                                          at the collector, literals replaced by ?. -->
-                                    <DataGridTextColumn Header="Message" Binding="{Binding Message}" Width="*"/>
-                                    <DataGridTextColumn Header="Detail" Binding="{Binding Detail}" Width="220"/>
+                                    <DataGridTextColumn Header="Message" Binding="{Binding Message}" ElementStyle="{StaticResource FreeTextCell}" Width="*"/>
+                                    <DataGridTextColumn Header="Detail" Binding="{Binding Detail}" ElementStyle="{StaticResource FreeTextCell}" Width="220"/>
                                     <!-- The CONTEXT companion: for a lock wait, the tuple and relation. -->
-                                    <DataGridTextColumn Header="Context" Binding="{Binding Context}" Width="200"/>
+                                    <DataGridTextColumn Header="Context" Binding="{Binding Context}" ElementStyle="{StaticResource FreeTextCell}" Width="200"/>
                                     <!-- No statement fingerprint column: no viewer returns any hash (#4004). -->
                                     <!-- Re-reads of the SAME line, not repeats - the deadlock grid's Sightings, same
                                          mechanism. -->
@@ -4479,7 +4479,7 @@
                                     <DataGridTemplateColumn Header="Statement" Width="*">
                                         <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
-                                                <TextBlock Text="{Binding QueryText}" TextTrimming="CharacterEllipsis" ToolTip="{Binding QueryText}"/>
+                                                <TextBlock Text="{Binding QueryText}" TextTrimming="CharacterEllipsis" MaxHeight="90" ToolTip="{Binding QueryText}"/>
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
                                     </DataGridTemplateColumn>
@@ -4534,8 +4534,8 @@
                                     <DataGridTextColumn Header="System (ms)" Binding="{Binding ExecSystemTimeMs}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
                                     <!-- Bytes that reached the DEVICE. Zero means the page cache served
                                          the read, not that nothing was read. -->
-                                    <DataGridTextColumn Header="Disk Read (bytes)" Binding="{Binding ExecReadBytes}" ElementStyle="{StaticResource NumericCell}" Width="140"/>
-                                    <DataGridTextColumn Header="Disk Write (bytes)" Binding="{Binding ExecWriteBytes}" ElementStyle="{StaticResource NumericCell}" Width="140"/>
+                                    <DataGridTextColumn Header="Disk Read" Binding="{Binding ExecReadBytes}" SortMemberPath="ExecReadBytesSort" ElementStyle="{StaticResource NumericCell}" Width="140"/>
+                                    <DataGridTextColumn Header="Disk Write" Binding="{Binding ExecWriteBytes}" SortMemberPath="ExecWriteBytesSort" ElementStyle="{StaticResource NumericCell}" Width="140"/>
                                     <DataGridTextColumn Header="Major Faults" Binding="{Binding MajorFaults}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
                                     <DataGridTextColumn Header="Counter Reset" Binding="{Binding CounterReset}" Width="*"/>
                                 </DataGrid.Columns>
@@ -4570,7 +4570,7 @@
                                     <DataGridTemplateColumn Header="Plan (redacted)" Width="*">
                                         <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
-                                                <TextBlock Text="{Binding PlanJson}" TextTrimming="CharacterEllipsis" ToolTip="{Binding PlanJson}"/>
+                                                <TextBlock Text="{Binding PlanJson}" TextTrimming="CharacterEllipsis" MaxHeight="90" ToolTip="{Binding PlanJson}"/>
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
                                     </DataGridTemplateColumn>
