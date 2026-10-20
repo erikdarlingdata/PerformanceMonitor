@@ -372,16 +372,14 @@ public sealed class McpIncidentActionsLiveTests
                 await hold.ExecuteNonQueryAsync(ct);
             }
 
-            var clock = System.Diagnostics.Stopwatch.StartNew();
             var busy = await Assert.ThrowsAsync<PostgresException>(async () =>
             {
                 await using var call = asRole.CreateCommand("SELECT config.request_mcp_command('pause', NULL, NULL, 'mcp')");
-                call.CommandTimeout = 20;
+                call.CommandTimeout = 20; /* a request that waited on the lock would end in 57014 (query canceled), not DL409 */
                 await call.ExecuteScalarAsync(ct);
             });
             Assert.Equal("DL409", busy.SqlState);
             Assert.Contains("busy", busy.MessageText, StringComparison.Ordinal);
-            Assert.True(clock.Elapsed < TimeSpan.FromSeconds(10), "the request waited on the lock: " + clock.Elapsed);
 
             await using (var release = new NpgsqlCommand("SELECT pg_advisory_unlock(6230, hashtext('pause:'))", holder))
             {

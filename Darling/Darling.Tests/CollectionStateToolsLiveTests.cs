@@ -320,10 +320,10 @@ public sealed class CollectionStateToolsLiveTests
         var ok = false;
         try
         {
-            await SeedServerAsync(rig.Owner, 6211, "reports-01", "ARRAY['tempdb','model']", ct);
+            await SeedServerAsync(rig.Owner, 6211, "reports-north", "ARRAY['tempdb','model']", ct);
             var modifiedBefore = await ScalarAsync<string>(rig.Owner, "SELECT modified_at::text FROM config_monitored_servers WHERE server_id = 6211", ct);
 
-            var set = Parse(await Tools.SetServerExcludedDatabases(rig.Mcp, "reports-01", ["Staging", "Archive", "staging", " "], cancellationToken: ct));
+            var set = Parse(await Tools.SetServerExcludedDatabases(rig.Mcp, "reports-north", ["Staging", "Archive", "staging", " "], cancellationToken: ct));
             Assert.Equal("changed", Status(set));
             Assert.Equal(new[] { "tempdb", "model" }, Strings(set["previous"]!["excluded_databases"]));
             Assert.Equal(new[] { "Staging", "Archive" }, Strings(set["current"]!["excluded_databases"]));
@@ -342,18 +342,18 @@ public sealed class CollectionStateToolsLiveTests
             Assert.Equal(new[] { "tempdb", "model" }, (await ServiceViewAsync(rig, ct)).EnabledServers.Single().ExcludedDatabases.ToArray());
 
             /* An empty list clears; the same list again changes nothing. */
-            Assert.Equal("changed", Status(Parse(await Tools.SetServerExcludedDatabases(rig.Mcp, "reports-01", [], cancellationToken: ct))));
+            Assert.Equal("changed", Status(Parse(await Tools.SetServerExcludedDatabases(rig.Mcp, "reports-north", [], cancellationToken: ct))));
             Assert.Empty((await ServiceViewAsync(rig, ct)).EnabledServers.Single().ExcludedDatabases);
-            Assert.Equal("unchanged", Status(Parse(await Tools.SetServerExcludedDatabases(rig.Mcp, "reports-01", [], cancellationToken: ct))));
+            Assert.Equal("unchanged", Status(Parse(await Tools.SetServerExcludedDatabases(rig.Mcp, "reports-north", [], cancellationToken: ct))));
 
             /* Bad arguments are refused in words and write nothing. */
             await ExecAsync(rig.Owner, "UPDATE config_monitored_servers SET excluded_databases = ARRAY['keep'] WHERE server_id = 6211", ct);
-            var tooMany = Parse(await Tools.SetServerExcludedDatabases(rig.Mcp, "reports-01", Enumerable.Range(0, 300).Select(i => "db" + i).ToArray(), cancellationToken: ct));
+            var tooMany = Parse(await Tools.SetServerExcludedDatabases(rig.Mcp, "reports-north", Enumerable.Range(0, 300).Select(i => "db" + i).ToArray(), cancellationToken: ct));
             Assert.Equal("refused", Status(tooMany));
             Assert.Contains("more than 256", tooMany["message"]!.GetValue<string>(), StringComparison.Ordinal);
-            Assert.Equal("refused", Status(Parse(await Tools.SetServerExcludedDatabases(rig.Mcp, "reports-01", ["bad\u0001name"], cancellationToken: ct))));
-            Assert.Equal("refused", Status(Parse(await Tools.SetServerExcludedDatabases(rig.Mcp, "reports-01", [new string('x', 129)], cancellationToken: ct))));
-            Assert.Equal("refused", Status(Parse(await Tools.SetServerExcludedDatabases(rig.Mcp, "reports-01", null!, cancellationToken: ct))));
+            Assert.Equal("refused", Status(Parse(await Tools.SetServerExcludedDatabases(rig.Mcp, "reports-north", ["bad\u0001name"], cancellationToken: ct))));
+            Assert.Equal("refused", Status(Parse(await Tools.SetServerExcludedDatabases(rig.Mcp, "reports-north", [new string('x', 129)], cancellationToken: ct))));
+            Assert.Equal("refused", Status(Parse(await Tools.SetServerExcludedDatabases(rig.Mcp, "reports-north", null!, cancellationToken: ct))));
             Assert.Equal("not_found", Parse(await Tools.SetServerExcludedDatabases(rig.Mcp, "nope", ["a"], cancellationToken: ct))["reason"]!.GetValue<string>());
             Assert.Equal("keep", await ScalarAsync<string>(rig.Owner, "SELECT array_to_string(excluded_databases, ',') FROM config_monitored_servers WHERE server_id = 6211", ct));
             ok = true;
@@ -372,7 +372,7 @@ public sealed class CollectionStateToolsLiveTests
         var ok = false;
         try
         {
-            await SeedServerAsync(rig.Owner, 6221, "reload-01", "ARRAY['tempdb']", ct);
+            await SeedServerAsync(rig.Owner, 6221, "reload-east", "ARRAY['tempdb']", ct);
             var versionBefore = await ScalarAsync<long>(rig.Owner, "SELECT config_version FROM config_service", ct);
             var reloaded = Parse(await Tools.ReloadConfig(rig.Mcp, ct));
             Assert.Equal("changed", Status(reloaded));
