@@ -65,6 +65,9 @@ public sealed partial class ChangeWatchEvaluator
        is 0 (the first sighting or a counter reset: no delta is knowable) adds nothing, and a legacy row with no stored interval falls back
        to the gap since the previous collection. The rate is the window's delta over those seconds, so a gap in collection thins the window's
        coverage instead of its rate, and the first row after a gap, which carries the whole gap's delta over the gap's seconds, stays a rate.
+       A collection whose interval began before the window's start counts only the part inside the window: its seconds are clipped to the time
+       since the start and its wait time is scaled by the same share (the delta is taken as spread evenly over the interval), so a collection
+       that follows a long gap does not carry the gap's waits into the window or inflate its coverage.
        Columns: the rate, the seconds covered, the collections read. */
     private const string WaitSql = @"
 WITH c AS (
@@ -75,17 +78,23 @@ WITH c AS (
     WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3
     GROUP BY collection_time
 ), d AS (
-    SELECT wait_ms,
+    SELECT collection_time, wait_ms,
            coalesce(stored_seconds::double precision,
                     extract(epoch FROM collection_time - lag(collection_time) OVER (ORDER BY collection_time))::double precision) AS seconds
     FROM c
+), e AS (
+    SELECT wait_ms * f.share AS wait_ms, seconds * f.share AS seconds
+    FROM d
+    CROSS JOIN LATERAL (SELECT CASE WHEN seconds > 0
+                                    THEN least(1.0, extract(epoch FROM collection_time - $2)::double precision / seconds)
+                                    ELSE 1.0 END AS share) f
 )
 SELECT CASE WHEN coalesce(sum(seconds) FILTER (WHERE seconds > 0), 0) > 0
             THEN (sum(wait_ms) FILTER (WHERE seconds > 0) / sum(seconds) FILTER (WHERE seconds > 0))::double precision
             ELSE 0::double precision END,
        coalesce(sum(seconds) FILTER (WHERE seconds > 0), 0)::double precision,
        count(*)::bigint
-FROM d";
+FROM e";
 
     /* Average CPU over the samples whose own instant is in the window (#6234): the ring-buffer collector ingests a backlog of up to hours of
        samples under the post-gap collection_time, so the window rides sample_time_utc (collection_time on a row from before V134 that has
@@ -349,7 +358,8 @@ WHERE rn = 1";
                             ? $"Query Store holds no interval for query {queryId} in {database} that ended at or before the change (the interval length leaves no whole interval in the hour before it), so there is no pre-change baseline"
                             : $"Query Store holds no interval for query {queryId} in {database} that started at or after the change yet, so there is no post-change measure";
                         notMeasured.Add(new ChangeWatchNotMeasured(measureName, reason));
-                        notes.Add($"{reason}; the top {TopQueries} queries by total duration in the changed databases were measured instead");
+                        /* The reason is in the notes through Complete (every not-measured entry is); only the fallback is added here (#6239 round 3, L9). */
+                        notes.Add($"{measureName}: the top {TopQueries} queries by total duration in the changed databases were measured instead");
                         continue;
                     }
 

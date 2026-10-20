@@ -23,7 +23,7 @@ namespace PerformanceMonitor.Darling.Service.ChangeWatch;
 /// #6234, the PostgreSQL pass: the evaluation of a PostgreSQL target's watch. The same three windows (the after-window from the first
 /// change to the window's end, the 60 minutes before it, and the after-window shifted back 7 days), the same thresholds
 /// (<see cref="WaitMoved"/>, <see cref="CpuMoved"/>, <see cref="DurationMoved"/>) and the same week-earlier rule as the SQL Server
-/// evaluation, over the PostgreSQL readers: wait load from <see cref="DarlingPgWaitReader"/> (Aurora) or <see cref="DarlingPgWaitSamplingReader"/> (pg_wait_sampling), CPU from
+/// evaluation, over the PostgreSQL readers: wait load from <c>pg_wait_stats</c> (Aurora) or <see cref="DarlingPgWaitSamplingReader"/> (pg_wait_sampling), CPU from
 /// <see cref="DarlingPgCpuUtilizationReader"/>, and statement duration from <see cref="DarlingPgStatementReader"/>.
 /// <para>A target that lacks a signal (no CPU source, no wait collection, no statement statistics) reports that measure as NOT
 /// MEASURED with the reason, in <see cref="ChangeWatchEvaluation.NotMeasured"/>: absent data is never read as flat.</para>
@@ -63,24 +63,35 @@ public sealed partial class ChangeWatchEvaluator
         return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
     }
 
-    /* Seconds the Aurora wait collector covered in a window, and how many collections it holds (#6234): one interval per collection_time (every
-       wait row of a collection carries the same sample_interval_seconds; 0 means no delta was knowable, NULL a legacy row that falls back to the
-       gap since the previous collection). Columns: seconds covered, seconds covered again (the same figure, so both wait sources read alike), collections. */
-    private const string PgWaitStatsCoverageSql = @"
+    /* The Aurora wait collector's wait time and the seconds it covered in a window, and how many collections it holds (#6234): one interval per
+       collection_time (every wait row of a collection carries the same sample_interval_seconds; 0 means no delta was knowable, NULL a legacy
+       row that falls back to the gap since the previous collection). A collection whose interval began before the window's start counts only
+       the part inside the window: its seconds are clipped to the time since the start and its wait time is scaled by the same share, so a
+       collection after a long gap does not carry the gap's waits into the window or inflate its coverage. Columns: wait time in ms (positive
+       deltas only), seconds covered, collections. */
+    private const string PgWaitStatsSql = @"
 WITH c AS (
-    SELECT collection_time, max(sample_interval_seconds) AS stored_seconds
+    SELECT collection_time, max(sample_interval_seconds) AS stored_seconds,
+           sum(CASE WHEN delta_wait_time_us > 0 THEN delta_wait_time_us ELSE 0 END)::double precision / 1000.0 AS wait_ms
     FROM pg_wait_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
     GROUP BY collection_time
 ), d AS (
-    SELECT coalesce(stored_seconds::double precision,
+    SELECT collection_time, wait_ms,
+           coalesce(stored_seconds::double precision,
                     extract(epoch FROM collection_time - lag(collection_time) OVER (ORDER BY collection_time))::double precision) AS seconds
     FROM c
+), e AS (
+    SELECT wait_ms * f.share AS wait_ms, seconds * f.share AS seconds
+    FROM d
+    CROSS JOIN LATERAL (SELECT CASE WHEN seconds > 0
+                                    THEN least(1.0, extract(epoch FROM collection_time - $2)::double precision / seconds)
+                                    ELSE 1.0 END AS share) f
 )
-SELECT coalesce(sum(seconds) FILTER (WHERE seconds > 0), 0)::double precision,
+SELECT coalesce(sum(wait_ms) FILTER (WHERE seconds > 0), 0)::double precision,
        coalesce(sum(seconds) FILTER (WHERE seconds > 0), 0)::double precision,
        count(*)::bigint
-FROM d";
+FROM e";
 
     /* The pg_wait_sampling profile is cumulative and DarlingPgWaitSamplingReader differences its newest reading against its oldest in the
        window, so the figure covers the span between the window's first and last collection. The time the profile was OBSERVED over that span is
@@ -116,17 +127,16 @@ FROM d";
         return (reader.GetDouble(0), reader.GetDouble(1), reader.GetInt64(2));
     }
 
-    /// <summary>Total wait time per second from the Aurora wait collector (<c>pg_wait_stats</c>), through the reader <c>get_pg_wait_stats</c> uses.</summary>
+    /// <summary>Total wait time per second from the Aurora wait collector (<c>pg_wait_stats</c>), over the part of each collection that lies inside the window.</summary>
     private async Task<RateSample> ReadPgWaitStatsRateAsync(int serverId, DateTime start, DateTime end, CancellationToken cancellationToken)
     {
-        var coverage = await ReadCoverageAsync(PgWaitStatsCoverageSql, serverId, start, end, cancellationToken);
-        if (coverage.Rows == 0)
+        var (totalMs, seconds, rows) = await ReadCoverageAsync(PgWaitStatsSql, serverId, start, end, cancellationToken);
+        if (rows == 0)
         {
             return default;
         }
 
-        var totalMs = (await DarlingPgWaitReader.GetPgWaitStatsPageAsync(_dataSource, serverId, Open(start), end, 1, cancellationToken)).WindowTotalWaitTimeMs;
-        return new RateSample(coverage.First > 0 ? totalMs / coverage.First : 0, coverage.First, coverage.Rows);
+        return new RateSample(seconds > 0 ? totalMs / seconds : 0, seconds, rows);
     }
 
     /// <summary>Total wait time per second from the sampled profile (<c>pg_wait_sampling</c>), through the reader <c>get_pg_wait_sampling</c> uses.
@@ -146,7 +156,10 @@ FROM d";
 
     private async Task<RateSample> ReadCpuAsync(int serverId, DateTime start, DateTime end, CancellationToken cancellationToken)
     {
-        var all = await DarlingPgCpuUtilizationReader.GetHistoryAsync(_dataSource, serverId, Open(start), end, cancellationToken);
+        /* The reader filters on collection_time, and a sample is collected after it was taken (the collector runs every few minutes, and a backlog
+           after a gap arrives later still), so the scan runs a day past the window's end, as the SQL Server read does, and the sample's own
+           instant decides below (#6234). */
+        var all = await DarlingPgCpuUtilizationReader.GetHistoryAsync(_dataSource, serverId, Open(start), end.AddDays(1), cancellationToken);
         /* A sample counts in the window its own instant falls in: a backlog ingested after a gap carries the later collection_time. */
         var samples = all.Where(s => s.SampleTimeUtc > start && s.SampleTimeUtc <= end).ToList();
         if (samples.Count == 0)

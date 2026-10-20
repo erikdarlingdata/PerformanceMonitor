@@ -32,11 +32,19 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpChangeWatchTools
 {
+    /// <summary>What <c>state</c> accepts: a watch's state, or the result it closed with (the store matches either).</summary>
+    internal static readonly string[] StateFilters =
+    {
+        "open", "evaluating", "closed", "failed",
+        ChangeWatchStore.ResultFlat, ChangeWatchStore.ResultRequestOpened, ChangeWatchStore.ResultMovedNoRequest,
+        ChangeWatchStore.ResultAgentChange, ChangeWatchStore.ResultNoData,
+    };
+
     [McpServerTool(Name = "get_change_watches"), Description(
         "Lists a server's change watches, open and closed, newest first: a recorded change (a configuration, trace flag, plan or " +
         "extension change) opens a 60 minute watch, and at its end Darling compares wait time per second, average CPU and query " +
         "duration with the hour before and the same hour a week earlier. Each watch carries its changes, its measures and its result " +
-        "(flat, request_opened, moved_no_request, no_data). Stored read. <<GUIDE>> " +
+        "(flat, request_opened, moved_no_request, moved_agent_change, no_data), or its failed state. Stored read. <<GUIDE>> " +
         "Reads the change watch windows (config.change_watches) for SQL Server and PostgreSQL targets. A SQL Server change is a server, database or " +
         "database-scoped setting, a trace flag, or a forced or unforced Query Store plan; a PostgreSQL change is a server setting, a per-database " +
         "or per-role setting, or an extension install, drop or version change. Every change Darling records opens a watch of 60 " +
@@ -45,25 +53,33 @@ public sealed class DarlingMcpChangeWatchTools
         "average CPU and each query whose average duration at least doubled with 10 or more executions in both windows, each with the " +
         "hour before, the watch window and the same window a week earlier. result says how it closed: flat (nothing moved), " +
         "request_opened (something moved and ONE investigation request opened, request_id names it), moved_no_request (something moved and " +
-        "no investigation could open: investigations are off or no agent route matched), or no_data (the before or after hour had no " +
-        "collected rows, so nothing was compared). result_detail.notes says when a plan-change watch could not read the query from Query " +
-        "Store and measured the top 20 queries instead. A PostgreSQL target reads waits from pg_wait_sampling, or from the Aurora wait " +
+        "no investigation could open: investigations are off or no agent route matched), moved_agent_change (something moved, but every " +
+        "change in the watch was the investigation agent's own plan force or unforce made while it handled a change watch request, so it " +
+        "is recorded and measured and opens no further request), or no_data (the before or after hour had no " +
+        "collected rows, so nothing was compared). state says where a watch is: open (still collecting its window), evaluating (its " +
+        "window ended and a Darling pass is reading its measures or opening its request; a watch stuck here is retried), closed (done, " +
+        "with a result) or failed (its evaluation or request failed repeatedly and Darling gave up; result_detail holds the last error). " +
+        "result_detail.notes says when a plan-change watch could not read the query from Query " +
+        "Store and measured the top 20 queries instead; a plan-change query's after-window holds only Query Store intervals that start at or " +
+        "after the change, so a watch evaluated soon after the change may fall back to the top 20 queries and lists the plan measure in " +
+        "not_measured. A PostgreSQL target reads waits from pg_wait_sampling, or from the Aurora wait " +
         "collector where that is its source, CPU from Performance Insights samples and statements from pg_stat_statements; a measure it has no source for is listed in not_measured with the reason " +
         "(for example no CPU source), never as flat. An open watch has no measures yet: it is still collecting its window. Pass state " +
-        "open or closed to see only those. A read over the monitoring store; no monitored server is touched.")]
+        "open, evaluating, closed or failed to see only watches in that state, or a result (flat, request_opened, moved_no_request, " +
+        "moved_agent_change, no_data) to see only watches that closed with it. A read over the monitoring store; no monitored server is touched.")]
     public static async Task<string> GetChangeWatches(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Only watches in this state: open or closed. Omit for both.")] string? state = null,
+        [Description("Only watches in this state (open, evaluating, closed, failed) or with this result (flat, request_opened, moved_no_request, moved_agent_change, no_data). Omit for all.")] string? state = null,
         [Description("Most watches to return, newest first. Default 20 (1-1000).")] int limit = 20,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
-        if (state is not null && state != "open" && state != "closed")
+        if (state is not null && Array.IndexOf(StateFilters, state) < 0)
         {
-            return McpHelpers.Refusal("state", $"Invalid state '{state}'. Use open or closed, or omit it for both.");
+            return McpHelpers.Refusal("state", $"Invalid state '{state}'. Use {string.Join(", ", StateFilters)}, or omit it for all.");
         }
 
         var limitError = McpHelpers.ValidateTop(limit);
@@ -82,14 +98,14 @@ public sealed class DarlingMcpChangeWatchTools
                     : "a server, database or database-scoped configuration change, a trace flag change or a Query Store plan force or unforce";
                 return McpHelpers.Status(
                     "empty",
-                    $"No change watch{(state is null ? "" : $" in state {state}")} is recorded for {resolved.DisplayName}. A watch opens when {kinds} " +
+                    $"No change watch{(state is null ? "" : $" matching {state}")} is recorded for {resolved.DisplayName}. A watch opens when {kinds} " +
                     "is recorded; none has been since change watching began, or the 90 day retention removed it.");
             }
 
             return JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
-                state = state ?? "open and closed",
+                state = state ?? "all",
                 watch_count = watches.Count,
                 watches = watches.Select(w =>
                 {

@@ -335,8 +335,10 @@ WHERE NOT EXISTS (SELECT 1 FROM collect.query_store_forced_plans AS f
 
                 if (await _store.FindRequestAsync(watch.WatchId, cancellationToken) is { } existing)
                 {
-                    /* A claimer opened the request and died before it closed the watch. */
-                    await _store.CloseAsync(watch.WatchId, ChangeWatchStore.ResultRequestOpened, existing, "{}", cancellationToken);
+                    /* A claimer opened the request and died before it closed the watch. The windows are fixed, so the evaluation is read again and
+                       stored with the result: the takeover must not leave a request_opened watch with no measures (#6239 round 3, L7). */
+                    var taken = await _evaluator.EvaluateAsync(watch, cancellationToken);
+                    await _store.CloseAsync(watch.WatchId, ChangeWatchStore.ResultRequestOpened, existing, taken.ResultJson, cancellationToken);
                     continue;
                 }
 

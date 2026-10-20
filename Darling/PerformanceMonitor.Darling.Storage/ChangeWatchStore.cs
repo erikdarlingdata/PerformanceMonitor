@@ -365,9 +365,9 @@ SELECT EXISTS (SELECT 1 FROM config.change_watch_changes WHERE watch_id = $1)
         return await command.ExecuteScalarAsync(cancellationToken) is true;
     }
 
-    /// <summary>Watches for <c>get_change_watches</c>: open and closed, newest first, optionally one server and one state.</summary>
+    /// <summary>Watches for <c>get_change_watches</c>: open and closed, newest first, optionally one server and one state or result (<paramref name="state"/> matches a watch's <c>state</c> or its <c>result</c>).</summary>
     public Task<IReadOnlyList<ChangeWatchRow>> ListAsync(int? serverId, string? state, int limit, CancellationToken cancellationToken = default) =>
-        ReadAsync("($1::int IS NULL OR w.server_id = $1) AND ($2::text IS NULL OR w.state = $2)", new object?[] { serverId, state }, Math.Clamp(limit, 1, 1000), cancellationToken);
+        ReadAsync("($1::int IS NULL OR w.server_id = $1) AND ($2::text IS NULL OR w.state = $2 OR w.result = $2)", new object?[] { serverId, state }, Math.Clamp(limit, 1, 1000), cancellationToken);
 
     private async Task<IReadOnlyList<ChangeWatchRow>> ReadAsync(string where, object?[] parameters, int limit, CancellationToken cancellationToken)
     {
