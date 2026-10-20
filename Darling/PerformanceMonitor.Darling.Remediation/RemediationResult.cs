@@ -20,6 +20,10 @@ public enum RemediationOutcome
 
     /// <summary>The server or the connection failed. <see cref="RemediationResult.Message"/> is the server's message, with the secret removed.</summary>
     Failed,
+
+    /// <summary>The write statement was sent and its reply never came back (a lost connection, a timeout, a cancel): the server may or may not
+    /// have done it. Not a failure: the caller must not journal it as failed, and must say the change may have happened.</summary>
+    Unknown,
 }
 
 /// <summary>
@@ -35,8 +39,15 @@ public sealed record RemediationResult(
     /// <summary>A kill's facts about the session it named, read in the batch that decided (#5632, step 12). Null for every other action, and when no such session was found.</summary>
     public KillSessionFacts? Session { get; init; }
 
+    /// <summary>A PostgreSQL kill's facts about the session it named, read in the same sign-in that decided (#5632). Null for every other action, and when no such session was found.</summary>
+    public PgKillSessionFacts? PgSession { get; init; }
+
     /// <summary>A real kill's rollback read (#5632, step 12): whether the session's request showed a rollback right after the kill. Null except after a kill.</summary>
     public KillRollback? Rollback { get; init; }
+
+    /// <summary>A PostgreSQL kill's read right after the signal (#5632): true when the same backend (pid and start second) was still there,
+    /// false when it was gone, null when the read did not run or failed.</summary>
+    public bool? PgStillThere { get; init; }
 
     public static class Reasons
     {
@@ -53,6 +64,7 @@ public sealed record RemediationResult(
         public const string OwnSession = "own_session";
         public const string NotUserSession = "not_user_session";
         public const string KillPermissionDenied = "kill_permission_denied";
+        public const string NotPermitted = "not_permitted";
         public const string KillNotBuiltOnPlatform = "kill_not_built_on_platform";
         public const string LoginMissing = "login_missing";
         public const string SecretSlotMissing = "secret_slot_missing";
@@ -60,6 +72,9 @@ public sealed record RemediationResult(
         public const string SecretUnreadable = "secret_unreadable";
         public const string SecretEmpty = "secret_empty";
         public const string SignInFailed = "sign_in_failed";
+        public const string SignInNotStrongEnough = "sign_in_not_strong_enough";
+        public const string OutcomeUnknown = "outcome_unknown";
+        public const string BackendIdHoldsServerStart = "backend_id_has_no_session_start";
     }
 
     internal static RemediationResult Done(string action, bool dryRun, bool wrote, string message) =>
@@ -67,6 +82,9 @@ public sealed record RemediationResult(
 
     internal static RemediationResult Refused(string action, bool dryRun, string reason, string message) =>
         new(RemediationOutcome.Refused, action, dryRun, false, reason, message);
+
+    internal static RemediationResult Unknown(string action, string message) =>
+        new(RemediationOutcome.Unknown, action, false, false, RemediationResult.Reasons.OutcomeUnknown, message);
 
     internal static RemediationResult Failed(string action, bool dryRun, string message, string? reason = null) =>
         new(RemediationOutcome.Failed, action, dryRun, false, reason, message);
