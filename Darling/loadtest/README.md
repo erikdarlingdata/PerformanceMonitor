@@ -161,6 +161,8 @@ Each copy reads its source partition again. That is the price of a run that can 
     ./measure.ps1 -Psql psql -Store '<copy connection string>' -Steps Jobs,Writes,Compression -McpToken '<token>' -ServiceLog '<log folder>/darling-service_yyyyMMdd.log'
     ```
 
+    `-Steps` takes a comma list, and the list works under `pwsh -File` too. An unknown step name stops the script before it does anything, and the message lists the valid names.
+
     The Jobs step prints the hourly work that grows with N. Four jobs write one line to the service log on each hourly tick, with the time they took in ms:
 
     - the plan regression daily totals

@@ -73,6 +73,25 @@ public sealed class ViewerBlockedProcessRow : BlockedProcessAlertRow
     public int BlockedPriority { get; set; }
     public int BlockingPriority { get; set; }
 
+    /* #5632 part 4, DMV-snapshot rows only (null on an XE report row and on a row captured before the columns existed): the head
+       blocker's session. The two times are the monitored server's own clock, stored raw. */
+    public DateTime? BlockingLoginTime { get; set; }
+    public DateTime? BlockingLastRequestEndTime { get; set; }
+    public int? BlockingOpenTransactionCount { get; set; }
+    public long? BlockingTranLogBytesUsed { get; set; }
+
+    /// <summary>When the head blocker's session signed in, rendered as the server's clock (the stored value is not UTC); empty for NULL.</summary>
+    public string BlockingLoginTimeLocal => ViewerDataService.FormatServerClock(BlockingLoginTime);
+
+    /// <summary>When the head blocker's last request ended, rendered as the server's clock; empty for NULL.</summary>
+    public string BlockingLastRequestEndTimeLocal => ViewerDataService.FormatServerClock(BlockingLastRequestEndTime);
+
+    /// <summary>The head blocker's open transaction count; empty for NULL, never 0.</summary>
+    public string BlockingOpenTransactionCountText => BlockingHeadEvidenceText.FormatCount(BlockingOpenTransactionCount);
+
+    /// <summary>The head blocker's transaction log used in KB / MB / GB; empty for NULL. The column sorts on <see cref="BlockingTranLogBytesUsed"/>.</summary>
+    public string BlockingTranLogBytesUsedText => BlockingHeadEvidenceText.FormatLogBytes(BlockingTranLogBytesUsed);
+
     /// <summary>The stored naive-UTC event time in the viewer machine's local time (Lite's grid format).</summary>
     public string EventTimeLocal
         => EventTime is { } eventTime ? ViewerTimeHelper.FormatForDisplay(eventTime, "yyyy-MM-dd HH:mm:ss") : "";
@@ -205,7 +224,11 @@ public sealed partial class ViewerDataService
             monitor_loop,
             blocking_login_name,
             blocking_host_name,
-            blocking_client_app
+            blocking_client_app,
+            blocking_login_time,
+            blocking_last_request_end_time,
+            blocking_open_transaction_count,
+            blocking_tran_log_bytes_used
         FROM v_dmv_blocking_snapshots
         WHERE server_id = $1
         AND   collection_time >= $2
@@ -515,7 +538,7 @@ public sealed partial class ViewerDataService
         return rows;
     }
 
-    /// <summary>Maps the 19-column DMV blocking-snapshot fallback read into the widened grid row.</summary>
+    /// <summary>Maps the 26-column DMV blocking-snapshot fallback read into the widened grid row.</summary>
     private async Task<List<ViewerBlockedProcessRow>> ReadDmvBlockedProcessRowsAsync(
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
     {
@@ -528,37 +551,48 @@ public sealed partial class ViewerDataService
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(new ViewerBlockedProcessRow
-            {
-                CollectionTime = reader.GetDateTime(0),
-                EventTime = reader.IsDBNull(1) ? null : reader.GetDateTime(1),
-                DatabaseName = reader.IsDBNull(2) ? "" : reader.GetString(2),
-                BlockedSpid = reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
-                BlockedEcid = reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
-                BlockingSpid = reader.IsDBNull(5) ? 0 : reader.GetInt32(5),
-                BlockingEcid = reader.IsDBNull(6) ? 0 : reader.GetInt32(6),
-                WaitTimeMs = reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
-                LockMode = reader.IsDBNull(8) ? "" : reader.GetString(8),
-                BlockingStatus = reader.IsDBNull(9) ? "" : reader.GetString(9),
-                ContentiousObject = reader.IsDBNull(10) ? "" : reader.GetString(10),
-                BlockedSqlText = reader.IsDBNull(11) ? "" : reader.GetString(11),
-                BlockingSqlText = reader.IsDBNull(12) ? "" : reader.GetString(12),
-                BlockedLoginName = reader.IsDBNull(13) ? "" : reader.GetString(13),
-                BlockedHostName = reader.IsDBNull(14) ? "" : reader.GetString(14),
-                BlockedClientApp = reader.IsDBNull(15) ? "" : reader.GetString(15),
-                BlockedLastTranStarted = reader.IsDBNull(16) ? null : reader.GetDateTime(16),
-                BlockingLastTranStarted = reader.IsDBNull(17) ? null : reader.GetDateTime(17),
-                MonitorLoop = reader.IsDBNull(18) ? null : reader.GetInt32(18),
-                /* Blocking-side identity — the DMV snapshot is the only blocking source on AWS RDS / when the
-                   BPR threshold is unset, so surface it here too (the XE path already sets these). */
-                BlockingLoginName = reader.IsDBNull(19) ? "" : reader.GetString(19),
-                BlockingHostName = reader.IsDBNull(20) ? "" : reader.GetString(20),
-                BlockingClientApp = reader.IsDBNull(21) ? "" : reader.GetString(21),
-                Source = BlockedProcessAlertRow.DmvSnapshotSource,
-            });
+            rows.Add(MapDmvRow(reader));
         }
 
         return rows;
+    }
+
+    /// <summary>Maps one row of <see cref="DmvBlockingSnapshotsSql"/> (26 columns, in the SELECT's order).</summary>
+    internal static ViewerBlockedProcessRow MapDmvRow(System.Data.Common.DbDataReader reader)
+    {
+        return new ViewerBlockedProcessRow
+        {
+            CollectionTime = reader.GetDateTime(0),
+            EventTime = reader.IsDBNull(1) ? null : reader.GetDateTime(1),
+            DatabaseName = reader.IsDBNull(2) ? "" : reader.GetString(2),
+            BlockedSpid = reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
+            BlockedEcid = reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
+            BlockingSpid = reader.IsDBNull(5) ? 0 : reader.GetInt32(5),
+            BlockingEcid = reader.IsDBNull(6) ? 0 : reader.GetInt32(6),
+            WaitTimeMs = reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
+            LockMode = reader.IsDBNull(8) ? "" : reader.GetString(8),
+            BlockingStatus = reader.IsDBNull(9) ? "" : reader.GetString(9),
+            ContentiousObject = reader.IsDBNull(10) ? "" : reader.GetString(10),
+            BlockedSqlText = reader.IsDBNull(11) ? "" : reader.GetString(11),
+            BlockingSqlText = reader.IsDBNull(12) ? "" : reader.GetString(12),
+            BlockedLoginName = reader.IsDBNull(13) ? "" : reader.GetString(13),
+            BlockedHostName = reader.IsDBNull(14) ? "" : reader.GetString(14),
+            BlockedClientApp = reader.IsDBNull(15) ? "" : reader.GetString(15),
+            BlockedLastTranStarted = reader.IsDBNull(16) ? null : reader.GetDateTime(16),
+            BlockingLastTranStarted = reader.IsDBNull(17) ? null : reader.GetDateTime(17),
+            MonitorLoop = reader.IsDBNull(18) ? null : reader.GetInt32(18),
+            /* Blocking-side identity — the DMV snapshot is the only blocking source on AWS RDS / when the
+               BPR threshold is unset, so surface it here too (the XE path already sets these). */
+            BlockingLoginName = reader.IsDBNull(19) ? "" : reader.GetString(19),
+            BlockingHostName = reader.IsDBNull(20) ? "" : reader.GetString(20),
+            BlockingClientApp = reader.IsDBNull(21) ? "" : reader.GetString(21),
+            /* #5632 part 4: the head blocker's session, columns 22 to 25 (the two times raw, in the server's clock). */
+            BlockingLoginTime = reader.IsDBNull(22) ? null : reader.GetDateTime(22),
+            BlockingLastRequestEndTime = reader.IsDBNull(23) ? null : reader.GetDateTime(23),
+            BlockingOpenTransactionCount = reader.IsDBNull(24) ? null : reader.GetInt32(24),
+            BlockingTranLogBytesUsed = reader.IsDBNull(25) ? null : reader.GetInt64(25),
+            Source = BlockedProcessAlertRow.DmvSnapshotSource,
+        };
     }
 
     /// <summary>

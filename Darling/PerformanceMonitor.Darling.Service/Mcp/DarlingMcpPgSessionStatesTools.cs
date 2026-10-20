@@ -273,7 +273,7 @@ public sealed class DarlingMcpPgSessionStatesTools
                 /* The collector's synthetic (backend_start, pid) identity, and the reason a pid alone is not
                    the key: pids are reused, and this id is comparable to the one on get_pg_blocking's rows
                    for the same backend. */
-                backend_id = r.BackendId,
+                backend_id = r.BackendId.ToString(CultureInfo.InvariantCulture),
                 severity = SessionSeverity(r),
                 database = r.DatabaseName,
                 username = r.Username,

@@ -53,6 +53,8 @@ public sealed class PgClusterObjectCensusTests
     /// <summary>Classes that reach the shared cluster, match a rule, and are safe. Every entry says why.</summary>
     internal static readonly IReadOnlyDictionary<string, string> AllowList = new Dictionary<string, string>(StringComparer.Ordinal)
     {
+        ["PostgresKillLiveTests"] =
+            "its ALTER SYSTEM, ALTER DATABASE postgres and CONNECT grants run on the class's own cluster (ScramTlsCluster, booted from DARLING_TEST_PGRUNTIME on its own port); on DARLING_TEST_PG it only creates a scratch store database",
         ["PgStatementTextScrubLiveTests"] =
             "the ALTER ROLE text is a sample statement fed to the scrubber as data; the class runs no role DDL",
         ["StatementAnalysisReadCutLiveTests"] =

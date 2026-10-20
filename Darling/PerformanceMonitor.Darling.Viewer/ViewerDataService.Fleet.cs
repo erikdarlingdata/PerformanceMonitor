@@ -277,6 +277,10 @@ public sealed class FleetRankedServer
 /// </summary>
 public sealed class FleetRollup
 {
+    /// <summary>The one sentence every viewer surface uses for an offline server: the Overview card, the server tab's
+    /// header and the Recommendations tab (#6135).</summary>
+    public const string OfflineNote = "Offline — no recent collection";
+
     /// <summary>
     /// The default depth of the worst-first ranking (the "Needs attention" list caps at this).
     ///
@@ -738,7 +742,7 @@ public sealed class FleetRollup
            its first collection — see ServerCollectionStatus. */
         if (s.CardStatus == ServerCollectionStatus.Offline)
         {
-            return "Offline — no recent collection";
+            return OfflineNote;
         }
 
         if (s.CardStatus == ServerCollectionStatus.AwaitingFirstCollection)

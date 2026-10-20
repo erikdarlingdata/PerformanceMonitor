@@ -49,6 +49,8 @@ public partial class JobHistoryTab : UserControl
     public JobHistoryTab()
     {
         InitializeComponent();
+        /* #6136: each column is at least as wide as its own header, so no title is cut at a fixed width. */
+        Loaded += (_, _) => DataGridHeaderFit.Apply(this);
         RangePicker.Value = TimeRangePresets.FromLegacyHours(24)!; /* 24 hours, as the list opened; '1mo' is the old 30 days, '90d' can be typed */
         /* R8: the old "Last Year" (365 days). The parser has no year unit, so "1y" cannot be typed; this choice is the way to a year. */
         RangePicker.SetLongestChoice(LiteTimeRange.JobHistoryLongestChoice, "Last Year");
@@ -139,6 +141,14 @@ public partial class JobHistoryTab : UserControl
             _readClocks[id] = readClock;
         }
 
+        /* #6137: every row knows its server's clock and whether the list holds several servers, so a mixed list reads on one clock. */
+        var mixed = PerformanceMonitor.Ui.MultiServerTime.IsMixed(all.Select(r => r.ServerId));
+        foreach (var row in all)
+        {
+            row.MixedServers = mixed;
+            row.Clock = readClocks.TryGetValue(row.ServerId, out var own) ? own : null;
+        }
+
         /* #2126: rows carry the raw collected server name; swap in the operator's alias where the
            config layer knows one, so the Server column and filter speak the same names as every
            other tab. A server no longer in config keeps its raw name (the durable-record case). */
@@ -217,7 +227,8 @@ public partial class JobHistoryTab : UserControl
 
             var displayCount = JobHistoryDataGrid.ItemsSource is ICollection<JobHistoryRow> coll ? coll.Count : all.Count;
             NoJobsMessage.Visibility = displayCount == 0 ? Visibility.Visible : Visibility.Collapsed;
-            RunTimeHeaderText.Text = TimeColumnTitle.For("Run Time", ServerTimeHelper.CurrentDisplayMode); // D5: the column names its clock
+            RunTimeHeaderText.Text = TimeColumnTitle.For("Run Time", ServerTimeHelper.CurrentDisplayMode, all.Any(r => r.MixedServers)); // D5: the column names its clock
+            DataGridHeaderFit.Apply(JobHistoryDataGrid); // #6136: the longer title widens its column
 
             /* The cap applies to the read (all.Count), not the column-filtered display count: a column filter narrowing the
                grid must not make the "newest 2,000" label disappear when the underlying read still hit the cap. */

@@ -54,3 +54,15 @@ export function orderServers(rows) {
   keyed.sort(favoritesFirst(byDisplayName));
   return keyed.map((k) => k.r);
 }
+
+/**
+ * The name a person reads for the server whose connection key is `key` (#6157): the display name the fleet cards or
+ * list_servers rows carry, or the key itself when the server is not in `rows` or has no display name.
+ */
+export function displayNameFor(rows, key) {
+  if (key == null || key === "") return "";
+  for (const r of Array.isArray(rows) ? rows : []) {
+    if (r && r.server_name === key) return r.display_name || key;
+  }
+  return key;
+}

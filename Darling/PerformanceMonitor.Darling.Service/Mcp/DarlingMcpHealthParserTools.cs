@@ -129,6 +129,89 @@ public sealed class DarlingMcpHealthParserTools
         catch (Exception ex) when (ex is not OperationCanceledException) { return McpHelpers.FormatError("get_health_parser_system_health", ex); }
     }
 
+    /// <summary>The web page's CPU chart (#6158): the same parsed SYSTEM snapshots, but the answer is one row per time bucket
+    /// (the mean of each CPU reading) across the whole window, instead of the newest <c>limit</c> rows. A day of snapshots used
+    /// to stop at the limit and draw only its newest hours. The width is <paramref name="bucket_minutes"/>, or sized so the
+    /// answer fits <see cref="TrendBudget.Chart"/>'s point budget. Not an MCP tool: the agent read keeps its shape.</summary>
+    internal static async Task<string> GetSystemHealthChart(
+        NpgsqlDataSource postgres,
+        string? server_name,
+        int hours_back,
+        int? bucket_minutes,
+        string? as_of,
+        ILogger? logger = null,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 2, TrendBudget.Chart, out var bucketMinutes);
+            if (bucketError != null) return bucketError;
+
+            var c = await CollectAsync(postgres, server_name, hours_back, 50, as_of,
+                SystemHealthParser.SpServerDiagnosticsEvent,
+                xml => One(SystemHealthParser.ParseSystemHealth(xml)),
+                r => r.EventTime.HasValue, cancellationToken);
+            if (c.EarlyReturn != null) return c.EarlyReturn;
+            if (c.Rows.Count == 0)
+                return await EmptyAsync(postgres, c, hours_back, SystemHealthParser.SpServerDiagnosticsEvent,
+                    "none carried a SYSTEM component result with a timestamp (the other four sp_server_diagnostics components feed the sibling reads)", logger, cancellationToken);
+
+            var notice = await NoticeAsync(postgres, c, hours_back, EarliestOf(c.Rows.Select(r => r.EventTime)), emptyAnswer: false, logger, cancellationToken);
+            var buckets = BucketCpu(c.Rows, bucketMinutes);
+
+            return Finish(notice, JsonSerializer.Serialize(new
+            {
+                server = c.ServerName,
+                hours_back,
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
+                source_observed = true,
+                last_captured_at = Stamp(c.LastCapturedAt),
+                bucket_minutes = bucketMinutes,
+                snapshots = c.Rows.Count,
+                /* Every bucket is shown, so the page's row-limit notice (total_entries above shown) never fires on this answer. */
+                total_entries = buckets.Count,
+                shown = buckets.Count,
+                entries = buckets.Select(b => new
+                {
+                    event_time = b.Start.ToString("o"),
+                    system_cpu_utilization = b.SystemCpu,
+                    sql_cpu_utilization = b.SqlCpu,
+                    snapshots = b.Snapshots
+                })
+            }, McpHelpers.JsonOptions));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException) { return McpHelpers.FormatError("get_health_parser_system_health", ex); }
+    }
+
+    /// <summary>One bucket of the CPU chart: where it starts and the mean of each reading in it.</summary>
+    internal readonly record struct CpuBucket(DateTime Start, double? SystemCpu, double? SqlCpu, int Snapshots);
+
+    /// <summary>Groups the snapshots into <paramref name="bucketMinutes"/>-wide buckets aligned to the UTC epoch (every ladder
+    /// width divides a day, so none straddles midnight) and averages each CPU reading over the snapshots that carry it.
+    /// Oldest bucket first; a bucket with no snapshot is not made up.</summary>
+    internal static List<CpuBucket> BucketCpu(IEnumerable<SystemHealthRecord> rows, int bucketMinutes)
+    {
+        var width = TimeSpan.FromMinutes(Math.Max(1, bucketMinutes)).Ticks;
+        static double? Mean(IEnumerable<long?> values)
+        {
+            var present = values.Where(v => v.HasValue).Select(v => (double)v!.Value).ToList();
+            return present.Count == 0 ? null : Math.Round(present.Average(), 1);
+        }
+
+        return rows
+            .Where(r => r.EventTime.HasValue)
+            .GroupBy(r => r.EventTime!.Value.Ticks / width)
+            .OrderBy(g => g.Key)
+            .Select(g => new CpuBucket(
+                new DateTime(g.Key * width, DateTimeKind.Utc),
+                Mean(g.Select(r => r.SystemCpuUtilization)),
+                Mean(g.Select(r => r.SqlCpuUtilization)),
+                g.Count()))
+            .ToList();
+    }
+
     [McpServerTool(Name = "get_health_parser_severe_errors"), Description("Gets severe errors from system_health over an event_time window ending at as_of, newest first. Gated: severity 19 or higher only, benign connection-reset error numbers excluded, so a lower-severity error is never listed. An empty answer with status empty is a real result: nothing in this window passed the gate, and events_in_window counts what was captured and filtered out. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets severe errors from system_health (severity >= 19, benign connection-reset numbers excluded): error number, severity, state, database, and message. These are critical SQL Server events (stack dumps, fatal errors). " + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static Task<string> GetSevereErrors(
         NpgsqlDataSource postgres,

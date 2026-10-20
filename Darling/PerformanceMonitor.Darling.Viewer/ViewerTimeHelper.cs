@@ -209,7 +209,7 @@ public static class ViewerTimeHelper
     /// <summary>
     /// A short label naming the zone a time is shown in under <paramref name="mode"/>, for the text that sits
     /// next to a rendered time: "UTC", the viewer machine's zone name, or the server's UTC offset (for example
-    /// <c>UTC-4:00</c>). The viewer's port of Lite's <c>ServerTimeHelper.GetTimezoneLabel</c>, with one
+    /// <c>UTC-04:00</c>). The viewer's port of Lite's <c>ServerTimeHelper.GetTimezoneLabel</c>, with one
     /// difference: it takes the instant that was converted (<paramref name="naiveUtc"/>, the stored naive-UTC
     /// value). The server's offset and the machine's standard-or-daylight zone name both change across a
     /// daylight saving change, so a label built from the offset in force now would name a different zone than
@@ -231,9 +231,7 @@ public static class ViewerTimeHelper
             : zone.StandardName;
     }
 
-    private static string OffsetLabel(int utcOffsetMinutes)
-    {
-        var magnitude = Math.Abs(utcOffsetMinutes);
-        return $"UTC{(utcOffsetMinutes < 0 ? "-" : "+")}{magnitude / 60}:{magnitude % 60:D2}";
-    }
+    /// <summary>The offset as one label, "UTC-04:00" (#6137): the spelling the time range picker and the Settings list use,
+    /// so no label reads "UTC-04:00" beside them.</summary>
+    private static string OffsetLabel(int utcOffsetMinutes) => PerformanceMonitor.Ui.MultiServerTime.OffsetLabel(utcOffsetMinutes);
 }

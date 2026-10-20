@@ -81,6 +81,16 @@ public sealed class KillSessionTests
     }
 
     [Fact]
+    public void AKillWhoseRollbackReadFailed_IsStillAKill_WithItsRollbackNotRead()
+    {
+        var result = SqlServerRemediationExecutor.KillAnswer(Name, false, 57, "killed", Facts(4096), null, null, rollbackRead: false);
+        Assert.Equal(RemediationOutcome.Done, result.Outcome);
+        Assert.True(result.Wrote);
+        Assert.Null(result.Rollback);
+        Assert.Contains("was not read", result.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TheSessionFacts_RideOnTheResult_SoTheJournalCanKeepThem()
     {
         var facts = Facts(120);

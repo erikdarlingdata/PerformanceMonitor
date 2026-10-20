@@ -80,14 +80,16 @@ public sealed class WebBlockingColumnsPageTests
             "wait_time_ms", "wait_resource", "lock_mode", "blocked_status", "blocking_status", "blocked_isolation_level",
             "blocking_isolation_level", "blocked_transaction_name", "blocked_priority", "blocked_transaction_count",
             "blocked_log_used", "blocked_login_name", "blocked_host_name", "blocked_client_app", "blocking_login_name",
-            "blocking_host_name", "blocking_client_app", "contentious_object",
+            "blocking_host_name", "blocking_client_app", "blocking_login_time", "blocking_last_request_end_time",
+            "blocking_open_transaction_count", "blocking_tran_log_bytes_used", "contentious_object",
         }, Keys("BLOCKING_COLUMNS"));
         Assert.Equal(new[]
         {
             "Event Time", "Blocked SQL", "Blocking SQL", "Source", "Database", "Blocked SPID", "Blocking SPID", "Wait Time",
             "Wait Resource", "Lock Mode", "Blocked Status", "Blocking Status", "Blocked Isolation", "Blocking Isolation",
             "Blocked Tran", "Blocked Priority", "Blocked Tran Count", "Blocked Log Used", "Blocked Login", "Blocked Host",
-            "Blocked App", "Blocking Login", "Blocking Host", "Blocking App", "Object",
+            "Blocked App", "Blocking Login", "Blocking Host", "Blocking App", "Head login time", "Head last request ended",
+            "Head open transactions", "Head log used", "Object",
         }, Labels("BLOCKING_COLUMNS"));
     }
 

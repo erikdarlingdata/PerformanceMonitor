@@ -65,11 +65,15 @@ public sealed class DarlingMcpForcedPlanTools
 
     [McpServerTool(Name = "get_forced_plans"), Description(
         "Whether each Query Store force works: one entry per plan forced in its database's newest capture in the window, with a state and the evidence. " +
-        "States: FAILING (the engine counts a force failure or names a reason), IGNORED (another plan of the query ran after the force was first seen), WORKING (the forced plan ran, no other plan did), " +
+        "States: FAILING (the engine counts a force failure or names a reason), IGNORED (another plan of the query ran after the force was first seen), WORKING (the forced plan ran, or a variant of it did, and no other plan did), " +
         "NOT_EXERCISED (no plan of the query ran after the force was first seen), REMOVED (forced in an earlier capture in the window, absent from the database's newest). <<GUIDE>> " +
         "Reads the forced-plan collector (every 5 minutes) and the stored Query Store runs; never a monitored server. A database is judged by its own newest capture. " +
         "first_seen is the first capture that shows the force, so the real force can be up to one pass (5 minutes by default) earlier. " +
         "Evidence per force: forced_plan executions and last run since first_seen, the other plans' executions and last run since first_seen, failure count and reason. " +
+        "variant_plans lists plans of the query whose stored plan carries UsePlan=\"1\" and no plan guide name: SQL Server recompiled the force under a new plan id, so their runs count as the forced plan running, not as another plan " +
+        "(an OPTION (USE PLAN ...) hint in the query's own text also sets UsePlan, which is rare on a forced query). " +
+        "plan_guide names a plan guide that covers the forced query (name, enabled, scope), found from the query's object (an OBJECT-scoped guide) or a guide name in a later plan of the query; " +
+        "it sits beside the state and never changes it: a FAILING force with a guide may still be running fine. " +
         "An empty answer says why: no capture in the window (the collector has not run, or Query Store is off for every database), or no forced plans in the newest captures. " +
         "forced_plans lists the worst states first (truncated marks a cut).")]
     public static async Task<string> GetForcedPlans(
@@ -168,7 +172,10 @@ public sealed class DarlingMcpForcedPlanTools
         force_failure_count = p.FailureCount,
         last_force_failure_reason = p.FailureReason,
         forced_plan = new { execution_count = p.ForcedExecutions, last_execution_time = Format(p.ForcedLastExecution) },
+        variant_plans = p.VariantPlans.Take(MaxOtherPlans).Select(o => new { plan_id = o.PlanId, execution_count = o.Executions, last_execution_time = Format(o.LastExecution) }),
+        variant_plans_total = p.VariantPlans.Count,
         other_plans = p.OtherPlans.Take(MaxOtherPlans).Select(o => new { plan_id = o.PlanId, execution_count = o.Executions, last_execution_time = Format(o.LastExecution) }),
         other_plans_total = p.OtherPlans.Count,
+        plan_guide = p.PlanGuide is { } guide ? new { name = guide.Name, enabled = guide.Enabled, scope = guide.Scope } : null,
     };
 }

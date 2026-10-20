@@ -40,6 +40,8 @@ const BAR_CHAR_BUDGET_PX = BAR_CHAR_PX * 1.16;
 const BAR_TRACK_MIN = 40;
 /* Top margin leaves headroom for the y-axis unit caption to sit fully clear of the top tick's label. */
 const M = { l: 58, r: 16, t: 26, b: 30 };
+/* The margins as declared; a chart whose tick labels are wider than the left margin keeps a copy of its own named M (#6158). */
+const MARGINS = M;
 const PLOT_H = H - M.t - M.b;
 const Y_TICKS = 4;
 let clipSeq = 0;
@@ -376,6 +378,32 @@ export function renderLineChart(spec) {
   const yMin = scale.min;
   const yMax = scale.max;
 
+  /* Axis labels, and the room each side needs for its widest (#6158): a five-digit tick ("80,000.0") used to run out of the
+     fixed 58 px left margin and the 56 px right gutter and lose its leading digits. The right axis scale is worked out
+     here, from the rows, so its gutter is known before the plot is built. */
+  const yLabels = axisTickLabels(scale.ticks, scale.step, formatValue);
+  const M = { ...MARGINS, l: axisGutterPx(yLabels, MARGINS.l) };
+  let scale2 = null;
+  let yLabels2 = [];
+  let rightGutter = 56;
+  if (series2) {
+    let m2 = -Infinity;
+    let n2 = Infinity;
+    for (const { r } of rows) {
+      const v = r[series2.key];
+      if (v == null || isNaN(v)) continue;
+      const num = Number(v);
+      if (num > m2) m2 = num;
+      if (num < n2) n2 = num;
+    }
+    if (m2 === -Infinity) { m2 = 1; n2 = 0; }
+    n2 = Math.min(0, n2);
+    if (m2 === n2) m2 = n2 + 1;
+    scale2 = niceScale(n2, m2, Y_TICKS, null, series2.integerTicks === true);
+    yLabels2 = axisTickLabels(scale2.ticks, scale2.step, series2.formatValue || ((v) => String(v)));
+    rightGutter = axisGutterPx(yLabels2, 56);
+  }
+
   const scaleY = (v) => M.t + (1 - (v - yMin) / (yMax - yMin)) * PLOT_H;
   /* Plotted points clamp into the plot box so a value above a clamped (pct) domain can't draw outside it. */
   const plotY = (v) => Math.max(M.t, Math.min(M.t + PLOT_H, scaleY(v)));
@@ -391,7 +419,7 @@ export function renderLineChart(spec) {
   const buildPlot = (W) => {
     /* A dual-axis overlay reserves a right gutter for its own tick labels + unit caption (#1606); without
        one the geometry is byte-for-byte the original. All right-edge math below uses these, never M.r. */
-    const plotRight = series2 ? W - 56 : W - M.r;
+    const plotRight = series2 ? W - rightGutter : W - M.r;
     const plotW = plotRight - M.l;
     /* A single bucket spans no time (spanMs === 0), so every point shares tMin; center it rather than pinning
        it to the left axis, where a lone dot reads as a glitch. */
@@ -407,11 +435,11 @@ export function renderLineChart(spec) {
 
     /* Horizontal gridlines + y labels (on the nice tick values). */
     const axis = svg("g", { class: "axis" });
-    for (const val of scale.ticks) {
-      const y = scaleY(val);
+    for (let ti = 0; ti < scale.ticks.length; ti++) {
+      const y = scaleY(scale.ticks[ti]);
       axis.appendChild(svg("line", { class: "grid-line", x1: M.l, y1: y, x2: plotRight, y2: y }));
       const label = svg("text", { x: M.l - 8, y: y + 4, "text-anchor": "end" });
-      label.textContent = formatValue(val);
+      label.textContent = yLabels[ti];
       axis.appendChild(label);
     }
 
@@ -457,25 +485,12 @@ export function renderLineChart(spec) {
        together without either flattening the other. */
     let scaleY2 = null;
     if (series2) {
-      let m2 = -Infinity;
-      let n2 = Infinity;
-      for (const { r } of rows) {
-        const v = r[series2.key];
-        if (v == null || isNaN(v)) continue;
-        const num = Number(v);
-        if (num > m2) m2 = num;
-        if (num < n2) n2 = num;
-      }
-      if (m2 === -Infinity) { m2 = 1; n2 = 0; }
-      n2 = Math.min(0, n2);
-      if (m2 === n2) m2 = n2 + 1;
-      const s2 = niceScale(n2, m2, Y_TICKS, null, series2.integerTicks === true);
+      const s2 = scale2;
       scaleY2 = (v) => M.t + (1 - (v - s2.min) / (s2.max - s2.min)) * PLOT_H;
-      const fmt2 = series2.formatValue || ((v) => String(v));
-      for (const val of s2.ticks) {
-        const y = scaleY2(val);
+      for (let ti = 0; ti < s2.ticks.length; ti++) {
+        const y = scaleY2(s2.ticks[ti]);
         const label = svg("text", { x: plotRight + 8, y: y + 4, "text-anchor": "start", fill: normalizeColor(series2.color) });
-        label.textContent = fmt2(val);
+        label.textContent = yLabels2[ti];
         axis.appendChild(label);
       }
       if (series2.unit && series2.unit !== "%") {
@@ -1046,6 +1061,10 @@ export function renderScatterChart(spec) {
   const yMax = Math.max(...pts.map((d) => Number(d.y)));
   const sx = niceScale(0, xMax > 0 ? xMax : 1, Y_TICKS, null);
   const sy = niceScale(0, yMax > 0 ? yMax : 1, Y_TICKS, null);
+  /* Tick labels with the step each axis moved by, and the room the widest y label needs (#6158). */
+  const yLabels = axisTickLabels(sy.ticks, sy.step, formatY);
+  const xLabels = axisTickLabels(sx.ticks, sx.step, formatX);
+  const M = { ...MARGINS, l: axisGutterPx(yLabels, MARGINS.l) };
   const buildPlot = (W) => {
     const plotRight = W - M.r;
     const plotW = plotRight - M.l;
@@ -1054,18 +1073,18 @@ export function renderScatterChart(spec) {
 
     const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, width: W, height: H, style: `width:${W}px;height:${H}px`, class: "plot-svg", role: "img" });
     const axis = svg("g", { class: "axis" });
-    for (const val of sy.ticks) {
-      const y = scaleY(val);
+    for (let yi = 0; yi < sy.ticks.length; yi++) {
+      const y = scaleY(sy.ticks[yi]);
       axis.appendChild(svg("line", { class: "grid-line", x1: M.l, y1: y, x2: plotRight, y2: y }));
       const label = svg("text", { x: M.l - 8, y: y + 4, "text-anchor": "end" });
-      label.textContent = formatY(val);
+      label.textContent = yLabels[yi];
       axis.appendChild(label);
     }
     /* Every x gridline is drawn at any width; a narrow plot labels every second (third, ...) tick so the value labels do not
        overlap (#5586). The first and the last tick always keep their label: the stride counts from the first, and a stride
        tick too close to the last gives way to it. */
     const lastTick = sx.ticks.length - 1;
-    const xStride = Math.max(1, Math.ceil((1.5 * labelsPx(sx.ticks.map((v) => formatX(v))) + X_LABEL_GAP_PX) / (plotW / Math.max(1, lastTick))));
+    const xStride = Math.max(1, Math.ceil((1.5 * labelsPx(xLabels) + X_LABEL_GAP_PX) / (plotW / Math.max(1, lastTick))));
     for (let ti = 0; ti < sx.ticks.length; ti++) {
       const val = sx.ticks[ti];
       const x = scaleX(val);
@@ -1074,7 +1093,7 @@ export function renderScatterChart(spec) {
       if (!labelled) continue;
       /* The first and the last label are anchored inward, as the line chart's are, so the last never runs off the right edge. */
       const label = svg("text", { x: ti === 0 ? M.l : ti === lastTick ? plotRight : x, y: H - 8, "text-anchor": ti === 0 ? "start" : ti === lastTick ? "end" : "middle" });
-      label.textContent = formatX(val);
+      label.textContent = xLabels[ti];
       axis.appendChild(label);
     }
     if (unitY && unitY !== "%") {
@@ -1294,6 +1313,26 @@ function niceNum(range, round) {
 }
 
 /**
+ * The labels for one axis's ticks (#6158): each tick formatted with its step (so a small range prints the decimals it
+ * needs), and a label that repeats one already drawn is left blank, so no two ticks on an axis ever read the same even
+ * when a custom formatter ignores the step. The gridline of a blanked tick stays.
+ */
+export function axisTickLabels(ticks, step, format) {
+  const seen = new Set();
+  return ticks.map((t) => {
+    const text = String(format(t, { step }));
+    if (seen.has(text)) return "";
+    seen.add(text);
+    return text;
+  });
+}
+
+/** The room in px an axis needs for its widest label, plus the gap to the plot and to the box edge. */
+export function axisGutterPx(labels, minPx) {
+  return Math.max(minPx, Math.ceil(labelsPx(labels)) + 14);
+}
+
+/**
  * A "nice" y-axis over [min, max]: rounded bounds and evenly-spaced tick values that land on round numbers.
  * `clampMax` caps the top (percentage charts pass 100 so the axis never exceeds 100%).
  * `integer` keeps every tick on a whole number: a domain narrower than about five units would otherwise step by
@@ -1301,7 +1340,7 @@ function niceNum(range, round) {
  * 0-1 axis read "1 1 1 0 0 0". With the step held at 1 or more the ticks are distinct whole numbers, and a
  * small-count chart shows a few honest gridlines (0, 1, 2) instead of a column of repeated labels.
  */
-function niceScale(min, max, maxTicks, clampMax, integer = false) {
+export function niceScale(min, max, maxTicks, clampMax, integer = false) {
   const range = niceNum(max - min || 1, false);
   const niceStep = niceNum(range / Math.max(1, maxTicks), true) || 1;
   const step = integer ? Math.max(1, Math.ceil(niceStep)) : niceStep;
@@ -1311,7 +1350,8 @@ function niceScale(min, max, maxTicks, clampMax, integer = false) {
   const n = Math.max(1, Math.round((niceMax - niceMin) / step));
   const ticks = [];
   for (let i = 0; i <= n; i++) {
-    const v = niceMin + i * step;
+    /* toPrecision drops the float noise of the multiply (0.6000000000000001), which a bare String() label would print. */
+    const v = Number((niceMin + i * step).toPrecision(12));
     ticks.push(v > niceMax ? niceMax : v);
   }
   return { min: niceMin, max: niceMax, step, ticks };

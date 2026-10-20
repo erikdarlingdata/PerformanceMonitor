@@ -71,6 +71,10 @@ public sealed class QueryTagUsageBehaviourTests
         // The sections stay apart, and the deadlock section says how it counts.
         Assert.Contains("once for each tag among its processes", run.GetProperty("deadlockText").GetString());
         Assert.Equal("a", run.GetProperty("serverRead").GetProperty("server").GetString());
+        // #6156: an empty section says "None in the last 24 hours." in plain words, with no status word in front of it.
+        var deadlockText = run.GetProperty("deadlockText").GetString()!;
+        Assert.Contains("None in the last 24 hours.", deadlockText);
+        Assert.DoesNotContain("empty:", deadlockText);
     }
 
     [Fact]
@@ -85,6 +89,25 @@ public sealed class QueryTagUsageBehaviourTests
         Assert.Contains("a", text);
         Assert.Contains("b", text);
         Assert.Contains("Fleet total", text);
+    }
+
+    [Fact]
+    public void TheFleetSections_NameEachServerByDisplayName_AndKeepTheKeyWhenThereIsNone()
+    {
+        // #6157: the read names a server by its connection key; the heading is the display name list_servers gives it.
+        var headings = Run().GetProperty("fleetHeadings").EnumerateArray().Select(h => h.GetString()).ToArray();
+        Assert.Equal(new[] { "Server A", "b" }, headings);
+    }
+
+    [Fact]
+    public void TheAvailabilityGroupCard_SaysAsReportedByTheDisplayName_AndFallsBackToTheKey()
+    {
+        // #6157: "As reported by <name>" read the connection key before.
+        var run = Run();
+        Assert.StartsWith("As reported by Server A · ", run.GetProperty("agSubtitleNamed").GetString());
+        Assert.StartsWith("As reported by b · ", run.GetProperty("agSubtitleNoDisplayName").GetString());
+        Assert.StartsWith("As reported by zz · ", run.GetProperty("agSubtitleUnknown").GetString());
+        Assert.StartsWith("As reported by a · ", run.GetProperty("agSubtitleNoFleet").GetString());
     }
 
     [Fact]

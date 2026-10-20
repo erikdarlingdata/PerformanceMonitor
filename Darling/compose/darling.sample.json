@@ -1,5 +1,5 @@
 {
-  "// quickstart": "cp to darling.json, edit servers + alerting; every secret is a file:/env: reference (#1804) so nothing sensitive lives in this file.",
+  "// quickstart": "./setup.sh copies this to darling.json and makes the secret files; then edit servers + alerting. Every secret is a file:/env: reference (#1804) so nothing sensitive lives in this file. MCP is off: to turn it on, set mcp.enabled to true and uncomment mcp_token in docker-compose.yml.",
   "postgres": {
     "managed": false,
     "connectionString": "file:/run/secrets/store_connection"

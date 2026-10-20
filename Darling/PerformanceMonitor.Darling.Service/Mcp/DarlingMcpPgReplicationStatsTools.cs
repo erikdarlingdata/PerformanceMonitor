@@ -85,7 +85,7 @@ public sealed class DarlingMcpPgReplicationStatsTools
                                 + "hour(s)",
                             coveredClaim: ". On a server with no replicas that is the expected answer.",
                             tail: " If a "
-                                + "replica is SUPPOSED to be attached, check get_pg_replication_slots — a slot "
+                                + "replica is supposed to be attached, check get_pg_replication_slots — a slot "
                                 + "that persists with nothing connected to it retains WAL indefinitely, which is "
                                 + "the case worth acting on."),
                         emptyNotice.AsHints()), emptyNotice), cancellationToken);

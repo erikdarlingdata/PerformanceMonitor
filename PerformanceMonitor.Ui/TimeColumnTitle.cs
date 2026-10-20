@@ -23,5 +23,13 @@ namespace PerformanceMonitor.Ui
             TimeDisplayMode.LocalTime => name + " (local)",
             _ => name + " (server)",
         };
+
+        /// <summary>
+        /// The header of a time column in a grid that may list several servers (#6137): <see cref="For(string, TimeDisplayMode)"/>
+        /// on the mode the rows are really drawn in (<see cref="MultiServerTime.EffectiveMode"/>), so a mixed list in Server time
+        /// reads "Time (local)", and the header names the one zone every row is in.
+        /// </summary>
+        public static string For(string name, TimeDisplayMode chosen, bool mixedServers)
+            => For(name, MultiServerTime.EffectiveMode(chosen, mixedServers));
     }
 }

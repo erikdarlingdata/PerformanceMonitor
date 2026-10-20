@@ -94,3 +94,7 @@ Darling/tools/pg-harnesses/
 design/
 inbox/
 outbox/
+
+# Python bytecode
+__pycache__/
+*.pyc
