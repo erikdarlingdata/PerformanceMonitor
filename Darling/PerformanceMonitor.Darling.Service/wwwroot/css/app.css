@@ -1019,7 +1019,9 @@ td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
 .dlg-edge-label { fill: var(--fg); font: 11px var(--font); paint-order: stroke; stroke: var(--bg-dark); stroke-width: 3px; }
 .dlg-cycle { fill: none; stroke: var(--border); stroke-width: 1.5; stroke-dasharray: 6 4; }
 .dlg-cycle-label { fill: var(--muted); font: 11px var(--font); }
-.dlg-side { flex: 1 1 18rem; min-width: 0; }
+/* #6224: the graph sits in a table cell, and a data cell is white-space: nowrap, which the pane inherited: the SQL handle note
+   and every property line ran out past the pane's right edge. Wrapping is reset here; a long hex handle may break anywhere. */
+.dlg-side { flex: 1 1 18rem; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
 .dlg-side-head { font-weight: 600; color: var(--fg); margin-bottom: 0.3rem; }
 .dlg-prop { color: var(--dim); overflow-wrap: anywhere; }
 .dlg-prop .fk { color: var(--muted); font-weight: 600; }
