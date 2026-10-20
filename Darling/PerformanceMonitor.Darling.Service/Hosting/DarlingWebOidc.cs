@@ -308,6 +308,11 @@ internal static class DarlingWebOidc
         return null;
     }
 
+    /// <summary>The stable owner key (#6214) of a validated ID token: its <c>iss</c> and <c>sub</c>, hashed (see
+    /// <see cref="DarlingWebSeat.ComputeOwnerKey"/>). Null when either claim is missing, which leaves the seat unable to own a personal view.</summary>
+    internal static string? ResolveOwnerKey(JsonObject payload)
+        => DarlingWebSeat.ComputeOwnerKey(StringClaim(payload, "iss"), StringClaim(payload, "sub"));
+
     /// <summary>A claim as a string, or null when absent or not a JSON string — validation must never THROW
     /// on a malformed token, only refuse it.</summary>
     private static string? StringClaim(JsonObject payload, string claim)

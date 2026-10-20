@@ -702,7 +702,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <see cref="ValidateDefinition"/> (the authority) before any write; the store adds optimistic concurrency +
     /// duplicate-name conflict detection. Error bodies are always <c>{"error": "..."}</c>, matching the read surface.
     /// </summary>
-    private static void MapCustomViews(WebApplication app, NpgsqlDataSource postgres, ILogger logger, ReadLatencyRecorder readLatencyRecorder,
+    internal static void MapCustomViews(WebApplication app, NpgsqlDataSource postgres, ILogger logger, ReadLatencyRecorder readLatencyRecorder,
         ReadAdmission? readAdmission)
     {
         var store = new CustomViewStore(postgres);
@@ -715,7 +715,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            client sends, so this is the affordance layer, never the enforcement. A failed probe fails closed to
            read-only in the UI. */
         app.MapGet("/api/session", (HttpContext context) =>
-            JsonNodeResult(new JsonObject { ["can_edit"] = DarlingWebSeat.FromContext(context).CanEdit }));
+        {
+            /* #6214: can_own is whether this session can own a personal view (it holds an owner key: an OIDC sign-in made after owner keys
+               existed). The page decides the Personal checkbox from it, and "My views" and read-only from each view's own `mine`. Neither the
+               subject nor the key is returned: a name decides nothing, and a key is never shown. */
+            var seat = DarlingWebSeat.FromContext(context);
+            return JsonNodeResult(new JsonObject { ["can_edit"] = seat.CanEdit, ["can_own"] = seat.OwnerKey is not null });
+        });
 
         /* The read catalog: input truth (read names + their WIRE query keys) the composer binds params from. */
         /* #5562: ?server= makes the collector intervals the SERVER's own (a per-server schedule row wins over the
@@ -754,17 +760,19 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             return JsonNodeResult(BuildCatalogNode(resolved.ServerId, schedules));
         });
 
-        /* List — a bare array of summaries (no definition); [] when none. */
+        /* List — a bare array of summaries (no definition); [] when none. Every shared view, plus the caller's OWN personal views
+           (#6214): a personal view is listed for its owner only. That is a list filter, not access control: GET by id below still returns
+           any view, so a shared link keeps working. */
         app.MapGet("/api/views", async (HttpContext context) =>
         {
-            var views = await store.ListAsync(context.RequestAborted);
+            var views = await store.ListAsync(callerOwnerKey: DarlingWebSeat.FromContext(context).OwnerKey, cancellationToken: context.RequestAborted);
             return JsonNodeResult(BuildSummariesNode(views));
         });
 
         /* Get one — full, including the definition; 404 when missing. */
         app.MapGet("/api/views/{id:long}", async (HttpContext context, long id) =>
         {
-            var result = await store.GetAsync(id, context.RequestAborted);
+            var result = await store.GetAsync(id, DarlingWebSeat.FromContext(context).OwnerKey, context.RequestAborted);
             return result is CustomViewResult.Ok ok
                 ? JsonNodeResult(BuildFullViewNode(ok.View!))
                 : NotFoundResult();
@@ -791,11 +799,23 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 return ErrorResult(validation.Error!, StatusCodes.Status400BadRequest);
             }
 
+            /* #6214: a personal view is owned by the signed-in person's owner key, so a session that has none cannot make one: the shared
+               token and the tokenless loopback operator have no person, and a cookie from before owner keys existed names a person but
+               carries no key (they sign in again). Every create from a session that has a key stamps it, personal or not, so the creator
+               can later make their own shared view personal. */
+            var seat = DarlingWebSeat.FromContext(context);
+            var personal = request.Personal ?? false;
+            if (personal && seat.OwnerKey is null)
+            {
+                return ErrorResult(NoOwnerKeyMessage(seat), StatusCodes.Status400BadRequest);
+            }
+
             /* #4283: no local catch — an unexpected throw here (never ex.Message on the wire) is exactly what
                the #4281 top-of-pipeline backstop exists to answer, and MapAll wires this route after it. */
             var result = await store.CreateAsync(
                 request.Name, request.Description, request.DefinitionJson,
-                updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
+                updatedBy: seat.EditorPrincipal, folder: request.Folder, personal: personal, ownerKey: seat.OwnerKey,
+                cancellationToken: context.RequestAborted);
             return result switch
             {
                 CustomViewResult.Ok ok => CreatedResult(context, $"/api/views/{ok.View!.Id}", BuildFullViewNode(ok.View)),
@@ -832,21 +852,44 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 return ErrorResult(validation.Error!, StatusCodes.Status400BadRequest);
             }
 
+            /* #6214: an omitted folder or personal flag keeps the stored value. A personal view is its owner's alone to change (the
+               store's UPDATE holds the same rule, so a race cannot slip past this read). */
+            var seat = DarlingWebSeat.FromContext(context);
+            var current = await store.GetAsync(id, seat.OwnerKey, context.RequestAborted);
+            if (current is not CustomViewResult.Ok { View: { } stored })
+            {
+                return NotFoundResult();
+            }
+
+            if (stored.Personal && !stored.Mine)
+            {
+                return ErrorResult(CustomViewStore.NotOwnerMessage, StatusCodes.Status403Forbidden);
+            }
+
+            var personal = request.Personal ?? stored.Personal;
+            if (personal && seat.OwnerKey is null)
+            {
+                return ErrorResult(NoOwnerKeyMessage(seat), StatusCodes.Status400BadRequest);
+            }
+
             /* #4283: no local catch — see the create route's comment above. */
             var result = await store.UpdateAsync(
                 id, request.Name, request.Description, request.DefinitionJson, expectedVersion,
-                updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
+                updatedBy: seat.EditorPrincipal, folder: request.FolderGiven ? request.Folder : stored.Folder, personal: personal,
+                actorKey: seat.OwnerKey, cancellationToken: context.RequestAborted);
             return result switch
             {
                 CustomViewResult.Ok ok => JsonNodeResult(BuildFullViewNode(ok.View!)),
                 CustomViewResult.NotFound => NotFoundResult(),
+                CustomViewResult.Forbidden forbidden => ErrorResult(forbidden.Message, StatusCodes.Status403Forbidden),
                 CustomViewResult.Conflict conflict => ErrorResult(conflict.Message, StatusCodes.Status409Conflict),
                 CustomViewResult.Invalid invalid => ErrorResult(invalid.Message, StatusCodes.Status400BadRequest),
                 _ => ErrorResult("Could not update the view.", StatusCodes.Status500InternalServerError),
             };
         });
 
-        /* Delete — 204 on success, 404 when missing. Any authenticated seat; application/json required. */
+        /* Delete — 204 on success, 404 when missing, 403 for somebody else's personal view (#6214). Any authenticated seat;
+           application/json required. */
         app.MapDelete("/api/views/{id:long}", async (HttpContext context, long id) =>
         {
             if (!IsJsonContentType(context.Request.ContentType))
@@ -855,8 +898,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
 
             /* #4283: no local catch — see the create route's comment above. */
-            var result = await store.DeleteAsync(id, context.RequestAborted);
-            return result is CustomViewResult.Ok ? Results.NoContent() : NotFoundResult();
+            var result = await store.DeleteAsync(id, DarlingWebSeat.FromContext(context).OwnerKey, cancellationToken: context.RequestAborted);
+            return result switch
+            {
+                CustomViewResult.Ok => Results.NoContent(),
+                CustomViewResult.Forbidden forbidden => ErrorResult(forbidden.Message, StatusCodes.Status403Forbidden),
+                _ => NotFoundResult(),
+            };
         });
 
         /* Compile-and-run a single composed panel spec (Custom Views v2, #1563) against the least-privilege
@@ -986,11 +1034,18 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 return ErrorResult(definitionError ?? "definition is invalid.", StatusCodes.Status400BadRequest);
             }
 
+            var (createExpiry, createExpiryError) = Mcp.DarlingMcpCustomAlertTools.ResolveCreateExpiry(request.ExpiresAtText);
+            if (createExpiryError is not null)
+            {
+                return ErrorResult(createExpiryError, StatusCodes.Status400BadRequest);
+            }
+
             /* #4283: no local catch — an unexpected throw here (never ex.Message on the wire) is exactly what
                the #4281 top-of-pipeline backstop exists to answer, and MapAll wires this route after it. */
             var result = await store.CreateAsync(
                 request.Name, request.Description, request.DefinitionJson, request.Enabled,
-                updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
+                updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, expiresAtUtc: createExpiry,
+                cancellationToken: context.RequestAborted);
             return result switch
             {
                 CustomAlertRuleResult.Ok ok => CreatedResult(context, $"/api/alerts/{ok.Rule!.Id}", BuildFullRuleNode(ok.Rule)),
@@ -1027,10 +1082,26 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 return ErrorResult(definitionError ?? "definition is invalid.", StatusCodes.Status400BadRequest);
             }
 
+            /* #6235: a full replace, so an absent expiry clears it. A value that is in the past is refused only when it is a CHANGE: an
+               editor that re-saves an already-expired rule sends its old expiry back, and that must still save. */
+            var existing = await store.GetAsync(id, context.RequestAborted);
+            if (existing is not CustomAlertRuleResult.Ok { Rule: { } existingRule })
+            {
+                return AlertNotFoundResult();
+            }
+
+            var (updateExpiry, updateExpiryError) = Mcp.DarlingMcpCustomAlertTools.ResolveUpdateExpiry(
+                request.ExpiresAtText ?? string.Empty, existingRule.ExpiresAtUtc);
+            if (updateExpiryError is not null)
+            {
+                return ErrorResult(updateExpiryError, StatusCodes.Status400BadRequest);
+            }
+
             /* #4283: no local catch — see the create route's comment above. */
             var result = await store.UpdateAsync(
                 id, request.Name, request.Description, request.DefinitionJson, request.Enabled, expectedVersion,
-                updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
+                updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, expiresAtUtc: updateExpiry,
+                cancellationToken: context.RequestAborted);
             return result switch
             {
                 CustomAlertRuleResult.Ok ok => JsonNodeResult(BuildFullRuleNode(ok.Rule!)),
@@ -6812,7 +6883,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_query_store_clutter"] = R(CatData, "The Query Store CLUTTER view: per database the collector's read cost (how often and by how much it was the slowest fan-out item), plan churn (plans per query, arrivals per day, one-shot plans) and the options row, each with raw numbers and a decomposed verdict; ONE per-server overhead block (non-sleep QDS_* wait deltas with the excluded sleep waits named, and the Query Store memory clerk). Replicas excluded by architecture with the reason on the row; query_capture_mode (ALL / AUTO / CUSTOM / NONE) carried with capture_mode_known beside it, null meaning a capture older than the V137 rung rather than NONE. window_truncated says the raw tier did not hold the whole window. Composed from collected rows - no new query against the server.", PServer(), PHours(24), PLimit(DarlingMcpQueryStoreClutterTools.DefaultLimit), PBool("include_fleet_median", false), PAsOf(), PDatabases()),
             ["get_resource_use_by_tag"] = R(CatData, "Resource use rolled up by query tag, one section per source (plan cache, Query Store, procedures, blocking, deadlocks); sections are never summed. Omit the server for the fleet.", PServer(), PHours(24), PText("tag"), PLimit(DarlingMcpQueryTagRollupTools.DefaultLimit), PAsOf()),
             ["get_query_store_query_history"] = R(CatData, "One Query Store query's executions, duration and CPU per plan over the window (requires database_name, query_id).", PReqText("database_name"), PReqInt("query_id"), PServer(), PHours(24), PAsOf()),
-            ["get_forced_plans"] = R(CatData, "Whether each Query Store force works: one entry per plan forced in its database's newest capture, with a state (WORKING, NOT_EXERCISED, IGNORED, FAILING or REMOVED) and the evidence (database_name optional).", PServer(), PHours(24), PAsOf(), PDatabases()),
+            ["get_forced_plans"] = R(CatData, "Whether each Query Store force works: one entry per plan forced in its database's newest capture, with a state (WORKING, NOT_EXERCISED, IGNORED, FAILING, UNKNOWN_PLAN_NOT_COLLECTED or REMOVED) and the evidence (database_name optional).", PServer(), PHours(24), PAsOf(), PDatabases()),
             ["get_plan_force_precheck"] = R(CatData, "Reads one Query Store plan before anyone forces it: verdict blocked (plan_not_found or plan_already_forced, a force that cannot work) or not_blocked (never safe), the warnings with stable codes for the agent's own instructions to weigh, what a person should read first, and the checks the store could not answer (requires database_name, query_id, plan_id; compare_plan_id optional).", PReqText("database_name"), PReqInt("query_id"), PReqInt("plan_id"), PInt("compare_plan_id"), PServer(), PHours(24), PAsOf()),
             ["get_query_store_aborts"] = R(CatData, "Queries ranked by Query Store runs that ended aborted (a client timeout or cancel) or with an exception, with each query's share of its own runs, the average aborted duration and the newest failure time; window_truncated says the store did not hold the whole window.", PServer(), PHours(24), PTop(20), PText("database_name"), PAsOf(), PBool("full_text", false)),
             ["get_cpu_by_database"] = R(CatData, "Databases ranked by CPU over the window with each one's share of the server total, its heaviest statement and the procedure stats' CPU beside it (never added to it).", PServer(), PHours(24), PTop(20), PAsOf()),
@@ -7374,8 +7445,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /* ── request body parsing + response building ── */
 
     /// <summary>A parsed create/update body: name (required, trimmed), description (optional), the definition as
-    /// raw JSON text (re-serialized from the parsed node), and version (present only on updates).</summary>
-    private sealed record ViewWriteRequest(string Name, string? Description, string DefinitionJson, int? Version);
+    /// raw JSON text (re-serialized from the parsed node), version (present only on updates), and (#6214) the folder
+    /// (<see cref="FolderGiven"/> tells an omitted key from an explicit null, which means the top level) and the personal flag
+    /// (null when omitted).</summary>
+    private sealed record ViewWriteRequest(
+        string Name, string? Description, string DefinitionJson, int? Version, bool FolderGiven = false, string? Folder = null, bool? Personal = null);
 
     /// <summary>Parses the request body into a <see cref="ViewWriteRequest"/>, or returns a caller-facing error
     /// (the definition's STRUCTURE is validated separately by <see cref="ValidateDefinition"/>).</summary>
@@ -7418,7 +7492,34 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             version = v;
         }
 
-        return (new ViewWriteRequest(name.Trim(), description, definitionJson, version), null);
+        var folderGiven = obj.ContainsKey("folder");
+        string? folder = null;
+        if (folderGiven && obj["folder"] is { } folderNode)
+        {
+            if (folderNode is not JsonValue folderValue || !folderValue.TryGetValue<string>(out var folderText))
+            {
+                return (null, "'folder' must be a string, or null for the top level.");
+            }
+
+            folder = CustomViewStore.NormalizeFolder(folderText, out var folderError);
+            if (folderError is not null)
+            {
+                return (null, folderError);
+            }
+        }
+
+        bool? personal = null;
+        if (obj["personal"] is { } personalNode)
+        {
+            if (personalNode is not JsonValue personalValue || !personalValue.TryGetValue<bool>(out var personalFlag))
+            {
+                return (null, "'personal' must be true or false.");
+            }
+
+            personal = personalFlag;
+        }
+
+        return (new ViewWriteRequest(name.Trim(), description, definitionJson, version, folderGiven, folder, personal), null);
     }
 
     /// <summary>The full single-view wire shape (definition embedded as JSON, NOT an escaped string). Shared by
@@ -7434,7 +7535,16 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         ["created_at"] = view.CreatedAt,
         ["updated_at"] = view.UpdatedAt,
         ["updated_by"] = view.UpdatedBy,
+        ["folder"] = view.Folder,
+        ["personal"] = view.Personal,
+        ["created_by"] = view.CreatedBy,
+        ["mine"] = view.Mine,
     };
+
+    /// <summary>The 400 sentence for a personal view a session cannot own (#6214): a session that names a person (a cookie from before
+    /// owner keys existed) signs in again; one with no person at all has none to give.</summary>
+    internal static string NoOwnerKeyMessage(DarlingWebSeat seat) =>
+        seat.Subject is null ? CustomViewStore.NoIdentityMessage : CustomViewStore.SignInAgainMessage;
 
     /// <summary>The bare-array list wire shape (no definition body). Carries the view <c>kind</c> — always
     /// concrete (<c>"dashboard"</c> when the stored definition declares none) so the list page/sidebar can badge
@@ -7453,6 +7563,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 ["updated_at"] = view.UpdatedAt,
                 ["updated_by"] = view.UpdatedBy,
                 ["kind"] = view.Kind ?? "dashboard",
+                ["folder"] = view.Folder,
+                ["personal"] = view.Personal,
+                ["created_by"] = view.CreatedBy,
+                ["mine"] = view.Mine,
             });
         }
 
@@ -7465,7 +7579,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// definition as raw JSON text (re-serialized from the parsed node), <c>enabled</c> (defaults true when the
     /// key is absent, matching create's default and a full-replace PUT), and version (present only on updates).
     /// The definition's STRUCTURE is validated separately by <see cref="CustomAlertRuleDefinition.TryParse"/>.</summary>
-    private sealed record AlertWriteRequest(string Name, string? Description, string DefinitionJson, bool Enabled, int? Version);
+    private sealed record AlertWriteRequest(string Name, string? Description, string DefinitionJson, bool Enabled, int? Version, string? ExpiresAtText = null);
 
     /// <summary>Parses an alert create/update body into an <see cref="AlertWriteRequest"/>, or a caller-facing
     /// error. Mirrors <see cref="ParseViewBodyAsync"/>, adding the <c>enabled</c> field alert rules carry.</summary>
@@ -7516,7 +7630,20 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             version = v;
         }
 
-        return (new AlertWriteRequest(name.Trim(), description, definitionJson, enabled, version), null);
+        /* #6235: the optional expiry. Absent, null or empty means the rule does not expire (a full-replace PUT clears it, like every
+           other field the editor sends); anything else is parsed by the store call below, so a bad value is a 400, not a throw. */
+        string? expiresText = null;
+        if (obj["expires_at_utc"] is JsonValue expiresValue)
+        {
+            if (!expiresValue.TryGetValue<string>(out var expiresString))
+            {
+                return (null, $"'expires_at_utc' must be {CustomAlertExpiry.Spelling}, or null for a rule that does not expire.");
+            }
+
+            expiresText = string.IsNullOrWhiteSpace(expiresString) ? null : expiresString;
+        }
+
+        return (new AlertWriteRequest(name.Trim(), description, definitionJson, enabled, version, expiresText), null);
     }
 
     /// <summary>Extracts just the embedded <c>definition</c> object from a body as raw JSON text — the
@@ -7584,7 +7711,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// shape.</summary>
     internal static JsonObject BuildFullRuleNode(CustomAlertRule rule) =>
         JsonSerializer.SerializeToNode(new CustomAlertRuleImage(rule.Id, rule.Name, rule.Description, JsonNode.Parse(rule.DefinitionJson),
-            rule.Enabled, rule.Version, rule.CreatedAt, rule.UpdatedAt, rule.UpdatedBy))!.AsObject();
+            rule.Enabled, rule.Version, rule.CreatedAt, rule.UpdatedAt, rule.UpdatedBy,
+            CustomAlertExpiry.Format(rule.ExpiresAtUtc), rule.IsExpiredAt(DateTime.UtcNow)))!.AsObject();
 
     /// <summary>The bare-array list wire shape (no definition body), carrying <c>enabled</c> so the list can
     /// badge a paused rule without fetching each full definition — plus <c>last_fired</c> (#3360), the naive-UTC
@@ -7606,6 +7734,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 ["updated_at"] = rule.UpdatedAt,
                 ["updated_by"] = rule.UpdatedBy,
                 ["last_fired"] = rule.LastFired,
+                ["expires_at_utc"] = CustomAlertExpiry.Format(rule.ExpiresAtUtc),
+                ["expired"] = rule.IsExpiredAt(DateTime.UtcNow),
             });
         }
 

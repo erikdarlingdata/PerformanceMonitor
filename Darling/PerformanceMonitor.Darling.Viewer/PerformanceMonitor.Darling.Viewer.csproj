@@ -27,6 +27,12 @@
          Lite's suppression. -->
     <NoWarn>CA1849;CA2007;CA1508;CA1822;CA1805;CA1510;CA1816;CA1861;CA1845;CA2201;NU1701;CA1001;CA1848;CA1852;CA1305;CA1860;CA1707;CA1507;CA1806;CA2254</NoWarn>
     <WarningsAsErrors>CS4014</WarningsAsErrors>
+    <!-- #6244: stamp the git commit into this assembly's informational version (3.10.0+sha), which Help > About shows.
+         Directory.Build.props turns the source-revision suffix off tree-wide so the shipped apps keep a clean version
+         string; the viewer opts back in because a deploy check needs to tell builds of one version apart. Every reader
+         of the informational version strips the +suffix (ParseProductVersion, VersionText, ProductVersion). A build
+         outside a git checkout has no commit and keeps the plain version. -->
+    <IncludeSourceRevisionInInformationalVersion>true</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
 
   <ItemGroup>

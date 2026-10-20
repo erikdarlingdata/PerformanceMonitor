@@ -138,7 +138,7 @@ FROM generate_series(1, $3) AS g");
             // bypassed by create-disabled-then-enable.
             var enableCapped = Assert.IsType<CustomAlertRuleResult.Invalid>(
                 await store.UpdateAsync(disabled.Rule!.Id, disabled.Rule!.Name, null, SampleDefinition,
-                    enabled: true, disabled.Rule!.Version, "test", ct));
+                    enabled: true, disabled.Rule!.Version, "test", null, ct));
             Assert.Contains(Cap.ToString(), enableCapped.Message, StringComparison.Ordinal);
 
             // The refused enable was a true no-op: the rule is still disabled at its original version.

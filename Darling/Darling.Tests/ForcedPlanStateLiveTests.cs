@@ -106,6 +106,8 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,'Regular',$8,$9,$9,$10,$11,5000,7000,1,FALSE,0)",
         await RanAsync(c, ct, db, 1, 11, T0.AddMinutes(20), 10);
         await RanAsync(c, ct, db, 3, 31, T0.AddMinutes(20), 4);
         await RanAsync(c, ct, db, 3, 32, T0.AddMinutes(40), 7);
+        /* #6221: plan 32 is a LATER plan of the query, so it is another plan by its stored XML (an ordinary plan: no UsePlan). */
+        await StoredPlanSeed.AddAsync(c, ct, ServerId, db, 32, StoredPlanSeed.Plain);
         await RanAsync(c, ct, db, 4, 41, T0.AddMinutes(20), 3);
         await RanAsync(c, ct, db, 5, 51, T0.AddMinutes(10), 3);
 
@@ -173,6 +175,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,'Regular',$8,$9,$9,$10,$11,5000,7000,1,FALSE,0)",
                 await CaptureAsync(rig.Connection, ct, "SeamDb", T0.AddMinutes(minutes), (81, 9, 0, null), (91, 10, 0, null));
             /* Query 9: the other plan ran at T0+10m, the forced plan last ran at T0+40m. */
             await RanAsync(rig.Connection, ct, "SeamDb", 9, 82, T0.AddMinutes(10), 4);
+            await StoredPlanSeed.AddAsync(rig.Connection, ct, ServerId, "SeamDb", 82, StoredPlanSeed.Plain);
             await RanAsync(rig.Connection, ct, "SeamDb", 9, 81, T0.AddMinutes(40), 4);
             /* Query 10: the forced plan ran at T0+20m only. */
             await RanAsync(rig.Connection, ct, "SeamDb", 10, 91, T0.AddMinutes(20), 4);
@@ -311,6 +314,8 @@ VALUES ($1,$2,$3,$4,$5)", CollectionIdGenerator.Next(), at, ServerId, ServerName
 
             await RanAsync(rig.Connection, ct, db, 1, 12, T0.AddMinutes(20), 8);
             await RanAsync(rig.Connection, ct, db, 2, 22, T0.AddMinutes(20), 5);
+            /* #6221: plan 22 is a later plan of query 2, another plan by its stored XML. Plan 12 is named a variant by the older collector's row (still honored), so it is not looked up. */
+            await StoredPlanSeed.AddAsync(rig.Connection, ct, ServerId, db, 22, StoredPlanSeed.Plain);
 
             var forces = await ReadAsync(rig, ct);
             var working = forces[(db, 11)];

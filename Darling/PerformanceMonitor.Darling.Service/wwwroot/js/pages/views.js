@@ -37,6 +37,7 @@ import { resolveReadTable } from "../read-fields.js";
 import * as api from "../views-api.js";
 import { refreshChoiceOf } from "../refresh-policy.js";
 import { buildRefreshControl } from "../refresh-control.js";
+import { viewAccess, folderOf } from "../view-folders.js";
 
 /* #4666: the saved view/notebook on screen and its effective auto-refresh choice. app.js reads it through
    currentViewRefresh() to time the page's own re-render, and is told about a change through
@@ -100,34 +101,41 @@ function viewRefreshControl(view, def, isNotebook, canEdit) {
 export async function renderViewList(main) {
   mount(main, [listHead(false, []), loadingStrip("Loading views…")]);
 
-  /* The fleet read rides along with the session + list because a DASHBOARD template is scoped to one server
-     and its picker needs the names. A failed fleet read is not fatal here: the notebook templates and every
-     other affordance still work, and the dashboard group says why it cannot offer itself. */
-  const [session, res, servers] = await Promise.all([api.getSession(), api.listViews(), loadServerNames()]);
+  /* #6243: the list needs only the session and the view list. The fleet read exists for the dashboard templates' server
+     picker, so the list is drawn the moment those two answer; a slow or hung fleet read used to hold the page on
+     "Loading views…". The picker is filled in when the fleet answers, if the page is still this one. */
+  const serversRead = loadServerNames();
+  const [session, res] = await Promise.all([api.getSession(), api.listViews()]);
   const canEdit = !!session.can_edit;
+  const ourHash = location.hash;
 
   if (res.kind === "error") {
-    mount(main, [listHead(canEdit, servers), errorStrip(res.message)]);
+    mount(main, [listHead(canEdit, []), errorStrip(res.message)]);
     return;
   }
 
   const views = Array.isArray(res.data) ? res.data : [];
-  const nodes = [listHead(canEdit, servers)];
+  const head = listHead(canEdit, []);
+  const nodes = [head];
 
   /* Empty list -> a real first-run hero that sells the feature (M4), not a bare strip. The hero carries its own
      New view + Import affordances (can_edit only), so the standalone import panel is only shown once views exist. */
   if (!views.length) {
-    nodes.push(firstRunHero(canEdit, servers));
-    mount(main, nodes);
+    nodes.push(firstRunHero(canEdit, []));
+  } else {
+    if (canEdit) nodes.push(importPanel());
+    nodes.push(el("div", { class: "view-cards" }, views.map((v) => viewCard(v))));
+  }
+  mount(main, nodes);
+
+  const servers = await serversRead;
+  if (!servers.length || location.hash !== ourHash || main.firstChild !== head) return;
+  if (!views.length) {
+    mount(main, [listHead(canEdit, servers), firstRunHero(canEdit, servers)]);
     return;
   }
-
-  if (canEdit) {
-    nodes.push(importPanel());
-  }
-
-  nodes.push(el("div", { class: "view-cards" }, views.map((v) => viewCard(v))));
-  mount(main, nodes);
+  /* Only the head holds the picker: swap it in place so the cards, and their own reads, are not rebuilt. */
+  main.replaceChild(listHead(canEdit, servers), head);
 }
 
 /* First-run hero (M4): a centered pitch + a prominent New view + a few starting-point ideas + the (secondary)
@@ -305,8 +313,11 @@ async function loadServerNames() {
 
 function viewCard(v) {
   const isNotebook = v.kind === "notebook";
+  /* #6214: where the view sits. A personal view says whose it is; a shared one names its folder. */
+  const folder = folderOf(v);
+  const placed = v.personal === true ? "personal: " + (v.created_by || "unknown") + " · " : folder !== null ? "folder " + folder + " · " : "";
   const meta =
-    "v" + v.version + " · updated " + relTime(v.updated_at) + (v.updated_by ? " by " + v.updated_by : "");
+    placed + "v" + v.version + " · updated " + relTime(v.updated_at) + (v.updated_by ? " by " + v.updated_by : "");
   const chips = el("div", { class: "vc-chips" });
   /* The list summary carries a concrete `kind` (backend #56), so the link + "Notebook" badge are set SYNCHRONOUSLY
      here — no wait on the per-card definition fetch (which only fills in the count chips). */
@@ -563,7 +574,9 @@ export async function renderView(main, id) {
   }
 
   const panels = Array.isArray(def.panels) ? def.panels : [];
-  const canEdit = !!session.can_edit;
+  /* #6214: another person's personal view can be read but not changed, so Edit goes and Delete is disabled. */
+  const access = viewAccess(view, session);
+  const canEdit = !!session.can_edit && !access.readOnly;
   const readSet = new Set((catalog.reads || []).map((r) => r.name));
   const sourceSet = new Set(((catalog.compose || {}).measures || []).map((m) => m.source));
 
@@ -572,11 +585,12 @@ export async function renderView(main, id) {
     backToViews(),
     el("h2", { text: view.name || "View" }),
     view.description ? el("div", { class: "meta", text: view.description }) : null,
+    personalNote(access),
     el("div", { class: "spacer" }),
     viewRefreshControl(view, def, false, canEdit),
     exportButton(view),
     canEdit ? el("a", { class: "btn small", href: "#/view/" + encodeURIComponent(id) + "/edit", text: "Edit" }) : null,
-    canEdit ? deleteButton(id, status) : null,
+    canEdit ? deleteButton(id, status) : session.can_edit ? lockedDeleteButton(access) : null,
   ]);
 
   if (!panels.length) {
@@ -667,7 +681,9 @@ export async function renderNotebookDoc(main, opts) {
   const isAlert = opts.mode === "alert";
   const def = isAlert ? (opts.definition || {}) : (opts.view.definition || {});
   const cells = Array.isArray(def.cells) ? def.cells : [];
-  const canEdit = isAlert ? !!opts.canEdit : !!opts.session.can_edit;
+  /* #6214: another person's personal notebook can be read but not changed, so Edit goes and Delete is disabled. */
+  const access = isAlert ? null : viewAccess(opts.view, opts.session);
+  const canEdit = isAlert ? !!opts.canEdit : !!opts.session.can_edit && !access.readOnly;
   /* Alert mode validates its cells against the catalog its caller passed, the same /api/catalog body saved mode
      uses: a read the catalog lists must render, not fail as "Unknown read" (it did while this was always the
      empty catalog). The empty catalog is only what an alert-mode caller that passes none gets. */
@@ -689,11 +705,12 @@ export async function renderNotebookDoc(main, opts) {
         el("h2", { text: opts.view.name || "Notebook" }),
         el("span", { class: "notebook-badge", text: "Notebook" }),
         opts.view.description ? el("div", { class: "meta", text: opts.view.description }) : null,
+        personalNote(access),
         el("div", { class: "spacer" }),
         viewRefreshControl(opts.view, def, true, canEdit),
         exportButton(opts.view),
         canEdit ? el("a", { class: "btn small", href: "#/notebook/" + encodeURIComponent(opts.view.id) + "/edit", text: "Edit" }) : null,
-        canEdit ? deleteButton(opts.view.id, status) : null,
+        canEdit ? deleteButton(opts.view.id, status) : opts.session.can_edit ? lockedDeleteButton(access) : null,
       ]);
 
   if (!cells.length) {
@@ -1142,6 +1159,18 @@ function exportButton(view) {
 function safeFileName(name) {
   const cleaned = String(name || "view").replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^_+|_+$/g, "");
   return cleaned || "view";
+}
+
+/* #6214: "Personal view of X" for a personal view (nothing for a shared one). */
+function personalNote(access) {
+  return access && access.personal ? el("div", { class: "meta view-personal-note", text: access.note }) : null;
+}
+
+/* The Delete the store would refuse (another person's personal view): shown, but disabled, with the reason. */
+function lockedDeleteButton(access) {
+  const btn = el("button", { class: "btn small danger", type: "button", text: "Delete", title: access.note + ": only its owner can delete it." });
+  btn.disabled = true;
+  return btn;
 }
 
 function deleteButton(id, status) {

@@ -448,7 +448,7 @@ public partial class SettingsWindow : Window
 
             if (result is null)
             {
-                CollectionStatusText.Text = "Status: command sent — the service has not confirmed yet";
+                CollectionStatusText.Text = "Status: the service is running the command — check again later";
             }
             else if (result.Status == ViewerDataService.StatusSucceeded)
             {
