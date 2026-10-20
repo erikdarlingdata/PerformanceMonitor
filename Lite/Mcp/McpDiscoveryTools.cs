@@ -35,9 +35,17 @@ public sealed class McpDiscoveryTools
             {
                 /* #6178: no server has a list. When every server runs an engine that never writes one (Azure SQL Database), that is
                    not_collected, not a true negative. One server that could have had the list keeps the empty answer. */
-                var fleetNotCollected = searched.Count == 0
-                    ? await NotCollectedForWholeFleetAsync(dataService, servers.Select(s => (s.Id, s.Server.ServerName)).ToList())
-                    : null;
+                var envelopes = new List<string?>();
+                if (searched.Count == 0)
+                {
+                    foreach (var (server, id) in servers)
+                    {
+                        envelopes.Add(await McpEngineCapability.NotCollectedStatusAsync(dataService, id, server.ServerName, "database_states"));
+                    }
+                }
+
+                /* One server that could have had the list (no envelope for it) keeps the empty answer below. */
+                var fleetNotCollected = envelopes.Count > 0 && envelopes.All(e => e is not null) ? envelopes[0] : null;
                 return fleetNotCollected ?? McpHelpers.Status(
                     "empty",
                     searched.Count == 0
@@ -69,25 +77,6 @@ public sealed class McpDiscoveryTools
         {
             return McpHelpers.FormatError("find_database", ex);
         }
-    }
-
-    /// <summary>#6178: the <c>not_collected</c> envelope when the <c>database_states</c> collector cannot run on ANY server's engine
-    /// (Azure SQL Database), else <c>null</c>: one server that could have had the list leaves the caller's <c>empty</c> answer.</summary>
-    private static async Task<string?> NotCollectedForWholeFleetAsync(LocalDataService dataService, IReadOnlyList<(int Id, string ServerName)> servers)
-    {
-        string? first = null;
-        foreach (var (id, serverName) in servers)
-        {
-            var envelope = await McpEngineCapability.NotCollectedStatusAsync(dataService, id, serverName, "database_states");
-            if (envelope is null)
-            {
-                return null;
-            }
-
-            first ??= envelope;
-        }
-
-        return first;
     }
 
     [McpServerTool(Name = "list_servers"), Description("Lists monitored servers with collection freshness status and last collection time. Darling has no live connection to monitored servers: status is derived from how recently each was collected (Online = fresh, Warning = stale, Offline = no recent collection). Lite's status IS a live connection check, independent of whether anything is being collected. <<GUIDE>> Use this first to see available servers before calling other tools. Lists all monitored SQL Server instances with their current status and last collection time.")]

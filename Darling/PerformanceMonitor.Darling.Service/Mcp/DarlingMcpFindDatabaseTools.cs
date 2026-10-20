@@ -67,12 +67,9 @@ SELECT server_id, server_name
 FROM servers
 ORDER BY server_name";
 
-    /// <summary>
-    /// #6178: the <c>not_collected</c> envelope when the <c>database_states</c> collector cannot run on ANY registered server's
-    /// engine (Azure SQL Database), else <c>null</c>. One server that could have had the list returns <c>null</c>, so the caller
-    /// keeps its <c>empty</c> answer. The engine decision and the words come from the shared engine-gate helper.
-    /// </summary>
-    private static async Task<string?> NotCollectedForWholeFleetAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    /// <summary>#6178: the registered servers, the fleet a search with no database list at all would have covered. A failed read is
+    /// an empty fleet, which leaves the caller's <c>empty</c> answer as it was.</summary>
+    private static async Task<List<(int ServerId, string ServerName)>> RegisteredServersAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
     {
         var servers = new List<(int ServerId, string ServerName)>();
         try
@@ -87,22 +84,10 @@ ORDER BY server_name";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return null;
+            servers.Clear();
         }
 
-        string? first = null;
-        foreach (var (serverId, serverName) in servers)
-        {
-            var envelope = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, serverId, serverName, "database_states", cancellationToken);
-            if (envelope is null)
-            {
-                return null;
-            }
-
-            first ??= envelope;
-        }
-
-        return first;
+        return servers;
     }
 
     [McpServerTool(Name = "find_database"), Description("Finds which monitored server holds a database, by exact name (case-insensitive), from each server's newest database list. Tickets and traces name the tenant database, not the server. One row per matching server: registry name, display name, is_monitored (false = disabled), newest_snapshot_at (when the store last saw that list) and snapshot_current (false = older than 6 hours, so the match may be stale). empty = no newest list names it; a dropped, renamed or not-yet-collected database looks the same. Servers with no list in 7 days are not searched. not_collected = every server is an Azure SQL Database, which writes no list.")]
@@ -139,7 +124,17 @@ ORDER BY server_name";
             {
                 /* #6178: no server has a list. When every registered server runs an engine that never writes one (Azure SQL
                    Database), that is not_collected, not a true negative. One server that could have had the list keeps the empty answer. */
-                var fleetNotCollected = rows.Count == 0 ? await NotCollectedForWholeFleetAsync(postgres, cancellationToken) : null;
+                var envelopes = new List<string?>();
+                if (rows.Count == 0)
+                {
+                    foreach (var (serverId, serverName) in await RegisteredServersAsync(postgres, cancellationToken))
+                    {
+                        envelopes.Add(await DarlingEngineCapability.NotCollectedStatusAsync(postgres, serverId, serverName, "database_states", cancellationToken));
+                    }
+                }
+
+                /* One server that could have had the list (no envelope for it) keeps the empty answer below. */
+                var fleetNotCollected = envelopes.Count > 0 && envelopes.All(e => e is not null) ? envelopes[0] : null;
                 return fleetNotCollected ?? McpHelpers.Status(
                     "empty",
                     rows.Count == 0
