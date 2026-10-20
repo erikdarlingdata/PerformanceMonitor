@@ -51,6 +51,57 @@ public sealed class ProcedureStatsAzureLoopPlanPhaseLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #6182 Azure loop plan pin.");
         var token = TestContext.Current.CancellationToken;
 
+        await RunTwoDatabasePassAsync(failPlanQueryOn: Zeta, async (result, provider, source) =>
+        {
+            Assert.Equal(2, result.Rows);
+            Assert.Equal(new[] { Alpha, Zeta }, provider.PlanQueriesAskedOf);
+
+            /* The read get_procedure_plan_xml and analyze_procedure_plan make: by the sql_handle that get_top_procedures_by_cpu lists. */
+            var alphaPlan = await DarlingStoredPlanReader.GetProcedurePlanXmlBySqlHandleAsync(
+                source, LiveServerId, SqlHandleOf(Alpha), cancellationToken: token);
+            var zetaPlan = await DarlingStoredPlanReader.GetProcedurePlanXmlBySqlHandleAsync(
+                source, LiveServerId, SqlHandleOf(Zeta), cancellationToken: token);
+
+            Assert.True(
+                !string.IsNullOrEmpty(alphaPlan) && alphaPlan.Contains("ShowPlanXML", StringComparison.Ordinal),
+                "alpha's procedure plan comes from the plan query for alpha");
+            Assert.True(string.IsNullOrEmpty(zetaPlan), "zeta's plan query failed, so its row ships without a plan");
+
+            /* The failed query still cost zeta its milliseconds (each database's phase is at least 1 ms) and attempted none of
+               zeta's ids: the run's sums hold both databases' time and only alpha's one id. */
+            var plan = result.FetchPhases?.Plan;
+            Assert.NotNull(plan);
+            Assert.True(plan.Value.TargetMs >= 2, "plan_fetch target time covers both databases, got " + plan.Value.TargetMs);
+            Assert.Equal(1, plan.Value.IdsAttempted);
+        });
+    }
+
+    [Fact]
+    public async Task AzureLoop_PlanFetchSumsCoverEveryDatabaseOfThePass()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #6182 Azure loop plan pin.");
+
+        await RunTwoDatabasePassAsync(failPlanQueryOn: null, (result, provider, _) =>
+        {
+            Assert.Equal(new[] { Alpha, Zeta }, provider.PlanQueriesAskedOf);
+
+            /* One plan query per database, each at least 1 ms and one id: a pass that kept only the last database's stamp would
+               read 1 id here, not 2. */
+            var plan = result.FetchPhases?.Plan;
+            Assert.NotNull(plan);
+            Assert.Equal(2, plan.Value.IdsAttempted);
+            Assert.True(plan.Value.TargetMs >= 2, "plan_fetch target time covers both databases, got " + plan.Value.TargetMs);
+            Assert.Contains(result.Measurements, m => m.Label == "plans_rendered" && m.Value == 2);
+            return Task.CompletedTask;
+        });
+    }
+
+    private static async Task RunTwoDatabasePassAsync(
+        string? failPlanQueryOn,
+        Func<CollectorRunResult, FakeTargetProvider, NpgsqlDataSource, Task> assertions)
+    {
+        var token = TestContext.Current.CancellationToken;
+
         await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, token);
         await using (var migrate = new NpgsqlConnection(scratch.ConnectionString))
         {
@@ -64,7 +115,7 @@ public sealed class ProcedureStatsAzureLoopPlanPhaseLiveTests
         {
             AzureDatabaseListOverrideForTests = (_, _) => Task.FromResult(new List<string> { Alpha, Zeta }),
         };
-        var provider = new FakeTargetProvider(failPlanQueryOn: Zeta);
+        var provider = new FakeTargetProvider(failPlanQueryOn);
         runner.TargetProviderOverrideForTests = _ => provider;
 
         var server = new ServerRuntime
@@ -78,19 +129,7 @@ public sealed class ProcedureStatsAzureLoopPlanPhaseLiveTests
 
         var result = await runner.RunAsync(ProcedureStatsCollector.Instance, server, token);
 
-        Assert.Equal(2, result.Rows);
-        Assert.Equal(new[] { Alpha, Zeta }, provider.PlanQueriesAskedOf);
-
-        /* The read get_procedure_plan_xml and analyze_procedure_plan make: by the sql_handle that get_top_procedures_by_cpu lists. */
-        var alphaPlan = await DarlingStoredPlanReader.GetProcedurePlanXmlBySqlHandleAsync(
-            source, LiveServerId, SqlHandleOf(Alpha), cancellationToken: token);
-        var zetaPlan = await DarlingStoredPlanReader.GetProcedurePlanXmlBySqlHandleAsync(
-            source, LiveServerId, SqlHandleOf(Zeta), cancellationToken: token);
-
-        Assert.True(
-            !string.IsNullOrEmpty(alphaPlan) && alphaPlan.Contains("ShowPlanXML", StringComparison.Ordinal),
-            "alpha's procedure plan comes from the plan query for alpha");
-        Assert.True(string.IsNullOrEmpty(zetaPlan), "zeta's plan query failed, so its row ships without a plan");
+        await assertions(result, provider, source);
     }
 
     private static string SqlHandleOf(string database) => "0x03000500" + (database == Alpha ? "A1" : "B2") + "AABBCC";
@@ -140,7 +179,7 @@ public sealed class ProcedureStatsAzureLoopPlanPhaseLiveTests
         return table;
     }
 
-    private sealed class FakeTargetProvider(string failPlanQueryOn) : ITargetProvider
+    private sealed class FakeTargetProvider(string? failPlanQueryOn) : ITargetProvider
     {
         public List<string> PlanQueriesAskedOf { get; } = new();
 
