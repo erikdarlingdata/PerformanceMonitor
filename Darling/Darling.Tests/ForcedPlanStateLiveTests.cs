@@ -314,6 +314,8 @@ VALUES ($1,$2,$3,$4,$5)", CollectionIdGenerator.Next(), at, ServerId, ServerName
 
             await RanAsync(rig.Connection, ct, db, 1, 12, T0.AddMinutes(20), 8);
             await RanAsync(rig.Connection, ct, db, 2, 22, T0.AddMinutes(20), 5);
+            /* #6221: plan 22 is a later plan of query 2, another plan by its stored XML. Plan 12 is named a variant by the older collector's row (still honored), so it is not looked up. */
+            await StoredPlanSeed.AddAsync(rig.Connection, ct, ServerId, db, 22, StoredPlanSeed.Plain);
 
             var forces = await ReadAsync(rig, ct);
             var working = forces[(db, 11)];
