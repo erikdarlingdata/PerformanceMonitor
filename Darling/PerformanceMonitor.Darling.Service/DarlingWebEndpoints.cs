@@ -710,7 +710,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            client sends, so this is the affordance layer, never the enforcement. A failed probe fails closed to
            read-only in the UI. */
         app.MapGet("/api/session", (HttpContext context) =>
-            JsonNodeResult(new JsonObject { ["can_edit"] = DarlingWebSeat.FromContext(context).CanEdit }));
+        {
+            /* #6214: the signed-in identity (null for the shared token and for loopback) is what the page compares with a view's
+               created_by to decide "My views", read-only and the personal checkbox. It is the caller's own subject, nothing more. */
+            var seat = DarlingWebSeat.FromContext(context);
+            return JsonNodeResult(new JsonObject { ["can_edit"] = seat.CanEdit, ["subject"] = seat.Subject });
+        });
 
         /* The read catalog: input truth (read names + their WIRE query keys) the composer binds params from. */
         /* #5562: ?server= makes the collector intervals the SERVER's own (a per-server schedule row wins over the

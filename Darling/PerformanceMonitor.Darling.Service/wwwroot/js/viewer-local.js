@@ -16,7 +16,8 @@
  * Storage discipline: every key is namespaced under "darling.local." and carries a version, so a later shape can
  * change without misreading an old value. A stored value that is absent, corrupt, from another version or hand-edited
  * reads as the default and never throws; the page still works. Only server ids, instants, booleans and #rrggbb
- * literals are stored - never a name, a connection string or a token. The one exception is the database filter: it IS a
+ * literals are stored - never a name, a connection string or a token. The exceptions are the database filter and the Custom Views
+ * sidebar's collapsed folders (#6214: a folder has no id, only its name). The database filter IS a
  * set of database names per server (the reads filter by name, and the store has no stable database id). They are names the
  * page already shows, and they leave the browser only as the reads' own `database_name` parameter.
  *
@@ -31,6 +32,7 @@ export const KEY_ACKS = "darling.local.acks.v1";
 export const KEY_SEVERITY_COLORS = "darling.local.severityColors.v1";
 export const KEY_SIDEBAR = "darling.local.sidebar.v1";
 export const KEY_DB_FILTER = "darling.local.dbFilter.v1";
+export const KEY_VIEW_GROUPS = "darling.local.viewGroups.v1";
 const VERSION = 1;
 const MAX_IDS = 5000;
 
@@ -59,6 +61,7 @@ let colors = {}; // severity -> "#rrggbb" (only valid choices)
 let sidebarCollapsed = false;
 let sidebarGrouped = false;
 let dbFilters = new Map(); // server_id -> the chosen database names (1 to MAX_DB_NAMES, kept exactly as chosen)
+let viewGroups = new Set(); // collapsed Custom Views sidebar groups (#6214): "my", or "folder:" + the folder's name
 let sidebarGroups = new Set(); // collapsed sidebar groups: tag ids, plus the fixed ids "favourites" and "untagged"
 let attention = new Map(); // server_id -> { count, critical, latestMs } from the last alert read
 const listeners = new Set();
@@ -91,6 +94,17 @@ const FIXED_GROUPS = ["favourites", "untagged"];
 
 function isGroupId(g) {
   return isServerId(g) || FIXED_GROUPS.includes(g);
+}
+
+/** The Custom Views sidebar's group ids (#6214): the fixed "my" group, or "folder:" + a folder name (a name the store holds to 100
+ *  characters with no control characters; the same bound keeps a hand-edited value out). */
+const MAX_VIEW_GROUPS = 500;
+const VIEW_GROUP_NAME_MAX = 100;
+function isViewGroupId(g) {
+  if (g === "my") return true;
+  if (typeof g !== "string" || !g.startsWith("folder:")) return false;
+  const name = g.slice(7);
+  return name.length > 0 && name.length <= VIEW_GROUP_NAME_MAX && !/[\u0000-\u001f\u007f]/.test(name);
 }
 
 /** Re-reads every value from storage (the page load, and the tests' stand-in for a rebuilt page). */
@@ -130,6 +144,9 @@ export function reload() {
   sidebarCollapsed = !!(s && s.collapsed === true);
   sidebarGrouped = !!(s && s.grouped === true);
   sidebarGroups = new Set(s && Array.isArray(s.collapsedGroups) ? s.collapsedGroups.filter(isGroupId).slice(0, MAX_IDS) : []);
+
+  const g = readJson(KEY_VIEW_GROUPS);
+  viewGroups = new Set(g && Array.isArray(g.collapsed) ? g.collapsed.filter(isViewGroupId).slice(0, MAX_VIEW_GROUPS) : []);
 }
 
 /** Test seam: replaces the Storage and re-reads. */
@@ -405,6 +422,20 @@ export function toggleSidebarGroup(id) {
   if (sidebarGroups.has(id)) sidebarGroups.delete(id);
   else if (sidebarGroups.size < MAX_IDS) sidebarGroups.add(id);
   writeSidebar();
+  changed();
+}
+
+/** Whether a Custom Views sidebar group ("my" or "folder:" + name) is collapsed (#6214). */
+export function isViewGroupCollapsed(id) {
+  return viewGroups.has(id);
+}
+
+/** Collapses or expands one Custom Views sidebar group; an id that is neither "my" nor a "folder:" id is ignored. */
+export function toggleViewGroup(id) {
+  if (!isViewGroupId(id)) return;
+  if (viewGroups.has(id)) viewGroups.delete(id);
+  else if (viewGroups.size < MAX_VIEW_GROUPS) viewGroups.add(id);
+  writeJson(KEY_VIEW_GROUPS, { collapsed: [...viewGroups] });
   changed();
 }
 

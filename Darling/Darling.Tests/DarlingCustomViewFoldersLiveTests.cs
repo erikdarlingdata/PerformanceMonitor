@@ -360,6 +360,14 @@ public sealed class DarlingCustomViewFoldersLiveTests
             Assert.False(teamRow.GetProperty("personal").GetBoolean());
             Assert.Equal("alice", teamRow.GetProperty("created_by").GetString());
 
+            /* The page decides "My views", read-only and the personal checkbox from the session's identity: a person's own subject,
+               and null for the shared-token session. */
+            var (_, aliceSession) = await web.SendAsync(HttpMethod.Get, "/api/session", "alice", null, ct);
+            Assert.Equal("alice", aliceSession.GetProperty("subject").GetString());
+            var (_, tokenSession) = await web.SendAsync(HttpMethod.Get, "/api/session", null, null, ct);
+            Assert.Equal(JsonValueKind.Null, tokenSession.GetProperty("subject").ValueKind);
+            Assert.True(tokenSession.GetProperty("can_edit").GetBoolean());
+
             /* GET by id still returns another person's personal view, so a link keeps working. */
             var (getStatus, got) = await web.SendAsync(HttpMethod.Get, $"/api/views/{mineId}", "bob", null, ct);
             Assert.Equal(HttpStatusCode.OK, getStatus);
@@ -415,7 +423,7 @@ public sealed class DarlingCustomViewFoldersLiveTests
     }
 
     [Fact]
-    public async Task Web_APersonalView_MovesToAFolder_WithAnUpdate_AndTheNameMustBeFreeThere_AndASharedViewCanBecomeMine()
+    public async Task Web_APersonalView_MovesToAFolder_WithAnUpdate_AndTheNameMustBeFreeThere_AndASharedViewWithNoCreatorCanNeverBecomePersonal()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the V204 move facts (each mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
@@ -447,7 +455,8 @@ public sealed class DarlingCustomViewFoldersLiveTests
             /* Now shared, anyone may change it. */
             Assert.Equal(HttpStatusCode.OK, (await web.SendAsync(HttpMethod.Put, $"/api/views/{mineId}", "bob", ViewBody("Top queries 2", version: 2), ct)).Status);
 
-            /* A view with no recorded creator (made before V204) becomes the caller's own when the caller makes it personal. */
+            /* A view with no recorded creator (made before V204) can be made personal by nobody: that would let one person take a team's
+               view out of everyone else's list. The refusal is a plain 403 and the view stays shared and listed for everyone. */
             await using (var owner = new NpgsqlConnection(scratch.ConnectionString))
             {
                 await owner.OpenAsync(ct);
@@ -455,11 +464,28 @@ public sealed class DarlingCustomViewFoldersLiveTests
             }
 
             var legacy = (await web.SendAsync(HttpMethod.Get, "/api/views", "carol", null, ct)).Body.EnumerateArray().Single(v => v.GetProperty("name").GetString() == "legacy");
+            var legacyId = legacy.GetProperty("id").GetInt64();
             Assert.Equal(JsonValueKind.Null, legacy.GetProperty("created_by").ValueKind);
-            var (claimed, claimedBody) = await web.SendAsync(HttpMethod.Put, $"/api/views/{legacy.GetProperty("id").GetInt64()}", "carol", ViewBody("legacy", personal: true, version: 1), ct);
-            Assert.Equal(HttpStatusCode.OK, claimed);
-            Assert.Equal("carol", claimedBody.GetProperty("created_by").GetString());
-            Assert.Equal(HttpStatusCode.Forbidden, (await web.SendAsync(HttpMethod.Delete, $"/api/views/{legacy.GetProperty("id").GetInt64()}", "bob", null, ct)).Status);
+            foreach (var caller in new[] { "carol", "bob" })
+            {
+                var (claimed, claimedBody) = await web.SendAsync(HttpMethod.Put, $"/api/views/{legacyId}", caller, ViewBody("legacy", personal: true, version: 1), ct);
+                Assert.Equal(HttpStatusCode.Forbidden, claimed);
+                Assert.Equal("This shared view has no recorded creator, so it can't be made personal. Save a copy as a personal view instead.", claimedBody.GetProperty("error").GetString());
+            }
+
+            var (stillShared, stillSharedBody) = await web.SendAsync(HttpMethod.Get, $"/api/views/{legacyId}", "bob", null, ct);
+            Assert.Equal(HttpStatusCode.OK, stillShared);
+            Assert.False(stillSharedBody.GetProperty("personal").GetBoolean());
+            Assert.Equal(JsonValueKind.Null, stillSharedBody.GetProperty("created_by").ValueKind);
+            Assert.Equal(1, stillSharedBody.GetProperty("version").GetInt32());
+            Assert.Contains((await web.SendAsync(HttpMethod.Get, "/api/views", "bob", null, ct)).Body.EnumerateArray(), v => v.GetProperty("name").GetString() == "legacy");
+
+            /* A legacy view is still an ordinary shared view otherwise, and a personal copy of it is a new view its saver owns. */
+            Assert.Equal(HttpStatusCode.OK, (await web.SendAsync(HttpMethod.Put, $"/api/views/{legacyId}", "carol", ViewBody("legacy", version: 1), ct)).Status);
+            var (copyStatus, copy) = await web.SendAsync(HttpMethod.Post, "/api/views", "carol", ViewBody("legacy", personal: true), ct);
+            Assert.Equal(HttpStatusCode.Created, copyStatus);
+            Assert.Equal("carol", copy.GetProperty("created_by").GetString());
+            Assert.Equal(HttpStatusCode.Forbidden, (await web.SendAsync(HttpMethod.Delete, $"/api/views/{copy.GetProperty("id").GetInt64()}", "bob", null, ct)).Status);
             bodySucceeded = true;
         }
         finally

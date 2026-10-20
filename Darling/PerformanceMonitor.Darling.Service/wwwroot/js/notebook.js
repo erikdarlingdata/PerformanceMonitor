@@ -38,6 +38,8 @@ import { buildCreateAlertAction } from "./alert-seed.js";
 import * as api from "./views-api.js";
 import { refreshChoiceOf } from "./refresh-policy.js";
 import { buildRefreshControl } from "./refresh-control.js";
+import { buildViewMetaFields } from "./view-meta-fields.js";
+import { metaForSave } from "./view-folders.js";
 
 /** The definition discriminator: a notebook definition carries kind:"notebook"; a dashboard omits it. */
 export const NOTEBOOK_KIND = "notebook";
@@ -77,11 +79,14 @@ export async function renderNotebookEditor(main, id, templateKey) {
 
   /* Fleet options carry the per-server platform for D4 measure auto-greying (loadFleetOptions is shared from the
      dashboard composer so the enrichment lives in one place). */
-  const [catalog, fleet] = await Promise.all([api.getCatalog(), loadFleetOptions()]);
+  const [catalog, fleet, listed] = await Promise.all([api.getCatalog(), loadFleetOptions(), api.listViews()]);
+  /* #6214: the folder suggestions come from the same list the sidebar reads; a failed read just means none. */
+  const views = listed.kind === "data" && Array.isArray(listed.data) ? listed.data : [];
 
   let model;
   let editingId = null;
   let loadedVersion = null;
+  let stored = null;
 
   if (id != null && id !== "new") {
     const res = await api.getView(id);
@@ -96,20 +101,21 @@ export async function renderNotebookEditor(main, id, templateKey) {
     }
     editingId = res.data.id;
     loadedVersion = res.data.version;
+    stored = res.data;
     model = notebookToModel(res.data);
   } else {
     const tpl = templateKey ? NOTEBOOK_TEMPLATES.find((t) => t.key === templateKey) : null;
     model = tpl ? notebookToModel(tpl.make()) : blankNotebookModel();
   }
 
-  buildNotebookEditor(main, { model, editingId, loadedVersion, catalog, fleet });
+  buildNotebookEditor(main, { model, editingId, loadedVersion, catalog, fleet, session, views, stored });
 }
 
 /* ─────────────────────────── model <-> definition ─────────────────────────── */
 
 /** A brand-new notebook: one empty markdown cell + one empty panel cell (both cell kinds visible to start). */
 function blankNotebookModel() {
-  return { name: "", description: "", cells: [markdownCellModel(""), panelCellModel()], variables: [], rangeHours: null, refresh: null };
+  return { name: "", description: "", folder: "", personal: false, cells: [markdownCellModel(""), panelCellModel()], variables: [], rangeHours: null, refresh: null };
 }
 
 function markdownCellModel(text) {
@@ -128,6 +134,8 @@ function notebookToModel(view) {
   return {
     name: view.name || "",
     description: view.description || "",
+    folder: typeof view.folder === "string" ? view.folder : "",
+    personal: view.personal === true,
     cells: cells.length ? cells : [markdownCellModel("")],
     variables: parseVariables(def.variables),
     rangeHours: def.range && typeof def.range.hours === "number" ? def.range.hours : null,
@@ -219,6 +227,9 @@ function buildNotebookEditor(main, ctx) {
     model.description = descInput.value;
   });
 
+  /* #6214: folder, personal and owner. Another person's personal notebook opens read-only: Save stays disabled. */
+  const metaFields = buildViewMetaFields({ meta: model, view: ctx.stored, session: ctx.session, views: ctx.views, onChange: () => refreshSaveState() });
+
   const cellsBox = el("div", { class: "cells-box" });
   const saveStatus = el("div", { class: "save-status" });
   const saveBtn = el("button", { class: "btn primary", type: "button", text: ctx.editingId != null ? "Save changes" : "Create notebook" });
@@ -272,7 +283,7 @@ function buildNotebookEditor(main, ctx) {
 
   function refreshSaveState() {
     const problem = notebookSaveBlocker(model, ctx.catalog);
-    saveBtn.disabled = problem != null;
+    saveBtn.disabled = problem != null || metaFields.readOnly;
     const atCap = model.cells.length >= MAX_NOTEBOOK_CELLS;
     addMdBtn.disabled = atCap;
     addPanelBtn.disabled = atCap;
@@ -293,6 +304,7 @@ function buildNotebookEditor(main, ctx) {
       name: model.name.trim(),
       description: model.description ? model.description : null,
       definition: modelToNotebookDefinition(model),
+      ...metaForSave(model, ctx.stored, ctx.session),
     };
 
     let res;
@@ -320,6 +332,7 @@ function buildNotebookEditor(main, ctx) {
       buildRefreshControl(refreshChoiceOf(model, true), (choice) => { model.refresh = choice; }).root,
     ]),
     el("div", { class: "editor-meta" }, [field("Name", nameInput), field("Description", descInput)]),
+    metaFields.node,
     viewScopeSection,
     el("h3", { class: "section-title", text: "Cells" }),
     cellsBox,

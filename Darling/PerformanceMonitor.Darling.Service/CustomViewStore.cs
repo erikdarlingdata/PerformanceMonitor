@@ -71,8 +71,8 @@ RETURNING id, name, definition, description, version, created_at, updated_at, up
     /// <summary>Optimistic-concurrency update. $1 id, $2 name, $3 definition (jsonb), $4 description,
     /// $5 updated_by, $6 expected_version, $7 folder, $8 personal (the new value), $9 actor (the signed-in identity; null when there is none).
     /// Returns the row only when the expected version matched AND the actor may change this view: anyone may change a shared view and keep
-    /// it shared; a personal view only its owner may change; a shared view becomes personal only when it has no recorded creator (the actor
-    /// then becomes the owner) or the actor created it.</summary>
+    /// it shared; a personal view only its owner may change; a shared view becomes personal only when the actor created it (a view with no
+    /// recorded creator can never be made personal, so nobody can take a team's legacy view out of everyone else's list).</summary>
     public const string UpdateSql = @"
 UPDATE custom_views
 SET name = $2,
@@ -82,11 +82,10 @@ SET name = $2,
     updated_at = (now() AT TIME ZONE 'UTC'),
     updated_by = $5,
     folder = $7,
-    personal = $8,
-    created_by = CASE WHEN $8::boolean AND created_by IS NULL THEN $9::text ELSE created_by END
+    personal = $8
 WHERE id = $1 AND version = $6
   AND ((NOT personal AND NOT $8::boolean)
-       OR (NOT personal AND $8::boolean AND (created_by IS NULL OR created_by = $9::text))
+       OR (NOT personal AND $8::boolean AND created_by = $9::text)
        OR (personal AND created_by = $9::text))
 RETURNING id, name, definition, description, version, created_at, updated_at, updated_by, folder, personal, created_by";
 
@@ -112,6 +111,9 @@ RETURNING id, name, definition, description, version, created_at, updated_at, up
 
     /// <summary>The plain sentence for turning a shared view that somebody else created into a personal one.</summary>
     public const string NotCreatorMessage = "Only the person who created a view can make it personal.";
+
+    /// <summary>The plain sentence for turning a shared view with no recorded creator (made before V204) into a personal one.</summary>
+    public const string NoCreatorMessage = "This shared view has no recorded creator, so it can't be made personal. Save a copy as a personal view instead.";
 
     /// <summary>The plain sentence for a personal view with nobody to own it.</summary>
     public const string NoIdentityMessage = "A personal view needs a signed-in identity; this session has none.";
@@ -350,9 +352,9 @@ RETURNING id, name, definition, description, version, created_at, updated_at, up
             return new CustomViewResult.Forbidden(NotOwnerMessage);
         }
 
-        if (!isPersonal && wantPersonal && createdBy is not null && createdBy != actor)
+        if (!isPersonal && wantPersonal && createdBy != actor)
         {
-            return new CustomViewResult.Forbidden(NotCreatorMessage);
+            return new CustomViewResult.Forbidden(createdBy is null ? NoCreatorMessage : NotCreatorMessage);
         }
 
         return new CustomViewResult.Conflict(
