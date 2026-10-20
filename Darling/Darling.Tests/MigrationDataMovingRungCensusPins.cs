@@ -312,6 +312,13 @@ public sealed class MigrationDataMovingRungCensusPins
             + "on a busy store, hundreds at the very most, so each build and each validation is milliseconds and spends none of the "
             + "budget. The rung's DO block also drops V31's UNIQUE (name) under the name it carries, found by its column; a DROP "
             + "CONSTRAINT is catalog-only"),
+        new(
+            207,
+            SetsTheFloor: false,
+            "one partial unique index on config.investigation_requests (created V184), WHERE trigger_kind = 'change_watch'. The column "
+            + "is added by the same rung with DEFAULT 'alert', so no existing row matches the predicate and the build indexes nothing: "
+            + "it reads the table once (a request is one row per incident, about a hundred a day at the route limits, kept for a few "
+            + "weeks) and is milliseconds. It does not move the lock-wait floor."),
     ];
 
     /// <summary>
