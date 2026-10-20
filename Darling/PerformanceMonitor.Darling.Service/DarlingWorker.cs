@@ -1164,6 +1164,15 @@ public sealed class DarlingWorker : BackgroundService
     /* #4004 review, round 3: "the log-hash key was replaced at start", held for the first pg_log_events run. */
     private readonly LogHashKeyRotationNote _logHashKeyRotation = new();
 
+    /// <summary>#4004: lets a test arm the rotation note the way the service start does, then run the worker's real run path.</summary>
+    internal LogHashKeyRotationNote LogHashKeyRotationForTests => _logHashKeyRotation;
+
+    /// <summary>
+    /// Test seam: with this set, <see cref="RunOneAsync"/> dispatches every collector through it instead of the collector's own
+    /// run, and everything after the dispatch (the notes, the collection_log row) is the real path. Null in production.
+    /// </summary>
+    internal Func<string, ServerRuntime, CancellationToken, Task<CollectorRunResult>>? DispatchOverrideForTests { get; set; }
+
     /* The fleet-level memory launch guard (#1556, #5479): one per process, the whole process's memory rather than
        a per-server state, so it is a single worker field and not a ServerLoopState flag. It owns the trip, the
        garbage collection that releases it, the hold warnings and the release (see LaunchMemoryGuard). The setter
@@ -16277,6 +16286,11 @@ LIMIT 1";
         if (runtime is null || !s_dispatch.TryGetValue(collectorName, out var run))
         {
             return 0;
+        }
+
+        if (DispatchOverrideForTests is { } dispatchOverride)
+        {
+            run = (_, overrideRuntime, overrideToken) => dispatchOverride(collectorName, overrideRuntime, overrideToken);
         }
 
         /* #2165: the tick's Query Store pass and the backfill slice both do heavy QS text extraction, and
