@@ -35,16 +35,23 @@ public sealed partial class PlanForceToolLiveTests
     /// <summary>A second session on the test SQL Server, with the id and login time the server itself holds for it.</summary>
     private sealed record Victim(SqlConnection Connection, int SessionId, DateTime LoginLocal);
 
-    private static async Task<Victim> OpenVictimAsync(Ctx c)
+    /// <summary>
+    /// A session to kill. By default it is the test server's admin login with an ordinary program name: the remediation login is the scratch one, and
+    /// Darling's own sessions (its program name, its remediation login) are refused (#5632). <paramref name="asRemediationLogin"/> signs in as that login.
+    /// </summary>
+    private static async Task<Victim> OpenVictimAsync(Ctx c, string program = VictimProgram, bool asRemediationLogin = false)
     {
         /* No connection resiliency: with it the driver quietly reconnects after a kill, and the test could not see the session end. */
         var builder = new SqlConnectionStringBuilder(c.Sql.Admin(c.Sql.Database).ConnectionString)
         {
-            UserID = c.Sql.Login,
-            Password = c.Sql.Password,
             ConnectRetryCount = 0,
-            ApplicationName = "PerformanceMonitorDarling-KillVictim",
+            ApplicationName = program,
         };
+        if (asRemediationLogin)
+        {
+            builder.UserID = c.Sql.Login;
+            builder.Password = c.Sql.Password;
+        }
         var connection = await OpenAsync(builder, c.Ct);
         var id = Convert.ToInt32(await ScalarAsync(connection, "SELECT @@SPID;", c.Ct), CultureInfo.InvariantCulture);
         await using var admin = await OpenAsync(c.Sql.Admin(), c.Ct);
@@ -78,6 +85,8 @@ public sealed partial class PlanForceToolLiveTests
         return Convert.ToInt64(await command.ExecuteScalarAsync(c.Ct), CultureInfo.InvariantCulture) > 0;
     }
 
+    private const string VictimProgram = "pm5632_victim";
+
     private static Task<string> KillAsync(Ctx c, int session, string? loginTime, bool dryRun, string server = "srv-7") =>
         DarlingMcpPlanForceTools.RunKillAsync(c.Source, c.Source, c.Log, server, session, loginTime, null, c.Arg, dryRun, c.Ct);
 
@@ -92,8 +101,8 @@ public sealed partial class PlanForceToolLiveTests
             var answer = await KillAsync(c, victim.SessionId, UtcText(victim, offset), dryRun: true);
             var json = Parse(answer);
             Assert.Equal("dry_run", (string?)json["status"]);
-            Assert.Equal(c.Sql.Login, (string?)json["session"]!["login_name"]);
-            Assert.Equal("PerformanceMonitorDarling-KillVictim", (string?)json["session"]!["program_name"]);
+            Assert.Equal(Environment.GetEnvironmentVariable("DARLING_TEST_SQL_USER"), (string?)json["session"]!["login_name"]);
+            Assert.Equal(VictimProgram, (string?)json["session"]!["program_name"]);
             Assert.Equal(victim.LoginLocal.AddMinutes(-offset).ToString("o", CultureInfo.InvariantCulture), (string?)json["session"]!["login_time"]);
             Assert.Empty(json["warnings"]!.AsArray());
             Assert.True(await SessionAliveAsync(c, victim));
@@ -101,6 +110,35 @@ public sealed partial class PlanForceToolLiveTests
             var parameter = typeof(DarlingMcpPlanForceTools).GetMethod(nameof(DarlingMcpPlanForceTools.KillSession))!.GetParameters().Single(p => p.Name == "dry_run");
             Assert.True((bool)parameter.DefaultValue!);
             AssertNoSecret(c, answer);
+        });
+    }
+
+    /// <summary>
+    /// #5632: a session of Darling itself is never killed, dry run or real: one whose program name starts with PerformanceMonitorDarling (the
+    /// monitoring and remediation connections), and another session of the remediation login. The refusal returns no facts about the session, and
+    /// journals nothing. The monitoring login's name is not a reason to refuse, so an ordinary session of the same login stays killable.
+    /// </summary>
+    [Fact]
+    public async Task ASessionOfDarlingsProgram_OrOfTheRemediationLogin_IsRefused_WithNoFacts_AndNothingIsKilled()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var offset = await SeedClockAsync(c);
+            foreach (var (program, remediation) in new[] { ("PerformanceMonitorDarling-Collector", false), (VictimProgram, true) })
+            {
+                var victim = await OpenVictimAsync(c, program, remediation);
+                using var _ = victim.Connection;
+                foreach (var dry in new[] { true, false })
+                {
+                    var json = Parse(await KillAsync(c, victim.SessionId, UtcText(victim, offset), dryRun: dry));
+                    Assert.Equal("refused", (string?)json["status"]);
+                    Assert.Equal(RemediationResult.Reasons.ToolLoginSession, (string?)json["reason"]);
+                    Assert.Null(json["session"]);
+                    Assert.True(await SessionAliveAsync(c, victim));
+                }
+            }
+
+            Assert.Equal(0, await JournalActionRowsAsync(c));
         });
     }
 
@@ -139,7 +177,7 @@ public sealed partial class PlanForceToolLiveTests
             Assert.Equal("kill_session", (string?)called["tool"]);
             Assert.Equal(victim.SessionId.ToString(CultureInfo.InvariantCulture), (string?)called["target"]!["id"]);
             Assert.Equal(7, (int)called["target"]!["server_id"]!);
-            Assert.Equal(c.Sql.Login, (string?)called["before"]!["session"]!["login_name"]);
+            Assert.Equal(Environment.GetEnvironmentVariable("DARLING_TEST_SQL_USER"), (string?)called["before"]!["session"]!["login_name"]);
             Assert.True((long)called["before"]!["session"]!["log_bytes_used"]! > 0);
             var done = Assert.Single(await RowsAsync(c, "action_done"));
             Assert.Equal((long)json["journal_id"]!, (long)done["called_id"]!);

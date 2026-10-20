@@ -193,9 +193,9 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
                 omitPid ? null : session ?? (PostgresBackendId.TryUnpack(backendId, out var pid, out _) ? pid : null),
                 null, backendId, Arg, dryRun, Ct);
 
-        public async Task<(NpgsqlConnection Connection, int Pid, string BackendId)> OpenVictimAsync(string? role = null, string? password = null)
+        public async Task<(NpgsqlConnection Connection, int Pid, string BackendId)> OpenVictimAsync(string? role = null, string? password = null, string? application = null)
         {
-            var builder = new NpgsqlConnectionStringBuilder(Target.ConnectionString(role ?? Roles.Victim, password ?? VictimPassword)) { ApplicationName = "PerformanceMonitorDarling-KillVictim" };
+            var builder = new NpgsqlConnectionStringBuilder(Target.ConnectionString(role ?? Roles.Victim, password ?? VictimPassword)) { ApplicationName = application ?? "pm5632-victim" };
             var connection = new NpgsqlConnection(builder.ConnectionString);
             await connection.OpenAsync(Ct);
             var pid = Convert.ToInt32(await Scalar(connection, "SELECT pg_backend_pid()"), CultureInfo.InvariantCulture);
@@ -451,6 +451,37 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             Assert.Equal("not_permitted", (string?)json["reason"]);
             Assert.Contains("superuser", (string?)json["message"], StringComparison.Ordinal);
             Assert.True(await c.AliveAsync(pid));
+        });
+    }
+
+    /// <summary>
+    /// #5632: a backend of Darling itself is never ended, dry run or real: one whose application name starts with PerformanceMonitorDarling, and
+    /// another backend of the remediation role. The refusal returns no facts about the backend. Nothing is signalled.
+    /// </summary>
+    [Fact]
+    public async Task ABackendOfDarlingsApplication_OrOfTheRemediationRole_IsRefused_WithNoFacts_AndNothingIsEnded()
+    {
+        await RunAsync(Grants.SignalAndStats, Without.Nothing, async c =>
+        {
+            foreach (var (role, password, application) in new[]
+            {
+                (c.Roles.Victim, VictimPassword, "PerformanceMonitorDarling-Collector"),
+                (c.Roles.Remediation, c.Roles.Secret, "pm5632-other"),
+            })
+            {
+                var (connection, pid, id) = await c.OpenVictimAsync(role, password, application);
+                await using var victimConnection = connection;
+                foreach (var dry in new[] { true, false })
+                {
+                    var json = Parse(await c.Kill(id, dryRun: dry));
+                    Assert.Equal("refused", (string?)json["status"]);
+                    Assert.Equal(RemediationResult.Reasons.ToolLoginSession, (string?)json["reason"]);
+                    Assert.Null(json["session"]);
+                    Assert.True(await c.AliveAsync(pid));
+                }
+            }
+
+            Assert.Equal(0, await c.JournalAsync("action_called"));
         });
     }
 
@@ -889,5 +920,17 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
         Assert.Equal(RemediationResult.Reasons.NotUserSession, PostgresRemediationExecutor.KillRefusal("kill_session", false, 43, 1_700_000_000, Row(43, "walsender"))!.Reason);
         Assert.Equal(RemediationResult.Reasons.SessionReused, PostgresRemediationExecutor.KillRefusal("kill_session", false, 43, 1_700_000_001, Row(43, "client backend"))!.Reason);
         Assert.Null(PostgresRemediationExecutor.KillRefusal("kill_session", false, 43, 1_700_000_000, Row(43, "client backend")));
+
+        /* #5632: the tool's own program and the remediation role's backends are refused, with no facts, whatever the login may signal. */
+        var darling = Row(43, "client backend") with { Facts = Row(43, "client backend").Facts with { ApplicationName = "PerformanceMonitorDarling-Remediation" } };
+        var refusedProgram = PostgresRemediationExecutor.KillRefusal("kill_session", false, 43, 1_700_000_000, darling)!;
+        Assert.Equal(RemediationResult.Reasons.ToolLoginSession, refusedProgram.Reason);
+        Assert.Null(refusedProgram.PgSession);
+        var ownRole = PostgresRemediationExecutor.KillRefusal("kill_session", false, 43, 1_700_000_000, Row(43, "client backend") with { TargetIsCallerRole = true })!;
+        Assert.Equal(RemediationResult.Reasons.ToolLoginSession, ownRole.Reason);
+        Assert.Null(ownRole.PgSession);
+        Assert.True(PostgresRemediationExecutor.IsDarlingProgram("performancemonitordarling"));
+        Assert.False(PostgresRemediationExecutor.IsDarlingProgram("PerformanceMonitor"));
+        Assert.False(PostgresRemediationExecutor.IsDarlingProgram(null));
     }
 }
