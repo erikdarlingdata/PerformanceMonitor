@@ -1,0 +1,335 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Linq;
+using System.Security.Cryptography;
+using System.Text.Json.Nodes;
+using System.Threading;
+using System.Threading.Tasks;
+using Npgsql;
+using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
+using Xunit;
+
+namespace Darling.Tests;
+
+/* #1776 own-store: every fact mints its own scratch database through ScratchPostgres and a role with a per-run name,
+   and touches nothing on the shared one, so the class is deliberately NOT [Collection("live-postgres")]. */
+
+/// <summary>
+/// The MCP incident actions (#6230, part B) as the <c>mcp</c> role runs them: <c>test_connection</c>, <c>analyze_now</c> and <c>purge_now</c>
+/// queue a command through <c>config.request_mcp_command</c>, and <c>get_command_result</c> reads what the service wrote back. The role's
+/// grants come from <see cref="DarlingManagedRoles.BuildProvisioningSql"/> (through <see cref="ViewerGrantReplay"/>) and the function is the
+/// product's own builder, so a table grant added to the product's SQL, or a dropped EXECUTE grant, fails these facts. No SQL Server is
+/// involved: the service's part is played by the test (it completes the row the way the executor reports it).
+/// </summary>
+public sealed class McpIncidentActionsLiveTests
+{
+    private static readonly string RolePassword = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
+
+    private const int ServerId = 41;
+
+    private static JsonObject Parse(string answer) => JsonNode.Parse(answer)!.AsObject();
+
+    [Fact]
+    public async Task EachAction_IsQueuedAsTheFixedCommand_AndTheExecutorResolvesItsPlanOnTheNextPass()
+    {
+        await WithRoleAsync("mcp", grantFunction: true, async (owner, asRole, ct) =>
+        {
+            foreach (var (answer, type, plan) in new[]
+            {
+                (await DarlingMcpIncidentActionTools.TestConnection(asRole, "snap-target", ct), "test_connect", CommandKind.Probe),
+                (await DarlingMcpIncidentActionTools.AnalyzeNow(asRole, "snap-target", ct), "analyze_now", CommandKind.Analyze),
+                (await DarlingMcpIncidentActionTools.PurgeNow(asRole, confirm: true, retention_days: 30, cancellationToken: ct), "purge_now", CommandKind.Purge),
+            })
+            {
+                var node = Parse(answer);
+                Assert.Equal("queued", (string?)node["status"]);
+                var id = (long)node["command_id"]!;
+                Assert.Equal(id, (long)node["check_with"]!["command_id"]!);
+                Assert.False(string.IsNullOrWhiteSpace((string?)node["undo"]));
+
+                await using var read = owner.CreateCommand(
+                    "SELECT command_type, status, target_server_id, requested_by, args_json::text FROM config.config_command WHERE command_id = $1");
+                read.Parameters.AddWithValue(id);
+                await using var reader = await read.ExecuteReaderAsync(ct);
+                Assert.True(await reader.ReadAsync(ct));
+                Assert.Equal(type, reader.GetString(0));
+                Assert.Equal("pending", reader.GetString(1));
+                int? target = reader.IsDBNull(2) ? null : reader.GetInt32(2);
+                Assert.Equal(type == "purge_now" ? null : ServerId, target);
+                Assert.Equal("mcp", reader.GetString(3));
+                var args = reader.IsDBNull(4) ? null : reader.GetString(4);
+
+                /* The service's own plan for that row is a real one (not a refusal), so it runs on its next poll. */
+                Assert.Equal(plan, DarlingCommandExecutor.ResolvePlan(new ClaimedCommand(id, type, target, args, "mcp")).Kind);
+                if (type == "purge_now")
+                {
+                    Assert.Contains("30", args, StringComparison.Ordinal);
+                    Assert.Contains("cannot be brought back", (string?)node["undo"], StringComparison.Ordinal);
+                }
+
+                if (type == "test_connect")
+                {
+                    /* Built from the stored row: the host, no plain password slot, and the stored secret as the service reads it. */
+                    var built = JsonNode.Parse(args!)!.AsObject();
+                    Assert.Equal("snap-target", (string?)built["host"]);
+                    Assert.Equal("blob-from-the-store", (string?)built["encryptedPassword"]);
+                    Assert.False(built.ContainsKey("password"));
+                }
+            }
+        });
+    }
+
+    [Fact]
+    public async Task TestConnection_ReportsSuccessAndFailure_ThroughGetCommandResult()
+    {
+        await WithRoleAsync("mcp", grantFunction: true, async (owner, asRole, ct) =>
+        {
+            var first = Parse(await DarlingMcpIncidentActionTools.TestConnection(asRole, "snap-target", ct));
+            var id = (long)first["command_id"]!;
+
+            var waiting = Parse(await DarlingMcpIncidentActionTools.GetCommandResult(asRole, id, ct));
+            Assert.Equal("pending", (string?)waiting["command_status"]);
+
+            var ok = DarlingCommandExecutor.MapProbeResult(new ConnectionProbeResult(
+                Success: true, MajorVersion: 16, EngineEdition: 3, EngineEditionDescription: "Enterprise",
+                IsAzureSqlDb: false, IsAzureManagedInstance: false, IsAwsRds: false, HasMsdbAccess: true, Error: null));
+            await CompleteAsync(owner, id, "succeeded", ok.ResultStatus, ok.ResultJson, ct);
+            var done = Parse(await DarlingMcpIncidentActionTools.GetCommandResult(asRole, id, ct));
+            Assert.Equal("succeeded", (string?)done["command_status"]);
+            Assert.Equal("connected", (string?)done["result_status"]);
+            Assert.Equal(16, (int)done["result"]!["majorVersion"]!);
+            Assert.DoesNotContain("args", done.ToJsonString(), StringComparison.OrdinalIgnoreCase);
+
+            await ExecAsync(owner, "UPDATE config.config_command SET created_at = created_at - interval '1 minute'", ct);
+            var second = Parse(await DarlingMcpIncidentActionTools.TestConnection(asRole, "snap-target", ct));
+            var failedId = (long)second["command_id"]!;
+            var bad = DarlingCommandExecutor.MapProbeResult(new ConnectionProbeResult(
+                Success: false, MajorVersion: 0, EngineEdition: 0, EngineEditionDescription: null,
+                IsAzureSqlDb: false, IsAzureManagedInstance: false, IsAwsRds: false, HasMsdbAccess: false, Error: "A network-related error occurred"));
+            await CompleteAsync(owner, failedId, "failed", bad.ResultStatus, bad.ResultJson, ct);
+            var failed = Parse(await DarlingMcpIncidentActionTools.GetCommandResult(asRole, failedId, ct));
+            Assert.Equal("failed", (string?)failed["command_status"]);
+            Assert.Equal("connection_failed", (string?)failed["result_status"]);
+            Assert.Contains("network-related", failed["result"]!.ToJsonString(), StringComparison.Ordinal);
+
+            Assert.Equal("not_found", (string?)Parse(await DarlingMcpIncidentActionTools.GetCommandResult(asRole, 999999, ct))["status"]);
+        });
+    }
+
+    [Fact]
+    public async Task PurgeNow_WithoutConfirm_OrWithABadRetention_IsRefused_AndQueuesNothing()
+    {
+        await WithRoleAsync("mcp", grantFunction: true, async (owner, asRole, ct) =>
+        {
+            var noConfirm = Parse(await DarlingMcpIncidentActionTools.PurgeNow(asRole, confirm: false, retention_days: 7, cancellationToken: ct));
+            Assert.Equal("refused", (string?)noConfirm["status"]);
+            Assert.Equal("confirm_required", (string?)noConfirm["reason"]);
+            Assert.Contains("cannot be brought back", (string?)noConfirm["message"], StringComparison.Ordinal);
+
+            foreach (var days in new[] { 0, -5, DarlingMcpIncidentActionTools.MaxPurgeRetentionDays + 1 })
+            {
+                var bad = Parse(await DarlingMcpIncidentActionTools.PurgeNow(asRole, confirm: true, retention_days: days, cancellationToken: ct));
+                Assert.Equal("refused", (string?)bad["status"]);
+                Assert.Equal("invalid", (string?)bad["reason"]);
+            }
+
+            await using var count = owner.CreateCommand("SELECT count(*) FROM config.config_command");
+            Assert.Equal(0L, Convert.ToInt64(await count.ExecuteScalarAsync(ct)));
+        });
+    }
+
+    [Fact]
+    public async Task ASecondRequest_IsRefusedInPlainWords_WhileOneIsPending_AndAnUnknownServerIsRefused()
+    {
+        await WithRoleAsync("mcp", grantFunction: true, async (owner, asRole, ct) =>
+        {
+            Assert.Equal("queued", (string?)Parse(await DarlingMcpIncidentActionTools.AnalyzeNow(asRole, "snap-target", ct))["status"]);
+            var again = Parse(await DarlingMcpIncidentActionTools.AnalyzeNow(asRole, "snap-target", ct));
+            Assert.Equal("refused", (string?)again["status"]);
+            Assert.Equal("already_queued", (string?)again["reason"]);
+            Assert.Contains("Nothing was queued", (string?)again["message"], StringComparison.Ordinal);
+
+            var unknown = await DarlingMcpIncidentActionTools.AnalyzeNow(asRole, "no-such-server", ct);
+            Assert.DoesNotContain("\"queued\"", unknown, StringComparison.Ordinal);
+
+            await using var count = owner.CreateCommand("SELECT count(*) FROM config.config_command");
+            Assert.Equal(1L, Convert.ToInt64(await count.ExecuteScalarAsync(ct)));
+        });
+    }
+
+    [Theory]
+    [InlineData("pause", null, null)]
+    [InlineData("resume", null, null)]
+    [InlineData("disable_server", ServerId, null)]
+    [InlineData("snapshot_now", ServerId, null)]
+    [InlineData("undo_plan_change", null, null)]
+    [InlineData("execute_actual_plan", ServerId, null)]
+    [InlineData("", null, null)]
+    [InlineData("analyze_now", ServerId, 30)]
+    [InlineData("purge_now", ServerId, null)]
+    [InlineData("purge_now", null, 0)]
+    [InlineData("purge_now", null, 3651)]
+    [InlineData("reload", ServerId, null)]
+    public async Task TheFunction_RefusesACommandTypeOutsideItsFourOrABadArgument_AndQueuesNothing(string type, int? serverId, int? retentionDays)
+    {
+        await WithRoleAsync("mcp", grantFunction: true, async (owner, asRole, ct) =>
+        {
+            var refused = await Assert.ThrowsAsync<PostgresException>(async () =>
+            {
+                await using var call = asRole.CreateCommand("SELECT config.request_mcp_command($1, $2, $3, 'mcp')");
+                call.Parameters.AddWithValue(type);
+                call.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer, Value = (object?)serverId ?? DBNull.Value });
+                call.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer, Value = (object?)retentionDays ?? DBNull.Value });
+                await call.ExecuteScalarAsync(ct);
+            });
+            Assert.Equal("DL400", refused.SqlState);
+
+            await using var count = owner.CreateCommand("SELECT count(*) FROM config.config_command");
+            Assert.Equal(0L, Convert.ToInt64(await count.ExecuteScalarAsync(ct)));
+        });
+    }
+
+    [Fact]
+    public async Task Reload_IsQueuedThroughTheFunction_WithNoServerAndNoArguments()
+    {
+        await WithRoleAsync("mcp", grantFunction: true, async (owner, asRole, ct) =>
+        {
+            await using var call = asRole.CreateCommand("SELECT config.request_mcp_command('reload', NULL, NULL, NULL)");
+            var id = Convert.ToInt64(await call.ExecuteScalarAsync(ct));
+            await using var read = owner.CreateCommand(
+                "SELECT command_type || '/' || COALESCE(args_json::text, 'null') || '/' || requested_by FROM config.config_command WHERE command_id = $1");
+            read.Parameters.AddWithValue(id);
+            Assert.Equal("reload/null/mcp", (string)(await read.ExecuteScalarAsync(ct))!);
+            Assert.Equal(CommandKind.StoreWrite, DarlingCommandExecutor.ResolvePlan(new ClaimedCommand(id, "reload", null, null, "mcp")).Kind);
+        });
+    }
+
+    [Fact]
+    public async Task TheMcpRole_CannotInsertACommandRowDirectly_AndAnotherRoleCannotCallTheFunction()
+    {
+        await WithRoleAsync("mcp", grantFunction: true, async (owner, asRole, ct) =>
+        {
+            var denied = await Assert.ThrowsAsync<PostgresException>(async () =>
+            {
+                await using var insert = asRole.CreateCommand(
+                    "INSERT INTO config.config_command (requested_by, command_type, target_server_id, args_json, status, created_at) " +
+                    "VALUES ('x', 'pause', NULL, NULL, 'pending', now() AT TIME ZONE 'UTC')");
+                await insert.ExecuteNonQueryAsync(ct);
+            });
+            Assert.Equal("42501", denied.SqlState);
+        });
+
+        await WithRoleAsync("viewer", grantFunction: false, async (owner, asRole, ct) =>
+        {
+            var denied = await Assert.ThrowsAsync<PostgresException>(async () =>
+            {
+                await using var call = asRole.CreateCommand("SELECT config.request_mcp_command('purge_now', NULL, NULL, 'x')");
+                await call.ExecuteScalarAsync(ct);
+            });
+            Assert.Equal("42501", denied.SqlState);
+
+            await using var count = owner.CreateCommand("SELECT count(*) FROM config.config_command");
+            Assert.Equal(0L, Convert.ToInt64(await count.ExecuteScalarAsync(ct)));
+        });
+    }
+
+    [Fact]
+    public async Task UndoPlanChange_RefusesAnUnknownChange_AndABadId_WritingNothing_AndGetAgentChangesReadsTheJournal()
+    {
+        await WithRoleAsync("mcp", grantFunction: true, async (owner, asRole, ct) =>
+        {
+            var empty = Parse(await DarlingMcpIncidentActionTools.GetAgentChanges(asRole, cancellationToken: ct));
+            Assert.Equal("empty", (string?)empty["status"]);
+
+            var unknown = Parse(await DarlingMcpPlanUndoTools.RunAsync(asRole, null, null, 424242, confirm: true, shown: "x", ct));
+            Assert.Equal("refused", (string?)unknown["status"]);
+            Assert.Equal("not_found", (string?)unknown["code"]);
+
+            var bad = Parse(await DarlingMcpPlanUndoTools.RunAsync(asRole, null, null, 0, confirm: false, shown: null, ct));
+            Assert.Equal("refused", (string?)bad["status"]);
+            Assert.Equal("invalid", (string?)bad["code"]);
+
+            await using var count = owner.CreateCommand("SELECT count(*) FROM config.investigation_journal WHERE event = 'action_undone'");
+            Assert.Equal(0L, Convert.ToInt64(await count.ExecuteScalarAsync(ct)));
+        });
+    }
+
+    private static Task CompleteAsync(NpgsqlDataSource owner, long id, string status, string resultStatus, string resultJson, CancellationToken ct) =>
+        ExecAsync(owner,
+            $"UPDATE config.config_command SET status = '{status}', result_status = '{resultStatus}', result_json = '{resultJson.Replace("'", "''", StringComparison.Ordinal)}'::jsonb, " +
+            $"claimed_at = now() AT TIME ZONE 'UTC', completed_at = now() AT TIME ZONE 'UTC', args_json = NULL WHERE command_id = {id}", ct);
+
+    private static async Task WithRoleAsync(
+        string managedRole, bool grantFunction, Func<NpgsqlDataSource, NpgsqlDataSource, CancellationToken, Task> body)
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the MCP incident action live tests (they mint their own scratch database and role).");
+
+        var ct = TestContext.Current.CancellationToken;
+        var roleName = "mcp_inc_" + Guid.NewGuid().ToString("N")[..8];
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+        }
+
+        await using var owner = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var bodySucceeded = false;
+        try
+        {
+            await ExecAsync(owner,
+                $"INSERT INTO config.config_monitored_servers (server_id, name, host, encrypted_password, is_enabled) VALUES ({ServerId}, 'snap-target', 'snap-target', 'blob-from-the-store', TRUE)", ct);
+            await ExecAsync(owner,
+                $"INSERT INTO collect.servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date) VALUES ({ServerId}, 'snap-target', 'snap-target', TRUE, 15, now(), now())", ct);
+
+            await ExecAsync(owner, DarlingManagedRoles.BuildRequestMcpCommandFunctionSql("config"), ct);
+            await ExecAsync(owner, $"CREATE ROLE {roleName} LOGIN NOSUPERUSER PASSWORD '{RolePassword}'", ct);
+            foreach (var statement in ViewerGrantReplay.StatementsFor(roleName, scratch.DatabaseName, managedRole))
+            {
+                await ExecAsync(owner, statement, ct);
+            }
+
+            /* The product's own EXECUTE grant for the function, retargeted: mcp holds it, no other role does. */
+            var execute = ViewerGrantReplay.BatchStatements().Single(s =>
+                s.StartsWith("GRANT EXECUTE ON FUNCTION config.request_mcp_command", StringComparison.Ordinal));
+            var at = execute.LastIndexOf(" TO ", StringComparison.Ordinal);
+            Assert.Equal("mcp", execute[(at + 4)..].Trim());
+            if (grantFunction)
+            {
+                await ExecAsync(owner, execute[..at] + " TO " + roleName, ct);
+            }
+
+            await using var asRole = NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(scratch.ConnectionString)
+            {
+                Username = roleName,
+                Password = RolePassword,
+                Pooling = false,
+                SearchPath = PgSchemaGenerator.SearchPath,
+            }.ConnectionString);
+
+            await body(owner, asRole, ct);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, () => ExecAsync(owner, $"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName};", CancellationToken.None));
+        }
+    }
+
+    private static async Task ExecAsync(NpgsqlDataSource source, string sql, CancellationToken ct)
+    {
+        await using var command = source.CreateCommand(sql);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+}

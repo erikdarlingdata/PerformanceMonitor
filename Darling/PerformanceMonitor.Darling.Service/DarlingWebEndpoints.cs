@@ -150,6 +150,14 @@ public static class DarlingWebEndpoints
         "kill_session",
         /* #5632 step 10: an agent's read of what compiled after its eviction, served over MCP by journal id; no page read mirrors it. */
         "get_compiles_after_evict",
+        /* #6230 part B: the incident actions queue a command to the service over MCP; the web has its own routes for them, none a generic read.
+           get_command_result reads a queue row by id and get_agent_changes is the MCP twin of GET /api/agent-changes. */
+        "test_connection",
+        "analyze_now",
+        "purge_now",
+        "undo_plan_change",
+        "get_command_result",
+        "get_agent_changes",
         "set_notification_route_enabled",
         "set_notification_route_fallback",
         /* #5632 Phase A: claim and submit write investigation state for an agent over MCP; the web serves the two

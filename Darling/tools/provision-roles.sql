@@ -1157,6 +1157,81 @@ $fn$;
 REVOKE ALL ON FUNCTION config.request_snapshot_now(integer, text, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION config.request_snapshot_now(integer, text, text) TO viewer, mcp;
 
+-- #6230: the MCP incident tools queue analyze_now, purge_now, test_connect and reload through this function, the only way the
+--     mcp role writes a command row. Same function, same text, as managed provisioning rebuilds on every start.
+CREATE OR REPLACE FUNCTION config.request_mcp_command(
+   p_command_type text,
+   p_server_id integer,
+   p_retention_days integer,
+   p_requested_by text)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+   v_type text := lower(btrim(COALESCE(p_command_type, '')));
+   v_args jsonb;
+   v_id bigint;
+   v_last_status text;
+   v_last_at timestamp;
+BEGIN
+   -- The only command types the mcp role may queue (#6230). Everything else the command plane runs (pause, resume, disable_server, the
+   -- plan and execute commands) stays out of this function on purpose: it is the one way mcp writes a command row.
+   IF v_type NOT IN ('analyze_now', 'purge_now', 'test_connect', 'reload') THEN
+      RAISE EXCEPTION 'That command type cannot be queued through this function.' USING ERRCODE = 'DL400';
+   END IF;
+   IF p_retention_days IS NOT NULL AND (v_type <> 'purge_now' OR p_retention_days < 1 OR p_retention_days > 3650) THEN
+      RAISE EXCEPTION 'retention_days is only for purge_now and must be 1 to 3650.' USING ERRCODE = 'DL400';
+   END IF;
+   IF v_type IN ('purge_now', 'reload') THEN
+      IF p_server_id IS NOT NULL THEN
+         RAISE EXCEPTION 'This command takes no server.' USING ERRCODE = 'DL400';
+      END IF;
+   ELSIF p_server_id IS NULL OR NOT EXISTS (SELECT 1 FROM config.config_monitored_servers WHERE server_id = p_server_id) THEN
+      RAISE EXCEPTION 'No monitored server with that id.' USING ERRCODE = 'DL404';
+   END IF;
+   IF v_type = 'purge_now' AND p_retention_days IS NOT NULL THEN
+      v_args := jsonb_build_object('retention_days', p_retention_days);
+   END IF;
+   -- A connection test is built HERE from the stored row. The caller supplies a server id and nothing else, so there is no
+   -- argument that carries a credential, a host or a connection string, and the password is the stored one (the service
+   -- tests it only against the server that holds it).
+   IF v_type = 'test_connect' THEN
+      SELECT jsonb_strip_nulls(jsonb_build_object(
+                'name', s.name, 'engine', s.engine, 'host', s.host, 'port', s.port, 'database', s.database,
+                'auth', s.auth, 'username', s.username, 'encryptedPassword', s.encrypted_password,
+                'readOnlyIntent', s.read_only_intent, 'trustServerCertificate', s.trust_server_certificate,
+                'encryptMode', s.encrypt_mode, 'multiSubnetFailover', s.multi_subnet_failover))
+        INTO v_args
+      FROM config.config_monitored_servers AS s
+      WHERE s.server_id = p_server_id;
+   END IF;
+   -- One request of a kind (per server where it has one) at a time, and not within 15 seconds of the last, so a holder of the
+   -- mcp login cannot fill the queue. The lock never blocks (provisioning rule): a request holding it is a concurrent one.
+   IF NOT pg_try_advisory_xact_lock(6230, hashtext(v_type || ':' || COALESCE(p_server_id::text, ''))) THEN
+      RAISE EXCEPTION 'The same request is already queued or running.' USING ERRCODE = 'DL409';
+   END IF;
+   SELECT c.status, c.created_at INTO v_last_status, v_last_at
+   FROM config.config_command AS c
+   WHERE c.command_type = v_type AND c.target_server_id IS NOT DISTINCT FROM p_server_id
+   ORDER BY c.command_id DESC
+   LIMIT 1;
+   IF v_last_status IN ('pending', 'in_progress') THEN
+      RAISE EXCEPTION 'The same request is already queued or running.' USING ERRCODE = 'DL409';
+   END IF;
+   IF v_last_at IS NOT NULL AND v_last_at > (now() AT TIME ZONE 'UTC') - interval '15 seconds' THEN
+      RAISE EXCEPTION 'The same request was made less than 15 seconds ago.' USING ERRCODE = 'DL429';
+   END IF;
+   INSERT INTO config.config_command (requested_by, command_type, target_server_id, args_json, status, created_at)
+   VALUES (left(COALESCE(p_requested_by, 'mcp'), 200), v_type, p_server_id, v_args, 'pending', (now() AT TIME ZONE 'UTC'))
+   RETURNING command_id INTO v_id;
+   RETURN v_id;
+END
+$fn$;
+REVOKE ALL ON FUNCTION config.request_mcp_command(text, integer, integer, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION config.request_mcp_command(text, integer, integer, text) TO mcp;
+
 -- The store's own password rules for every role but the owner: a BEFORE INSERT OR UPDATE trigger on
 --     config_monitored_servers. A new or changed password that starts with env: or file: (a reference) is refused:
 --     references are set in the configuration file, or by --add-server on the service host, as the owner. An update
