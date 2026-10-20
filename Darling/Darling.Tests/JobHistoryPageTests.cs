@@ -270,6 +270,21 @@ public sealed class JobHistoryPageTests
         Assert.DoesNotContain("pick a server", rendered, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #6178: a not_collected answer that names Azure SQL Database reads "Azure SQL Database has no SQL Agent, so it has no job history."
+    /// Any other engine, an empty answer, and no answer at all keep their own sentence (null here).
+    /// </summary>
+    [Fact]
+    public void AnAzureSqlDatabaseNotCollectedAnswer_SaysItHasNoSqlAgent_AndNothingElseDoes()
+    {
+        var lines = Run().GetProperty("noAgentLines");
+        Assert.Equal("Azure SQL Database has no SQL Agent, so it has no job history.", lines.GetProperty("azure").GetString());
+        Assert.Equal(JsonValueKind.Null, lines.GetProperty("otherEngine").ValueKind);
+        Assert.Equal(JsonValueKind.Null, lines.GetProperty("plainEmpty").ValueKind);
+        Assert.Equal(JsonValueKind.Null, lines.GetProperty("azureButEmpty").ValueKind);
+        Assert.Equal(JsonValueKind.Null, lines.GetProperty("none").ValueKind);
+    }
+
     [Fact]
     public void ARebuildInPlaceKeepsTheTypedTextFocusAndCaretWithOneRead()
     {

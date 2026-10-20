@@ -57,20 +57,15 @@ public sealed class StoreSessionTimeZonePinCensusTests
     /// </summary>
     private static readonly HashSet<string> MonitoredTargetSites = new(StringComparer.Ordinal)
     {
-        /* MonitoredServer connect-and-probe: onboarding/health-check reads the TARGET's own clock. */
-        "DarlingServerConnector.cs:ConnectPostgresAsync",
+        /* #6143: the unpooled data source without type loading that the MonitoredServer connect-and-probe
+           (DarlingServerConnector.ConnectPostgresAsync) and the RDS endpoint check's login
+           (RdsEndpointVerifier.ProbeLoginAsync) open: both to a MONITORED target, never the store. */
+        "DarlingServerConnector.cs:OpenWithoutTypeLoading",
 
-        /* ITargetProvider's generic collector connection factory — every PostgreSQL collector's connection,
-           always against a MONITORED target, never the store. */
-        "PostgresTargetProvider.cs:CreateConnection",
-
-        /* Both read runtime.ConnectionString — a ServerRuntime is a MONITORED target's own resolved
-           connection, not the store's. */
-        "DarlingWorker.cs:ReadPgStatementTextAsync",
-        "DarlingWorker.cs:RunTestHypotheticalIndexAsync",
-
-        /* The RDS endpoint check's fresh unpooled login to a MONITORED target (runtime.ConnectionString), never the store. */
-        "RdsEndpointVerifier.cs:ProbeLoginAsync",
+        /* #6143: the per-connection-string data source behind PostgresTargetProvider.CreateConnection (every
+           PostgreSQL collector's connection) and CreatePinnedConnection (DarlingWorker's statement-text fetch and
+           hypothetical-index experiment, both on runtime.ConnectionString): always a MONITORED target. */
+        "PostgresTargetProvider.cs:BuildDataSource",
     };
 
     [Fact]

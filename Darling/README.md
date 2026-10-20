@@ -1205,6 +1205,12 @@ Add `"engine": "postgres"` to a `servers` entry and that target is collected by 
 
 **A collector never runs against the wrong engine.** Every definition declares its `TargetEngine`, and both SKUs check it before dispatch, so a PostgreSQL target is never sent T-SQL and a SQL Server target never sees `pg_stat_statements`. A store monitoring only SQL Server still carries the 29 PostgreSQL tables, empty; nothing else about it changes.
 
+### Connect to the server, not to a pooler
+
+A PostgreSQL target must be a direct connection to the server. When the service signs in, it sets `search_path` to `pg_catalog, pg_temp` for its own session. That way every name in its queries means the built-in object. It sends this setting in the startup `options` parameter, and connection poolers do not pass it on.
+
+PgBouncer refuses the sign-in with "unsupported startup parameter: options". If `options` is listed in its `ignore_startup_parameters`, PgBouncer drops the setting instead. RDS Proxy accepts only a short list of startup parameters, and `options` is not on it. In each case the target fails to connect with a `precondition` message, and nothing is collected from it. Point the target at the server's own host and port. On AWS, use the instance or cluster endpoint, not the RDS Proxy endpoint.
+
 ### Permissions on a PostgreSQL target
 
 `pg_monitor` covers most collectors. One further grant and one extension decide whether three of them return anything, and neither absence reports as a permission error:

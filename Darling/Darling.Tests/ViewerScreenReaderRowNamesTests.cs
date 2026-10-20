@@ -156,9 +156,13 @@ public sealed class ViewerScreenReaderRowNamesTests
             var top = AccessibleNames.WatcherCount;
             var max = top;
             var bad = 0;
-            var seen = 0;
+            var seen = new HashSet<JobRow>();
 
-            for (var offset = 0; offset <= rows.Count; offset += 37)
+            /* #6194: the step is one viewport less a row of overlap, read after layout, so every row is visited on any runner.
+               A fixed step visited only as many rows as the runner's row height and window let fit (816 on one). */
+            var step = Math.Max(1, (int)scroll.ViewportHeight - 1);
+
+            for (var offset = 0; offset <= rows.Count; offset += step)
             {
                 scroll.ScrollToVerticalOffset(offset);
                 Settle(window);
@@ -171,7 +175,7 @@ public sealed class ViewerScreenReaderRowNamesTests
                         continue;
                     }
 
-                    seen++;
+                    seen.Add(item);
 
                     if (AutomationProperties.GetName(row) != "Time " + item.Time + ", Server " + item.Server)
                     {
@@ -182,10 +186,10 @@ public sealed class ViewerScreenReaderRowNamesTests
 
             var realizedCells = Descendants(grid).OfType<DataGridCell>().Count();
             window.Close();
-            return (bad, seen, top, max, realizedCells);
+            return (bad, seen.Count, top, max, realizedCells);
         });
 
-        Assert.True(checkedRows > 1000, "the scroll visited only " + checkedRows + " rows");
+        Assert.True(checkedRows == 3000, "the scroll visited only " + checkedRows + " of 3000 rows");
         Assert.Equal(0, mismatches);
         /* A few watchers per realized cell and row, never one per data row. */
         Assert.True(peak <= atTop * 2, "watchers grew from " + atTop + " to " + peak + " while scrolling 3000 rows (" + realized + " cells realized at the end)");
