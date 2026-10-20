@@ -30,15 +30,16 @@ namespace Darling.Tests;
 /* #1776 own-store: every fact mints its own scratch database through ScratchPostgres, so the class is deliberately NOT [Collection("live-postgres")]. */
 public sealed class ChangeWatchLiveTests
 {
-    private const int ServerId = 7;
-    private const string ServerName = "sql-seven";
+    internal const int ServerId = 7;
+    internal const string ServerName = "sql-seven";
 
-    private sealed record Harness(
-        NpgsqlConnection Connection, NpgsqlDataSource Source, ChangeWatchStore Store, DateTime Now, Func<ChangeWatchPass> NewPass);
+    internal sealed record Harness(
+        NpgsqlConnection Connection, NpgsqlDataSource Source, ChangeWatchStore Store, DateTime Now, Func<ChangeWatchPass> NewPass,
+        Func<Func<DateTime>, ChangeWatchPass> NewPassAt);
 
     private static DateTime Minute(DateTime t) => new(t.Year, t.Month, t.Day, t.Hour, t.Minute, 0, DateTimeKind.Utc);
 
-    private static async Task RunAsync(bool agentRoute, Func<Harness, CancellationToken, Task> body)
+    internal static async Task RunAsync(bool agentRoute, Func<Harness, CancellationToken, Task> body)
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the change watch live tests.");
@@ -64,10 +65,11 @@ public sealed class ChangeWatchLiveTests
 
         /* A new pass over the same store and the same data source holds no state, as a restarted service would. */
         ChangeWatchPass NewPass() => new(source, store, dispatcher.Core, NullLogger.Instance, 30, () => now);
-        await body(new Harness(connection, source, store, now, NewPass), ct);
+        ChangeWatchPass NewPassAt(Func<DateTime> clock) => new(source, store, dispatcher.Core, NullLogger.Instance, 30, clock);
+        await body(new Harness(connection, source, store, now, NewPass, NewPassAt), ct);
     }
 
-    private static async Task SeedAsync(NpgsqlConnection connection, string table, IReadOnlyDictionary<string, object> values, CancellationToken ct)
+    internal static async Task SeedAsync(NpgsqlConnection connection, string table, IReadOnlyDictionary<string, object> values, CancellationToken ct)
     {
         /* Every NOT NULL column without a default that the test does not name gets a neutral value, so the seed survives a collector adding a column. */
         var filled = new Dictionary<string, object>(values);
@@ -125,13 +127,13 @@ public sealed class ChangeWatchLiveTests
     private static Task<ChangeWatchChange[]> OneChange(DateTime at, string what) =>
         Task.FromResult(new[] { new ChangeWatchChange($"server_config:{what}:{at:O}", "server_config", at, what) });
 
-    private static async Task<long> CountAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    internal static async Task<long> CountAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(sql, connection);
         return Convert.ToInt64(await command.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
     }
 
-    private static async Task<string?> TextAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    internal static async Task<string?> TextAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(sql, connection);
         return Convert.ToString(await command.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);

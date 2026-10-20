@@ -25,7 +25,7 @@ public sealed record ChangeWatchMeasure(string Name, string Unit, double? Before
 
 /// <summary>What a watch window showed: every measure's numbers, which moved, and the text the investigation request carries.</summary>
 public sealed record ChangeWatchEvaluation(
-    bool HadData, IReadOnlyList<ChangeWatchMeasure> Measures, string DetailText, string ResultJson)
+    bool HadData, IReadOnlyList<ChangeWatchMeasure> Measures, string DetailText, string ResultJson, IReadOnlyList<string>? Notes = null)
 {
     public bool Moved => Measures.Any(m => m.Moved);
 }
@@ -77,6 +77,23 @@ GROUP BY query_hash::text
 HAVING sum(delta_execution_count) > 0
 ORDER BY sum(delta_elapsed_time) DESC
 LIMIT $6";
+
+    /* $1 server, $2 database, $3 query_id, $4/$5 the window on the interval's start. The same dedup the Query Store duration trend runs: an
+       interval is snapshotted many times, so each interval counts at its last (cumulative) snapshot. */
+    private const string QueryStoreSql = @"
+SELECT coalesce(sum(execution_count), 0)::bigint,
+       coalesce(sum(execution_count::double precision * avg_duration_us::double precision), 0)::double precision,
+       count(*)
+FROM (
+    SELECT execution_count, avg_duration_us,
+           ROW_NUMBER() OVER (PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
+                              ORDER BY collection_time DESC, execution_count DESC) AS rn
+    FROM query_store_stats
+    WHERE server_id = $1 AND database_name = $2 AND query_id = $3
+      AND interval_start_time_utc >= $4 AND interval_start_time_utc < $5
+      AND collection_time >= $4 - interval '1 day' AND collection_time <= $5 + interval '1 day'
+) AS x
+WHERE rn = 1";
 
     private readonly NpgsqlDataSource _dataSource;
     private readonly int _commandTimeoutSeconds;
@@ -177,12 +194,55 @@ LIMIT $6";
                 CpuMoved(cpuBefore.Value, cpuAfter.Value) && (week is null || CpuMoved(week.Value, cpuAfter.Value))));
         }
 
-        /* Query duration. A watch of plan changes alone reads the changed databases' queries; any other mix reads the top 20 by total duration. */
+        /* Query duration. A watch of plan changes alone measures THAT query (Query Store's own runtime intervals, the source the duration
+           trend reads, keyed by database and query_id); where Query Store has no intervals for it in a window, the top 20 by total duration
+           of the changed databases are measured instead and the result says so. Any other mix reads the top 20 server-wide. */
         var planDatabases = watch.Changes.Where(c => c.Kind == "plan_force" && c.DatabaseName is not null)
             .Select(c => c.DatabaseName!).Distinct(StringComparer.Ordinal).ToArray();
         var onlyPlan = watch.Changes.Count > 0 && watch.Changes.All(c => c.Kind == "plan_force");
         var scope = onlyPlan && planDatabases.Length > 0 ? planDatabases : null;
-        var afterQueries = await ReadQueriesAsync(connection, watch.ServerId, afterStart, afterEnd, null, scope, TopQueries, cancellationToken);
+        var notes = new List<string>();
+        var needTopQueries = true;
+        if (onlyPlan)
+        {
+            var planQueries = watch.Changes.Where(c => c.DatabaseName is not null && c.QueryId is not null)
+                .Select(c => (Database: c.DatabaseName!, QueryId: c.QueryId!.Value)).Distinct().ToList();
+            if (planQueries.Count > 0)
+            {
+                needTopQueries = false;
+                foreach (var (database, queryId) in planQueries)
+                {
+                    var queryAfter = await ReadQueryStoreAsync(connection, watch.ServerId, database, queryId, afterStart, afterEnd, cancellationToken);
+                    var queryBefore = await ReadQueryStoreAsync(connection, watch.ServerId, database, queryId, beforeStart, afterStart, cancellationToken);
+                    if (queryAfter.Intervals == 0 || queryBefore.Intervals == 0)
+                    {
+                        needTopQueries = true;
+                        notes.Add($"Query Store has no intervals for query {queryId} in {database} in the {(queryAfter.Intervals == 0 ? "after" : "before")} window, so the top {TopQueries} queries by total duration in the changed databases were measured instead");
+                        continue;
+                    }
+
+                    hadData = true;
+                    if (queryBefore.Executions < MinExecutions || queryAfter.Executions < MinExecutions)
+                    {
+                        continue;
+                    }
+
+                    var queryWeek = await ReadQueryStoreAsync(connection, watch.ServerId, database, queryId, weekStart, weekEnd, cancellationToken);
+                    var queryBeforeAvg = queryBefore.ElapsedUs / queryBefore.Executions;
+                    var queryAfterAvg = queryAfter.ElapsedUs / queryAfter.Executions;
+                    double? queryWeekAvg = queryWeek.Executions >= MinExecutions ? queryWeek.ElapsedUs / queryWeek.Executions : null;
+                    if (DurationMoved(queryBeforeAvg, queryAfterAvg) && (queryWeekAvg is null || DurationMoved(queryWeekAvg.Value, queryAfterAvg)))
+                    {
+                        measures.Add(new ChangeWatchMeasure($"query_avg_duration_ms:{database}:{queryId}", "ms", queryBeforeAvg / 1000, queryAfterAvg / 1000,
+                            queryWeekAvg / 1000, true, $"Query Store query {queryId} in {database}; {queryBefore.Executions} -> {queryAfter.Executions} executions"));
+                    }
+                }
+            }
+        }
+
+        var afterQueries = needTopQueries
+            ? await ReadQueriesAsync(connection, watch.ServerId, afterStart, afterEnd, null, scope, TopQueries, cancellationToken)
+            : new Dictionary<string, (string? Database, long Executions, double ElapsedUs)>(StringComparer.Ordinal);
         if (afterQueries.Count > 0)
         {
             var hashes = afterQueries.Keys.ToArray();
@@ -212,7 +272,23 @@ LIMIT $6";
             }
         }
 
-        return new ChangeWatchEvaluation(hadData, measures, DetailText(watch, measures), ResultJson(watch, measures, hadData));
+        return new ChangeWatchEvaluation(hadData, measures, DetailText(watch, measures), ResultJson(watch, measures, hadData, notes), notes);
+    }
+
+    /// <summary>One query's Query Store runtime in a window: executions, total elapsed microseconds, and how many intervals it had.
+    /// Each interval counts once, at its final cumulative snapshot, the way the duration trend counts it, and is placed by its start.</summary>
+    private async Task<(long Executions, double ElapsedUs, long Intervals)> ReadQueryStoreAsync(
+        NpgsqlConnection connection, int serverId, string database, long queryId, DateTime start, DateTime end, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(QueryStoreSql, connection) { CommandTimeout = _commandTimeoutSeconds };
+        command.Parameters.Add(new NpgsqlParameter { Value = serverId });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = database });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = queryId });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Naive(start) });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Naive(end) });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await reader.ReadAsync(cancellationToken);
+        return (reader.GetInt64(0), reader.GetDouble(1), reader.GetInt64(2));
     }
 
     private static string Num(double? value) => value is { } v ? v.ToString("0.##", CultureInfo.InvariantCulture) : "n/a";
@@ -243,10 +319,11 @@ LIMIT $6";
         return result.Length <= 990 ? result : result[..987] + "...";
     }
 
-    internal static string ResultJson(ChangeWatchRow watch, IReadOnlyList<ChangeWatchMeasure> measures, bool hadData) =>
+    internal static string ResultJson(ChangeWatchRow watch, IReadOnlyList<ChangeWatchMeasure> measures, bool hadData, IReadOnlyList<string>? notes = null) =>
         JsonSerializer.Serialize(new
         {
             had_data = hadData,
+            notes = notes ?? [],
             window = new { before_start = watch.FirstChangeUtc - ChangeWatchStore.Window, after_start = watch.FirstChangeUtc, after_end = watch.WindowEndsUtc },
             changes = watch.Changes.Select(c => new { time = c.ChangeTimeUtc, kind = c.Kind, what = c.Description }),
             measures = measures.Select(m => new { measure = m.Name, unit = m.Unit, before = m.Before, after = m.After, week_earlier = m.WeekEarlier, moved = m.Moved, note = m.Note }),

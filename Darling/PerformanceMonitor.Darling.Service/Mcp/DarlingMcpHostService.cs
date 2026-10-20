@@ -1543,6 +1543,10 @@ public sealed class DarlingMcpHostService : BackgroundService
                routes serve — one reader, one shape, the zero-drift rule get_fleet_overview and /api/fleet
                established, applied to the sweep rows. */
             .WithGeminiCompatibleTools<DarlingMcpFleetSweepTools>()
+            /* The change watch read - get_change_watches (#6234) - a server's watch windows, each with its changes, its measures and
+               its result, over the same ChangeWatchStore the worker pass writes. A read of the monitoring store: the investigation
+               agent may call it. */
+            .WithGeminiCompatibleTools<DarlingMcpChangeWatchTools>()
             /* The system_health parse-on-read family — get_health_parser_cpu_tasks / _io_issues /
                _memory_broker / _memory_conditions / _memory_node_oom / _scheduler_issues /
                _severe_errors / _significant_waits / _system_health — the same names the Dashboard

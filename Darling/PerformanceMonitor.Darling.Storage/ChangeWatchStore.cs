@@ -23,7 +23,8 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <param name="ChangeTimeUtc">The capture time the change was seen at.</param>
 /// <param name="Description">One line in words, for the investigation brief.</param>
 /// <param name="DatabaseName">The database a plan change belongs to, or null.</param>
-public sealed record ChangeWatchChange(string Key, string Kind, DateTime ChangeTimeUtc, string Description, string? DatabaseName = null);
+/// <param name="QueryId">The Query Store query a plan change belongs to, or null; a watch of plan changes alone measures these queries.</param>
+public sealed record ChangeWatchChange(string Key, string Kind, DateTime ChangeTimeUtc, string Description, string? DatabaseName = null, long? QueryId = null);
 
 /// <summary>A watch window and what it saw (#6234).</summary>
 public sealed record ChangeWatchRow(
@@ -84,10 +85,21 @@ CREATE TABLE IF NOT EXISTS config.change_watch_changes
     change_time timestamptz NOT NULL,
     description text NOT NULL,
     database_name text,
+    query_id bigint,
     PRIMARY KEY (server_id, change_key)
 );
 
-CREATE INDEX IF NOT EXISTS ix_change_watch_changes_watch ON config.change_watch_changes (watch_id);";
+CREATE INDEX IF NOT EXISTS ix_change_watch_changes_watch ON config.change_watch_changes (watch_id);
+
+/* The high-water mark of change detection, per server and per source: detection reads only snapshots newer than it, so a tick costs the
+   new rows and not the history. A server with no mark yet gets every mark set to now and opens nothing for what is already stored. */
+CREATE TABLE IF NOT EXISTS config.change_watch_marks
+(
+    server_id integer NOT NULL,
+    source text NOT NULL,
+    mark timestamptz NOT NULL,
+    PRIMARY KEY (server_id, source)
+);";
 
     private readonly NpgsqlDataSource _dataSource;
     private readonly int _commandTimeoutSeconds;
@@ -193,15 +205,52 @@ WHERE watch_id = $1", watchId, first, last, last + Window);
         foreach (var change in fresh)
         {
             await using var insert = Command(connection, transaction, @"
-INSERT INTO config.change_watch_changes (server_id, change_key, watch_id, change_kind, change_time, description, database_name)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
+INSERT INTO config.change_watch_changes (server_id, change_key, watch_id, change_kind, change_time, description, database_name, query_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 ON CONFLICT (server_id, change_key) DO NOTHING",
-                serverId, change.Key, watchId, change.Kind, Utc(change.ChangeTimeUtc), change.Description, change.DatabaseName);
+                serverId, change.Key, watchId, change.Kind, Utc(change.ChangeTimeUtc), change.Description, change.DatabaseName, change.QueryId);
             await insert.ExecuteNonQueryAsync(cancellationToken);
         }
 
         await transaction.CommitAsync(cancellationToken);
         return watchId;
+    }
+
+    /// <summary>The detection sources a server has a high-water mark for.</summary>
+    public static readonly IReadOnlyList<string> MarkSources =
+        ["server_config", "database_config", "database_scoped_config", "trace_flags", "plan_actions", "plan_snapshots"];
+
+    /// <summary>The server's high-water marks (UTC), by source. Empty for a server detection has never run for.</summary>
+    public async Task<Dictionary<string, DateTime>> GetMarksAsync(int serverId, CancellationToken cancellationToken = default)
+    {
+        var marks = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = Command(connection, null, "SELECT source, mark FROM config.change_watch_marks WHERE server_id = $1", serverId);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            marks[reader.GetString(0)] = Utc(reader.GetDateTime(1));
+        }
+
+        return marks;
+    }
+
+    /// <summary>Sets the marks of a server; a mark never moves back.</summary>
+    public async Task SetMarksAsync(int serverId, IReadOnlyDictionary<string, DateTime> marks, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(marks);
+        if (marks.Count == 0)
+        {
+            return;
+        }
+
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = Command(connection, null, @"
+INSERT INTO config.change_watch_marks (server_id, source, mark)
+SELECT $1, s.source, s.mark FROM unnest($2::text[], $3::timestamptz[]) AS s(source, mark)
+ON CONFLICT (server_id, source) DO UPDATE SET mark = greatest(config.change_watch_marks.mark, EXCLUDED.mark)",
+            serverId, marks.Keys.ToArray(), marks.Values.Select(Utc).ToArray());
+        await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     /// <summary>The open watches whose window has ended, oldest first: a watch that ended while the service was down is among them.</summary>
@@ -210,7 +259,7 @@ ON CONFLICT (server_id, change_key) DO NOTHING",
 
     /// <summary>Watches for <c>get_change_watches</c>: open and closed, newest first, optionally one server and one state.</summary>
     public Task<IReadOnlyList<ChangeWatchRow>> ListAsync(int? serverId, string? state, int limit, CancellationToken cancellationToken = default) =>
-        ReadAsync("($1::int IS NULL OR w.server_id = $1) AND ($2::text IS NULL OR w.state = $2)", new object?[] { serverId, state }, Math.Clamp(limit, 1, 500), cancellationToken);
+        ReadAsync("($1::int IS NULL OR w.server_id = $1) AND ($2::text IS NULL OR w.state = $2)", new object?[] { serverId, state }, Math.Clamp(limit, 1, 1000), cancellationToken);
 
     private async Task<IReadOnlyList<ChangeWatchRow>> ReadAsync(string where, object?[] parameters, int limit, CancellationToken cancellationToken)
     {
@@ -237,7 +286,7 @@ LIMIT {limit.ToString(CultureInfo.InvariantCulture)}", parameters))
         if (rows.Count > 0)
         {
             await using var command = Command(connection, null, @"
-SELECT watch_id, change_key, change_kind, change_time, description, database_name
+SELECT watch_id, change_key, change_kind, change_time, description, database_name, query_id
 FROM config.change_watch_changes
 WHERE watch_id = ANY($1)
 ORDER BY change_time, change_key", rows.Select(r => r.Item1).ToArray());
@@ -251,7 +300,7 @@ ORDER BY change_time, change_key", rows.Select(r => r.Item1).ToArray());
                 }
 
                 list.Add(new ChangeWatchChange(reader.GetString(1), reader.GetString(2), Utc(reader.GetDateTime(3)), reader.GetString(4),
-                    reader.IsDBNull(5) ? null : reader.GetString(5)));
+                    reader.IsDBNull(5) ? null : reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetInt64(6)));
             }
         }
 
