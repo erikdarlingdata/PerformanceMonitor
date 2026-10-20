@@ -209,14 +209,15 @@ WITH daily AS
 (
     SELECT cc.server_id, cc.collector_name, date_trunc('day', cc.metric_time) AS day,
            sum(cc.total_sql_ms) AS sql_ms, sum(cc.run_count) AS runs,
-           max(cc.metric_time) AS latest_metric_time_in_day
+           max(cc.metric_time) AS latest_metric_time_in_day,
+           min(cc.metric_time) AS first_metric_time_in_day
     FROM collect.collector_cost AS cc
     WHERE cc.metric_time >= $1
     GROUP BY cc.server_id, cc.collector_name, date_trunc('day', cc.metric_time)
 ),
 ranked AS
 (
-    SELECT server_id, collector_name, day, sql_ms, runs, latest_metric_time_in_day,
+    SELECT server_id, collector_name, day, sql_ms, runs, latest_metric_time_in_day, first_metric_time_in_day,
            sql_ms::double precision / nullif(runs, 0) AS ms_per_run,
            max(day) OVER (PARTITION BY server_id, collector_name) AS latest_day
     FROM daily
@@ -232,14 +233,15 @@ agg AS
            count(*)                        FILTER (WHERE day < latest_day) AS baseline_days,
            percentile_disc(0.95) WITHIN GROUP (ORDER BY ms_per_run)
                FILTER (WHERE day < latest_day)                      AS baseline_p95_ms_per_run,
-           max(latest_metric_time_in_day)  FILTER (WHERE day = latest_day) AS latest_metric_time
+           max(latest_metric_time_in_day)  FILTER (WHERE day = latest_day) AS latest_metric_time,
+           max(latest_metric_time_in_day) - min(first_metric_time_in_day)  AS observed_span
     FROM ranked
     GROUP BY server_id, collector_name
 ),
 scored AS
 (
     SELECT a.server_id, a.collector_name, a.latest_ms, a.latest_runs, a.baseline_ms,
-           a.baseline_days, a.latest_metric_time, a.baseline_p95_ms_per_run,
+           a.baseline_days, a.latest_metric_time, a.baseline_p95_ms_per_run, a.observed_span,
            a.latest_ms::double precision
                / nullif(a.latest_runs, 0)          AS latest_ms_per_run,
            a.baseline_total_ms::double precision
@@ -252,6 +254,7 @@ SELECT sc.server_id, COALESCE(s.display_name, s.server_name) AS server_name, sc.
 FROM scored AS sc
 JOIN collect.servers AS s ON s.server_id = sc.server_id
 WHERE sc.baseline_days >= 3
+AND   sc.observed_span >= interval '3 days'
 AND   sc.baseline_ms >= $2
 AND   sc.latest_ms_per_run IS NOT NULL
 AND   sc.baseline_ms_per_run IS NOT NULL
@@ -377,7 +380,10 @@ ORDER BY (sc.latest_ms_per_run - sc.baseline_ms_per_run) DESC";
     ///
     /// <para><c>baseline_days &gt;= 3</c> is retained from the regression read: below three prior days
     /// there is no baseline to have moved against, so the ratio would be an artifact rather than an
-    /// inclusive reading. $1 = baseline window start (naive UTC), $2 = minimum absolute added ms per day
+    /// inclusive reading. #6215: the days are calendar buckets, and an install's first bucket is a few hours
+    /// of data counted as a day, so three buckets can sit on well under three days of history. The pair must
+    /// ALSO span <c>interval '3 days'</c> between its first and last observation (<c>observed_span</c>), in
+    /// this read and in <see cref="RegressionSql"/>, so a fresh install's first hours are never a baseline. $1 = baseline window start (naive UTC), $2 = minimum absolute added ms per day
     /// (#3462, the paging read's own floor), $3 = row cap.</para>
     /// </summary>
     public const string MoverSql = @"
@@ -385,7 +391,8 @@ WITH daily AS
 (
     SELECT cc.server_id, cc.collector_name, date_trunc('day', cc.metric_time) AS day,
            sum(cc.total_sql_ms) AS sql_ms, sum(cc.run_count) AS runs,
-           max(cc.max_sql_ms) AS worst_ms
+           max(cc.max_sql_ms) AS worst_ms,
+           min(cc.metric_time) AS first_metric_time_in_day, max(cc.metric_time) AS last_metric_time_in_day
     FROM collect.collector_cost AS cc
     WHERE cc.metric_time >= $1
     GROUP BY cc.server_id, cc.collector_name, date_trunc('day', cc.metric_time)
@@ -394,6 +401,7 @@ WITH daily AS
 ranked AS
 (
     SELECT server_id, collector_name, day, sql_ms, runs, worst_ms,
+           first_metric_time_in_day, last_metric_time_in_day,
            sql_ms::double precision / runs AS day_ms_per_run,
            max(day) OVER (PARTITION BY server_id, collector_name) AS latest_day
     FROM daily
@@ -407,6 +415,7 @@ agg AS
            sum(sql_ms)   FILTER (WHERE day < latest_day) AS baseline_total_ms,
            sum(runs)     FILTER (WHERE day < latest_day) AS baseline_total_runs,
            count(*)      FILTER (WHERE day < latest_day) AS baseline_days,
+           max(last_metric_time_in_day) - min(first_metric_time_in_day) AS observed_span,
            max(day_ms_per_run) FILTER (WHERE day < latest_day) AS baseline_worst_day_ms_per_run,
            percentile_disc(0.95) WITHIN GROUP (ORDER BY day_ms_per_run)
                FILTER (WHERE day < latest_day) AS baseline_p95_ms_per_run
@@ -421,6 +430,7 @@ eligible AS
                / nullif(a.baseline_total_runs, 0) AS baseline_ms_per_run
     FROM agg AS a
     WHERE a.baseline_days >= 3
+    AND   a.observed_span >= interval '3 days'
     AND   a.latest_ms_per_run IS NOT NULL
     AND   a.baseline_total_runs > 0
 )

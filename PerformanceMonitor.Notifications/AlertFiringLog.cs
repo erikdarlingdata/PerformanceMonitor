@@ -49,6 +49,19 @@ public static class AlertFiringLog
         + (muted ? " [muted]" : "");
 
     /// <summary>
+    /// The line for a SCHEDULED REPORT that was produced and handed to the channels (#6215): the collector-cost
+    /// digest, the fleet-sweep rollup and the analysis singles digest. A report states a measurement of a
+    /// period; it is not a condition that went wrong, so it must not read as <c>ALERT TRIGGERED</c> and must
+    /// not be logged at Warning, which is the level the Windows event log keeps. Same shape as
+    /// <see cref="Fired"/> after the marker, so a reader greps the two the same way, and the same muted flag:
+    /// muting suppresses the channels, not the operator's ability to find the report in the log.
+    /// </summary>
+    public static string Report(string serverName, string metricName, string? shortMessage, bool muted) =>
+        $"SCHEDULED REPORT {metricName} on {serverName}"
+        + (string.IsNullOrWhiteSpace(shortMessage) ? string.Empty : $": {shortMessage}")
+        + (muted ? " [muted]" : "");
+
+    /// <summary>
     /// The line for an alert that CLEARED — the other half of the pair, in the same shape so the two grep
     /// together and read as one story.
     /// </summary>
