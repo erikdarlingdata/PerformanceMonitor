@@ -304,6 +304,14 @@ public sealed class MigrationDataMovingRungCensusPins
             + "holds one row per server per closed day and the hourly cleanup keeps about 17 days of them, so a fleet of "
             + "a hundred servers is a few thousand rows and the UPDATE is milliseconds. The ADD COLUMN is nullable "
             + "with no DEFAULT, so it is catalog-only and rewrites no row. It does not move the lock-wait floor."),
+        new(
+            204,
+            SetsTheFloor: false,
+            "two partial unique indexes and two CHECK constraints on config.custom_views (created V31), whose new constraints are validated "
+            + "over the rows already there. custom_views is the user-authored view list, one row per saved dashboard or notebook: dozens "
+            + "on a busy store, hundreds at the very most, so each build and each validation is milliseconds and spends none of the "
+            + "budget. The rung's DO block also drops V31's UNIQUE (name) under the name it carries, found by its column; a DROP "
+            + "CONSTRAINT is catalog-only"),
     ];
 
     /// <summary>
@@ -589,12 +597,12 @@ public sealed class MigrationDataMovingRungCensusPins
     /// <see cref="s_declared"/> entry at all: there is no data-moving cost to declare, only a scan blind
     /// spot to name.
     /// </summary>
-    private static readonly int[] s_dynamicSqlExemptedRungs = [152];
+    private static readonly int[] s_dynamicSqlExemptedRungs = [152, 204];
 
     /// <summary>
     /// The scan is textual, so dynamic SQL would hide a data-moving statement from it completely. The
-    /// ladder has one exempted rung today (V152, named in <see cref="s_dynamicSqlExemptedRungs"/> because
-    /// its <c>DO $$ ... EXECUTE format(...)</c> drops a catalog index rather than moving data) and
+    /// ladder has two exempted rungs today (V152 and V204, named in <see cref="s_dynamicSqlExemptedRungs"/> because
+    /// each <c>DO $$ ... EXECUTE format(...)</c> drops a catalog index or constraint rather than moving data) and
     /// otherwise none — the only other <c>EXECUTE</c> is <c>EXECUTE FUNCTION</c> in V17's trigger
     /// definitions. Pinned so the blind spot stays theoretical for every other rung: one that builds DDL
     /// with <c>format()</c> needs to be costed by hand, added either to this exemption list (if it moves

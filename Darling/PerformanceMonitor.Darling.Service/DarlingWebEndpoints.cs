@@ -705,7 +705,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <see cref="ValidateDefinition"/> (the authority) before any write; the store adds optimistic concurrency +
     /// duplicate-name conflict detection. Error bodies are always <c>{"error": "..."}</c>, matching the read surface.
     /// </summary>
-    private static void MapCustomViews(WebApplication app, NpgsqlDataSource postgres, ILogger logger, ReadLatencyRecorder readLatencyRecorder,
+    internal static void MapCustomViews(WebApplication app, NpgsqlDataSource postgres, ILogger logger, ReadLatencyRecorder readLatencyRecorder,
         ReadAdmission? readAdmission)
     {
         var store = new CustomViewStore(postgres);
@@ -718,7 +718,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            client sends, so this is the affordance layer, never the enforcement. A failed probe fails closed to
            read-only in the UI. */
         app.MapGet("/api/session", (HttpContext context) =>
-            JsonNodeResult(new JsonObject { ["can_edit"] = DarlingWebSeat.FromContext(context).CanEdit }));
+        {
+            /* #6214: can_own is whether this session can own a personal view (it holds an owner key: an OIDC sign-in made after owner keys
+               existed). The page decides the Personal checkbox from it, and "My views" and read-only from each view's own `mine`. Neither the
+               subject nor the key is returned: a name decides nothing, and a key is never shown. */
+            var seat = DarlingWebSeat.FromContext(context);
+            return JsonNodeResult(new JsonObject { ["can_edit"] = seat.CanEdit, ["can_own"] = seat.OwnerKey is not null });
+        });
 
         /* The read catalog: input truth (read names + their WIRE query keys) the composer binds params from. */
         /* #5562: ?server= makes the collector intervals the SERVER's own (a per-server schedule row wins over the
@@ -757,17 +763,19 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             return JsonNodeResult(BuildCatalogNode(resolved.ServerId, schedules));
         });
 
-        /* List — a bare array of summaries (no definition); [] when none. */
+        /* List — a bare array of summaries (no definition); [] when none. Every shared view, plus the caller's OWN personal views
+           (#6214): a personal view is listed for its owner only. That is a list filter, not access control: GET by id below still returns
+           any view, so a shared link keeps working. */
         app.MapGet("/api/views", async (HttpContext context) =>
         {
-            var views = await store.ListAsync(context.RequestAborted);
+            var views = await store.ListAsync(callerOwnerKey: DarlingWebSeat.FromContext(context).OwnerKey, cancellationToken: context.RequestAborted);
             return JsonNodeResult(BuildSummariesNode(views));
         });
 
         /* Get one — full, including the definition; 404 when missing. */
         app.MapGet("/api/views/{id:long}", async (HttpContext context, long id) =>
         {
-            var result = await store.GetAsync(id, context.RequestAborted);
+            var result = await store.GetAsync(id, DarlingWebSeat.FromContext(context).OwnerKey, context.RequestAborted);
             return result is CustomViewResult.Ok ok
                 ? JsonNodeResult(BuildFullViewNode(ok.View!))
                 : NotFoundResult();
@@ -794,11 +802,23 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 return ErrorResult(validation.Error!, StatusCodes.Status400BadRequest);
             }
 
+            /* #6214: a personal view is owned by the signed-in person's owner key, so a session that has none cannot make one: the shared
+               token and the tokenless loopback operator have no person, and a cookie from before owner keys existed names a person but
+               carries no key (they sign in again). Every create from a session that has a key stamps it, personal or not, so the creator
+               can later make their own shared view personal. */
+            var seat = DarlingWebSeat.FromContext(context);
+            var personal = request.Personal ?? false;
+            if (personal && seat.OwnerKey is null)
+            {
+                return ErrorResult(NoOwnerKeyMessage(seat), StatusCodes.Status400BadRequest);
+            }
+
             /* #4283: no local catch — an unexpected throw here (never ex.Message on the wire) is exactly what
                the #4281 top-of-pipeline backstop exists to answer, and MapAll wires this route after it. */
             var result = await store.CreateAsync(
                 request.Name, request.Description, request.DefinitionJson,
-                updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
+                updatedBy: seat.EditorPrincipal, folder: request.Folder, personal: personal, ownerKey: seat.OwnerKey,
+                cancellationToken: context.RequestAborted);
             return result switch
             {
                 CustomViewResult.Ok ok => CreatedResult(context, $"/api/views/{ok.View!.Id}", BuildFullViewNode(ok.View)),
@@ -835,21 +855,44 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 return ErrorResult(validation.Error!, StatusCodes.Status400BadRequest);
             }
 
+            /* #6214: an omitted folder or personal flag keeps the stored value. A personal view is its owner's alone to change (the
+               store's UPDATE holds the same rule, so a race cannot slip past this read). */
+            var seat = DarlingWebSeat.FromContext(context);
+            var current = await store.GetAsync(id, seat.OwnerKey, context.RequestAborted);
+            if (current is not CustomViewResult.Ok { View: { } stored })
+            {
+                return NotFoundResult();
+            }
+
+            if (stored.Personal && !stored.Mine)
+            {
+                return ErrorResult(CustomViewStore.NotOwnerMessage, StatusCodes.Status403Forbidden);
+            }
+
+            var personal = request.Personal ?? stored.Personal;
+            if (personal && seat.OwnerKey is null)
+            {
+                return ErrorResult(NoOwnerKeyMessage(seat), StatusCodes.Status400BadRequest);
+            }
+
             /* #4283: no local catch — see the create route's comment above. */
             var result = await store.UpdateAsync(
                 id, request.Name, request.Description, request.DefinitionJson, expectedVersion,
-                updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
+                updatedBy: seat.EditorPrincipal, folder: request.FolderGiven ? request.Folder : stored.Folder, personal: personal,
+                actorKey: seat.OwnerKey, cancellationToken: context.RequestAborted);
             return result switch
             {
                 CustomViewResult.Ok ok => JsonNodeResult(BuildFullViewNode(ok.View!)),
                 CustomViewResult.NotFound => NotFoundResult(),
+                CustomViewResult.Forbidden forbidden => ErrorResult(forbidden.Message, StatusCodes.Status403Forbidden),
                 CustomViewResult.Conflict conflict => ErrorResult(conflict.Message, StatusCodes.Status409Conflict),
                 CustomViewResult.Invalid invalid => ErrorResult(invalid.Message, StatusCodes.Status400BadRequest),
                 _ => ErrorResult("Could not update the view.", StatusCodes.Status500InternalServerError),
             };
         });
 
-        /* Delete — 204 on success, 404 when missing. Any authenticated seat; application/json required. */
+        /* Delete — 204 on success, 404 when missing, 403 for somebody else's personal view (#6214). Any authenticated seat;
+           application/json required. */
         app.MapDelete("/api/views/{id:long}", async (HttpContext context, long id) =>
         {
             if (!IsJsonContentType(context.Request.ContentType))
@@ -858,8 +901,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
 
             /* #4283: no local catch — see the create route's comment above. */
-            var result = await store.DeleteAsync(id, context.RequestAborted);
-            return result is CustomViewResult.Ok ? Results.NoContent() : NotFoundResult();
+            var result = await store.DeleteAsync(id, DarlingWebSeat.FromContext(context).OwnerKey, cancellationToken: context.RequestAborted);
+            return result switch
+            {
+                CustomViewResult.Ok => Results.NoContent(),
+                CustomViewResult.Forbidden forbidden => ErrorResult(forbidden.Message, StatusCodes.Status403Forbidden),
+                _ => NotFoundResult(),
+            };
         });
 
         /* Compile-and-run a single composed panel spec (Custom Views v2, #1563) against the least-privilege
@@ -7211,8 +7259,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /* ── request body parsing + response building ── */
 
     /// <summary>A parsed create/update body: name (required, trimmed), description (optional), the definition as
-    /// raw JSON text (re-serialized from the parsed node), and version (present only on updates).</summary>
-    private sealed record ViewWriteRequest(string Name, string? Description, string DefinitionJson, int? Version);
+    /// raw JSON text (re-serialized from the parsed node), version (present only on updates), and (#6214) the folder
+    /// (<see cref="FolderGiven"/> tells an omitted key from an explicit null, which means the top level) and the personal flag
+    /// (null when omitted).</summary>
+    private sealed record ViewWriteRequest(
+        string Name, string? Description, string DefinitionJson, int? Version, bool FolderGiven = false, string? Folder = null, bool? Personal = null);
 
     /// <summary>Parses the request body into a <see cref="ViewWriteRequest"/>, or returns a caller-facing error
     /// (the definition's STRUCTURE is validated separately by <see cref="ValidateDefinition"/>).</summary>
@@ -7255,7 +7306,34 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             version = v;
         }
 
-        return (new ViewWriteRequest(name.Trim(), description, definitionJson, version), null);
+        var folderGiven = obj.ContainsKey("folder");
+        string? folder = null;
+        if (folderGiven && obj["folder"] is { } folderNode)
+        {
+            if (folderNode is not JsonValue folderValue || !folderValue.TryGetValue<string>(out var folderText))
+            {
+                return (null, "'folder' must be a string, or null for the top level.");
+            }
+
+            folder = CustomViewStore.NormalizeFolder(folderText, out var folderError);
+            if (folderError is not null)
+            {
+                return (null, folderError);
+            }
+        }
+
+        bool? personal = null;
+        if (obj["personal"] is { } personalNode)
+        {
+            if (personalNode is not JsonValue personalValue || !personalValue.TryGetValue<bool>(out var personalFlag))
+            {
+                return (null, "'personal' must be true or false.");
+            }
+
+            personal = personalFlag;
+        }
+
+        return (new ViewWriteRequest(name.Trim(), description, definitionJson, version, folderGiven, folder, personal), null);
     }
 
     /// <summary>The full single-view wire shape (definition embedded as JSON, NOT an escaped string). Shared by
@@ -7271,7 +7349,16 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         ["created_at"] = view.CreatedAt,
         ["updated_at"] = view.UpdatedAt,
         ["updated_by"] = view.UpdatedBy,
+        ["folder"] = view.Folder,
+        ["personal"] = view.Personal,
+        ["created_by"] = view.CreatedBy,
+        ["mine"] = view.Mine,
     };
+
+    /// <summary>The 400 sentence for a personal view a session cannot own (#6214): a session that names a person (a cookie from before
+    /// owner keys existed) signs in again; one with no person at all has none to give.</summary>
+    internal static string NoOwnerKeyMessage(DarlingWebSeat seat) =>
+        seat.Subject is null ? CustomViewStore.NoIdentityMessage : CustomViewStore.SignInAgainMessage;
 
     /// <summary>The bare-array list wire shape (no definition body). Carries the view <c>kind</c> — always
     /// concrete (<c>"dashboard"</c> when the stored definition declares none) so the list page/sidebar can badge
@@ -7290,6 +7377,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 ["updated_at"] = view.UpdatedAt,
                 ["updated_by"] = view.UpdatedBy,
                 ["kind"] = view.Kind ?? "dashboard",
+                ["folder"] = view.Folder,
+                ["personal"] = view.Personal,
+                ["created_by"] = view.CreatedBy,
+                ["mine"] = view.Mine,
             });
         }
 

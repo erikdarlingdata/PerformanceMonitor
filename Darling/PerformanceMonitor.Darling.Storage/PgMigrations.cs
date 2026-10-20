@@ -1906,6 +1906,66 @@ ALTER TABLE config.config_monitored_servers ADD COLUMN IF NOT EXISTS hypothetica
 ALTER TABLE config.config_monitored_servers ADD COLUMN IF NOT EXISTS hypothetical_index_encrypted_password text;";
 
     /// <summary>
+    /// V204 (#6214): shared folders, personal views and an owner on the saved custom views and notebooks (both are
+    /// <c>config.custom_views</c> rows). Four columns: <c>folder</c> (NULL is the top level; the writers store it trimmed, empty as NULL,
+    /// at most 100 characters, no control characters, and a check holds the same rule), <c>personal</c> (default false, so every existing
+    /// view stays shared) and <c>created_by</c> (NULL for every existing view, which reads as "unknown"; <c>updated_by</c> is NOT copied
+    /// into it, because that is who last saved a view, not who made it) and <c>owner_key</c> (NULL for every existing view and for every view
+    /// the shared token or MCP made). <c>created_by</c> is a name for display only: it is what a person's sign-in called them, it can change,
+    /// and an identity provider can hand the same name to somebody else, so it never decides who may touch a personal view. <c>owner_key</c>
+    /// does: the web host stamps base64url(SHA-256(issuer + newline + sub)) of the validated ID token, which is stable and is not reused. A
+    /// check refuses a personal view with no owner key.
+    ///
+    /// <para><b>Uniqueness moves from the store to the scope.</b> V31's <c>UNIQUE (name)</c> is dropped under whatever name it carries
+    /// (looked up by its column, not assumed). Two partial unique indexes replace it: shared views are unique on
+    /// <c>(COALESCE(folder, ''), name)</c>, personal views on <c>(owner_key, name)</c>. Names still compare exactly (case-sensitive), as
+    /// before. A view's folder does not take part in a personal view's uniqueness.</para>
+    ///
+    /// <para>Every step is guarded, so a second run changes nothing. An older build keeps working against the new shape: it writes top-level
+    /// shared views, which the new indexes treat as before, and ignores the columns. It does not hide a person's personal views from the
+    /// list. Grants need no change: the viewer and mcp roles hold table-level INSERT, UPDATE and DELETE on the table, which cover new columns.</para>
+    /// </summary>
+    private const string V204Sql = @"
+ALTER TABLE config.custom_views ADD COLUMN IF NOT EXISTS folder text;
+ALTER TABLE config.custom_views ADD COLUMN IF NOT EXISTS personal boolean NOT NULL DEFAULT false;
+ALTER TABLE config.custom_views ADD COLUMN IF NOT EXISTS created_by text;
+ALTER TABLE config.custom_views ADD COLUMN IF NOT EXISTS owner_key text;
+
+DO $$
+DECLARE
+    unique_name text;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conrelid = 'config.custom_views'::regclass AND conname = 'ck_custom_views_folder')
+    THEN
+        ALTER TABLE config.custom_views ADD CONSTRAINT ck_custom_views_folder CHECK (
+            folder IS NULL
+            OR (folder = btrim(folder) AND folder <> '' AND char_length(folder) <= 100 AND folder !~ '[--]'));
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conrelid = 'config.custom_views'::regclass AND conname = 'ck_custom_views_personal_owner')
+    THEN
+        ALTER TABLE config.custom_views ADD CONSTRAINT ck_custom_views_personal_owner CHECK (NOT personal OR owner_key IS NOT NULL);
+    END IF;
+
+    /* V31's UNIQUE (name), found by the one column it covers so a renamed constraint is dropped too. */
+    FOR unique_name IN
+        SELECT con.conname
+        FROM pg_constraint con
+        WHERE con.conrelid = 'config.custom_views'::regclass
+          AND con.contype = 'u'
+          AND con.conkey = ARRAY[(SELECT a.attnum FROM pg_attribute a
+                                  WHERE a.attrelid = 'config.custom_views'::regclass AND a.attname = 'name')]
+    LOOP
+        EXECUTE format('ALTER TABLE config.custom_views DROP CONSTRAINT %I', unique_name);
+    END LOOP;
+END $$;
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_custom_views_shared_name ON config.custom_views ((COALESCE(folder, '')), name) WHERE NOT personal;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_custom_views_personal_name ON config.custom_views (owner_key, name) WHERE personal;";
+
+    /// <summary>
     /// V196 (#5632, step 5): Level 3 and the per-server action switches. <b>Nothing here turns an action on.</b>
     ///
     /// <para><b>Levels.</b> <c>ck_config_notification_routes_agent</c> now allows <c>agent_level</c> NULL and 0 to 3, and
@@ -2283,6 +2343,7 @@ $rung$;";
         new Migration(201, "forced-plan-variants-and-guides", V201Sql),
         new Migration(202, "ag-primary-replica", V202Sql),
         new Migration(203, "hypothetical-index-login", V203Sql),
+        new Migration(204, "custom-view-folders", V204Sql),
     };
 
     /// <summary>

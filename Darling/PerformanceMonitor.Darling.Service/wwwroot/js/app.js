@@ -56,12 +56,13 @@ import { renderEditor } from "./editor.js";
 import { renderNotebookEditor } from "./notebook.js";
 import { renderAlertEditor } from "./alert-editor.js";
 import { getSession, listViews } from "./views-api.js";
+import { paintViewList } from "./view-sidebar.js";
 import { renderMuteRules } from "./pages/mute-rules.js";
 import { renderManageTags } from "./pages/manage-tags.js";
 import { renderManageQueryTags } from "./pages/manage-query-tags.js";
 import { renderQueryTagUsage } from "./pages/query-tag-usage.js";
 import { renderJobHistory } from "./pages/job-history.js";
-import { refreshAttention, onChange as onLocalChange } from "./viewer-local.js";
+import { refreshAttention, clearViewGroups, onChange as onLocalChange } from "./viewer-local.js";
 import { initSidebarCollapse, initSeverityColorSettings } from "./viewer-local-ui.js";
 import { initSidebarSearch, paintServerList } from "./sidebar.js";
 
@@ -271,6 +272,8 @@ async function refreshSidebar() {
 let lastSidebarFleet = null;
 
 function paintSidebar() {
+  /* #6214: a signed-out page paints nothing: a late poll or a local change must not bring the old session's lists back. */
+  if (isSessionExpired()) return;
   const res = lastSidebarFleet;
   if (!res) return;
   const r = currentRoute();
@@ -309,37 +312,19 @@ async function refreshAgNav() {
 async function refreshViewList() {
   if (!viewList) return;
   const [session, res] = await Promise.all([getSession(), listViews()]);
+  if (isSessionExpired()) return; // the session ended while the list was in flight: keep nothing of it
+  lastViewList = { session, views: res.kind === "data" && Array.isArray(res.data) ? res.data : [] };
+  paintViewListNow();
+}
+
+/* #6214: the last good list, kept so collapsing a folder (a viewer-local change) repaints without a refetch. The grouping,
+   the order and the collapse state live in view-sidebar.js and view-folders.js. */
+let lastViewList = null;
+
+function paintViewListNow() {
+  if (isSessionExpired() || !viewList || !lastViewList) return;
   const r = currentRoute();
-  const items = [];
-
-  if (res.kind === "data" && Array.isArray(res.data)) {
-    for (const v of res.data) {
-      const active = isViewItemRoute(r.name) && String(r.id) === String(v.id);
-      /* The summary carries the view kind (definition->>'kind'), so the sidebar links + badges a notebook without
-         fetching its definition; a notebook links to its own route and gets a document glyph (CSS). */
-      const isNotebook = v.kind === "notebook";
-      items.push(
-        el("a", {
-          class: "view-item" + (active ? " active" : "") + (isNotebook ? " is-notebook" : ""),
-          href: (isNotebook ? "#/notebook/" : "#/view/") + encodeURIComponent(v.id),
-          dataset: { view: String(v.id) },
-          title: v.description || v.name,
-          text: v.name,
-        })
-      );
-    }
-  }
-
-  if (session.can_edit) {
-    items.push(el("a", { class: "view-item new-view", href: "#/view/new", text: "＋ New view" }));
-    items.push(el("a", { class: "view-item new-view", href: "#/notebook/new", text: "＋ New notebook" }));
-  }
-
-  if (!items.length) {
-    items.push(el("div", { class: "muted", style: "padding:0.35rem 1.25rem", text: "No views yet" }));
-  }
-
-  mount(viewList, items);
+  paintViewList(viewList, lastViewList.views, lastViewList.session, isViewItemRoute(r.name) ? r.id : null);
 }
 
 /* ─────────────────────────── status bar ─────────────────────────── */
@@ -681,6 +666,10 @@ function updateRefreshHint() {
    alert link's #/triage route survives a stale-session sign-in the same way the login page's own return
    value does: the hash never left the address bar, so there is nothing to lose. */
 function showSignedOutState(message, _login) {
+  /* #6214: drop the cached lists too, so nothing later repaints the old session's personal views. */
+  lastViewList = null;
+  lastSidebarFleet = null;
+  clearViewGroups();
   mount(serverList, []);
   mount(viewList, []);
   mount(statusbar, el("span", { class: "sb-item muted", text: "Signed out" }));
@@ -747,6 +736,7 @@ function start() {
   initSidebarSearch(document.getElementById("server-search"), paintSidebar);
   initSeverityColorSettings(document.getElementById("viewer-settings"));
   onLocalChange(paintSidebar);
+  onLocalChange(paintViewListNow);
 
   refreshSidebar();
   refreshViewList();
