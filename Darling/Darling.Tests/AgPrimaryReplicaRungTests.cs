@@ -59,11 +59,11 @@ public sealed class AgPrimaryReplicaRungTests
             Assert.Equal("NODE1", (string)(await ScalarAsync(connection, "SELECT primary_replica FROM collect.ag_replica_states WHERE server_id = " + TestServerId, ct))!);
             await ExecAsync(connection, "DELETE FROM collect.ag_replica_states WHERE server_id = " + TestServerId, ct);
 
-            /* Upgraded: a store at V200 (the newest rung on dev when this was written) has no such column, and the probe says so. A row collected then is kept through the rung. */
-            await RungRewindArtifacts.DropSentinelsAboveAsync(connection, 200, ct);
-            await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version >= 201", ct);
+            /* Upgraded: a store at V201 (the rung just below this one) has no such column, and the probe says so. A row collected then is kept through the rung. */
+            await RungRewindArtifacts.DropSentinelsAboveAsync(connection, 201, ct);
+            await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version >= 202", ct);
             Assert.DoesNotContain("primary_replica", await ColumnOrderAsync(connection, ct));
-            Assert.Equal(200, await ProbedVersionAsync(connection, ct));
+            Assert.Equal(201, await ProbedVersionAsync(connection, ct));
             await ExecAsync(connection,
                 "INSERT INTO collect.ag_replica_states (collection_id, collection_time, server_id, server_name, ag_name, replica_server_name, role_desc) "
                 + "VALUES (" + CollectionIdGenerator.Next() + ", timestamp '2026-10-19 10:00:00', " + TestServerId + ", 'primary-test', 'AG1', 'NODE2', 'SECONDARY')", ct);
