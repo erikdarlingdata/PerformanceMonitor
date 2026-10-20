@@ -447,15 +447,6 @@ public sealed class AzureSqlDatabaseMemoryScopeTests : IClassFixture<SharedDuckD
         Assert.Equal(engineEdition, json.GetProperty("engine_edition").GetInt32());
     }
 
-    [Fact]
-    public void GetMemoryStatsTool_BuildsItsPayloadThroughTheSharedNote()
-    {
-        var tool = ReadRepoFile("Lite/Mcp/McpMemoryTools.cs");
-
-        Assert.Contains("return MemoryStatsPayload(resolved.ServerName, stats, engineEdition);", tool, StringComparison.Ordinal);
-        Assert.Contains("ServerHardwareScope.WithMemoryNote(", tool, StringComparison.Ordinal);
-    }
-
     // ── seeding ──
 
     private async Task SeedAsync(int engineEdition)

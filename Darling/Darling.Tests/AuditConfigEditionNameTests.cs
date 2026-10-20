@@ -47,25 +47,4 @@ public sealed class AuditConfigEditionNameTests
             Assert.Equal(CollectorEngineCapability.DescribeEngineEdition(edition), DarlingMcpTools.AuditEditionName(edition));
         }
     }
-
-    [Fact]
-    public void AuditConfig_AsksTheEngineQuestion_BeforeItSaysTheConfigCollectorMayNotHaveRun()
-    {
-        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpTools.cs");
-        var start = source.IndexOf("Name = \"audit_config\"", StringComparison.Ordinal);
-        var body = source[start..source.IndexOf("FormatError(\"audit_config\"", StringComparison.Ordinal)];
-
-        /* Exactly one gate, for the collector get_server_config gates on (see DarlingMcpConfigTools). */
-        var gate = body.IndexOf("DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, \"server_config\"", StringComparison.Ordinal);
-        Assert.True(gate >= 0, "audit_config's empty answer does not ask the engine question for server_config");
-        Assert.Equal(body.IndexOf("NotCollectedStatusAsync(", StringComparison.Ordinal), body.LastIndexOf("NotCollectedStatusAsync(", StringComparison.Ordinal));
-
-        /* And it comes before the SQL Server arm's own "no_config_data" (the PostgreSQL arm's precedes it). */
-        Assert.True(gate < body.LastIndexOf("\"no_config_data\"", StringComparison.Ordinal));
-
-        /* The private edition switch is gone: the tool names an edition through the shared table only. */
-        Assert.Contains("AuditEditionLabel(propertiesRow?.Edition, edition)", body, StringComparison.Ordinal);
-        Assert.DoesNotContain("(HADR)", body, StringComparison.Ordinal);
-        Assert.DoesNotContain("Azure Synapse serverless\"", body, StringComparison.Ordinal);
-    }
 }

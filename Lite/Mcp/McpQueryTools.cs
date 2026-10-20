@@ -1175,7 +1175,7 @@ public sealed class McpQueryTools
                     startUtc, windowEnd, PerInterval,
                     "Query Store",
                     "Query Store may be OFF on this server's databases — that, not an absence of slow queries, is the usual cause. Check QUERY_STORE = ON per database, then that collection is running for this server.",
-                    () => McpRuntimePrecondition.QueryStoreFirstIntervalMessageAsync(dataService, resolved.ServerId, resolved.ServerName, database));
+                    () => McpRuntimePrecondition.QueryStoreFirstIntervalMessageAsync(dataService, resolved.ServerId, resolved.DisplayName, database));
             }
 
             return SerializeTrend(resolved.DisplayName, hours_back, startUtc, windowEnd, points, PerInterval,

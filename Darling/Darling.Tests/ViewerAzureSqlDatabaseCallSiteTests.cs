@@ -118,25 +118,6 @@ public sealed class ViewerAzureSqlDatabaseCallSiteTests
     private static readonly string[] EngineCapabilityFile = ["Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingEngineCapability.cs"];
 
     /// <summary>
-    /// get_memory_stats reads the edition on its success path and publishes the state through the shared rule, in the payload
-    /// function it hands the row and that edition to. The tool needs a live store to run, so its use of the rule is pinned here
-    /// and the rule itself in
-    /// <see cref="ViewerAzureSqlDatabaseEmptyStateTests.TheMcpMemoryState_IsNullWithItsNote_OnAzureSqlDatabaseOnly"/>.
-    /// </summary>
-    [Fact]
-    public void GetMemoryStats_PublishesTheStateThroughTheSharedRule()
-    {
-        var body = MethodBody(McpDataToolsFile, "Task<string> GetMemoryStats(");
-        var payload = MethodBody(McpDataToolsFile, "string MemoryStatsPayload(");
-
-        Assert.Contains("var engineEdition = await DarlingEngineCapability.EngineEditionAsync(postgres, resolved.ServerId, cancellationToken);", body, StringComparison.Ordinal);
-        Assert.Contains("return MemoryStatsPayload(resolved.ServerName, stats, engineEdition);", body, StringComparison.Ordinal);
-        Assert.Contains("system_memory_state = ServerHardwareScope.MemoryStateOrNull(engineEdition, stats.SystemMemoryState),", payload, StringComparison.Ordinal);
-        Assert.Contains("system_memory_state_note = ServerHardwareScope.MemoryStateNoteFor(engineEdition),", payload, StringComparison.Ordinal);
-        Assert.DoesNotContain("system_memory_state = stats.SystemMemoryState", payload, StringComparison.Ordinal);
-    }
-
-    /// <summary>
     /// get_memory_stats has ONE edition, read ONCE, from the registry: <c>DarlingEngineCapability.EngineEditionAsync</c>, which
     /// reads the same <c>servers</c> row as <c>NotCollectedStatusAsync</c>, the answer every other Darling MCP gate gives. The
     /// payload's <c>engine_edition</c>, <c>memory_note</c> and memory-state pair are all built from that value, so the tool

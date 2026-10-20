@@ -769,7 +769,7 @@ public sealed class DarlingMcpTrendTools
                        product's own latest evidence says Query Store is on and the collector's last run succeeded, say
                        that rather than "may be OFF". Unknown or off state keeps the text below. */
                     var firstInterval = await DarlingRuntimePrecondition.QueryStoreFirstIntervalMessageAsync(
-                        postgres, resolved.ServerId, resolved.ServerName, databases, cancellationToken);
+                        postgres, resolved.ServerId, resolved.DisplayName, databases, cancellationToken);
                     if (firstInterval != null)
                     {
                         return EmptyStatus("unavailable", firstInterval, disclosure, databases);
