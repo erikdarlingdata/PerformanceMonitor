@@ -189,7 +189,7 @@ CLOSE c; DEALLOCATE c;", ct);
     }
 
     [Fact]
-    public async Task APlanCompiledAfterTheFirstPass_IsReadOnTheNextPass_AndOnlyThatPlan()
+    public async Task PlansThatCompileAfterTheFirstPass_AreReadOnTheNextPass_AndOnlyThey()
     {
         await RunAsync(async (database, ct) =>
         {
@@ -197,17 +197,31 @@ CLOSE c; DEALLOCATE c;", ct);
             var first = await PassAsync(collector, database, ct);
             var laterBefore = await LaterPlanCountAsync(database, ct);
 
-            await SqlAsync(database, "EXEC sp_recompile 'dbo.p1'; EXEC dbo.p1 @k = 1; EXEC sys.sp_query_store_flush_db;", ct);
+            /* A new forced procedure whose force the engine recompiles under new plan ids, after the collector's first pass. */
+            await SqlAsync(database, "EXEC('CREATE PROCEDURE dbo.p9 @k int AS SELECT COUNT_BIG(*), MAX(pad), 9 AS n FROM dbo.t WHERE k = @k;');", ct);
+            await SqlAsync(database, "EXEC dbo.p9 @k = 5; EXEC sp_recompile 'dbo.p9'; EXEC dbo.p9 @k = 1; EXEC sys.sp_query_store_flush_db;", ct);
+            await SqlAsync(database, @"
+DECLARE @q bigint, @p bigint;
+SELECT @q = q.query_id, @p = MIN(p.plan_id) FROM sys.query_store_query AS q JOIN sys.query_store_plan AS p ON p.query_id = q.query_id
+WHERE q.object_id = OBJECT_ID(N'dbo.p9') GROUP BY q.query_id;
+EXEC sys.sp_query_store_force_plan @q, @p;", ct);
+            for (var round = 0; round < 3; round++)
+            {
+                await SqlAsync(database, "EXEC sp_recompile 'dbo.p9'; EXEC dbo.p9 @k = 1;", ct);
+            }
+
+            await SqlAsync(database, "EXEC sys.sp_query_store_flush_db;", ct);
             var laterAfter = await LaterPlanCountAsync(database, ct);
             var third = await PassAsync(collector, database, ct);
             var fourth = await PassAsync(collector, database, ct);
 
-            Assert.True(laterAfter > laterBefore, "the recompile under the force gave the query a new plan id");
+            Assert.True(laterAfter > laterBefore, "the new forced procedure gave the forced queries more later plans");
             Assert.True(third.PlanXmlLobReads > 0, "a plan nobody has read is read");
-            Assert.True(third.PlanXmlLobReads < first.PlanXmlLobReads, "only the new plan is read, not every later plan again");
+            Assert.True(third.PlanXmlLobReads < first.PlanXmlLobReads, "only the new plans are read, not every later plan again");
             Assert.Equal(0, fourth.PlanXmlLobReads);
-            Assert.True(VariantsOf(third)[0]!.Split(',').Length > VariantsOf(first)[0]!.Split(',').Length || laterAfter == laterBefore + 1,
-                "the new plan's verdict reaches the row");
+            Assert.Equal(VariantsOf(first).Length + 1, VariantsOf(third).Length);
+            Assert.False(string.IsNullOrEmpty(VariantsOf(third)[^1]), "the new force's variant is found on the pass that first read it");
+            Assert.Equal(VariantsOf(third), VariantsOf(fourth));
         });
     }
 
