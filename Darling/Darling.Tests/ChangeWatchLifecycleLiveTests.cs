@@ -490,7 +490,7 @@ FROM config.investigation_requests", ct, agentForcedAt);
         await RunAsync(true, async (h, ct) =>
         {
             var t1 = h.Now.AddMinutes(-60);
-            var t2 = h.Now.AddMinutes(-50);
+            var t2 = h.Now.AddMinutes(-35);
             /* Plans 10 and 11 are in the capture at t2 and not in the one at t1. The ledger forced 11 inside the gap (after t1, up to t2). It forced 10 at
                t2 - 28 minutes, which is BEFORE t1: that action belongs to the interval before the previous capture, not to this one. */
             await ForcedPlanCaptureAsync(h.Connection, t1, "Sales", ct);
@@ -506,7 +506,7 @@ FROM config.investigation_requests", ct, agentForcedAt);
     }
 
     /* #6234: the forced-plans collector's frequency is per server and settable, so the longest gap between two captures that is still diffed follows it
-       (twice the frequency plus 5 minutes), not a fixed 30 minutes. */
+       (the larger of 30 minutes and twice the frequency plus 5 minutes), not a fixed 30 minutes. */
     private static Task SetForcedPlansFrequencyAsync(Harness h, int minutes, CancellationToken ct) =>
         ExecAsync(h.Connection, "INSERT INTO config.config_collector_schedules (server_id, collector_name, frequency_minutes) VALUES ($1, 'query_store_forced_plans', $2)", ct, ServerId, minutes);
 
@@ -528,6 +528,27 @@ FROM config.investigation_requests", ct, agentForcedAt);
             var change = Assert.Single(found, c => c.Kind == "plan_force");
             Assert.Equal(20, change.PlanId);
             Assert.Equal("plan_force:snapshot:Sales:2:20:" + Stamp(second), change.Key);
+        });
+    }
+
+    [Fact]
+    public async Task AtTheDefaultFrequency_APlanForcedBetweenTwoCapturesTwentyFiveMinutesApart_IsStillDetected()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            await AddServerAsync(h.Connection, ct);
+            /* No override row: the forced-plans collector runs at its 5-minute default, where twice the frequency plus 5 minutes is 15. A capture delayed by load
+               25 minutes after the last is still diffed, because the gap limit never drops below 30 minutes. */
+            var first = h.Now.AddMinutes(-60);
+            var second = h.Now.AddMinutes(-35);
+            await ForcedPlanCaptureAsync(h.Connection, first, "Sales", ct, (1, 10));
+            await ForcedPlanCaptureAsync(h.Connection, second, "Sales", ct, (1, 10), (2, 20));
+
+            var found = await h.NewPass().ReadChangesAsync(ServerId, first.AddMinutes(-1), h.Now, ct);
+
+            var change = Assert.Single(found, c => c.Kind == "plan_force");
+            Assert.Equal(20, change.PlanId);
+            Assert.Equal(TimeSpan.FromMinutes(30), ChangeWatchPass.CaptureGapLimit(5));
         });
     }
 

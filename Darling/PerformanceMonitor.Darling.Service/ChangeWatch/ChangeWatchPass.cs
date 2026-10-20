@@ -72,8 +72,9 @@ WHERE server_id = $1 AND outcome = 'succeeded' AND action_time > $2 AND action_t
        the same database in the day before it, found by a LATERAL seek on idx_query_store_forced_plans_markers (V207), so a pass no longer sorts a day of forced-plan
        rows per server. #6239 round 3, L4: a database whose previous capture is more than $4 minutes before this one (it came back after a failback, a
        Query Store that was read-only, a collector that failed for hours) has this capture treated as a NEW BASELINE. #6234: $4 is CaptureGapLimit of the
-       forced-plans collector's frequency on this server (twice the frequency plus 5 minutes), not a fixed 30 minutes: at a 60-minute frequency every capture is
-       more than 30 minutes after the last and no plan change would ever be read. A skipped gap is one of more than a missed capture or two: what was forced or unforced during the gap
+       forced-plans collector's frequency on this server (the larger of 30 minutes and twice the frequency plus 5 minutes), not a fixed 30 minutes: at a 60-minute
+       frequency every capture is more than 30 minutes after the last and no plan change would ever be read, and at the 5-minute default twice the frequency plus
+       5 minutes is only 15, so the 30-minute floor keeps a capture delayed by load from dropping a real plan change. A skipped gap is one of more than a missed capture or two: what was forced or unforced during the gap
        cannot be dated, and reporting it at the return capture would open a watch bracketing the failback and not the change. #6239 round 3, L3: a change the
        plan-force ledger explains (a succeeded action on the plan AFTER the previous capture and up to this one) is skipped; a fixed 30 minutes missed an action
        early in a longer gap. The other capture's plans are probed with a LATERAL LIMIT 1 per plan row (an index probe on the capture's time), because as an
@@ -142,10 +143,15 @@ WHERE after.hit IS NULL
     internal const string ForcedPlansCollector = "query_store_forced_plans";
 
     /// <summary>
-    /// #6234: how far apart two captures of one database may be and still be diffed: twice the collector's frequency, so one missed capture
-    /// still bridges, plus <see cref="MarkSlack"/> for the capture's own run time. A longer gap is a return from an outage, whose change cannot be dated.
+    /// #6234: how far apart two captures of one database may be and still be diffed: the larger of 30 minutes and twice the collector's frequency plus
+    /// <see cref="MarkSlack"/>. Twice the frequency lets one missed capture still bridge and the slack covers the capture's own run time; the 30-minute floor is
+    /// what the limit was before it followed the frequency, and keeps a capture delayed by load from dropping a real plan change at the 5-minute default (where
+    /// twice the frequency plus the slack is only 15 minutes). A longer gap is a return from an outage, whose change cannot be dated.
     /// </summary>
-    public static TimeSpan CaptureGapLimit(int frequencyMinutes) => TimeSpan.FromMinutes((2L * Math.Max(1, CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(frequencyMinutes))) + MarkSlack.TotalMinutes);
+    public static TimeSpan CaptureGapLimit(int frequencyMinutes) => TimeSpan.FromMinutes(Math.Max(MinimumCaptureGap.TotalMinutes, (2L * Math.Max(1, CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(frequencyMinutes))) + MarkSlack.TotalMinutes));
+
+    /// <summary>#6234: the floor of <see cref="CaptureGapLimit"/>: the fixed gap limit before it followed the collector's frequency.</summary>
+    public static readonly TimeSpan MinimumCaptureGap = TimeSpan.FromMinutes(30);
 
     /// <summary>
     /// #6234: the frequency, in minutes, the forced-plans collector runs at on one server, resolved the way the worker resolves it: the server's own

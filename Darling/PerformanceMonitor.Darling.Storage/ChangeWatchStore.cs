@@ -394,7 +394,7 @@ WHERE watch_id = $1 AND state = 'evaluating' AND attempts >= $4",
     /// <c>action_called</c> journal row of a <c>plan_force</c> or <c>plan_unforce</c> kind, by an agent, on a change-watch request of the change's server, whose
     /// target is the change's database and plan (#6239 round 3, M1: matched by plan, not by time alone, so a person's change near an agent's unrelated one still
     /// opens a request), up to <paramref name="reach"/> before the capture that saw the change (#6234: the forced-plans collector's capture gap limit on that
-    /// server, <c>twice its frequency plus 5 minutes</c>, not a fixed 30 minutes: at a 60-minute frequency the capture that sees an agent's force comes up to an hour
+    /// server, <c>the larger of 30 minutes and twice its frequency plus 5 minutes</c>, not a fixed 30 minutes: at a 60-minute frequency the capture that sees an agent's force comes up to an hour
     /// after it, and a person's change is told apart from the agent's only if the window reaches the action). Such a watch is recorded and measured but opens no request, so an agent's fix
     /// cannot start the next.
     /// </summary>
