@@ -170,6 +170,19 @@ public sealed class CollectionHealthPayloadBudgetToolTests : IClassFixture<Share
         Assert.True(defaultRows["deadlocks"].TryGetProperty("compact", out var deadlocksCompact) && deadlocksCompact.GetBoolean());
 
         using var fullDoc = JsonDocument.Parse(fullJson);
+
+        /* #6180: full_detail asks for ~30 fields on every collector, which is past the response target on a store this size.
+           It still answers within the target: the leading whole rows that fit, with the cut counted and the way to the rest named. */
+        Assert.True(fullBytes <= McpResponseBudget.DefaultBytes,
+            $"full_detail get_collection_health is {fullBytes:N0} bytes, over the {McpResponseBudget.DefaultBytes:N0}-byte budget.");
+        Assert.True(fullDoc.RootElement.GetProperty("truncated").GetBoolean(), "full_detail on this store is over the budget, so it must say it was cut.");
+        Assert.Equal(sqlServerCollectors.Length, fullDoc.RootElement.GetProperty("collectors_total").GetInt32());
+        Assert.Equal(fullDoc.RootElement.GetProperty("collectors").GetArrayLength(), fullDoc.RootElement.GetProperty("collectors_returned").GetInt32());
+        Assert.True(fullDoc.RootElement.GetProperty("collectors_returned").GetInt32() < sqlServerCollectors.Length);
+        Assert.Contains("without full_detail", fullDoc.RootElement.GetProperty("size_note").GetString(), StringComparison.Ordinal);
+        Assert.False(defaultDoc.RootElement.GetProperty("truncated").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, defaultDoc.RootElement.GetProperty("size_note").ValueKind);
+
         Assert.All(fullDoc.RootElement.GetProperty("collectors").EnumerateArray(), r =>
         {
             Assert.False(r.TryGetProperty("compact", out _));

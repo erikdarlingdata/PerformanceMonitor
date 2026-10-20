@@ -611,6 +611,13 @@ public sealed class DarlingWorker : BackgroundService
     internal Func<ServerLoopState, ServerRuntime, string, CancellationToken, Task<int>>? RunOneBodyOverride { get; set; }
 
     /// <summary>
+    /// Test seam (#6186): with <see cref="RunOneBodyOverride"/> set, a non-null answer here stands for the monitored server
+    /// refusing that collector (a PERMISSIONS run with this message). The override's run is recorded the way the real
+    /// run's outcome is, so the backoff sees it.
+    /// </summary>
+    internal Func<string, string?>? RunOneRefusalOverride { get; set; }
+
+    /// <summary>
     /// The fleet sweep gate (#5941), set once the collection loop builds it. A <c>snapshot_now</c> takes a permit from it
     /// like a scheduled pass does. Null before the loop starts (and in tests that do not stand one in): no permit is taken.
     /// </summary>
@@ -1157,6 +1164,15 @@ public sealed class DarlingWorker : BackgroundService
     /* #4004 review, round 3: "the log-hash key was replaced at start", held for the first pg_log_events run. */
     private readonly LogHashKeyRotationNote _logHashKeyRotation = new();
 
+    /// <summary>#4004: lets a test arm the rotation note the way the service start does, then run the worker's real run path.</summary>
+    internal LogHashKeyRotationNote LogHashKeyRotationForTests => _logHashKeyRotation;
+
+    /// <summary>
+    /// Test seam: with this set, <see cref="RunOneAsync"/> dispatches every collector through it instead of the collector's own
+    /// run, and everything after the dispatch (the notes, the collection_log row) is the real path. Null in production.
+    /// </summary>
+    internal Func<string, ServerRuntime, CancellationToken, Task<CollectorRunResult>>? DispatchOverrideForTests { get; set; }
+
     /* The fleet-level memory launch guard (#1556, #5479): one per process, the whole process's memory rather than
        a per-server state, so it is a single worker field and not a ServerLoopState flag. It owns the trip, the
        garbage collection that releases it, the hold warnings and the release (see LaunchMemoryGuard). The setter
@@ -1633,6 +1649,11 @@ LIMIT 1";
            keys (never enumerated), so a lock-free concurrent map is a drop-in and eliminates the one structure
            the old strict single-threaded invariant (INV-1) existed to protect from tearing. */
         public ConcurrentDictionary<string, DateTime> NextDue { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+        /* #6186: the collectors this server keeps refusing with the same answer, and how long each waits for its next try. In
+           memory, so a restart (and a changed definition, which clears NextDue beside it) tries every collector once at its
+           normal interval. */
+        public RefusedCollectorBackoff RefusedBackoff { get; } = new();
 
         /* #4938: what a daily collector's run-time stamp in NextDue was computed from: the run time, the clock and the
            last run. One entry per collector that has a run time on this server, replaced whole (the record is
@@ -7108,6 +7129,7 @@ LIMIT 1";
                 state.NextConnectAttempt = DateTime.MinValue;
                 state.ConsecutiveConnectFailures = 0;
                 state.NextDue.Clear();
+                state.RefusedBackoff.Clear();
                 /* #3653 A5 (the adjacency #3540 A4 named and left): a same-id reconnect is a new epoch. The
                    fields ServerDefinitionEquals compares are the ones that decide WHICH instance the
                    connection reaches (host, port, engine, database, auth, intent, subnet failover) or WHAT it collects
@@ -14574,6 +14596,21 @@ AND   j.hypertable_name = '{relation}'", connection))
                     _fleetGateStats?.RecordSlot(gridSkipped);
                     server.CycleSkips.AddGrid(name, gridSkipped, due);
                     server.NextDue[name] = CollectorCadence.NextDue(due, now, intervalSpan);
+
+                    /* #6186: a collector the server refused with the same answer run after run waits out its backoff instead
+                       of writing a PERMISSIONS row every interval. The slot is served like any other: counted above, with the
+                       grid slots the loop stepped over, and the stamp moved on, because the fleet gate measures whether the
+                       sweep loop keeps cadence and those slots are real whether or not this collector then runs. The backoff
+                       only decides not to run it, so the first try after the wait is an ordinary slot, not a burst of missed
+                       ones. The continue skips the whole run for this pass (the detached query_store and daily dispatches
+                       below included), so no collection_log row is written. */
+                    if (server.RefusedBackoff.IsBackedOff(name, now, intervalSpan))
+                    {
+                        _logger.LogDebug(
+                            "  [{Server}] {Collector} not run this slot: the server has refused it {Streak} times in a row, so it is tried less often until that changes (#6186)",
+                            server.Config.DisplayName, name, server.RefusedBackoff.Streak(name));
+                        continue;
+                    }
                 }
 
                 /* #2700: query_store is split off this sequential body rather than awaited inline. Its
@@ -16212,6 +16249,44 @@ LIMIT 1";
 
 
     /// <summary>
+    /// #6186: the collection_log write every <see cref="RunOneAsync"/> outcome goes through, then the refusal backoff's record
+    /// of that outcome, so no arm can write its row and forget the backoff.
+    /// </summary>
+    private async Task LogRunAsync(
+        ServerLoopState server, ServerRuntime runtime, string collectorName, string status, int rowsCollected,
+        long sqlMs, long storageMs, string? errorMessage, FanoutCost? fanout, ServerPhaseCost? phases,
+        DrainForensics? drain, FetchPhaseCost? fetchPhases, int? sweepPeerMaxMs, ILogger? logger, CancellationToken cancellationToken)
+    {
+        await DarlingObservability.LogCollectionAsync(
+            _postgres!, runtime, collectorName, status, rowsCollected, sqlMs, storageMs, errorMessage, fanout, phases, drain,
+            fetchPhases, sweepPeerMaxMs, logger, cancellationToken);
+        RecordRunForBackoff(server, runtime, collectorName, status, errorMessage);
+    }
+
+    /// <summary>
+    /// #6186: feeds one run's status to the server's refusal backoff. A PERMISSIONS run with the same answer as the last one
+    /// extends the streak; a success, an error or a different answer restarts from the normal interval. YIELDED, ABANDONED and
+    /// SKIPPED runs say nothing about whether the grant changed, so they leave the streak alone.
+    /// </summary>
+    private void RecordRunForBackoff(ServerLoopState server, ServerRuntime runtime, string collectorName, string status, string? message)
+    {
+        if (status is "YIELDED" or "SKIPPED" || status == EnumeratedCollectorDriver.AbandonedStatus)
+        {
+            return;
+        }
+
+        var effective = StoreConfigProvider.ResolveSchedule(collectorName, runtime.ServerId, _scheduleOverrides);
+        var interval = TimeSpan.FromMinutes(CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(effective.FrequencyMinutes));
+        var streak = server.RefusedBackoff.Record(collectorName, status == "PERMISSIONS", message, DateTime.UtcNow, interval);
+        if (streak == RefusedCollectorBackoff.FreeRefusals + 1)
+        {
+            _logger.LogInformation(
+                "  [{Server}] {Collector} refused {Streak} times in a row with the same answer: it is tried less often (up to every {Max}) until the answer changes or it succeeds (#6186)",
+                server.Config.DisplayName, collectorName, streak, RefusedCollectorBackoff.MaxDelay);
+        }
+    }
+
+    /// <summary>
     /// Runs one collector for a server and logs its outcome to collection_log. Returns the rows written
     /// (0 on skip/permissions/error) so an on-demand snapshot can tally them; the scheduled/on-load callers
     /// simply discard the count.
@@ -16244,6 +16319,11 @@ LIMIT 1";
         if (runtime is null || !s_dispatch.TryGetValue(collectorName, out var run))
         {
             return 0;
+        }
+
+        if (DispatchOverrideForTests is { } dispatchOverride)
+        {
+            run = (_, overrideRuntime, overrideToken) => dispatchOverride(collectorName, overrideRuntime, overrideToken);
         }
 
         /* #2165: the tick's Query Store pass and the backfill slice both do heavy QS text extraction, and
@@ -16343,6 +16423,16 @@ LIMIT 1";
         if (RunOneBodyOverride is { } bodyOverride)
         {
             var overrideRows = await bodyOverride(server, runtime, collectorName, cancellationToken);
+            if (RunOneRefusalOverride?.Invoke(collectorName) is { } overrideRefusal)
+            {
+                /* Stands in for the PERMISSIONS arm: the same recorder the real run goes through (LogRunAsync). */
+                RecordRunForBackoff(server, runtime, collectorName, "PERMISSIONS", overrideRefusal);
+            }
+            else
+            {
+                RecordRunForBackoff(server, runtime, collectorName, overrideRows >= 0 ? "SUCCESS" : "ERROR", null);
+            }
+
             if (runOutcome is not null)
             {
                 runOutcome.Succeeded = overrideRows >= 0;
@@ -16546,8 +16636,8 @@ LIMIT 1";
                read. */
             var status = EnumeratedCollectorDriver.ClassifyReturnedRun(result.Abandoned);
 
-            await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, status, result.Rows, result.SqlMs, result.StorageMs, result.Note,
+            await LogRunAsync(
+                server, runtime, collectorName, status, result.Rows, result.SqlMs, result.StorageMs, result.Note,
                 result.Fanout, result.ServerPhases, result.Drain, result.FetchPhases, peerMaxAtDispatchMs, _logger, cancellationToken);
 
             /* #2864 item 3: fold THIS run into the body's peer high-water mark, AFTER its own row is
@@ -16616,8 +16706,8 @@ LIMIT 1";
                 "  [{Server}] {Collector} => insufficient permissions: {Message}",
                 server.Config.DisplayName, collectorName, ex.Message);
 
-            await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, "PERMISSIONS", 0, runClock.ElapsedMilliseconds, 0, ex.Message, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+            await LogRunAsync(
+                server, runtime, collectorName, "PERMISSIONS", 0, runClock.ElapsedMilliseconds, 0, ex.Message, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
         catch (DarlingXeSessionMissingException ex)
@@ -16645,8 +16735,8 @@ LIMIT 1";
                 "  [{Server}] {Collector} => XE session missing (capture down): {Message}",
                 server.Config.DisplayName, collectorName, ex.Message);
 
-            await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, "SESSION_MISSING", 0, runClock.ElapsedMilliseconds, 0, ex.Message, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+            await LogRunAsync(
+                server, runtime, collectorName, "SESSION_MISSING", 0, runClock.ElapsedMilliseconds, 0, ex.Message, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
         catch (Exception ex) when (AwsRoleConfigurationFault(ex) is { } assume)
@@ -16661,8 +16751,8 @@ LIMIT 1";
                STS failure) carry no operator-fixable setting and fall through to the general ERROR arm with the same message. */
             var roleNote = AwsRoleFaultNote(_logger, server.Config.DisplayName, collectorName, assume);
 
-            await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, runClock.ElapsedMilliseconds, roleNote,
+            await LogRunAsync(
+                server, runtime, collectorName, "PERMISSIONS", 0, 0, runClock.ElapsedMilliseconds, roleNote,
                 fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
@@ -16677,8 +16767,8 @@ LIMIT 1";
                     : "  [{Server}] {Collector} => PERMISSIONS: the host does not match the endpoint AWS reports",
                 server.Config.DisplayName, collectorName);
 
-            await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, runClock.ElapsedMilliseconds, ex.Message,
+            await LogRunAsync(
+                server, runtime, collectorName, "PERMISSIONS", 0, 0, runClock.ElapsedMilliseconds, ex.Message,
                 fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
@@ -16696,8 +16786,8 @@ LIMIT 1";
             _logger.LogWarning("  [{Server}] {Collector} => PERMISSIONS: the RDS log API refused the call",
                 server.Config.DisplayName, collectorName);
 
-            await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, runClock.ElapsedMilliseconds,
+            await LogRunAsync(
+                server, runtime, collectorName, "PERMISSIONS", 0, 0, runClock.ElapsedMilliseconds,
                 $"{ex.Message} — the MONITORING HOST's IAM role lacks a grant this source needs, which is "
                 + "not a database grant: plan capture on managed PostgreSQL reads the server log through "
                 + "the RDS API, so the role needs rds:DescribeDBInstances, rds:DescribeDBClusters, "
@@ -16715,8 +16805,8 @@ LIMIT 1";
             _logger.LogWarning("  [{Server}] {Collector} => PERMISSIONS: the RDS/PI API refused the call",
                 server.Config.DisplayName, collectorName);
 
-            await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, runClock.ElapsedMilliseconds,
+            await LogRunAsync(
+                server, runtime, collectorName, "PERMISSIONS", 0, 0, runClock.ElapsedMilliseconds,
                 $"{ex.Message} — the MONITORING HOST's IAM role lacks a grant this source needs, which is "
                 + "not a database grant: instance CPU on managed PostgreSQL reads AWS Performance Insights, "
                 + "so the role needs rds:DescribeDBInstances, rds:DescribeDBClusters and "
@@ -16759,8 +16849,8 @@ LIMIT 1";
             _logger.LogWarning("  [{Server}] {Collector} => PERMISSIONS: the server log is stamped '{Zone}', not UTC",
                 server.Config.DisplayName, collectorName, ex.ObservedZone);
 
-            await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, 0, ex.Message,
+            await LogRunAsync(
+                server, runtime, collectorName, "PERMISSIONS", 0, 0, 0, ex.Message,
                 fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
@@ -16785,8 +16875,8 @@ LIMIT 1";
             _logger.LogWarning("  [{Server}] {Collector} => PERMISSIONS: logging_collector is off, so the target writes no server log files",
                 server.Config.DisplayName, collectorName);
 
-            await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, "PERMISSIONS", 0, runClock.ElapsedMilliseconds, 0, ex.Message,
+            await LogRunAsync(
+                server, runtime, collectorName, "PERMISSIONS", 0, runClock.ElapsedMilliseconds, 0, ex.Message,
                 fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
@@ -16826,8 +16916,8 @@ LIMIT 1";
             _logger.LogWarning("  [{Server}] {Collector} => PERMISSIONS: log_destination carries no stderr-format file for this target",
                 server.Config.DisplayName, collectorName);
 
-            await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, "PERMISSIONS", 0, runClock.ElapsedMilliseconds, 0, ex.Message,
+            await LogRunAsync(
+                server, runtime, collectorName, "PERMISSIONS", 0, runClock.ElapsedMilliseconds, 0, ex.Message,
                 fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
@@ -16860,8 +16950,8 @@ LIMIT 1";
             _logger.LogWarning("  [{Server}] {Collector} => PERMISSIONS: no csvlog file has appeared for this target yet",
                 server.Config.DisplayName, collectorName);
 
-            await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, "PERMISSIONS", 0, runClock.ElapsedMilliseconds, 0, ex.Message,
+            await LogRunAsync(
+                server, runtime, collectorName, "PERMISSIONS", 0, runClock.ElapsedMilliseconds, 0, ex.Message,
                 fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
@@ -16887,8 +16977,8 @@ LIMIT 1";
             _logger.LogWarning("  [{Server}] {Collector} => PERMISSIONS: no jsonlog file has appeared for this target yet",
                 server.Config.DisplayName, collectorName);
 
-            await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, "PERMISSIONS", 0, runClock.ElapsedMilliseconds, 0, ex.Message,
+            await LogRunAsync(
+                server, runtime, collectorName, "PERMISSIONS", 0, runClock.ElapsedMilliseconds, 0, ex.Message,
                 fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
@@ -16907,8 +16997,8 @@ LIMIT 1";
             _logger.LogInformation("  [{Server}] {Collector} => YIELDED - 1s lock-timeout guard fired (target lock contention)",
                 server.Config.DisplayName, collectorName);
 
-            await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, "YIELDED", 0, runClock.ElapsedMilliseconds, 0,
+            await LogRunAsync(
+                server, runtime, collectorName, "YIELDED", 0, runClock.ElapsedMilliseconds, 0,
                 $"Lock-timeout yield (SQL error #{ex.Number}): the 1-second LOCK_TIMEOUT guard fired rather than waiting in a blocking chain. One snapshot sweep skipped; evidence of lock contention on the monitored server, not a monitoring failure.",
                 fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
@@ -16932,8 +17022,8 @@ LIMIT 1";
             _logger.LogWarning("  [{Server}] {Collector} => insufficient permissions ({Number}): {Message}",
                 server.Config.DisplayName, collectorName, ex.Number, message);
 
-            await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, "PERMISSIONS", 0, runClock.ElapsedMilliseconds, 0, message, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+            await LogRunAsync(
+                server, runtime, collectorName, "PERMISSIONS", 0, runClock.ElapsedMilliseconds, 0, message, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
         /* #2997: the database is read off the EXCEPTION first, falling back to the runtime's own. #2638
@@ -16989,8 +17079,8 @@ LIMIT 1";
                     server.Config.DisplayName, collectorName, status, ex.SqlState, explanation);
             }
 
-            await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, status, 0, runClock.ElapsedMilliseconds, 0, explanation, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+            await LogRunAsync(
+                server, runtime, collectorName, status, 0, runClock.ElapsedMilliseconds, 0, explanation, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
         /* yieldsOnLockTimeout: false is deliberate, and matches the general catch below rather than the
@@ -17084,8 +17174,8 @@ LIMIT 1";
             _logger.LogError("  [{Server}] {Collector} => ERROR (timeout): {Message}",
                 server.Config.DisplayName, collectorName, explanation);
 
-            await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, "ERROR", 0, elapsedMs, 0, explanation,
+            await LogRunAsync(
+                server, runtime, collectorName, "ERROR", 0, elapsedMs, 0, explanation,
                 fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
@@ -17187,8 +17277,8 @@ LIMIT 1";
                    #5813: the fan-out comes off the exception, where the runner's all-failed rethrow put it, so a
                    one-database server whose Query Store read timed out names that database in slowest_item with
                    the budget as slowest_item_ms. Null for every fault that carries none, as before. */
-                await DarlingObservability.LogCollectionAsync(
-                    _postgres!, runtime, collectorName, "ERROR", 0, runClock.ElapsedMilliseconds, 0, message, fanout: CollectorFaultFanout.For(ex), phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+                await LogRunAsync(
+                    server, runtime, collectorName, "ERROR", 0, runClock.ElapsedMilliseconds, 0, message, fanout: CollectorFaultFanout.For(ex), phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             }
             catch
             {

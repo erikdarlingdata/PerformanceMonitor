@@ -532,6 +532,34 @@ internal static class TrendPayloads
     }
 
     /// <summary>
+    /// The whole <c>get_perfmon_stats</c> reply, both SKUs (#6180): the leading counters that fit the shared response
+    /// target, with <c>truncated</c>, <c>counters_returned</c>, <c>counters_total</c> and a <c>size_note</c> (null when
+    /// nothing was left off).
+    /// </summary>
+    public static string PerfmonLatestReply(string server, string capturedAt, IReadOnlyList<Dictionary<string, object?>> counters)
+    {
+        /* #6180: a busy instance holds hundreds of counters (545 measured, 82 KB), so the whole set is over the shared
+           response target at DEFAULT arguments. The reply keeps the leading counters that fit and says how many were left
+           off and how to narrow to the rest; a counter is never cut mid-row. */
+        return McpResponseBudget.FitPrefix(counters.Count, count =>
+        {
+            var cut = count < counters.Count;
+            return JsonSerializer.Serialize(new
+            {
+                server,
+                captured_at = capturedAt,
+                truncated = cut,
+                counters_returned = count,
+                counters_total = counters.Count,
+                size_note = cut
+                    ? $"{counters.Count - count} of {counters.Count} counters were left off the end to keep this answer within about 32 KB. Pass counter_name (e.g. 'Batch Requests/sec') and/or instance_name (e.g. a database name) to read a narrower set in full."
+                    : null,
+                counters = counters.Take(count)
+            }, McpHelpers.JsonOptions);
+        }).Json;
+    }
+
+    /// <summary>
     /// One row of <c>get_perfmon_stats</c>' latest snapshot, both SKUs. <c>value</c> is the stored counter (a rate
     /// counter's running total, a gauge's reading), <c>delta_value</c> its change over the last collection interval
     /// (null on a gauge, which stores none), and <c>counter_kind</c> the stored type's word

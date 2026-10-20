@@ -146,6 +146,15 @@ public sealed class McpLatestSnapshotStampTests
     {
         foreach (var (label, body, _) in LatestToolBodies())
         {
+            /* get_perfmon_stats hands its payload to the shared TrendPayloads.PerfmonLatestReply (#6180), so its stamp is not in
+               the tool's own source; the stamp is asserted by calling it: McpResponseBudgetFitPrefixTests
+               .PerfmonLatestReply_CutsToTheBudget_AndNotesHowToNarrow, the live default-call test beside it, and the Lite
+               default-call test in McpResponseBudgetPerfmonAndBlockedXmlToolTests. */
+            if (label.EndsWith(" get_perfmon_stats", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
             Assert.True(CapturedAtKey.IsMatch(Strip(body)),
                 $"{label}: no `captured_at =` on the payload — a latest read that never says when it was captured");
         }
