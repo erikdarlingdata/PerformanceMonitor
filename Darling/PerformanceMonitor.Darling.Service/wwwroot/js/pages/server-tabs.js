@@ -46,6 +46,7 @@ import { multiPicker, mergeSeriesRows } from "../multi-picker.js";
 import { pgPlanColumn } from "./pg-plan-viewer.js";
 import { READ_FIELDS } from "../read-fields.js";
 import { analysisFindingsTab } from "./analysis-findings.js";
+import { findingTitle, severityLabel } from "./analysis-findings.js";
 import { collectorRunBar, runNowColumns } from "./collector-run.js";
 import { downloadText } from "../grid-tools.js";
 import { deadlockGraphCell, processRowsInDatabases } from "./deadlock-graph.js";
@@ -1027,7 +1028,7 @@ export function dailySummaryPanels(server) {
         /* Click-through 10: newest day first, as the other grids open. */
         orderRows: newestFirst("summary_date"),
         emptyText:
-          "No collected days in this range. A day with ANY collection appears here even when every signal was quiet, so a missing day is a gap in collection rather than a quiet one.",
+          "No collected days in this range. A day with any collection appears here, so a missing day is a gap in collection.",
       });
 
       const missing = Array.isArray(data.days_missing) ? data.days_missing : [];
@@ -1625,10 +1626,8 @@ export const SERVER_TABS = [
   {
     id: "queries",
     label: "Queries",
-    note:
-      "Execution-plan analysis, the query heatmap, cached-plan retrieval and actual-plan re-execution are " +
-      "desktop-viewer features — they need a plan renderer and a command back to the monitored server, neither " +
-      "of which this read-only web seat has.",
+    note: "Plan analysis, the query heatmap, cached-plan retrieval and actual-plan re-execution are in the desktop viewer, not on this page.",
+    noteInfo: "They need a plan renderer and a connection back to the monitored server. This page only shows collected data.",
     build: (server, ctx) => [
       activeQueriesPanel(server, ctx),
       /* #2484: the viewer's Performance Trends tab is four charts over three reads. Duration and the
@@ -1740,8 +1739,7 @@ export const SERVER_TABS = [
         "regressions",
         QUERY_STORE_REGRESSION_COLUMNS,
         ctx.label,
-        "No query regressed against its baseline in this window. If this server has no history OLDER than " +
-          "the window there is nothing to compare against, and the read says so rather than calling it clear.",
+        "No query regressed against its baseline in this window. A server with no earlier history has nothing to compare against.",
         2,
         null,
         null,
@@ -1796,8 +1794,7 @@ export const SERVER_TABS = [
           stats: QS_CLERK_STATS,
           noteKey: "qs_overhead.memory_clerk.note",
           emptyText:
-            "MEMORYCLERK_QUERYDISKSTORE did not appear in any memory_clerks capture in this window. The " +
-            "collector stores the top 25 clerks over 1 MB per capture, so that is a RANK, not a zero.",
+            "The Query Store memory clerk was not among the top 25 clerks over 1 MB in any capture in this window, so this is a rank, not a zero.",
         },
       ]),
       /* #2484: the Query Heatmap tab. The interactive plot stays desktop-only by design -- there is no
@@ -2252,7 +2249,7 @@ export const POSTGRES_TABS = [
         PG_XMIN_STATS,
         ctx.label,
         1,
-        "Nothing held the xmin horizon back in this window — the healthy state, and the reason this tile is a sentence rather than three em-dashes."
+        "Nothing held the xmin horizon back in this window."
       ),
       /* The counts are over the rows RETURNED, not over the database: the read ranks worst-first and caps at
          `limit`, and table_count / past_threshold_count / growing_count are all computed after that cap. So the
@@ -2346,12 +2343,12 @@ export const POSTGRES_TABS = [
       ...fanout("get_pg_extensions", { server, hours: ctx.hours, limit: 50 }, [
         {
           title: "Extensions",
-          subtitle: ctx.label + ", per DATABASE not per cluster; 'available' means CREATE EXTENSION would work",
+          subtitle: ctx.label + ", per database; 'available' means CREATE EXTENSION would work",
           viz: "table",
           rowsKey: "extensions",
           columns: PG_EXTENSION_COLUMNS,
           emptyText:
-            "No extension inventory in this window. This collector runs DAILY, so a short window can be empty on a healthy server.",
+            "No extension inventory in this window. It is collected once a day, so a short window can be empty.",
           noteKey: "note",
         },
         {
@@ -2361,7 +2358,7 @@ export const POSTGRES_TABS = [
           rowsKey: "install_census",
           columns: PG_EXTENSION_CENSUS_COLUMNS,
           emptyText:
-            "Nothing is created on this server beyond what PostgreSQL installs itself, or the inventory has not been collected yet. This census counts only extensions somebody created: the available-but-absent ones are the actionable rows and they sort FIRST in the grid above.",
+            "Nothing is created on this server beyond what PostgreSQL installs itself, or the inventory has not been collected yet. This census counts only extensions somebody created: the available-but-absent ones are the actionable rows and they sort first in the grid above.",
         },
       ]),
     ],
@@ -2379,11 +2376,8 @@ export const POSTGRES_TABS = [
        the reader clicks. Saying it here rather than only in the panel matters more on THIS tab than on
        Waits, because the rest of the tab does fill, so a reader could reasonably read one empty grid among
        three as a fault. */
-    note:
-      "The blocking panels are collected at every PostgreSQL target, standbys included. Top Query Shapes is " +
-      "not: it comes from Amazon Aurora's aurora_stat_statements(), which core PostgreSQL has in no version, " +
-      "so on a stock PostgreSQL target that one panel is permanently empty and says so in its own words " +
-      "while the two above it keep working.",
+    note: "The blocking panels cover every PostgreSQL target. Top Query Shapes needs Amazon Aurora and stays empty elsewhere.",
+    noteInfo: "Top Query Shapes comes from aurora_stat_statements(), which core PostgreSQL does not have. The blocking panels above it work everywhere, standbys included.",
     build: (server, ctx) => [
       /* One read, three panels, and the FIRST of them is the denominator. get_pg_blocking is a periodic SAMPLE,
          not an event log: PostgreSQL records nothing unless asked, so "no chains" is ambiguous between a quiet
@@ -2463,8 +2457,8 @@ export const POSTGRES_TABS = [
         { server, hours: ctx.hours, limit: 25 },
         "facets",
         PG_PLAN_CAPTURE_READINESS_COLUMNS,
-        ctx.label + ", the newest reading of each facet in it; in CAUSAL order rather than alphabetically - fix them top to bottom; the remedy is per facet, and on Aurora/RDS it says which changes need a parameter group and a reboot",
-        "No readiness state collected. Unlike the grids around it an empty panel here is never the healthy answer - the collector writes one row per facet on every run whatever it finds - so this means it has not run for this server, or the window is shorter than its hourly cadence."
+        ctx.label + ", the newest reading of each facet in it; in the order to fix them, top to bottom; the remedy is per facet, and on Aurora/RDS it says which changes need a parameter group and a reboot",
+        "No readiness state collected. The collector has not run for this server yet, or the window is shorter than its hourly run."
       ),
       /* #3607: the rest of the logging surface, directly under plan-capture readiness because it is the
          other half of the same onboarding question - is this target telling us everything it could. Judged
@@ -2478,7 +2472,7 @@ export const POSTGRES_TABS = [
         { server },
         "facets",
         PG_LOGGING_AUDIT_COLUMNS,
-        "newest configuration snapshot; verdict describes the LINES each setting writes - partial means a threshold is filtering and is the recommended posture for log_min_duration_statement; the remedy is worded for this server's hosting flavour",
+        "newest configuration snapshot; verdict describes the log lines each setting writes - partial means a threshold is filtering and is the recommended posture for log_min_duration_statement; the remedy is worded for this server's hosting flavour",
         "No configuration snapshot to audit. pg_server_config runs hourly, so a server registered in the last hour has not reached its first collection - this is the absence of evidence, not a verdict about the server's logging."
       ),
       /* Directly UNDER the query shapes, because that is the question it answers (#2539). A statement whose
@@ -2503,7 +2497,7 @@ export const POSTGRES_TABS = [
           rowsKey: "databases",
           columns: PG_DATABASE_COLUMNS,
           emptyText:
-            "No per-database activity in this window. These are windowed DIFFERENCES, so a single snapshot is not enough — the panel above says which of the two it is.",
+            "No per-database activity in this window. These are changes over the window, so one snapshot is not enough.",
         },
       ]),
       /* #2663 the same counters over TIME, directly under the window they summarise. This is where the
@@ -2531,7 +2525,7 @@ export const POSTGRES_TABS = [
         "locks",
         PG_LOCK_STATS_COLUMNS,
         ctx.label + ", a sample of pg_locks rather than an event log; ungranted rows are the contended ones",
-        "No lock activity sampled in this window. This is a SAMPLE, so a lock taken and released between two captures does not appear - an empty grid is the healthy state, not proof nothing was ever locked."
+        "No lock activity sampled in this window. Locks are sampled, so one taken and released between two captures does not appear."
       ),
       /* #2629: what the queries above actually FILTER on. Placed on Activity rather than Storage because
          it is evidence about the workload, not about the disk — and it belongs beside top queries, since
@@ -2542,7 +2536,7 @@ export const POSTGRES_TABS = [
         { server, hours: ctx.hours, limit: 25 },
         "predicates",
         PG_PREDICATE_COLUMNS,
-        ctx.label + ", SAMPLED counts - scale by 1/sample rate and treat the product as an estimate",
+        ctx.label + ", sampled counts - scale by 1/sample rate and treat the product as an estimate",
         "No predicate statistics in this window. pg_qualstats samples executions (1% by default) and needs shared_preload_libraries plus a restart, so an empty panel here usually means it is not loaded."
       ),
       table(
@@ -2552,7 +2546,7 @@ export const POSTGRES_TABS = [
         "columns",
         PG_COLUMN_STATS_COLUMNS,
         ctx.label + ", the numbers the planner turns into row estimates; n_distinct is a ratio when negative",
-        "No column statistics in this window. This collector runs DAILY and reads only tables above a size floor, and pg_stats is privilege-filtered - a login without SELECT on a table sees nothing for it."
+        "No column statistics in this window. They are collected once a day, for tables above a size floor and only where the monitoring login can read the table."
       ),
       /* #2661 deadlocks, on Activity beside blocking because they are the same subject at its limit: a
          blocking chain that resolved, and one the server had to break by cancelling somebody. Below
@@ -2611,15 +2605,11 @@ export const POSTGRES_TABS = [
   {
     id: "vacuum",
     label: "Vacuum",
-    note:
-      "Four reads, one tab, on purpose. A session holds a transaction open; that transaction holds the xmin " +
-      "horizon; an old horizon starves vacuum of anything it is allowed to reclaim; starved vacuum falls " +
-      "behind on freezing; freezing falling behind is what ends in wraparound. Read alone each panel looks " +
-      "survivable — one long session here, a holder there, a backlog, plenty of XIDs left — and together " +
-      "they are one escalating story, in the order they are shown. Only the first panel names the SESSION, " +
-      "which is where the fix has to be made, and only it says whether that session pins anything at all: an " +
-      "open transaction holding no snapshot and no transaction id costs vacuum nothing, however long it has " +
-      "been idle.",
+    note: "Sessions, the xmin horizon, the vacuum backlog and freeze headroom, in the order one leads to the next.",
+    noteInfo:
+      "A session holds a transaction open, which holds the xmin horizon back, which stops vacuum reclaiming rows, which lets freezing fall " +
+      "behind and ends in wraparound. Each panel looks survivable alone. The first panel names the session, which is where the fix is made, " +
+      "and says whether it pins anything: an open transaction with no snapshot and no transaction id costs vacuum nothing.",
     build: (server, ctx) => [
       /* Ordered by CAUSE, not by severity: session, then horizon, then backlog, then headroom.
 
@@ -2637,7 +2627,7 @@ export const POSTGRES_TABS = [
           stats: PG_SESSION_STATE_STATS,
           span: 2,
           emptyText:
-            "No session held a transaction open past the collector's floor in this window — the healthy state, and a real all-clear rather than missing data. It is an all-clear about a SAMPLE, though: a transaction that opened and closed between two captures left no trace here.",
+            "No session held a transaction open past the collector's floor in this window. Sessions are sampled, so one that opened and closed between two captures left no trace.",
         },
         {
           title: "By Session",
@@ -2646,7 +2636,7 @@ export const POSTGRES_TABS = [
           rowsKey: "sessions",
           columns: PG_SESSION_STATE_COLUMNS,
           emptyText:
-            "No session held a transaction open past the collector's floor. Zero rows is the healthy answer — the collector stores nothing when every transaction is short — and it is a sample, so a transaction that opened and closed between two captures is invisible.",
+            "No session held a transaction open past the collector's floor. Sessions are sampled, so one that opened and closed between two captures is not shown.",
         },
       ]),
       ...fanout("get_pg_xmin_horizon", { server, hours: ctx.hours }, [
@@ -2735,11 +2725,8 @@ export const POSTGRES_TABS = [
        were. Hiding it would buy a tidier stock-PostgreSQL page at the price of a tab set that changes shape
        between two PostgreSQL servers in one fleet, and of making the one Aurora-specific capability we have
        invisible to the operator best placed to want it. */
-    note:
-      "Wait-event sampling on PostgreSQL is an Amazon Aurora feature: it comes from " +
-      "aurora_stat_system_waits(), which core PostgreSQL has in no version. On a stock PostgreSQL target this " +
-      "tab is permanently empty and the panel says so in its own words. The tab is here anyway so that the tab " +
-      "set does not change shape between two PostgreSQL servers in the same fleet.",
+    note: "Wait-event sampling needs Amazon Aurora. On other PostgreSQL targets this tab stays empty.",
+    noteInfo: "It comes from aurora_stat_system_waits(), which core PostgreSQL does not have.",
     build: (server, ctx) => [
       table(
         "Wait Events",
@@ -2798,11 +2785,8 @@ export const POSTGRES_TABS = [
   {
     id: "io",
     label: "I/O",
-    note:
-      "PostgreSQL reports I/O by BACKEND TYPE, object and context rather than by file, so there is no " +
-      "per-file grid here and the shape is deliberately not the SQL Server one. On Aurora the whole write side " +
-      "is NULL — backends there do not write data files, storage does — so the write columns read as blank " +
-      "rather than as zero, which would claim a measurement never taken.",
+    note: "PostgreSQL reports I/O by backend type, object and context, not by file.",
+    noteInfo: "On Aurora the write columns are blank rather than zero: backends there do not write data files, storage does.",
     build: (server, ctx) => [
       ...fanout("get_pg_io_stats", { server, hours: ctx.hours, limit: 20 }, [
         {
@@ -2971,8 +2955,8 @@ export const POSTGRES_TABS = [
         { server, hours: ctx.hours, limit: 25 },
         "indexes",
         PG_INDEX_BLOAT_COLUMNS,
-        ctx.label + ", ESTIMATED from catalog statistics with no page reads; a row with a reason instead of a number has NO answer, not a healthy one",
-        "Nothing recorded for this server. That is not the same as no bloat: this collector runs DAILY, so a short window or a fresh install is legitimately empty here. Read the coverage sentence for which it is.",
+        ctx.label + ", estimated from catalog statistics with no page reads; a row with a reason instead of a number has no answer, which is not the same as healthy",
+        "Nothing recorded for this server yet. It is collected once a day, so a short window or a new install is empty here.",
         2,
         "note"
       ),
@@ -2997,8 +2981,8 @@ export const POSTGRES_TABS = [
         { server, hours: ctx.hours, limit: 25, answered_only: true },
         "indexes",
         PG_INDEX_BLOAT_COLUMNS,
-        ctx.label + ", only the indexes that HAVE an answer, biggest reclaimable bytes first",
-        "No row came back for this server. The read answers no_answers with the census when nothing here has an answer, so reaching this sentence instead means the collector recorded nothing in the window - it runs DAILY.",
+        ctx.label + ", only the indexes that have an answer, biggest reclaimable bytes first",
+        "Nothing recorded for this server in this window. It is collected once a day.",
         2,
         "note"
       ),
@@ -3079,7 +3063,11 @@ export function findServerTab(id, tabs) {
  *  when the presets change. */
 export function tabNote(tab, widestHours) {
   const note = typeof tab.note === "function" ? tab.note(widestHours) : tab.note;
-  return note ? noticeStrip(note) : null;
+  if (!note) return null;
+  const strip = noticeStrip(note);
+  /* A longer background behind an info mark, not in the banner itself. */
+  if (tab.noteInfo) strip.appendChild(el("span", { class: "info-tip", tabindex: "0", role: "img", title: tab.noteInfo, "aria-label": tab.noteInfo, text: " \u24d8" }));
+  return strip;
 }
 
 /* ─────────────────────────── stat descriptors ─────────────────────────── */
@@ -3256,7 +3244,7 @@ const ALERT_READ_STATS = [
 
 const ALERT_READ_PANEL = {
   title: "Alerting Reads",
-  subtitle: "since this service started \u2014 NOT the trailing 7 days",
+  subtitle: "since this service started, not the trailing 7 days",
   viz: "stat",
   stats: ALERT_READ_STATS,
 };
@@ -4779,9 +4767,9 @@ const INDEX_COLUMNS = [
 const FINDING_COLUMNS = [
   { key: "last_seen", label: "Last seen", format: "time" },
   { key: "category", label: "Category" },
-  { key: "story_path", label: "Story", wrap: true },
-  { key: "severity", label: "Severity", format: "num2" },
-  { key: "confidence", label: "Confidence", format: "num2" },
+  /* The finding's headline, not its story key; severity as a word, not the score (the cards on the Recommendations tab do the same). */
+  { key: "story_path", label: "Finding", display: (r) => findingTitle(r), sortValue: (r) => findingTitle(r), wrap: true },
+  { key: "severity", label: "Severity", display: (r) => severityLabel(r.severity), sortValue: (r) => Number(r.severity), cellClass: (r) => { const w = severityLabel(r.severity); return w === "Info" ? null : "sev-" + w; } },
   { key: "occurrences", label: "Occurrences", format: "int" },
   { key: "first_seen", label: "First seen", format: "time" },
 ];
@@ -5232,7 +5220,7 @@ const PG_SESSION_STATE_STATS = [
   { key: "captures_with_sessions", label: "With reportable sessions", format: "int" },
   { key: "sessions_returned", label: "Sessions returned", format: "int" },
   { key: "horizon_holder_count", label: "Pinned the xmin horizon", format: "int" },
-  { key: "idle_in_transaction_pinning_nothing", label: "Idle in xact, pinning NOTHING", format: "int" },
+  { key: "idle_in_transaction_pinning_nothing", label: "Idle in transaction, pinning nothing", format: "int" },
   { key: "redacted_row_count", label: "Redacted rows", format: "int" },
   { key: "truncated", label: "Truncated", format: "bool" },
 ];

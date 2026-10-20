@@ -19,6 +19,7 @@ import { favoritesFirst, onChange as onLocalChange } from "../viewer-local.js";
 import { buildTagGroups, cardMatches } from "../fleet-groups.js";
 import { favoriteStar, alertBadge } from "../viewer-local-ui.js";
 import * as api from "../alerts-api.js";
+import { plainText } from "../plain-text.js";
 import { createRule, deleteRule } from "./mute-rules.js";
 
 const BAND_RANK = { Offline: 0, Critical: 1, Warning: 2, Healthy: 3 };
@@ -647,7 +648,7 @@ export function rollup(d) {
         "Deadlocks (recent)",
         deadlockClass,
         deadlockSub,
-        coverage ? coverage.note : null,
+        coverage ? plainText(coverage.note) : null,
       ),
     ]),
   ]);

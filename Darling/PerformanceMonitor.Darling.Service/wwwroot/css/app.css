@@ -997,6 +997,9 @@ td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
 .disclosure.cell-detail > .disc-summary:hover { color: var(--fg); text-decoration: underline; }
 .cell-detail .disc-body { white-space: normal; min-width: 16rem; max-width: 34rem; font-weight: normal; text-align: left; }
 .cell-detail-text { margin: 0; color: var(--dim); }
+/* #6156: an info mark after a banner; the longer background is its tooltip. */
+.info-tip { cursor: help; color: var(--muted); }
+.info-tip:hover, .info-tip:focus { color: var(--fg); }
 
 /* #5246: the deadlock graph under Blocking > Deadlock Graphs. */
 .dlg { display: flex; gap: 0.75rem; align-items: flex-start; flex-wrap: wrap; }
