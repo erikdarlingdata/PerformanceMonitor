@@ -91,7 +91,8 @@ SELECT edition = @edition, granted = @granted, cached = @cached;";
     /// The one kill batch (#5632, step 12), for a dry run and a write alike (<c>@dry</c>). It reads the session's facts, then decides in this order
     /// and stops at the first that applies: the engine is an Azure SQL Database (<c>azure_sql_database</c>: its kill is <see cref="AzureKillSql"/>, in the session's own database), the session is this connection's
     /// own (<c>own_session</c>), no such session (<c>session_gone</c>), a different <c>login_time</c> (<c>session_reused</c>: the id was reused),
-    /// not a user session (<c>not_user_session</c>), the login lacks <c>ALTER ANY CONNECTION</c> (<c>kill_permission_denied</c>). Then it runs the
+    /// not a user session (<c>not_user_session</c>), a session of Darling itself (a program name that starts with <c>PerformanceMonitorDarling</c>, or the
+    /// remediation login: <c>tool_login_session</c>), the login lacks <c>ALTER ANY CONNECTION</c> (<c>kill_permission_denied</c>). Then it runs the
     /// <c>KILL</c> unless <c>@dry</c>, and answers <c>dry_ok</c> or <c>killed</c>. The check and the <c>KILL</c> are one batch but not one atomic step:
     /// a session can end and its id be reused between them. The <c>KILL</c> text is built from the int parameter's decimal form only. After a real
     /// <c>KILL</c> it reads the session's request once (<c>command</c>, <c>percent_complete</c>), so a rollback shows. That read sits in TRY/CATCH, so
@@ -148,6 +149,9 @@ BEGIN
         SET @outcome = 'session_reused';
     ELSE IF @is_user = 0
         SET @outcome = 'not_user_session';
+    ELSE IF @program_name COLLATE Latin1_General_100_CI_AS LIKE N'PerformanceMonitorDarling%'
+         OR UPPER(@login_name) = UPPER(SUSER_SNAME())
+        SET @outcome = 'tool_login_session';
     ELSE IF ISNULL(HAS_PERMS_BY_NAME(NULL, NULL, 'ALTER ANY CONNECTION'), 0) <> 1
         SET @outcome = 'kill_permission_denied';
     ELSE IF @dry = 1
@@ -424,7 +428,7 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
             var outcome = reader.IsDBNull(0) ? null : reader.GetString(0);
             var found = !reader.IsDBNull(1) && Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture) == 1;
             KillSessionFacts? facts = null;
-            if (found && outcome is not KillOutcomes.OwnSession)
+            if (found && outcome is not (KillOutcomes.OwnSession or KillOutcomes.ToolLoginSession or KillOutcomes.SessionInOtherDatabase))
             {
                 facts = new KillSessionFacts(sessionId,
                     reader.IsDBNull(2) ? null : reader.GetDateTime(2),
@@ -457,7 +461,7 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
         var result = outcome switch
         {
             KillOutcomes.AzureSqlDatabase => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.DatabaseRequired,
-                "This server is an Azure SQL Database, where a session is reached only from inside its own database: call kill_session again with database_name, the database the session is in. Nothing was run."),
+                "This server answered as an Azure SQL Database, but Darling has not recorded its engine edition yet (Darling records it when its collector connects to the server, which has not happened yet or has not happened since the server became an Azure SQL Database), so this call went the SQL Server way and database_name was not used. Call kill_session again after the next collection; then pass database_name, the database the session is in. Nothing was run."),
             KillOutcomes.NotAzureSqlDatabase => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.NotAzureSqlDatabase,
                 "The server answered as an engine that is not an Azure SQL Database, so the Azure kill was not run. Nothing was run."),
             KillOutcomes.WrongDatabase => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.WrongDatabase,
@@ -469,7 +473,7 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
             KillOutcomes.SessionInOtherDatabase => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.SessionInOtherDatabase,
                 $"Session {sessionId} is connected to another database, not {database}. Nothing was run."),
             KillOutcomes.ToolLoginSession => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.ToolLoginSession,
-                $"Session {sessionId} belongs to the monitoring login or the remediation login, which this tool never kills. Nothing was run."),
+                $"Session {sessionId} belongs to Darling itself (its program name starts with PerformanceMonitorDarling, it has no login name, or it is the remediation login's), which this tool never kills. Nothing was run."),
             KillOutcomes.SessionGone when azure => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.SessionGone,
                 $"Session {sessionId} was not found on the primary of database {database}. It is gone, or it is on a named replica or a read-only secondary, which this tool does not reach. Nothing was run."),
             KillOutcomes.PermissionDenied when azure => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.KillPermissionDenied,
@@ -490,8 +494,12 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
             _ => RemediationResult.Failed(name, dryRun, "The server returned an answer to the session check that this code does not know. Nothing is known to have run."),
         };
 
-        /* A reused id answers nothing about the session that has it now (#5632). */
-        result = result with { Session = outcome == KillOutcomes.SessionReused ? null : facts };
+        /* A reused id answers nothing about the session that has it now, and neither does a refusal about the tool's own session or a session in
+           another database: those facts are not the session the caller was allowed to ask about (#5632). */
+        result = result with
+        {
+            Session = outcome is KillOutcomes.SessionReused or KillOutcomes.OwnSession or KillOutcomes.ToolLoginSession or KillOutcomes.SessionInOtherDatabase ? null : facts,
+        };
         if (outcome == KillOutcomes.Killed && !rollbackRead)
         {
             result = result with { Message = $"Session {sessionId} was killed. Whether a rollback is running was not read; read get_blocking to see its locks clear." };

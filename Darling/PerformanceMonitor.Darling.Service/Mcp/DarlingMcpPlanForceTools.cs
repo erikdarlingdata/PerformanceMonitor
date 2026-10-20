@@ -117,7 +117,7 @@ public sealed class DarlingMcpPlanForceTools
         "PostgreSQL: pass backend_id exactly as get_pg_blocking (root_backend_id) or get_pg_session_states (backend_id) returns it, a string of digits, and session_id as the pid the same read returned (root_pid or pid); leave login_time out. backend_id is the session's start time in epoch seconds followed by its pid in seven digits, and session_id must agree with it. The pid and the start second are checked in the SAME statement that calls pg_terminate_backend, so a pid given to a session that started in another second is never ended. On Windows a pid can come back within about a second, so there a new session can share the pid and the start second. A login that cannot signal the session (no pg_signal_backend, a superuser's session, or no pg_read_all_stats to see its start time) is refused before any kill is tried. Only client sessions are ended. " +
         "The tool sets no limit of its own. Whether to kill a running session, an idle one, one with an open transaction, or a login on a protected list is the agent's instruction file's call, not this tool's. " +
         "On SQL Server the answer lists the session's login_name, host_name, program_name, status, open_transaction_count, last_request_end_time and log_bytes_used (no statement text). If log_bytes_used is above 0 the kill rolls the work back: the session keeps its locks until the rollback ends, so do not kill it again, and read get_blocking to see it clear. After a write, rollback says whether a rollback is running and its percent_complete, read once. On PostgreSQL it lists the backend_id, login_name, application_name, client_addr, database, state, wait_event, backend_type, backend_start, xact_start and state_change (no statement text); ending a session rolls its open transaction back, except a session waiting for a synchronous standby, which has already committed. After a write, still_there says whether the backend was still there when read right after the signal. There is no undo. " +
-        "Refusals: Azure SQL Database only: database_required, database_excluded, database_not_monitored, wrong_database, not_primary, view_state_permission_denied, session_in_other_database, tool_login_session (a session of the monitoring or remediation login); database_unavailable (paused or resuming serverless, nothing sent) fails. Every engine: own_session, session_gone, session_reused (the id now belongs to another session; nothing about that session is returned), backend_id_has_no_session_start (PostgreSQL: the id holds the server's start time because the monitoring login lacks pg_read_all_stats), not_user_session, kill_permission_denied (SQL Server: the login lacks ALTER ANY CONNECTION), not_permitted (PostgreSQL: the login cannot signal that session; the message names the missing grant), bad_session_id, bad_login_time, bad_backend_id, server_clock_unknown (no clock collected for the server yet), sign_in_not_strong_enough (PostgreSQL: the server does not offer SCRAM-SHA-256 sign-in over TLS, which only a person can change on the server) and kill_not_built_on_platform (Azure SQL Database). " +
+        "Refusals: Azure SQL Database only: database_required, database_excluded, database_not_monitored, wrong_database, not_primary, view_state_permission_denied, session_in_other_database, database_unavailable (paused or resuming serverless, nothing sent) fails. Every engine: tool_login_session (a session of Darling itself: its program or application name starts with PerformanceMonitorDarling, or it is the remediation login's), own_session, session_gone, session_reused (the id now belongs to another session; nothing about that session is returned), backend_id_has_no_session_start (PostgreSQL: the id holds the server's start time because the monitoring login lacks pg_read_all_stats), not_user_session, kill_permission_denied (SQL Server: the login lacks ALTER ANY CONNECTION), not_permitted (PostgreSQL: the login cannot signal that session; the message names the missing grant), bad_session_id, bad_login_time, bad_backend_id, server_clock_unknown (no clock collected for the server yet), sign_in_not_strong_enough (PostgreSQL: the server does not offer SCRAM-SHA-256 sign-in over TLS, which only a person can change on the server). " +
         "mcp.allowWrites never bypasses the gate, and a dry run needs it too (it signs in with the remediation login). The change is journaled in Agent changes (kind session_kill). Answers status dry_run, done, refused (reason), failed, or outcome_unknown (the kill was sent and its reply was lost, so the session may have ended; read get_blocking or get_pg_session_states before trying again), with session, warnings, rollback and journal_id.")]
     public static Task<string> KillSession(
         NpgsqlDataSource postgres,
@@ -452,7 +452,17 @@ public sealed class DarlingMcpPlanForceTools
 
             /* 3: the gate, for a dry run too. The permit's Id and the journal's target.id are the session id in decimal. */
             var idText = sessionId.ToString(CultureInfo.InvariantCulture);
-            var target = new AgentActionTarget(resolved.ServerId, resolved.ServerName, idText, null);
+            string? targetDatabase = null;
+            if (azure)
+            {
+                /* The database is part of what the permit and the journal name: a permit for session 87 in one database never reaches session 87 in
+                   another. Its shape is checked before the gate; the registry and the collected data are checked after it (#5632). */
+                targetDatabase = AzureDatabaseShape(database_name);
+                if (targetDatabase is null)
+                    return await RefuseBeforeGateAsync(store, agent_action, tool, AzureDatabaseRequired, AzureDatabaseRequiredMessage, ct);
+            }
+
+            var target = new AgentActionTarget(resolved.ServerId, resolved.ServerName, idText, targetDatabase);
             var decision = await ServerActionGate.AuthorizeAsync(store, owner, logger, tool, ServerActionNames.KillSession, agent_action, target, ct);
             if (decision.Refusal is { } gateRefusal)
                 return DarlingAgentActionGate.RefusalAnswer(gateRefusal);
@@ -476,22 +486,20 @@ public sealed class DarlingMcpPlanForceTools
             var executor = new SqlServerRemediationExecutor(resolved.ServerId, row.Server, row.UserName, row.SecretSlot, logger);
 
             /* 4b: Azure SQL Database. The database is never free-form: it is checked against the registry entry and the collected data. */
-            string? killDatabase = null;
             if (azure)
             {
-                var (database, refusal) = await AzureKillDatabaseAsync(postgres, resolved.ServerId, row, database_name, ct);
+                var refusal = await AzureKillDatabaseAsync(postgres, resolved.ServerId, row, targetDatabase!, ct);
                 if (refusal is not null)
                 {
                     await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, refusal.Reason, ct);
                     return DarlingAgentActionGate.RefusalAnswer(refusal);
                 }
-
-                killDatabase = database;
             }
 
-            Task<RemediationResult> Kill(bool dryRun, CancellationToken token) => killDatabase is null
+            /* The Azure kill reads its database from the permit, the one the gate was asked about. */
+            Task<RemediationResult> Kill(bool dryRun, CancellationToken token) => !azure
                 ? executor.KillSessionAsync(permit, sessionId, loginLocal, dryRun, token)
-                : executor.KillAzureSessionAsync(permit, killDatabase, sessionId, loginLocal, row.MonitoringUserName, dryRun, token);
+                : executor.KillAzureSessionAsync(permit, sessionId, loginLocal, dryRun, token);
 
             /* 5: one batch decides, for a dry run and before a write: the engine, own session, gone, reused, not a user session, the grant. */
             var dry = await Kill(true, ct);
@@ -1016,22 +1024,14 @@ SELECT EXISTS (SELECT 1 FROM v_dmv_blocking_snapshots WHERE server_id = $1 AND d
     /// target is known to hold: the entry's own database, or a database Darling collected a blocking row from for this server in the last day.
     /// The kill batch then checks on the server that the connection landed there, read-write, and that the session is in it.
     /// </summary>
-    private static async Task<(string? Database, AgentActionRefusal? Refusal)> AzureKillDatabaseAsync(NpgsqlDataSource postgres, int serverId, ServerRow row,
-        string? databaseName, CancellationToken ct)
+    private static async Task<AgentActionRefusal?> AzureKillDatabaseAsync(NpgsqlDataSource postgres, int serverId, ServerRow row,
+        string database, CancellationToken ct)
     {
-        var database = databaseName?.Trim();
-        if (string.IsNullOrEmpty(database) || database.Length > 128 || database.Any(char.IsControl)
-            || string.Equals(database, "master", StringComparison.OrdinalIgnoreCase))
-        {
-            return (null, new AgentActionRefusal(AzureDatabaseRequired,
-                "This server is an Azure SQL Database, where a session is reached only from inside its own database: pass database_name, the database_name of the get_blocking row you read (never master). Nothing was run."));
-        }
-
-        if (row.ExcludedDatabases is { } excluded && excluded.Any(e => string.Equals(e, database, StringComparison.OrdinalIgnoreCase)))
-            return (null, new AgentActionRefusal(AzureDatabaseExcluded, $"Database {database} is excluded in this server's entry, so Darling does not act in it. Nothing was run."));
+        if (IsExcludedDatabase(row.ExcludedDatabases, database))
+            return new AgentActionRefusal(AzureDatabaseExcluded, $"Database {database} is excluded in this server's entry, so Darling does not act in it. Nothing was run.");
 
         if (string.Equals(row.Server.Database, database, StringComparison.OrdinalIgnoreCase))
-            return (database, null);
+            return null;
 
         await using var command = postgres.CreateCommand(AzureDatabaseSeenSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
@@ -1039,9 +1039,29 @@ SELECT EXISTS (SELECT 1 FROM v_dmv_blocking_snapshots WHERE server_id = $1 AND d
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = database, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
         var seen = await command.ExecuteScalarAsync(ct) is true;
         return seen
-            ? (database, null)
-            : (null, new AgentActionRefusal(AzureDatabaseUnknown,
-                $"Database {database} is not this server's registered database, and Darling has collected no blocking row from it in the last day, so the kill does not connect to it. Pass the database_name of the get_blocking row you read. Nothing was run."));
+            ? null
+            : new AgentActionRefusal(AzureDatabaseUnknown,
+                $"Database {database} is not this server's registered database, and Darling has collected no blocking row from it in the last day, so the kill does not connect to it. Pass the database_name of the get_blocking row you read. Nothing was run.");
+    }
+
+    /// <summary>Whether the server entry's excluded list names <paramref name="database"/>: entries are compared trimmed, and without regard to case (#5632).</summary>
+    internal static bool IsExcludedDatabase(string[]? excluded, string database) =>
+        excluded is not null && excluded.Any(e => string.Equals(e?.Trim(), database, StringComparison.OrdinalIgnoreCase));
+
+    internal const string AzureDatabaseRequiredMessage =
+        "This server is an Azure SQL Database, where a session is reached only from inside its own database: pass database_name, the database_name of the get_blocking row you read (never master). Nothing was run.";
+
+    /// <summary>
+    /// The shape of <c>database_name</c> for an Azure SQL Database kill (#5632): trimmed, 1 to 128 characters, no control character, and not
+    /// <c>master</c>. Null when it is not one. Checked before the gate, because the database is part of what the gate permits and the journal records.
+    /// </summary>
+    internal static string? AzureDatabaseShape(string? databaseName)
+    {
+        var database = databaseName?.Trim();
+        return string.IsNullOrEmpty(database) || database.Length > 128 || database.Any(char.IsControl)
+            || string.Equals(database, "master", StringComparison.OrdinalIgnoreCase)
+                ? null
+                : database;
     }
 
     /// <summary>One statement an undo would run, and the words around it.</summary>

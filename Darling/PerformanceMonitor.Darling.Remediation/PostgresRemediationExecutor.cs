@@ -81,7 +81,8 @@ SELECT a.pid,
        pg_catalog.pg_has_role(current_user, 'pg_signal_backend', 'USAGE') AS caller_has_signal_backend,
        coalesce((SELECT c.rolsuper FROM pg_catalog.pg_roles AS c WHERE c.rolname OPERATOR(pg_catalog.=) current_user), false) AS caller_is_superuser,
        a.wait_event,
-       extract(epoch FROM pg_catalog.pg_postmaster_start_time())::bigint AS postmaster_epoch
+       extract(epoch FROM pg_catalog.pg_postmaster_start_time())::bigint AS postmaster_epoch,
+       coalesce(a.usename OPERATOR(pg_catalog.=) current_user, false) AS target_is_caller
 FROM pg_catalog.pg_stat_activity AS a
 LEFT JOIN pg_catalog.pg_roles AS r ON r.oid OPERATOR(pg_catalog.=) a.usesysid
 WHERE a.pid OPERATOR(pg_catalog.=) @pid;";
@@ -90,7 +91,8 @@ WHERE a.pid OPERATOR(pg_catalog.=) @pid;";
     /// The kill: the identity check and the termination are ONE statement, so nothing separates them. The start second is derived exactly the way the
     /// collector derives the one inside <c>backend_id</c> (<c>extract(epoch FROM backend_start)::bigint</c>, the cast's own rounding), and a backend
     /// with no visible start time matches nothing. No row means nothing was signalled. A row is <c>pg_terminate_backend</c>'s answer: true when the
-    /// server accepted the signal. The tool's own backend is never matched, and neither is anything but a client session: the check
+    /// server accepted the signal. The tool's own backend is never matched, nor is a session of Darling (an <c>application_name</c> that starts with
+    /// <c>PerformanceMonitorDarling</c>, or the remediation login's own role), and neither is anything but a client session: the check
     /// <see cref="KillRefusal"/> makes from the read before is repeated here, in the statement that ends the session.
     /// </summary>
     internal const string KillSql = @"
@@ -99,7 +101,9 @@ FROM pg_catalog.pg_stat_activity AS a
 WHERE a.pid OPERATOR(pg_catalog.=) @pid
 AND   extract(epoch FROM a.backend_start)::bigint OPERATOR(pg_catalog.=) @start_epoch
 AND   a.backend_type OPERATOR(pg_catalog.=) 'client backend'
-AND   a.pid OPERATOR(pg_catalog.<>) pg_catalog.pg_backend_pid();";
+AND   a.pid OPERATOR(pg_catalog.<>) pg_catalog.pg_backend_pid()
+AND   pg_catalog.lower(pg_catalog.left(coalesce(a.application_name, ''), 25)) OPERATOR(pg_catalog.<>) 'performancemonitordarling'
+AND   coalesce(a.usename OPERATOR(pg_catalog.<>) current_user, true);";
 
     /// <summary>Read AFTER the kill statement: is the pid still there, is it the same start second, and is it a client session.</summary>
     internal const string AfterSql = @"
@@ -112,7 +116,7 @@ WHERE a.pid OPERATOR(pg_catalog.=) @pid;";
     /// <summary>The backend's row as <see cref="FactsSql"/> reads it, with what the login may do to it.</summary>
     internal sealed record PgBackendRow(
         PgKillSessionFacts Facts, int OwnPid, bool TargetIsSuperuser, bool CallerHasTargetRole, bool CallerHasSignalBackend, bool CallerIsSuperuser,
-        long? PostmasterEpoch = null);
+        long? PostmasterEpoch = null, bool TargetIsCallerRole = false);
 
     /// <summary>
     /// How long the read after a kill that signalled waits first. pg_terminate_backend only sends the signal; an idle backend is gone a few
@@ -321,7 +325,7 @@ WHERE a.pid OPERATOR(pg_catalog.=) @pid;";
             reader.IsDBNull(10) ? null : reader.GetFieldValue<DateTime>(10),
             reader.IsDBNull(16) ? null : reader.GetString(16));
         return new PgBackendRow(facts, reader.GetInt32(11), reader.GetBoolean(12), reader.GetBoolean(13), reader.GetBoolean(14), reader.GetBoolean(15),
-            reader.IsDBNull(17) ? null : reader.GetInt64(17));
+            reader.IsDBNull(17) ? null : reader.GetInt64(17), !reader.IsDBNull(18) && reader.GetBoolean(18));
     }
 
     private static async Task<RemediationResult> AfterAsync(NpgsqlConnection connection, string name, int pid, long startEpoch, PgKillSessionFacts facts, CancellationToken ct)
@@ -410,6 +414,14 @@ WHERE a.pid OPERATOR(pg_catalog.=) @pid;";
                 $"Backend {pid} is not a client session (it is {facts.BackendType ?? "unknown"}). Nothing was run.") with { PgSession = facts };
         }
 
+        /* The tool never ends its own program's sessions or the remediation role's, whatever the login may signal. The monitoring login is not
+           matched: a server monitored as a superuser would make its real blocker unkillable. No facts: they are not the caller's to read (#5632). */
+        if (row.TargetIsCallerRole || IsDarlingProgram(facts.ApplicationName))
+        {
+            return RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.ToolLoginSession,
+                $"Backend {pid} belongs to Darling itself (its application name starts with PerformanceMonitorDarling, or it is the remediation login's), which this tool never ends. Nothing was run.");
+        }
+
         if (row.TargetIsSuperuser && !row.CallerIsSuperuser)
         {
             return RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.NotPermitted,
@@ -424,6 +436,10 @@ WHERE a.pid OPERATOR(pg_catalog.=) @pid;";
 
         return null;
     }
+
+    /// <summary>True for an application name that starts with <c>PerformanceMonitorDarling</c> (the monitoring and the remediation connections), whatever its case.</summary>
+    internal static bool IsDarlingProgram(string? applicationName) =>
+        applicationName is not null && applicationName.StartsWith("PerformanceMonitorDarling", StringComparison.OrdinalIgnoreCase);
 
     private static string ReasonFor(RemediationLoginError error) => error switch
     {

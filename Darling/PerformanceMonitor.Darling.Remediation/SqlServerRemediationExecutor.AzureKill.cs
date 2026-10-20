@@ -7,9 +7,11 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Data;
 using System.Globalization;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
@@ -35,7 +37,7 @@ public sealed partial class SqlServerRemediationExecutor
     /// <c>VIEW DATABASE STATE</c>, without which the session view shows only its own session (<c>view_state_permission_denied</c>); the session
     /// is this connection's own (<c>own_session</c>); no such session on this compute (<c>session_gone</c>); a different <c>login_time</c>
     /// (<c>session_reused</c>); the session is in another database (<c>session_in_other_database</c>); not a user session
-    /// (<c>not_user_session</c>); the session's login is the remediation login or the monitoring login (<c>tool_login_session</c>); the login lacks
+    /// (<c>not_user_session</c>); the session has no login name, belongs to a Darling program (<c>PerformanceMonitorDarling%</c>), or is the remediation login's (<c>tool_login_session</c>); the login lacks
     /// <c>KILL DATABASE CONNECTION</c> (<c>kill_permission_denied</c>). Then the <c>KILL</c> unless <c>@dry</c>, built from the int parameter's
     /// decimal form only, and the same TRY/CATCH read of the session's request after it as <see cref="KillSql"/>. The columns are
     /// <see cref="KillSql"/>'s, so the one reader serves both.
@@ -50,6 +52,9 @@ DECLARE @is_user bit = NULL;
 DECLARE @session_database_id int = NULL;
 DECLARE @login_name nvarchar(128) = NULL;
 DECLARE @own_login nvarchar(128) = NULL;
+DECLARE @login_base nvarchar(128) = NULL;
+DECLARE @own_login_base nvarchar(128) = NULL;
+DECLARE @suser_base nvarchar(128) = NULL;
 DECLARE @host_name nvarchar(128) = NULL;
 DECLARE @program_name nvarchar(128) = NULL;
 DECLARE @status nvarchar(30) = NULL;
@@ -97,6 +102,12 @@ BEGIN
     WHERE s.session_id = @session_id
     OPTION(RECOMPILE);
 
+    /* A sign-in can be written name or name@server: compare the name part, so either form of the remediation login is the tool's own. */
+    DECLARE @server_suffix nvarchar(200) = N'@' + CONVERT(nvarchar(128), @@SERVERNAME);
+    SET @login_base = ISNULL(REPLACE(@login_name, @server_suffix, N''), @login_name);
+    SET @own_login_base = ISNULL(REPLACE(@own_login, @server_suffix, N''), @own_login);
+    SET @suser_base = ISNULL(REPLACE(CONVERT(nvarchar(128), SUSER_SNAME()), @server_suffix, N''), CONVERT(nvarchar(128), SUSER_SNAME()));
+
     IF @session_id = @@SPID
         SET @outcome = 'own_session';
     ELSE IF @found = 0
@@ -107,7 +118,9 @@ BEGIN
         SET @outcome = 'session_in_other_database';
     ELSE IF @is_user = 0
         SET @outcome = 'not_user_session';
-    ELSE IF UPPER(@login_name) IN (UPPER(@own_login), UPPER(SUSER_SNAME()), UPPER(@monitoring_login))
+    ELSE IF @login_name IS NULL
+         OR @program_name COLLATE Latin1_General_100_CI_AS LIKE N'PerformanceMonitorDarling%'
+         OR UPPER(@login_base) IN (UPPER(@own_login_base), UPPER(@suser_base))
         SET @outcome = 'tool_login_session';
     ELSE IF ISNULL(HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'KILL DATABASE CONNECTION'), 0) <> 1
         SET @outcome = 'kill_permission_denied';
@@ -147,6 +160,30 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
     internal static bool IsAzureTransient(SqlException ex) =>
         ex.Errors.Cast<SqlError>().Any(e => IsAzureTransientNumber(e.Number)) || IsAzureTransientNumber(ex.Number);
 
+    /// <summary>
+    /// An Azure error as the answer and the log say it (#5632). The service's text for 40613, 40197 and 40501 names the logical server and carries a
+    /// tracing or incident id, so those three are reported by number with fixed wording. Any other text has the secret, a quoted server name and
+    /// any GUID taken out of it.
+    /// </summary>
+    internal static string AzureErrorText(IEnumerable<int> numbers, string message, string secret)
+    {
+        var all = numbers.ToList();
+        if (all.Contains(40613))
+            return "SQL error 40613: the database is not available now.";
+        if (all.Contains(40197))
+            return "SQL error 40197: the service reported an error processing the request.";
+        if (all.Contains(40501))
+            return "SQL error 40501: the service is busy.";
+        var text = secret.Length == 0 ? message : message.Replace(secret, "***", StringComparison.Ordinal);
+        text = Regex.Replace(text, @"server\s+['""][^'""]*['""]", "the server", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+        return Regex.Replace(text, @"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", "<id>", RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+    }
+
+    /// <summary><see cref="AzureErrorText(IEnumerable{int}, string, string)"/> for the exception the driver raised.</summary>
+    internal static string AzureErrorText(Exception ex, RemediationLogin login) => ex is SqlException sql
+        ? AzureErrorText(sql.Errors.Cast<SqlError>().Select(e => e.Number).Append(sql.Number), sql.Message, login.Secret)
+        : AzureErrorText([], ex.GetType().Name + ": " + ex.Message, login.Secret);
+
     /// <summary>One error number of <see cref="IsAzureTransient"/>.</summary>
     internal static bool IsAzureTransientNumber(int number) =>
         number is 40613 or 40197 or 40501 or 49918 or 49919 or 49920 or 10928 or 10929 || SqlErrorClassification.IsTransient(number);
@@ -164,25 +201,24 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
 
     /// <summary>
     /// Kills one session on an Azure SQL Database, only when it is still the session the caller named, in the database the caller named, on the
-    /// primary. <paramref name="database"/> is the session's database: the connection opens it (never <c>master</c>), read-write.
-    /// <paramref name="monitoringLogin"/> is the monitoring login's name: its sessions are refused, like the remediation login's own.
+    /// primary. The database is the permit's (<see cref="ServerActionPermit.Database"/>): the gate was asked about that database, so a permit for
+    /// one session id never reaches the same id in another database. The connection opens it (never <c>master</c>), read-write.
     /// A transient error on the open is retried (<see cref="AzureOpenWaits"/>); the kill batch is sent once, and never again.
     /// </summary>
-    public async Task<RemediationResult> KillAzureSessionAsync(ServerActionPermit permit, string database, int sessionId, DateTime loginTime,
-        string? monitoringLogin, bool dryRun, CancellationToken ct)
+    public async Task<RemediationResult> KillAzureSessionAsync(ServerActionPermit permit, int sessionId, DateTime loginTime, bool dryRun, CancellationToken ct)
     {
         const string name = "kill_session";
         if (sessionId <= 0)
             return Log(RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.BadSession, "A session id is a positive whole number. Nothing was run."));
+        if (PermitRefusal(permit, ServerActionNames.KillSession, sessionId.ToString(CultureInfo.InvariantCulture), name, dryRun) is { } mismatch)
+            return mismatch;
+        var database = permit.Database;
         if (string.IsNullOrWhiteSpace(database) || database.Length > 128 || ContainsControl(database)
             || string.Equals(database, "master", StringComparison.OrdinalIgnoreCase))
         {
             return Log(RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.BadDatabase,
-                "The kill on an Azure SQL Database names the user database the session is in, never master. Nothing was run."));
+                "The kill on an Azure SQL Database names the user database the session is in, never master. The permit names none, or names one that cannot be. Nothing was run."));
         }
-
-        if (PermitRefusal(permit, ServerActionNames.KillSession, sessionId.ToString(CultureInfo.InvariantCulture), name, dryRun) is { } mismatch)
-            return mismatch;
 
         var resolution = RemediationLoginResolver.Resolve(_userName, _secretSlot);
         if (resolution.Login is not { } login)
@@ -199,7 +235,6 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
             command.Parameters.Add(new SqlParameter("@login_time", SqlDbType.DateTime) { Value = DateTime.SpecifyKind(loginTime, DateTimeKind.Unspecified) });
             command.Parameters.Add(new SqlParameter("@dry", SqlDbType.Bit) { Value = dryRun });
             command.Parameters.Add(new SqlParameter("@database", SqlDbType.NVarChar, 128) { Value = database });
-            command.Parameters.Add(new SqlParameter("@monitoring_login", SqlDbType.NVarChar, 128) { Value = (object?)monitoringLogin ?? DBNull.Value });
             try
             {
                 return Log(await ReadKillAnswerAsync(command, name, dryRun, sessionId, ct, database));
@@ -208,7 +243,7 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
             {
                 /* The batch was sent and its reply was lost: the server may have run the KILL. Never reported as failed, never sent again (#5632). */
                 return Log(RemediationResult.Unknown(name,
-                    $"The kill batch for session {sessionId} in database {database} was sent, but its reply was lost ({Scrub(ex.GetType().Name + ": " + ex.Message, login)}). Session {sessionId} may have been killed. Read get_blocking to see whether it is still there before you try again."));
+                    $"The kill batch for session {sessionId} in database {database} was sent, but its reply was lost ({AzureErrorText(ex, login)}). Session {sessionId} may have been killed. Read get_blocking to see whether it is still there before you try again."));
             }
         }
         catch (OperationCanceledException)
@@ -217,11 +252,11 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
         }
         catch (SqlException ex)
         {
-            return Log(RemediationResult.Failed(name, dryRun, Scrub(ex.Message, login)));
+            return Log(RemediationResult.Failed(name, dryRun, AzureErrorText(ex, login)));
         }
         catch (Exception ex)
         {
-            return Log(RemediationResult.Failed(name, dryRun, Scrub(ex.GetType().Name + ": " + ex.Message, login)));
+            return Log(RemediationResult.Failed(name, dryRun, AzureErrorText(ex, login)));
         }
     }
 
@@ -243,7 +278,7 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
             catch (SqlException ex) when (ex.Number is 18456 or 4060 or 916)
             {
                 return RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.SignInFailed,
-                    $"The remediation login could not open database {database}: {Scrub(ex.Message, login)} The kill connects to the session's own database, so the "
+                    $"The remediation login could not open database {database}: {AzureErrorText(ex, login)} The kill connects to the session's own database, so the "
                     + $"remediation login needs a user there (CREATE USER <user> FROM LOGIN <login>, or a contained user with a password), with {AzureGrants} Nothing was run.");
             }
             catch (SqlException ex) when (IsAzureTransient(ex))
@@ -260,7 +295,7 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
                     (paused
                         ? $"Database {database} is not available now. A serverless database that is paused or resuming answers this way; it resumes on this sign-in, so try again in a minute. "
                         : $"Database {database} did not accept the connection after {attempt + 1} tries. ")
-                    + $"The server said: {Scrub(ex.Message, login)} Nothing was sent.",
+                    + $"The server said: {AzureErrorText(ex, login)} Nothing was sent.",
                     RemediationResult.Reasons.DatabaseUnavailable);
             }
         }

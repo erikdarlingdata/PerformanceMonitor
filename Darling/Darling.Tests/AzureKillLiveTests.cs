@@ -60,7 +60,7 @@ public sealed class AzureKillLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(Host) || database == "(none)" || string.IsNullOrEmpty(Environment.GetEnvironmentVariable(SecretEnv)),
             "Set DARLING_TEST_AZURE_SQL, DARLING_TEST_AZURE_DATABASES and DARLING_TEST_AZURE_PASSWORD to run the Azure SQL Database kill live tests.");
 
-    private static SqlConnectionStringBuilder Builder(string database, string user) => new()
+    private static SqlConnectionStringBuilder Builder(string database, string user, string program = "pm5632_victim") => new()
     {
         DataSource = "tcp:" + Host + ",1433",
         InitialCatalog = database,
@@ -71,14 +71,14 @@ public sealed class AzureKillLiveTests
         /* No connection resiliency: with it the driver quietly reconnects after a kill, and the test could not see the session end. */
         ConnectRetryCount = 0,
         Pooling = false,
-        ApplicationName = "PerformanceMonitorDarling-KillVictim",
+        ApplicationName = program,
     };
 
     private static SqlServerRemediationExecutor Executor(string user = Fix) =>
         new(1, new RemediationServer(Host!, EncryptMode: "Mandatory"), user, "env:" + SecretEnv);
 
-    private static ServerActionPermit Permit(int sessionId) =>
-        new(ServerActionNames.KillSession, 1, "azure-test", sessionId.ToString(CultureInfo.InvariantCulture), null, Guid.NewGuid(), "person:test");
+    private static ServerActionPermit Permit(int sessionId, string? database) =>
+        new(ServerActionNames.KillSession, 1, "azure-test", sessionId.ToString(CultureInfo.InvariantCulture), database, Guid.NewGuid(), "person:test");
 
     /// <summary>A session of <paramref name="user"/> in <paramref name="database"/> that holds an exclusive row lock in an open transaction.</summary>
     private sealed record Victim(SqlConnection Connection, SqlTransaction? Transaction, int SessionId, DateTime LoginTime) : IAsyncDisposable
@@ -90,10 +90,10 @@ public sealed class AzureKillLiveTests
         }
     }
 
-    private static async Task<Victim> OpenVictimAsync(string database, string user = App, bool holdLock = true)
+    private static async Task<Victim> OpenVictimAsync(string database, string user = App, bool holdLock = true, string program = "pm5632_victim")
     {
         var ct = TestContext.Current.CancellationToken;
-        var connection = new SqlConnection(Builder(database, user).ConnectionString);
+        var connection = new SqlConnection(Builder(database, user, program).ConnectionString);
         await connection.OpenAsync(ct);
         SqlTransaction? transaction = null;
         if (holdLock)
@@ -127,7 +127,7 @@ public sealed class AzureKillLiveTests
     {
         SkipUnlessSet(database);
         await using var victim = await OpenVictimAsync(database);
-        var result = await Executor().KillAzureSessionAsync(Permit(victim.SessionId), database, victim.SessionId, victim.LoginTime, Monitor, dryRun: true,
+        var result = await Executor().KillAzureSessionAsync(Permit(victim.SessionId, database), victim.SessionId, victim.LoginTime, dryRun: true,
             TestContext.Current.CancellationToken);
         Assert.Equal(RemediationOutcome.Done, result.Outcome);
         Assert.False(result.Wrote);
@@ -152,7 +152,7 @@ public sealed class AzureKillLiveTests
         await Task.Delay(TimeSpan.FromSeconds(2), ct);
         Assert.False(waiting.IsCompleted);
 
-        var result = await Executor().KillAzureSessionAsync(Permit(victim.SessionId), database, victim.SessionId, victim.LoginTime, Monitor, dryRun: false, ct);
+        var result = await Executor().KillAzureSessionAsync(Permit(victim.SessionId, database), victim.SessionId, victim.LoginTime, dryRun: false, ct);
         Assert.Equal(RemediationOutcome.Done, result.Outcome);
         Assert.True(result.Wrote);
         Assert.NotNull(result.Rollback);
@@ -166,7 +166,7 @@ public sealed class AzureKillLiveTests
     {
         SkipUnlessSet(database);
         await using var victim = await OpenVictimAsync(database);
-        var result = await Executor().KillAzureSessionAsync(Permit(victim.SessionId), database, victim.SessionId, victim.LoginTime.AddSeconds(-3), Monitor,
+        var result = await Executor().KillAzureSessionAsync(Permit(victim.SessionId, database), victim.SessionId, victim.LoginTime.AddSeconds(-3),
             dryRun: false, TestContext.Current.CancellationToken);
         Assert.Equal(RemediationResult.Reasons.SessionReused, result.Reason);
         Assert.Null(result.Session);
@@ -179,7 +179,7 @@ public sealed class AzureKillLiveTests
     {
         SkipUnlessSet(database);
         await using var victim = await OpenVictimAsync(database);
-        var result = await Executor(NoKill).KillAzureSessionAsync(Permit(victim.SessionId), database, victim.SessionId, victim.LoginTime, Monitor,
+        var result = await Executor(NoKill).KillAzureSessionAsync(Permit(victim.SessionId, database), victim.SessionId, victim.LoginTime,
             dryRun: false, TestContext.Current.CancellationToken);
         Assert.Equal(RemediationResult.Reasons.KillPermissionDenied, result.Reason);
         Assert.Contains("GRANT KILL DATABASE CONNECTION", result.Message, StringComparison.Ordinal);
@@ -195,7 +195,7 @@ public sealed class AzureKillLiveTests
 
         /* The server opens a database whatever the case of its name, but the batch compares DB_NAME() with the name exactly. */
         var other = database.ToUpperInvariant() == database ? database.ToLowerInvariant() : database.ToUpperInvariant();
-        var result = await Executor().KillAzureSessionAsync(Permit(victim.SessionId), other, victim.SessionId, victim.LoginTime, Monitor,
+        var result = await Executor().KillAzureSessionAsync(Permit(victim.SessionId, other), victim.SessionId, victim.LoginTime,
             dryRun: false, TestContext.Current.CancellationToken);
         Assert.Equal(RemediationResult.Reasons.WrongDatabase, result.Reason);
         Assert.True(await AliveAsync(database, victim));
@@ -209,23 +209,73 @@ public sealed class AzureKillLiveTests
         SkipUnlessSet(names[0]);
 
         await using var victim = await OpenVictimAsync(names[0]);
-        var result = await Executor().KillAzureSessionAsync(Permit(victim.SessionId), names[1], victim.SessionId, victim.LoginTime, Monitor,
+        var result = await Executor().KillAzureSessionAsync(Permit(victim.SessionId, names[1]), victim.SessionId, victim.LoginTime,
             dryRun: false, TestContext.Current.CancellationToken);
         Assert.Equal(RemediationOutcome.Refused, result.Outcome);
         Assert.Contains(result.Reason, new[] { RemediationResult.Reasons.SessionGone, RemediationResult.Reasons.SessionReused, RemediationResult.Reasons.SessionInOtherDatabase });
         Assert.True(await AliveAsync(names[0], victim));
     }
 
+    /// <summary>#5632: a session of Darling's own program (the monitoring and the remediation connections) is never killed, whoever signed in.</summary>
     [Theory]
     [MemberData(nameof(Databases))]
-    public async Task ASessionOfTheMonitoringUser_IsNeverKilled(string database)
+    public async Task ASessionOfADarlingProgram_IsNeverKilled_AndItsFactsAreNotReturned(string database)
+    {
+        SkipUnlessSet(database);
+        await using var victim = await OpenVictimAsync(database, App, holdLock: false, program: "PerformanceMonitorDarling-Collector");
+        var result = await Executor().KillAzureSessionAsync(Permit(victim.SessionId, database), victim.SessionId, victim.LoginTime,
+            dryRun: false, TestContext.Current.CancellationToken);
+        Assert.Equal(RemediationResult.Reasons.ToolLoginSession, result.Reason);
+        Assert.Null(result.Session);
+        Assert.True(await AliveAsync(database, victim));
+    }
+
+    /// <summary>#5632: another session of the remediation login is the tool's own, whatever its program, and also when it signed in as user@server.</summary>
+    [Theory]
+    [MemberData(nameof(Databases))]
+    public async Task AnotherSessionOfTheRemediationLogin_IsNeverKilled_InEitherSignInForm(string database)
+    {
+        SkipUnlessSet(database);
+        foreach (var user in new[] { Fix, Fix + "@" + Host!.Split('.')[0] })
+        {
+            await using var victim = await OpenVictimAsync(database, user, holdLock: false);
+            var result = await Executor().KillAzureSessionAsync(Permit(victim.SessionId, database), victim.SessionId, victim.LoginTime,
+                dryRun: false, TestContext.Current.CancellationToken);
+            Assert.Equal(RemediationResult.Reasons.ToolLoginSession, result.Reason);
+            Assert.True(await AliveAsync(database, victim));
+        }
+    }
+
+    /// <summary>
+    /// #5632: the monitoring login's name is not a reason to refuse. A server monitored as its admin login would otherwise have a real blocker
+    /// nobody could end; Darling's own sessions are told apart by their program name.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(Databases))]
+    public async Task ASessionOfTheMonitoringLoginWithAnotherProgram_IsAnOrdinarySession(string database)
     {
         SkipUnlessSet(database);
         await using var victim = await OpenVictimAsync(database, Monitor, holdLock: false);
-        var result = await Executor().KillAzureSessionAsync(Permit(victim.SessionId), database, victim.SessionId, victim.LoginTime, Monitor,
-            dryRun: false, TestContext.Current.CancellationToken);
-        Assert.Equal(RemediationResult.Reasons.ToolLoginSession, result.Reason);
+        var result = await Executor().KillAzureSessionAsync(Permit(victim.SessionId, database), victim.SessionId, victim.LoginTime,
+            dryRun: true, TestContext.Current.CancellationToken);
+        Assert.Equal(RemediationOutcome.Done, result.Outcome);
+        Assert.False(result.Wrote);
         Assert.True(await AliveAsync(database, victim));
+    }
+
+    /// <summary>#5632: a session in another database answers no facts about it, and is not killed.</summary>
+    [Fact]
+    public async Task ASessionInTheOtherDatabase_ReturnsNoFactsAboutIt()
+    {
+        var names = DatabaseNames();
+        Assert.SkipWhen(names.Count < 2, "Set DARLING_TEST_AZURE_DATABASES to two databases on one logical server to run this test.");
+        SkipUnlessSet(names[0]);
+
+        await using var victim = await OpenVictimAsync(names[0]);
+        var result = await Executor().KillAzureSessionAsync(Permit(victim.SessionId, names[1]), victim.SessionId, victim.LoginTime,
+            dryRun: false, TestContext.Current.CancellationToken);
+        Assert.Null(result.Session);
+        Assert.True(await AliveAsync(names[0], victim));
     }
 
     [Theory]
@@ -241,7 +291,7 @@ public sealed class AzureKillLiveTests
         };
         try
         {
-            var result = await Executor().KillAzureSessionAsync(Permit(victim.SessionId), database, victim.SessionId, victim.LoginTime, Monitor,
+            var result = await Executor().KillAzureSessionAsync(Permit(victim.SessionId, database), victim.SessionId, victim.LoginTime,
                 dryRun: false, TestContext.Current.CancellationToken);
             Assert.Equal(RemediationOutcome.Unknown, result.Outcome);
             Assert.Equal(RemediationResult.Reasons.OutcomeUnknown, result.Reason);
@@ -287,7 +337,6 @@ public sealed class AzureKillLiveTests
         command.Parameters.Add(new SqlParameter("@login_time", SqlDbType.DateTime) { Value = victim.LoginTime });
         command.Parameters.Add(new SqlParameter("@dry", SqlDbType.Bit) { Value = false });
         command.Parameters.Add(new SqlParameter("@database", SqlDbType.NVarChar, 128) { Value = database });
-        command.Parameters.Add(new SqlParameter("@monitoring_login", SqlDbType.NVarChar, 128) { Value = Monitor });
         Assert.Equal("not_primary", (string?)await command.ExecuteScalarAsync(ct));
         Assert.True(await AliveAsync(database, victim));
     }
@@ -310,9 +359,10 @@ public sealed class AzureKillLiveTests
             loginTime = reader.GetDateTime(1);
         }
 
-        var result = await Executor().KillAzureSessionAsync(Permit(sessionId), database, sessionId, loginTime, Monitor, dryRun: false, ct);
+        var result = await Executor().KillAzureSessionAsync(Permit(sessionId, database), sessionId, loginTime, dryRun: false, ct);
         Assert.Equal(RemediationOutcome.Refused, result.Outcome);
-        Assert.Contains(result.Reason, new[] { RemediationResult.Reasons.SessionGone, RemediationResult.Reasons.SessionReused });
+        /* A replica session can share its id with this call's own connection on the primary (Hyperscale numbers them separately): own_session is then the first refusal, and nothing is killed either way. */
+        Assert.Contains(result.Reason, new[] { RemediationResult.Reasons.SessionGone, RemediationResult.Reasons.SessionReused, RemediationResult.Reasons.OwnSession });
         await using var still = new SqlCommand("SELECT 1;", replica);
         Assert.Equal(1, (int)(await still.ExecuteScalarAsync(ct))!);
     }

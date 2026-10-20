@@ -9,6 +9,7 @@
 using System;
 using PerformanceMonitor.Darling.Remediation;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -118,19 +119,121 @@ public sealed class KillSessionTests
         Assert.False(SqlServerRemediationExecutor.IsAzureOutcomeUnknown(new OperationCanceledException(), connectionOpen: true, cancelled: true));
     }
 
-    /// <summary>#5632: the Azure kill never connects to master, and a database name that cannot be one is refused before any connection.</summary>
+    private static ServerActionPermit KillPermit(string? database) =>
+        new(ServerActionNames.KillSession, 1, "srv", "57", database, Guid.NewGuid(), "person:test");
+
+    /// <summary>
+    /// #5632: the Azure kill takes its database from the permit the gate issued, so a permit for session 57 in one database never reaches session 57 in
+    /// another. A permit that names none, or names master or a name that cannot be a database, is refused before any connection.
+    /// </summary>
     [Theory]
+    [InlineData(null)]
     [InlineData("")]
     [InlineData("   ")]
     [InlineData("master")]
     [InlineData("MASTER")]
     [InlineData("a\0b")]
-    public async System.Threading.Tasks.Task TheAzureKill_RefusesMasterAndANameThatCannotBeADatabase_BeforeAnyConnection(string database)
+    public async System.Threading.Tasks.Task TheAzureKill_RefusesAPermitWithNoUsableDatabase_BeforeAnyConnection(string? database)
     {
         var executor = new SqlServerRemediationExecutor(1, new RemediationServer("127.0.0.1,1"), "remediator", "env:NOT_SET_5632");
-        var result = await executor.KillAzureSessionAsync(null!, database, 57, new DateTime(2026, 10, 19), "monitor", dryRun: true, default);
+        var result = await executor.KillAzureSessionAsync(KillPermit(database), 57, new DateTime(2026, 10, 19), dryRun: true, default);
         Assert.Equal(RemediationOutcome.Refused, result.Outcome);
         Assert.Equal(RemediationResult.Reasons.BadDatabase, result.Reason);
+    }
+
+    /// <summary>#5632: a permit for another session id is refused first, whatever database it names.</summary>
+    [Fact]
+    public async System.Threading.Tasks.Task TheAzureKill_RefusesAPermitForAnotherSession()
+    {
+        var executor = new SqlServerRemediationExecutor(1, new RemediationServer("127.0.0.1,1"), "remediator", "env:NOT_SET_5632");
+        var result = await executor.KillAzureSessionAsync(KillPermit("Sales"), 58, new DateTime(2026, 10, 19), dryRun: true, default);
+        Assert.Equal(RemediationResult.Reasons.PermitMismatch, result.Reason);
+    }
+
+    /// <summary>#5632: the database name is read before the gate, trimmed, and master or a name that cannot be a database is not one.</summary>
+    [Theory]
+    [InlineData(" Sales ", "Sales")]
+    [InlineData("Sales", "Sales")]
+    [InlineData(null, null)]
+    [InlineData("", null)]
+    [InlineData("  ", null)]
+    [InlineData("master", null)]
+    [InlineData(" Master ", null)]
+    [InlineData("a\0b", null)]
+    public void TheAzureDatabaseName_IsReadTrimmed_BeforeTheGate(string? given, string? expected)
+    {
+        Assert.Equal(expected, DarlingMcpPlanForceTools.AzureDatabaseShape(given));
+        Assert.Null(DarlingMcpPlanForceTools.AzureDatabaseShape(new string('x', 129)));
+        Assert.NotNull(DarlingMcpPlanForceTools.AzureDatabaseShape(new string('x', 128)));
+    }
+
+    /// <summary>#5632: an excluded-database entry with a stray space still excludes its database, whatever the case.</summary>
+    [Theory]
+    [InlineData("Archive", "archive", true)]
+    [InlineData(" Archive ", "Archive", true)]
+    [InlineData("Archive\t", "ARCHIVE", true)]
+    [InlineData("Archive2", "Archive", false)]
+    public void AnExcludedDatabaseEntry_IsComparedTrimmed(string entry, string database, bool excluded)
+    {
+        Assert.Equal(excluded, DarlingMcpPlanForceTools.IsExcludedDatabase(["Other", entry], database));
+        Assert.False(DarlingMcpPlanForceTools.IsExcludedDatabase(null, database));
+    }
+
+    /// <summary>
+    /// #5632: a refusal about Darling's own session, or a session in another database, answers no facts about that session; one about an
+    /// ordinary session still does, so the caller can see why it was refused.
+    /// </summary>
+    [Theory]
+    [InlineData("own_session", false)]
+    [InlineData("tool_login_session", false)]
+    [InlineData("session_in_other_database", false)]
+    [InlineData("session_reused", false)]
+    [InlineData("not_user_session", true)]
+    [InlineData("kill_permission_denied", true)]
+    [InlineData("dry_ok", true)]
+    public void ARefusalAboutTheToolsOwnSessionOrAnotherDatabase_ReturnsNoFacts(string outcome, bool facts)
+    {
+        var result = SqlServerRemediationExecutor.KillAnswer(Name, true, 57, outcome, Facts(), null, null, database: "Sales");
+        Assert.Equal(facts, result.Session is not null);
+    }
+
+    /// <summary>#5632: Azure's text for a database that is unavailable, a service error or a busy service names the logical server and carries an id; the answer says the number instead.</summary>
+    [Theory]
+    [InlineData(40613, "Database 'Sales' on server 'contoso-sql' is not currently available. Please retry the connection later. If the problem persists, contact customer support, and provide them the session tracing ID of '{A1B2C3D4-0000-1111-2222-333344445555}'.")]
+    [InlineData(40197, "The service has encountered an error processing your request. Please try again. Error code 4060 on server 'contoso-sql'.")]
+    [InlineData(40501, "The service is currently busy. Retry the request after 10 seconds. Incident ID: A1B2C3D4-0000-1111-2222-333344445555. Code: 40501. server 'contoso-sql'")]
+    public void AnAzureServiceError_IsReportedByNumber_NotByTheServicesText(int number, string message)
+    {
+        var text = SqlServerRemediationExecutor.AzureErrorText([number], message, "s3cret");
+        Assert.Contains(number.ToString(System.Globalization.CultureInfo.InvariantCulture), text, StringComparison.Ordinal);
+        Assert.DoesNotContain("contoso", text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("A1B2C3D4", text, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>#5632: any other Azure error text loses the secret, a quoted server name and any id before it is answered or logged.</summary>
+    [Fact]
+    public void AnyOtherAzureErrorText_LosesTheSecretTheServerNameAndTheId()
+    {
+        var text = SqlServerRemediationExecutor.AzureErrorText([4060],
+            "Cannot open database \"Sales\" requested by the login on server 'contoso-sql' with s3cret. Activity ID {A1B2C3D4-0000-1111-2222-333344445555}.", "s3cret");
+        Assert.DoesNotContain("contoso", text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("s3cret", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("A1B2C3D4", text, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Sales", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #5632: when the registry has not recorded engine edition 5 yet, the refusal says so (the call went the SQL Server way, which ignores
+    /// database_name), and does not send the caller round again with database_name.
+    /// </summary>
+    [Fact]
+    public void WhenTheRegistryHasNotRecordedAnAzureEngineYet_TheRefusalSaysSo_NotToPassDatabaseNameAgain()
+    {
+        var result = SqlServerRemediationExecutor.KillAnswer(Name, true, 57, "azure_sql_database", null, null, null);
+        Assert.Equal("database_required", result.Reason);
+        Assert.Contains("not recorded its engine edition yet", result.Message, StringComparison.Ordinal);
+        Assert.Contains("database_name was not used", result.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("call kill_session again with database_name", result.Message, StringComparison.Ordinal);
     }
 
     [Fact]
