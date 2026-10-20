@@ -129,6 +129,10 @@ function templateMenu(templates) {
    card renders immediately and never blocks on that fetch. */
 function ruleCard(r) {
   const meta = "v" + r.version + " · updated " + relTime(r.updated_at) + (r.updated_by ? " by " + r.updated_by : "");
+  /* #6235: an expired rule is not evaluated; a rule with a future expiry says when it ends. */
+  const expiry = r.expires_at_utc
+    ? (r.expired ? "Expired " : "Expires ") + String(r.expires_at_utc).slice(0, 16).replace("T", " ") + " UTC"
+    : null;
   /* last_fired (#3360): the summary correlates the rule's fires (config_alert_log 'Custom:<id>' rows, resolves
      excluded) into one field. Non-null -> a relative time via the shared relTime helper; null -> "never fired". */
   const fired = r.last_fired ? "Last fired " + relTime(r.last_fired) : "Never fired";
@@ -137,10 +141,12 @@ function ruleCard(r) {
     el("div", { class: "vc-name" }, [
       el("span", { class: "vc-name-text", text: r.name }),
       r.enabled === false ? el("span", { class: "paused-badge", text: "Paused" }) : null,
+      r.expired ? el("span", { class: "paused-badge", text: "Expired" }) : null,
     ]),
     r.description ? el("div", { class: "vc-desc", text: r.description }) : null,
     chips,
     el("div", { class: "vc-fired" + (r.last_fired ? "" : " never"), text: fired }),
+    expiry ? el("div", { class: "vc-meta", text: expiry }) : null,
     el("div", { class: "vc-meta", text: meta }),
   ]);
   enrichCard(r.id, chips);

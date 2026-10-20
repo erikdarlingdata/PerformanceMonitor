@@ -163,7 +163,7 @@ public sealed class CustomAlertTeardownLiveTests
 
             // Disable the rule (does NOT delete or cascade — the firing state row persists, orphaned).
             var disabled = Assert.IsType<CustomAlertRuleResult.Ok>(
-                await rules.UpdateAsync(ruleId, ruleName, null, SampleDefinition, enabled: false, created.Rule!.Version, "test", ct));
+                await rules.UpdateAsync(ruleId, ruleName, null, SampleDefinition, enabled: false, created.Rule!.Version, "test", null, ct));
             Assert.False(disabled.Rule!.Enabled);
 
             // Build the monitored map from the real registry PLUS this test's synthetic server, so a real

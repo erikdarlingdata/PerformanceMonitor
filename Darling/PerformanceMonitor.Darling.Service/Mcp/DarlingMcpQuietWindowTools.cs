@@ -29,7 +29,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// work does not page anyone. A quiet window is NOT a second system: it is a mute rule whose only scope is a server (or nothing, for the
 /// fleet) and whose end is set, written through <see cref="DarlingMcpAlertTools.CreateMuteRuleOver"/> and the same
 /// <see cref="PgMuteRuleStore"/> the mute tools use, so the validation, the duplicate check and the reload beacon exist once. What the
-/// mute rule lacked was a START (V205 <c>starts_at_utc</c>), so a window can be set ahead of the work; until the start passes the rule
+/// mute rule lacked was a START (V206 <c>starts_at_utc</c>), so a window can be set ahead of the work; until the start passes the rule
 /// is listed as <c>upcoming</c> and mutes nothing. The window ends on its own at its end. Served under <c>mcp.allowWrites</c> only, and on
 /// <see cref="DarlingMcpWritePolicy.NeverAgentTools"/>: an agent investigating an alert can never silence the fleet.
 /// </summary>

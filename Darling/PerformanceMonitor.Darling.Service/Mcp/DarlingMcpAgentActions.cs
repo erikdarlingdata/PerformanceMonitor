@@ -377,7 +377,8 @@ internal static class DarlingMcpAgentActions
     }
 
     internal static async Task<string> CreateCustomRuleAsync(DarlingAgentActionSeat seat, NpgsqlDataSource postgres, ILogger? logger,
-        string? agentAction, string name, string definition, string? description, bool enabled, CancellationToken ct = default)
+        string? agentAction, string name, string definition, string? description, bool enabled, string? expiresAtUtc = null,
+        CancellationToken ct = default)
     {
         const string tool = "create_custom_alert_rule";
         InvestigationToolCore.ParseAgentAction(agentAction, out var action);
@@ -390,7 +391,10 @@ internal static class DarlingMcpAgentActions
                 var (parsed, error) = CustomAlertRuleDefinition.TryParse(definition);
                 if (parsed is null || error is not null)
                     throw new AgentToolOutcomeException(DarlingMcpAlertTools.Outcome("invalid", error ?? "definition is invalid."));
-                var result = await new CustomAlertRuleStore(connection, transaction).CreateAsync(name, description, definition, enabled, "agent:" + action!.AgentId, token);
+                var (expiry, expiryError) = DarlingMcpCustomAlertTools.ResolveCreateExpiry(expiresAtUtc);
+                if (expiryError is not null)
+                    throw new AgentToolOutcomeException(DarlingMcpAlertTools.Outcome("invalid", expiryError));
+                var result = await new CustomAlertRuleStore(connection, transaction).CreateAsync(name, description, definition, enabled, "agent:" + action!.AgentId, expiry, token);
                 return CustomRuleAnswer(result);
             }, ct);
     }
@@ -413,7 +417,7 @@ internal static class DarlingMcpAgentActions
 
     private static string CustomRuleAnswer(CustomAlertRuleResult result) => result switch
     {
-        CustomAlertRuleResult.Ok ok => DarlingWebEndpoints.BuildFullRuleNode(ok.Rule!).ToJsonString(McpHelpers.JsonOptions),
+        CustomAlertRuleResult.Ok ok => DarlingMcpCustomAlertTools.RuleAnswer(ok.Rule!),
         CustomAlertRuleResult.NotFound => throw new AgentToolOutcomeException(DarlingMcpAlertTools.Outcome("not_found", "No such custom alert rule.")),
         CustomAlertRuleResult.Conflict conflict => throw new AgentToolOutcomeException(DarlingMcpAlertTools.Outcome("conflict", conflict.Message)),
         CustomAlertRuleResult.Invalid invalid => throw new AgentToolOutcomeException(DarlingMcpAlertTools.Outcome("invalid", invalid.Message)),
@@ -422,7 +426,7 @@ internal static class DarlingMcpAgentActions
 
     internal static async Task<string> UpdateCustomRuleAsync(DarlingAgentActionSeat seat, NpgsqlDataSource postgres, ILogger? logger,
         string? agentAction, long rule_id, int version, string? name, string? definition, string? description, bool? enabled,
-        CancellationToken ct = default)
+        string? expiresAtUtc = null, CancellationToken ct = default)
     {
         const string tool = "update_custom_alert_rule";
         InvestigationToolCore.ParseAgentAction(agentAction, out var action);
@@ -447,9 +451,12 @@ internal static class DarlingMcpAgentActions
                         throw new AgentToolOutcomeException(DarlingMcpAlertTools.Outcome("invalid", error ?? "definition is invalid."));
                 }
 
-                var result = await new CustomAlertRuleStore(connection, transaction).UpdateAsync(rule_id, name ?? row!.Name,
-                    DarlingMcpCustomAlertTools.ResolveOptionalText(description, row!.Description), definition ?? row.DefinitionJson,
-                    enabled ?? row.Enabled, version, "agent:" + action!.AgentId, token);
+                var (expiry, expiryError) = DarlingMcpCustomAlertTools.ResolveUpdateExpiry(expiresAtUtc, row!.ExpiresAtUtc);
+                if (expiryError is not null)
+                    throw new AgentToolOutcomeException(DarlingMcpAlertTools.Outcome("invalid", expiryError));
+                var result = await new CustomAlertRuleStore(connection, transaction).UpdateAsync(rule_id, name ?? row.Name,
+                    DarlingMcpCustomAlertTools.ResolveOptionalText(description, row.Description), definition ?? row.DefinitionJson,
+                    enabled ?? row.Enabled, version, "agent:" + action!.AgentId, expiry, token);
                 return CustomRuleAnswer(result);
             }, ct);
     }
