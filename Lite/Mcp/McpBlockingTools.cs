@@ -400,11 +400,20 @@ public sealed class McpBlockingTools
             var requestedStart = windowEnd.AddHours(-hours_back);
             var coverageProbe = new Lazy<Task<DateTime?>>(
                 () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.BlockedProcessReports, resolved.ServerId, requestedStart, windowEnd, includeAlsoCovered: false));
+            /* Lite's probe also reads the stored event times, so on its own it names the store's oldest report in the window, which a
+               size cut can have left out (Darling's probe reads the collector's own times, never these events). A page shorter than
+               the selection therefore probes with the reports it can serve as the only event times: the newest served report bounds
+               the event side, the collector's runs and any older row still prove coverage, and the notice's earlier-of with the oldest
+               report served (EventWindowNoticeAsync) then names that report when nothing proves more. */
+            var newestSelected = withXml.Max(r => r.EventTime);
+            var servedProbe = new Lazy<Task<DateTime?>>(
+                () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.BlockedProcessReports, resolved.ServerId, requestedStart, windowEnd, includeAlsoCovered: false, rowsNotBeforeUtc: newestSelected));
             var noticeByCount = new McpQueryTools.McpWindowNotice[withXml.Count + 1];
             for (var shown = 1; shown <= withXml.Count; shown++)
             {
+                var probe = shown < withXml.Count && newestSelected != null ? servedProbe : coverageProbe;
                 noticeByCount[shown] = await McpQueryTools.EventWindowNoticeAsync(
-                    () => coverageProbe.Value, withXml.Take(shown).Min(r => r.EventTime), requestedStart, windowEnd, "blocked_process_report");
+                    () => probe.Value, withXml.Take(shown).Min(r => r.EventTime), requestedStart, windowEnd, "blocked_process_report");
             }
 
             var allReports = withXml.Select(r => new

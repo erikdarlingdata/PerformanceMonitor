@@ -120,10 +120,14 @@ public sealed class McpResponseBudgetPerfmonAndBlockedXmlToolTests : IClassFixtu
         var oldestServed = root.GetProperty("reports")[returned - 1].GetProperty("event_time").GetString();
         Assert.Equal(System.DateTime.Parse(oldestServed!, null, System.Globalization.DateTimeStyles.RoundtripKind),
             System.DateTime.Parse(root.GetProperty("oldest_returned_event_time").GetString()!, null, System.Globalization.DateTimeStyles.RoundtripKind));
-        /* Lite's coverage probe reads the stored event time itself, so the notice names the store's oldest report in the window,
-           left out or not (a start that is true of the store, and never later than the oldest report served). It is the shared
-           notice's value, written through the shared formatter: the seeded oldest report, to the instant. */
-        Assert.Equal(McpHelpers.FormatEffectiveStart(newest.AddMinutes(-4 * 10)), root.GetProperty("effective_start").GetString());
+        /* The store holds an older report the size cut left out, and nothing proves the window was covered before it, so the
+           notice's start is the oldest report SERVED (the Darling twin's answer), written through the shared formatter, and the
+           truncation flag and note agree with that start. */
+        var oldestServedTime = DateTime.Parse(oldestServed!, null, System.Globalization.DateTimeStyles.RoundtripKind);
+        Assert.True(oldestServedTime > newest.AddMinutes(-4 * 10), "the cut must have left the store's oldest report out");
+        Assert.Equal(McpHelpers.FormatEffectiveStart(oldestServedTime), root.GetProperty("effective_start").GetString());
+        Assert.True(root.GetProperty("window_truncated").GetBoolean());
+        Assert.Contains("blocked_process_report", root.GetProperty("truncation_note").GetString(), StringComparison.Ordinal);
 
         /* Every report returned is a whole, well-formed document: never cut mid-way. */
         foreach (var report in root.GetProperty("reports").EnumerateArray())
@@ -140,6 +144,27 @@ public sealed class McpResponseBudgetPerfmonAndBlockedXmlToolTests : IClassFixtu
             service, _serverManager, ServerName, hours_back: 24, limit: 1, as_of: eventTime));
         Assert.Equal(1, one.RootElement.GetProperty("reports").GetArrayLength());
         Assert.Equal(leftOut.GetProperty("blocked_spid").GetInt32(), one.RootElement.GetProperty("reports")[0].GetProperty("blocked_spid").GetInt32());
+    }
+
+    [Fact]
+    public async Task BlockedProcessXml_SizeCut_WhereTheStoreHoldsOlderReports_StillSaysTheWindowWasCovered()
+    {
+        var service = new LocalDataService(_duckDb);
+        var bigXml = BuildReportXml(18_000);
+        var newest = DateTime.UtcNow.AddMinutes(-5);
+        newest = new DateTime(newest.Ticks - (newest.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Utc);
+        for (var i = 0; i < 5; i++)
+        {
+            await SeedBlockedReportAsync(newest.AddMinutes(-i * 10), 100 + i, bigXml);
+        }
+        /* A report from before the window's start: the store reaches back past what was asked for, size cut or not. */
+        await SeedBlockedReportAsync(newest.AddHours(-30), 200, bigXml);
+
+        using var doc = JsonDocument.Parse(await McpBlockingTools.GetBlockedProcessXml(service, _serverManager, ServerName));
+        var root = doc.RootElement;
+        Assert.True(root.GetProperty("left_out_count").GetInt32() > 0);
+        Assert.False(root.GetProperty("window_truncated").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("truncation_note").ValueKind);
     }
 
     private static string BuildReportXml(int approxLength)

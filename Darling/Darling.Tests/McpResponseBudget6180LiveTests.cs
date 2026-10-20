@@ -139,6 +139,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
                 DateTime.Parse(root.GetProperty("oldest_returned_event_time").GetString()!, null, System.Globalization.DateTimeStyles.RoundtripKind));
             Assert.True(root.GetProperty("window_truncated").GetBoolean());
             Assert.Equal(root.GetProperty("oldest_returned_event_time").GetString(), root.GetProperty("effective_start").GetString());
+            Assert.Equal(JsonValueKind.String, root.GetProperty("truncation_note").ValueKind);
+            Assert.Contains("blocked_process_report", root.GetProperty("truncation_note").GetString(), StringComparison.Ordinal);
 
             /* Never cut mid-way: every report returned is the whole, well-formed document. */
             foreach (var report in root.GetProperty("reports").EnumerateArray())
