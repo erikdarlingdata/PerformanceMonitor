@@ -99,6 +99,30 @@ public sealed class DarlingMcpPgOfflineEmptyLiveTests
         });
     }
 
+    /// <summary>
+    /// An as_of read judges offline as of its anchor, not as of the clock: a target that was being collected at the anchored time and
+    /// has gone quiet since still answers <c>empty</c> there, in the tool that builds its empty answer in a helper (plan-capture
+    /// readiness), while the live read of the same target says it is offline.
+    /// </summary>
+    [Fact]
+    public async Task AnAsOfRead_JudgesOfflineAsOfItsAnchor_NotAsOfNow_AgainstDevPostgres()
+    {
+        const string Name = "pg6155-asof.example:appdb:pg";
+        await WindowFloorLiveHarness.RunAsync(ConnectionString, ["pg_blocking"], [Name], Tables, async (c, ds, now) =>
+        {
+            var lastCollection = now.AddDays(-10);
+            await WindowFloorLiveHarness.SeedServerAsync(
+                c, Name, now.AddDays(-40), "pg_blocking", lastCollection.AddHours(-3), 30, lastCollection, Tables, TestContext.Current.CancellationToken);
+
+            var atAnchor = WindowFloorLiveHarness.Parse(await DarlingMcpPgPlanTools.GetPgPlanCaptureReadiness(
+                ds, Name, 1, 25, WebDataStartNote.FormatWindowEnd(lastCollection.AddHours(-1))));
+            Assert.Equal("empty", atAnchor.GetProperty("status").GetString());
+
+            var live = WindowFloorLiveHarness.Parse(await DarlingMcpPgPlanTools.GetPgPlanCaptureReadiness(ds, Name, 1, 25));
+            Assert.Equal("unavailable", live.GetProperty("status").GetString());
+        });
+    }
+
     /// <summary>Only the <c>empty</c> word is replaced: any other answer for an offline server comes back as it was.</summary>
     [Fact]
     public async Task OnlyAnEmptyAnswer_IsReplaced_AgainstDevPostgres()

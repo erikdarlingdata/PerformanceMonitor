@@ -145,7 +145,9 @@ internal static class DarlingServerOfflineNote
             return answer;
         }
 
-        var lead = await LeadAsync(postgres, serverId, displayName, DateTime.UtcNow, cancellationToken, windowEndUtc);
+        /* The caller's window end is the read's anchor (as_of, or now for a live read), so offline is judged as of it, not as of the
+           clock: an as_of read of a past window must not answer as the server is today. */
+        var lead = await LeadAsync(postgres, serverId, displayName, windowEndUtc, cancellationToken, windowEndUtc);
         return lead is null ? answer : OfflineInsteadOfEmpty(lead);
     }
 

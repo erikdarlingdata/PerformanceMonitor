@@ -157,7 +157,7 @@ public sealed class DarlingMcpPgPlanTools
 
             if (rows.Count == 0)
             {
-                return await NoReadinessStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, hours_back, cancellationToken);
+                return await NoReadinessStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, cancellationToken);
             }
 
             return BuildReadinessJson(resolved.DisplayName, hours_back, rows, limit);
@@ -184,7 +184,7 @@ public sealed class DarlingMcpPgPlanTools
     /// that order.</para>
     /// </summary>
     private static async Task<string> NoReadinessStatusAsync(
-        NpgsqlDataSource postgres, int serverId, string serverName, int hoursBack,
+        NpgsqlDataSource postgres, int serverId, string serverName, int hoursBack, DateTime windowEnd,
         CancellationToken cancellationToken = default)
     {
         var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
@@ -201,7 +201,7 @@ public sealed class DarlingMcpPgPlanTools
             return precondition;
         }
 
-        return await DarlingServerOfflineNote.EmptyAsync(postgres, serverId, serverName, DateTime.UtcNow, McpHelpers.Status(
+        return await DarlingServerOfflineNote.EmptyAsync(postgres, serverId, serverName, windowEnd, McpHelpers.Status(
             "empty",
             $"No plan-capture readiness state for {serverName} in the last {hoursBack} hour(s). This is NOT "
             + "the healthy case for this read: the collector writes one row per facet on every run whatever "
