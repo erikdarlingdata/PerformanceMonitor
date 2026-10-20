@@ -45,14 +45,32 @@ public static class WebhookConnectGuard
         ConnectCallback = ConnectAsync,
     };
 
-    /// <summary>Whether the address is link-local: 169.254.0.0/16, or fe80::/10 (an IPv4-mapped IPv6 address counts as its IPv4).</summary>
+    /// <summary>The IPv4 address an IPv6 form carries, else the address itself: the IPv4-mapped form (::ffff:a.b.c.d), the NAT64
+    /// form (64:ff9b::/96) and the IPv4-compatible form (::/96, ::a.b.c.d) all mean their last four bytes. A name that
+    /// resolves to one of them reaches that IPv4 address on a host that translates it, so it is checked as the IPv4 (#6231).</summary>
+    private static IPAddress Unwrap(IPAddress address)
+    {
+        if (address.IsIPv4MappedToIPv6)
+        {
+            return address.MapToIPv4();
+        }
+
+        if (address.AddressFamily != AddressFamily.InterNetworkV6)
+        {
+            return address;
+        }
+
+        var bytes = address.GetAddressBytes();
+        var upperZero = bytes.Take(12).All(b => b == 0);
+        var nat64 = bytes[0] == 0x00 && bytes[1] == 0x64 && bytes[2] == 0xff && bytes[3] == 0x9b && bytes.Skip(4).Take(8).All(b => b == 0);
+        return upperZero || nat64 ? new IPAddress(bytes.AsSpan(12, 4)) : address;
+    }
+
+    /// <summary>Whether the address is link-local: 169.254.0.0/16, or fe80::/10 (an IPv4-mapped, NAT64 or IPv4-compatible IPv6 address counts as its IPv4).</summary>
     public static bool IsLinkLocal(IPAddress address)
     {
         ArgumentNullException.ThrowIfNull(address);
-        if (address.IsIPv4MappedToIPv6)
-        {
-            address = address.MapToIPv4();
-        }
+        address = Unwrap(address);
 
         if (address.AddressFamily == AddressFamily.InterNetwork)
         {
@@ -73,11 +91,7 @@ public static class WebhookConnectGuard
             return true;
         }
 
-        if (address.IsIPv4MappedToIPv6)
-        {
-            address = address.MapToIPv4();
-        }
-
+        address = Unwrap(address);
         return Array.Exists(s_instanceAddresses, a => a.Equals(address));
     }
 

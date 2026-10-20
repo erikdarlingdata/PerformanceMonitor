@@ -71,6 +71,8 @@ public sealed class HeartbeatConfig
         "heartbeat.url must be an absolute http or https URL. (The value is not echoed: the URL is a secret.)";
     internal const string UserInfoProblem =
         "heartbeat.url must not carry a user name or password; put the check's token in the path. (The value is not echoed: the URL is a secret.)";
+    internal const string BlockedAddressProblem =
+        "heartbeat.url must not be a link-local or cloud instance address (169.254.0.0/16, fe80::/10, fd00:ec2::254, 168.63.129.16, 100.100.100.200). (The value is not echoed: the URL is a secret.)";
     internal const string EnvShapeProblem =
         "heartbeat.url: an env: reference must name an environment variable. (The value is not echoed.)";
     internal const string FileShapeProblem =
@@ -141,7 +143,10 @@ public sealed class HeartbeatConfig
     {
         PerformanceMonitor.Darling.Storage.WebhookUrlShape.Problem.Shape => UrlShapeProblem,
         PerformanceMonitor.Darling.Storage.WebhookUrlShape.Problem.UserInfo => UserInfoProblem,
-        _ => null,
+        PerformanceMonitor.Darling.Storage.WebhookUrlShape.Problem.BlockedAddress => BlockedAddressProblem,
+        PerformanceMonitor.Darling.Storage.WebhookUrlShape.Problem.None => null,
+        /* A problem value added later reads as a problem, never as fine (#6231). */
+        _ => UrlShapeProblem,
     };
 
     /// <summary>

@@ -46,7 +46,7 @@ public static class WebhookUrlShape
 
         /* A host written as a link-local or cloud instance address is refused at save, the same addresses the connect guard refuses at
            send. A host name is checked at send, when it resolves. */
-        if (System.Net.IPAddress.TryParse(parsed.IdnHost, out var literal) && PerformanceMonitor.Notifications.WebhookConnectGuard.IsRefused(literal))
+        if (System.Net.IPAddress.TryParse((parsed.IdnHost.EndsWith('.') ? parsed.IdnHost[..^1] : parsed.IdnHost), out var literal) && PerformanceMonitor.Notifications.WebhookConnectGuard.IsRefused(literal))
         {
             return Problem.BlockedAddress;
         }
