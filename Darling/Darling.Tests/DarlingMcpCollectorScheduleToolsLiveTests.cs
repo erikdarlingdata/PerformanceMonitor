@@ -181,7 +181,7 @@ public sealed class DarlingMcpCollectorScheduleToolsLiveTests
             Assert.Equal(2, rows.Count);
             var fleet = rows.Single(r => (string?)r["scope"] == "fleet-wide");
             Assert.Equal(7, (int?)fleet["frequency_minutes"]);
-            Assert.False((bool?)fleet["enabled"]);
+            Assert.Equal("inherited", (string?)fleet["enabled"]);
             Assert.Equal(11, (int?)rows.Single(r => (string?)r["scope"] == "server")["retention_days"]);
             Assert.Equal(false, (bool?)read["code_default"]!["enabled"]);
 
@@ -201,6 +201,48 @@ public sealed class DarlingMcpCollectorScheduleToolsLiveTests
             var cleared = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorFrequency(source, Delta, null, true, "sched-beta", cancellationToken: ct));
             Assert.Equal("unchanged", (string?)cleared["status"]);
             Assert.Equal(0, await ScalarAsync(owner, $"SELECT count(*) FROM config.config_collector_schedules WHERE server_id = {ServerB} AND collector_name = '{Delta}'", ct));
+        });
+    }
+
+    [Fact]
+    public async Task FleetDisable_ReachesAServerWithAToolSetFrequency_AndInheritReturnsAServerToTheFleetValue()
+    {
+        await WithStoreAsync(async (source, owner, ct) =>
+        {
+            /* A frequency set on a server stores no enabled flag, so a later fleet-wide disable still reaches that server (V205). */
+            await DarlingMcpCollectorScheduleTools.SetCollectorFrequency(source, Delta, 5, false, "sched-alpha", cancellationToken: ct);
+            Assert.Equal(1, await ScalarAsync(owner, $"SELECT count(*) FROM config.config_collector_schedules WHERE server_id = {ServerA} AND enabled IS NULL", ct));
+            await DarlingMcpCollectorScheduleTools.DisableCollector(source, Delta, null, cancellationToken: ct);
+            Assert.False((await RunnerSeesAsync(source, Delta, ServerA, ct)).Enabled);
+            Assert.Equal(5, (await RunnerSeesAsync(source, Delta, ServerA, ct)).FrequencyMinutes);
+
+            /* An explicit server value wins over the fleet; inherit=true puts the server back on the fleet value, and its undo restores the explicit one. */
+            await DarlingMcpCollectorScheduleTools.EnableCollector(source, Delta, "sched-alpha", cancellationToken: ct);
+            Assert.True((await RunnerSeesAsync(source, Delta, ServerA, ct)).Enabled);
+            var inherit = Parse(await DarlingMcpCollectorScheduleTools.EnableCollector(source, Delta, "sched-alpha", inherit: true, cancellationToken: ct));
+            Assert.Equal("changed", (string?)inherit["status"]);
+            Assert.False((await RunnerSeesAsync(source, Delta, ServerA, ct)).Enabled);
+            Assert.Equal("enable_collector", (string?)inherit["undo"]!["tool"]);
+            await CallUndoAsync(source, inherit, ct);
+            Assert.True((await RunnerSeesAsync(source, Delta, ServerA, ct)).Enabled);
+
+            var read = Parse(await DarlingMcpCollectorScheduleTools.GetCollectorSchedules(source, Delta, "sched-beta", ct));
+            Assert.Contains(((JsonArray)read["overrides"]!).Cast<JsonObject>(), r => (string?)r["scope"] == "fleet-wide");
+        });
+    }
+
+    [Fact]
+    public async Task Undo_NamesTheServerByItsStorageName_NotByItsDisplayLabel()
+    {
+        await WithStoreAsync(async (source, owner, ct) =>
+        {
+            await ExecAsync(owner, $"UPDATE servers SET display_name = 'Alpha Box' WHERE server_id = {ServerA}", ct);
+            var disabled = Parse(await DarlingMcpCollectorScheduleTools.DisableCollector(source, Delta, "Alpha Box", cancellationToken: ct));
+            Assert.Equal("sched-alpha", (string?)disabled["undo"]!["arguments"]!["server_name"]);
+            Assert.True((bool?)disabled["undo"]!["arguments"]!["inherit"]);
+            Assert.False((await RunnerSeesAsync(source, Delta, ServerA, ct)).Enabled);
+            await CallUndoAsync(source, disabled, ct);
+            Assert.True((await RunnerSeesAsync(source, Delta, ServerA, ct)).Enabled);
         });
     }
 
