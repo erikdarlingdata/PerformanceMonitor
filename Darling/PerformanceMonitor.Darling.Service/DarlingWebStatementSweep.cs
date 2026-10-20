@@ -7,7 +7,6 @@
  */
 
 using System;
-using System.Collections.Generic;
 using System.Text.Json.Nodes;
 using System.Threading;
 using Microsoft.AspNetCore.Http;
@@ -60,22 +59,6 @@ internal static class DarlingWebStatementSweep
     {
         if (logger is not null) DarlingWebFailureLog.Report(logger, route, elapsedMs, SensitiveStatements.JsonRefusal, requestAborted);
         return Results.Json(new { error = SensitiveStatements.JsonRefusal }, statusCode: StatusCodes.Status500InternalServerError);
-    }
-
-    /// <summary>Writes JSON lines (one JSON object per line, <c>application/x-ndjson</c>) the endpoint built itself, each line swept as a
-    /// body is (#6236). One refused line refuses the whole answer: a partial file would read as a smaller test set.</summary>
-    internal static IResult JsonText(IReadOnlyList<string> lines, string route, ILogger? logger, long elapsedMs, CancellationToken requestAborted)
-    {
-        var text = new System.Text.StringBuilder();
-        foreach (var line in lines)
-        {
-            var swept = Apply(line);
-            if (swept.Refused)
-                return Refusal(route, logger, elapsedMs, requestAborted);
-            text.Append(swept.Text).Append('\n');
-        }
-
-        return Results.Text(text.ToString(), "application/x-ndjson", System.Text.Encoding.UTF8);
     }
 
     /// <summary>Writes a JSON body the endpoint built itself, after sweeping it.</summary>

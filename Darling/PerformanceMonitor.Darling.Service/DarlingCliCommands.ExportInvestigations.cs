@@ -104,15 +104,9 @@ public static partial class DarlingCliCommands
             return false;
         }
 
-        if (InvestigationFeedbackExport.VerdictRefusal(verdict) is { } refusal)
+        if (InvestigationFeedbackExport.FilterRefusal(since, until, verdict) is { } refusal)
         {
             errorMessage = refusal;
-            return false;
-        }
-
-        if (since is { } from && until is { } to && from >= to)
-        {
-            errorMessage = "--since must be before --until.";
             return false;
         }
 
@@ -136,9 +130,8 @@ public static partial class DarlingCliCommands
             return CollectorToggleExitCode.UsageOrConfig;
         }
 
-        if (File.Exists(args!.FilePath) && !args.Force)
+        if (!TryCheckInvestigationExportTarget(args!, error))
         {
-            error.WriteLine($"'{args.FilePath}' already exists. Pick another file, or add --force to replace it.");
             return CollectorToggleExitCode.UsageOrConfig;
         }
 
@@ -163,33 +156,120 @@ public static partial class DarlingCliCommands
         return await ExportInvestigationsAsync(dataSource, args, mode, output, error, cancellationToken);
     }
 
+    /// <summary>
+    /// Decides, before anything is read, whether the export file can be written (#6236): refuses a folder, a link or junction, a
+    /// folder that does not exist, and (without <c>--force</c>) a file that is already there. Writes nothing.
+    /// </summary>
+    private static bool TryCheckInvestigationExportTarget(ExportInvestigationsArgs args, TextWriter error)
+    {
+        var path = args.FilePath;
+        if (path.EndsWith(Path.DirectorySeparatorChar) || path.EndsWith(Path.AltDirectorySeparatorChar) || Directory.Exists(path))
+        {
+            error.WriteLine($"'{path}' is a folder. Name the file to write inside it.");
+            return false;
+        }
+
+        var directory = Path.GetDirectoryName(Path.GetFullPath(path));
+        if (directory is null || !Directory.Exists(directory))
+        {
+            error.WriteLine($"The folder for '{path}' does not exist. Create it first.");
+            return false;
+        }
+
+        FileAttributes attributes;
+        try
+        {
+            attributes = File.GetAttributes(path);
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            error.WriteLine($"Could not inspect '{path}': {ex.Message}");
+            return false;
+        }
+
+        if (attributes.HasFlag(FileAttributes.ReparsePoint))
+        {
+            error.WriteLine($"'{path}' is a link, so the file would land somewhere else. Name a plain file.");
+            return false;
+        }
+
+        if (attributes.HasFlag(FileAttributes.Directory))
+        {
+            error.WriteLine($"'{path}' is a folder. Name the file to write inside it.");
+            return false;
+        }
+
+        if (!args.Force)
+        {
+            error.WriteLine($"'{path}' already exists. Pick another file, or add --force to replace it.");
+            return false;
+        }
+
+        return true;
+    }
+
     /// <summary>The export on an open store, so a live test drives exactly what the command line does.</summary>
     internal static async Task<int> ExportInvestigationsAsync(
         NpgsqlDataSource dataSource, ExportInvestigationsArgs args, McpDataDetail mode, TextWriter output, TextWriter error,
         CancellationToken cancellationToken)
     {
-        var scope = await ResolveCollectorScopeAsync(dataSource, args.ServerName, error);
-        if (scope.FailureExitCode is { } failed)
+        if (!TryCheckInvestigationExportTarget(args, error))
         {
-            return failed;
+            return CollectorToggleExitCode.UsageOrConfig;
         }
 
+        var path = Path.GetFullPath(args.FilePath);
+
+        /* The partial file sits beside the target under a random name, created new (so a planted file or link at that name makes
+           the create fail rather than be written through) and readable by the current user only. It is deleted on every way out
+           but the move that makes it the export. */
+        var temp = Path.Combine(
+            Path.GetDirectoryName(path)!, "." + Path.GetFileName(path) + "." + Guid.NewGuid().ToString("N") + ".partial");
         try
         {
+            var (serverId, serverLabel, serverError) = await InvestigationFeedbackExport.ResolveServerAsync(dataSource, args.ServerName, cancellationToken);
+            if (serverError is not null)
+            {
+                error.WriteLine(serverError);
+                return CollectorToggleExitCode.UsageOrConfig;
+            }
+
             var owner = new StoreOwnerSource();
             owner.Publish(dataSource);
             using var keys = new PseudonymKeySource(owner);
             var key = await PseudonymKeySources.KeyForAsync(keys, mode, cancellationToken);
             var store = new InvestigationRequestStore(dataSource, McpCommandDeadlines.ReadSeconds, () => DateTime.UtcNow);
-            var (lines, truncated) = await InvestigationFeedbackExport.ReadLinesAsync(
-                store, args.SinceUtc, args.UntilUtc, scope.ServerId, args.Verdict, mode, key, cancellationToken);
+            InvestigationExportOutcome outcome;
+            await using (var stream = InvestigationExportFile.CreateOwnerOnly(temp))
+            {
+                outcome = await InvestigationFeedbackExport.WriteAsync(
+                    store, args.SinceUtc, args.UntilUtc, serverId, args.Verdict, mode, key, stream, cancellationToken);
+            }
 
-            /* Write beside the target and move it in, so a failure never leaves half a file where an earlier export was. */
-            var temp = args.FilePath + ".partial";
-            await File.WriteAllTextAsync(temp, string.Concat(lines.Select(l => l + "\n")), new UTF8Encoding(false), cancellationToken);
-            File.Move(temp, args.FilePath, overwrite: true);
-            output.WriteLine($"Wrote {lines.Count} investigation case(s) with feedback to {args.FilePath} (one JSON object per line, masked at {McpDataDetailModes.Word(mode)}).");
-            if (truncated)
+            if (outcome.Refused)
+            {
+                error.WriteLine(InvestigationFeedbackExport.RefusalSentence);
+                return CollectorToggleExitCode.StoreUnavailable;
+            }
+
+            /* No overwrite unless --force: a file that appeared at the target while the store was read makes this fail. */
+            File.Move(temp, path, overwrite: args.Force);
+            output.WriteLine($"Wrote {outcome.Cases} investigation case(s) with feedback to {path} (one JSON object per line, masked at {McpDataDetailModes.Word(mode)}, readable by the current user only).");
+            if (serverLabel is not null)
+            {
+                output.WriteLine($"Server: {serverLabel}.");
+            }
+
+            if (outcome.HeldBack > 0)
+            {
+                output.WriteLine($"{outcome.HeldBack} case(s) a live practice request replays were held back.");
+            }
+
+            if (outcome.Truncated)
             {
                 output.WriteLine($"The filter held more than {InvestigationRequestStore.FeedbackExportLimit} cases; these are the newest. Narrow it with --since, --until, --server or --verdict for the rest.");
             }
@@ -198,13 +278,17 @@ public static partial class DarlingCliCommands
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            error.WriteLine($"Could not write '{args.FilePath}': {ex.Message}");
+            error.WriteLine($"Could not write '{path}': {ex.Message}");
             return CollectorToggleExitCode.UsageOrConfig;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             error.WriteLine($"Could not read the investigation cases from the store: {ex.Message}");
             return CollectorToggleExitCode.StoreUnavailable;
+        }
+        finally
+        {
+            InvestigationExportFile.TryDelete(temp);
         }
     }
 }

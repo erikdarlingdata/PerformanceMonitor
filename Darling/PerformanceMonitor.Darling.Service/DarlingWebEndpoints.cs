@@ -347,7 +347,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// and the MCP host's analysis fill — so compare_analysis' banding here reads a series the store was already asked
     /// for this analysis hour from memory. Null keeps the analysis service's baselines private to it.</para>
     /// </summary>
-    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null, PostgresConfig? postgresConfig = null, ReadLatencyAccumulator? readLatency = null, PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null, MonitoredServerRegistryState? registryState = null, SlowReadLog? slowReads = null, ReadAdmission? readAdmission = null, StoreOwnerSource? ownerSource = null)
+    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null, PostgresConfig? postgresConfig = null, ReadLatencyAccumulator? readLatency = null, PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null, MonitoredServerRegistryState? registryState = null, SlowReadLog? slowReads = null, ReadAdmission? readAdmission = null, StoreOwnerSource? ownerSource = null, McpDataDetail dataDetail = McpDataDetail.MetadataOnly, IPseudonymKeySource? pseudonymKeys = null)
     {
         /* #4442 scope 2, #4782: the read-latency seat THIS call's routes record into -- the accumulator and
            logger this call was given, held in a per-call object that the two record sites close over: the
@@ -665,7 +665,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         MapServers(app, postgres, logger);
         MapAlertHistoryDismiss(app, postgres, logger);
         MapInvestigationFeedback(app, postgres, logger);
-        MapInvestigationExport(app, postgres, logger);
+        MapInvestigationExport(app, postgres, logger, dataDetail, pseudonymKeys, readAdmission, readLatencyRecorder);
         MapInvestigationPractice(app, postgres, logger);
         MapWebhookSigningStatus(app, collector);
 
@@ -2763,20 +2763,32 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         });
     }
 
-    /// <summary>The 403 sentence the export answers a login that may not record feedback (#6236): the export is gated as the record is.</summary>
+    /// <summary>The 403 sentence the export answers a login that may not record feedback (#6236).</summary>
     internal const string InvestigationExportRefusedMessage =
         "Exporting investigation cases needs the same store login as recording feedback: the admin role. Managed and compose stores connect the web "
         + "dashboard as the viewer role, which cannot: run --export-investigations on the host, or (bring-your-own store) set postgres.webConnectionString to an admin login.";
 
+    /// <summary>The 403 sentence the export answers a request that is not a signed-in admin session (#6236).</summary>
+    internal const string InvestigationExportSeatMessage =
+        "Exporting investigation cases needs a signed-in dashboard account with the admin role. A viewer account, and a dashboard with no sign-in "
+        + "configured, cannot: run --export-investigations on the host instead.";
+
+    /// <summary>The route name the export is admitted and recorded under (#6236).</summary>
+    internal const string InvestigationExportRoute = "investigation_export";
+
     /// <summary>
     /// The download of the investigation cases that have feedback (#6236): <c>GET /api/investigation-export?since=&amp;until=&amp;server=&amp;verdict=</c>
-    /// answers JSON lines (<c>application/x-ndjson</c>, one case per line, as <c>--export-investigations</c> writes them) as an attachment.
-    /// Gated exactly as the feedback record is (<see cref="InvestigationFeedbackStore.CanRecordAsync"/>: the web login holds INSERT and
-    /// UPDATE on the feedback table, which is the admin role), so a viewer-role login answers 403 and reads nothing. Text is read at
-    /// <see cref="McpDataDetail.Full"/>, as the web's report panel reads it: the role that may record feedback can select these tables itself.
-    /// 400 for a date, verdict or server it cannot use.
+    /// answers JSON lines (<c>application/x-ndjson</c>, one case per line, the same bytes <c>--export-investigations</c> writes) as an attachment.
+    /// Two gates, both required: the request is a signed-in dashboard session whose account holds the admin role
+    /// (<see cref="DarlingWebSeat.IsSignedInAdmin"/>; a viewer account and a dashboard with no sign-in are refused), and the web login holds INSERT and
+    /// UPDATE on the feedback table (<see cref="InvestigationFeedbackStore.CanRecordAsync"/>). The route is admitted like the other heavy reads.
+    /// Text is masked at the <c>mcp.dataDetail</c> the service started with, with the store's pseudonym key, by <see cref="InvestigationFeedbackExport"/>,
+    /// the same code the command line runs. The cases are written to a temporary file one at a time and the file is then sent, so a refused case
+    /// refuses the whole download and no case is held in memory. 400 for a date, verdict or server it cannot use.
     /// </summary>
-    internal static void MapInvestigationExport(WebApplication app, NpgsqlDataSource postgres, ILogger logger)
+    internal static void MapInvestigationExport(
+        WebApplication app, NpgsqlDataSource postgres, ILogger logger, McpDataDetail dataDetail, IPseudonymKeySource? pseudonymKeys,
+        ReadAdmission? readAdmission = null, ReadLatencyRecorder? readLatencyRecorder = null)
     {
         var feedbackStore = new InvestigationFeedbackStore(postgres, McpCommandDeadlines.ReadSeconds);
         var requestStore = new InvestigationRequestStore(postgres, McpCommandDeadlines.ReadSeconds, () => DateTime.UtcNow);
@@ -2784,6 +2796,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         app.MapGet("/api/investigation-export", async (HttpContext context) =>
         {
             var stopwatch = Stopwatch.StartNew();
+            if (!DarlingWebSeat.IsSignedInAdmin(context))
+            {
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = InvestigationExportSeatMessage }, "/api/investigation-export", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
+            }
+
             var since = ExportDate(context, "since", out var badSince);
             var until = ExportDate(context, "until", out var badUntil);
             if (badSince || badUntil)
@@ -2792,51 +2809,91 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
 
             var verdict = context.Request.Query.TryGetValue("verdict", out var verdictText) ? verdictText.ToString() : null;
-            if (InvestigationFeedbackExport.VerdictRefusal(verdict) is { } verdictRefusal)
+            if (InvestigationFeedbackExport.FilterRefusal(since, until, verdict) is { } filterRefusal)
             {
-                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = verdictRefusal }, "/api/investigation-export", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status400BadRequest);
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = filterRefusal }, "/api/investigation-export", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status400BadRequest);
             }
 
+            /* Up to 2000 cases are read, so the route is admitted like the other heavy reads. */
+            using var readScope = ReadScope.Open(logger);
+            using var ticket = await AdmitWebRouteAsync(readAdmission, InvestigationExportRoute, ReadWindowBand.None, context, readLatencyRecorder, readScope.Scope);
+            if (ticket.Refusal is { } refusal)
+            {
+                return BusyResult(refusal);
+            }
+
+            using var run = new WebRouteRun(readLatencyRecorder, InvestigationExportRoute, ReadWindowBand.None, context, readScope.Scope);
+            var temp = Path.Combine(Path.GetTempPath(), "darling-export-" + Guid.NewGuid().ToString("N") + ".partial");
             try
             {
                 await using (var connection = await postgres.OpenConnectionAsync(context.RequestAborted))
                 {
                     if (!await feedbackStore.CanRecordAsync(connection, context.RequestAborted))
                     {
+                        run.Complete(ReadOutcome.GateFailed);
                         return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = InvestigationExportRefusedMessage }, "/api/investigation-export", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
                     }
                 }
 
-                int? serverId = null;
-                if (context.Request.Query.TryGetValue("server", out var serverText) && !string.IsNullOrWhiteSpace(serverText))
+                var (serverId, serverLabel, serverError) = await InvestigationFeedbackExport.ResolveServerAsync(postgres, context.Request.Query.TryGetValue("server", out var serverText) ? serverText.ToString() : null, context.RequestAborted);
+                if (serverError is not null)
                 {
-                    var (resolved, resolveError) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, serverText.ToString(), context.RequestAborted);
-                    if (resolveError is not null)
-                    {
-                        return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = McpHelpers.ErrorMessageOf(resolveError) }, "/api/investigation-export", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status400BadRequest);
-                    }
-
-                    serverId = resolved.ServerId;
+                    run.Complete(ReadOutcome.Ok);
+                    return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = serverError }, "/api/investigation-export", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status400BadRequest);
                 }
 
-                var (lines, truncated) = await InvestigationFeedbackExport.ReadLinesAsync(
-                    requestStore, since, until, serverId, verdict, McpDataDetail.Full, null, context.RequestAborted);
+                var key = await PseudonymKeySources.KeyForAsync(pseudonymKeys, dataDetail, context.RequestAborted);
+                InvestigationExportOutcome outcome;
+                await using (var file = InvestigationExportFile.CreateOwnerOnly(temp))
+                {
+                    outcome = await InvestigationFeedbackExport.WriteAsync(
+                        requestStore, since, until, serverId, verdict, dataDetail, key, file, context.RequestAborted);
+                }
+
+                if (outcome.Refused)
+                {
+                    return DarlingWebStatementSweep.Refusal("/api/investigation-export", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+                }
+
+                context.Response.ContentType = "application/x-ndjson; charset=utf-8";
                 context.Response.Headers.ContentDisposition = "attachment; filename=\"investigation-cases.jsonl\"";
-                if (truncated)
+                if (outcome.Truncated)
                 {
                     context.Response.Headers["X-Export-Truncated"] = InvestigationRequestStore.FeedbackExportLimit.ToString(CultureInfo.InvariantCulture);
                 }
 
-                return DarlingWebStatementSweep.JsonText(lines, "/api/investigation-export", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+                if (outcome.HeldBack > 0)
+                {
+                    context.Response.Headers["X-Export-Held-Back"] = outcome.HeldBack.ToString(CultureInfo.InvariantCulture);
+                }
+
+                if (serverLabel is not null)
+                {
+                    context.Response.Headers["X-Export-Server"] = Uri.EscapeDataString(serverLabel);
+                }
+
+                await using (var read = new FileStream(temp, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, FileOptions.Asynchronous | FileOptions.SequentialScan))
+                {
+                    context.Response.ContentLength = read.Length;
+                    await read.CopyToAsync(context.Response.Body, context.RequestAborted);
+                }
+
+                run.Complete(ReadOutcome.Ok);
+                return Results.Empty;
             }
             catch (Exception ex) when (IsFeedbackPrivilegeRefusal(ex))
             {
+                run.Complete(ReadOutcome.GateFailed);
                 return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = InvestigationExportRefusedMessage }, "/api/investigation-export", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 DarlingWebFailureLog.Report(logger, "/api/investigation-export", stopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
                 return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
+            }
+            finally
+            {
+                InvestigationExportFile.TryDelete(temp);
             }
         });
     }

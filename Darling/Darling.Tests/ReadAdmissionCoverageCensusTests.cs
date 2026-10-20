@@ -42,7 +42,7 @@ public sealed class ReadAdmissionCoverageCensusTests
     /// admission call beside it.</summary>
     private static readonly Dictionary<string, int> ScopeSites = new(StringComparer.Ordinal)
     {
-        ["DarlingWebEndpoints.cs"] = 8, // /api/query-tag-rules/test (#5986), the /api/read/{name} loop, the composed panel (its run and its cache), /api/fleet, /api/alerts/test, /api/ag and /api/catalog (round 2, L5)
+        ["DarlingWebEndpoints.cs"] = 9, // /api/investigation-export (#6236), /api/query-tag-rules/test (#5986), the /api/read/{name} loop, the composed panel (its run and its cache), /api/fleet, /api/alerts/test, /api/ag and /api/catalog (round 2, L5)
         ["DarlingTriageEndpoint.cs"] = 1, // /api/triage (the dedicated routes record their own samples, #5506 part 3)
         ["AlertNotebookEndpoint.cs"] = 1, // /api/alert-notebook (round 1, M3)
         ["DarlingFleetSweepEndpoints.cs"] = 4, // /api/sweeps, /latest, /{id} and /watch-items (round 1, M3)
@@ -221,7 +221,6 @@ public sealed class ReadAdmissionCoverageCensusTests
         [WebFile + "POST \"/api/alert-history/dismiss\""] = "write",
         [WebFile + "GET \"/api/investigation-feedback\""] = "definition read: reported requests with their feedback and the false-positive counts (two small config-table reads, capped at 100 requests; #5913)",
         [WebFile + "PUT \"/api/investigation-feedback/{requestId}\""] = "write",
-        [WebFile + "GET \"/api/investigation-export\""] = "definition read: the reported requests that have feedback, capped at 2000 cases, behind the feedback-record login (#6236)",
         [WebFile + "GET \"/api/investigation-practice-scores\""] = "definition read: the practice scores per agent (two small config-table reads over the practice requests in the window; advisory, #5918)",
         [WebFile + "GET \"/api/investigation-notes/pending\""] = "definition read: the notes agents proposed that nobody has decided (one small config table, capped at 200 rows; #5903)",
         [WebFile + "GET \"/api/agent-changes\""] = "definition read: the journal's agent calls and refusals (one capped journal read plus the switch; #5917)",

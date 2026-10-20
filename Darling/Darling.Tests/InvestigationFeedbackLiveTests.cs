@@ -22,6 +22,7 @@ using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -254,8 +255,22 @@ public sealed class InvestigationFeedbackLiveTests
     /// <summary>Runs <paramref name="body"/> against the web routes (a test server over the endpoints) with the web host's data
     /// source logging in as a role holding exactly what the managed <paramref name="managedRole"/> holds, on a scratch store with
     /// one reported request. The body gets the owner source, the reported request, and a sender for the routes.</summary>
-    internal static async Task WithWebRoutesAsync(
-        string managedRole, Func<NpgsqlDataSource, Guid, Func<string, string, string?, string?, Task<(int Status, JsonNode? Body)>>, CancellationToken, Task> body)
+    internal static Task WithWebRoutesAsync(
+        string managedRole, Func<NpgsqlDataSource, Guid, Func<string, string, string?, string?, Task<(int Status, JsonNode? Body)>>, CancellationToken, Task> body) =>
+        WithRawWebRoutesAsync(managedRole, null, McpDataDetail.Full, null, (owner, request, sendRaw, ct) => body(owner, request,
+            async (method, path, contentType, payload) =>
+            {
+                var (status, bytes) = await sendRaw(method, path, contentType, payload);
+                var text = Encoding.UTF8.GetString(bytes);
+                return (status, string.IsNullOrWhiteSpace(text) ? null : JsonNode.Parse(text));
+            }, ct));
+
+    /// <summary>The same harness with the answer's raw bytes. <paramref name="seat"/> is what the sign-in middleware would have stored for the
+    /// request (null: no sign-in is configured, so nothing is stored); <paramref name="dataDetail"/> is the level the dashboard started with;
+    /// <paramref name="configureStore"/> runs on the scratch store before the routes start.</summary>
+    internal static async Task WithRawWebRoutesAsync(
+        string managedRole, DarlingWebSeat? seat, McpDataDetail dataDetail, Func<NpgsqlDataSource, Task>? configureStore,
+        Func<NpgsqlDataSource, Guid, Func<string, string, string?, string?, Task<(int Status, byte[] Raw)>>, CancellationToken, Task> body)
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the investigation feedback live tests.");
@@ -294,11 +309,28 @@ public sealed class InvestigationFeedbackLiveTests
             builder.Logging.ClearProviders();
             builder.Services.AddSingleton(webLogin);
             await using var app = builder.Build();
-            DarlingWebEndpoints.MapAll(app, webLogin, new CollectorRuntimeState(), new CapturingTestLogger());
+            if (seat is not null)
+            {
+                app.Use(async (http, next) =>
+                {
+                    http.Items[DarlingWebSeat.HttpContextItemKey] = seat;
+                    await next(http);
+                });
+            }
+
+            var ownerSource = new StoreOwnerSource();
+            ownerSource.Publish(owner);
+            using var keys = new PseudonymKeySource(ownerSource);
+            DarlingWebEndpoints.MapAll(app, webLogin, new CollectorRuntimeState(), new CapturingTestLogger(), dataDetail: dataDetail, pseudonymKeys: keys);
+            if (configureStore is not null)
+            {
+                await configureStore(owner);
+            }
+
             await app.StartAsync(ct);
             using var server = app.GetTestServer();
 
-            async Task<(int Status, JsonNode? Body)> Send(string method, string path, string? contentType, string? payload)
+            async Task<(int Status, byte[] Raw)> Send(string method, string path, string? contentType, string? payload)
             {
                 var context = await server.SendAsync(http =>
                 {
@@ -314,9 +346,9 @@ public sealed class InvestigationFeedbackLiveTests
 
                     http.Request.Body = new MemoryStream(Encoding.UTF8.GetBytes(payload ?? ""));
                 });
-                using var reader = new StreamReader(context.Response.Body);
-                var text = await reader.ReadToEndAsync(ct);
-                return (context.Response.StatusCode, string.IsNullOrWhiteSpace(text) ? null : JsonNode.Parse(text));
+                using var bytes = new MemoryStream();
+                await context.Response.Body.CopyToAsync(bytes, ct);
+                return (context.Response.StatusCode, bytes.ToArray());
             }
 
             await body(owner, request, Send, ct);
