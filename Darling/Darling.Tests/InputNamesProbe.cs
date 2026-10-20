@@ -59,6 +59,15 @@ internal static class InputNamesProbe
                     continue;
                 }
 
+                /* WPF names a box from its LabeledBy target through the target's peer only when that peer already exists. A screen
+                   reader has walked the tree, so it does; a headless run (CI has no UI Automation client) has not, and a text
+                   label is never an input this loop visits, so its peer was never made and the name came back empty. Make the
+                   label's peer first, as the reader's walk does; the name asserted below is still the label's text. */
+                if (AutomationProperties.GetLabeledBy(input) is { } labelElement)
+                {
+                    UIElementAutomationPeer.CreatePeerForElement(labelElement);
+                }
+
                 var name = UIElementAutomationPeer.CreatePeerForElement(input)?.GetName() ?? string.Empty;
                 string? problem = null;
                 if (string.IsNullOrWhiteSpace(name))
