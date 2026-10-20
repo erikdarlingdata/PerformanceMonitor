@@ -49,14 +49,19 @@ public sealed class DarlingMcpCustomViewTools
 {
     [McpServerTool(Name = "list_custom_views"), Description(
         "Lists every saved custom view (dashboards and notebooks) as lightweight summaries — id, name, description, " +
-        "kind ('dashboard' or 'notebook'), version, and who/when it was last updated. No definition body. Use the " +
-        "id with get_custom_view to fetch a view's full spec, or with update_custom_view / delete_custom_view.")]
-    public static async Task<string> ListCustomViews(NpgsqlDataSource postgres)
+        "kind ('dashboard' or 'notebook'), folder (null = the top level), personal (true = one person's own view), " +
+        "created_by (null = unknown), version, and who/when it was last updated (updated_by). No definition body. " +
+        "Lists ALL views, other people's personal views included and marked personal:true. Pass 'folder' to list one " +
+        "folder (an empty string lists the top level). Use the id with get_custom_view to fetch a view's full spec, or " +
+        "with update_custom_view / delete_custom_view (which refuse a personal view: only its owner can change it, in the web dashboard).")]
+    public static async Task<string> ListCustomViews(
+        NpgsqlDataSource postgres,
+        [Description("Optional folder filter: a folder name lists only that folder; an empty string \"\" lists the views at the top level (no folder). Omit to list every folder.")] string? folder = null)
     {
         try
         {
             var store = new CustomViewStore(postgres);
-            var views = await store.ListAsync();
+            var views = await store.ListAsync(allPersonal: true, folder: folder?.Trim());
             return DarlingWebEndpoints.BuildSummariesNode(views).ToJsonString(McpHelpers.JsonOptions);
         }
         catch (Exception ex)
@@ -128,13 +133,16 @@ public sealed class DarlingMcpCustomViewTools
     [McpServerTool(Name = "create_custom_view"), Description(
         "Creates a new saved custom view. The definition is VALIDATED first (same as validate_custom_view); an " +
         "invalid definition returns {status:\"invalid\", ...} and saves nothing. On success returns the stored view " +
-        "(id, version 1, and the definition). A name collision returns {status:\"conflict\", ...}. The view is " +
+        "(id, version 1, and the definition). A name collision returns {status:\"conflict\", ...}, and the message " +
+        "says which folder it collided in. Pass 'folder' to put the view in a shared folder; omit it for the top " +
+        "level. A view made here is always shared, never personal: MCP has no person identity. The view is " +
         "stamped as MCP-authored.")]
     public static async Task<string> CreateCustomView(
         NpgsqlDataSource postgres,
-        [Description("The view name — unique across all views, max 200 characters.")] string name,
+        [Description("The view name, max 200 characters. Unique among the shared views of its folder (or of the top level), exact match.")] string name,
         [Description("The view definition JSON (a dashboard {\"panels\":[...]} or a notebook {\"kind\":\"notebook\",\"cells\":[...]}). Validate it with validate_custom_view first.")] string definition,
-        [Description("Optional human-readable description.")] string? description = null)
+        [Description("Optional human-readable description.")] string? description = null,
+        [Description("Optional folder to put the view in (max 100 characters, no control characters). Omit or send an empty string for the top level.")] string? folder = null)
     {
         try
         {
@@ -145,7 +153,8 @@ public sealed class DarlingMcpCustomViewTools
             }
 
             var store = new CustomViewStore(postgres);
-            var result = await store.CreateAsync(name, description, definition, updatedBy: DarlingWebEndpoints.McpEditorPrincipal);
+            var result = await store.CreateAsync(
+                name, description, definition, updatedBy: DarlingWebEndpoints.McpEditorPrincipal, folder: folder, personal: false);
             return result switch
             {
                 CustomViewResult.Ok ok => DarlingWebEndpoints.BuildFullViewNode(ok.View!).ToJsonString(McpHelpers.JsonOptions),
@@ -168,15 +177,19 @@ public sealed class DarlingMcpCustomViewTools
         "definition is VALIDATED first; an invalid one returns {status:\"invalid\", ...} and changes nothing. Pass " +
         "the 'version' you last read via get_custom_view — if someone else changed the view since, this returns " +
         "{status:\"conflict\", ...} rather than silently overwriting their edit (reload and re-apply). A missing id " +
-        "returns {status:\"not_found\", ...}; a name collision returns {status:\"conflict\", ...}. On success returns " +
-        "the stored view with its bumped version.")]
+        "returns {status:\"not_found\", ...}; a name collision (in the view's folder) returns {status:\"conflict\", ...}. " +
+        "'folder' follows the same vocabulary as description: OMITTED keeps the view's current folder, an EMPTY string " +
+        "moves it to the top level, any other text moves it to that folder. A PERSONAL view cannot be updated over MCP " +
+        "(MCP has no person identity; only the owner can change it in the web dashboard): it returns " +
+        "{status:\"refused\", ...}. On success returns the stored view with its bumped version.")]
     public static async Task<string> UpdateCustomView(
         NpgsqlDataSource postgres,
         [Description("The id of the view to update (from list_custom_views).")] long view_id,
-        [Description("The view name (unique, max 200 characters).")] string name,
+        [Description("The view name (max 200 characters; unique among the shared views of its folder, exact match).")] string name,
         [Description("The full replacement view definition JSON. Validate it with validate_custom_view first.")] string definition,
         [Description("The version you last read from get_custom_view (optimistic concurrency; a mismatch is a conflict, not an overwrite).")] int version,
-        [Description("Optional human-readable description. Omit to keep the current description; send an empty string \"\" to clear it.")] string? description = null)
+        [Description("Optional human-readable description. Omit to keep the current description; send an empty string \"\" to clear it.")] string? description = null,
+        [Description("Optional folder. Omit to keep the current folder; send an empty string \"\" to move the view to the top level; any other text moves it to that folder (max 100 characters).")] string? folder = null)
     {
         try
         {
@@ -201,13 +214,21 @@ public sealed class DarlingMcpCustomViewTools
                 return Outcome("not_found", $"No custom view with id {view_id}.");
             }
 
+            /* #6214: MCP has no person identity, so it never changes a personal view (the store's UPDATE holds the same rule). */
+            if (currentOk.View.Personal)
+            {
+                return Outcome("refused", PersonalViewRefusal);
+            }
+
             var result = await store.UpdateAsync(
                 view_id, name, DarlingMcpCustomAlertTools.ResolveOptionalText(description, currentOk.View.Description),
-                definition, version, updatedBy: DarlingWebEndpoints.McpEditorPrincipal);
+                definition, version, updatedBy: DarlingWebEndpoints.McpEditorPrincipal,
+                folder: DarlingMcpCustomAlertTools.ResolveOptionalText(folder, currentOk.View.Folder), personal: false, actor: null);
             return result switch
             {
                 CustomViewResult.Ok ok => DarlingWebEndpoints.BuildFullViewNode(ok.View!).ToJsonString(McpHelpers.JsonOptions),
                 CustomViewResult.NotFound => Outcome("not_found", $"No custom view with id {view_id}."),
+                CustomViewResult.Forbidden => Outcome("refused", PersonalViewRefusal),
                 CustomViewResult.Conflict conflict => Outcome("conflict", conflict.Message),
                 CustomViewResult.Invalid invalid => Outcome("invalid", invalid.Message),
                 _ => Outcome("error", "Could not update the view."),
@@ -221,7 +242,9 @@ public sealed class DarlingMcpCustomViewTools
 
     [McpServerTool(Name = "delete_custom_view"), Description(
         "Deletes a saved custom view by id. Returns {status:\"deleted\", view_id:N} on success, or " +
-        "{status:\"not_found\", ...} when no view has that id. This is permanent.")]
+        "{status:\"not_found\", ...} when no view has that id. A PERSONAL view cannot be deleted over MCP (MCP has no " +
+        "person identity; only the owner can delete it in the web dashboard): it returns {status:\"refused\", ...}. " +
+        "This is permanent.")]
     public static async Task<string> DeleteCustomView(
         NpgsqlDataSource postgres,
         [Description("The id of the view to delete (from list_custom_views).")] long view_id)
@@ -229,10 +252,13 @@ public sealed class DarlingMcpCustomViewTools
         try
         {
             var store = new CustomViewStore(postgres);
-            var result = await store.DeleteAsync(view_id);
-            return result is CustomViewResult.Ok
-                ? JsonSerializer.Serialize(new { status = "deleted", view_id }, McpHelpers.JsonOptions)
-                : Outcome("not_found", $"No custom view with id {view_id}.");
+            var result = await store.DeleteAsync(view_id, actor: null);
+            return result switch
+            {
+                CustomViewResult.Ok => JsonSerializer.Serialize(new { status = "deleted", view_id }, McpHelpers.JsonOptions),
+                CustomViewResult.Forbidden => Outcome("refused", PersonalViewRefusal),
+                _ => Outcome("not_found", $"No custom view with id {view_id}."),
+            };
         }
         catch (Exception ex)
         {
@@ -383,6 +409,12 @@ public sealed class DarlingMcpCustomViewTools
     /// <summary>A small <c>{status, message}</c> envelope for a non-data write outcome (conflict / invalid /
     /// not_found / error) — the same shape mute_analysis_finding uses for its status, so an MCP client can branch
     /// on the outcome kind. A successful create/update/get returns the view object itself, not this.</summary>
+    /// <summary>The refusal for a personal view over MCP (#6214): MCP authenticates a client, not a person, so it can neither own
+    /// a personal view nor act as its owner.</summary>
+    internal const string PersonalViewRefusal =
+        "This is a personal view. Over MCP it can be listed and read but not updated or deleted, because MCP has no person identity; " +
+        "only its owner can change or delete it, in the web dashboard.";
+
     private static string Outcome(string status, string message) =>
         JsonSerializer.Serialize(new { status, message }, McpHelpers.JsonOptions);
 }

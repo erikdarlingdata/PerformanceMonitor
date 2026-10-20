@@ -129,6 +129,12 @@ public sealed class WebExceptionTextCensusTests
         ),
         (
             Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
+            "forbidden.Message",
+            "#6214: CustomViewResult.Forbidden's own fixed sentence (403 body: a personal view is its owner's alone) " +
+            "- the store's own constant, never ex.Message."
+        ),
+        (
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
             "invalid.Message",
             "CustomViewResult.Invalid / CustomAlertRuleResult.Invalid's own validation text (400 body) " +
             "— the store-write layer's own sentence, never ex.Message."

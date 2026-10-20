@@ -106,7 +106,7 @@ public sealed class DarlingCustomViewsLiveTests
         {
             /* create -> Ok, version 1, fields round-trip. */
             var created = Assert.IsType<CustomViewResult.Ok>(
-                await store.CreateAsync(name1, "first", SampleDefinition, CreatePrincipal, ct));
+                await store.CreateAsync(name1, "first", SampleDefinition, CreatePrincipal, cancellationToken: ct));
             var view = created.View!;
             Assert.Equal(name1, view.Name);
             Assert.Equal("first", view.Description);
@@ -121,7 +121,7 @@ public sealed class DarlingCustomViewsLiveTests
 
             /* list -> contains our summary, and the kind scalar reads through — null here, since SampleDefinition
                is a kindless dashboard (definition->>'kind' is NULL); the wire layer defaults null -> "dashboard". */
-            var list = await store.ListAsync(ct);
+            var list = await store.ListAsync(cancellationToken: ct);
             Assert.Contains(list, s => s.Id == view.Id && s.Name == name1 && s.Version == 1);
             Assert.Null(list.Single(s => s.Id == view.Id).Kind);
 
@@ -129,33 +129,33 @@ public sealed class DarlingCustomViewsLiveTests
                principal from the create's is what makes the last assertion able to fail: with one shared value
                an update that never writes $5 at all still reads back the expected string. */
             var updated = Assert.IsType<CustomViewResult.Ok>(
-                await store.UpdateAsync(view.Id, name1, "second", SampleDefinitionV2, 1, UpdatePrincipal, ct));
+                await store.UpdateAsync(view.Id, name1, "second", SampleDefinitionV2, 1, UpdatePrincipal, null, false, null, ct));
             Assert.Equal(2, updated.View!.Version);
             Assert.Equal("second", updated.View.Description);
             Assert.Equal(UpdatePrincipal, updated.View.UpdatedBy);
 
             /* stale update (still presenting version 1) -> Conflict, not a silent clobber. */
             Assert.IsType<CustomViewResult.Conflict>(
-                await store.UpdateAsync(view.Id, name1, "third", SampleDefinitionV2, 1, CreatePrincipal, ct));
+                await store.UpdateAsync(view.Id, name1, "third", SampleDefinitionV2, 1, CreatePrincipal, null, false, null, ct));
 
             /* duplicate name on CREATE -> Conflict. */
             Assert.IsType<CustomViewResult.Conflict>(
-                await store.CreateAsync(name1, null, SampleDefinition, CreatePrincipal, ct));
+                await store.CreateAsync(name1, null, SampleDefinition, CreatePrincipal, cancellationToken: ct));
 
             /* duplicate name on UPDATE: a second view renamed onto the first's name -> Conflict. */
             var second = Assert.IsType<CustomViewResult.Ok>(
-                await store.CreateAsync(name2, null, SampleDefinition, CreatePrincipal, ct));
+                await store.CreateAsync(name2, null, SampleDefinition, CreatePrincipal, cancellationToken: ct));
             Assert.IsType<CustomViewResult.Conflict>(
-                await store.UpdateAsync(second.View!.Id, name1, null, SampleDefinition, 1, CreatePrincipal, ct));
+                await store.UpdateAsync(second.View!.Id, name1, null, SampleDefinition, 1, CreatePrincipal, null, false, null, ct));
 
             /* update a non-existent id -> NotFound. */
             Assert.IsType<CustomViewResult.NotFound>(
-                await store.UpdateAsync(-999999, name1, null, SampleDefinition, 1, CreatePrincipal, ct));
+                await store.UpdateAsync(-999999, name1, null, SampleDefinition, 1, CreatePrincipal, null, false, null, ct));
 
             /* delete -> Ok; then get + delete-again -> NotFound. */
-            Assert.IsType<CustomViewResult.Ok>(await store.DeleteAsync(view.Id, ct));
+            Assert.IsType<CustomViewResult.Ok>(await store.DeleteAsync(view.Id, null, ct));
             Assert.IsType<CustomViewResult.NotFound>(await store.GetAsync(view.Id, ct));
-            Assert.IsType<CustomViewResult.NotFound>(await store.DeleteAsync(view.Id, ct));
+            Assert.IsType<CustomViewResult.NotFound>(await store.DeleteAsync(view.Id, null, ct));
 
             bodySucceeded = true;
         }
@@ -212,7 +212,7 @@ public sealed class DarlingCustomViewsLiveTests
         try
         {
             var created = Assert.IsType<CustomViewResult.Ok>(
-                await store.CreateAsync(name, "notebook with a read cell", SampleNotebookWithReadCell, CreatePrincipal, ct));
+                await store.CreateAsync(name, "notebook with a read cell", SampleNotebookWithReadCell, CreatePrincipal, cancellationToken: ct));
             viewId = created.View!.Id;
 
             var fetched = Assert.IsType<CustomViewResult.Ok>(await store.GetAsync(viewId, ct));
@@ -224,7 +224,7 @@ public sealed class DarlingCustomViewsLiveTests
                 $"read cell definition did not round-trip byte-for-byte; expected {expected}, got {actual}");
 
             /* The kind scalar the list read pulls out of the stored JSON: a notebook, not the dashboard default. */
-            var list = await store.ListAsync(ct);
+            var list = await store.ListAsync(cancellationToken: ct);
             Assert.Equal("notebook", list.Single(s => s.Id == viewId).Kind);
 
             bodySucceeded = true;

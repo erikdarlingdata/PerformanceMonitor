@@ -2867,7 +2867,7 @@ public sealed class DarlingComposeTests
     public void BuildSummariesNode_EmitsAConcreteKind_DefaultingDashboard(string? storedKind, string expectedWireKind)
     {
         var summary = new CustomViewSummary(
-            Id: 7, Name: "v", Description: null, Version: 1, UpdatedAt: DateTime.UnixEpoch, UpdatedBy: "web", Kind: storedKind);
+            Id: 7, Name: "v", Description: null, Version: 1, UpdatedAt: DateTime.UnixEpoch, UpdatedBy: "web", Kind: storedKind, Folder: null, Personal: false, CreatedBy: null);
 
         var node = DarlingWebEndpoints.BuildSummariesNode(new[] { summary });
 
