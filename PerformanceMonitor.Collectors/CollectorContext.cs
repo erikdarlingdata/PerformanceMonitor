@@ -112,6 +112,19 @@ public sealed class CollectorContext
     public IReadOnlyDictionary<string, string>? PgExtensionSchemas { get; set; }
 
     /// <summary>
+    /// Extension name to its <c>pg_extension.extversion</c>, read in the same catalog read as
+    /// <see cref="PgExtensionSchemas"/> (#6206). Null until the host has read it; an extension that is not created in
+    /// this database has no entry. A collector whose columns depend on the extension's catalog version (the stock
+    /// <c>pg_stat_statements</c> view renamed its time columns at 1.8) picks its query from this, and falls back to the
+    /// server major when it is not there.
+    /// </summary>
+    public IReadOnlyDictionary<string, string>? PgExtensionVersions { get; set; }
+
+    /// <summary>The <c>extversion</c> of <paramref name="extensionName"/> in the connected database, or null when not read or not created.</summary>
+    public string? PgExtensionVersion(string extensionName) =>
+        PgExtensionVersions is not null && PgExtensionVersions.TryGetValue(extensionName, out var version) ? version : null;
+
+    /// <summary>
     /// The schema of <paramref name="extensionName"/>, quoted as an identifier, for collector SQL to name the
     /// extension's objects with (#6143). Monitoring connections pin search_path to pg_catalog, so an extension object
     /// named without its schema would not resolve. An extension the host did not find (not created in this

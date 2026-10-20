@@ -1308,6 +1308,23 @@ The two Aurora-only collectors — `pg_wait_stats` and `pg_cpu_utilization`, the
 
 Cadences and retention are the shared defaults, with no knobs, exactly as for SQL Server.
 
+### Oldest PostgreSQL version per collector
+
+Each collector sends a query that works on the version of the target it connects to. A column that a version does not have is stored as NULL. A collector never sends a query that fails on the target, so an older target writes no error lines to its log for these collectors.
+
+| Collector | Oldest version | Older versions |
+|---|---|---|
+| `pg_statement_stats` | 10 | `pg_stat_statements` before 1.8 (PostgreSQL 12 and older) has `total_time`, `min_time`, `max_time` and `mean_time`. The collector stores them in the same columns. The WAL columns are NULL. The collector reads the extension's own version from `pg_extension`, so a newer server with an older extension is handled too. |
+| `pg_replication_slots` | 10 | `wal_status` and `safe_wal_size_bytes` need 13 and are NULL below it. `two_phase` needs 14. |
+| `pg_session_states` | 10 | Parallel workers are left out by `leader_pid` from 13. Below 13 they are left out by `backend_type`, which names them from 11. On 10 they can not be told apart from other background workers, so they add to the session total only. |
+| `pg_deadlocks`, `pg_log_events`, `pg_plan_capture` | 10 | The server log query leaves out `MATERIALIZED` below 12, because older servers already materialize those CTEs. |
+| `pg_write_stats` | 10 | The WAL columns need 14 and are NULL below it. The checkpoint and background writer columns are collected on every version. |
+| `pg_io_stats` | 16 | `pg_stat_io` does not exist before 16. The collector does not run below 16, and `get_pg_io_stats` answers `not_collected` with the server's version. |
+| `pg_wait_sampling` | 10 | `query_id` needs 14 and is NULL below it. |
+| Every other PostgreSQL collector | 10 | No version difference. `pg_wait_stats` and `pg_cpu_utilization` run on Aurora only. |
+
+The queries for versions before 13 were run against real PostgreSQL 10 and 12 servers for #6206. PostgreSQL 11 and 13 are checked against the documentation only.
+
 Three of the 29 are outage predictors rather than performance metrics, which is deliberate: PostgreSQL's most damaging failures are quiet, slow, and fully predictable days ahead, and nothing in the engine raises its hand about them. They are read through the MCP tools (see [the tool list](#mcp)), a web tab and — since #2530 — a WPF viewer tab: a PostgreSQL target gets **seven** inner tabs (Overview, Activity, Vacuum, Waits, I/O, Replication, Storage) in place of the nineteen SQL Server ones, chosen from `collect.servers.engine_kind`. The placement is derived from the collector catalog in both directions, so a new PostgreSQL collector cannot ship without a screen — or without the coverage pin's explicit, dated exemption, which is where `pg_database_size_stats` sits until its consumer lanes land (#3691).
 
 ### What it does not do yet

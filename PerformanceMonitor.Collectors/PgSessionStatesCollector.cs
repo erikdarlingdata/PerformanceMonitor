@@ -189,8 +189,15 @@ public sealed class PgSessionStatesCollector : PostgresCollectorDefinitionBase<P
 
        age() rather than arithmetic on the raw xid, because modular wrap makes naive subtraction wrong
        exactly at the boundary where it matters most. */
-    private static string BuildQueryText(int postgresMajorVersion)
+    internal static string BuildQueryText(int postgresMajorVersion)
     {
+        /* #6206: leader_pid arrived in PostgreSQL 13. Below that the column does not exist, and parallel workers
+           are told apart by backend_type instead: 'parallel worker' from 11. PostgreSQL 10 labels them 'background
+           worker' with no state, so they cannot be told from other background workers there; they carry a NULL
+           state, are never idle in transaction, and add to the session total only. */
+        var parallelWorkerFilter = postgresMajorVersion >= 13
+            ? "(a.leader_pid IS NULL OR a.leader_pid = a.pid)"
+            : "a.backend_type IS DISTINCT FROM 'parallel worker'";
         /* query_id arrived in PostgreSQL 14. Below that the column does not exist and naming it is a parse
            error, so it is substituted with a typed NULL: the row shape stays constant across a mixed-version
            fleet and the read distinguishes "this version cannot report it" from "compute_query_id is off"
@@ -292,7 +299,7 @@ WITH activity AS
        would come through as its own row. That errs toward INCLUDING rather than dropping, which is the safe
        direction for a guard whose only job is to avoid double-counting, and state_is_redacted already tells
        the reader the whole row is untrustworthy. */
-    AND   (a.leader_pid IS NULL OR a.leader_pid = a.pid)
+    AND   {parallelWorkerFilter}
 ),
 /* Capture-wide context, computed once and carried on every row.
 

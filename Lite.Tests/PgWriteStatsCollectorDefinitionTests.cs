@@ -219,14 +219,15 @@ public class PgWriteStatsCollectorDefinitionTests
     }
 
     /// <summary>
-    /// <c>pg_stat_wal</c> is the binding floor at 14. Below that the collector must not dispatch at all
-    /// rather than fail per cycle.
+    /// #6206: <c>pg_stat_wal</c> starts at 14, but the checkpoint and bgwriter counters exist on every major, so the
+    /// collector dispatches everywhere and the WAL columns are NULL below 14 (the query never names the view).
     /// </summary>
     [Theory]
-    [InlineData(13, false)]
+    [InlineData(10, true)]
+    [InlineData(13, true)]
     [InlineData(14, true)]
     [InlineData(17, true)]
-    public void AppliesTo_FloorsAtFourteen(int major, bool expected)
+    public void AppliesTo_EveryMajor(int major, bool expected)
         => Assert.Equal(expected, PgWriteStatsCollector.Instance.AppliesTo(
             new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql, PostgresMajorVersion = major }));
 

@@ -192,12 +192,12 @@ FROM
     SELECT DISTINCT ON (s.queryid)
         s.queryid AS queryid,
         s.query AS query_text,
-        s.total_exec_time AS total_exec_time
+        s.{TOTAL_TIME} AS total_exec_time
     FROM {STATEMENTS_SCHEMA}.pg_stat_statements AS s
     WHERE s.queryid IS NOT NULL
     AND   s.query IS NOT NULL
     AND   {TOPLEVEL}
-    ORDER BY s.queryid, s.total_exec_time DESC
+    ORDER BY s.queryid, s.{TOTAL_TIME} DESC
 ) AS d
 ORDER BY d.total_exec_time DESC
 LIMIT $1";
@@ -218,6 +218,10 @@ LIMIT $1";
     public static string FetchSqlFor(bool isAurora, int postgresMajorVersion, CollectorContext schemas)
     {
         System.ArgumentNullException.ThrowIfNull(schemas);
+        /* #6206: the view's columns follow the extension's catalog version (read with the schema lookup), so total_time
+           stands in for total_exec_time below pg_stat_statements 1.8, and the server major only decides when the
+           extension's version is unknown. */
+        var layout = PgVersionSql.StatementsLayout.For(postgresMajorVersion, schemas.PgExtensionVersion("pg_stat_statements"));
         return isAurora
             ? AuroraFetchSql.Replace(
                 "{AURORA_SCHEMA}", schemas.PgFunctionSchema("aurora_stat_statements"), System.StringComparison.Ordinal)
@@ -225,7 +229,11 @@ LIMIT $1";
                 .Replace("{STATEMENTS_SCHEMA}", schemas.PgExtensionSchema("pg_stat_statements"), System.StringComparison.Ordinal)
                 .Replace(
                     "{TOPLEVEL}",
-                    postgresMajorVersion >= 14 ? "s.toplevel" : "true",
+                    layout.HasToplevel ? "s.toplevel" : "true",
+                    System.StringComparison.Ordinal)
+                .Replace(
+                    "{TOTAL_TIME}",
+                    layout.HasExecTimeNames ? "total_exec_time" : "total_time",
                     System.StringComparison.Ordinal);
     }
 

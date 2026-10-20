@@ -141,7 +141,7 @@ public sealed class PgWriteStatsCollector : PostgresCollectorDefinitionBase<PgWr
        All three views are kept as separate stats_reset columns. They CAN be reset independently
        (pg_stat_reset_shared takes a target), and a read that differenced across a reset it could not see
        would report a negative interval as a huge positive one. */
-    private static string BuildQueryText(int postgresMajorVersion, bool isAurora)
+    internal static string BuildQueryText(int postgresMajorVersion, bool isAurora)
     {
         var hasCheckpointer = postgresMajorVersion >= 17;
         var has18 = postgresMajorVersion >= 18;
@@ -204,19 +204,23 @@ public sealed class PgWriteStatsCollector : PostgresCollectorDefinitionBase<PgWr
                clause that does not name the view, and never a gate that stops the collector - AppliesTo
                has to keep passing on Aurora, or the same two thirds of the payload are lost a second way
                and CollectorEngineCapability reports a permanent gap for a collector that does run. ---- */
-        var walRecords = isAurora ? "NULL::bigint" : "w.wal_records";
-        var walFpi = isAurora ? "NULL::bigint" : "w.wal_fpi";
-        var walBuffersFull = isAurora ? "NULL::bigint" : "w.wal_buffers_full";
-        var walWrite = isAurora || has18 ? "NULL::bigint" : "w.wal_write";
-        var walSync = isAurora || has18 ? "NULL::bigint" : "w.wal_sync";
-        var walWriteTime = isAurora || has18 ? "NULL::double precision" : "w.wal_write_time";
-        var walSyncTime = isAurora || has18 ? "NULL::double precision" : "w.wal_sync_time";
-        var walStatsReset = isAurora ? "NULL::timestamp" : "(w.stats_reset AT TIME ZONE 'UTC')";
+        /* #6206: pg_stat_wal arrived in PostgreSQL 14. Below that there is no WAL view to name, which is the same
+           shape as Aurora's 0A000: typed NULLs and no join, so the checkpoint and bgwriter figures (which every major
+           has) are still collected. A major of 0 (not probed yet) reads as newest. */
+        var noWalView = isAurora || postgresMajorVersion is > 0 and < 14;
+        var walRecords = noWalView ? "NULL::bigint" : "w.wal_records";
+        var walFpi = noWalView ? "NULL::bigint" : "w.wal_fpi";
+        var walBuffersFull = noWalView ? "NULL::bigint" : "w.wal_buffers_full";
+        var walWrite = noWalView || has18 ? "NULL::bigint" : "w.wal_write";
+        var walSync = noWalView || has18 ? "NULL::bigint" : "w.wal_sync";
+        var walWriteTime = noWalView || has18 ? "NULL::double precision" : "w.wal_write_time";
+        var walSyncTime = noWalView || has18 ? "NULL::double precision" : "w.wal_sync_time";
+        var walStatsReset = noWalView ? "NULL::timestamp" : "(w.stats_reset AT TIME ZONE 'UTC')";
 
         /* wal_bytes is NUMERIC, not bigint - it is allowed to exceed 2^63 over a long uptime, which is
            exactly why upstream chose numeric. Cast to a bounded numeric so the store's column type is
            decidable, and carried through C# as decimal rather than long for the same reason. */
-        var walBytes = isAurora ? "NULL::numeric(38,0)" : "w.wal_bytes::numeric(38,0)";
+        var walBytes = noWalView ? "NULL::numeric(38,0)" : "w.wal_bytes::numeric(38,0)";
 
         /* #3955: which postmaster produced this snapshot. Not version- or flavour-gated: the function is core,
            readable by any login, and present on every major this collector applies to and on Aurora. AT TIME ZONE
@@ -225,7 +229,7 @@ public sealed class PgWriteStatsCollector : PostgresCollectorDefinitionBase<PgWr
 
         /* Naming the view in FROM is itself the 0A000, so the join has to go rather than just its
            columns. The two-line literal keeps the repository's CRLF instead of hardcoding a newline. */
-        var fromClause = isAurora
+        var fromClause = noWalView
             ? "FROM pg_catalog.pg_stat_bgwriter AS b"
             : @"FROM pg_catalog.pg_stat_bgwriter AS b
 CROSS JOIN pg_catalog.pg_stat_wal AS w";
@@ -267,15 +271,16 @@ SELECT
     public override string TargetTable => "pg_write_stats";
 
     /// <summary>
-    /// <c>pg_stat_wal</c> is PostgreSQL 14+, which is the binding floor — <c>pg_stat_bgwriter</c> long
-    /// predates it. Standbys included: <c>restartpoints_*</c> exists to describe exactly that case.
+    /// #6206: every major. <c>pg_stat_wal</c> is PostgreSQL 14+, but <c>pg_stat_bgwriter</c> long predates it, so
+    /// below 14 the checkpoint and bgwriter columns are collected and the WAL columns are NULL (the query never
+    /// names the missing view). Standbys included: <c>restartpoints_*</c> exists to describe exactly that case.
     /// <para>The floor binds the STOCK path only, since the Aurora path never names <c>pg_stat_wal</c>. It is
     /// left applying to both anyway: every Aurora major in the field is far above 14, and widening a gate
     /// would change what <see cref="CollectorEngineCapability"/> derives for a reason unrelated to the
     /// 0A000 this branch exists for. What matters is the direction it must NOT move - narrowing it to
     /// exclude Aurora would discard the checkpointer and bgwriter columns that Aurora does supply.</para>
     /// </summary>
-    public override bool AppliesTo(CollectorTargetInfo target) => target.PostgresMajorVersion >= 14;
+    public override bool AppliesTo(CollectorTargetInfo target) => true;
 
     public override CollectorQuery BuildQuery(CollectorContext context)
         => new(BuildQueryText(context.Target.PostgresMajorVersion, context.Target.IsAurora));

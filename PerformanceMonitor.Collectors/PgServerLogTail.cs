@@ -256,7 +256,9 @@ public static class PgServerLogTail
             parameters.Add(new CollectorParameter(ReadShiftParameter, (long)context.PgLogReadShiftBytes, CollectorParameterType.BigInt));
         }
 
-        return new CollectorQuery(text, parameters);
+        /* #6206: every consumer of the log tail goes through here, and the tails open with CTEs written AS MATERIALIZED,
+           which PostgreSQL 11 and older reject at the keyword. */
+        return new CollectorQuery(PgVersionSql.ForMajor(text, context.Target.PostgresMajorVersion), parameters);
     }
 
     /// <summary>Parses <c>"&lt;offset&gt;|&lt;file name&gt;"</c>; false for anything else.</summary>

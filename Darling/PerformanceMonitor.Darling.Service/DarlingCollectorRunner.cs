@@ -1802,17 +1802,17 @@ public sealed class DarlingCollectorRunner
     /// <see cref="CollectorContext.ChoosePgFunctionSchemas"/> checks the same rule again. Run on the monitoring
     /// connection, whose search_path is pinned to pg_catalog; every relation and operator is named by schema all the same.
     /// </summary>
-    internal const string PgExtensionSchemasSql = @"SELECT 'extension'::text, e.extname::text, n.nspname::text
+    internal const string PgExtensionSchemasSql = @"SELECT 'extension'::text, e.extname::text, n.nspname::text, e.extversion::text
 FROM pg_catalog.pg_extension AS e
 JOIN pg_catalog.pg_namespace AS n ON n.oid OPERATOR(pg_catalog.=) e.extnamespace
 UNION ALL
-SELECT 'function'::text, p.proname::text, n.nspname::text
+SELECT 'function'::text, p.proname::text, n.nspname::text, NULL::text
 FROM pg_catalog.pg_proc AS p
 JOIN pg_catalog.pg_namespace AS n ON n.oid OPERATOR(pg_catalog.=) p.pronamespace
 WHERE p.proname::text OPERATOR(pg_catalog.=) ANY (@functions)
 AND n.nspname OPERATOR(pg_catalog.=) 'pg_catalog'
 UNION ALL
-SELECT 'function'::text, p.proname::text, n.nspname::text
+SELECT 'function'::text, p.proname::text, n.nspname::text, NULL::text
 FROM pg_catalog.pg_extension AS x
 JOIN pg_catalog.pg_depend AS d
   ON d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_extension'::pg_catalog.regclass
@@ -1850,6 +1850,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
         CancellationToken cancellationToken)
     {
         context.PgExtensionSchemas = null;
+        context.PgExtensionVersions = null;
         context.PgFunctionSchemas = null;
         var readsFunctions = definition.ReadsAuroraFunctions && context.Target.IsAurora;
         if (definition.TargetEngine != CollectorTargetEngine.PostgreSql
@@ -1859,6 +1860,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
         }
 
         var schemas = new Dictionary<string, string>(StringComparer.Ordinal);
+        var versions = new Dictionary<string, string>(StringComparer.Ordinal);
         var functions = new List<(string Function, string Schema)>();
         try
         {
@@ -1876,6 +1878,11 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
                     if (string.Equals(reader.GetString(0), "extension", StringComparison.Ordinal))
                     {
                         schemas[reader.GetString(1)] = reader.GetString(2);
+                        /* #6206: the extension's own catalog version, from the same read - no second probe. */
+                        if (!reader.IsDBNull(3))
+                        {
+                            versions[reader.GetString(1)] = reader.GetString(3);
+                        }
                     }
                     else
                     {
@@ -1894,6 +1901,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
         }
 
         context.PgExtensionSchemas = schemas;
+        context.PgExtensionVersions = versions;
         if (readsFunctions)
         {
             var statementsSchema = schemas.TryGetValue("pg_stat_statements", out var found) ? found : null;

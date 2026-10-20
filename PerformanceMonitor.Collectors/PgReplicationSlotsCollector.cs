@@ -73,8 +73,14 @@ public sealed class PgReplicationSlotsCollector : PostgresCollectorDefinitionBas
        The LSN reference must switch on recovery state: pg_current_wal_lsn() ERRORS on a standby, so a
        reader target would fail the whole collection. pg_last_wal_receive_lsn() is the standby's
        equivalent. Aurora readers are legitimate targets here, so this is not hypothetical. */
-    private static string BuildQueryText(int postgresMajorVersion)
+    internal static string BuildQueryText(int postgresMajorVersion)
     {
+        /* #6206: two_phase arrived in PostgreSQL 14, and wal_status / safe_wal_size in 13 (with
+           max_slot_wal_keep_size). Below those majors each is a typed NULL, like the 16 and 17 columns below, so the
+           row shape is the same on every target; safe_wal_size then reads as the -1 "not applicable" sentinel. */
+        var twoPhase = postgresMajorVersion >= 14 ? "s.two_phase" : "NULL::boolean";
+        var walStatus = postgresMajorVersion >= 13 ? "s.wal_status" : "NULL::text";
+        var safeWalSize = postgresMajorVersion >= 13 ? "s.safe_wal_size" : "NULL::bigint";
         var conflicting = postgresMajorVersion >= 16 ? "s.conflicting" : "false";
         /* AT TIME ZONE 'UTC', not a bare select and not ::timestamp. inactive_since is
            `timestamp with time zone`, and two things go wrong if that is not converted HERE:
@@ -101,9 +107,9 @@ SELECT
     s.active                                                     AS is_active,
     coalesce(s.active_pid, 0)::bigint                            AS active_pid,
     s.temporary                                                  AS is_temporary,
-    s.two_phase                                                  AS two_phase,
-    s.wal_status                                                 AS wal_status,
-    coalesce(s.safe_wal_size, -1)::bigint                        AS safe_wal_size_bytes,
+    {twoPhase}                                                   AS two_phase,
+    {walStatus}                                                  AS wal_status,
+    coalesce({safeWalSize}, -1)::bigint                          AS safe_wal_size_bytes,
     coalesce(
         (CASE
              WHEN pg_is_in_recovery() THEN pg_last_wal_receive_lsn()
