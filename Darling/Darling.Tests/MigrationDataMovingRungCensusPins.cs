@@ -318,7 +318,9 @@ public sealed class MigrationDataMovingRungCensusPins
             "one partial unique index on config.investigation_requests (created V184), WHERE trigger_kind = 'change_watch'. The column "
             + "is added by the same rung with DEFAULT 'alert', so no existing row matches the predicate and the build indexes nothing: "
             + "it reads the table once (a request is one row per incident, about a hundred a day at the route limits, kept for a few "
-            + "weeks) and is milliseconds. It does not move the lock-wait floor."),
+            + "weeks) and is milliseconds. The rung also builds one partial index on collect.query_store_forced_plans, WHERE plan_id IS NULL "
+            + "(the marker rows, one per captured database per pass): a read of that plain table once, a few seconds on a store that keeps "
+            + "30 days of captures. It does not move the lock-wait floor."),
     ];
 
     /// <summary>
