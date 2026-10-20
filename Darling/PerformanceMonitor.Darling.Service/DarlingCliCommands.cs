@@ -887,29 +887,60 @@ public static class DarlingCliCommands
         NpgsqlDataSource? dataSource = null;
         Exception? storeError = null;
         string? storeReason = null;
+        IReadOnlyList<string> connectNotes = Array.Empty<string>();
         if (string.IsNullOrWhiteSpace(connectionString))
         {
             storeReason = DiagnosticsBundle.MissingConnectionReason(postgres);
         }
         else
         {
+            /* One try at one port. A managed store on Windows is also located from its own data directory when this
+               try is refused (#6217): see DiagnosticsBundleStoreLocator. */
+            async Task<NpgsqlDataSource> OpenStoreAsync(int port, CancellationToken token)
+            {
+                var attemptString = port == postgres.Port ? connectionString : DiagnosticsBundleStoreLocator.WithPort(connectionString, port);
+                NpgsqlDataSource? opened = null;
+                try
+                {
+                    opened = NpgsqlDataSource.Create(
+                        DarlingStoreConnection.PinSessionTimeZoneUtc(
+                            DarlingStoreConnection.WithApplicationName(attemptString, DarlingManagedPostgres.CliApplicationName)));
+                    using var probeBudget = CancellationTokenSource.CreateLinkedTokenSource(token);
+                    probeBudget.CancelAfter(TimeSpan.FromSeconds(ServiceCommandDeadlines.CliStoreReadSeconds * 2));
+                    await using var probe = await opened.OpenConnectionAsync(probeBudget.Token);
+                    return opened;
+                }
+                catch
+                {
+                    if (opened is not null)
+                    {
+                        await opened.DisposeAsync();
+                    }
+
+                    throw;
+                }
+            }
+
             try
             {
-                dataSource = NpgsqlDataSource.Create(
-                    DarlingStoreConnection.PinSessionTimeZoneUtc(
-                        DarlingStoreConnection.WithApplicationName(connectionString, DarlingManagedPostgres.CliApplicationName)));
-                using var probeBudget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                probeBudget.CancelAfter(TimeSpan.FromSeconds(ServiceCommandDeadlines.CliStoreReadSeconds * 2));
-                await using var probe = await dataSource.OpenConnectionAsync(probeBudget.Token);
+                if (postgres.Managed && OperatingSystem.IsWindows())
+                {
+                    var connected = await DiagnosticsBundleStoreLocator.ConnectAsync(
+                        DarlingManagedPostgres.ResolveDataDirectory(postgres), postgres.Port, OpenStoreAsync,
+                        TimeSpan.FromSeconds(ServiceCommandDeadlines.CliStoreReadSeconds * 2), TimeSpan.FromSeconds(1), cancellationToken);
+                    dataSource = connected.DataSource;
+                    storeError = connected.Error;
+                    storeReason = connected.Reason;
+                    connectNotes = connected.Notes;
+                }
+                else
+                {
+                    dataSource = await OpenStoreAsync(postgres.Port, cancellationToken);
+                }
             }
             catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
             {
                 storeError = ex;
-                if (dataSource is not null)
-                {
-                    await dataSource.DisposeAsync();
-                    dataSource = null;
-                }
             }
         }
 
@@ -919,7 +950,7 @@ public static class DarlingCliCommands
             /* #5366: sealed webhook values are opened with the key file read only, so the hosts they hold are aliased. */
             var keyRing = DarlingCliSealKey.TryOpenFileRing(config, DarlingConfig.ResolveConfigPath(options.ConfigPath), null);
             outcome = await DiagnosticsBundleRunner.BuildAsync(
-                options, config, connectionString, dataSource, storeError, storeReason, cancellationToken, keyRing: keyRing);
+                options, config, connectionString, dataSource, storeError, storeReason, cancellationToken, keyRing: keyRing, connectNotes: connectNotes);
         }
         finally
         {
