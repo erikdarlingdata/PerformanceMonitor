@@ -75,6 +75,8 @@ public sealed class McpResponseBudgetPerfmonAndBlockedXmlToolTests : IClassFixtu
         var root = doc.RootElement;
         var returned = root.GetProperty("counters").GetArrayLength();
         Assert.True(root.GetProperty("truncated").GetBoolean());
+        /* A latest read says when it was captured (#3541 A10), cut or not. */
+        Assert.False(string.IsNullOrEmpty(root.GetProperty("captured_at").GetString()));
         Assert.Equal(545, root.GetProperty("counters_total").GetInt32());
         Assert.Equal(returned, root.GetProperty("counters_returned").GetInt32());
         Assert.InRange(returned, 1, 544);
@@ -111,6 +113,16 @@ public sealed class McpResponseBudgetPerfmonAndBlockedXmlToolTests : IClassFixtu
         Assert.Equal(5 - returned, root.GetProperty("left_out_count").GetInt32());
         Assert.Equal(5 - returned, root.GetProperty("left_out_reports").GetArrayLength());
         Assert.Contains("limit 1", root.GetProperty("size_note").GetString(), StringComparison.Ordinal);
+
+        /* The field the web's data-start note reads, and the coverage notice, come from the reports SERVED: the page's oldest
+           event is the last report returned, and the notice's start is that event, not the older one left out. */
+        var oldestServed = root.GetProperty("reports")[returned - 1].GetProperty("event_time").GetString();
+        Assert.Equal(System.DateTime.Parse(oldestServed!, null, System.Globalization.DateTimeStyles.RoundtripKind),
+            System.DateTime.Parse(root.GetProperty("oldest_returned_event_time").GetString()!, null, System.Globalization.DateTimeStyles.RoundtripKind));
+        /* Lite's coverage probe reads the event time itself, so it names the store's oldest report in the window, left out or not:
+           the notice's start is never later than the oldest report served. */
+        Assert.True(System.DateTime.Parse(root.GetProperty("effective_start").GetString()!, null, System.Globalization.DateTimeStyles.RoundtripKind)
+            <= System.DateTime.Parse(root.GetProperty("oldest_returned_event_time").GetString()!, null, System.Globalization.DateTimeStyles.RoundtripKind));
 
         /* Every report returned is a whole, well-formed document: never cut mid-way. */
         foreach (var report in root.GetProperty("reports").EnumerateArray())

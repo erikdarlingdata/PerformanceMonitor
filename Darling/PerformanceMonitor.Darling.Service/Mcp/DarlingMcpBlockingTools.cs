@@ -759,10 +759,19 @@ public sealed class DarlingMcpBlockingTools
                             () => DarlingMcpWindowNotice.Probe(postgres, "blocked_process_reports", resolved.ServerName, windowStart, now, cancellationToken),
                             null, windowStart, now, "blocked_process_reports", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints());
 
-            /* #4966: the XE collector's coverage, earlier-of the oldest report shown (see get_deadlocks). */
-            var notice = await DarlingMcpWindowNotice.ReadEventAsync(
-                () => DarlingMcpWindowNotice.Probe(postgres, "blocked_process_reports", resolved.ServerName, windowStart, now, cancellationToken),
-                withXml.Min(r => r.EventTime), windowStart, now, "blocked_process_reports", logger: logger, cancellationToken: cancellationToken);
+            /* #4966: the XE collector's coverage, earlier-of the oldest report shown (see get_deadlocks).
+               #6180: "shown" is the reports the page SERVES, and the size target decides how many that is after this point, so the
+               probe is read once and a notice is built for every possible page length; the one for the length that fits is the one
+               published. Built from every report selected, it would claim a reach that only the reports left out have. */
+            var coverageProbe = new Lazy<Task<DateTime?>>(
+                () => DarlingMcpWindowNotice.Probe(postgres, "blocked_process_reports", resolved.ServerName, windowStart, now, cancellationToken));
+            var noticeByCount = new McpWindowNotice[withXml.Count + 1];
+            for (var shown = 1; shown <= withXml.Count; shown++)
+            {
+                noticeByCount[shown] = await DarlingMcpWindowNotice.ReadEventAsync(
+                    () => coverageProbe.Value, withXml.Take(shown).Min(r => r.EventTime), windowStart, now, "blocked_process_reports",
+                    logger: logger, cancellationToken: cancellationToken);
+            }
 
             var allReports = withXml.Select(r => new
             {
@@ -777,8 +786,9 @@ public sealed class DarlingMcpBlockingTools
             /* #6180: each report is a whole XML document (about 18 KB), so the default limit of 5 passes the shared response
                target. The page keeps the newest reports that fit WHOLE (always at least one) and lists the ones it left out by
                their identifying fields, so a report is never cut mid-way and any one of them can be fetched by itself. */
-            var (_, json) =McpResponseBudget.FitPrefix(allReports.Count, fitCount =>
+            var (servedCount, json) = McpResponseBudget.FitPrefix(allReports.Count, fitCount =>
             {
+                var notice = noticeByCount[fitCount];
                 var page = withXml.Take(fitCount).ToList();
                 var leftOut = allReports.Count - fitCount;
                 return JsonSerializer.Serialize(new
@@ -815,7 +825,7 @@ public sealed class DarlingMcpBlockingTools
             });
 
             /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). */
-            return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
+            return noticeByCount[servedCount].IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

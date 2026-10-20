@@ -66,6 +66,8 @@ public sealed class McpResponseBudget6180LiveTests
             var root = doc.RootElement;
             var returned = root.GetProperty("counters").GetArrayLength();
             Assert.True(root.GetProperty("truncated").GetBoolean());
+            /* The tool's own stamp: the snapshot's collection_time, which the census can no longer find in this file's source. */
+            Assert.Equal(at, DateTime.Parse(root.GetProperty("captured_at").GetString()!, null, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal));
             Assert.Equal(545, root.GetProperty("counters_total").GetInt32());
             Assert.Equal(returned, root.GetProperty("counters_returned").GetInt32());
             Assert.InRange(returned, 1, 544);
@@ -110,7 +112,9 @@ public sealed class McpResponseBudget6180LiveTests
     (blocked_report_id, collection_time, server_id, server_name, event_time, database_name,
      blocked_spid, blocking_spid, wait_time_ms, blocked_process_report_xml)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
-                    CollectionIdGenerator.Next(), t, ServerId, ServerName, t, "StackOverflow", 100 + i, 51, 5000L, bigXml);
+                    /* collection_time is the newest report's for all five: the collector's own coverage then starts AFTER the older
+                       events, so the notice's start can only come from the oldest report the page serves. */
+                    CollectionIdGenerator.Next(), newest, ServerId, ServerName, t, "StackOverflow", 100 + i, 51, 5000L, bigXml);
             }
 
             var json = await DarlingMcpBlockingTools.GetBlockedProcessXml(postgres, ServerName);
@@ -126,6 +130,15 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
             Assert.Equal(5 - returned, root.GetProperty("left_out_count").GetInt32());
             Assert.Equal(5 - returned, root.GetProperty("left_out_reports").GetArrayLength());
             Assert.Contains("limit 1", root.GetProperty("size_note").GetString(), StringComparison.Ordinal);
+
+            /* The fields the web's data-start note reads, and the coverage notice, come from the reports SERVED: the page's oldest
+               event is the last report returned, and the notice's start is that event, not the older one left out. */
+            var served = root.GetProperty("reports");
+            var oldestServed = served[returned - 1].GetProperty("event_time").GetString();
+            Assert.Equal(DateTime.Parse(oldestServed!, null, System.Globalization.DateTimeStyles.RoundtripKind),
+                DateTime.Parse(root.GetProperty("oldest_returned_event_time").GetString()!, null, System.Globalization.DateTimeStyles.RoundtripKind));
+            Assert.True(root.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(root.GetProperty("oldest_returned_event_time").GetString(), root.GetProperty("effective_start").GetString());
 
             /* Never cut mid-way: every report returned is the whole, well-formed document. */
             foreach (var report in root.GetProperty("reports").EnumerateArray())
@@ -293,8 +306,11 @@ public sealed class McpResponseBudgetFitPrefixTests
         Assert.True(doc.RootElement.GetProperty("truncated").GetBoolean());
         Assert.Equal(545, doc.RootElement.GetProperty("counters_total").GetInt32());
         Assert.Equal(doc.RootElement.GetProperty("counters").GetArrayLength(), doc.RootElement.GetProperty("counters_returned").GetInt32());
+        /* A latest read says when it was captured (#3541 A10), cut or not. */
+        Assert.Equal("2026-10-19T00:00:00.0000000Z", doc.RootElement.GetProperty("captured_at").GetString());
 
         var few = JsonDocument.Parse(TrendPayloads.PerfmonLatestReply("srv", "t", counters.GetRange(0, 5)));
+        Assert.Equal("t", few.RootElement.GetProperty("captured_at").GetString());
         Assert.False(few.RootElement.GetProperty("truncated").GetBoolean());
         Assert.Equal(JsonValueKind.Null, few.RootElement.GetProperty("size_note").ValueKind);
     }

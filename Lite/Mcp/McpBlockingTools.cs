@@ -393,11 +393,19 @@ public sealed class McpBlockingTools
 
             /* #4966: the XML exists only in the XE arm, so the probe is the XE collector's alone (the DMV snapshots are not
                a source of these rows). Where this server's blocked_process_report data starts for the window. An event list, so the floor is the
-               earlier of the coverage probe and the oldest event the page shows. */
+               earlier of the coverage probe and the oldest event the page shows.
+               #6180: "shown" is the reports the page SERVES, and the size target decides how many that is after this point, so the
+               probe is read once and a notice is built for every possible page length; the one for the length that fits is the one
+               published. Built from every report selected, it would claim a reach that only the reports left out have. */
             var requestedStart = windowEnd.AddHours(-hours_back);
-            var notice = await McpQueryTools.EventWindowNoticeAsync(
-                () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.BlockedProcessReports, resolved.ServerId, requestedStart, windowEnd, includeAlsoCovered: false),
-                withXml.Min(r => r.EventTime), requestedStart, windowEnd, "blocked_process_report");
+            var coverageProbe = new Lazy<Task<DateTime?>>(
+                () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.BlockedProcessReports, resolved.ServerId, requestedStart, windowEnd, includeAlsoCovered: false));
+            var noticeByCount = new McpQueryTools.McpWindowNotice[withXml.Count + 1];
+            for (var shown = 1; shown <= withXml.Count; shown++)
+            {
+                noticeByCount[shown] = await McpQueryTools.EventWindowNoticeAsync(
+                    () => coverageProbe.Value, withXml.Take(shown).Min(r => r.EventTime), requestedStart, windowEnd, "blocked_process_report");
+            }
 
             var allReports = withXml.Select(r => new
             {
@@ -414,6 +422,7 @@ public sealed class McpBlockingTools
                their identifying fields, so a report is never cut mid-way and any one of them can be fetched by itself. */
             return McpResponseBudget.FitPrefix(allReports.Count, fitCount =>
             {
+            var notice = noticeByCount[fitCount];
             var page = withXml.Take(fitCount).ToList();
             var leftOut = allReports.Count - fitCount;
             return JsonSerializer.Serialize(new
