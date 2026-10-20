@@ -1705,9 +1705,11 @@ GRANT EXECUTE ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerLeg
 GRANT EXECUTE ON FUNCTION {config}.request_snapshot_now(integer, text, text) TO {viewer}, {mcp};
 -- #6231: the MCP route tools. mcp holds no INSERT on {config}.config_notification_routes and no SELECT or UPDATE on its
 --     destination columns, and gets none here: create_notification_route and update_notification_route reach the table only
---     through these two functions, which never take or change a destination (create leaves every channel empty, so the route sends
---     through the channels configured in Settings; update writes the match, scope, enabled flag, resolution override and
---     fallback). Update re-reads the row FOR UPDATE and refuses an agent route inside the transaction. Granted to mcp only.
+--     through these two functions, which never take or change a destination (create leaves every channel empty, so the route has no
+--     destinations of its own and each channel goes where it went before: the next matching route, else the Settings channels;
+--     update writes the match, scope, enabled flag, resolution override and fallback, and changes the match or scope only on a
+--     route with no destination and no agent setting). Update re-reads the row FOR UPDATE and refuses an agent route inside
+--     the transaction. Granted to mcp only.
 {BuildNotificationRouteFunctionsSql(config)}
 GRANT EXECUTE ON FUNCTION {config}.create_notification_route(text, boolean, integer, integer, boolean, integer) TO {mcp};
 GRANT EXECUTE ON FUNCTION {config}.update_notification_route(integer, text[], text, boolean, integer, integer, boolean, integer) TO {mcp};
@@ -2428,8 +2430,9 @@ REVOKE ALL ON FUNCTION {config}.request_snapshot_now(integer, text, text) FROM P
     /// The two SECURITY DEFINER functions (#6231) the MCP <c>create_notification_route</c> and <c>update_notification_route</c>
     /// tools write a notification route through. The <c>mcp</c> login holds no INSERT on the table and no SELECT or UPDATE on its
     /// destination columns, and these functions are how it still creates and edits a route: create inserts a route with every
-    /// destination empty (it sends through the channels configured in Settings), and update writes the match, scope, enabled
-    /// flag, resolution override and fallback, never a destination. Update reads the row again under its lock and refuses an
+    /// destination empty (it has no destinations of its own, so each channel goes where it went before: the next matching route,
+    /// else the Settings channels), and update writes the match, scope, enabled flag, resolution override and fallback, never
+    /// a destination, and changes the match or scope only on a route with no destination and no agent setting. Update reads the row again under its lock and refuses an
     /// agent route inside the transaction. Created and REVOKEd from PUBLIC here; the caller adds the GRANT EXECUTE to mcp only.
     /// </summary>
     internal static string BuildNotificationRouteFunctionsSql(string config) => $@"
@@ -2470,8 +2473,8 @@ BEGIN
       AND NOT EXISTS (SELECT 1 FROM {config}.config_notification_routes WHERE route_id = p_fallback_route_id) THEN
       RAISE EXCEPTION 'The fallback route does not exist.' USING ERRCODE = 'DL404';
    END IF;
-   -- Every destination column keeps its empty default, so the route sends through the channels configured in Settings
-   -- (an empty channel inherits the parent's) and no caller of this function can name a URL, a key or an address list.
+   -- Every destination column keeps its empty default, so the route has no destinations of its own: each channel
+   -- goes where it went before (the next matching route, else the Settings channels), and no caller of this function can name a URL, a key or an address list.
    -- The agent columns keep their defaults too: this function never makes an agent route.
    INSERT INTO {config}.config_notification_routes
       (metric_match, enabled, scope_server_id, scope_tag_id, send_resolutions, fallback_route_id, modified_at)
@@ -2519,6 +2522,18 @@ BEGIN
    END IF;
    IF v_row.agent_level IS NOT NULL AND v_row.agent_level >= 1 THEN
       RAISE EXCEPTION 'That route is an agent route: it is changed in the Viewer, not over MCP.' USING ERRCODE = 'DL403';
+   END IF;
+   -- What a route matches and which servers it covers decide which alerts reach its destinations, and which servers an agent
+   -- route covers, so a route that has a destination of its own, or an explicit agent setting (Off included), keeps both in
+   -- the Viewer. Enabled, send_resolutions and the fallback stay open to this function. A route with no destination (the kind
+   -- create_notification_route makes) can be edited in full. (#6231)
+   IF 'metric_match' = ANY (p_columns) OR 'scope' = ANY (p_columns) THEN
+      IF COALESCE(cardinality(v_row.configured_channels), 0) > 0 THEN
+         RAISE EXCEPTION 'That route has destinations of its own, so what it matches and which servers it covers are changed in the Viewer, not over MCP. Enabled, send_resolutions and fallback_route_id can still be changed here.' USING ERRCODE = 'DL403';
+      END IF;
+      IF v_row.agent_level IS NOT NULL THEN
+         RAISE EXCEPTION 'That route has an agent setting (Off), so what it matches and which servers it covers are changed in the Viewer, not over MCP. Enabled, send_resolutions and fallback_route_id can still be changed here.' USING ERRCODE = 'DL403';
+      END IF;
    END IF;
    v_match := CASE WHEN 'metric_match' = ANY (p_columns) THEN btrim(COALESCE(p_metric_match, '')) ELSE v_row.metric_match END;
    v_enabled := CASE WHEN 'enabled' = ANY (p_columns) THEN COALESCE(p_enabled, v_row.enabled) ELSE v_row.enabled END;

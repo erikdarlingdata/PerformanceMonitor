@@ -54,6 +54,9 @@ public sealed class McpToolLatencyRecordingTests
         [McpServerTool(Name = "latency_probe_ok"), Description("Test-only: always answers Ok.")]
         public static string ProbeOk() => "probe-ok";
 
+        [McpServerTool(Name = "latency_probe_identity"), Description("Test-only: answers who the write log would name for this call.")]
+        public static string ProbeIdentity() => ReadCaller.WriteIdentity();
+
         [McpServerTool(Name = "latency_probe_gate_failed"), Description("Test-only: answers Ok after noting a gate failure.")]
         public static string ProbeGateFailed()
         {
@@ -316,7 +319,7 @@ public sealed class McpToolLatencyRecordingTests
         return SendJsonRpcAsync(server, path, requestBody);
     }
 
-    private static async Task<(int StatusCode, string Body)> SendJsonRpcAsync(TestServer server, string path, string requestBody, string? userAgent = null)
+    private static async Task<(int StatusCode, string Body)> SendJsonRpcAsync(TestServer server, string path, string requestBody, string? userAgent = null, string? authorization = null)
     {
         var ctx = await server.SendAsync(c =>
         {
@@ -332,6 +335,11 @@ public sealed class McpToolLatencyRecordingTests
             if (userAgent is not null)
             {
                 c.Request.Headers.UserAgent = userAgent;
+            }
+
+            if (authorization is not null)
+            {
+                c.Request.Headers.Authorization = authorization;
             }
         });
 
@@ -508,6 +516,26 @@ public sealed class McpToolLatencyRecordingTests
         Assert.True(slowReads.TryRead(out var first));
         Assert.True(slowReads.TryRead(out var second));
         Assert.Equal(new[] { "ua:node/22.3.0", "ua:python-httpx/0.27.0" }, new[] { first!.Caller, second!.Caller });
+    }
+
+    /// <summary>#6231: what a write log line names for a call is the identity the service itself knows (a fingerprint of the bearer token the
+    /// request carried, never the token) followed by the name the client gave, labelled as the client's own claim.</summary>
+    [Fact]
+    public async Task TheWriteIdentity_IsTheTokenFingerprint_ThenTheClientReportedName()
+    {
+        using var server = await BuildServer(new ReadLatencyAccumulator(), new SlowReadLog(0));
+        var requestBody = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"latency_probe_identity\",\"arguments\":{}}}";
+        const string Token = "probe-token-6231-not-a-real-one";
+
+        var (_, withToken) = await SendJsonRpcAsync(server, "/", requestBody, "node/22.3.0 (win32; x64)", "Bearer " + Token);
+        Assert.Contains(ReadCaller.OfMcpToken(Token) + ", client says: ua:node/22.3.0", withToken, StringComparison.Ordinal);
+        Assert.StartsWith("token ", ReadCaller.OfMcpToken(Token), StringComparison.Ordinal);
+        Assert.DoesNotContain(Token, withToken, StringComparison.Ordinal);
+
+        /* Another token is another identity, whatever name the client gives. */
+        Assert.NotEqual(ReadCaller.OfMcpToken(Token), ReadCaller.OfMcpToken(Token + "x"));
+        var (_, withoutToken) = await SendJsonRpcAsync(server, "/", requestBody, "node/22.3.0 (win32; x64)");
+        Assert.Contains("no token, client says: ua:node/22.3.0", withoutToken, StringComparison.Ordinal);
     }
 
     /// <summary>#5793: a tool call that carries neither client info nor a User-Agent records <c>unknown</c>.</summary>

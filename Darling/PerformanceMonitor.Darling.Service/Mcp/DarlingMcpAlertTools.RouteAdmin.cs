@@ -30,8 +30,9 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// notification route, dismiss alert history, and the restore that undoes a dismiss. A route is written through the store's own
 /// <c>config.create_notification_route</c> and <c>config.update_notification_route</c> functions, because the <c>mcp</c> login holds
 /// no INSERT on the table and no read or write on a destination column. MCP never sets or changes where a route sends: create makes a
-/// route with every channel empty (it sends through the channels configured in Settings) and update changes the match, scope, enabled
-/// flag, resolution override and fallback. An answer shows a route the way <c>get_notification_routes</c> does (channels by name). Every tool here is in
+/// route with every channel empty (it has no destinations of its own: each channel goes where it went before, the next matching route and
+/// else the Settings channels) and update changes the match, scope, enabled flag, resolution override and fallback. Update changes the match or
+/// scope only on a route with no destination and no agent setting; the store function refuses the rest, in plain words. An answer shows a route the way <c>get_notification_routes</c> does (channels by name). Every tool here is in
 /// <see cref="DarlingMcpWritePolicy.WriteTools"/> (served only with <c>mcp.allowWrites</c> and a token) and in
 /// <see cref="DarlingMcpWritePolicy.NeverAgentTools"/> (an agent working an alert can never call it).
 /// </summary>
@@ -43,10 +44,10 @@ public sealed partial class DarlingMcpAlertTools
     private const string DestinationsInViewer = "Neither route tool takes or changes a destination (a webhook URL, a routing key or email recipients): those are set in the Viewer's Settings window (Notifications, routes).";
 
     [McpServerTool(Name = "create_notification_route"), Description(
-        "Creates a notification route that sends through the channels configured in Settings (Notifications): the route is made with every channel empty, and an empty channel inherits the parent's. It takes no webhook URL, key or email recipients; the route's own destinations are set in the Viewer. Changes shared alert configuration the service delivers on, on its next sweep. Returns created (the route as get_notification_routes shows it) with the undo call, or invalid. It cannot set the agent channel: agent routes are changed in the Viewer." +
+        "Creates a notification route with no destinations of its own: each channel goes where it went before (the next matching route, else the Settings channels). It takes no webhook URL, key or email recipients; the route's own destinations are set in the Viewer. Changes shared alert configuration the service delivers on, on its next sweep. Returns created (the route as get_notification_routes shows it) with the undo call, or invalid. It cannot set the agent channel: agent routes are changed in the Viewer." +
         "<<GUIDE>>" +
-        "Creates a route that decides WHERE one family's alerts go and nothing about the destinations themselves: the route is stored with every destination empty, " +
-        "so it sends to the channels configured in Settings > Notifications (the parent set), exactly as get_notification_routes explains inherit. " +
+        "Creates a route that decides WHICH alerts it covers and nothing about destinations: the route is stored with every destination empty, " +
+        "so it has none of its own and each channel goes where it went before: to the next less specific matching route that sets that channel, else to the Settings > Notifications channels. " +
         DestinationsInViewer + " " +
         "What it can set: metric_match (" + MatchHelp + "), a scope of one server or one tag (not both; * only with a scope), enabled, " +
         "send_resolutions (inherit, always or never: the clear message to the channels this route resolves to) and fallback_route_id (an existing route). " +
@@ -99,7 +100,7 @@ public sealed partial class DarlingMcpAlertTools
             {
                 status = "created",
                 route = stored is null ? null : RoutePayload(stored),
-                sends_to = "The channels configured in Settings > Notifications (the route's own destinations are empty, so it inherits them). Set the route's own destinations in the Viewer.",
+                sends_to = "The route has no destinations of its own, so each channel goes where it went before: to the next matching route that sets that channel, else to the channels configured in Settings > Notifications. Set the route's own destinations in the Viewer.",
                 undo = new { tool = "delete_notification_route", arguments = new { route_id = routeId } },
                 note = "The service picks the route up on its next collection sweep.",
             }, McpHelpers.JsonOptions);
@@ -111,9 +112,10 @@ public sealed partial class DarlingMcpAlertTools
     }
 
     [McpServerTool(Name = "update_notification_route"), Description(
-        "Edits a notification route by route_id: only the fields you pass change, and never its destinations (webhook URLs, keys, email recipients), which are set in the Viewer. Changes shared alert configuration the service delivers on, on its next sweep. Returns updated (the route as get_notification_routes shows it), previous (the route before) and the undo call, or unchanged, invalid, or not_found. An agent route (agent_level 1 or more) is refused: it is changed in the Viewer." +
+        "Edits a notification route by route_id: only the fields you pass change, and never its destinations (webhook URLs, keys, email recipients), which are set in the Viewer. Changes shared alert configuration the service delivers on, on its next sweep. Returns updated (the route as get_notification_routes shows it), previous (the route before) and the undo call, or unchanged, invalid, or not_found. Refused (change it in the Viewer): an agent route, and a change to what a route matches or which servers it covers when the route has destinations of its own or an agent setting (Off)." +
         "<<GUIDE>>" +
         "Edits what a route matches and applies to, never where it sends. " + DestinationsInViewer + " " +
+        "A route that has destinations of its own, or an agent setting (Off included), keeps its match and scope: changing metric_match, scope_server_id, scope_tag_id or fleet_wide on it answers refused, and the change is made in the Viewer. enabled, send_resolutions and fallback_route_id can still be changed on it. A route with no destinations (one made by create_notification_route) can be edited in full. " +
         "Fields: metric_match (" + MatchHelp + "), enabled, scope (scope_server_id or scope_tag_id, the other is cleared; fleet_wide true clears both), " +
         "send_resolutions (inherit, always or never) and fallback_route_id (an existing route; clear_fallback true removes it). A field left out keeps its stored value. " +
         "The same rules the Viewer's route window applies hold: * needs a scope, a route is scoped to one server or one tag, a route is not its own fallback. " +
@@ -275,13 +277,13 @@ public sealed partial class DarlingMcpAlertTools
         _ => null,
     };
 
-    /// <summary>The caller of a route write: the MCP client's own name and version, else the request's User-Agent token, else unknown.
-    /// The tool-call filter names it once per call (<see cref="ReadCaller.AmbientMcpCaller"/>).</summary>
-    private static string CallerOf() => ReadCaller.AmbientMcpCaller ?? ReadCaller.Unknown;
+    /// <summary>Who made a route write, for the log: the token's server-side identity, then the name the client reported for itself
+    /// (<see cref="ReadCaller.WriteIdentity"/>). The tool-call filter sets both once per call.</summary>
+    private static string CallerOf() => ReadCaller.WriteIdentity();
 
-    /// <summary>One line per route write (#6231): the tool, the caller, the route and the names of the fields changed. Never a value.</summary>
+    /// <summary>One line per route write (#6231): the tool, the token and client identity, the route and the names of the fields changed. Never a value.</summary>
     internal static void LogRouteWrite(ILogger? logger, string tool, string caller, int routeId, string fields) =>
-        logger?.LogInformation("MCP route write {Tool} by {Caller}: route {RouteId}, fields changed: {Fields}", tool, caller, routeId, fields);
+        logger?.LogInformation("MCP route write {Tool} by {Identity}: route {RouteId}, fields changed: {Fields}", tool, caller, routeId, fields);
 
     /// <summary>The update call that puts a route's fields back to <paramref name="existing"/>'s values.</summary>
     private static Dictionary<string, object?> UndoArguments(PgNotificationRouteStore.RouteSummary existing)
@@ -425,8 +427,8 @@ public sealed partial class DarlingMcpAlertTools
 
     /// <summary>One Information line per dismiss or restore call: the tool, who called, and how many rows changed.</summary>
     private static void LogAlertWrite(ILogger? logger, string tool, int rows) =>
-        logger?.LogInformation("MCP write {Tool} by {Caller}: {Rows} alert history rows changed",
-            tool, ReadCaller.AmbientMcpCaller ?? ReadCaller.Unknown, rows);
+        logger?.LogInformation("MCP write {Tool} by {Identity}: {Rows} alert history rows changed",
+            tool, ReadCaller.WriteIdentity(), rows);
 
     /// <summary>Parses the keys with the web dismiss route's own parser, so the two surfaces refuse a body in the same words.</summary>
     private static string? ParseAlertKeys(string? alertsJson, out List<AlertDismissKey> keys)

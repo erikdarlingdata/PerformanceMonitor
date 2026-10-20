@@ -161,8 +161,55 @@ public sealed class QuietWindowBehaviourTests
         var ahead = Parse(await DarlingMcpQuietWindowTools.SetQuietWindowCore(store, Alpha, Iso(Now.AddDays(11)), Iso(Now.AddDays(5)), null, Now));
         Assert.Equal("created", ahead["status"]!.GetValue<string>());
 
-        var week = Parse(await DarlingMcpQuietWindowTools.SetQuietWindowCore(store, Alpha, Iso(Now.AddDays(7)), null, null, Now));
+        var week = Parse(await DarlingMcpQuietWindowTools.SetQuietWindowCore(new FakeMuteRuleStore(), Alpha, Iso(Now.AddDays(7)), null, null, Now));
         Assert.Equal("created", week["status"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task AWindowThatStartsMoreThanSevenDaysAhead_IsRefused_AndOneThatStartsInSevenDaysIsAccepted()
+    {
+        var store = new FakeMuteRuleStore();
+
+        var far = Parse(await DarlingMcpQuietWindowTools.SetQuietWindowCore(store, Alpha, Iso(Now.AddDays(9)), Iso(Now.AddDays(8)), null, Now));
+        Assert.Equal("invalid", far["status"]!.GetValue<string>());
+        Assert.Contains("7 days from now", far["message"]!.GetValue<string>(), StringComparison.Ordinal);
+        Assert.Equal(0, store.Count);
+
+        var edge = Parse(await DarlingMcpQuietWindowTools.SetQuietWindowCore(store, Alpha, Iso(Now.AddDays(7).AddHours(2)), Iso(Now.AddDays(7)), null, Now));
+        Assert.Equal("created", edge["status"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task ASecondUpcomingOrActiveWindowForTheSameScope_IsRefused_UntilTheFirstIsCleared()
+    {
+        var store = new FakeMuteRuleStore();
+        var first = Parse(await DarlingMcpQuietWindowTools.SetQuietWindowCore(store, Alpha, Iso(Now.AddDays(2)), Iso(Now.AddDays(1)), null, Now));
+        var firstId = first["rule_id"]!.GetValue<string>();
+
+        /* A different window for the same server is refused, whether it starts later or now, and the answer names the one in the way. */
+        foreach (var (end, start) in new[] { (Now.AddDays(4), (DateTime?)Now.AddDays(3)), (Now.AddHours(1), (DateTime?)null) })
+        {
+            var second = Parse(await DarlingMcpQuietWindowTools.SetQuietWindowCore(store, Alpha, Iso(end), start is { } s ? Iso(s) : null, null, Now));
+            Assert.Equal("refused", second["status"]!.GetValue<string>());
+            Assert.Contains(firstId, second["message"]!.GetValue<string>(), StringComparison.Ordinal);
+            Assert.Contains("clear_quiet_window", second["message"]!.GetValue<string>(), StringComparison.Ordinal);
+        }
+
+        Assert.Equal(1, store.Count);
+
+        /* The same call repeated is still the safe repeat, another server and the fleet have their own scope, and a cleared window frees the scope. */
+        Assert.Equal("already_exists", Parse(await DarlingMcpQuietWindowTools.SetQuietWindowCore(store, Alpha, Iso(Now.AddDays(2)), Iso(Now.AddDays(1)), null, Now))["status"]!.GetValue<string>());
+        Assert.Equal("created", Parse(await DarlingMcpQuietWindowTools.SetQuietWindowCore(store, (12, "beta"), Iso(Now.AddHours(1)), null, null, Now))["status"]!.GetValue<string>());
+        Assert.Equal("created", Parse(await DarlingMcpQuietWindowTools.SetQuietWindowCore(store, null, Iso(Now.AddHours(1)), null, null, Now))["status"]!.GetValue<string>());
+        Assert.Equal("refused", Parse(await DarlingMcpQuietWindowTools.SetQuietWindowCore(store, null, Iso(Now.AddHours(3)), null, null, Now))["status"]!.GetValue<string>());
+
+        Assert.Equal("cleared", Parse(await DarlingMcpQuietWindowTools.ClearQuietWindowCore(store, firstId, Now))["status"]!.GetValue<string>());
+        Assert.Equal("created", Parse(await DarlingMcpQuietWindowTools.SetQuietWindowCore(store, Alpha, Iso(Now.AddDays(4)), Iso(Now.AddDays(3)), null, Now))["status"]!.GetValue<string>());
+
+        /* A window that already ended does not count. */
+        var later = Now.AddDays(5);
+        Assert.Equal("created", Parse(await DarlingMcpQuietWindowTools.SetQuietWindowCore(store, (13, "gamma"), Iso(Now.AddHours(1)), null, null, Now))["status"]!.GetValue<string>());
+        Assert.Equal("created", Parse(await DarlingMcpQuietWindowTools.SetQuietWindowCore(store, (13, "gamma"), Iso(later.AddHours(1)), null, null, later))["status"]!.GetValue<string>());
     }
 
     [Fact]
@@ -279,6 +326,56 @@ public sealed class QuietWindowBehaviourTests
 [Collection("live-postgres")]
 public sealed class QuietWindowLivePostgresTests
 {
+    /// <summary>The two set_quiet_window limits (#6231) on the production store: a start more than 7 days ahead is refused, and so is a
+    /// second upcoming window for the scope that already has one, until the first is cleared.</summary>
+    [Fact]
+    public async Task SetQuietWindow_OnTheProductionStore_RefusesAFarStart_AndASecondWindowForTheSameServer()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the live quiet-window limits.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var store = new PgMuteRuleStore(postgres);
+        var target = (ServerId: -6233, DisplayName: "qw-limits-" + Guid.NewGuid().ToString("N"));
+        var now = DateTime.UtcNow;
+        static string Status(string answer) => JsonNode.Parse(answer)!["status"]!.GetValue<string>();
+        string At(DateTime utc) => utc.ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+
+        var bodySucceeded = false;
+        try
+        {
+            Assert.Equal("invalid", Status(await DarlingMcpQuietWindowTools.SetQuietWindowCore(store, target, At(now.AddDays(9)), At(now.AddDays(8)), null, now)));
+            Assert.DoesNotContain(await store.LoadAllAsync(), r => r.ServerId == target.ServerId);
+
+            var first = JsonNode.Parse(await DarlingMcpQuietWindowTools.SetQuietWindowCore(store, target, At(now.AddDays(2)), At(now.AddDays(1)), null, now))!;
+            Assert.Equal("created", first["status"]!.GetValue<string>());
+
+            var second = JsonNode.Parse(await DarlingMcpQuietWindowTools.SetQuietWindowCore(store, target, At(now.AddDays(4)), At(now.AddDays(3)), null, now))!;
+            Assert.Equal("refused", second["status"]!.GetValue<string>());
+            Assert.Contains(first["rule_id"]!.GetValue<string>(), second["message"]!.GetValue<string>(), StringComparison.Ordinal);
+            Assert.Single(await store.LoadAllAsync(), r => r.ServerId == target.ServerId);
+
+            Assert.Equal("cleared", Status(await DarlingMcpQuietWindowTools.ClearQuietWindowCore(store, first["rule_id"]!.GetValue<string>(), now)));
+            Assert.Equal("created", Status(await DarlingMcpQuietWindowTools.SetQuietWindowCore(store, target, At(now.AddDays(4)), At(now.AddDays(3)), null, now)));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, async () =>
+            {
+                foreach (var rule in (await store.LoadAllAsync()).Where(r => r.ServerId == target.ServerId))
+                {
+                    await store.DeleteAsync(rule.Id);
+                }
+            });
+        }
+    }
+
     [Fact]
     public async Task PgMuteRuleStore_RoundTripsTheStart_AndTheFleetSilenceReadIgnoresAWindowNotYetStarted()
     {

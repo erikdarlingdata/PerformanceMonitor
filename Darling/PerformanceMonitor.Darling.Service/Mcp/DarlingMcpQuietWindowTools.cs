@@ -65,13 +65,19 @@ public sealed class DarlingMcpQuietWindowTools
     /// 7 days, or never). A longer mute is made by an operator in the Viewer.</summary>
     internal static readonly TimeSpan MaxWindow = TimeSpan.FromDays(7);
 
+    /// <summary>How far ahead a window may start: 7 days from now, the same horizon as its length.</summary>
+    internal static readonly TimeSpan MaxStartAhead = TimeSpan.FromDays(7);
+
+    private static bool SameInstant(DateTime? a, DateTime? b) =>
+        a is null || b is null ? a is null && b is null : Math.Abs((a.Value - b.Value).Ticks) < TimeSpan.TicksPerMillisecond;
+
     [McpServerTool(Name = "set_quiet_window"), Description(
         "Sets a QUIET WINDOW: no alert is delivered for one server (server_name) or for the WHOLE FLEET (server_name omitted) from starts_at (optional, default now) until ends_at (required). Alerts are still logged. Changes shared alert configuration the service delivers on. The window ends on its own. Returns the rule id and the clear_quiet_window call that undoes it.<<GUIDE>>" +
         "A quiet window is a mute rule with only a server scope (or none, for the fleet) and an end time, so get_mute_rules lists it with its " +
         "starts_at_utc and a state of active, upcoming or expired. starts_at is an optional ISO-8601 UTC timestamp: set it ahead of " +
         "planned work and the window mutes nothing until that moment (state upcoming); omit it to start now. ends_at is required, an " +
         "ISO-8601 UTC timestamp that must be in the future and after starts_at; an end that is not after the start is refused and nothing is " +
-        "written. A window lasts at most 7 days (ends_at minus the start), the longest finite choice the Viewer offers. server_name scopes the window to one monitored server (its display name; keyed on the server's store id, so a renamed " +
+        "written. A window lasts at most 7 days (ends_at minus the start), the longest finite choice the Viewer offers, and starts at most 7 days from now. A server (or the fleet) can have only one quiet window upcoming or active at a time: a second one answers refused, naming the first, and you clear that one first. server_name scopes the window to one monitored server (its display name; keyed on the server's store id, so a renamed " +
         "server does not escape it); OMIT it and the window mutes EVERY alert on EVERY server, so say so to the person who asked. " +
         "Repeating the same call is safe: an identical window already in force answers already_exists with its id. The running service " +
         "applies the window on its next collection sweep, when the write's config_version bump makes it reload its mute cache. " +
@@ -153,6 +159,26 @@ public sealed class DarlingMcpQuietWindowTools
         {
             return DarlingMcpAlertTools.Outcome("invalid",
                 $"A quiet window can last at most 7 days, the longest finite choice the Viewer's mute dialog offers (ends_at {Iso(end)} is longer). Set a shorter window and set another when it ends. Nothing was written.");
+        }
+
+        // Both limits count from now, like the Viewer's choices (1 hour, 24 hours, 7 days): a start a year ahead, or one window
+        // set after another, would make a long mute out of short ones. (#6231)
+        if (start.HasValue && start.Value - nowUtc > MaxStartAhead)
+        {
+            return DarlingMcpAlertTools.Outcome("invalid",
+                $"starts_at ({Iso(start.Value)}) is more than 7 days from now. A quiet window can start at most 7 days ahead; set it closer to the work. Nothing was written.");
+        }
+
+        var sameScope = (await store.LoadAllAsync()).Where(r => r is not null && r.Enabled && IsQuietWindow(r) && !r.IsExpiredAt(nowUtc)
+            && (target is { } scoped ? r.ServerId == scoped.ServerId : r.ServerId is null && r.ServerName is null)).ToList();
+        if (sameScope.Count > 0 && !sameScope.Any(r => SameInstant(r.ExpiresAtUtc, end) && SameInstant(r.StartsAtUtc, start)))
+        {
+            var held = sameScope.OrderBy(r => r.CreatedAtUtc).First();
+            var who = target is { } named ? $"Server {named.DisplayName}" : "The fleet";
+            var heldState = held.StartsAtUtc is { } heldStart && heldStart > nowUtc ? "upcoming" : "active";
+            return DarlingMcpAlertTools.Outcome("refused",
+                $"{who} already has a quiet window that is {heldState} (rule {held.Id}, ends {Iso(held.ExpiresAtUtc!.Value)}). " +
+                "Only one quiet window can be waiting or running for the same scope: clear it with clear_quiet_window first, then set the new one. Nothing was written.");
         }
 
         var text = string.IsNullOrWhiteSpace(reason) ? ReasonPrefix : $"{ReasonPrefix}: {reason.Trim()}";
@@ -285,8 +311,8 @@ public sealed class DarlingMcpQuietWindowTools
             return;
         }
 
-        logger.LogInformation("MCP write {Tool} by {Caller}: {Status}, rule {RuleId}",
-            tool, ReadCaller.AmbientMcpCaller ?? ReadCaller.Unknown, status, node?["rule_id"]?.GetValue<string>());
+        logger.LogInformation("MCP write {Tool} by {Identity}: {Status}, rule {RuleId}",
+            tool, ReadCaller.WriteIdentity(), status, node?["rule_id"]?.GetValue<string>());
     }
 
     private static bool TryParseUtc(string text, out DateTime utc)

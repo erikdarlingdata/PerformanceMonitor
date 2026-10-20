@@ -87,6 +87,7 @@ public sealed class McpAlertAdminLiveTests
             var created = JsonDocument.Parse(answer).RootElement;
             var mcpId = created.GetProperty("route").GetProperty("route_id").GetInt32();
             Assert.Empty(created.GetProperty("route").GetProperty("configured_channels").EnumerateArray());
+            Assert.Contains("next matching route", created.GetProperty("sends_to").GetString(), StringComparison.Ordinal);
             Assert.Contains("Settings", created.GetProperty("sends_to").GetString(), StringComparison.Ordinal);
             Assert.True(created.GetProperty("route").GetProperty("send_resolutions").GetBoolean());
 
@@ -95,9 +96,16 @@ public sealed class McpAlertAdminLiveTests
             var viewerId = await viewer.SaveNotificationRouteSealedAsync(
                 typed, null, NotificationRow.Defaults(), new ViewerPasswordSealer(key.PublicKey), null, ct);
 
-            /* An edit over MCP changes the match, scope, enabled flag and fallback, and never the destinations or the address list. */
+            /* What a route with a destination of its own matches, and which servers it covers, is changed in the Viewer: the refusal says so. */
+            var refused = await DarlingMcpAlertTools.UpdateNotificationRoute(
+                source, viewerId, metric_match: "Blocking", fleet_wide: true, cancellationToken: ct);
+            Assert.Equal("refused", Status(refused));
+            Assert.Contains("Viewer", refused, StringComparison.Ordinal);
+            Assert.Equal("Deadlocks", (await OpenedRoutesAsync(scratch.ConnectionString, ring, ct)).Single(r => r.RouteId == viewerId).MetricMatch);
+
+            /* An edit over MCP still changes the enabled flag and fallback, and never the destinations or the address list. */
             var edit = await DarlingMcpAlertTools.UpdateNotificationRoute(
-                source, viewerId, metric_match: "Blocking", enabled: false, fleet_wide: true, fallback_route_id: mcpId, cancellationToken: ct);
+                source, viewerId, enabled: false, fallback_route_id: mcpId, cancellationToken: ct);
             Assert.Equal("updated", Status(edit));
             foreach (var secret in new[] { "hook-secret-token", "127.0.0.1" })
             {
@@ -110,15 +118,14 @@ public sealed class McpAlertAdminLiveTests
             var after = (await OpenedRoutesAsync(scratch.ConnectionString, ring, ct)).Single(r => r.RouteId == viewerId);
             Assert.Equal(Hook, after.GenericUrl);
             Assert.Equal("ops@example.com", after.SmtpRecipients);
-            Assert.Equal("Blocking", after.MetricMatch);
+            Assert.Equal("Deadlocks", after.MetricMatch);
             Assert.False(after.Enabled);
             Assert.Equal(mcpId, after.FallbackRouteId);
 
             /* The undo puts the fields back, and a call that changes nothing says so. */
             var undo = doc.GetProperty("undo").GetProperty("arguments");
             Assert.Equal("updated", Status(await DarlingMcpAlertTools.UpdateNotificationRoute(
-                source, viewerId, metric_match: undo.GetProperty("metric_match").GetString(), enabled: undo.GetProperty("enabled").GetBoolean(),
-                clear_fallback: true, cancellationToken: ct)));
+                source, viewerId, enabled: undo.GetProperty("enabled").GetBoolean(), clear_fallback: true, cancellationToken: ct)));
             Assert.Equal("unchanged", Status(await DarlingMcpAlertTools.UpdateNotificationRoute(source, viewerId, enabled: true, cancellationToken: ct)));
             bodySucceeded = true;
         }
@@ -234,18 +241,20 @@ VALUES ((now() at time zone 'utc') - interval '1 hour', 7, 's7', 'Blocking', 9, 
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the MCP dismiss checks.");
         var ct = TestContext.Current.CancellationToken;
         var role = "mcp_dismiss_probe_" + Guid.NewGuid().ToString("N")[..8];
+        /* A login role belongs to the whole cluster, so a run that cannot clean up must not leave a published password behind. */
+        var rolePassword = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
         var scratch = await MintAsync(ct);
         var bodySucceeded = false;
         try
         {
             await using var owner = NpgsqlDataSource.Create(scratch.ConnectionString);
-            await ExecAsync(owner, $@"CREATE ROLE {role} LOGIN NOSUPERUSER PASSWORD 'probe-6231-pw';
+            await ExecAsync(owner, $@"CREATE ROLE {role} LOGIN NOSUPERUSER PASSWORD '{rolePassword}';
 GRANT USAGE ON SCHEMA config TO {role};
 GRANT SELECT ON config.config_alert_log TO {role};
 INSERT INTO config_alert_log (alert_time, server_id, server_name, metric_name, current_value, threshold_value, dismissed)
 VALUES ('2026-10-04 10:00:00', 7, 's7', 'Blocking', 9, 5, false)", ct);
 
-            var roleString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Username = role, Password = "probe-6231-pw", Pooling = false }.ConnectionString;
+            var roleString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Username = role, Password = rolePassword, Pooling = false }.ConnectionString;
             await using var asMcp = NpgsqlDataSource.Create(roleString);
             var rows = JsonSerializer.Serialize(new[] { new { alert_time = "2026-10-04T10:00:00Z", server_id = 7, metric_name = "Blocking" } });
 
@@ -284,6 +293,40 @@ VALUES ('2026-10-04 10:00:00', 7, 's7', 'Blocking', 9, 5, false)", ct);
             });
             await scratch.DisposeAsync();
         }
+    }
+
+    /// <summary>A write's log line names the token's identity and the client's own name, labelled as what the client says, and no destination value.</summary>
+    [Fact]
+    public void ARouteWriteLogLine_NamesTheTokenIdentity_AndLabelsTheClientsOwnName()
+    {
+        var logger = new LineLogger();
+        ReadCaller.SetAmbientMcpCaller("claude-desktop 1.2.3");
+        ReadCaller.SetAmbientMcpToken(ReadCaller.OfMcpToken("a-token"));
+        try
+        {
+            DarlingMcpAlertTools.LogRouteWrite(logger, "update_notification_route", ReadCaller.WriteIdentity(), 4, "enabled");
+        }
+        finally
+        {
+            ReadCaller.SetAmbientMcpCaller(null);
+            ReadCaller.SetAmbientMcpToken(null);
+        }
+
+        var line = Assert.Single(logger.Lines);
+        Assert.Contains(ReadCaller.OfMcpToken("a-token") + ", client says: claude-desktop 1.2.3", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("a-token", line, StringComparison.Ordinal);
+    }
+
+    private sealed class LineLogger : Microsoft.Extensions.Logging.ILogger
+    {
+        public List<string> Lines { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+
+        public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+            Lines.Add(formatter(state, exception));
     }
 
     [Theory]

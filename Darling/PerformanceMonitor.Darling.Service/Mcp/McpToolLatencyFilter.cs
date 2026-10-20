@@ -112,6 +112,7 @@ public sealed class McpToolLatencyFilter
             var caller = CallerOf(request);
             /* #6231: the write tools log who called them; they read it here instead of taking the request as a parameter. */
             ReadCaller.SetAmbientMcpCaller(caller);
+            ReadCaller.SetAmbientMcpToken(TokenIdentityOf(request));
             if (string.Equals(toolName, SkippedToolName, StringComparison.Ordinal))
             {
                 ReadCaller.SetAmbientMcpCaller(caller);
@@ -457,6 +458,25 @@ public sealed class McpToolLatencyFilter
             types is not null && !string.IsNullOrEmpty(toolName) && types.TryGetDefault(toolName, key, out var value)
                 ? ReadWindowBand.DefaultText(value)
                 : null), toolName);
+
+    /// <summary>The server-side identity of the call (#6231): the bearer token the HTTP request carried, as a short fingerprint
+    /// (<see cref="ReadCaller.OfMcpToken"/>), never the token. The client's own name is not part of it. Never throws.</summary>
+    private string TokenIdentityOf(ModelContextProtocol.Server.RequestContext<CallToolRequestParams> request)
+    {
+        try
+        {
+            if (request.Services?.GetService(typeof(IHttpContextAccessor)) is IHttpContextAccessor accessor)
+            {
+                return ReadCaller.OfMcpToken(DarlingMcpHostService.ExtractBearerToken(accessor.HttpContext?.Request.Headers.Authorization.ToString()));
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "The token identity of MCP tool {Tool} was not read.", request.Params?.Name);
+        }
+
+        return "token unknown";
+    }
 
     /// <summary>The caller of the call (#5793): the client info the request's server holds (sent per request from protocol
     /// 2026-07-28; the stateless host has none for an older client's tool call), else the first product token of the HTTP

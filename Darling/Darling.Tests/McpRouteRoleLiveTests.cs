@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text.Json;
@@ -114,7 +115,8 @@ public sealed class McpRouteRoleLiveTests
             Assert.Equal("DL400", (await CallAsync(2, ["generic_url"])).SqlState);
             Assert.Equal("DL404", (await CallAsync(99, ["metric_match"])).SqlState);
 
-            await using (var call = asMcp.CreateCommand("SELECT config.update_notification_route(2, ARRAY['metric_match', 'enabled'], 'Blocking', false, NULL, NULL, NULL, NULL)"))
+            /* The enabled flag is still open on a route with a destination of its own. */
+            await using (var call = asMcp.CreateCommand("SELECT config.update_notification_route(2, ARRAY['enabled'], 'x', false, NULL, NULL, NULL, NULL)"))
             {
                 await call.ExecuteNonQueryAsync(ct);
             }
@@ -123,8 +125,81 @@ public sealed class McpRouteRoleLiveTests
                 "SELECT metric_match, enabled, generic_url, smtp_recipients FROM config.config_notification_routes WHERE route_id = 2");
             await using var reader = await read.ExecuteReaderAsync(ct);
             Assert.True(await reader.ReadAsync(ct));
-            Assert.Equal(("Blocking", false, "sealed-text", "ops@example.com"),
+            Assert.Equal(("Deadlocks", false, "sealed-text", "ops@example.com"),
                 (reader.GetString(0), reader.GetBoolean(1), reader.GetString(2), reader.GetString(3)));
+        });
+    }
+
+    /// <summary>What a route matches and which servers it covers decide which alerts reach its destinations, so a route with a destination of its
+    /// own keeps both, and so does a route with an explicit agent setting (Off). The same run shows what stays open: the enabled flag on both, and a
+    /// full edit of a route with no destination and no agent setting. The role is the mcp role, so a raw login gets the same answer.</summary>
+    [Fact]
+    public async Task TheUpdateFunction_RefusesAMatchOrScopeChange_OnARouteWithADestinationOrAnAgentOffSetting_AndAllowsTheRest()
+    {
+        await WithMcpRoleAsync(async (owner, asMcp, ct) =>
+        {
+            await ExecAsync(owner,
+                "INSERT INTO config.config_notification_routes (metric_match, slack_url, scope_tag_id) VALUES ('Blocking', 'sealed-text', NULL), ('Deadlocks', '', NULL), ('Blocking', '', NULL);" +
+                "UPDATE config.config_notification_routes SET agent_level = 0 WHERE route_id = 2;", ct);
+            await ExecAsync(owner, "INSERT INTO config.server_tags (id, name) OVERRIDING SYSTEM VALUE VALUES (9001, 'prod')", ct);
+
+            async Task CallAsync(int routeId, string columns, string match = "x", bool enabled = true, string tag = "NULL")
+            {
+                await using var call = asMcp.CreateCommand(
+                    $"SELECT config.update_notification_route($1, ARRAY[{columns}]::text[], $2, $3, NULL, {tag}, NULL, NULL)");
+                call.Parameters.AddWithValue(routeId);
+                call.Parameters.AddWithValue(match);
+                call.Parameters.AddWithValue(enabled);
+                await call.ExecuteNonQueryAsync(ct);
+            }
+
+            /* A route with a destination of its own: a scope or a match change is refused, in plain words that point at the Viewer. */
+            var scope = await Assert.ThrowsAsync<PostgresException>(() => CallAsync(1, "'scope'", tag: "9001"));
+            Assert.Equal("DL403", scope.SqlState);
+            Assert.Contains("Viewer", scope.MessageText, StringComparison.Ordinal);
+            Assert.Equal("DL403", (await Assert.ThrowsAsync<PostgresException>(() => CallAsync(1, "'metric_match'", match: "Deadlocks"))).SqlState);
+
+            /* A route whose agent setting is Off: the same refusal, with no destination on it. */
+            var off = await Assert.ThrowsAsync<PostgresException>(() => CallAsync(2, "'scope'", tag: "9001"));
+            Assert.Equal("DL403", off.SqlState);
+            Assert.Contains("Viewer", off.MessageText, StringComparison.Ordinal);
+            Assert.Equal("DL403", (await Assert.ThrowsAsync<PostgresException>(() => CallAsync(2, "'metric_match'", match: "Blocking"))).SqlState);
+
+            /* What stays open: the enabled flag on either, and a full edit of a route that has no destination and no agent setting. */
+            await CallAsync(1, "'enabled'", enabled: false);
+            await CallAsync(2, "'enabled'", enabled: false);
+            await CallAsync(3, "'metric_match', 'scope', 'enabled'", match: "Deadlocks", enabled: false, tag: "9001");
+
+            await using var read = owner.CreateCommand(
+                "SELECT route_id, metric_match, enabled, scope_tag_id FROM config.config_notification_routes ORDER BY route_id");
+            await using var reader = await read.ExecuteReaderAsync(ct);
+            var rows = new List<(int, string, bool, int?)>();
+            while (await reader.ReadAsync(ct))
+            {
+                rows.Add((reader.GetInt32(0), reader.GetString(1), reader.GetBoolean(2), reader.IsDBNull(3) ? null : reader.GetInt32(3)));
+            }
+
+            Assert.Equal([(1, "Blocking", false, (int?)null), (2, "Deadlocks", false, (int?)null), (3, "Deadlocks", false, (int?)9001)], rows);
+        });
+    }
+
+    /// <summary>The MCP tool's answer for the refused change says why in plain words, says the change is made in the Viewer, and leaves the route as it was.</summary>
+    [Fact]
+    public async Task TheUpdateTool_AnswersARefusedScopeChange_InPlainWords_AndPointsAtTheViewer()
+    {
+        await WithMcpRoleAsync(async (owner, asMcp, ct) =>
+        {
+            await ExecAsync(owner, "INSERT INTO config.config_notification_routes (metric_match, generic_url) VALUES ('Blocking', 'sealed-text')", ct);
+
+            var answer = JsonDocument.Parse(await DarlingMcpAlertTools.UpdateNotificationRoute(asMcp, 1, metric_match: "Deadlocks", fleet_wide: true, cancellationToken: ct)).RootElement;
+            Assert.Equal("refused", answer.GetProperty("status").GetString());
+            var message = answer.GetProperty("message").GetString()!;
+            Assert.Contains("destinations of its own", message, StringComparison.Ordinal);
+            Assert.Contains("Viewer", message, StringComparison.Ordinal);
+            Assert.DoesNotContain("sealed-text", message, StringComparison.Ordinal);
+
+            /* The enabled flag is still changed over MCP on the same route. */
+            Assert.Equal("updated", Status(await DarlingMcpAlertTools.UpdateNotificationRoute(asMcp, 1, enabled: false, cancellationToken: ct)));
         });
     }
 
