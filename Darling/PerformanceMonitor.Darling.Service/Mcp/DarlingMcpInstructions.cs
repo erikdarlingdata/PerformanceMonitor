@@ -191,7 +191,7 @@ internal static class DarlingMcpInstructions
 
         ## What this server can and cannot do
 
-        This server reads previously collected performance data. It cannot run SQL on a monitored server, kill sessions, change a monitored server's settings, or run ad-hoc diagnostics. With writes on, purge_now deletes collected history older than the retention given (show, then confirm).
+        This server reads previously collected performance data. It cannot run SQL on a monitored server, kill sessions, change a monitored server's settings, or run ad-hoc diagnostics. With writes on, purge_now deletes collected history older than the retention given.
 
         """ + DarlingMcpWritePolicy.InstructionsLine;
 
@@ -224,7 +224,7 @@ internal static class DarlingMcpInstructions
         - Latest-snapshot reads take no `as_of` — read `captured_at` / `age_seconds`. `get_pvs_stats`, `get_fleet_overview`, `get_store_metrics` never take it.
         - The analysis family does take it: `get_analysis_facts`/`analyze_server` re-run fact collection, anomaly detection and scoring over the anchored window (`analyze_server` with `as_of` is exploratory, does not persist).
 
-        Each finding's `confidence` is an evidence score (0.20 for the symptom alone, more as the root fact's amplifier checks match and the chain deepens) and `confidence_basis` says in words what it rests on (an ANOMALY_* fact's `baseline_confidence` is the baseline's trustworthiness, not the finding's `confidence`).
+        Each finding's `confidence` is an evidence score (0.20 for the symptom alone, more as the root fact's amplifier checks match and the chain deepens — a lone uncorroborated symptom is 0.20, never 1.0) and `confidence_basis` says in words what it rests on (an ANOMALY_* fact's `baseline_confidence` is the baseline's trustworthiness, not a finding's `confidence`).
 
         ## Workflow
 
