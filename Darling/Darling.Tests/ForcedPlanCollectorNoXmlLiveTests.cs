@@ -119,7 +119,7 @@ CLOSE c; DEALLOCATE c;", ct);
     private static Task<long> LaterPlanCountAsync(string database, CancellationToken ct) =>
         ScalarAsync(database, "SELECT COUNT(*) FROM sys.query_store_plan AS l JOIN sys.query_store_plan AS f ON f.query_id = l.query_id AND f.is_forced_plan = 1 AND l.plan_id > f.plan_id;", ct);
 
-    private sealed record Pass(List<QueryStoreForcedPlansCollector.Row> Rows, long PlanXmlLobReads, long ElapsedMs);
+    private sealed record Pass(List<QueryStoreForcedPlansCollector.Row> Rows, long PlanXmlLobReads);
 
     /// <summary>One pass of the collector's real per-database statement and reader, with the server's own count of plan XML read.</summary>
     private static async Task<Pass> PassAsync(QueryStoreForcedPlansCollector collector, string database, CancellationToken ct)
@@ -131,7 +131,6 @@ CLOSE c; DEALLOCATE c;", ct);
         };
         var query = collector.BuildPerItemQuery(database, context);
         await using var connection = new SqlConnection(Admin("master").ConnectionString);
-        connection.StatisticsEnabled = true;
         var lobReads = 0L;
         connection.InfoMessage += (_, e) =>
         {
@@ -150,9 +149,7 @@ CLOSE c; DEALLOCATE c;", ct);
             await collector.ReadItemAsync(database, reader, rows, context, ct);
         }
 
-        /* The server-side execution time of the pass, from the driver's own statistics (no clock of the test's own). */
-        var executionMs = Convert.ToInt64(connection.RetrieveStatistics()["ExecutionTime"], CultureInfo.InvariantCulture);
-        return new Pass(rows, lobReads, executionMs);
+        return new Pass(rows, lobReads);
     }
 
     private static async Task RunAsync(Func<string, CancellationToken, Task> body)
@@ -189,10 +186,9 @@ CLOSE c; DEALLOCATE c;", ct);
 
             var pass = await PassAsync(collector, database, ct);
             var second = await PassAsync(collector, database, ct);
-            TestContext.Current.SendDiagnosticMessage($"#6221 collector pass over {later} later plans: {pass.ElapsedMs} ms first, {second.ElapsedMs} ms second, {pass.PlanXmlLobReads} plan LOB reads");
 
-            Assert.True(pass.PlanXmlLobReads == 0, $"the first pass read {pass.PlanXmlLobReads} LOB pages of plan XML in {pass.ElapsedMs} ms over {later} later plans");
-            Assert.True(second.PlanXmlLobReads == 0, $"the second pass read {second.PlanXmlLobReads} LOB pages of plan XML in {second.ElapsedMs} ms");
+            Assert.True(pass.PlanXmlLobReads == 0, $"the first pass read {pass.PlanXmlLobReads} LOB pages of plan XML over {later} later plans");
+            Assert.True(second.PlanXmlLobReads == 0, $"the second pass read {second.PlanXmlLobReads} LOB pages of plan XML");
 
             var forced = pass.Rows.Where(r => r.PlanId is not null).ToList();
             Assert.Equal(ProcedureCount, forced.Count);
