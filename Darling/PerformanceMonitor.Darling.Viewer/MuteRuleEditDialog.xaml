@@ -46,13 +46,33 @@
         <TextBlock Grid.Row="2" Text="Reason (optional)" FontWeight="Bold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
         <TextBox Grid.Row="3" x:Name="ReasonBox" Margin="0,0,0,12"/>
 
-        <TextBlock Grid.Row="4" Text="Expires After" FontWeight="Bold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
-        <ComboBox Grid.Row="5" x:Name="ExpirationCombo" SelectedIndex="3" Margin="0,0,0,12">
-            <ComboBoxItem Content="1 hour"/>
-            <ComboBoxItem Content="24 hours"/>
-            <ComboBoxItem Content="7 days"/>
-            <ComboBoxItem Content="Never (permanent)"/>
-        </ComboBox>
+        <Grid Grid.Row="4">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Grid.Column="0" Text="Expires After" FontWeight="Bold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+            <TextBlock Grid.Column="1" Text="Starts (quiet window set ahead of planned work)" FontWeight="Bold" HorizontalAlignment="Left" Margin="12,0,0,4"/>
+        </Grid>
+        <Grid Grid.Row="5">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <ComboBox Grid.Column="0" x:Name="ExpirationCombo" SelectedIndex="3" Margin="0,0,0,12">
+                <ComboBoxItem Content="1 hour"/>
+                <ComboBoxItem Content="24 hours"/>
+                <ComboBoxItem Content="7 days"/>
+                <ComboBoxItem Content="Never (permanent)"/>
+            </ComboBox>
+            <ComboBox Grid.Column="1" x:Name="StartCombo" SelectedIndex="0" Margin="12,0,0,12">
+                <ComboBoxItem Content="Now"/>
+                <ComboBoxItem Content="In 1 hour"/>
+                <ComboBoxItem Content="In 4 hours"/>
+                <ComboBoxItem Content="In 12 hours"/>
+                <ComboBoxItem Content="In 24 hours"/>
+            </ComboBox>
+        </Grid>
 
         <Border Grid.Row="6" BorderThickness="0,0,0,1" BorderBrush="{DynamicResource BorderBrush}" Margin="0,0,0,12"/>
 

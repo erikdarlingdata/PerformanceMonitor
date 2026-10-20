@@ -39,10 +39,12 @@ export const TEXT_FIELDS = [
   { key: "reason", label: "Reason" },
 ];
 const EXPIRY = "expires_at_utc";
+/* #6231: the optional start; until it passes the rule is stored and listed but mutes nothing (a quiet window set ahead of planned work). */
+const STARTS = "starts_at_utc";
 /* server_id is not a form field: it arrives from an Alert History pre-fill and rides along in the create body, so
    the rule is keyed on the server's store id (the name is only its label). */
 const SERVER_ID = "server_id";
-const EDITABLE_KEYS = TEXT_FIELDS.map((f) => f.key).concat([EXPIRY, SERVER_ID]);
+const EDITABLE_KEYS = TEXT_FIELDS.map((f) => f.key).concat([STARTS, EXPIRY, SERVER_ID]);
 
 /** A datetime-local value ("2026-08-01T10:30", local clock) to an ISO UTC string, or "" when blank/unparseable. */
 export function localInputToIso(v) {
@@ -64,7 +66,7 @@ export function isoToLocalInput(iso) {
  *  datetime-local value). */
 function fieldValue(values, key) {
   const raw = values[key] == null ? "" : String(values[key]).trim();
-  if (key === EXPIRY) return localInputToIso(raw) || null;
+  if (key === EXPIRY || key === STARTS) return localInputToIso(raw) || null;
   if (key === SERVER_ID) return /^-?\d+$/.test(raw) && Number(raw) !== 0 ? Number(raw) : null;
   return raw === "" ? null : raw;
 }
@@ -81,7 +83,7 @@ export function formToCreateBody(values) {
 
 /** True for a create body that names no scope at all: such a rule mutes EVERY alert, so the page confirms first. */
 export function isEmptyCreate(body) {
-  return !body || Object.keys(body).filter((k) => k !== "reason" && k !== EXPIRY).length === 0;
+  return !body || Object.keys(body).filter((k) => k !== "reason" && k !== EXPIRY && k !== STARTS).length === 0;
 }
 
 export const EMPTY_CREATE_WARNING =
@@ -97,7 +99,7 @@ export function buildPatch(original, values) {
     if (key === SERVER_ID) continue; /* never edited on the form, so an edit must not clear it */
     const next = fieldValue(values, key);
     const old = original[key] == null || original[key] === "" ? null : original[key];
-    const same = key === EXPIRY && next !== null && old !== null
+    const same = (key === EXPIRY || key === STARTS) && next !== null && old !== null
       ? new Date(next).getTime() === new Date(old).getTime()
       : next === old;
     if (!same) patch[key] = next;
@@ -120,6 +122,11 @@ export function interpretWrite(status, body) {
   }
   if (status >= 200 && status < 300) return { kind: "ok", rule: b.mute_rule || null, status: b.status || null };
   return { kind: "error", message };
+}
+
+/** Whether a rule's start is still ahead (#6231): the rule exists but does not apply yet. */
+export function isUpcoming(rule, now) {
+  return !!rule.starts_at_utc && new Date(rule.starts_at_utc).getTime() > (now || Date.now());
 }
 
 /** Whether a rule's expiry has passed. */
@@ -220,7 +227,7 @@ async function refreshList(state) {
 
 function drawList(state) {
   if (!state.rules.length) return mount(state.listBox, emptyStrip("No mute rules are configured."));
-  const head = ["Status", "Scope", "External source", "Reason", "Expires", "Created", state.canEdit ? "" : null]
+  const head = ["Status", "Scope", "External source", "Reason", "Starts", "Expires", "Created", state.canEdit ? "" : null]
     .filter((h) => h !== null)
     .map((h) => el("th", { text: h }));
   const rows = state.rules.map((r) => ruleRow(r, state.canEdit));
@@ -232,7 +239,8 @@ function drawList(state) {
 
 function statusOf(r) {
   if (isExpired(r)) return "Expired";
-  return r.enabled ? "Enabled" : "Paused";
+  if (!r.enabled) return "Paused";
+  return isUpcoming(r) ? "Upcoming" : "Enabled";
 }
 
 function ruleRow(r, canEdit) {
@@ -243,6 +251,7 @@ function ruleRow(r, canEdit) {
     el("td", { text: scope, title: r.server_id != null ? "server_id " + r.server_id : null }),
     el("td", { text: r.external_source || "—" }),
     el("td", { text: r.reason || "—" }),
+    el("td", { text: r.starts_at_utc ? localTime(r.starts_at_utc) + (isUpcoming(r) ? " (not started)" : "") : "At once" }),
     el("td", { text: r.expires_at_utc ? localTime(r.expires_at_utc) + (isExpired(r) ? " (expired)" : "") : "Never" }),
     el("td", { text: r.created_at_utc ? localTime(r.created_at_utc) : "—" }),
   ];
@@ -259,6 +268,7 @@ function ruleRow(r, canEdit) {
 function valuesOf(r) {
   const v = {};
   for (const f of TEXT_FIELDS) v[f.key] = r[f.key] || "";
+  v[STARTS] = isoToLocalInput(r.starts_at_utc);
   v[EXPIRY] = isoToLocalInput(r.expires_at_utc);
   return v;
 }
@@ -305,6 +315,7 @@ function closeForm() {
 
 function formNode() {
   const fields = TEXT_FIELDS.map((f) => fieldRow(f.key, f.label, "text"));
+  fields.push(fieldRow(STARTS, "Starts (local time; blank = at once)", "datetime-local"));
   fields.push(fieldRow(EXPIRY, "Expires (local time; blank = never)", "datetime-local"));
   const empty = form.mode === "create" && isEmptyCreate(formToCreateBody(form.values));
   return el("div", { class: "card mute-form" }, [

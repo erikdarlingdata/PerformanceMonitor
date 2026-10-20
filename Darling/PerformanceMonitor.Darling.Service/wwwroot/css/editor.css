@@ -630,3 +630,10 @@ button.template-item:focus-visible { outline: 2px solid var(--muted); outline-of
 
 /* The would-fire preview area. */
 .alert-preview { margin-bottom: 1rem; }
+
+/* #6214: the folder, personal and owner fields under the name and description. */
+.view-meta-fields { margin-bottom: 1rem; }
+.view-meta-fields .editor-meta { margin-bottom: 0.4rem; }
+.editor-check-row { display: flex; align-items: center; gap: 0.4rem; cursor: pointer; }
+.view-meta-note, .view-owner-line { font-size: 0.78rem; margin-top: 0.2rem; }
+.view-readonly-note { margin-top: 0.5rem; }

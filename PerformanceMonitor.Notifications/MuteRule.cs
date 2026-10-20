@@ -18,6 +18,13 @@ public class MuteRule
     public bool Enabled { get; set; } = true;
     public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
     public DateTime? ExpiresAtUtc { get; set; }
+
+    /// <summary>The moment the rule begins to apply (#6231), or null for a rule that applies from the moment it exists, which is
+    /// every rule stored before this field. A quiet window for planned work is a rule with a start in the future and an end: until
+    /// the start passes, <see cref="MatchesAt"/> declines every alert, so the rule is stored and listed but mutes nothing. Lite's
+    /// store does not persist it, so a Lite rule never carries one.</summary>
+    public DateTime? StartsAtUtc { get; set; }
+
     public string? Reason { get; set; }
 
     public string? ServerName { get; set; }
@@ -79,12 +86,25 @@ public class MuteRule
 
     public bool IsExpired => IsExpiredAt(DateTime.UtcNow);
 
+    /// <summary>Whether the rule's start (#6231) is still ahead of <paramref name="nowUtc"/>: the rule exists but does not apply yet.</summary>
+    public bool IsUpcomingAt(DateTime nowUtc) => StartsAtUtc.HasValue && nowUtc < StartsAtUtc.Value;
+
+    /// <summary>The rule's state at <paramref name="nowUtc"/> as one word: <c>disabled</c> (paused by hand, whatever its times),
+    /// <c>expired</c>, <c>upcoming</c> (its start is ahead) or <c>active</c>. The single place the word is decided, so the MCP read,
+    /// the web list and the Viewer cannot disagree about which a rule is.</summary>
+    public string StateAt(DateTime nowUtc) =>
+        IsExpiredAt(nowUtc) ? "expired"
+        : !Enabled ? "disabled"
+        : IsUpcomingAt(nowUtc) ? "upcoming"
+        : "active";
+
     public MuteRule Clone() => new()
     {
         Id = Id,
         Enabled = Enabled,
         CreatedAtUtc = CreatedAtUtc,
         ExpiresAtUtc = ExpiresAtUtc,
+        StartsAtUtc = StartsAtUtc,
         Reason = Reason,
         ServerName = ServerName,
         ServerId = ServerId,
@@ -96,6 +116,11 @@ public class MuteRule
         JobNamePattern = JobNamePattern,
         ClientAppPattern = ClientAppPattern
     };
+
+    /// <summary>The Starts column (#6231): "At once" for a rule with no start, the local start time otherwise, marked while it is still ahead.</summary>
+    public string StartsDisplay => StartsAtUtc.HasValue
+        ? StartsAtUtc.Value.ToLocalTime().ToString("g") + (IsUpcomingAt(DateTime.UtcNow) ? " (not started)" : "")
+        : "At once";
 
     public string ExpiresDisplay => ExpiresAtUtc.HasValue
         ? (IsExpired ? "Expired" : ExpiresAtUtc.Value.ToLocalTime().ToString("g"))
@@ -171,7 +196,7 @@ public class MuteRule
     /// </summary>
     public bool MatchesAt(AlertMuteContext context, DateTime nowUtc)
     {
-        if (!Enabled || IsExpiredAt(nowUtc)) return false;
+        if (!Enabled || IsExpiredAt(nowUtc) || IsUpcomingAt(nowUtc)) return false;
 
         /* An id-keyed rule is decided on the id ALONE: the name is only the label the rule lists under, so a
            same-named sibling does not match and a renamed server does not escape. A context with no id never

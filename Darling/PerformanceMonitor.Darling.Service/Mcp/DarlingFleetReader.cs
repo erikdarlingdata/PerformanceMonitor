@@ -97,6 +97,7 @@ SELECT s.server_id, COALESCE(s.display_name, s.server_name) AS display_name, s.s
            WHERE (m.server_id = s.server_id OR (m.server_id IS NULL AND lower(m.server_name) = lower(COALESCE(s.display_name, s.server_name))))
            AND   m.enabled
            AND   (m.expires_at_utc IS NULL OR m.expires_at_utc > (CURRENT_TIMESTAMP AT TIME ZONE 'UTC'))
+           AND   (m.starts_at_utc IS NULL OR m.starts_at_utc <= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC'))
            AND   m.metric_name IS NULL
            AND   m.external_source IS NULL
            AND   m.database_pattern IS NULL

@@ -384,6 +384,32 @@ ALTER TABLE IF EXISTS collect.ag_replica_states DROP COLUMN IF EXISTS primary_re
 ALTER TABLE IF EXISTS config.config_monitored_servers
     DROP COLUMN IF EXISTS hypothetical_index_username,
     DROP COLUMN IF EXISTS hypothetical_index_encrypted_password;"),
+
+        // /// V204 (#6214): the folder, personal flag and creator on the custom views. The creator column is the probe's newest sentinel.
+        // The rewind restores V31's one store-wide unique name and drops the three columns (their constraints and indexes go with them),
+        // so a re-run of V204 builds them again. Safe on a store that never had them.
+        new(204, "hasCustomViewFolders",
+            @"
+DROP INDEX IF EXISTS config.ux_custom_views_shared_name;
+DROP INDEX IF EXISTS config.ux_custom_views_personal_name;
+ALTER TABLE IF EXISTS config.custom_views
+    DROP COLUMN IF EXISTS folder,
+    DROP COLUMN IF EXISTS personal,
+    DROP COLUMN IF EXISTS created_by;
+DO $$
+BEGIN
+    IF to_regclass('config.custom_views') IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conrelid = 'config.custom_views'::regclass AND conname = 'custom_views_name_key')
+    THEN
+        ALTER TABLE config.custom_views ADD CONSTRAINT custom_views_name_key UNIQUE (name);
+    END IF;
+END $$;"),
+
+        // /// V205 (#6231): the start time on the mute rules. The column is the probe's newest sentinel. The rewind drops it, so a re-run of V205
+        // adds it again. Safe on a store that never had it.
+        new(205, "hasMuteRuleStartsAt",
+            @"
+ALTER TABLE IF EXISTS config.config_mute_rules DROP COLUMN IF EXISTS starts_at_utc;"),
     ];
 
     /// <summary>

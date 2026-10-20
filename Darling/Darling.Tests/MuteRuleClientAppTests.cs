@@ -98,9 +98,9 @@ public sealed class MuteRuleClientAppTests
         /* The service store: the same three statements, with the external_source column (V180, #5654) after the client
            application column: 14 bound insert values and 13 update values. */
         var store = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "PgMuteRuleStore.cs");
-        Assert.Contains("job_name_pattern, server_id, client_app_pattern, external_source\nFROM config_mute_rules", store, StringComparison.Ordinal);
-        Assert.Contains("job_name_pattern, server_id, client_app_pattern, external_source)\nVALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)", store, StringComparison.Ordinal);
-        Assert.Contains("server_id = $11, client_app_pattern = $12,\n    external_source = $13", store, StringComparison.Ordinal);
+        Assert.Contains("job_name_pattern, server_id, client_app_pattern, external_source, starts_at_utc\nFROM config_mute_rules", store, StringComparison.Ordinal);
+        Assert.Contains("job_name_pattern, server_id, client_app_pattern, external_source, starts_at_utc)\nVALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)", store, StringComparison.Ordinal);
+        Assert.Contains("server_id = $11, client_app_pattern = $12,\n    external_source = $13, starts_at_utc = $14", store, StringComparison.Ordinal);
         Assert.Contains("ClientAppPattern = reader.IsDBNull(12)", store, StringComparison.Ordinal);
         Assert.Contains("ExternalSource = reader.IsDBNull(13)", store, StringComparison.Ordinal);
 

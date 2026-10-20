@@ -186,7 +186,7 @@ internal static class DarlingMcpAgentActions
     internal static async Task<string> CreateMuteAsync(DarlingAgentActionSeat seat, NpgsqlDataSource postgres, ILogger? logger,
         string? agentAction, string? server_name, string? metric_name, string? database_pattern, string? query_text_pattern,
         string? wait_type_pattern, string? job_name_pattern, string? reason, string? expires_at, int? server_id,
-        string? client_app_pattern, string? external_source, CancellationToken ct = default)
+        string? client_app_pattern, string? external_source, string? starts_at = null, CancellationToken ct = default)
     {
         const string tool = "create_mute_rule";
         var parsed = InvestigationToolCore.ParseAgentAction(agentAction, out var action);
@@ -202,7 +202,7 @@ internal static class DarlingMcpAgentActions
                 var answer = await DarlingMcpAlertTools.CreateMuteRuleOver(new PgMuteRuleStore(connection, transaction), server_name, metric_name,
                     database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, WithSuffix(reason, action!), expires_at,
                     server_id, id => DarlingMcpAlertTools.MonitoredServerDisplayNameAsync(postgres, id), client_app_pattern,
-                    external_source);
+                    external_source, starts_at);
                 RequireSuccess(answer);
                 return answer;
             }, ct);
