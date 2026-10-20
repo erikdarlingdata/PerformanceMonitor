@@ -137,6 +137,9 @@ public sealed class AlertHistoryRowClockTests : IClassFixture<SharedDuckDbFixtur
         var collected = new Dictionary<int, ServerClock?> { [1] = Eastern(), [2] = ServerClock.FixedOffset(330) };
 
         AlertsHistoryTab.StampClocks(new[] { eastern, india, easternSummer }, collected, openTabClock: null);
+        /* #6137: a list of several servers reads on one clock, so these rows are read as lists of one server each here: this
+           test is about which clock StampClocks gives each row (MultiServerTimeTests covers the mixed list). */
+        foreach (var r in new[] { eastern, india, easternSummer }) r.MixedServers = false;
 
         Assert.Equal("2026-11-01 01:30:00 -05:00", eastern.TimeLocal);
         Assert.Equal("2026-11-01 12:00:00", india.TimeLocal);
@@ -236,6 +239,7 @@ public sealed class AlertHistoryRowClockTests : IClassFixture<SharedDuckDbFixtur
 
         ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
         AlertsHistoryTab.StampClocks(rows, clocks, openTabClock: null);
+        foreach (var r in rows) r.MixedServers = false; // #6137: see StampClocks_TwoServersWithDifferentClocks_EachConvertOnTheirOwn
         Assert.Equal("2026-11-01 01:30:00 -05:00", rows[0].TimeLocal);
         Assert.Equal("2026-11-01 12:00:00", rows[1].TimeLocal);
         Assert.Equal("2026-11-01 01:31:00 -05:00", rows[2].TimeLocal);
