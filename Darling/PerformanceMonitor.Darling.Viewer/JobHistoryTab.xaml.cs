@@ -193,7 +193,7 @@ public partial class JobHistoryTab : UserControl
 
             var displayCount = JobHistoryDataGrid.Items.Count;
             NoJobsMessage.Visibility = displayCount == 0 ? Visibility.Visible : Visibility.Collapsed;
-            RunTimeHeaderText.Text = TimeColumnTitle.For("Run Time", ViewerTimeHelper.CurrentDisplayMode); // D5: the column names its clock
+            RunTimeHeaderText.Text = TimeColumnTitle.For("Run Time", ViewerTimeHelper.CurrentDisplayMode, all.Any(r => r.MixedServers)); // D5: the column names its clock
             DataGridHeaderFit.Apply(JobHistoryDataGrid); // #6136: the longer title ("Run Time (server)") widens its column
 
             /* The cap applies to the read (all.Count), not the display count after the per-column filter popups: a column filter

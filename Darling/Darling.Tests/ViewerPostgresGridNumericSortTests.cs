@@ -35,22 +35,39 @@ public sealed class ViewerPostgresGridNumericSortTests
     private const long Gb = 1024 * Mb;
 
     /* The tab's XAML resolves its styles (NumericCell and the rest) from the application's merged theme, as the viewer's
-       App.xaml supplies it, so the test host gets the same dictionary before the tab is built. */
-    private static ViewerServerTab NewTab()
-    {
-        var app = Application.Current ?? new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
-        if (!app.Resources.Contains("NumericCell"))
+       App.xaml supplies it, so the test host gets the same dictionary before the tab is built. #6175: that dictionary is
+       process-wide state, and a later class that renders against stock controls (ViewerDisabledListBoxThemeTests) saw it,
+       so the dictionary this body added is taken back out when the body ends. WPF allows one Application per process and
+       will not make a second after it shuts down, so the Application object itself stays; without the dictionary it is
+       empty. The body runs on the shared STA thread, one test at a time, so nothing else sees the theme in between. */
+    private static void OnTab(Action<ViewerServerTab> body) =>
+        StaTestThread.Run(() =>
         {
-            app.Resources.MergedDictionaries.Add(new ResourceDictionary
+            var app = Application.Current ?? new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+            ResourceDictionary? added = null;
+            if (!app.Resources.Contains("NumericCell"))
             {
-                Source = new Uri("pack://application:,,,/PerformanceMonitor.Darling.Viewer;component/Themes/DarkTheme.xaml"),
-            });
-        }
+                added = new ResourceDictionary
+                {
+                    Source = new Uri("pack://application:,,,/PerformanceMonitor.Darling.Viewer;component/Themes/DarkTheme.xaml"),
+                };
+                app.Resources.MergedDictionaries.Add(added);
+            }
 
-        return new ViewerServerTab(
-            new ViewerDataService("Host=127.0.0.1;Port=1;Database=darling;Username=darling"),
-            new DarlingServer(1, "pg-sort-test", "pg-sort-test", true, null, engineKind: "postgres"));
-    }
+            try
+            {
+                body(new ViewerServerTab(
+                    new ViewerDataService("Host=127.0.0.1;Port=1;Database=darling;Username=darling"),
+                    new DarlingServer(1, "pg-sort-test", "pg-sort-test", true, null, engineKind: "postgres")));
+            }
+            finally
+            {
+                if (added is not null)
+                {
+                    app.Resources.MergedDictionaries.Remove(added);
+                }
+            }
+        });
 
     private static DataGridTextColumn Column(DataGrid grid, string header) =>
         grid.Columns.OfType<DataGridTextColumn>().Single(c => c.Header is string text && text == header);
@@ -69,9 +86,8 @@ public sealed class ViewerPostgresGridNumericSortTests
     [Fact]
     public void SizeColumns_SortByBytes_NotByTheFormattedText_AndTheSentinelSortsBelowEverySize()
     {
-        StaTestThread.Run(() =>
+        OnTab(tab =>
         {
-            var tab = NewTab();
             var rows = new[]
             {
                 PgDisplay.Slot(Slot("nineMb", 9 * Mb, 9 * Mb, 9 * Mb)),
@@ -91,9 +107,8 @@ public sealed class ViewerPostgresGridNumericSortTests
     [Fact]
     public void TrendColumn_SortsBySignedByteChange()
     {
-        StaTestThread.Run(() =>
+        OnTab(tab =>
         {
-            var tab = NewTab();
             var rows = new[]
             {
                 PgDisplay.Slot(Slot("grewNineMb", 10 * Mb, 1, 1 * Mb)),
@@ -112,9 +127,8 @@ public sealed class ViewerPostgresGridNumericSortTests
     [Fact]
     public void DurationAndAgeColumns_SortByMilliseconds_NotByTheFormattedText()
     {
-        StaTestThread.Run(() =>
+        OnTab(tab =>
         {
-            var tab = NewTab();
             var rows = new[]
             {
                 PgDisplay.SessionState(Session(1, 9_000, 9_000)),
@@ -135,9 +149,8 @@ public sealed class ViewerPostgresGridNumericSortTests
     [Fact]
     public void ShareColumn_SortsByTheFraction_NotByTheText()
     {
-        StaTestThread.Run(() =>
+        OnTab(tab =>
         {
-            var tab = NewTab();
             /* "9 of 10 samples" sorts after "10 of 10 samples" as text. */
             var rows = new[]
             {
@@ -156,9 +169,8 @@ public sealed class ViewerPostgresGridNumericSortTests
     [Fact]
     public void VolumeAndPercentColumns_SortByTheirNumbers_AndNotMeasuredIsBlankNotZero()
     {
-        StaTestThread.Run(() =>
+        OnTab(tab =>
         {
-            var tab = NewTab();
             var rows = PgDisplay.IoRows(new[]
             {
                 Io("nineMb", 1, 9, true, 8192, 9 * Mb),
@@ -179,9 +191,8 @@ public sealed class ViewerPostgresGridNumericSortTests
     [Fact]
     public void CountColumn_SortsByTheNumber_NotByTheText()
     {
-        StaTestThread.Run(() =>
+        OnTab(tab =>
         {
-            var tab = NewTab();
             var rows = new[]
             {
                 PgDisplay.Wait(new DarlingPgWaitReader.PgWaitRow("Lock", "9", 9, 1, 1)),
@@ -199,9 +210,8 @@ public sealed class ViewerPostgresGridNumericSortTests
     [Fact]
     public void BlockingChainColumns_SortByTheirNumbers_AndUnknownIsBlankNotZero()
     {
-        StaTestThread.Run(() =>
+        OnTab(tab =>
         {
-            var tab = NewTab();
             var rows = new[]
             {
                 PgDisplay.Chain(Chain(7, 9_000, 9)),
@@ -220,9 +230,8 @@ public sealed class ViewerPostgresGridNumericSortTests
     [Fact]
     public void IndexBloatSizes_ShowInHumanUnits_AndSortByBytes()
     {
-        StaTestThread.Run(() =>
+        OnTab(tab =>
         {
-            var tab = NewTab();
             static DarlingPgIndexBloatReader.PgIndexBloatRow Bloat(string name, long bytes, long? reclaimable) => new(
                 "appdb", "public", "orders", name, bytes, null, null, null, null, null, reclaimable, null,
                 "estimated", 12.5, null, null, null, null, null, null, Utc);

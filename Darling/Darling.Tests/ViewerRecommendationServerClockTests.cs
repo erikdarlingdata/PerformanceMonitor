@@ -183,7 +183,7 @@ public sealed class ViewerRecommendationServerClockTests
     /// A server whose <c>server_properties</c> has no offset yet has no entry in the per-server clock read. The
     /// viewer's own Server mode shows the viewer machine's offset for it, so the cards and the "Last analyzed" line
     /// take that offset too and do not drop to UTC. The machine is at -240 here and the finding is at 15:00 UTC:
-    /// both read 11:00, where UTC would read 15:00 (UTC+0:00). Another server's clock is in the read, and is not
+    /// both read 11:00, where UTC would read 15:00 (UTC+00:00). Another server's clock is in the read, and is not
     /// this server's.
     /// </summary>
     [Fact]
@@ -200,7 +200,7 @@ public sealed class ViewerRecommendationServerClockTests
             Prompt(analyzed, Utc(2026, 6, 1, 17, 0), clock),
             StringComparison.Ordinal);
         Assert.Equal(
-            "Last analyzed 2026-06-01 11:00:00 (UTC-4:00)",
+            "Last analyzed 2026-06-01 11:00:00 (UTC-04:00)",
             RecommendationsViewModel.FormatLastAnalyzed(analyzed, TimeDisplayMode.ServerTime, clock));
     }
 
@@ -265,7 +265,7 @@ public sealed class ViewerRecommendationServerClockTests
         var (time, zone) = mode switch
         {
             /* 14:00 UTC is 10:00 on a US Eastern server in July, which is on daylight time. */
-            TimeDisplayMode.ServerTime => ("2026-07-15 10:00:00", "UTC-4:00"),
+            TimeDisplayMode.ServerTime => ("2026-07-15 10:00:00", "UTC-04:00"),
             TimeDisplayMode.UTC => ("2026-07-15 14:00:00", "UTC"),
             _ => (
                 TimeZoneInfo.ConvertTimeFromUtc(analyzed, machine).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
@@ -284,8 +284,8 @@ public sealed class ViewerRecommendationServerClockTests
             RecommendationsViewModel.FormatLastAnalyzed(Utc(2026, 1, 15, 14, 0), TimeDisplayMode.ServerTime, Eastern),
             RecommendationsViewModel.FormatLastAnalyzed(Utc(2026, 7, 15, 14, 0), TimeDisplayMode.ServerTime, Eastern)));
 
-        Assert.Equal("Last analyzed 2026-01-15 09:00:00 (UTC-5:00)", winter);
-        Assert.Equal("Last analyzed 2026-07-15 10:00:00 (UTC-4:00)", summer);
+        Assert.Equal("Last analyzed 2026-01-15 09:00:00 (UTC-05:00)", winter);
+        Assert.Equal("Last analyzed 2026-07-15 10:00:00 (UTC-04:00)", summer);
     }
 
     /// <summary>

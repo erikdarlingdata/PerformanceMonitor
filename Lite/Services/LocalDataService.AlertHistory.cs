@@ -655,8 +655,14 @@ public class AlertHistoryRow
     /// for the other grids.
     /// </summary>
     public string TimeLocal => ServerTimeHelper.FormatInstant(
-        AlertTime, ServerTimeHelper.DisplayZoneFor(ServerTimeHelper.CurrentDisplayMode, Clock ?? ServerTimeHelper.ActiveServerClock),
+        AlertTime, ServerTimeHelper.DisplayZoneFor(
+            PerformanceMonitor.Ui.MultiServerTime.EffectiveMode(ServerTimeHelper.CurrentDisplayMode, MixedServers),
+            Clock ?? ServerTimeHelper.ActiveServerClock),
         "yyyy-MM-dd HH:mm:ss");
+
+    /// <summary>True when the list this row sits in holds rows of several servers (#6137), stamped with <see cref="Clock"/>. Server
+    /// time cannot apply across servers, so such a row reads in this machine's time like every other row of the list.</summary>
+    public bool MixedServers { get; set; }
     public string CurrentValueDisplay => AlertMetricClassifier.FormatHistoryValue(MetricName, CurrentValue);
     public string ThresholdValueDisplay => AlertMetricClassifier.FormatHistoryValue(MetricName, ThresholdValue);
 
