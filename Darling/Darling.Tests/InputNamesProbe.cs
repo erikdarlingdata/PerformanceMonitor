@@ -47,6 +47,8 @@ internal static class InputNamesProbe
         var seen = new HashSet<string>(StringComparer.Ordinal);
         for (var i = 0; i < tabs.Items.Count; i++)
         {
+            /* #6216: the step names say where a body that never returns stopped (the hang guard reads the last one). */
+            StaTestThread.Step($"tab {i}: selecting it");
             tabs.SelectedIndex = i;
             ClippedTextProbe.Settle(window);
             var tab = (TabItem)tabs.Items[i];
@@ -58,6 +60,8 @@ internal static class InputNamesProbe
                 {
                     continue;
                 }
+
+                StaTestThread.Step($"tab {i} ({tab.Header}): naming {Describe(input, "")}");
 
                 /* WPF names a box from its LabeledBy target through the target's peer only when that peer already exists. A screen
                    reader has walked the tree, so it does; a headless run (CI has no UI Automation client) has not, and a text

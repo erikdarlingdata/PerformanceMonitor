@@ -121,6 +121,128 @@ public sealed class StaTestThreadTests
         }
     }
 
+    /// <summary>#6216: a stuck body leaves no stack to read, so the guard's message names the last step the body reached and what the thread and dispatcher were doing.</summary>
+    [Fact]
+    public void TheHangGuardsMessage_NamesTheLastStep_AndSaysABlockedBodyWasWaitingWithNothingToRun()
+    {
+        var host = new StaHost { HangGuard = TimeSpan.FromMilliseconds(300) };
+        using var release = new ManualResetEventSlim();
+        try
+        {
+            var timedOut = Assert.Throws<TimeoutException>(() => host.Run(() =>
+            {
+                host.Step("tab 3, waiting for the release");
+                release.Wait();
+            }));
+
+            Assert.Contains("tab 3, waiting for the release", timedOut.Message);
+            Assert.Contains("it is waiting, and the dispatcher has nothing to run", timedOut.Message);
+        }
+        finally
+        {
+            release.Set();
+            host.Shutdown();
+        }
+    }
+
+    [Fact]
+    public void TheHangGuardsMessage_SaysABodyThatSpinsInOneCall_WasUsingTheCpu()
+    {
+        var host = new StaHost { HangGuard = TimeSpan.FromMilliseconds(300) };
+        using var release = new ManualResetEventSlim();
+        try
+        {
+            var timedOut = Assert.Throws<TimeoutException>(() => host.Run(() =>
+            {
+                host.Step("spinning");
+                while (!release.IsSet)
+                {
+                    Thread.SpinWait(100);
+                }
+            }));
+
+            Assert.Contains("\"spinning\"", timedOut.Message);
+            Assert.Contains("it is spinning inside one call", timedOut.Message);
+        }
+        finally
+        {
+            release.Set();
+            host.Shutdown();
+        }
+    }
+
+    [Fact]
+    public void TheHangGuardsMessage_SaysABodyWhoseDispatcherNeverRunsOut_IsStillRunningWork()
+    {
+        var host = new StaHost { HangGuard = TimeSpan.FromMilliseconds(300) };
+        using var release = new ManualResetEventSlim();
+        try
+        {
+            var timedOut = Assert.Throws<TimeoutException>(() => host.Run(() =>
+            {
+                host.Step("pumping");
+                var dispatcher = Dispatcher.CurrentDispatcher;
+                var frame = new DispatcherFrame();
+                Action again = null!;
+                /* The shape of a layout that never settles: each operation queues the next, so the idle priority is never reached. */
+                again = () =>
+                {
+                    if (release.IsSet)
+                    {
+                        frame.Continue = false;
+                        return;
+                    }
+
+                    dispatcher.BeginInvoke(DispatcherPriority.Render, again);
+                };
+                again();
+                Dispatcher.PushFrame(frame);
+            }));
+
+            Assert.Contains("\"pumping\"", timedOut.Message);
+            Assert.Contains("it is still running dispatcher work that does not end", timedOut.Message);
+        }
+        finally
+        {
+            release.Set();
+            host.Shutdown();
+        }
+    }
+
+    /// <summary>#6216: the wait for idle that every layout probe makes is bounded, so a dispatcher that never reaches idle fails that one test and leaves the shared thread usable.</summary>
+    [Fact]
+    public void ASettleWhoseDispatcherNeverReachesIdle_FailsAtItsLimit_AndTheSharedThreadStaysUsable()
+    {
+        var stop = false;
+        var thrown = Assert.Throws<TimeoutException>(() => StaTestThread.Run(() =>
+        {
+            var window = new Window { Width = 50, Height = 50, ShowInTaskbar = false };
+            var dispatcher = Dispatcher.CurrentDispatcher;
+            Action again = null!;
+            again = () =>
+            {
+                if (!stop)
+                {
+                    dispatcher.BeginInvoke(DispatcherPriority.Render, again);
+                }
+            };
+            again();
+            try
+            {
+                ClippedTextProbe.Settle(window, TimeSpan.FromMilliseconds(300));
+            }
+            finally
+            {
+                /* The body's drain waits for idle too, so the churn this test makes stops before the body returns. */
+                stop = true;
+            }
+        }));
+
+        Assert.Contains("did not reach application idle within 300 ms", thrown.Message);
+        Assert.Matches(@"it ran [1-9]\d* operations meanwhile", thrown.Message);
+        Assert.Equal(9, StaTestThread.Run(() => 9));
+    }
+
     [Fact]
     public void AfterABody_TheDispatcherIsDrained_AndAWindowItLeftOpenIsClosed()
     {

@@ -213,13 +213,17 @@ public sealed class ViewerAutomationInvokeAndNamesTests
     {
         var problems = StaTestThread.Run(() =>
         {
+            /* #6216: each step is named, so a hang says in the hang guard's message which one it stopped in. */
+            StaTestThread.Step("constructing the Settings window");
             var store = new ViewerAppSettingsStore(Path.Combine(Path.GetTempPath(), "input-names-" + Guid.NewGuid().ToString("N") + ".json"));
             var window = new SettingsWindow(new ViewerPreferences(), store, null);
+            StaTestThread.Step("showing the Settings window");
             window.Show();
             var found = InputNamesProbe.Unnamed(window, (TabControl)window.FindName("SettingsTabs"));
 
             /* Closing an unsaved settings window re-applies the original theme, which needs the running app's pack resources; this window changed none. */
             typeof(SettingsWindow).GetField("_themeSaved", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(window, true);
+            StaTestThread.Step("closing the Settings window");
             window.Close();
             return found;
         });

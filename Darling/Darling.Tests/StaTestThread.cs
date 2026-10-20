@@ -37,6 +37,12 @@ using Xunit;
 /// message naming the stuck test, instead of each waiting out its own 60 s.
 /// </para>
 /// <para>
+/// <b>Where it stuck (#6216).</b> .NET Core cannot capture another thread's stack, so the timeout message carries what can be read from
+/// outside: the last step the body named with <see cref="Step"/>, how many dispatcher operations ran (a loop that never settles starts
+/// them without end; one that never finishes leaves one running; a pump waiting on a frame starts none), and the thread's state and CPU
+/// over a quarter-second sample.
+/// </para>
+/// <para>
 /// Tests that must own a thread (a dispatcher shutdown, a thread that has to END while the test looks at the process) stay on
 /// their own thread and take <see cref="EnterExclusive"/> around it, so they cannot overlap a body running here. The allow list
 /// is in <c>StaThreadCensusTests</c>, with a reason per file.
@@ -61,6 +67,12 @@ internal static class StaTestThread
     internal static void Run(Func<Task> body) => s_host.Run(body);
 
     /// <summary>
+    /// #6216: names the step the running body has reached ("tab 3, Alert rules"). Costs one field write. When the hang guard fires, its
+    /// message says which step the stuck body last named and how long ago, because a thread stuck in a native call has no stack to read.
+    /// </summary>
+    internal static void Step(string what) => s_host.Step(what);
+
+    /// <summary>
     /// For a test that must own its thread: waits for the gate and returns the token that releases it. Not re-entrant, and not to
     /// be called from a body already running in <see cref="Run(Action)"/>.
     /// </summary>
@@ -83,7 +95,24 @@ internal sealed class StaHost
     private Dispatcher? _dispatcher;
     private volatile string? _stuckTest;
 
+    /* #6216: what the hang guard reports about a body that did not return. The host thread writes the dispatcher counters (the hooks run
+       on it); the body writes the step; the caller reads them all once the guard expires. */
+    private volatile string _step = "";
+    private long _stepTick;
+    private long _opsStarted;
+    private long _opsCompleted;
+    private long _lastStartedTick;
+    private volatile DispatcherOperation? _lastStarted;
+    private int _nativeThreadId;
+
     internal string? StuckTest => _stuckTest;
+
+    /// <summary>Names the step the running body has reached, for the hang guard's message. See <see cref="StaTestThread.Step"/>.</summary>
+    internal void Step(string what)
+    {
+        _step = what;
+        Interlocked.Exchange(ref _stepTick, Environment.TickCount64);
+    }
 
     /// <summary>The dispatcher of the host thread (starting the thread if it is not yet). For the host's own tests.</summary>
     internal Dispatcher HostDispatcher => EnsureThread();
@@ -142,6 +171,10 @@ internal sealed class StaHost
                 _strays.Clear();
             }
 
+            var began = Environment.TickCount64;
+            var opsAtStart = Interlocked.Read(ref _opsStarted);
+            _step = "(the body named no step)";
+            Interlocked.Exchange(ref _stepTick, began);
             var finished = dispatcher.InvokeAsync(() => Job(body, e => error = e)).Task.Unwrap();
             if (!finished.Wait(HangGuard))
             {
@@ -149,7 +182,8 @@ internal sealed class StaHost
                 _stuckTest = name;
                 throw new TimeoutException(
                     $"WPF test body did not return within {HangGuard.TotalSeconds:0} s: {name}. The shared STA test thread is stuck inside it, "
-                    + "so every later WPF test in this process fails at once naming this test (#5602).");
+                    + "so every later WPF test in this process fails at once naming this test (#5602). "
+                    + DescribeStuckBody(opsAtStart));
             }
 
             error?.Throw();
@@ -216,6 +250,69 @@ internal sealed class StaHost
 
     private static string CurrentTestName() => TestContext.Current.Test?.TestDisplayName ?? "(test name unavailable)";
 
+    private static readonly TimeSpan s_sampleWindow = TimeSpan.FromMilliseconds(250);
+    private static readonly System.Reflection.FieldInfo? s_operationMethod =
+        typeof(DispatcherOperation).GetField("_method", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+
+    /// <summary>
+    /// #6216: what another thread can read about a body that did not return. .NET Core cannot capture another thread's stack, and a
+    /// thread stuck in a native call or a message loop has none to show, so this reports what is observable: the last step the body
+    /// named, what the dispatcher has been doing (a run of operations that never ends, one operation that never finishes, or nothing at
+    /// all), and whether the thread is burning CPU or waiting. It samples for a quarter second, so "burning" means it is still going now.
+    /// </summary>
+    private string DescribeStuckBody(long opsAtStart)
+    {
+        try
+        {
+            var step = _step;
+            var stepAgo = Environment.TickCount64 - Interlocked.Read(ref _stepTick);
+            var startedBefore = Interlocked.Read(ref _opsStarted);
+            var cpuBefore = ReadThread(out _);
+            Darling.Tests.TestWait.Elapse(s_sampleWindow);
+            var startedAfter = Interlocked.Read(ref _opsStarted);
+            var cpuAfter = ReadThread(out var threadState);
+            var running = startedAfter - Interlocked.Read(ref _opsCompleted);
+            var last = _lastStarted;
+            var lastName = last is null
+                ? "none"
+                : $"priority {last.Priority}{(s_operationMethod?.GetValue(last) is Delegate d ? $", {d.Method.DeclaringType?.Name}.{d.Method.Name}" : "")}, "
+                    + $"{Environment.TickCount64 - Interlocked.Read(ref _lastStartedTick)} ms ago";
+            var cpu = cpuAfter - cpuBefore;
+            var ran = startedAfter - startedBefore;
+            var verdict = cpu.TotalMilliseconds >= s_sampleWindow.TotalMilliseconds / 2
+                ? (ran > 0 ? "it is still running dispatcher work that does not end" : "it is spinning inside one call")
+                : (ran > 0 ? "it is mostly waiting while the dispatcher still runs operations" : "it is waiting, and the dispatcher has nothing to run");
+            return $"Where it was: the body's last step was \"{step}\", named {stepAgo} ms ago. "
+                + $"The dispatcher started {startedBefore - opsAtStart} operations during the body and {ran} more in the next {s_sampleWindow.TotalMilliseconds:0} ms, "
+                + $"{running} of them still running; the last it started was {lastName}. "
+                + $"The thread is {threadState} and used {cpu.TotalMilliseconds:0} ms of CPU in those {s_sampleWindow.TotalMilliseconds:0} ms, so {verdict} (#6216).";
+        }
+        catch (Exception ex)
+        {
+            return $"(where the body was could not be read: {ex.GetType().Name}: {ex.Message}) (#6216)";
+        }
+    }
+
+    /// <summary>The host thread's CPU time and state, read from the process's thread list by the native id taken when the thread started.</summary>
+    private TimeSpan ReadThread(out string state)
+    {
+        using var process = System.Diagnostics.Process.GetCurrentProcess();
+        foreach (System.Diagnostics.ProcessThread thread in process.Threads)
+        {
+            if (thread.Id == _nativeThreadId)
+            {
+                state = thread.ThreadState == System.Diagnostics.ThreadState.Wait ? $"Wait ({thread.WaitReason})" : thread.ThreadState.ToString();
+                return thread.TotalProcessorTime;
+            }
+        }
+
+        state = "not in the process's thread list";
+        return TimeSpan.Zero;
+    }
+
     private Dispatcher EnsureThread()
     {
         var existing = _dispatcher;
@@ -245,6 +342,18 @@ internal sealed class StaHost
 
                     e.Handled = true;
                 };
+                /* #6216: the hang guard's message says what the dispatcher was doing, so every operation it starts is counted here. */
+                dispatcher.Hooks.OperationStarted += (_, e) =>
+                {
+                    Interlocked.Increment(ref _opsStarted);
+                    Interlocked.Exchange(ref _lastStartedTick, Environment.TickCount64);
+                    _lastStarted = e.Operation;
+                };
+                dispatcher.Hooks.OperationCompleted += (_, _) =>
+                {
+                    Interlocked.Increment(ref _opsCompleted);
+                };
+                _nativeThreadId = (int)GetCurrentThreadId();
                 made = dispatcher;
                 ready.Set();
                 Dispatcher.Run();

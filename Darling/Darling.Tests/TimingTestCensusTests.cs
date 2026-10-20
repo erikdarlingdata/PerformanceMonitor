@@ -72,6 +72,7 @@ public sealed class TimingTestCensusTests
         ["StatementFilterPlanReadsLiveTests.cs"] = LiveStore + "; the 15 s bound is a hang guard on a filter that judges a plan in tens of milliseconds",
         ["StatementScrubBlockingTests.cs"] = Diagnostic + " (scrub throughput records)",
         ["StatementScrubSnapshotTests.cs"] = HangGuard + " (2 minutes for a worst-case snapshot read)",
+        ["StaTestThread.cs"] = "the hang guard's own report (#6216): tick counts say how long ago a stuck body named its step and started its last operation, and are only printed in the timeout message",
         ["StoreCopyPhaseLivePostgresTests.cs"] = "live-postgres member; lower bound only (the start phase must not give up before the sweep deadline less a second); the upper bound moved to the exact fault type and message asserts, which tell the deadline from Npgsql's own timeout (#5602)",
         ["TrendStaleStatsLiveTests.cs"] = Diagnostic + " (the assertions are on the answer status)",
         ["TuningDropLockRecoveryLiveTests.cs"] = HangGuard + " (60 s against a single blocked drop)",

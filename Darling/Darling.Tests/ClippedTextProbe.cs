@@ -22,12 +22,62 @@ using System.Windows.Threading;
 /// </summary>
 internal static class ClippedTextProbe
 {
-    internal static void Settle(Window window)
+    /// <summary>How long <see cref="Settle(Window)"/> waits for the dispatcher to reach application idle: a healthy window takes tens of milliseconds, a loaded runner a few seconds.</summary>
+    internal static readonly TimeSpan SettleLimit = TimeSpan.FromSeconds(15);
+
+    internal static void Settle(Window window) => Settle(window, SettleLimit);
+
+    /// <summary>
+    /// Lays the window out, lets the dispatcher run to application idle, and lays it out again. #6216: the wait for idle is bounded. An
+    /// idle that never comes (a layout or a handler that queues work ahead of it without end) used to leave the body, and with it the
+    /// shared STA thread, in <c>PushFrame</c> until the hang guard gave up on the whole process; now it fails this test alone, naming how
+    /// many operations the dispatcher ran meanwhile, and the thread stays usable.
+    /// </summary>
+    internal static void Settle(Window window, TimeSpan limit)
     {
+        /* Each step is named, so a body that never returns says in the hang guard's message which of the three it was in. */
+        StaTestThread.Step("Settle: the layout pass before the idle frame");
         window.UpdateLayout();
+        var dispatcher = window.Dispatcher;
         var frame = new DispatcherFrame();
-        window.Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(() => frame.Continue = false));
-        Dispatcher.PushFrame(frame);
+        var idle = false;
+        var operations = 0;
+        var lastPriority = DispatcherPriority.Invalid;
+        DispatcherHookEventHandler counter = (_, e) =>
+        {
+            operations++;
+            lastPriority = e.Operation.Priority;
+        };
+        dispatcher.Hooks.OperationStarted += counter;
+
+        /* Send priority and promoted by the dispatcher on every pass, so it fires even when the queue is never empty. */
+        var expiry = new DispatcherTimer(DispatcherPriority.Send, dispatcher) { Interval = limit };
+        expiry.Tick += (_, _) => frame.Continue = false;
+        try
+        {
+            dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(() =>
+            {
+                idle = true;
+                frame.Continue = false;
+            }));
+            expiry.Start();
+            StaTestThread.Step("Settle: waiting in the frame for the dispatcher to reach application idle");
+            Dispatcher.PushFrame(frame);
+        }
+        finally
+        {
+            expiry.Stop();
+            dispatcher.Hooks.OperationStarted -= counter;
+        }
+
+        if (!idle)
+        {
+            throw new TimeoutException(
+                $"The dispatcher did not reach application idle within {limit.TotalMilliseconds:0} ms: it ran {operations} operations meanwhile, the last at priority {lastPriority}. "
+                + "A layout or a handler that queues work ahead of idle without end looks like this (#6216).");
+        }
+
+        StaTestThread.Step("Settle: the layout pass after the idle frame");
         window.UpdateLayout();
     }
 
