@@ -474,6 +474,34 @@ FROM config.investigation_requests AS c JOIN config.investigation_requests AS r 
     }
 
     [Fact]
+    public async Task AnIgnoredForce_ShowsItsOtherPlan_EvenWhenMoreUnknownLaterPlansRanThanTheCheckShows()
+    {
+        await RunAsync(async (dataSource, connection, at, ct) =>
+        {
+            var force = await ForceAsync(at(T), connection, T, ct);
+            await CaptureAsync(connection, T.AddMinutes(1), ct);
+            /* The plan forced before ran again after the force: a definite other plan, so the force is IGNORED. */
+            await StatsAsync(connection, OldPlan, T.AddMinutes(3), T.AddMinutes(4), T.AddMinutes(5), 50, 900, 1000, 1100, ct, intervalId: 7101);
+            /* More later plans with no stored XML ran than the check shows: they must not push the other plan out of the evidence. */
+            for (var i = 0; i < ForceCheckPlansShownForTest + 2; i++)
+                await StatsAsync(connection, 100 + i, T.AddMinutes(6), T.AddMinutes(7), T.AddMinutes(8), 10 + i, 100, 200, 300, ct, intervalId: 7200 + i);
+            await PassAsync(connection, T.AddMinutes(20), ct);
+            Assert.Equal(1, (await at(T.AddMinutes(21)).SweepAsync(ct)).FollowUps);
+            var check = Assert.Single(await ChecksAsync(connection, force.CalledId, ct)).Id;
+            var evidence = await EvidenceAsync(connection, check, ct);
+
+            Assert.Equal("ignored", evidence["state"]!.GetValue<string>());
+            Assert.True(evidence["since_force"]!["other_plans_ran"]!.GetValue<bool>());
+            Assert.True(evidence["since_force"]!["unknown_plans_ran"]!.GetValue<bool>());
+            var plans = evidence["since_force"]!["plans"]!.AsArray();
+            Assert.Contains(plans, p => p!["plan_id"]!.GetValue<long>() == OldPlan);
+            Assert.True(plans.Count <= ForceCheckPlansShownForTest);
+        });
+    }
+
+    private const int ForceCheckPlansShownForTest = InvestigationRequestStore.ForceCheckPlansShown;
+
+    [Fact]
     public async Task ALaterPlanWhoseStoredXmlIsAVariant_MakesTheCheckWorking_AndMarksTheVariant()
     {
         await RunAsync(async (dataSource, connection, at, ct) =>

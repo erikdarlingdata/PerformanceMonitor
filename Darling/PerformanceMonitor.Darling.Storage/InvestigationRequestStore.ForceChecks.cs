@@ -305,17 +305,18 @@ RETURNING route_id, server_id, server_name";
                 sincePlans.Add(numbers);
             }
 
+            /* A definite other plan is the evidence for IGNORED, which beats an unknown, so other plans are listed before the unknown ones and
+               an unknown can't push them out of the shown plans. */
+            foreach (var other in fact.OtherPlans.Take(Math.Max(0, ForceCheckPlansShown - sincePlans.Count)))
+                sincePlans.Add(PlanNumbers(other.PlanId, other.Run ?? new DarlingForcedPlanStateReader.Ran(other.Executions, other.LastExecution)));
+
             /* #6221: a later plan whose stored XML is not there yet is neither a variant nor another plan; it is listed, marked, and the state says so. */
-            var room = Math.Max(0, ForceCheckPlansShown - sincePlans.Count);
-            foreach (var unknown in fact.UnknownPlans.Take(room))
+            foreach (var unknown in fact.UnknownPlans.Take(Math.Max(0, ForceCheckPlansShown - sincePlans.Count)))
             {
                 var numbers = PlanNumbers(unknown.PlanId, unknown.Run ?? new DarlingForcedPlanStateReader.Ran(unknown.Executions, unknown.LastExecution));
                 numbers["plan_xml_not_stored"] = true;
                 sincePlans.Add(numbers);
             }
-
-            foreach (var other in fact.OtherPlans.Take(Math.Max(0, ForceCheckPlansShown - sincePlans.Count)))
-                sincePlans.Add(PlanNumbers(other.PlanId, other.Run ?? new DarlingForcedPlanStateReader.Ran(other.Executions, other.LastExecution)));
         }
         else
         {
