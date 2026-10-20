@@ -421,7 +421,7 @@ public static class CollectorScheduleDefaults
         minutes is int v
             && v >= 0
             && !(CollectorDeltaCalculator.IsDeltaFamily(collectorName) && v > CollectorDeltaCalculator.MaxDeltaFrequencyMinutes)
-        ? v
+        ? Math.Min(v, MaxFrequencyMinutes)
         : null;
 
     /// <summary>
@@ -509,5 +509,15 @@ public static class CollectorScheduleDefaults
     /// TRACE_FLAGS read the same way (see <c>PgLatestValueBounds</c> / Lite's <c>LatestValueBounds</c>).
     /// </summary>
     public static int EffectiveRecurringIntervalMinutes(int frequencyMinutes) =>
-        frequencyMinutes == 0 ? OnLoadRecaptureMinutes : frequencyMinutes;
+        frequencyMinutes == 0 ? OnLoadRecaptureMinutes : Math.Min(frequencyMinutes, MaxFrequencyMinutes);
+
+    /// <summary>The longest frequency a collector's schedule accepts, in minutes: one year (#6227). A stored value above it (a row
+    /// written another way, or before the cap) is read as this, because a longer one overflows the time arithmetic the analysis
+    /// look-backs and the retention floors do with it. No shipped default comes near it (the longest is a day).</summary>
+    public const int MaxFrequencyMinutes = 525_600;
+
+    /// <summary>The longest retention a collector's schedule accepts, in days: ten years (#6227). A stored value above it is read as
+    /// this, because a longer one makes the purge cutoff (now minus the days) fall before the earliest date a timestamp can hold.
+    /// The longest shipped default is a year.</summary>
+    public const int MaxRetentionDays = 3650;
 }

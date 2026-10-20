@@ -31,19 +31,25 @@ namespace PerformanceMonitor.Collectors;
 /// runs inside each database's own statement, so the enumeration is one cheap <c>sys.databases</c> read instead of a
 /// probe cursor.</para>
 ///
-/// <para><b>Load.</b> Per database one statement over <c>sys.query_store_plan</c> with <c>is_forced_plan = 1</c>,
-/// bounded by <see cref="MaxRowsPerDatabase"/>. It never SELECTS the plan XML: the XML of the plans of a forced query that
-/// compiled AFTER the force (higher plan_id, at most <see cref="MaxXmlPlansPerDatabase"/> per database, newest first) is only
-/// searched with <c>CHARINDEX</c> for two attributes (#6160). A plain table on every store
-/// (<see cref="StaysPlainTable"/>): the volume is a few rows per database per pass, the same grid decision as
-/// the attention table (#3035, #3044, #3107).</para>
+/// <para><b>Load, and what it never reads (#6221).</b> Per database one statement over <c>sys.query_store_plan</c> alone with
+/// <c>is_forced_plan = 1</c>, bounded by <see cref="MaxRowsPerDatabase"/>, then a second statement that takes each forced row's object id
+/// from <c>sys.query_store_query</c>. The two views are never joined in one statement: on a primary that join took 20 s for 162 forced
+/// plans in one database, against 0.6 s for this whole body (measured on a production primary; a read-only replica showed 0.1 s for the
+/// join, because it has no in-memory Query Store data). It reads NO plan XML: not the column, not a <c>CHARINDEX</c> over it. #6171
+/// searched the XML of every later plan of every forced query on every pass to find variants and plan guides (#6160). On one production
+/// store with about 300 forced plans per server the pass took 17 to 86 s; removing the XML read alone did not fix it there, the view join
+/// was most of the time. The variant check lives in the store now (<c>DarlingForcedPlanStateReader</c>): the Query Store collector already
+/// fetches the XML of every plan that ran and stores it once, and the reader looks at the stored XML of the later plans that ran in the
+/// window it judges. A plain table on every store (<see cref="StaysPlainTable"/>): the volume is a few rows per database per pass, the
+/// same grid decision as the attention table (#3035, #3044, #3107).</para>
 ///
-/// <para><b>Variants and plan guides (#6160).</b> SQL Server can recompile a forced plan under a NEW plan id of the same query; that
-/// plan's stored XML carries <c>UsePlan="1"</c> and no <c>PlanGuideName</c> (a variant, <see cref="Row.VariantPlanIds"/>). A
-/// <c>USE PLAN</c> plan guide on the forced query is read from <c>sys.plan_guides</c> in the same database: an OBJECT-scoped guide
-/// by <c>scope_object_id</c> = the query's <c>object_id</c> (the guide may cover another statement of the same object: the scope
-/// is the only match, no query text is compared); a guide of any scope whose name a later plan of the query carries as
-/// <c>PlanGuideName</c>. Only guides in the query's own database are seen.</para>
+/// <para><b>Plan guides.</b> A <c>USE PLAN</c> plan guide on the forced query is read from <c>sys.plan_guides</c> in the same database: an
+/// OBJECT-scoped guide by <c>scope_object_id</c> = the query's <c>object_id</c> (the guide may cover another statement of the same object:
+/// the scope is the only match, no query text is compared). That reads no plan XML. A guide that a later plan names in its XML
+/// (<c>PlanGuideName</c>) is found by the store-side reader. Only guides in the query's own database are seen here.</para>
+///
+/// <para><b>Variants.</b> <see cref="Row.VariantPlanIds"/> is always NULL now; the column stays (no migration), and the reader still
+/// honors a value that an older collector wrote.</para>
 ///
 /// <para><b>Version gates.</b> <c>plan_forcing_type_desc</c> is SQL Server 2017 and later (and always on Azure), read as
 /// a typed NULL below that, the way <see cref="QueryStoreCollector"/> gates the same column.</para>
@@ -74,12 +80,12 @@ public sealed class QueryStoreForcedPlansCollector : CollectorDefinitionBase<Que
 
         /// <summary>
         /// #6160: the plan ids of the same query, newer than the forced plan, whose stored XML carries <c>UsePlan="1"</c> and no
-        /// <c>PlanGuideName</c>, as a comma-separated list in ascending order with no spaces (<c>12,15</c>), at most
-        /// <see cref="MaxVariantPlanIds"/> of them. NULL on the marker row and when there are none.
+        /// <c>PlanGuideName</c>, as a comma-separated list (<c>12,15</c>). Always NULL from this collector since #6221, which reads no plan
+        /// XML on the monitored server; the store-side reader finds variants in the stored plans. Rows an older collector wrote still carry it.
         /// </summary>
         public string? VariantPlanIds { get; set; }
 
-        /// <summary>#6160: the name of a plan guide that covers the forced query (see the class remarks); NULL when none was found.</summary>
+        /// <summary>#6160: the name of an OBJECT-scoped <c>USE PLAN</c> plan guide that covers the forced query (see the class remarks); NULL when none was found.</summary>
         public string? PlanGuideName { get; set; }
 
         /// <summary>#6160: NULL when no guide was found, else whether the guide is enabled.</summary>
@@ -88,15 +94,6 @@ public sealed class QueryStoreForcedPlansCollector : CollectorDefinitionBase<Que
         /// <summary>#6160: the guide's <c>scope_type_desc</c> (OBJECT, SQL or TEMPLATE); NULL when no guide was found.</summary>
         public string? PlanGuideScope { get; set; }
     }
-
-    /// <summary>The most variant plan ids one forced plan lists (the oldest first). A query with more is not a normal one.</summary>
-    public const int MaxVariantPlanIds = 20;
-
-    /// <summary>
-    /// The most plans of forced queries whose XML one database's pass searches (newest first). A forced query's later plans are
-    /// usually one to three, so 500 forces read about 500 to 1500 plans; this is the backstop for a database that is not normal.
-    /// </summary>
-    public const int MaxXmlPlansPerDatabase = 2000;
 
     /// <summary>The most forced plans one database ships in one pass. A database with more forces than this is not a normal one.</summary>
     public const int MaxRowsPerDatabase = 500;
@@ -215,12 +212,11 @@ BEGIN
 END;
 
 DROP TABLE IF EXISTS #pm_forced_plans;
-DROP TABLE IF EXISTS #pm_forced_later_plans;
 
 SELECT TOP ({MaxRowsPerDatabase})
     plan_id = qsp.plan_id,
     query_id = qsp.query_id,
-    object_id = CONVERT(bigint, qsq.object_id),
+    object_id = CONVERT(bigint, NULL),
     query_plan_hash = CONVERT(varchar(64), qsp.query_plan_hash, 1),
     {forcingTypeColumn}
     force_failure_count = CONVERT(bigint, qsp.force_failure_count),
@@ -229,47 +225,18 @@ SELECT TOP ({MaxRowsPerDatabase})
     last_compile_start_time = CONVERT(datetime2, qsp.last_compile_start_time AT TIME ZONE 'UTC')
 INTO #pm_forced_plans
 FROM sys.query_store_plan AS qsp
-LEFT JOIN sys.query_store_query AS qsq
-    ON qsq.query_id = qsp.query_id
 WHERE qsp.is_forced_plan = 1
 ORDER BY qsp.plan_id
 OPTION(RECOMPILE);
 
-SELECT TOP ({MaxXmlPlansPerDatabase})
-    query_id = l.query_id,
-    plan_id = l.plan_id,
-    is_variant =
-        CONVERT
-        (
-            bit,
-            CASE
-                WHEN CHARINDEX(N'UsePlan=""1""', l.query_plan) > 0
-                AND  x.guide_at = 0
-                THEN 1
-                ELSE 0
-            END
-        ),
-    guide_name =
-        CONVERT
-        (
-            nvarchar(128),
-            CASE
-                WHEN x.guide_at > 0
-                AND  CHARINDEX(N'""', l.query_plan, x.guide_at + 15) > 0
-                THEN SUBSTRING(l.query_plan, x.guide_at + 15, CHARINDEX(N'""', l.query_plan, x.guide_at + 15) - x.guide_at - 15)
-            END
-        )
-INTO #pm_forced_later_plans
+/* #6221: the object id comes from sys.query_store_query in a SECOND statement, joined to the few forced rows in the temp table. On a
+   primary, joining the two Query Store views in one statement took 20 s for 162 forced plans in one database (the same rows in
+   0.6 s for the whole body when split), and a read-only replica does not show it, because it has no in-memory Query Store data. */
+UPDATE f
+SET f.object_id = CONVERT(bigint, qsq.object_id)
 FROM #pm_forced_plans AS f
-JOIN sys.query_store_plan AS l
-    ON  l.query_id = f.query_id
-    AND l.plan_id > f.plan_id
-CROSS APPLY
-(
-    SELECT
-        guide_at = CHARINDEX(N'PlanGuideName=""', l.query_plan)
-) AS x
-ORDER BY l.plan_id DESC
+JOIN sys.query_store_query AS qsq
+    ON qsq.query_id = f.query_id
 OPTION(RECOMPILE);
 
 SELECT /* PerformanceMonitorLite */
@@ -295,36 +262,11 @@ SELECT
     f.last_force_failure_reason,
     f.last_execution_time,
     f.last_compile_start_time,
-    v.variant_plan_ids,
+    variant_plan_ids = CONVERT(varchar(400), NULL),
     g.plan_guide_name,
     g.plan_guide_enabled,
     g.plan_guide_scope
 FROM #pm_forced_plans AS f
-OUTER APPLY
-(
-    SELECT
-        variant_plan_ids =
-            CONVERT
-            (
-                varchar(400),
-                STUFF
-                (
-                    (
-                        SELECT TOP ({MaxVariantPlanIds})
-                            ',' + CONVERT(varchar(20), l.plan_id)
-                        FROM #pm_forced_later_plans AS l
-                        WHERE l.query_id = f.query_id
-                        AND   l.is_variant = 1
-                        ORDER BY
-                            l.plan_id
-                        FOR XML PATH('')
-                    ),
-                    1,
-                    1,
-                    ''
-                )
-            )
-) AS v
 OUTER APPLY
 (
     SELECT TOP (1)
@@ -332,21 +274,10 @@ OUTER APPLY
         plan_guide_enabled = CONVERT(bit, CASE WHEN pg.is_disabled = 1 THEN 0 ELSE 1 END),
         plan_guide_scope = pg.scope_type_desc
     FROM sys.plan_guides AS pg
-    WHERE
-    (
-        pg.scope_type_desc = N'OBJECT'
-        AND f.object_id <> 0
-        AND pg.scope_object_id = f.object_id
-        AND pg.hints LIKE N'%USE PLAN%'
-    )
-    OR pg.name IN
-    (
-        SELECT
-            l.guide_name
-        FROM #pm_forced_later_plans AS l
-        WHERE l.query_id = f.query_id
-        AND   l.guide_name IS NOT NULL
-    )
+    WHERE pg.scope_type_desc = N'OBJECT'
+    AND   f.object_id <> 0
+    AND   pg.scope_object_id = f.object_id
+    AND   pg.hints LIKE N'%USE PLAN%'
     ORDER BY
         CASE WHEN pg.is_disabled = 0 THEN 0 ELSE 1 END,
         pg.name
@@ -355,8 +286,7 @@ ORDER BY
     plan_id
 OPTION(RECOMPILE);
 
-DROP TABLE IF EXISTS #pm_forced_plans;
-DROP TABLE IF EXISTS #pm_forced_later_plans;";
+DROP TABLE IF EXISTS #pm_forced_plans;";
     }
 
     /// <summary>The Azure per-database branch: the connection is already in the database.</summary>

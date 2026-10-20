@@ -1895,6 +1895,17 @@ ALTER TABLE collect.query_store_forced_plans ADD COLUMN IF NOT EXISTS plan_guide
 ALTER TABLE collect.ag_replica_states ADD COLUMN IF NOT EXISTS primary_replica text;";
 
     /// <summary>
+    /// V205 (#6235): an optional expiry on a custom alert rule, the same column name and meaning as
+    /// <c>config_mute_rules.expires_at_utc</c>. <c>expires_at_utc</c> is a nullable naive-UTC <c>timestamp</c>; NULL means the rule
+    /// never expires, which is every existing row. "Expired" is computed (<c>expires_at_utc &lt;= now</c>), never stored, so no job
+    /// has to flip anything. An expired rule is not evaluated and does not fire; its row stays, and moving or clearing the expiry
+    /// turns it back on. A nullable column with no default is catalog-only. An older build ignores the column and keeps evaluating
+    /// the rule. Idempotent.
+    /// </summary>
+    private const string V205Sql = @"
+ALTER TABLE config.custom_alert_rules ADD COLUMN IF NOT EXISTS expires_at_utc timestamp;";
+
+    /// <summary>
     /// V203 (#6170): the per-server login the PostgreSQL hypothetical-index check runs under, a pair in the same shape as the
     /// remediation pair V113 added. <c>hypothetical_index_username</c> is a login name. <c>hypothetical_index_encrypted_password</c>
     /// holds an <c>env:</c> or <c>file:</c> reference to its password, never the password. Both are nullable with no default and no
@@ -1904,6 +1915,158 @@ ALTER TABLE collect.ag_replica_states ADD COLUMN IF NOT EXISTS primary_replica t
     private const string V203Sql = @"
 ALTER TABLE config.config_monitored_servers ADD COLUMN IF NOT EXISTS hypothetical_index_username text;
 ALTER TABLE config.config_monitored_servers ADD COLUMN IF NOT EXISTS hypothetical_index_encrypted_password text;";
+
+    /// <summary>
+    /// V206 (#6227): <c>config.config_collector_schedules.enabled</c> may be NULL, which reads "inherit": the fleet-wide row's value
+    /// for a server's row, then the collector's shipped default. A row the schedule tools create to set only a frequency or a
+    /// retention then stores no enabled state of its own, so a later fleet-wide disable still reaches that server; before, such a row
+    /// stored <c>enabled</c> explicitly and the fleet-wide value never reached it. Dropping NOT NULL is catalog-only, the DEFAULT TRUE
+    /// stays (a row inserted without the column is explicit, as every row was), and existing rows keep their values. The service
+    /// and the viewer read NULL as "inherit" (<c>ScheduleOverride.Enabled</c> was already nullable and layers with <c>??</c>). An older
+    /// build reads the column as a plain boolean and fails on a NULL, so before rolling back past this rung set every NULL to the value
+    /// it inherits, or delete those rows (the rollback list in the README has the statement).
+    ///
+    /// <para><b>The table takes only what the schedule tools write.</b> The tools store a collector name in the catalog's own spelling
+    /// (lower-case letters, digits and underscores) and values inside <c>CollectorScheduleDefaults.MaxFrequencyMinutes</c> and
+    /// <c>MaxRetentionDays</c>; the unique indexes compare the name exactly, so a differently-cased name was a second row that the
+    /// readers resolved in no fixed order. First the rung tidies what is already stored: where one scope holds the same name in more than
+    /// one case, the lower-case row stays (else the first by name) and the others go; a remaining mixed-case name becomes lower-case; a
+    /// name that is still not a lower-case identifier of at most 64 characters names no collector and goes; a value over the cap is
+    /// set to the cap (a retention is already read as the cap; a frequency over a year was a collector that effectively never runs). Then three CHECK constraints, added <c>NOT VALID</c> so they bind every
+    /// later INSERT and UPDATE whatever the role, and the rung holds no row they would refuse. The viewer's save deletes a scope's rows
+    /// and inserts them again, so a stored row the checks refuse would fail that save: that is why the tidy comes first.</para>
+    ///
+    /// <para><b>No foreign key to the registry.</b> The viewer lists servers from the observed <c>servers</c> table, which keeps a server
+    /// after its definition in <c>config_monitored_servers</c> is removed and is the only list on a store that was never seeded, and the
+    /// schedule tools resolve against the same table, so a schedule row for an id with no definition is a normal write and a foreign key
+    /// would refuse it. Instead a row-level BEFORE INSERT trigger on <c>config_monitored_servers</c> clears the schedule rows held under
+    /// a server id the service has never seen: no definition in <c>config_monitored_servers</c> and no row in the observed
+    /// <c>collect.servers</c>, so a row written ahead of an unknown server being registered never decides how that server is collected.
+    /// It does nothing when the id already has a definition (an upsert, the seed) or an observed row, so a server that was removed and
+    /// is added again keeps the schedule rows the operator set for it (a collector switched off stays off). The trigger
+    /// function is <c>SECURITY DEFINER</c> with a pinned search_path, because the roles that register a server cannot delete schedule
+    /// rows; it deletes by the new row's server id and nothing else.</para>
+    ///
+    /// <para>Idempotent: every step is guarded or is a no-op the second time.</para>
+    /// </summary>
+    private const string V206Sql = @"
+ALTER TABLE config.config_collector_schedules ALTER COLUMN enabled DROP NOT NULL;
+
+DELETE FROM config.config_collector_schedules
+WHERE ctid IN
+(
+    SELECT d.row_id
+    FROM
+    (
+        SELECT
+            s.ctid AS row_id,
+            row_number() OVER (
+                PARTITION BY s.server_id, lower(s.collector_name)
+                ORDER BY (s.collector_name = lower(s.collector_name)) DESC, s.collector_name) AS keep_rank
+        FROM config.config_collector_schedules AS s
+    ) AS d
+    WHERE d.keep_rank > 1
+);
+UPDATE config.config_collector_schedules SET collector_name = lower(collector_name) WHERE collector_name <> lower(collector_name);
+DELETE FROM config.config_collector_schedules WHERE collector_name !~ '^[a-z0-9_]{1,64}$';
+UPDATE config.config_collector_schedules SET frequency_minutes = 525600 WHERE frequency_minutes > 525600;
+UPDATE config.config_collector_schedules SET retention_days = 3650 WHERE retention_days > 3650;
+
+DO $limits$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'config.config_collector_schedules'::regclass AND conname = 'ck_config_collector_schedules_name') THEN
+        ALTER TABLE config.config_collector_schedules
+            ADD CONSTRAINT ck_config_collector_schedules_name CHECK (collector_name ~ '^[a-z0-9_]{1,64}$') NOT VALID;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'config.config_collector_schedules'::regclass AND conname = 'ck_config_collector_schedules_frequency_cap') THEN
+        ALTER TABLE config.config_collector_schedules
+            ADD CONSTRAINT ck_config_collector_schedules_frequency_cap CHECK (frequency_minutes <= 525600) NOT VALID;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'config.config_collector_schedules'::regclass AND conname = 'ck_config_collector_schedules_retention_cap') THEN
+        ALTER TABLE config.config_collector_schedules
+            ADD CONSTRAINT ck_config_collector_schedules_retention_cap CHECK (retention_days <= 3650) NOT VALID;
+    END IF;
+END
+$limits$;
+
+CREATE OR REPLACE FUNCTION config.config_clear_unregistered_schedules() RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $clear$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM config.config_monitored_servers AS m WHERE m.server_id = NEW.server_id)
+       AND NOT EXISTS (SELECT 1 FROM collect.servers AS o WHERE o.server_id = NEW.server_id) THEN
+        DELETE FROM config.config_collector_schedules WHERE server_id = NEW.server_id;
+    END IF;
+    RETURN NEW;
+END;
+$clear$;
+REVOKE ALL ON FUNCTION config.config_clear_unregistered_schedules() FROM PUBLIC;
+DROP TRIGGER IF EXISTS trg_clear_unregistered_schedules ON config.config_monitored_servers;
+CREATE TRIGGER trg_clear_unregistered_schedules
+    BEFORE INSERT ON config.config_monitored_servers
+    FOR EACH ROW EXECUTE FUNCTION config.config_clear_unregistered_schedules();";
+
+    /// <summary>
+    /// V204 (#6214): shared folders, personal views and an owner on the saved custom views and notebooks (both are
+    /// <c>config.custom_views</c> rows). Four columns: <c>folder</c> (NULL is the top level; the writers store it trimmed, empty as NULL,
+    /// at most 100 characters, no control characters, and a check holds the same rule), <c>personal</c> (default false, so every existing
+    /// view stays shared) and <c>created_by</c> (NULL for every existing view, which reads as "unknown"; <c>updated_by</c> is NOT copied
+    /// into it, because that is who last saved a view, not who made it) and <c>owner_key</c> (NULL for every existing view and for every view
+    /// the shared token or MCP made). <c>created_by</c> is a name for display only: it is what a person's sign-in called them, it can change,
+    /// and an identity provider can hand the same name to somebody else, so it never decides who may touch a personal view. <c>owner_key</c>
+    /// does: the web host stamps base64url(SHA-256(issuer + newline + sub)) of the validated ID token, which is stable and is not reused. A
+    /// check refuses a personal view with no owner key.
+    ///
+    /// <para><b>Uniqueness moves from the store to the scope.</b> V31's <c>UNIQUE (name)</c> is dropped under whatever name it carries
+    /// (looked up by its column, not assumed). Two partial unique indexes replace it: shared views are unique on
+    /// <c>(COALESCE(folder, ''), name)</c>, personal views on <c>(owner_key, name)</c>. Names still compare exactly (case-sensitive), as
+    /// before. A view's folder does not take part in a personal view's uniqueness.</para>
+    ///
+    /// <para>Every step is guarded, so a second run changes nothing. An older build keeps working against the new shape: it writes top-level
+    /// shared views, which the new indexes treat as before, and ignores the columns. It does not hide a person's personal views from the
+    /// list. Grants need no change: the viewer and mcp roles hold table-level INSERT, UPDATE and DELETE on the table, which cover new columns.</para>
+    /// </summary>
+    private const string V204Sql = @"
+ALTER TABLE config.custom_views ADD COLUMN IF NOT EXISTS folder text;
+ALTER TABLE config.custom_views ADD COLUMN IF NOT EXISTS personal boolean NOT NULL DEFAULT false;
+ALTER TABLE config.custom_views ADD COLUMN IF NOT EXISTS created_by text;
+ALTER TABLE config.custom_views ADD COLUMN IF NOT EXISTS owner_key text;
+
+DO $$
+DECLARE
+    unique_name text;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conrelid = 'config.custom_views'::regclass AND conname = 'ck_custom_views_folder')
+    THEN
+        ALTER TABLE config.custom_views ADD CONSTRAINT ck_custom_views_folder CHECK (
+            folder IS NULL
+            OR (folder = btrim(folder) AND folder <> '' AND char_length(folder) <= 100 AND folder !~ '[--]'));
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conrelid = 'config.custom_views'::regclass AND conname = 'ck_custom_views_personal_owner')
+    THEN
+        ALTER TABLE config.custom_views ADD CONSTRAINT ck_custom_views_personal_owner CHECK (NOT personal OR owner_key IS NOT NULL);
+    END IF;
+
+    /* V31's UNIQUE (name), found by the one column it covers so a renamed constraint is dropped too. */
+    FOR unique_name IN
+        SELECT con.conname
+        FROM pg_constraint con
+        WHERE con.conrelid = 'config.custom_views'::regclass
+          AND con.contype = 'u'
+          AND con.conkey = ARRAY[(SELECT a.attnum FROM pg_attribute a
+                                  WHERE a.attrelid = 'config.custom_views'::regclass AND a.attname = 'name')]
+    LOOP
+        EXECUTE format('ALTER TABLE config.custom_views DROP CONSTRAINT %I', unique_name);
+    END LOOP;
+END $$;
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_custom_views_shared_name ON config.custom_views ((COALESCE(folder, '')), name) WHERE NOT personal;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_custom_views_personal_name ON config.custom_views (owner_key, name) WHERE personal;";
 
     /// <summary>
     /// V196 (#5632, step 5): Level 3 and the per-server action switches. <b>Nothing here turns an action on.</b>
@@ -2283,6 +2446,9 @@ $rung$;";
         new Migration(201, "forced-plan-variants-and-guides", V201Sql),
         new Migration(202, "ag-primary-replica", V202Sql),
         new Migration(203, "hypothetical-index-login", V203Sql),
+        new Migration(204, "custom-view-folders", V204Sql),
+        new Migration(205, "custom-alert-rule-expiry", V205Sql),
+        new Migration(206, "collector-enabled-inherit", V206Sql),
     };
 
     /// <summary>

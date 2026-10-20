@@ -95,7 +95,8 @@ SELECT
     r.version,
     r.updated_at,
     r.updated_by,
-    f.last_fired
+    f.last_fired,
+    r.expires_at_utc
 FROM custom_alert_rules AS r
 LEFT JOIN
 (
@@ -111,7 +112,7 @@ ORDER BY r.name";
 
     /// <summary>The full single-rule read (includes <c>definition</c>). $1 id.</summary>
     public const string GetSql = @"
-SELECT id, name, definition, description, enabled, version, created_at, updated_at, updated_by
+SELECT id, name, definition, description, enabled, version, created_at, updated_at, updated_by, expires_at_utc
 FROM custom_alert_rules
 WHERE id = $1";
 
@@ -121,9 +122,10 @@ WHERE id = $1";
     /// bound to <see cref="EnabledRuleCap"/> + 1 — one beyond the cap — so the caller can DETECT (and warn about)
     /// an over-cap table while still reading a bounded number of rows.</summary>
     public const string ListEnabledSql = @"
-SELECT id, name, definition, description, enabled, version, created_at, updated_at, updated_by
+SELECT id, name, definition, description, enabled, version, created_at, updated_at, updated_by, expires_at_utc
 FROM custom_alert_rules
 WHERE enabled
+  AND (expires_at_utc IS NULL OR expires_at_utc > (now() AT TIME ZONE 'UTC'))
 ORDER BY id
 LIMIT $1";
 
@@ -175,14 +177,16 @@ FROM tag_subtree AS s
 JOIN server_tag_map AS m
   ON m.tag_id = s.tag_id";
 
-    /// <summary>Inserts a new rule at version 1. $1 name, $2 definition (jsonb), $3 description, $4 enabled, $5 updated_by.</summary>
+    /// <summary>Inserts a new rule at version 1. $1 name, $2 definition (jsonb), $3 description, $4 enabled, $5 updated_by,
+    /// $6 expires_at_utc (naive UTC, NULL = never expires, #6235).</summary>
     public const string InsertSql = @"
-INSERT INTO custom_alert_rules (name, definition, description, enabled, version, created_at, updated_at, updated_by)
-VALUES ($1, $2, $3, $4, 1, (now() AT TIME ZONE 'UTC'), (now() AT TIME ZONE 'UTC'), $5)
-RETURNING id, name, definition, description, enabled, version, created_at, updated_at, updated_by";
+INSERT INTO custom_alert_rules (name, definition, description, enabled, version, created_at, updated_at, updated_by, expires_at_utc)
+VALUES ($1, $2, $3, $4, 1, (now() AT TIME ZONE 'UTC'), (now() AT TIME ZONE 'UTC'), $5, $6)
+RETURNING id, name, definition, description, enabled, version, created_at, updated_at, updated_by, expires_at_utc";
 
     /// <summary>Optimistic-concurrency update. $1 id, $2 name, $3 definition (jsonb), $4 description,
-    /// $5 enabled, $6 updated_by, $7 expected_version. Returns the row only when the expected version matched.</summary>
+    /// $5 enabled, $6 updated_by, $7 expected_version, $8 expires_at_utc (the WHOLE value: NULL clears it, #6235). Returns the
+    /// row only when the expected version matched.</summary>
     public const string UpdateSql = @"
 UPDATE custom_alert_rules
 SET name = $2,
@@ -191,9 +195,10 @@ SET name = $2,
     enabled = $5,
     version = version + 1,
     updated_at = (now() AT TIME ZONE 'UTC'),
-    updated_by = $6
+    updated_by = $6,
+    expires_at_utc = $8
 WHERE id = $1 AND version = $7
-RETURNING id, name, definition, description, enabled, version, created_at, updated_at, updated_by";
+RETURNING id, name, definition, description, enabled, version, created_at, updated_at, updated_by, expires_at_utc";
 
     /// <summary>Disambiguates a 0-rowcount update: the current version, or no row when the id is gone. $1 id.</summary>
     public const string VersionProbeSql = "SELECT version FROM custom_alert_rules WHERE id = $1";
@@ -243,17 +248,18 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
 
     /// <summary>Inserts a new ENABLED rule at version 1 ONLY while the enabled count is under the cap; returns
     /// zero rows (nothing inserted) when the cap is already reached. $1 name, $2 definition (jsonb),
-    /// $3 description, $4 updated_by, $5 cap. Run inside the advisory-locked transaction so the count and the
+    /// $3 description, $4 updated_by, $5 cap, $6 expires_at_utc (#6235). The count is of ACTIVE rules (enabled and not
+    /// expired): an expired rule costs the evaluator nothing, so it does not hold a slot. Run inside the advisory-locked transaction so the count and the
     /// insert are one atomic step.</summary>
     public const string InsertEnabledIfUnderCapSql = @"
-INSERT INTO custom_alert_rules (name, definition, description, enabled, version, created_at, updated_at, updated_by)
-SELECT $1, $2, $3, true, 1, (now() AT TIME ZONE 'UTC'), (now() AT TIME ZONE 'UTC'), $4
-WHERE (SELECT count(*) FROM custom_alert_rules WHERE enabled) < $5
-RETURNING id, name, definition, description, enabled, version, created_at, updated_at, updated_by";
+INSERT INTO custom_alert_rules (name, definition, description, enabled, version, created_at, updated_at, updated_by, expires_at_utc)
+SELECT $1, $2, $3, true, 1, (now() AT TIME ZONE 'UTC'), (now() AT TIME ZONE 'UTC'), $4, $6
+WHERE (SELECT count(*) FROM custom_alert_rules WHERE " + ActiveRuleSql + @") < $5
+RETURNING id, name, definition, description, enabled, version, created_at, updated_at, updated_by, expires_at_utc";
 
     /// <summary>Enables (or re-saves an already-enabled) rule under optimistic concurrency, refusing a
     /// disabled-&gt;enabled transition that would exceed the cap. $1 id, $2 name, $3 definition (jsonb),
-    /// $4 description, $5 updated_by, $6 expected_version, $7 cap. Zero rows means id gone OR stale version OR
+    /// $4 description, $5 updated_by, $6 expected_version, $7 cap, $8 expires_at_utc (the whole value, #6235). Zero rows means id gone OR stale version OR
     /// (the row was disabled AND the cap is reached) — disambiguated by <see cref="EnabledStateProbeSql"/>. The
     /// <c>enabled = true OR …</c> guard lets an already-enabled rule be re-saved without consuming a cap slot.
     /// Run inside the advisory-locked transaction.</summary>
@@ -265,14 +271,22 @@ SET name = $2,
     enabled = true,
     version = version + 1,
     updated_at = (now() AT TIME ZONE 'UTC'),
-    updated_by = $5
+    updated_by = $5,
+    expires_at_utc = $8
 WHERE id = $1 AND version = $6
-  AND (enabled = true OR (SELECT count(*) FROM custom_alert_rules WHERE enabled) < $7)
-RETURNING id, name, definition, description, enabled, version, created_at, updated_at, updated_by";
+  AND (" + ActiveRuleSql + @" OR (SELECT count(*) FROM custom_alert_rules WHERE " + ActiveRuleSql + @") < $7)
+RETURNING id, name, definition, description, enabled, version, created_at, updated_at, updated_by, expires_at_utc";
 
     /// <summary>Disambiguates a 0-row enable: the current version and enabled state, or no row when the id is
     /// gone. $1 id.</summary>
-    public const string EnabledStateProbeSql = "SELECT version, enabled FROM custom_alert_rules WHERE id = $1";
+    public const string EnabledStateProbeSql = "SELECT version, " + ActiveRuleSql + " FROM custom_alert_rules WHERE id = $1";
+
+    /// <summary>
+    /// A rule that is ACTIVE now (#6235): enabled and not past its expiry. "Expired" is computed here, never stored
+    /// (<c>expires_at_utc &lt;= now</c>), the mute rules' meaning. The cap counts active rules, so a short-term watch that has
+    /// expired does not keep holding one of the <see cref="EnabledRuleCap"/> slots.
+    /// </summary>
+    public const string ActiveRuleSql = "(enabled AND (expires_at_utc IS NULL OR expires_at_utc > (now() AT TIME ZONE 'UTC')))";
 
     /// <summary>
     /// The Level 2 recheck (#5915): locks the stored rule <c>FOR UPDATE</c> on this store's transaction and returns its
@@ -313,7 +327,8 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
                 reader.GetDateTime(5),
                 reader.IsDBNull(6) ? null : reader.GetString(6),
                 // last_fired: naive-UTC like updated_at (timestamp column -> Kind=Unspecified), NULL when never fired.
-                reader.IsDBNull(7) ? (DateTime?)null : reader.GetDateTime(7)));
+                reader.IsDBNull(7) ? (DateTime?)null : reader.GetDateTime(7),
+                reader.IsDBNull(8) ? (DateTime?)null : reader.GetDateTime(8)));
         }
 
         return results;
@@ -398,6 +413,12 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
         return new CustomAlertRuleResult.Ok(ReadFullRule(reader));
     }
 
+    /// <summary>A create with no expiry (the rule never expires). See the overload that takes <c>expiresAtUtc</c> (#6235).</summary>
+    public Task<CustomAlertRuleResult> CreateAsync(
+        string name, string? description, string definitionJson, bool enabled, string? updatedBy,
+        CancellationToken cancellationToken = default) =>
+        CreateAsync(name, description, definitionJson, enabled, updatedBy, null, cancellationToken);
+
     /// <summary>
     /// Inserts a new rule. Returns <see cref="CustomAlertRuleResult.Ok"/> with the stored row (version 1),
     /// <see cref="CustomAlertRuleResult.Conflict"/> on a duplicate name (23505), or
@@ -408,7 +429,7 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
     /// </summary>
     public async Task<CustomAlertRuleResult> CreateAsync(
         string name, string? description, string definitionJson, bool enabled, string? updatedBy,
-        CancellationToken cancellationToken = default)
+        DateTime? expiresAtUtc, CancellationToken cancellationToken = default)
     {
         var invalid = ValidateArgs(name, definitionJson);
         if (invalid is not null)
@@ -419,7 +440,7 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
         // A disabled rule never evaluates, so it does not count against the cap and takes the plain insert.
         if (!enabled)
         {
-            return await InsertDisabledAsync(name, description, definitionJson, updatedBy, cancellationToken);
+            return await InsertDisabledAsync(name, description, definitionJson, updatedBy, expiresAtUtc, cancellationToken);
         }
 
         // An ENABLED create must not push the enabled count over the cap. Serialize the count-then-insert with a
@@ -439,6 +460,7 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
         AddNullableText(command, description);                                                                      // $3
         AddNullableText(command, updatedBy);                                                                        // $4
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = EnabledRuleCap });                          // $5
+        AddNullableTimestamp(command, expiresAtUtc);                                                                // $6
 
         try
         {
@@ -470,7 +492,7 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
 
     /// <summary>The plain insert for a DISABLED rule (no cap check needed). Shares the create result contract.</summary>
     private async Task<CustomAlertRuleResult> InsertDisabledAsync(
-        string name, string? description, string definitionJson, string? updatedBy, CancellationToken cancellationToken)
+        string name, string? description, string definitionJson, string? updatedBy, DateTime? expiresAtUtc, CancellationToken cancellationToken)
     {
         await using var command = NewCommand(InsertSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
@@ -479,6 +501,7 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
         AddNullableText(command, description);                                                                      // $3
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = false });                                  // $4 (disabled)
         AddNullableText(command, updatedBy);                                                                        // $5
+        AddNullableTimestamp(command, expiresAtUtc);                                                                // $6
 
         try
         {
@@ -503,7 +526,7 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
     /// </summary>
     public async Task<CustomAlertRuleResult> UpdateAsync(
         long id, string name, string? description, string definitionJson, bool enabled, int expectedVersion,
-        string? updatedBy, CancellationToken cancellationToken = default)
+        string? updatedBy, DateTime? expiresAtUtc, CancellationToken cancellationToken = default)
     {
         var invalid = ValidateArgs(name, definitionJson);
         if (invalid is not null)
@@ -513,9 +536,11 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
 
         // Disabling, or staying disabled, can never increase the enabled count, so it takes the plain versioned
         // update. Only a transition to enabled has to be checked against (and serialized around) the cap.
-        if (!enabled)
+        // A rule that is disabled, or already past its expiry (#6235), is not active after this write either, so it takes the plain
+        // update and neither needs nor consumes a cap slot.
+        if (!enabled || (expiresAtUtc is { } expiry && expiry <= DateTime.UtcNow))
         {
-            return await UpdateDisabledAsync(id, name, description, definitionJson, expectedVersion, updatedBy, cancellationToken);
+            return await UpdateInactiveAsync(id, name, description, definitionJson, enabled, expectedVersion, updatedBy, expiresAtUtc, cancellationToken);
         }
 
         await using var scope = await OpenScopeAsync(cancellationToken);
@@ -534,6 +559,7 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
         AddNullableText(command, updatedBy);                                                                        // $5
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = expectedVersion });                         // $6
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = EnabledRuleCap });                          // $7
+        AddNullableTimestamp(command, expiresAtUtc);                                                                // $8
 
         try
         {
@@ -565,10 +591,10 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
         }
     }
 
-    /// <summary>The plain versioned update for a rule being set (or left) DISABLED (no cap check needed).</summary>
-    private async Task<CustomAlertRuleResult> UpdateDisabledAsync(
-        long id, string name, string? description, string definitionJson, int expectedVersion, string? updatedBy,
-        CancellationToken cancellationToken)
+    /// <summary>The plain versioned update for a rule that is not active after the write: disabled, or already past its expiry (no cap check needed).</summary>
+    private async Task<CustomAlertRuleResult> UpdateInactiveAsync(
+        long id, string name, string? description, string definitionJson, bool enabled, int expectedVersion, string? updatedBy,
+        DateTime? expiresAtUtc, CancellationToken cancellationToken)
     {
         await using var command = NewCommand(UpdateSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
@@ -576,9 +602,10 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = name });                                 // $2
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Jsonb, Value = definitionJson }); // $3
         AddNullableText(command, description);                                                                      // $4
-        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = false });                                  // $5 (disabled)
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = enabled });                                // $5
         AddNullableText(command, updatedBy);                                                                        // $6
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = expectedVersion });                         // $7
+        AddNullableTimestamp(command, expiresAtUtc);                                                                // $8
 
         try
         {
@@ -708,7 +735,7 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
     }
 
     /// <summary>Reads a full-rule row (column order: id, name, definition, description, enabled, version,
-    /// created_at, updated_at, updated_by — shared by the SELECT/RETURNING lists). <c>definition</c> is jsonb,
+    /// created_at, updated_at, updated_by, expires_at_utc — shared by the SELECT/RETURNING lists). <c>definition</c> is jsonb,
     /// read as its text representation.</summary>
     private static CustomAlertRule ReadFullRule(NpgsqlDataReader reader) => new(
         reader.GetInt64(0),
@@ -719,7 +746,16 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
         reader.GetInt32(5),
         reader.GetDateTime(6),
         reader.GetDateTime(7),
-        reader.IsDBNull(8) ? null : reader.GetString(8));
+        reader.IsDBNull(8) ? null : reader.GetString(8),
+        reader.IsDBNull(9) ? null : reader.GetDateTime(9));
+
+    /// <summary>A naive-UTC <c>timestamp</c> parameter: the column rejects a Kind=Utc value, so the kind is stripped, never converted (#6235).</summary>
+    private static void AddNullableTimestamp(NpgsqlCommand command, DateTime? value) =>
+        command.Parameters.Add(new NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlDbType.Timestamp,
+            Value = value is { } v ? DateTime.SpecifyKind(v, DateTimeKind.Unspecified) : DBNull.Value,
+        });
 
     private static void AddNullableText(NpgsqlCommand command, string? value) =>
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)value ?? DBNull.Value });
@@ -735,7 +771,12 @@ public sealed record CustomAlertRule(
     int Version,
     DateTime CreatedAt,
     DateTime UpdatedAt,
-    string? UpdatedBy);
+    string? UpdatedBy,
+    DateTime? ExpiresAtUtc = null)
+{
+    /// <summary>True when the rule has an expiry that is at or before <paramref name="nowUtc"/> (#6235): the mute rules' meaning, <c>expires_at_utc &lt;= now</c>.</summary>
+    public bool IsExpiredAt(DateTime nowUtc) => ExpiresAtUtc is { } e && e <= nowUtc;
+}
 
 /// <summary>The lightweight list projection — every field except the <c>definition</c> body. <see cref="LastFired"/>
 /// (#3360) is the UTC instant this rule most recently FIRED, or null when it never has — see
@@ -749,7 +790,12 @@ public sealed record CustomAlertRuleSummary(
     int Version,
     DateTime UpdatedAt,
     string? UpdatedBy,
-    DateTime? LastFired);
+    DateTime? LastFired,
+    DateTime? ExpiresAtUtc = null)
+{
+    /// <summary>True when the rule has an expiry at or before <paramref name="nowUtc"/> (#6235).</summary>
+    public bool IsExpiredAt(DateTime nowUtc) => ExpiresAtUtc is { } e && e <= nowUtc;
+}
 
 /// <summary>
 /// The discriminated outcome of a store operation. Closed (the private base constructor blocks external

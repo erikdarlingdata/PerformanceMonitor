@@ -33,6 +33,13 @@ public enum ForcedPlanState
 
     /// <summary>The plan was forced in an earlier capture of its database inside the window and is absent from that database's newest capture.</summary>
     Removed,
+
+    /// <summary>
+    /// A later plan of the query ran after the force was first seen, and its XML is not in the store (the Query Store collector has not fetched it
+    /// yet), or was not read because more later plans ran than one read checks (#6221). Whether it is a variant of the force, which would make the
+    /// force WORKING, or another plan, which would make it IGNORED, is not known. A definite other plan beats it: IGNORED stays IGNORED.
+    /// </summary>
+    UnknownPlanNotCollected,
 }
 
 /// <summary>
@@ -66,8 +73,18 @@ public sealed record ForcedPlanFact(
     IReadOnlyList<ForcedPlanOtherPlan> OtherPlans,
     DarlingForcedPlanStateReader.Ran? ForcedRun = null,
     IReadOnlyList<ForcedPlanOtherPlan>? Variants = null,
-    ForcedPlanGuide? PlanGuide = null)
+    ForcedPlanGuide? PlanGuide = null,
+    IReadOnlyList<ForcedPlanOtherPlan>? Unknowns = null,
+    string? UnknownReason = null)
 {
+    /// <summary>
+    /// The later plans that ran since <see cref="Since"/> whose stored XML could not be checked (#6221), so it is not known whether they are
+    /// variants of the forced plan. They are in neither <see cref="OtherPlans"/> nor <see cref="VariantPlans"/>. Non-empty only with
+    /// <see cref="UnknownReason"/>, and when <see cref="State"/> is not IGNORED, FAILING or REMOVED it is
+    /// <see cref="ForcedPlanState.UnknownPlanNotCollected"/>.
+    /// </summary>
+    public IReadOnlyList<ForcedPlanOtherPlan> UnknownPlans => Unknowns ?? Array.Empty<ForcedPlanOtherPlan>();
+
     /// <summary>
     /// The variants of the forced plan that ran since <see cref="Since"/> (#6160): plans of the query, other than the forced one, whose
     /// stored XML carries <c>UsePlan="1"</c> and no <c>PlanGuideName</c>, which is how SQL Server stores a force it recompiled under a new
@@ -107,11 +124,57 @@ public sealed record ForcedPlanRead(
 /// (<c>idx_query_store_forced_plans_time</c>). The stats read starts from the forced plans' own queries (an inner join on
 /// database and query_id, so it takes <c>idx_query_store_stats_server_db_query_plan_time</c>) and is bounded below by the
 /// plan's own since time, never the whole table.</para>
+///
+/// <para><b>Variants and plan guides come from the stored plans (#6221).</b> The collector reads no plan XML on the monitored server. When a
+/// force's runs moved to a LATER plan id of the same query, this reads that plan's stored XML (the plan map, then <c>query_plan_dim</c>: two
+/// index lookups a plan) and looks for <c>UsePlan="1"</c>: with no <c>PlanGuideName</c> it is a variant and counts as the force running, with
+/// one it is another plan and the guide is named. Only the later plans that ran in the window are read, at most <see cref="MaxStoredPlanChecks"/>
+/// plans a read. A later plan with no stored XML, and a plan past that bound, make the force
+/// <see cref="ForcedPlanState.UnknownPlanNotCollected"/> with a reason, never IGNORED.</para>
 /// </summary>
 public static class DarlingForcedPlanStateReader
 {
     /// <summary>The most forces one read returns. A database has at most 500 per pass (the collector's cap).</summary>
     public const int MaxForces = 2000;
+
+    /// <summary>
+    /// The most later plans one read looks up in the store (#6221), busiest first within each force. Past it the plans are not read and their
+    /// force is UNKNOWN_PLAN_NOT_COLLECTED with a reason that says so. A force check reads one query, so it never gets near this; the fleet list
+    /// of a database with hundreds of recompiling forces can.
+    /// </summary>
+    public const int MaxStoredPlanChecks = 200;
+
+    /// <summary>
+    /// The stored plan XML of the plans of one database that ran after a force, through the plan map. $1 server, $2 database array, $3 plan_id
+    /// array (parallel). A plan with no map row is absent from the result; a row with NULL XML and NULL gzip is a map row whose content is not
+    /// there (a NULL digest, or a digest the dimension no longer holds). The same two index lookups as the stored-plan read by plan_id.
+    /// </summary>
+    public const string StoredPlansSql = @"
+WITH t AS (
+    SELECT * FROM unnest($2::text[], $3::bigint[]) AS x(database_name, plan_id))
+SELECT t.database_name, t.plan_id, d.query_plan_xml, d.query_plan_gz
+FROM t
+JOIN collect.query_store_plan_map AS m
+  ON m.server_id = $1 AND m.database_name = t.database_name AND m.plan_id = t.plan_id
+LEFT JOIN query_plan_dim AS d
+  ON d.digest = m.digest";
+
+    private enum PlanKind { Unknown, Variant, Guided, Plain }
+
+    /// <summary>What a stored plan's XML says about a force (#6160's rule): <c>UsePlan="1"</c> and no plan guide name is a variant; a plan guide name makes it a guided plan.</summary>
+    private static (PlanKind Kind, string? Guide) InspectPlanXml(string xml)
+    {
+        const string guideAttribute = "PlanGuideName=\"";
+        var guideAt = xml.IndexOf(guideAttribute, StringComparison.Ordinal);
+        if (guideAt >= 0)
+        {
+            var start = guideAt + guideAttribute.Length;
+            var end = xml.IndexOf('"', start);
+            return (PlanKind.Guided, end > start ? xml[start..end] : null);
+        }
+
+        return xml.Contains("UsePlan=\"1\"", StringComparison.Ordinal) ? (PlanKind.Variant, null) : (PlanKind.Plain, null);
+    }
 
     /// <summary>The newest collector capture of each force, read from the window. $1 server, $2 start, $3 end, $4 database filter, $5 query_id or NULL.</summary>
     public static string ForcesSql(DatabaseFilter databases) => $@"
@@ -207,6 +270,8 @@ GROUP BY plan_id
 ORDER BY SUM(execution_count) DESC, plan_id
 LIMIT 50";
 
+    private sealed record Inspected(PlanKind Kind, string? Guide);
+
     private sealed record Force(
         string Database, long PlanId, long QueryId, string? ForcingType, long FailureCount, string? FailureReason,
         DateTime LastSeen, DateTime FirstSeen, DateTime? Newest, string? VariantPlanIds = null, ForcedPlanGuide? Guide = null);
@@ -269,16 +334,95 @@ LIMIT 50";
     /// The state, from the facts alone. REMOVED first (an absent force has no state to speak of), then FAILING (a failure count or a
     /// reason beats what ran), then IGNORED (another plan of the query ran after the force), WORKING (the forced plan ran, or a variant
     /// of it did: SQL Server recompiled the force under a new plan id, #6160) and NOT_EXERCISED (nothing ran). A variant is never
-    /// <paramref name="otherPlanRan"/>.
+    /// <paramref name="otherPlanRan"/>. A later plan whose XML could not be checked (<paramref name="unknownPlanRan"/>, #6221) is UNKNOWN
+    /// unless a definite other plan ran (IGNORED), whatever the forced plan or a variant did: the unknown plan could be either.
     /// </summary>
     public static ForcedPlanState Classify(bool inNewestCapture, long failureCount, string? failureReason, bool otherPlanRan, bool forcedPlanRan,
-        bool variantPlanRan = false)
+        bool variantPlanRan = false, bool unknownPlanRan = false)
     {
         forcedPlanRan |= variantPlanRan;
         if (!inNewestCapture) return ForcedPlanState.Removed;
         if (failureCount > 0 || !string.IsNullOrWhiteSpace(failureReason)) return ForcedPlanState.Failing;
         if (otherPlanRan) return ForcedPlanState.Ignored;
+        if (unknownPlanRan) return ForcedPlanState.UnknownPlanNotCollected;
         return forcedPlanRan ? ForcedPlanState.Working : ForcedPlanState.NotExercised;
+    }
+
+    private static string UnknownReasonText(List<ForcedPlanOtherPlan> unknowns, int notChecked)
+    {
+        var ids = string.Join(", ", unknowns.Take(10).Select(u => u.PlanId.ToString(System.Globalization.CultureInfo.InvariantCulture)))
+                  + (unknowns.Count > 10 ? ", ..." : "");
+        var text = $"Later plan(s) {ids} of the query ran after the force, and whether they are variants of the forced plan (the force running) or other plans (the force ignored) is not known: ";
+        var notCollected = unknowns.Count - notChecked;
+        if (notCollected > 0)
+            text += $"{notCollected} of them have no plan XML in the store yet (the Query Store collector has not fetched it)";
+        if (notChecked > 0)
+            text += (notCollected > 0 ? "; " : "") + $"{notChecked} were not looked up because more than {MaxStoredPlanChecks} later plans ran in this read";
+        return text + ".";
+    }
+
+    /// <summary>
+    /// Looks up the stored XML of the later plans that ran (#6221): plans of a forced query with a higher plan id than the forced plan, that ran
+    /// after the force, and that no collector row already named a variant. At most <see cref="MaxStoredPlanChecks"/> plans, taken force by force,
+    /// busiest first; a plan not in the result was not looked up. A plan whose XML is not in the store is <see cref="PlanKind.Unknown"/>.
+    /// </summary>
+    private static async Task<Dictionary<(string Database, long Plan), Inspected>> InspectLaterPlansAsync(
+        NpgsqlDataSource postgres, int serverId, List<Force> live, Dictionary<(string Database, long ForcedPlan, long Plan), Ran> ran,
+        int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        var result = new Dictionary<(string Database, long Plan), Inspected>();
+        if (live.Count == 0 || ran.Count == 0) return result;
+
+        var byForce = ran.GroupBy(r => (r.Key.Database, r.Key.ForcedPlan)).ToDictionary(g => g.Key, g => g.ToList());
+        var wanted = new List<(string Database, long Plan)>();
+        var seen = new HashSet<(string Database, long Plan)>();
+        foreach (var f in live)
+        {
+            if (!byForce.TryGetValue((f.Database, f.PlanId), out var plans)) continue;
+            var legacy = ParseVariantPlanIds(f.VariantPlanIds);
+            foreach (var r in plans.Where(r => r.Key.Plan > f.PlanId && !legacy.Contains(r.Key.Plan))
+                         .OrderByDescending(r => r.Value.Executions).ThenBy(r => r.Key.Plan))
+            {
+                var key = (f.Database, r.Key.Plan);
+                if (seen.Contains(key)) continue;
+                if (wanted.Count >= MaxStoredPlanChecks) break;
+                seen.Add(key);
+                wanted.Add(key);
+            }
+        }
+
+        if (wanted.Count == 0) return result;
+
+        var found = new Dictionary<(string Database, long Plan), string?>();
+        await using (var command = postgres.CreateCommand(StoredPlansSql))
+        {
+            command.CommandTimeout = commandTimeoutSeconds;
+            command.Parameters.AddWithValue(serverId);
+            command.Parameters.AddWithValue(NpgsqlDbType.Array | NpgsqlDbType.Text, wanted.Select(w => w.Database).ToArray());
+            command.Parameters.AddWithValue(NpgsqlDbType.Array | NpgsqlDbType.Bigint, wanted.Select(w => w.Plan).ToArray());
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var text = reader.IsDBNull(2) ? null : reader.GetString(2);
+                var gzip = reader.IsDBNull(3) ? null : (byte[])reader.GetValue(3);
+                found[(reader.GetString(0), reader.GetInt64(1))] = PayloadDimensions.ResolveContent(text, gzip);
+            }
+        }
+
+        foreach (var w in wanted)
+        {
+            if (found.TryGetValue(w, out var xml) && !string.IsNullOrEmpty(xml))
+            {
+                var (kind, guide) = InspectPlanXml(xml);
+                result[w] = new Inspected(kind, guide);
+            }
+            else
+            {
+                result[w] = new Inspected(PlanKind.Unknown, null);
+            }
+        }
+
+        return result;
     }
 
     /// <summary>
@@ -369,6 +513,8 @@ LIMIT 50";
             complete = floor is not null && !RawWindowFloor.IsTruncated(floor, oldestRead);
         }
 
+        var inspected = await InspectLaterPlansAsync(postgres, serverId, live, ran, commandTimeoutSeconds, cancellationToken);
+
         var facts = new List<ForcedPlanFact>(forces.Count);
         foreach (var f in forces)
         {
@@ -381,15 +527,52 @@ LIMIT 50";
                 .Select(r => new ForcedPlanOtherPlan(r.Key.Plan, r.Value.Executions, r.Value.LastExecution, r.Value))
                 .OrderByDescending(o => o.Executions).ThenBy(o => o.PlanId)
                 .ToList();
-            /* #6160: a variant (a plan the engine compiled to run the force) is the force running, not another plan. */
-            var others = ranOfQuery.Where(o => !variantIds.Contains(o.PlanId)).ToList();
-            var variants = ranOfQuery.Where(o => variantIds.Contains(o.PlanId)).ToList();
+            /* #6160: a variant (a plan the engine compiled to run the force) is the force running, not another plan. #6221: the collector reads no
+               plan XML now, so a LATER plan is a variant, a guided plan or another plan by its stored XML; one with no stored XML is unknown. */
+            var others = new List<ForcedPlanOtherPlan>();
+            var variants = new List<ForcedPlanOtherPlan>();
+            var unknowns = new List<ForcedPlanOtherPlan>();
+            string? xmlGuide = null;
+            var notChecked = 0;
+            foreach (var o in ranOfQuery)
+            {
+                if (variantIds.Contains(o.PlanId))
+                {
+                    variants.Add(o);
+                }
+                else if (o.PlanId < f.PlanId)
+                {
+                    others.Add(o);
+                }
+                else if (!inspected.TryGetValue((f.Database, o.PlanId), out var what))
+                {
+                    unknowns.Add(o);
+                    notChecked++;
+                }
+                else if (what.Kind == PlanKind.Unknown)
+                {
+                    unknowns.Add(o);
+                }
+                else if (what.Kind == PlanKind.Variant)
+                {
+                    variants.Add(o);
+                }
+                else
+                {
+                    others.Add(o);
+                    if (what.Kind == PlanKind.Guided && what.Guide is not null && (xmlGuide is null || string.CompareOrdinal(what.Guide, xmlGuide) < 0))
+                        xmlGuide = what.Guide;
+                }
+            }
+
             ran.TryGetValue((f.Database, f.PlanId, f.PlanId), out var own);
-            var state = Classify(inNewest, f.FailureCount, f.FailureReason, others.Count > 0, own.LastExecution is not null, variants.Count > 0);
+            var state = Classify(inNewest, f.FailureCount, f.FailureReason, others.Count > 0, own.LastExecution is not null, variants.Count > 0, unknowns.Count > 0);
+            var guide = f.Guide ?? (xmlGuide is null ? null : new ForcedPlanGuide(xmlGuide, null, null));
+            var unknownReason = unknowns.Count == 0 ? null : UnknownReasonText(unknowns, notChecked);
             facts.Add(new ForcedPlanFact(
                 f.Database, f.QueryId, f.PlanId, state, f.FirstSeen, f.LastSeen, forcedAtValue, since, f.ForcingType,
                 f.FailureCount, f.FailureReason, own.Executions, own.LastExecution, others, own.Executions > 0 || own.LastExecution is not null ? own : null,
-                variants, f.Guide));
+                variants, guide, unknowns.Count == 0 ? null : unknowns, unknownReason));
         }
 
         var perDatabase = facts.Where(f => f.State != ForcedPlanState.Removed).GroupBy(f => f.DatabaseName, StringComparer.Ordinal)

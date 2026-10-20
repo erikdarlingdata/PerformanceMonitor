@@ -226,7 +226,7 @@ GRANT EXECUTE ON FUNCTION config.record_custom_alert_resolution(integer, text, t
 
             /* Disable the rule so the reconcile sweep force-resolves its now-orphaned firing incident. */
             var disabled = Assert.IsType<CustomAlertRuleResult.Ok>(
-                await rules.UpdateAsync(ruleId, ruleName, null, SampleDefinition, enabled: false, created.Rule!.Version, "test", ct));
+                await rules.UpdateAsync(ruleId, ruleName, null, SampleDefinition, enabled: false, created.Rule!.Version, "test", null, ct));
             Assert.False(disabled.Rule!.Enabled);
 
             var monitored = new Dictionary<int, (string StorageName, string DisplayName)> { [serverId] = ("syn_storage", "SynServer") };

@@ -240,7 +240,16 @@ WHERE s.server_id <> 0";
         await using var recorded = _dataSource.CreateCommand(StoreSelfMetrics.LatestStoreSizeSql);
         recorded.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         var recordedBytes = await recorded.ExecuteScalarAsync(CancellationToken.None);
-        return recordedBytes is null || recordedBytes == DBNull.Value ? (long?)null : Convert.ToInt64(recordedBytes);
+        if (recordedBytes is null || recordedBytes == DBNull.Value)
+        {
+            return null;
+        }
+
+        /* #6245: the hourly sweep records a catalog estimate and one sweep a day the exact size, so say which this is. */
+        await using var estimated = _dataSource.CreateCommand(StoreSelfMetrics.LatestStoreSizeEstimatedSql);
+        estimated.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        StoreSizeIsEstimate = await estimated.ExecuteScalarAsync(CancellationToken.None) is true;
+        return Convert.ToInt64(recordedBytes);
     }
 
     private async Task<long?> ReadLiveStoreSizeAsync()
@@ -248,6 +257,11 @@ WHERE s.server_id <> 0";
         await using var command = _dataSource.CreateCommand(StoreSizeSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         var result = await command.ExecuteScalarAsync(CancellationToken.None);
+        StoreSizeIsEstimate = false;
         return result is null || result == DBNull.Value ? (long?)null : Convert.ToInt64(result);
     }
+
+    /// <summary>True when the size <see cref="GetStoreSizeBytesAsync"/> last returned is the hourly catalog estimate
+    /// (#6245) rather than the exact size: the status bar says so.</summary>
+    public bool StoreSizeIsEstimate { get; private set; }
 }

@@ -36,6 +36,8 @@ import { buildCreateAlertAction } from "./alert-seed.js";
 import * as api from "./views-api.js";
 import { refreshChoiceOf } from "./refresh-policy.js";
 import { buildRefreshControl } from "./refresh-control.js";
+import { buildViewMetaFields } from "./view-meta-fields.js";
+import { metaForSave } from "./view-folders.js";
 import * as derive from "./derive.js";
 import { rollingHoursPicker } from "./page-range.js";
 
@@ -87,11 +89,14 @@ export async function renderEditor(main, id) {
     return;
   }
 
-  const [catalog, fleet] = await Promise.all([api.getCatalog(), loadFleetOptions()]);
+  const [catalog, fleet, listed] = await Promise.all([api.getCatalog(), loadFleetOptions(), api.listViews()]);
+  /* #6214: the folder suggestions come from the same list the sidebar reads; a failed read just means none. */
+  const views = listed.kind === "data" && Array.isArray(listed.data) ? listed.data : [];
 
   let model;
   let editingId = null;
   let loadedVersion = null;
+  let stored = null;
 
   if (id != null && id !== "new") {
     const res = await api.getView(id);
@@ -101,12 +106,13 @@ export async function renderEditor(main, id) {
     }
     editingId = res.data.id;
     loadedVersion = res.data.version;
+    stored = res.data;
     model = viewToModel(res.data);
   } else {
-    model = { name: "", description: "", panels: [newPanel()], variables: [], rangeHours: null, refresh: null };
+    model = { name: "", description: "", folder: "", personal: false, panels: [newPanel()], variables: [], rangeHours: null, refresh: null };
   }
 
-  buildEditor(main, { model, editingId, loadedVersion, catalog, fleet });
+  buildEditor(main, { model, editingId, loadedVersion, catalog, fleet, session, views, stored });
 }
 
 /* Fleet server options for the `server` param dropdown (value = stored server_name, label = display name). Each
@@ -201,6 +207,8 @@ function viewToModel(view) {
   return {
     name: view.name || "",
     description: view.description || "",
+    folder: typeof view.folder === "string" ? view.folder : "",
+    personal: view.personal === true,
     panels: panels.length ? panels : [newPanel()],
     variables: parseVariables(def.variables),
     rangeHours: def.range && typeof def.range.hours === "number" ? def.range.hours : null,
@@ -420,6 +428,9 @@ function buildEditor(main, ctx) {
     model.description = descInput.value;
   });
 
+  /* #6214: folder, personal and owner. Another person's personal view opens read-only: Save stays disabled. */
+  const metaFields = buildViewMetaFields({ meta: model, view: ctx.stored, session: ctx.session, views: ctx.views, onChange: () => refreshSaveState() });
+
   const panelsBox = el("div", { class: "panels-box" });
   const saveStatus = el("div", { class: "save-status" });
   const saveBtn = el("button", {
@@ -471,7 +482,7 @@ function buildEditor(main, ctx) {
 
   function refreshSaveState() {
     const problem = saveBlocker(model, ctx.catalog);
-    saveBtn.disabled = problem != null;
+    saveBtn.disabled = problem != null || metaFields.blocked;
     mount(saveStatus, problem ? el("span", { class: "muted", text: problem }) : null);
   }
 
@@ -498,6 +509,7 @@ function buildEditor(main, ctx) {
       name: model.name.trim(),
       description: model.description ? model.description : null,
       definition: modelToDefinition(model),
+      ...metaForSave(model, ctx.stored, ctx.session),
     };
 
     let res;
@@ -525,6 +537,7 @@ function buildEditor(main, ctx) {
       buildRefreshControl(refreshChoiceOf(model, false), (choice) => { model.refresh = choice; }).root,
     ]),
     el("div", { class: "editor-meta" }, [field("Name", nameInput), field("Description", descInput)]),
+    metaFields.node,
     viewScopeSection,
     el("h3", { class: "section-title", text: "Panels" }),
     panelsBox,

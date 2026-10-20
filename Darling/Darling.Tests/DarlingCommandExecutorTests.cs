@@ -985,6 +985,8 @@ public sealed class DarlingCommandExecutorTests
     {
         using var command = new NpgsqlCommand(DarlingCommandExecutor.ClaimCommandSql, connection, tx);
         command.Parameters.AddWithValue("claim-test");
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Interval, Value = DarlingCommandExecutor.CommandLifetime });
+        command.Parameters.AddWithValue(DarlingCommandExecutor.ExpiredErrorText);
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
         {

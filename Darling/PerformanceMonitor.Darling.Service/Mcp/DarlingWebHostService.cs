@@ -156,8 +156,12 @@ public sealed class DarlingWebHostService : BackgroundService
     /* #5632 step 9: the worker's store owner data source, for the plan undo route only (it reads one server's remediation slot). */
     private readonly StoreOwnerSource? _ownerSource;
 
-    public DarlingWebHostService(ILogger<DarlingWebHostService> logger, WebRuntimeState state, CollectorRuntimeState collectorState, WebTlsCertificateState certState, BaselineCache? baselineCache = null, ReadLatencyAccumulator? readLatency = null, MonitoredServerRegistryState? registryState = null, SlowReadLog? slowReads = null, ReadAdmission? readAdmission = null, StoreOwnerSource? ownerSource = null)
+    /* #6236: the store's pseudonym key, so the dashboard's investigation export numbers a login as the command line does. */
+    private readonly PseudonymKeySource? _pseudonymKeys;
+
+    public DarlingWebHostService(ILogger<DarlingWebHostService> logger, WebRuntimeState state, CollectorRuntimeState collectorState, WebTlsCertificateState certState, BaselineCache? baselineCache = null, ReadLatencyAccumulator? readLatency = null, MonitoredServerRegistryState? registryState = null, SlowReadLog? slowReads = null, ReadAdmission? readAdmission = null, StoreOwnerSource? ownerSource = null, PseudonymKeySource? pseudonymKeys = null)
     {
+        _pseudonymKeys = pseudonymKeys;
         _ownerSource = ownerSource;
         _slowReads = slowReads;
         _readAdmission = readAdmission;
@@ -892,7 +896,7 @@ public sealed class DarlingWebHostService : BackgroundService
                was parsed before any degrade and still holds it afterwards, so it goes through the MCP host's
                ResolveHostGuardListenIp (the one rule both hosts share) with the final mode: a start that fell back to
                loopback-only admits loopback names only, whatever it parsed. */
-            ConfigurePipeline(_app, postgres, networkMode, DarlingMcpHostService.ResolveHostGuardListenIp(networkMode, networkListenIp), allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig, config.Analyzer, requireTokenWhenLoopbackOnly, trustedProxies: trustedProxies, sendHsts: network?.Hsts ?? false);
+            ConfigurePipeline(_app, postgres, networkMode, DarlingMcpHostService.ResolveHostGuardListenIp(networkMode, networkListenIp), allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig, config.Analyzer, requireTokenWhenLoopbackOnly, trustedProxies: trustedProxies, sendHsts: network?.Hsts ?? false, dataDetail: McpDataDetailModes.Resolve(config.Mcp.DataDetail));
 
             /* #2389: name the authority for each half of what is being started — enabled/port from whichever
                plane the supervisor resolved, listen/allowFrom/token always from darling.json. */
@@ -1115,6 +1119,8 @@ public sealed class DarlingWebHostService : BackgroundService
     /// <see cref="DarlingHostBinding.TryParseTrustedProxies"/>). Null or empty (the default) means the headers
     /// are ignored from every source, so the scheme, the client address and the host are always the
     /// connection's own.</param>
+    /// <param name="dataDetail">The <c>mcp.dataDetail</c> level the dashboard's investigation download masks at (#6236), read from the file when the
+    /// host starts. The default is the strictest level, so a caller that does not say never serves more than it was told to.</param>
     /// <param name="utcNow">The clock the sign-in gate's per-source wait reads (null is the system clock). A test
     /// passes a settable one so the wait can be crossed without sleeping.</param>
     internal void ConfigurePipeline(
@@ -1132,7 +1138,8 @@ public sealed class DarlingWebHostService : BackgroundService
         byte[]? sessionSigningKeyForTests = null,
         IReadOnlyList<IPNetwork>? trustedProxies = null,
         bool sendHsts = false,
-        Func<DateTime>? utcNow = null)
+        Func<DateTime>? utcNow = null,
+        McpDataDetail dataDetail = McpDataDetail.MetadataOnly)
     {
         Func<DateTime> clock = utcNow ?? (() => DateTime.UtcNow);
 
@@ -1453,7 +1460,7 @@ public sealed class DarlingWebHostService : BackgroundService
             });
         }
 
-        DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig, _registryState, _slowReads, _readAdmission, _ownerSource);
+        DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig, _registryState, _slowReads, _readAdmission, _ownerSource, dataDetail, _pseudonymKeys);
         app.UseDefaultFiles();
 
         /* Static assets carry an ETag/Last-Modified already (the framework default); no-cache (#4188) makes
@@ -2047,7 +2054,9 @@ public sealed class DarlingWebHostService : BackgroundService
             return;
         }
 
-        AppendSessionCookie(context, signingKey, DarlingWebSeat.EncodeCookieSubject(subject, role));
+        /* #6214: the owner key (issuer + sub, hashed) rides in the signed cookie, so a personal view follows the person's provider
+           identity and not the display name, which can change and can be reissued. */
+        AppendSessionCookie(context, signingKey, DarlingWebSeat.EncodeCookieSubject(subject, role, DarlingWebOidc.ResolveOwnerKey(payload!)));
 
         /* Per-user identity in the service log — the #2550 counterpart of the updated_by stamp. */
         _logger.LogInformation(

@@ -42,7 +42,7 @@ public sealed class ReadAdmissionCoverageCensusTests
     /// admission call beside it.</summary>
     private static readonly Dictionary<string, int> ScopeSites = new(StringComparer.Ordinal)
     {
-        ["DarlingWebEndpoints.cs"] = 8, // /api/query-tag-rules/test (#5986), the /api/read/{name} loop, the composed panel (its run and its cache), /api/fleet, /api/alerts/test, /api/ag and /api/catalog (round 2, L5)
+        ["DarlingWebEndpoints.cs"] = 9, // /api/investigation-export (#6236), /api/query-tag-rules/test (#5986), the /api/read/{name} loop, the composed panel (its run and its cache), /api/fleet, /api/alerts/test, /api/ag and /api/catalog (round 2, L5)
         ["DarlingTriageEndpoint.cs"] = 1, // /api/triage (the dedicated routes record their own samples, #5506 part 3)
         ["AlertNotebookEndpoint.cs"] = 1, // /api/alert-notebook (round 1, M3)
         ["DarlingFleetSweepEndpoints.cs"] = 4, // /api/sweeps, /latest, /{id} and /watch-items (round 1, M3)
@@ -193,6 +193,7 @@ public sealed class ReadAdmissionCoverageCensusTests
         ["DarlingServerDatabasesEndpoint.cs: GET Route"] = null, // the database picker, /api/server-databases
         [WebFile + "POST \"/api/compose/run\""] = null,
         [WebFile + "POST \"/api/alerts/test\""] = null,
+        [WebFile + "GET \"/api/investigation-export\""] = null, // #6236: admitted like the other heavy reads; up to 2000 cases, read a page at a time
         [WebFile + "GET \"/api/catalog\""] = null, // round 2, L5: it reads the schedule overrides and resolves ?server=
         [WebFile + "GET \"/api/ping\""] = "health: answers without reading the store (D8)",
         [WebFile + "GET \"/api/webhook-signing\""] = "status: answers from what the worker read when it applied the configuration, no store read (#5998)",

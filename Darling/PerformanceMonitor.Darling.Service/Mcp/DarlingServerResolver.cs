@@ -89,11 +89,13 @@ ORDER BY server_name";
     /// degrades to an informative error string here — the tools' always-return-a-string
     /// contract holds instead of surfacing the MCP SDK's generic invocation error.
     /// </summary>
+    #pragma warning disable CA1068 // #6230: nameClash trails the token on purpose; putting it before would shift every positional caller.
     public static async Task<((int ServerId, string ServerName, string DisplayName) resolved, string? error)> ResolveOrErrorAsync(
         NpgsqlDataSource postgres,
         string? serverName,
         CancellationToken cancellationToken = default,
         NameClash nameClash = NameClash.StoredNameWins)
+    #pragma warning restore CA1068
     {
         var (servers, fault) = await LoadEnabledOrFaultAsync(postgres, cancellationToken);
         if (fault is not null)

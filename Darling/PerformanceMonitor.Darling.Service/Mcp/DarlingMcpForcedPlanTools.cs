@@ -44,6 +44,7 @@ public sealed class DarlingMcpForcedPlanTools
         ForcedPlanState.Ignored => "IGNORED",
         ForcedPlanState.Removed => "REMOVED",
         ForcedPlanState.NotExercised => "NOT_EXERCISED",
+        ForcedPlanState.UnknownPlanNotCollected => "UNKNOWN_PLAN_NOT_COLLECTED",
         _ => "WORKING",
     };
 
@@ -52,9 +53,10 @@ public sealed class DarlingMcpForcedPlanTools
     {
         ForcedPlanState.Failing => 0,
         ForcedPlanState.Ignored => 1,
-        ForcedPlanState.NotExercised => 2,
-        ForcedPlanState.Removed => 3,
-        _ => 4,
+        ForcedPlanState.UnknownPlanNotCollected => 2,
+        ForcedPlanState.NotExercised => 3,
+        ForcedPlanState.Removed => 4,
+        _ => 5,
     };
 
     private static string? Format(DateTime? t) => t?.ToString("o", CultureInfo.InvariantCulture);
@@ -66,13 +68,14 @@ public sealed class DarlingMcpForcedPlanTools
     [McpServerTool(Name = "get_forced_plans"), Description(
         "Whether each Query Store force works: one entry per plan forced in its database's newest capture in the window, with a state and the evidence. " +
         "States: FAILING (the engine counts a force failure or names a reason), IGNORED (another plan of the query ran after the force was first seen), WORKING (the forced plan ran, or a variant of it did, and no other plan did), " +
-        "NOT_EXERCISED (no plan of the query ran after the force was first seen), REMOVED (forced in an earlier capture in the window, absent from the database's newest). <<GUIDE>> " +
+        "NOT_EXERCISED (no plan of the query ran after the force was first seen), UNKNOWN_PLAN_NOT_COLLECTED (a later plan's XML not stored), REMOVED (forced in an earlier capture in the window, absent from the database's newest). <<GUIDE>> " +
+        "UNKNOWN_PLAN_NOT_COLLECTED: a later plan of the query ran after the force, but its plan XML is not in the store yet (the Query Store collector has not fetched it, or more later plans ran than one read looks up), so it is not known whether it is a variant of the force (WORKING) or another plan (IGNORED); unknown_plans and unknown_reason say which, and the state resolves on its own once the XML is stored. " +
         "Reads the forced-plan collector (every 5 minutes) and the stored Query Store runs; never a monitored server. A database is judged by its own newest capture. " +
         "first_seen is the first capture that shows the force, so the real force can be up to one pass (5 minutes by default) earlier. " +
         "Evidence per force: forced_plan executions and last run since first_seen, the other plans' executions and last run since first_seen, failure count and reason. " +
-        "variant_plans lists plans of the query whose stored plan carries UsePlan=\"1\" and no plan guide name: SQL Server recompiled the force under a new plan id, so their runs count as the forced plan running, not as another plan " +
+        "variant_plans lists plans of the query whose stored plan (read from the plan XML the Query Store collector stored, never from the monitored server) carries UsePlan=\"1\" and no plan guide name: SQL Server recompiled the force under a new plan id, so their runs count as the forced plan running, not as another plan " +
         "(an OPTION (USE PLAN ...) hint in the query's own text also sets UsePlan, which is rare on a forced query). " +
-        "plan_guide names a plan guide that covers the forced query (name, enabled, scope), found from the query's object (an OBJECT-scoped guide) or a guide name in a later plan of the query; " +
+        "plan_guide names a plan guide that covers the forced query (name, enabled, scope), found from the query's object (an OBJECT-scoped guide) or a guide name in the stored XML of a later plan of the query; " +
         "it sits beside the state and never changes it: a FAILING force with a guide may still be running fine. " +
         "An empty answer says why: no capture in the window (the collector has not run, or Query Store is off for every database), or no forced plans in the newest captures. " +
         "forced_plans lists the worst states first (truncated marks a cut).")]
@@ -176,6 +179,9 @@ public sealed class DarlingMcpForcedPlanTools
         variant_plans_total = p.VariantPlans.Count,
         other_plans = p.OtherPlans.Take(MaxOtherPlans).Select(o => new { plan_id = o.PlanId, execution_count = o.Executions, last_execution_time = Format(o.LastExecution) }),
         other_plans_total = p.OtherPlans.Count,
+        unknown_plans = p.UnknownPlans.Take(MaxOtherPlans).Select(o => new { plan_id = o.PlanId, execution_count = o.Executions, last_execution_time = Format(o.LastExecution) }),
+        unknown_plans_total = p.UnknownPlans.Count,
+        unknown_reason = p.UnknownReason,
         plan_guide = p.PlanGuide is { } guide ? new { name = guide.Name, enabled = guide.Enabled, scope = guide.Scope } : null,
     };
 }

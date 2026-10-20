@@ -207,7 +207,9 @@ public sealed class SerialLoopStoreSizeSourceTests
             "DarlingWorker.cs", "ReadStoreSizeBytesAsync");
         var code = CSharpSourceWalker.StripCommentsAndStrings(body);
 
-        Assert.Contains("StoreSelfMetrics.LatestStoreSizeSql", code, StringComparison.Ordinal);
+        /* #6245: the read takes size_estimated with the size, so it runs the WithTime statement - the same
+           predicate and ordering (one shared tail) as LatestStoreSizeSql, checked below as the sibling. */
+        Assert.Contains("StoreSelfMetrics.LatestStoreSizeWithTimeSql", code, StringComparison.Ordinal);
 
         /* And the deadline regime is unchanged — this member is still one of the eleven, so the chain
            arithmetic StartupCommandTimeoutTests defends still describes the same population. Asserted here
@@ -219,7 +221,7 @@ public sealed class SerialLoopStoreSizeSourceTests
             StringComparison.Ordinal);
 
         /* The referent, at runtime. */
-        var sql = StoreSelfMetrics.LatestStoreSizeSql;
+        var sql = StoreSelfMetrics.LatestStoreSizeWithTimeSql;
 
         Assert.False(
             s_storeScalingRead.IsMatch(sql),

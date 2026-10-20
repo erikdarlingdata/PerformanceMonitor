@@ -85,7 +85,9 @@ public sealed record CustomAlertRuleImage(
     [property: JsonPropertyName("version")] int Version,
     [property: JsonPropertyName("created_at")] DateTime CreatedAt,
     [property: JsonPropertyName("updated_at")] DateTime UpdatedAt,
-    [property: JsonPropertyName("updated_by")] string? UpdatedBy)
+    [property: JsonPropertyName("updated_by")] string? UpdatedBy,
+    [property: JsonPropertyName("expires_at_utc"), ImageColumn(ImageColumnType.Time)] string? ExpiresAtUtc = null,
+    [property: JsonPropertyName("expired")] bool Expired = false)
 {
     public const string Kind = AgentChangeKinds.CustomRule;
     public const string Table = "config.custom_alert_rules";

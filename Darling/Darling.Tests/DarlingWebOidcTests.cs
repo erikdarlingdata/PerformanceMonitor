@@ -432,6 +432,68 @@ public sealed class DarlingWebOidcTests
         Assert.Equal(admin, seat.CanEdit);
     }
 
+    private const string SampleKey = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO-_";
+
+    /// <summary>The o2 shape carries the owner key in the signed slot and round-trips it with the subject and the role (#6214).</summary>
+    [Theory]
+    [InlineData("erik@example.com", true)]
+    [InlineData("reader@example.com", false)]
+    [InlineData("o2:v:looks:like:a-seat", true)]
+    public void SeatCodec_OwnerKey_RoundTrips(string subject, bool admin)
+    {
+        Assert.Equal(DarlingWebSeat.OwnerKeyLength, SampleKey.Length);
+        var encoded = DarlingWebSeat.EncodeCookieSubject(subject, admin ? WebOidcRole.Admin : WebOidcRole.Viewer, SampleKey);
+        Assert.StartsWith(admin ? "o2:a:" : "o2:v:", encoded, StringComparison.Ordinal);
+        Assert.True(DarlingWebSeat.TryResolveSeat(encoded, out var seat));
+        Assert.Equal(subject, seat.Subject);
+        Assert.Equal(SampleKey, seat.OwnerKey);
+        Assert.Equal(admin, seat.CanEdit);
+    }
+
+    /// <summary>A cookie an older build wrote (o1) keeps reading, as a seat that names a person but has no owner key.</summary>
+    [Theory]
+    [InlineData("o1:a:erik@example.com", "erik@example.com", true)]
+    [InlineData("o1:v:reader@example.com", "reader@example.com", false)]
+    public void SeatCodec_O1Cookie_StillReads_WithNoOwnerKey(string cookieSubject, string subject, bool admin)
+    {
+        Assert.True(DarlingWebSeat.TryResolveSeat(cookieSubject, out var seat));
+        Assert.Equal(subject, seat.Subject);
+        Assert.Null(seat.OwnerKey);
+        Assert.Equal(admin, seat.CanEdit);
+        Assert.Equal(cookieSubject, DarlingWebSeat.EncodeCookieSubject(subject, admin ? WebOidcRole.Admin : WebOidcRole.Viewer));
+    }
+
+    /// <summary>The longest subject sign-in accepts still fits the session cookie's own limit once the o2 prefix and key ride with it.</summary>
+    [Fact]
+    public void SeatCodec_TheLongestAllowedSubject_FitsTheCookieSlot()
+    {
+        var encoded = DarlingWebSeat.EncodeCookieSubject(new string('s', DarlingWebSeat.MaxSubjectLength), WebOidcRole.Admin, SampleKey);
+        Assert.Equal(PerformanceMonitor.Darling.Service.Mcp.DarlingWebHostService.MaxSessionSubjectLength, encoded.Length);
+    }
+
+    /// <summary>The owner key is base64url(SHA-256(issuer + newline + sub)): stable, 43 characters with no ':', different for a
+    /// different issuer or sub, and absent when the token has no issuer or no sub.</summary>
+    [Fact]
+    public void OwnerKey_IsStable_AndDiffersByIssuerAndSub()
+    {
+        var key = DarlingWebSeat.ComputeOwnerKey("https://idp.example.invalid/tenant", "abc-123");
+        Assert.NotNull(key);
+        Assert.Equal(DarlingWebSeat.OwnerKeyLength, key!.Length);
+        Assert.Matches("^[A-Za-z0-9_-]{43}$", key);
+        Assert.Equal(key, DarlingWebSeat.ComputeOwnerKey("https://idp.example.invalid/tenant", "abc-123"));
+        Assert.NotEqual(key, DarlingWebSeat.ComputeOwnerKey("https://idp.example.invalid/other", "abc-123"));
+        Assert.NotEqual(key, DarlingWebSeat.ComputeOwnerKey("https://idp.example.invalid/tenant", "abc-124"));
+        Assert.Null(DarlingWebSeat.ComputeOwnerKey(null, "abc-123"));
+        Assert.Null(DarlingWebSeat.ComputeOwnerKey("https://idp.example.invalid/tenant", ""));
+
+        /* From a validated token: the key follows iss and sub, never the display name (preferred_username, email). */
+        var payload = new JsonObject { ["iss"] = "https://idp.example.invalid/tenant", ["sub"] = "abc-123", ["preferred_username"] = "a@example.invalid" };
+        Assert.Equal(key, DarlingWebOidc.ResolveOwnerKey(payload));
+        payload["preferred_username"] = "renamed@example.invalid";
+        Assert.Equal(key, DarlingWebOidc.ResolveOwnerKey(payload));
+        Assert.Null(DarlingWebOidc.ResolveOwnerKey(new JsonObject { ["iss"] = "https://idp.example.invalid/tenant" }));
+    }
+
     /// <summary>A subject containing the codec's own separator must not shift the parse.</summary>
     [Fact]
     public void SeatCodec_SubjectWithColons_RoundTrips()
@@ -457,7 +519,14 @@ public sealed class DarlingWebOidcTests
     [InlineData("bare-subject-no-prefix")]
     [InlineData("o1:x:unknown-role")]
     [InlineData("o1:a:")]  // empty subject
-    [InlineData("o2:a:future-version")]
+    [InlineData("o3:a:future-version")]
+    [InlineData("o2:a:future-version")]                       // an o2 slot with no owner key and subject
+    [InlineData("o2:x:KEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYK:who")] // unknown role letter
+    [InlineData("o2:a:short:who")]                            // a key that is not 43 characters
+    [InlineData("o2:a:KEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYK:")]  // empty subject
+    [InlineData("o2:a:KEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYK")]   // no separator or subject
+    [InlineData("o2:a:KEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEY:EYK:who")] // ':' inside the key's 43 characters
+    [InlineData("o2:a:KEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEY+EYK:who")] // not base64url
     public void SeatCodec_UnrecognizedShape_Refuses(string cookieSubject)
         => Assert.False(DarlingWebSeat.TryResolveSeat(cookieSubject, out _));
 

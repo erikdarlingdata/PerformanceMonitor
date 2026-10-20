@@ -27,6 +27,17 @@ namespace Darling.Tests;
 /// </summary>
 internal static class RungRewindArtifacts
 {
+    /// <summary>
+    /// The statement the README's rollback list gives for V206 (#6227): every NULL enabled state becomes the value it inherits, which is
+    /// the fleet-wide row's value for a server's row, else the collector's shipped default (off for long_query_completions, on for the
+    /// rest). The subquery reads the rows as they were before the UPDATE, so a server's row takes a fleet row set to false. Written once
+    /// so the rewind and the test that proves it run the same text.
+    /// </summary>
+    internal const string ResolveInheritedEnabledSql =
+        "UPDATE config.config_collector_schedules AS s SET enabled = COALESCE((SELECT f.enabled FROM config.config_collector_schedules AS f " +
+        "WHERE s.server_id IS NOT NULL AND f.server_id IS NULL AND lower(f.collector_name) = lower(s.collector_name) LIMIT 1), " +
+        "lower(s.collector_name) <> 'long_query_completions') WHERE s.enabled IS NULL";
+
     /// <summary>One rung of the ladder. <c>DropSql</c> is null for a rung no live test rewinds below through this helper.</summary>
     internal sealed record LadderRung(int Version, string ProbeParameter, string? DropSql = null);
 
@@ -384,6 +395,54 @@ ALTER TABLE IF EXISTS collect.ag_replica_states DROP COLUMN IF EXISTS primary_re
 ALTER TABLE IF EXISTS config.config_monitored_servers
     DROP COLUMN IF EXISTS hypothetical_index_username,
     DROP COLUMN IF EXISTS hypothetical_index_encrypted_password;"),
+
+        // /// V204 (#6214): the folder, personal flag and creator on the custom views. The creator column is the probe's newest sentinel.
+        // The rewind restores V31's one store-wide unique name and drops the three columns (their constraints and indexes go with them),
+        // so a re-run of V204 builds them again. Safe on a store that never had them.
+        new(204, "hasCustomViewFolders",
+            @"
+DROP INDEX IF EXISTS config.ux_custom_views_shared_name;
+DROP INDEX IF EXISTS config.ux_custom_views_personal_name;
+ALTER TABLE IF EXISTS config.custom_views
+    DROP COLUMN IF EXISTS folder,
+    DROP COLUMN IF EXISTS personal,
+    DROP COLUMN IF EXISTS created_by;
+DO $$
+BEGIN
+    IF to_regclass('config.custom_views') IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conrelid = 'config.custom_views'::regclass AND conname = 'custom_views_name_key')
+    THEN
+        ALTER TABLE config.custom_views ADD CONSTRAINT custom_views_name_key UNIQUE (name);
+    END IF;
+END $$;"),
+
+        // /// V205 (#6235): the optional expiry on the custom alert rules. The column is the probe's newest sentinel. The rewind drops it,
+        // so a re-run of V205 adds it again. Safe on a store that never had it.
+        new(205, "hasCustomAlertRuleExpiry",
+            @"
+ALTER TABLE IF EXISTS config.custom_alert_rules
+    DROP COLUMN IF EXISTS expires_at_utc;"),
+
+        // /// V206 (#6227): the collector schedule rows may hold a NULL enabled state, and the table carries the name and value limits and
+        // the clear-on-register trigger. The rewind gives every NULL the value it inherits (the statement the README's rollback list
+        // gives), puts NOT NULL back, and removes the three CHECK constraints, the trigger and its function, so a re-run of V206 adds
+        // them again and a test can seed the rows an older store held. Safe on a store that never had the table.
+        new(206, "hasInheritableCollectorEnabled",
+            @"
+DO $$
+BEGIN
+    IF to_regclass('config.config_collector_schedules') IS NOT NULL THEN
+        " + ResolveInheritedEnabledSql + @";
+        ALTER TABLE config.config_collector_schedules ALTER COLUMN enabled SET NOT NULL;
+        ALTER TABLE config.config_collector_schedules DROP CONSTRAINT IF EXISTS ck_config_collector_schedules_name;
+        ALTER TABLE config.config_collector_schedules DROP CONSTRAINT IF EXISTS ck_config_collector_schedules_frequency_cap;
+        ALTER TABLE config.config_collector_schedules DROP CONSTRAINT IF EXISTS ck_config_collector_schedules_retention_cap;
+    END IF;
+    IF to_regclass('config.config_monitored_servers') IS NOT NULL THEN
+        DROP TRIGGER IF EXISTS trg_clear_unregistered_schedules ON config.config_monitored_servers;
+    END IF;
+END $$;
+DROP FUNCTION IF EXISTS config.config_clear_unregistered_schedules();"),
     ];
 
     /// <summary>
