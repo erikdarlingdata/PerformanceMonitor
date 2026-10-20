@@ -531,7 +531,7 @@ public sealed class StoreServerPasswordRulesLiveTests
     {
         await RunScenarioAsync(selfManagedText: false, async (ownerString, owner, ct) =>
         {
-            const string pairCheck = " OR COALESCE(s.hypothetical_index_encrypted_password, '') <> ''";
+            const string pairCheck = " OR COALESCE((to_jsonb(s) ->> 'hypothetical_index_encrypted_password'), '') <> ''";
             var older = DarlingManagedRoles.BuildEditMonitoredServerFunctionSql("config");
             Assert.Contains(pairCheck, older, StringComparison.Ordinal);
             await ExecAsync(owner, older.Replace(pairCheck, "", StringComparison.Ordinal), ct);
