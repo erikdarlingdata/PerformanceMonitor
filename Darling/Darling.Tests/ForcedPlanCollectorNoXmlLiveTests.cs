@@ -191,8 +191,8 @@ CLOSE c; DEALLOCATE c;", ct);
             var second = await PassAsync(collector, database, ct);
             TestContext.Current.SendDiagnosticMessage($"#6221 collector pass over {later} later plans: {pass.ElapsedMs} ms first, {second.ElapsedMs} ms second, {pass.PlanXmlLobReads} plan LOB reads");
 
-            Assert.Equal(0, pass.PlanXmlLobReads);
-            Assert.Equal(0, second.PlanXmlLobReads);
+            Assert.True(pass.PlanXmlLobReads == 0, $"the first pass read {pass.PlanXmlLobReads} LOB pages of plan XML in {pass.ElapsedMs} ms over {later} later plans");
+            Assert.True(second.PlanXmlLobReads == 0, $"the second pass read {second.PlanXmlLobReads} LOB pages of plan XML in {second.ElapsedMs} ms");
 
             var forced = pass.Rows.Where(r => r.PlanId is not null).ToList();
             Assert.Equal(ProcedureCount, forced.Count);
