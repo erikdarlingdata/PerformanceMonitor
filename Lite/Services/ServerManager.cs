@@ -709,8 +709,8 @@ public class ServerManager
         catch (SqlException ex)
         {
             status.IsOnline = false;
-            status.ErrorMessage = ex.Message;
-            
+            status.ErrorMessage = SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ex.Message;
+
             // Detect MFA cancellation (error code 0 with specific message patterns)
             if (server.AuthenticationType == AuthenticationTypes.EntraMFA && MfaAuthenticationHelper.IsMfaCancelledException(ex))
             {
@@ -730,8 +730,12 @@ public class ServerManager
         catch (Exception ex)
         {
             status.IsOnline = false;
-            status.ErrorMessage = ex.Message;
-            
+            /* #6183: SqlClient's native network library failing to load arrives here as a TypeInitializationException
+               ("The type initializer for 'TdsParser' threw an exception"), which does not say why. The shared
+               explanation replaces it in the status the connection test and the UI show. */
+            var nativeLoadFailure = SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory);
+            status.ErrorMessage = nativeLoadFailure ?? ex.Message;
+
             // Detect MFA cancellation from generic exceptions
             if (server.AuthenticationType == AuthenticationTypes.EntraMFA && MfaAuthenticationHelper.IsMfaCancelledException(ex))
             {
@@ -751,6 +755,10 @@ public class ServerManager
                 status.UserCancelledMfa = true;
                 status.ErrorMessage = "Authentication cancelled by user";
                 _logger?.LogInformation("Device-code sign-in cancelled by user for server '{DisplayName}'", server.DisplayName);
+            }
+            else if (nativeLoadFailure is not null)
+            {
+                _logger?.LogError(ex, "Connectivity check failed for server '{DisplayName}': {Explanation}", server.DisplayName, nativeLoadFailure);
             }
             else
             {

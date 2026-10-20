@@ -567,7 +567,10 @@ SELECT
                 IsAzureManagedInstance: false,
                 IsAwsRds: false,
                 HasMsdbAccess: false,
-                Error: ex.Message);
+                /* #6183: SqlClient's native library failing to load reads "The type initializer for ... TdsParser
+                   threw an exception" and says nothing about why. One shared explanation, for every caller. */
+                Error: SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ex.Message,
+                SqlClientNativeLoadFailed: SqlClientNativeLoadFailure.IsMatch(ex));
         }
     }
 
@@ -663,7 +666,11 @@ public sealed record ConnectionProbeResult(
     string? ConnectedDatabase = null,
     /* #3604: the wait-tier fact, so --test-connection's "which collectors would run" count is computed
        against the same shape the gate reads. Trailing and defaulted for the #2280 reason. */
-    bool HasPgWaitSamplingExtension = false)
+    bool HasPgWaitSamplingExtension = false,
+    /* #6183: the failure was SqlClient's native library not loading. No SQL Server connection can work from this
+       install, so a caller that probes several servers says so once instead of once per server. Trailing and
+       defaulted, like the fields above. */
+    bool SqlClientNativeLoadFailed = false)
 {
     /// <summary>
     /// Rebuilds the gate's-eye view of this target, so a caller can ask which collectors would actually
