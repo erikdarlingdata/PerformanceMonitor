@@ -2283,6 +2283,7 @@ $rung$;";
         new Migration(201, "forced-plan-variants-and-guides", V201Sql),
         new Migration(202, "ag-primary-replica", V202Sql),
         new Migration(203, "hypothetical-index-login", V203Sql),
+        new Migration(207, "change-watches", ChangeWatchStore.V207Sql),
     };
 
     /// <summary>

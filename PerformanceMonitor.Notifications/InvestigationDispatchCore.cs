@@ -137,7 +137,8 @@ public sealed class InvestigationDispatchCore
     /// <returns>What the store answered, or null when nothing was asked of it (muted, no family, no agent route) or it failed.</returns>
     public async Task<InvestigationOpenResult?> OpenOrJoinAsync(
         string serverId, string serverName, string metricName, bool muted, DateTime alertTimeUtc, AlertContext? context,
-        string? storyPathHash, InvestigationAlertFacts? facts, CancellationToken cancellationToken)
+        string? storyPathHash, InvestigationAlertFacts? facts, CancellationToken cancellationToken,
+        string triggerKind = InvestigationTriggerKinds.Alert)
     {
         if (muted)
         {
@@ -188,6 +189,8 @@ public sealed class InvestigationDispatchCore
                 AutonomyLevel = route.AgentLevel ?? NotificationRoute.AgentLevelInvestigate,
                 /* #6003, D6: a join above the request's max_severity is an event. */
                 Severity = SeverityOf(metricName, context),
+                /* #6234: a change watch's request goes through this same route, gate and store call; only its kind differs. */
+                TriggerKind = triggerKind,
             };
 
             var result = await _openOrJoin(alert, cancellationToken);
@@ -227,6 +230,17 @@ public sealed class InvestigationDispatchCore
             return null;
         }
     }
+
+    /// <summary>
+    /// #6234: opens the one investigation request of a change watch whose measures moved. It is the alert path with a different
+    /// trigger: the same agent route (the metric <see cref="InvestigationTriggerKinds.ChangeWatchMetric"/> resolves like any
+    /// other, so a route that sends everything, or this metric, to an agent turns it on), the same agent gate, the same store
+    /// call and the same wake-up. Null when nothing was opened (no agent route, held by the gate, or a failure).
+    /// </summary>
+    public Task<InvestigationOpenResult?> OpenChangeWatchAsync(
+        string serverId, string serverName, DateTime alertTimeUtc, InvestigationAlertFacts facts, CancellationToken cancellationToken) =>
+        OpenOrJoinAsync(serverId, serverName, InvestigationTriggerKinds.ChangeWatchMetric, false, alertTimeUtc, null, null, facts,
+            cancellationToken, InvestigationTriggerKinds.ChangeWatch);
 
     /// <summary>
     /// #5821, shared by #5820: opens or joins the request for an alert that is about to be sent and recorded, and returns the

@@ -3704,7 +3704,12 @@ LIMIT 1";
             new PerformanceMonitor.Darling.Service.Investigations.ServiceInvestigationEventSends(
                 webhookAlertService, deliverer, () => _selfAlerts),
             PerformanceMonitor.Darling.Service.Investigations.InvestigationOpenSignal.Shared, _logger);
-        var investigationSweepLoop = RunInvestigationSweepLoopAsync(investigationStore, investigationEvents, deadlockRollup, stoppingToken);
+        /* #6234: the change watch rides the sweep's tick; its first pass runs at start, so a watch whose window ended while the service was down is evaluated then. */
+        var changeWatchPass = new PerformanceMonitor.Darling.Service.ChangeWatch.ChangeWatchPass(
+            postgres,
+            new ChangeWatchStore(investigationPostgres, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds),
+            investigationDispatcher.Core, _logger, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds);
+        var investigationSweepLoop = RunInvestigationSweepLoopAsync(investigationStore, investigationEvents, deadlockRollup, changeWatchPass, stoppingToken);
 
         /* #6001: the evidence capture, on its own tick. It reads the store only and opens no connection to a monitored server. */
         var investigationEvidenceLoop = RunInvestigationEvidenceLoopAsync(
@@ -6701,12 +6706,27 @@ LIMIT 1";
     /// </summary>
     private async Task RunInvestigationSweepLoopAsync(InvestigationRequestStore store,
         PerformanceMonitor.Darling.Service.Investigations.InvestigationEventDelivery events,
-        PerformanceMonitor.Darling.Service.Investigations.DarlingDeadlockRollup deadlockRollup, CancellationToken stoppingToken)
+        PerformanceMonitor.Darling.Service.Investigations.DarlingDeadlockRollup deadlockRollup,
+        PerformanceMonitor.Darling.Service.ChangeWatch.ChangeWatchPass changeWatchPass, CancellationToken stoppingToken)
     {
         while (!stoppingToken.IsCancellationRequested)
         {
             if (ShouldRunCollection(_paused))
             {
+                /* #6234: its own try, like the passes below. */
+                try
+                {
+                    await changeWatchPass.RunOnceAsync(stoppingToken);
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Change watch pass failed; it is tried again next pass");
+                }
+
                 /* #6005: the deadlock digest, once per 4-hour bucket; its own try, like the two below. */
                 try
                 {
