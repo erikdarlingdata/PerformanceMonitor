@@ -83,6 +83,13 @@ public sealed class DarlingMcpPgStatementTools
                        reporting it when somebody acts on the advice. */
                     ?? await DarlingRuntimePrecondition.StatusAsync(
                         postgres, resolved.ServerId, resolved.DisplayName, "pg_statement_stats", cancellationToken)
+                    /* #6226: the collector ran in the window (and has had a baseline: its first run stores nothing by design) and
+                       stored no statement, so nothing executed: empty, not a gap. Only inside the raw tier's retention. */
+                    ?? (hours_back <= TimescaleSupport.RawRetentionSpan.TotalHours
+                        ? DarlingMcpDataTools.EmptyCollectorRan(
+                            await DarlingCollectorRunFactsReader.ReadAsync(postgres, resolved.ServerId, "pg_statement_stats", now.AddHours(-hours_back), now, cancellationToken),
+                            "pg_statement_stats", hours_back, "executed statements", DatabaseFilter.All, requireDeltaBaseline: true)
+                        : null)
                     ?? await DarlingServerOfflineNote.UnavailableAsync(
                         postgres, resolved.ServerId, resolved.DisplayName,
                         "No PostgreSQL query statistics for this server and window. Check that "

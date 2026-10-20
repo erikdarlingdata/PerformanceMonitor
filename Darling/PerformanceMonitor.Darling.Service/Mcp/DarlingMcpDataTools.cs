@@ -348,6 +348,18 @@ public sealed class DarlingMcpDataTools
         }
     }
 
+    /// <summary>#6226: the <c>empty</c> envelope for a ranking over a window the collector ran in and stored nothing, with
+    /// <c>successful_runs_in_window</c> beside the sentence; null when it has no successful run in the window. Words in
+    /// <see cref="CollectorRunFacts.RanFoundNothing"/>, shared with Lite. Names the database when the read was scoped to one.</summary>
+    internal static string? EmptyCollectorRan(
+        CollectorRunFacts facts, string collectorName, int hoursBack, string found, DatabaseFilter databases, bool requireDeltaBaseline = false)
+    {
+        var chosen = databases.Describe();
+        var scope = chosen is null ? null : chosen == DatabaseFilter.ManyDatabasesDescription ? chosen : $"database '{chosen}'";
+        var message = facts.RanFoundNothing(collectorName, hoursBack, found, scope, requireDeltaBaseline);
+        return message is null ? null : McpHelpers.Status("empty", message, new { successful_runs_in_window = facts.SuccessfulRunsInWindow });
+    }
+
     /// <summary>#5633 item 3: the empty-page envelope of the procedure tools, from the collector's own run history. Two cycles only while
     /// the collector is new; <c>empty</c> once it has run and found no procedure in the window. Words in <see cref="CollectorRunFacts"/>.</summary>
     internal static string EmptyProcedureStatsStatus(CollectorRunFacts facts, int hoursBack, int databasesLeftOut = 0)
@@ -881,7 +893,14 @@ public sealed class DarlingMcpDataTools
                     }
                 }
 
+                /* #6226: the collector looked and nothing ran. query_stats stores only what executed since its watermark, so a window in
+                   which it ran successfully and stored no row is a measurement (empty), not a gap (unavailable). Raw tier only, like the
+                   probe above: a window the hourly rollup serves has its own rows, and a run count says nothing about a rollup. After
+                   not_collected, which names an engine that never runs the collector. */
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_stats", cancellationToken)
+                    ?? (hourly ? null : EmptyCollectorRan(
+                        await DarlingCollectorRunFactsReader.ReadAsync(postgres, resolved.ServerId, "query_stats", requestedStart, now, cancellationToken),
+                        "query_stats", hours_back, "executed statements", databases))
                     ?? McpHelpers.Status("unavailable", "No query stats available for the specified time range.");
             }
 
@@ -1573,6 +1592,14 @@ public sealed class DarlingMcpDataTools
                        ever stored but Query Store is READ_WRITE and the collector's last run succeeded, say that instead of
                        "may not be enabled". */
                     ?? await FirstIntervalStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, databases, cancellationToken)
+                    /* #6226: the collector ran in the window and stored nothing, so nothing executed: empty, not a gap. Only when the
+                       raw tier answered and the window is inside what it keeps (raw is dropped at RawRetentionSpan on a store with the
+                       rollups armed, and collection_log outlives it, so a longer window's runs prove nothing about the dropped part). */
+                    ?? (tablePlan is null && read.DailyDaysUsed == 0 && now - requestedStart <= TimescaleSupport.RawRetentionSpan
+                        ? EmptyCollectorRan(
+                            await DarlingCollectorRunFactsReader.ReadAsync(postgres, resolved.ServerId, "query_store", requestedStart, now, cancellationToken),
+                            "query_store", hours_back, "Query Store intervals", databases)
+                        : null)
                     ?? McpHelpers.Status(
                         "unavailable",
                         $"No Query Store rows for this server in the {hours_back}-hour window searched. Query Store " +
