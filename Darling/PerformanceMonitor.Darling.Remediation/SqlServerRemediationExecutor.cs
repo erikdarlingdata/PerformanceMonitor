@@ -33,7 +33,7 @@ namespace PerformanceMonitor.Darling.Remediation;
 /// action, another server, another database or another object, before it reads the secret or opens a connection.</para>
 /// <para><b>The sign-in</b> is the server's remediation login: its name, and the secret read from the <c>env:</c> or <c>file:</c> reference when
 /// the action runs. The secret reaches the connection string and nothing else: every message that leaves here has it removed first.</para>
-/// <para><b>PostgreSQL is not built:</b> this is SQL Server only, and there is no PostgreSQL kill (<c>pg_terminate_backend</c>).</para>
+/// <para>This class is SQL Server only. The PostgreSQL kill (<c>pg_terminate_backend</c>) is <see cref="PostgresRemediationExecutor"/>. Azure SQL Database kill is not built.</para>
 /// </summary>
 public sealed class SqlServerRemediationExecutor
 {
@@ -94,8 +94,9 @@ SELECT edition = @edition, granted = @granted, cached = @cached;";
     /// not a user session (<c>not_user_session</c>), the login lacks <c>ALTER ANY CONNECTION</c> (<c>kill_permission_denied</c>). Then it runs the
     /// <c>KILL</c> unless <c>@dry</c>, and answers <c>dry_ok</c> or <c>killed</c>. The check and the <c>KILL</c> are one batch but not one atomic step:
     /// a session can end and its id be reused between them. The <c>KILL</c> text is built from the int parameter's decimal form only. After a real
-    /// <c>KILL</c> it reads the session's request once (<c>command</c>, <c>percent_complete</c>), so a rollback shows. No statement text and no input
-    /// buffer are read.
+    /// <c>KILL</c> it reads the session's request once (<c>command</c>, <c>percent_complete</c>), so a rollback shows. That read sits in TRY/CATCH, so
+    /// nothing after the <c>KILL</c> can raise an error that would read as a failed kill: a read that fails answers <c>rollback_read = 0</c>, and the
+    /// kill is still <c>killed</c> with its rollback not read. No statement text and no input buffer are read.
     /// </summary>
     internal const string KillSql = @"
 DECLARE @edition bigint = CONVERT(bigint, SERVERPROPERTY('EngineEdition'));
@@ -112,6 +113,7 @@ DECLARE @last_end datetime = NULL;
 DECLARE @log_bytes bigint = NULL;
 DECLARE @command nvarchar(32) = NULL;
 DECLARE @percent real = NULL;
+DECLARE @rollback_read bit = 1;
 IF @edition = 5
     SET @outcome = 'kill_not_built_on_platform';
 ELSE
@@ -155,15 +157,22 @@ BEGIN
         DECLARE @kill nvarchar(40) = N'KILL ' + CONVERT(nvarchar(11), @session_id) + N';';
         EXEC (@kill);
         SET @outcome = 'killed';
-        SELECT @command = r.command, @percent = r.percent_complete
-        FROM sys.dm_exec_requests AS r
-        WHERE r.session_id = @session_id
-        OPTION(RECOMPILE);
+        BEGIN TRY
+            SELECT @command = r.command, @percent = r.percent_complete
+            FROM sys.dm_exec_requests AS r
+            WHERE r.session_id = @session_id
+            OPTION(RECOMPILE);
+        END TRY
+        BEGIN CATCH
+            SET @command = NULL;
+            SET @percent = NULL;
+            SET @rollback_read = 0;
+        END CATCH;
     END;
 END;
 SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actual, login_name = @login_name, host_name = @host_name,
        program_name = @program_name, status = @status, open_transaction_count = @open_tran, last_request_end_time = @last_end,
-       log_bytes_used = @log_bytes, rollback_command = @command, percent_complete = @percent;";
+       log_bytes_used = @log_bytes, rollback_command = @command, percent_complete = @percent, rollback_read = @rollback_read;";
 
     /// <summary>Query Store plan rows: the plan asked about, and any plan of the query that is forced now.</summary>
     internal const string PlanFactsSql =
@@ -372,7 +381,43 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
             command.Parameters.Add(new SqlParameter("@session_id", SqlDbType.Int) { Value = sessionId });
             command.Parameters.Add(new SqlParameter("@login_time", SqlDbType.DateTime) { Value = DateTime.SpecifyKind(loginTime, DateTimeKind.Unspecified) });
             command.Parameters.Add(new SqlParameter("@dry", SqlDbType.Bit) { Value = dryRun });
-            await using var reader = await command.ExecuteReaderAsync(ct);
+            try
+            {
+                return await ReadKillAnswerAsync(command, name, dryRun, sessionId, ct);
+            }
+            catch (Exception ex) when (!dryRun && IsOutcomeUnknown(ex, connection.State == ConnectionState.Open, ct.IsCancellationRequested))
+            {
+                /* The batch was sent and its reply was lost: the server may have run the KILL. Never reported as failed (#5632). */
+                var detail = secret.Length == 0 ? ex.Message : ex.Message.Replace(secret, "***", StringComparison.Ordinal);
+                return RemediationResult.Unknown(name,
+                    $"The kill batch for session {sessionId} was sent, but its reply was lost ({ex.GetType().Name}: {detail}). Session {sessionId} may have been killed. Read get_blocking to see whether it is still there before you try again.");
+            }
+        }, ct);
+    }
+
+    /// <summary>
+    /// The test seam for the kill batch (#5632): null runs it with <c>ExecuteReaderAsync</c>. A test sets it, for its own async flow only, to run
+    /// the real batch and then lose the reply, the way a dropped connection would.
+    /// </summary>
+    internal static readonly AsyncLocal<Func<SqlCommand, CancellationToken, Task<SqlDataReader>>?> KillBatchSeam = new();
+
+    /// <summary>
+    /// True for an error that came after the kill batch was sent and is not the server refusing a statement: a broken connection (the
+    /// connection is no longer open, or the error is severity 20 or higher), a timeout (-2), a cancel, or an error that is not a
+    /// <see cref="SqlException"/> at all. The server may have run the KILL. An error the server sent on a connection that is still open
+    /// means the batch stopped there.
+    /// </summary>
+    internal static bool IsOutcomeUnknown(Exception ex, bool connectionOpen, bool cancelled) => ex switch
+    {
+        OperationCanceledException => false,
+        SqlException sql => !connectionOpen || cancelled || sql.Number == -2 || sql.Class >= 20,
+        _ => true,
+    };
+
+    private static async Task<RemediationResult> ReadKillAnswerAsync(SqlCommand command, string name, bool dryRun, int sessionId, CancellationToken ct)
+    {
+        {
+            await using var reader = !dryRun && KillBatchSeam.Value is { } seam ? await seam(command, ct) : await command.ExecuteReaderAsync(ct);
             if (!await reader.ReadAsync(ct))
                 return RemediationResult.Failed(name, dryRun, "The server returned no answer to the session check.");
             var outcome = reader.IsDBNull(0) ? null : reader.GetString(0);
@@ -393,15 +438,18 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
 
             var rollbackCommand = reader.IsDBNull(10) ? null : reader.GetString(10);
             double? percent = reader.IsDBNull(11) ? null : Convert.ToDouble(reader.GetValue(11), CultureInfo.InvariantCulture);
-            return KillAnswer(name, dryRun, sessionId, outcome, facts, rollbackCommand, percent);
-        }, ct);
+            var rollbackRead = reader.IsDBNull(12) || Convert.ToInt64(reader.GetValue(12), CultureInfo.InvariantCulture) == 1;
+            return KillAnswer(name, dryRun, sessionId, outcome, facts, rollbackCommand, percent, rollbackRead);
+        }
     }
 
     /// <summary>
     /// Turns the kill batch's outcome into the executor's answer. Pure, so a test needs no server. An outcome the batch does not name is a failure,
-    /// never a kill: only <c>killed</c> says <see cref="RemediationResult.Wrote"/>.
+    /// never a kill: only <c>killed</c> says <see cref="RemediationResult.Wrote"/>. A kill whose rollback read failed (<paramref name="rollbackRead"/>
+    /// false) is still a kill, with no <see cref="RemediationResult.Rollback"/>, as PostgreSQL's kill answers a still-there read that failed.
     /// </summary>
-    internal static RemediationResult KillAnswer(string name, bool dryRun, int sessionId, string? outcome, KillSessionFacts? facts, string? rollbackCommand, double? percent)
+    internal static RemediationResult KillAnswer(string name, bool dryRun, int sessionId, string? outcome, KillSessionFacts? facts, string? rollbackCommand, double? percent,
+        bool rollbackRead = true)
     {
         var result = outcome switch
         {
@@ -423,8 +471,13 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
             _ => RemediationResult.Failed(name, dryRun, "The server returned an answer to the session check that this code does not know. Nothing is known to have run."),
         };
 
-        result = result with { Session = facts };
-        if (outcome == KillOutcomes.Killed)
+        /* A reused id answers nothing about the session that has it now (#5632). */
+        result = result with { Session = outcome == KillOutcomes.SessionReused ? null : facts };
+        if (outcome == KillOutcomes.Killed && !rollbackRead)
+        {
+            result = result with { Message = $"Session {sessionId} was killed. Whether a rollback is running was not read; read get_blocking to see its locks clear." };
+        }
+        else if (outcome == KillOutcomes.Killed)
         {
             var inProgress = rollbackCommand is not null && rollbackCommand.StartsWith("KILLED/ROLLBACK", StringComparison.OrdinalIgnoreCase);
             result = result with { Rollback = new KillRollback(inProgress, inProgress ? percent : null) };

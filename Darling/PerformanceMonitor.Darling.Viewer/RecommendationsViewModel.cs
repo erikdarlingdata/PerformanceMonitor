@@ -147,6 +147,12 @@ public sealed class RecommendationItem
 
     /// <summary>UTC end of the finding's time window (analysis TimeRangeEnd), or null.</summary>
     public DateTime? WindowEndUtc { get; init; }
+
+    /// <summary>The finding's root fact key, which says where on a PostgreSQL server its link goes (#6134).</summary>
+    public string RootFactKey { get; init; } = string.Empty;
+
+    /// <summary>True when the finding's server runs PostgreSQL (#6134): its link must not open a SQL Server tab.</summary>
+    public bool IsPostgres { get; init; }
 }
 
 /// <summary>
@@ -279,7 +285,20 @@ public sealed class RecommendationCardViewModel
     /// needs both.
     /// </summary>
     public bool ShowOpenInActiveQueries =>
-        IsIncident && Item.ServerId != 0 && Item.WindowStartUtc.HasValue && Item.WindowEndUtc.HasValue;
+        IsIncident && Item.ServerId != 0 && Item.WindowStartUtc.HasValue && Item.WindowEndUtc.HasValue
+        && LinkTarget != RecommendationLinkTarget.None;
+
+    /// <summary>
+    /// Where the deep-link goes for this finding's engine (#6134): Active Queries on SQL Server, the PostgreSQL
+    /// Activity tab on PostgreSQL, or none when this PostgreSQL server has no matching view.
+    /// </summary>
+    public RecommendationLinkTarget LinkTarget => RecommendationDeepLink.Resolve(Item.IsPostgres, Item.RootFactKey);
+
+    /// <summary>The link button's label for this finding's engine.</summary>
+    public string OpenLinkLabel => RecommendationDeepLink.Label(LinkTarget);
+
+    /// <summary>The link button's tooltip for this finding's engine.</summary>
+    public string OpenLinkToolTip => RecommendationDeepLink.ToolTip(LinkTarget);
 
     /// <summary>
     /// The UTC window the deep-link scopes Active Queries to: the finding's own window when it carries a
@@ -504,7 +523,7 @@ public sealed class RecommendationsViewModel
     public static RecommendationsViewModel FromFindings(
         IReadOnlyList<ViewerFindingRow> rows, string serverName, ServerClock? serverClock = null,
         bool insufficientData = false, string? insufficientDataMessage = null,
-        bool windowEmpty = false, string? windowEmptyMessage = null)
+        bool windowEmpty = false, string? windowEmptyMessage = null, bool isPostgres = false)
     {
         if (rows is null || rows.Count == 0)
             return ZeroFindingState(insufficientData, insufficientDataMessage, windowEmpty, windowEmptyMessage);
@@ -514,7 +533,7 @@ public sealed class RecommendationsViewModel
         {
             if (row is null)
                 continue;
-            items.Add(MapItem(row, serverName));
+            items.Add(MapItem(row, serverName, isPostgres));
         }
 
         if (items.Count == 0)
@@ -550,7 +569,7 @@ public sealed class RecommendationsViewModel
     /// root fact key; copy-paste SQL comes from the PERSISTED remediation action
     /// (<see cref="BuildCopyPasteSql"/>). Exposed <c>internal</c> for tests.
     /// </summary>
-    internal static RecommendationItem MapItem(ViewerFindingRow row, string serverName)
+    internal static RecommendationItem MapItem(ViewerFindingRow row, string serverName, bool isPostgres = false)
     {
         var finding = row.Finding;
         var advice = FactAdvice.GetComposedForFinding(finding);
@@ -572,7 +591,9 @@ public sealed class RecommendationsViewModel
             ServerName = serverName ?? string.Empty,
             ServerId = finding.ServerId,
             WindowStartUtc = AsUtc(finding.TimeRangeStart),
-            WindowEndUtc = AsUtc(finding.TimeRangeEnd)
+            WindowEndUtc = AsUtc(finding.TimeRangeEnd),
+            RootFactKey = finding.RootFactKey ?? string.Empty,
+            IsPostgres = isPostgres
         };
     }
 

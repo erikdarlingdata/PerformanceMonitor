@@ -45,18 +45,33 @@ public sealed partial class ViewerDataService
             return new List<AgTopologyCard>();
         }
 
-        /* #6159: a primary learned from the stored column is shown by its display name when it is a monitored server. The server list is
-           read only when some row carries a stored primary, so a store not yet re-collected after the upgrade costs nothing extra. */
-        Func<int, string?>? displayNameOf = null;
-        if (replicas.Any(r => !string.IsNullOrWhiteSpace(r.PrimaryReplica)))
-        {
-            var byId = (await GetServersAsync(cancellationToken))
-                .GroupBy(sv => sv.ServerId)
-                .ToDictionary(g => g.Key, g => g.First().DisplayName);
-            displayNameOf = id => byId.TryGetValue(id, out var name) ? name : null;
-        }
+        /* One display-name lookup serves both uses (#6157, #6159): the card's "As reported by" server, and a primary learned from the
+           stored column, which is shown by its display name when it is a monitored server. */
+        var byId = DisplayNamesByServerId(await GetServersAsync(cancellationToken));
+        Func<int, string?> displayNameOf = id => byId.TryGetValue(id, out var name) ? name : null;
+        var cards = AgTopology.BuildCards(replicas, await ReadAgDatabasesAsync(nowUtc, cancellationToken), nowUtc, displayNameOf);
+        ApplyNames(cards, byId);
+        return cards;
+    }
 
-        return AgTopology.BuildCards(replicas, await ReadAgDatabasesAsync(nowUtc, cancellationToken), nowUtc, displayNameOf);
+    private static Dictionary<int, string?> DisplayNamesByServerId(IEnumerable<DarlingServer> servers) =>
+        servers.GroupBy(s => s.ServerId).ToDictionary(g => g.Key, g => (string?)g.First().DisplayName);
+
+    /// <summary>#6157: the card's "As reported by" line names the reporting server the way the server list does, by display name,
+    /// not by the connection key the store rows carry. A server with no display name keeps the key (GetServersAsync already
+    /// falls back to it), and a card whose server is not in the list is left alone.</summary>
+    internal static void ApplyDisplayNames(IEnumerable<AgTopologyCard> cards, IEnumerable<DarlingServer> servers) =>
+        ApplyNames(cards, DisplayNamesByServerId(servers));
+
+    private static void ApplyNames(IEnumerable<AgTopologyCard> cards, Dictionary<int, string?> byId)
+    {
+        foreach (var card in cards)
+        {
+            if (byId.TryGetValue(card.ServerId, out var name) && !string.IsNullOrWhiteSpace(name))
+            {
+                card.ServerName = name;
+            }
+        }
     }
 
     /// <summary>Maps <see cref="DarlingAgStatesReader"/>'s raw rows into <see cref="AgTopologyReplicaRow"/>,

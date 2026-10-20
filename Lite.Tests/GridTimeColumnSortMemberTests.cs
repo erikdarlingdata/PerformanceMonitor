@@ -77,6 +77,8 @@ public sealed class GridTimeColumnSortMemberTests : IDisposable
         { "Controls/ServerTab.xaml", "PlanCorrectionGrid", "ExecuteActionInitiatedTimeLocal", Name(typeof(PlanCorrectionRow)), "ExecuteActionInitiatedTime" },
         { "Controls/ServerTab.xaml", "PlanCorrectionGrid", "RevertActionInitiatedTimeLocal", Name(typeof(PlanCorrectionRow)), "RevertActionInitiatedTime" },
         { "Controls/ServerTab.xaml", "BlockedProcessReportGrid", "EventTimeLocal", Name(typeof(BlockedProcessReportRow)), "EventTime" },
+        { "Controls/ServerTab.xaml", "BlockedProcessReportGrid", "BlockingLoginTimeLocal", Name(typeof(BlockedProcessReportRow)), "BlockingLoginTime" },
+        { "Controls/ServerTab.xaml", "BlockedProcessReportGrid", "BlockingLastRequestEndTimeLocal", Name(typeof(BlockedProcessReportRow)), "BlockingLastRequestEndTime" },
         { "Controls/ServerTab.xaml", "DeadlockGrid", "DeadlockTimeLocal", Name(typeof(DeadlockProcessDetail)), "DeadlockTime" },
         { "Controls/ServerTab.xaml", "AutomaticTuningGrid", "CollectionTimeLocal", Name(typeof(AutomaticTuningRow)), "CollectionTime" },
         /* #4966: the Collected column of every grid that draws the newest snapshot: the snapshot's collection (or capture) time, sorted by the stored instant. */

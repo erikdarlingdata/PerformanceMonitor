@@ -38,6 +38,7 @@ import {
   getPath,
   parseUtc,
   applyFormat,
+  tickDecimals,
   bandClass,
   sevClass,
   windowFromHours,
@@ -45,6 +46,7 @@ import {
   dbFilteredEmptyText,
   sourceStrip,
   clampText,
+  disclosure,
   markPartialSubtitle,
   localizeIsoText,
   localizeAlertDetail,
@@ -1063,7 +1065,7 @@ function gridFilter(desc, cols, head, tbody) {
 /* An unsortable header cell. The sortable one is built by makeGridSort().headerCell; both are the place a later
    header affordance (a filter, a menu) attaches. */
 function headerCell(c) {
-  return el("th", { text: c.label, class: isNumericCol(c) ? "num" : null });
+  return el("th", { text: c.label, class: isNumericCol(c) ? "num" : null, title: c.hint || null });
 }
 
 /* The sort state of every grid, at MODULE scope so the 60 s poll's rebuild of a page re-applies the chosen sort.
@@ -1163,7 +1165,8 @@ function makeGridSort(desc, cols, rows) {
       const live = sortable[i];
       th.className = live ? "sortable" + (isNumericCol(c) ? " num" : "") : isNumericCol(c) ? "num" : "";
       th.setAttribute("tabindex", live ? "0" : "-1");
-      th.setAttribute("title", live ? "Sort by " + c.label : "");
+      /* The column's `hint` is its header tooltip; this refresh runs after the header is built, so it must not replace it. */
+      th.setAttribute("title", live ? (c.hint ? c.hint + " (click to sort)" : "Sort by " + c.label) : c.hint || "");
       const on = live && st && st.col === colId(c);
       th.setAttribute("aria-sort", on ? (st.dir === "asc" ? "ascending" : "descending") : "none");
       th.sortInd.textContent = on ? (st.dir === "asc" ? " ▲" : " ▼") : "";
@@ -1196,7 +1199,7 @@ function makeGridSort(desc, cols, rows) {
     eligible: cols.map((c) => c.sortable !== false),
     headerCell(c, i) {
       const ind = el("span", { class: "sort-ind", "aria-hidden": "true" });
-      const th = el("th", { class: "sortable" + (isNumericCol(c) ? " num" : ""), tabindex: "0", "aria-sort": "none", title: "Sort by " + c.label }, [c.label, ind]);
+      const th = el("th", { class: "sortable" + (isNumericCol(c) ? " num" : ""), tabindex: "0", "aria-sort": "none", title: c.hint ? c.hint + " (click to sort)" : "Sort by " + c.label }, [c.label, ind]);
       th.sortInd = ind;
       const cycle = () => {
         if (!sortable[i]) return;
@@ -1267,7 +1270,7 @@ export function visibleColumns(cols, rows) {
 }
 
 function isNumericCol(c) {
-  return c.align === "right" || ["int", "num1", "num2", "rate", "ms", "mb", "pct"].includes(c.format);
+  return c.align === "right" || ["int", "num1", "num2", "rate", "ms", "mb", "bytes", "pct"].includes(c.format);
 }
 
 function cell(row, c) {
@@ -1320,6 +1323,18 @@ function cell(row, c) {
     ? localizeAlertDetail(shown, getPath(row, "newest_sample"))
     : c.localizeText && !c.format ? localizeIsoText(shown) : shown;
   if (c.clamp) return el("td", { class: cls.join(" ") || null }, [clampText(text)]);
+  /* #6154: `detailKey` names a field of the SAME row that holds the long explanation. The cell shows only its short value and the
+     explanation opens under it on a click (a <details>, so the keyboard works), so a row stays one line tall. Text that is the same
+     for every row belongs in the column's `hint` (the header tooltip) instead. */
+  if (c.detailKey) {
+    const full = getPath(row, c.detailKey);
+    if (typeof full === "string" && full !== "") {
+      const detail = el("p", { class: "cell-detail-text", text: plainText(full) });
+      const box = disclosure(text, detail, { max: 60 });
+      box.classList.add("cell-detail");
+      return el("td", { class: cls.join(" ") || null }, [box]);
+    }
+  }
   return el("td", { class: cls.join(" ") || null, text });
 }
 
@@ -1396,7 +1411,8 @@ function vizLine(data, desc) {
     label: s.label,
     color: s.color || SERIES_COLORS[i % SERIES_COLORS.length],
   }));
-  const formatValue = desc.format ? (v) => applyFormat(desc.format, v) : (v) => String(Math.round(v));
+  /* The second argument is the axis tick step the chart passes (#6158), so a small range prints enough decimals that no two ticks read alike. */
+  const formatValue = desc.format ? (v, o) => applyFormat(desc.format, v, o) : (v, o) => (o && o.step > 0 && tickDecimals(o.step) ? Number(v).toFixed(tickDecimals(o.step)) : String(Math.round(v)));
   /* Percentage charts cap the y-domain at 100 so a 96% reading never rounds the axis up past 100% (B3). */
   const clampMax = desc.clampMax ?? (desc.format === "pct" ? 100 : null);
   /* #2802: span the x-axis over the REQUESTED window ("last N hours" ending now), not the data's own extent, so a

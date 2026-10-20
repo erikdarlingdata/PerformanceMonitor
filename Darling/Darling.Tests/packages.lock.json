@@ -796,6 +796,7 @@
         "dependencies": {
           "Microsoft.Data.SqlClient": "[7.1.1, )",
           "Microsoft.Extensions.Logging.Abstractions": "[10.0.13, )",
+          "Npgsql": "[10.0.3, )",
           "PerformanceMonitor.Common": "[3.10.0, )",
           "PerformanceMonitor.Darling.Storage": "[3.10.0, )"
         }
