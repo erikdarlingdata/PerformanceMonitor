@@ -14,6 +14,7 @@ using System.Runtime.CompilerServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Markup;
+using PerformanceMonitorLite;
 using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitorLite.Windows;
@@ -43,7 +44,11 @@ public class ClippedTextTests
         {
             var clipped = StaTestThread.Run(() =>
             {
-                var window = new SettingsWindow(new ScheduleManager(dir), new ServerManager(dir));
+                /* #6175: closing the window remembers the last tab it showed in App.SettingsWindowTab (a process-wide static
+                   SettingsWindowTabsLiteTests reads) and writes it to settings.json. This test visits every tab, so it ends on the
+                   last one: it puts the static back and keeps the write off the real file. */
+                var rememberedTab = App.SettingsWindowTab;
+                var window = new SettingsWindow(new ScheduleManager(dir), new ServerManager(dir)) { PersistSelectedTab = _ => { } };
                 window.Resources.MergedDictionaries.Add(Theme());
                 window.Show();
                 var tabs = (TabControl)window.FindName("SettingsTabs");
@@ -60,6 +65,7 @@ public class ClippedTextTests
                 /* Closing an unsaved settings window re-applies the original theme, which needs the running app's pack resources; this window changed none. */
                 typeof(SettingsWindow).GetField("_saved", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(window, true);
                 window.Close();
+                App.SettingsWindowTab = rememberedTab;
                 return found;
             });
 
