@@ -586,10 +586,30 @@ Two mutually exclusive modes — setting `managed: true` together with `connecti
 | `awsExternalId` | *(none)* | Optional, needs `awsRoleArn`: the external ID sent when the role is assumed, to match the trust policy's `sts:ExternalId` condition. 2 to 1224 characters. Never returned by the web or MCP and never written to a log |
 | `remediationUsername` | *(none)* | **Optional second credential, for operator-initiated remediation only (#2138).** The credential above stays read-only forever and is never used for a write. Omit both remediation keys — the default — and this server has no remediation surface at all: there is nothing to enable and nothing to disable. Both halves are required; one alone counts as unarmed and the service says so at connect. Always SQL auth when set, so there is no `remediationAuth` key: an integrated remediation identity would be the service account, which is the monitoring identity |
 | `remediationEncryptedPassword` | *(none)* | The remediation credential's secret: same DPAPI blob from `--encrypt-password`, or an `env:NAME` / `file:/path` reference. There is deliberately **no plaintext variant** of this one — a wrong monitoring password fails a read, a wrong remediation password fails a write against a production server |
+| `hypotheticalIndexUsername` | *(none)* | **PostgreSQL targets only. The login that the "Test an index" check runs under (#6170).** The check never runs under the monitoring login. With no login set, the check is refused and the message says what to set up. See [Testing an index on PostgreSQL](#testing-an-index-on-postgresql) |
+| `hypotheticalIndexEncryptedPassword` | *(none)* | The password of that login, as an `env:NAME` or `file:/path` reference. Darling reads it on its own host when the check runs. A stored password is refused |
 
 **Least privilege for the remediation credential.** Grant `ALTER` on each database you intend to force a plan in — that is what `sp_query_store_force_plan` / `sp_query_store_unforce_plan` need. `ALTER SERVER STATE` is needed *only* to evict a plan (`evict_cached_plan`, #5632), because that is what a targeted `DBCC FREEPROCCACHE(plan_handle)` requires, and it is the expensive grant. It is genuinely optional: without it an eviction is refused as `evict_permission_denied`, a named reason and never silent, and nothing is run. The service does not guess per platform: before it evicts (and on a dry run) it asks the server with a read-only `HAS_PERMS_BY_NAME` check, which answers for the credential's effective permissions however the grant arrived. Azure SQL Database has no plan handle eviction at all, which no grant changes, and that is refused as its own reason, `evict_unsupported_on_platform`, rather than as a permission problem. An eviction has no undo, and it also needs that server's `evict_plan` switch; no server has it on after an upgrade.
 
 **`ALTER ANY CONNECTION` is a strong grant, and it is needed only to kill (`kill_session`, #5632).** It lets the remediation login kill ANY session on that server, not only the one an agent names, so grant it only on a server where you want an agent to be able to kill. Darling checks that the session id and its sign-in time still match what the agent read from `get_blocking` before it runs `KILL`, and refuses with `kill_permission_denied` (a named reason, nothing run) when the login lacks the grant. A kill also needs that server's `kill_session` switch, which is off after an upgrade. A person turns it on the way they turn on `evict_plan`: set `enabled` to true for that server and the action `kill_session` in `config.config_server_actions`. There is no switch screen for it. Azure SQL Database kill is not built: it is refused as `kill_not_built_on_platform` and nothing is run.
+
+### Testing an index on PostgreSQL
+
+The server tab can test an index on a PostgreSQL server. It plans one stored statement twice, with and without an index that does not exist. The index is a hypothetical one from the `hypopg` extension. Nothing is built.
+
+Planning a statement can run a function. PostgreSQL runs a function while it plans when the function is marked `IMMUTABLE` and its arguments are constants. The function runs under the login that plans. So the check does not use the monitoring login, which usually holds `pg_monitor` or `pg_read_all_stats`. It uses its own login.
+
+Set up the login the way you set up the remediation login:
+
+1. Create a login on the server. Give it no `pg_monitor`, `pg_read_all_stats`, `pg_read_all_data` or superuser role.
+2. Give it `CONNECT` on the database.
+3. Give it `USAGE` on each schema that holds a table you want to test, and on the schema `hypopg` is installed in.
+4. Give it `SELECT` on each table that the statements read. PostgreSQL checks table privileges when it starts an `EXPLAIN`, so a table the login cannot read stops the check with `permission denied`.
+5. Set `hypotheticalIndexUsername` to the login name and `hypotheticalIndexEncryptedPassword` to an `env:NAME` or `file:/path` reference to its password, in the server entry.
+
+The login needs no write grants. The check tests `SELECT` statements and `WITH` statements only. An `INSERT`, `UPDATE` or `DELETE` is refused with a plain message, because planning one needs a write grant on its table.
+
+With no login set, the check is refused. The message names the login, the grants and the two keys. Darling never falls back to the monitoring login.
 
 ### Ending a PostgreSQL session
 

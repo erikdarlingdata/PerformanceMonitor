@@ -153,6 +153,13 @@
       // reference). There is deliberately no plaintext variant of this one.
       "remediationUsername": "",
       "remediationEncryptedPassword": "",
+      // OPTIONAL, PostgreSQL targets only (#6170). The login the "Test an index" check runs under. The check never runs
+      // under the monitoring login, because planning a statement can run a function another role created. With neither key
+      // set the check is refused and says what to set up. The login needs CONNECT on the database, USAGE on the schemas and
+      // SELECT on the tables of the statements to test, and nothing else: no pg_monitor, pg_read_all_stats,
+      // pg_read_all_data or superuser. The password is an env:NAME or file:/path reference only.
+      "hypotheticalIndexUsername": "",
+      "hypotheticalIndexEncryptedPassword": "",
       "excludedDatabases": [ "StageDb" ]
     }
   ],
