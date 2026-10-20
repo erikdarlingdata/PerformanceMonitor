@@ -1880,6 +1880,17 @@ ALTER TABLE collect.query_store_forced_plans ADD COLUMN IF NOT EXISTS plan_guide
 ALTER TABLE collect.query_store_forced_plans ADD COLUMN IF NOT EXISTS plan_guide_scope text;";
 
     /// <summary>
+    /// V203 (#6170): the per-server login the PostgreSQL hypothetical-index check runs under, a pair in the same shape as the
+    /// remediation pair V113 added. <c>hypothetical_index_username</c> is a login name. <c>hypothetical_index_encrypted_password</c>
+    /// holds an <c>env:</c> or <c>file:</c> reference to its password, never the password. Both are nullable with no default and no
+    /// fallback: a server with neither has the check refused, and the check never runs under the monitoring login. A new column
+    /// pair needs no backfill, so each <c>ADD COLUMN</c> is catalog-only. An older build ignores the columns. Idempotent.
+    /// </summary>
+    private const string V203Sql = @"
+ALTER TABLE config.config_monitored_servers ADD COLUMN IF NOT EXISTS hypothetical_index_username text;
+ALTER TABLE config.config_monitored_servers ADD COLUMN IF NOT EXISTS hypothetical_index_encrypted_password text;";
+
+    /// <summary>
     /// V196 (#5632, step 5): Level 3 and the per-server action switches. <b>Nothing here turns an action on.</b>
     ///
     /// <para><b>Levels.</b> <c>ck_config_notification_routes_agent</c> now allows <c>agent_level</c> NULL and 0 to 3, and
@@ -2255,6 +2266,7 @@ $rung$;";
         new Migration(199, "blocking-head-evidence", V199Sql),
         new Migration(200, "excluded-volumes", V200Sql),
         new Migration(201, "forced-plan-variants-and-guides", V201Sql),
+        new Migration(203, "hypothetical-index-login", V203Sql),
     };
 
     /// <summary>

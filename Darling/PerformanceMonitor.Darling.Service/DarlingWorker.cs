@@ -15009,11 +15009,22 @@ AND   j.hypertable_name = '{relation}'", connection))
                 JsonError($"no statement text is stored for queryid {queryId} on '{displayName}'. Text is refreshed on its own cadence and a major-version upgrade re-keys every queryid, so a statement first seen minutes ago genuinely has none yet — there is nothing to re-plan until it does."));
         }
 
+        /* #6170: the check runs under its own login, never the monitoring login. Planning can evaluate a function a database role created
+           when its arguments are constants, and the monitoring login usually holds pg_monitor or pg_read_all_stats. With no login set up
+           the check is refused with what to set up, and nothing is sent to the monitored server. */
+        var (hypotheticalIndexConnectionString, loginRefusal) = Targets.HypotheticalIndexLogin.Resolve(
+            displayName, server.Config.HypotheticalIndexUsername, server.Config.HypotheticalIndexEncryptedPassword,
+            runtime.ConnectionString);
+        if (hypotheticalIndexConnectionString is null)
+        {
+            return new CommandOutcome(false, "hypothetical-index login not set up", JsonError(loginRefusal ?? "no login"));
+        }
+
         try
         {
             /* #6143: pinned like every other monitoring connection. The experiment sets the database's own
                search_path only around the EXPLAIN and the hypothetical index it plans against. */
-            await using var connection = PostgresTargetProvider.CreatePinnedConnection(runtime.ConnectionString);
+            await using var connection = PostgresTargetProvider.CreatePinnedConnection(hypotheticalIndexConnectionString);
             await connection.OpenAsync(cancellationToken);
 
             var result = await Targets.HypotheticalIndexExperiment.RunAsync(

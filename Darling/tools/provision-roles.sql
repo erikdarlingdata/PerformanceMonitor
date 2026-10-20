@@ -546,6 +546,7 @@ GRANT SELECT (server_id, name, host, database, auth, username, encrypt_mode, tru
               -- V113 (#2138 phase 1): the remediation credential's login name. Non-secret, exactly like
               -- username; remediation_encrypted_password is deliberately NOT granted.
               remediation_username,
+              hypothetical_index_username,
               -- V169 (#5452): the AWS role a target uses, and whether an external ID is stored with it.
               -- Non-secret; the external ID itself (aws_external_id) is deliberately NOT granted.
               aws_role_arn, aws_external_id_set)
@@ -645,6 +646,7 @@ GRANT SELECT (server_id, name, host, database, auth, username, encrypt_mode, tru
               engine, port,
               plan_force_bot_enabled,
               remediation_username,
+              hypothetical_index_username,
               aws_role_arn, aws_external_id_set)
     ON config.config_monitored_servers TO mcp;
 REVOKE SELECT ON config.config_command FROM mcp;

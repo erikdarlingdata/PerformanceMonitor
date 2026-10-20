@@ -370,6 +370,14 @@ ALTER TABLE IF EXISTS collect.query_store_forced_plans
     DROP COLUMN IF EXISTS plan_guide_name,
     DROP COLUMN IF EXISTS plan_guide_enabled,
     DROP COLUMN IF EXISTS plan_guide_scope;"),
+
+        // /// V203 (#6170): the hypothetical-index login pair on the server registry. The password column is the probe's newest sentinel. The
+        // rewind drops both, so a re-run of V203 adds them again. Safe on a store that never had them.
+        new(203, "hasHypotheticalIndexLogin",
+            @"
+ALTER TABLE IF EXISTS config.config_monitored_servers
+    DROP COLUMN IF EXISTS hypothetical_index_username,
+    DROP COLUMN IF EXISTS hypothetical_index_encrypted_password;"),
     ];
 
     /// <summary>

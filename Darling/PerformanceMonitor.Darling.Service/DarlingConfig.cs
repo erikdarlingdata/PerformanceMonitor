@@ -2612,6 +2612,28 @@ public sealed class MonitoredServer
     public string? RemediationEncryptedPassword { get; set; }
 
     /// <summary>
+    /// The login the PostgreSQL hypothetical-index check runs under (<c>config_monitored_servers.hypothetical_index_username</c>, #6170),
+    /// a third identity beside the monitoring login and the remediation login, set up the way the remediation login is.
+    ///
+    /// <para>The check plans statements taken from <c>pg_stat_statements</c>, and planning can evaluate a function a
+    /// database role created when its arguments are constants, under the roles of the login that plans. So the check never runs under the
+    /// monitoring login, which usually holds <c>pg_monitor</c> or <c>pg_read_all_stats</c>. It runs under this login, which needs only
+    /// CONNECT, USAGE on the schemas and SELECT on the tables of the statements to test. Null here means the check is refused on this
+    /// server with a message that says what to set up. There is no fallback.</para>
+    ///
+    /// <para>Read from the file at seed time like the other credential fields. Presence is the auth mode: always SQL auth.</para>
+    /// </summary>
+    [JsonPropertyName("hypotheticalIndexUsername")]
+    public string? HypotheticalIndexUsername { get; set; }
+
+    /// <summary>
+    /// The password of <see cref="HypotheticalIndexUsername"/> as an <c>env:NAME</c> or <c>file:path</c> reference, read on the Darling
+    /// host when the check runs. Only a reference is accepted: a stored password is refused, as it is for the remediation login.
+    /// </summary>
+    [JsonPropertyName("hypotheticalIndexEncryptedPassword")]
+    public string? HypotheticalIndexEncryptedPassword { get; set; }
+
+    /// <summary>
     /// The AWS IAM role Darling assumes to reach this Amazon RDS or Aurora target (#5452), as a role ARN such as
     /// <c>arn:aws:iam::123456789012:role/darling-monitor</c>. Unset (the default) means the process's own AWS
     /// credentials, exactly as before. PostgreSQL targets only.
