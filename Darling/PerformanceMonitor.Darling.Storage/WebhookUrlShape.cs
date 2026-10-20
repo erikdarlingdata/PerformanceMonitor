@@ -23,6 +23,7 @@ public static class WebhookUrlShape
         None,
         Shape,
         UserInfo,
+        BlockedAddress,
     }
 
     /// <summary>Parses a literal URL: absolute, http or https, a host, and no user info.</summary>
@@ -43,6 +44,13 @@ public static class WebhookUrlShape
             return Problem.UserInfo;
         }
 
+        /* A host written as a link-local or cloud instance address is refused at save, the same addresses the connect guard refuses at
+           send. A host name is checked at send, when it resolves. */
+        if (System.Net.IPAddress.TryParse(parsed.IdnHost, out var literal) && PerformanceMonitor.Notifications.WebhookConnectGuard.IsRefused(literal))
+        {
+            return Problem.BlockedAddress;
+        }
+
         uri = parsed;
         return Problem.None;
     }
@@ -52,6 +60,7 @@ public static class WebhookUrlShape
     {
         Problem.Shape => $"The {label} must be an absolute http or https URL with a host. (The value is not echoed.)",
         Problem.UserInfo => $"The {label} must not carry a user name or password; put any token in the path. (The value is not echoed.)",
+        Problem.BlockedAddress => $"The {label} must not be a link-local or cloud instance address (169.254.0.0/16, fe80::/10, fd00:ec2::254, 168.63.129.16, 100.100.100.200). (The value is not echoed.)",
         _ => null,
     };
 }

@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -160,6 +161,11 @@ WHERE route_id = $1";
             return "Set at least one destination or the agent channel — a route with every channel empty inherits everything and routes nothing.";
         }
 
+        if (RecipientsRefusal(row.SmtpRecipients) is { } recipients)
+        {
+            return recipients;
+        }
+
         if (row.FallbackRouteId.HasValue && row.RouteId != 0 && row.FallbackRouteId == row.RouteId)
         {
             return "A route cannot be its own fallback route.";
@@ -174,6 +180,48 @@ WHERE route_id = $1";
             ?? ValidateAgentLimit("Requests per day", row.AgentMaxPerDay, NotificationRoute.MinAgentMaxPerDay, NotificationRoute.MaxAgentMaxPerDay)
             ?? ValidateAgentLimit("Lease minutes", row.AgentLeaseMinutes, NotificationRoute.MinAgentLeaseMinutes, NotificationRoute.MaxAgentLeaseMinutes)
             ?? ValidateAgentLimit("Expiry minutes", row.AgentExpiryMinutes, NotificationRoute.MinAgentExpiryMinutes, NotificationRoute.MaxAgentExpiryMinutes);
+    }
+
+    /// <summary>The most addresses one route's recipient list holds.</summary>
+    public const int MaxRecipients = 50;
+
+    /// <summary>
+    /// The refusal for a recipient list, or null when it is fine or blank (#6231). The list is comma separated, as the email send
+    /// splits it, and each entry must be one plain address (no display name, no group). One copy for the Viewer's route window and
+    /// the MCP route tools. The text never carries an address.
+    /// </summary>
+    public static string? RecipientsRefusal(string? recipients)
+    {
+        if (string.IsNullOrWhiteSpace(recipients))
+        {
+            return null;
+        }
+
+        var entries = recipients.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (entries.Length > MaxRecipients)
+        {
+            return string.Create(CultureInfo.InvariantCulture, $"A route holds at most {MaxRecipients} email recipients.");
+        }
+
+        foreach (var entry in entries)
+        {
+            if (!System.Net.Mail.MailAddress.TryCreate(entry, out var address) || !string.Equals(address.Address, entry, StringComparison.Ordinal)
+                || !string.IsNullOrEmpty(address.DisplayName))
+            {
+                return "The email recipients are a comma separated list of plain addresses such as name@example.com. (The value is not echoed.)";
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>The recipient count and the distinct domains of a list, for an answer that must not carry the addresses.</summary>
+    public static (int Count, string[] Domains) DescribeRecipients(string? recipients)
+    {
+        var entries = (recipients ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var domains = entries.Select(e => e.Contains('@', StringComparison.Ordinal) ? e[(e.LastIndexOf('@') + 1)..] : "")
+            .Where(d => d.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray();
+        return (entries.Length, domains);
     }
 
     private static string? ValidateAgentLimit(string name, int value, int min, int max) =>
@@ -251,6 +299,17 @@ WHERE route_id = $1";
         row.GenericUrl = ResolveValue(row.GenericUrl, stored?.GenericUrl, "generic", where, parent.GenericProxy, parent.GenericProxy, "generic webhook URL", seal, refusal);
         row.PagerDutyRoutingKey = ResolveValue(row.PagerDutyRoutingKey, stored?.PagerDutyRoutingKey, "pagerduty", where, parent.PagerDutyProxy, parent.PagerDutyProxy, "PagerDuty routing key", seal, refusal);
     }
+
+    /// <summary>
+    /// Shapes and seals one NEW webhook value for a route's own row (#6231): the URL shape and address refusal for a URL slot, then the seal bound to
+    /// <c>route:&lt;id&gt;</c> and the channel's proxy. The MCP route tools use it per field, because they hold no stored value to keep.
+    /// <paramref name="slot"/> is teams, slack, generic or pagerduty. Throws <see cref="NotificationRouteRefusedException"/>.
+    /// </summary>
+    public static string SealNewRouteValue(
+        string slot, string plaintext, int routeId, string? proxy, string label, Func<string, PasswordBinding, string>? seal, string? refusal) =>
+        PasswordSeal.IsSealed(plaintext?.Trim())
+            ? throw new NotificationRouteRefusedException($"The {label} must be the value itself, not saved text.", NotificationRouteRefusalKind.Value)
+            : ResolveValue(plaintext, null, slot, PasswordBinding.WebhookRouteRow(routeId), proxy, proxy, label, seal, refusal);
 
     private static string ResolveValue(
         string? value, string? stored, string slot, string row, string? proxy, string? storedProxy, string label,

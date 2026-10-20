@@ -68,7 +68,7 @@ public sealed class McpAlertAdminLiveTests
     private static string Status(string answer) => JsonDocument.Parse(answer).RootElement.GetProperty("status").GetString()!;
 
     [Fact]
-    public async Task ARouteMadeOverMcp_HasNoDestinationOfItsOwn_AndAnEditLeavesTheViewersDestinationsAlone()
+    public async Task ARouteMadeOverMcpWithNoDestination_HasNoneOfItsOwn_AndAnEditThatNamesNoDestinationLeavesTheViewersAlone()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the MCP route checks.");
         var ct = TestContext.Current.CancellationToken;
@@ -96,12 +96,12 @@ public sealed class McpAlertAdminLiveTests
             var viewerId = await viewer.SaveNotificationRouteSealedAsync(
                 typed, null, NotificationRow.Defaults(), new ViewerPasswordSealer(key.PublicKey), null, ct);
 
-            /* What a route with a destination of its own matches, and which servers it covers, is changed in the Viewer: the refusal says so. */
-            var refused = await DarlingMcpAlertTools.UpdateNotificationRoute(
+            /* What a route with a destination of its own matches can be changed over MCP: its destinations are MCP's to set too. They stay. */
+            var changed = await DarlingMcpAlertTools.UpdateNotificationRoute(
                 source, viewerId, metric_match: "Blocking", fleet_wide: true, cancellationToken: ct);
-            Assert.Equal("refused", Status(refused));
-            Assert.Contains("Viewer", refused, StringComparison.Ordinal);
-            Assert.Equal("Deadlocks", (await OpenedRoutesAsync(scratch.ConnectionString, ring, ct)).Single(r => r.RouteId == viewerId).MetricMatch);
+            Assert.Equal("updated", Status(changed));
+            Assert.Equal("Blocking", (await OpenedRoutesAsync(scratch.ConnectionString, ring, ct)).Single(r => r.RouteId == viewerId).MetricMatch);
+            Assert.Equal("updated", Status(await DarlingMcpAlertTools.UpdateNotificationRoute(source, viewerId, metric_match: "Deadlocks", cancellationToken: ct)));
 
             /* An edit over MCP still changes the enabled flag and fallback, and never the destinations or the address list. */
             var edit = await DarlingMcpAlertTools.UpdateNotificationRoute(
