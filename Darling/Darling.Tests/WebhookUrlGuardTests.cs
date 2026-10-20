@@ -125,6 +125,36 @@ public sealed class WebhookUrlGuardTests
         Assert.Contains(WebhookConnectGuard.RefusalText, refused.ToString(), StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("64:ff9b::a9fe:a9fe", true)]
+    [InlineData("64:ff9b::169.254.169.254", true)]
+    [InlineData("::169.254.169.254", true)]
+    [InlineData("::a9fe:a9fe", true)]
+    [InlineData("64:ff9b::a83f:8110", true)]
+    [InlineData("::168.63.129.16", true)]
+    [InlineData("64:ff9b::a00:1", false)]
+    [InlineData("::10.1.2.3", false)]
+    [InlineData("64:ff9b::7f00:1", false)]
+    [InlineData("::1", false)]
+    [InlineData("::", false)]
+    [InlineData("64:ff9b:1::a9fe:a9fe", false)]
+    [InlineData("2001:db8::a9fe:a9fe", false)]
+    public void ANat64OrIpv4CompatibleForm_IsCheckedAsItsIpv4(string address, bool refused) =>
+        Assert.Equal(refused, WebhookConnectGuard.IsRefused(IPAddress.Parse(address)));
+
+    [Theory]
+    [InlineData("http://169.254.169.254/latest", WebhookUrlShape.Problem.BlockedAddress)]
+    [InlineData("http://169.254.169.254./latest", WebhookUrlShape.Problem.BlockedAddress)]
+    [InlineData("https://[::ffff:169.254.169.254]/x", WebhookUrlShape.Problem.BlockedAddress)]
+    [InlineData("https://[64:ff9b::a9fe:a9fe]/x", WebhookUrlShape.Problem.BlockedAddress)]
+    [InlineData("https://[::169.254.169.254]/x", WebhookUrlShape.Problem.BlockedAddress)]
+    [InlineData("http://168.63.129.16./machine", WebhookUrlShape.Problem.BlockedAddress)]
+    [InlineData("http://127.0.0.1./hook", WebhookUrlShape.Problem.None)]
+    [InlineData("http://10.1.2.3/hook", WebhookUrlShape.Problem.None)]
+    [InlineData("https://hooks.example.com./services/x", WebhookUrlShape.Problem.None)]
+    public void TheSaveCheck_ReadsATrailingDotAndTheTranslatedForms_AsTheirIpv4Address(string url, WebhookUrlShape.Problem expected) =>
+        Assert.Equal(expected, WebhookUrlShape.TryParse(url, out _));
+
     [Fact]
     public async Task TheHeartbeatClient_RefusesALinkLocalTarget_AndStillReachesAPrivateReceiver()
     {
