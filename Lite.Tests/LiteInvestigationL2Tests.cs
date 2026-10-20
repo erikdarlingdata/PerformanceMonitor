@@ -321,7 +321,7 @@ public sealed class LiteInvestigationL2Tests : IDisposable
         const string ColumnsSql = "SELECT string_agg(column_name, ',' ORDER BY column_name) FROM information_schema.columns " +
                                   "WHERE table_name = 'investigation_reports' AND column_name IN ('family_of', 'queries_run')";
         Assert.Equal("family_of,queries_run", Scalar(ColumnsSql));
-        Assert.Equal("76", Scalar("SELECT max(version) FROM schema_version"));
+        Assert.Equal(DuckDbInitializer.CurrentSchemaVersion.ToString(CultureInfo.InvariantCulture), Scalar("SELECT max(version) FROM schema_version"));
 
         var path = Path.Combine(_tempDir, "old.duckdb");
         using (var old = new DuckDbInitializer(path))
@@ -335,7 +335,7 @@ public sealed class LiteInvestigationL2Tests : IDisposable
         using var upgraded = new DuckDbInitializer(path);
         await upgraded.InitializeAsync();
         Assert.Equal("family_of,queries_run", Scalar(ColumnsSql, upgraded));
-        Assert.Equal("76", Scalar("SELECT max(version) FROM schema_version", upgraded));
+        Assert.Equal(DuckDbInitializer.CurrentSchemaVersion.ToString(CultureInfo.InvariantCulture), Scalar("SELECT max(version) FROM schema_version", upgraded));
         const string ShapeSql = "SELECT string_agg(column_name || ':' || data_type, ',' ORDER BY ordinal_position) FROM information_schema.columns WHERE table_name = 'investigation_reports'";
         var shape = Scalar(ShapeSql, upgraded);
         Assert.Contains("family_of:UUID", shape, StringComparison.Ordinal);
@@ -343,6 +343,6 @@ public sealed class LiteInvestigationL2Tests : IDisposable
         using var again = new DuckDbInitializer(path);
         await again.InitializeAsync();
         Assert.Equal(shape, Scalar(ShapeSql, again));
-        Assert.Equal("76", Scalar("SELECT max(version) FROM schema_version", again));
+        Assert.Equal(DuckDbInitializer.CurrentSchemaVersion.ToString(CultureInfo.InvariantCulture), Scalar("SELECT max(version) FROM schema_version", again));
     }
 }

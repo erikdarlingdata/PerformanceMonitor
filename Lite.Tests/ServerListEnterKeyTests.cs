@@ -31,7 +31,7 @@ public sealed class ServerListEnterKeyTests
     {
         var xaml = Read("Lite", "MainWindow.xaml");
 
-        Assert.Matches(@"<ListBox[^>]*x:Name=""ServerListView""[^>]*KeyDown=""ServerListView_KeyDown""", xaml);
+        Assert.Matches(@"<ui:InvokableListBox[^>]*x:Name=""ServerListView""[^>]*KeyDown=""ServerListView_KeyDown""", xaml);
         Assert.Contains("MouseDoubleClick=\"ServerListView_MouseDoubleClick\"", xaml, StringComparison.Ordinal);
         Assert.Contains("Text=\"Double-click or press Enter to open a server tab\"", xaml, StringComparison.Ordinal);
     }

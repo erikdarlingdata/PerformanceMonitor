@@ -54,7 +54,9 @@ public static class ClientTimeoutsRead
     /// <summary>The sentence every data answer carries beside the sampled lists.</summary>
     public const string SamplesAreNotTheTotal =
         "count and rate_per_minute are exact (the session's event_counter). top_statements, top_databases, top_client_apps and sampled_events " +
-        "come from sampled ring-buffer events, which are a subset: they show what the timeouts looked like, never how many there were.";
+        "come from sampled ring-buffer events, which are a subset: they show what the timeouts looked like, never how many there were. " +
+        "A statement's text is returned once: a sampled event whose text is already in top_statements (or in an earlier event) has " +
+        "statement null and statement_shown_in saying where to read it.";
 
     /// <summary>Applies the alert's freshness and span rules to the window as of <paramref name="windowEnd"/> (naive UTC).</summary>
     public static (ClientTimeoutsKind Kind, AttentionReading? Reading) Classify(AttentionWindow window, DateTime windowEnd)
@@ -113,26 +115,35 @@ public static class ClientTimeoutsRead
         int statementTextLength)
     {
         var rate = Math.Round(reading.TotalCount / reading.CoveredMinutes, 2, MidpointRounding.AwayFromZero);
-        return new
+
+        /* #6131: the same monitoring-tool T-SQL (1.5 KB) came back twice in one answer, once as a top statement's sample and
+           again as the sampled event it was drawn from. A text is written the first time it appears (top_statements first,
+           then the events newest first) and every later row carrying exactly that text points at it instead. */
+        var shownAt = new Dictionary<string, string>(StringComparer.Ordinal);
+        var topStatements = window.TopStatements.Select(t => new
         {
-            count = reading.TotalCount,
-            rate_per_minute = rate,
-            minutes_covered = Math.Round(reading.CoveredMinutes, 1, MidpointRounding.AwayFromZero),
-            collector_runs = reading.RunCount,
-            newest_run_time = Stamp(reading.NewestRunTime),
-            sampled_events_in_range = reading.SampleTotal,
-            samples_note = SamplesAreNotTheTotal,
-            top_statements = window.TopStatements.Select(t => new
+            statement_fingerprint = t.Name,
+            sampled_events = t.Samples,
+            sample_statement = McpHelpers.TruncateStatement(t.SampleText, statementTextLength),
+        }).ToList();
+        foreach (var top in topStatements)
+        {
+            if (!string.IsNullOrEmpty(top.sample_statement))
             {
-                statement_fingerprint = t.Name,
-                sampled_events = t.Samples,
-                sample_statement = McpHelpers.TruncateStatement(t.SampleText, statementTextLength),
-            }).ToList(),
-            top_databases = window.TopDatabases.Select(t => new { database_name = t.Name, sampled_events = t.Samples }).ToList(),
-            top_client_apps = window.TopApplications.Select(t => new { client_app_name = t.Name, sampled_events = t.Samples }).ToList(),
-            sampled_events_returned = Math.Min(samples.Count, limit),
-            sampled_events_truncated = samples.Count > limit,
-            sampled_events = samples.Take(limit).Select(s => new
+                shownAt.TryAdd(top.sample_statement, "top_statements");
+            }
+        }
+
+        var events = samples.Take(limit).Select((s, i) =>
+        {
+            var text = McpHelpers.TruncateStatement(s.StatementText, statementTextLength);
+            string? earlier = null;
+            if (!string.IsNullOrEmpty(text) && !shownAt.TryAdd(text, $"sampled_events[{i}]"))
+            {
+                earlier = shownAt[text];
+            }
+
+            return new
             {
                 event_time = s.EventTime is null ? null : Stamp(s.EventTime.Value),
                 collected_at = Stamp(s.CollectionTime),
@@ -142,8 +153,26 @@ public static class ClientTimeoutsRead
                 session_id = s.SessionId,
                 interrupt_duration_ms = s.InterruptDurationUs is null ? (double?)null : s.InterruptDurationUs.Value / 1000.0,
                 statement_fingerprint = s.StatementFingerprint,
-                statement = McpHelpers.TruncateStatement(s.StatementText, statementTextLength),
-            }).ToList(),
+                statement = earlier is null ? text : null,
+                statement_shown_in = earlier,
+            };
+        }).ToList();
+
+        return new
+        {
+            count = reading.TotalCount,
+            rate_per_minute = rate,
+            minutes_covered = Math.Round(reading.CoveredMinutes, 1, MidpointRounding.AwayFromZero),
+            collector_runs = reading.RunCount,
+            newest_run_time = Stamp(reading.NewestRunTime),
+            sampled_events_in_range = reading.SampleTotal,
+            samples_note = SamplesAreNotTheTotal,
+            top_statements = topStatements,
+            top_databases = window.TopDatabases.Select(t => new { database_name = t.Name, sampled_events = t.Samples }).ToList(),
+            top_client_apps = window.TopApplications.Select(t => new { client_app_name = t.Name, sampled_events = t.Samples }).ToList(),
+            sampled_events_returned = Math.Min(samples.Count, limit),
+            sampled_events_truncated = samples.Count > limit,
+            sampled_events = events,
         };
     }
 

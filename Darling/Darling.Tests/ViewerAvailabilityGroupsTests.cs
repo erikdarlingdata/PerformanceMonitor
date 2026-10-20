@@ -115,9 +115,11 @@ public sealed class AgTopologyCardsTests
 
     private static AgTopologyReplicaRow Replica(
         int serverId, string serverName, string agName, string replicaName, string role,
-        string syncHealth = "HEALTHY", string? connected = "CONNECTED", string? operational = "ONLINE") =>
+        string syncHealth = "HEALTHY", string? connected = "CONNECTED", string? operational = "ONLINE", bool? local = null, string? primary = null) =>
         new()
         {
+            IsLocal = local,
+            PrimaryReplica = primary,
             ServerId = serverId,
             ServerName = serverName,
             CollectionTime = new DateTime(2026, 7, 26, 12, 0, 0),
@@ -175,6 +177,44 @@ public sealed class AgTopologyCardsTests
         Assert.Single(fromSecondary.Replicas);
         Assert.Null(fromSecondary.PrimaryReplica);
         Assert.Equal("No primary reported", fromSecondary.PrimaryDisplay);
+    }
+
+    [Fact]
+    public void Build_ASecondaryCard_NamesTheStoredPrimary_ByDisplayNameWhenItIsMonitored()
+    {
+        /* #6159: the secondary's view lists only itself, but the engine told it who the primary is. */
+        var secondary = Replica(2, "NODE2", "AG1", "NODE2", "SECONDARY", local: true, primary: "NODE1");
+        var primary = Replica(1, "NODE1", "AG1", "NODE1", "PRIMARY", local: true, primary: "NODE1");
+
+        var named = AgTopology.BuildCards(new[] { primary, secondary }, Array.Empty<AgTopologyDatabaseRow>(), displayNameOf: id => id == 1 ? "Orders primary" : null);
+        var card = Assert.Single(named, c => c.ServerId == 2);
+        Assert.Equal("Orders primary", card.PrimaryReplica);
+        Assert.Equal("Primary: Orders primary", card.PrimaryDisplay);
+        Assert.False(card.PrimaryNotVisible);
+
+        /* Not a monitored server (or one with no display name): the replica name. */
+        var plain = AgTopology.BuildCards(new[] { secondary }, Array.Empty<AgTopologyDatabaseRow>());
+        Assert.Equal("Primary: NODE1", Assert.Single(plain).PrimaryDisplay);
+
+        /* The card reported from the primary keeps naming the replica that holds the role in its own list. */
+        Assert.Equal("Primary: NODE1", Assert.Single(named, c => c.ServerId == 1).PrimaryDisplay);
+    }
+
+    [Fact]
+    public void Build_ASecondaryCardWithNoStoredPrimary_KeepsTheNotVisibleNote_AndAnUnknownRoleKeepsThePlainOne()
+    {
+        /* A row from before the column existed: the local SECONDARY proves a primary exists; nothing names it. */
+        var before = Assert.Single(AgTopology.BuildCards(
+            new[] { Replica(2, "NODE2", "AG1", "NODE2", "SECONDARY", local: true) }, Array.Empty<AgTopologyDatabaseRow>()));
+        Assert.Null(before.PrimaryReplica);
+        Assert.True(before.PrimaryNotVisible);
+        Assert.Equal("Primary not visible from this secondary", before.PrimaryDisplay);
+
+        /* Nothing says the reporter is a secondary (no is_local row): still "No primary reported". */
+        var unknown = Assert.Single(AgTopology.BuildCards(
+            new[] { Replica(2, "NODE2", "AG1", "NODE2", "SECONDARY") }, Array.Empty<AgTopologyDatabaseRow>()));
+        Assert.False(unknown.PrimaryNotVisible);
+        Assert.Equal("No primary reported", unknown.PrimaryDisplay);
     }
 
     [Fact]

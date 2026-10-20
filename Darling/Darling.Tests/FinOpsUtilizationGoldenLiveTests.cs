@@ -128,23 +128,30 @@ public sealed class FinOpsUtilizationGoldenLiveTests
 
         var now = DarlingMcpTestData.Naive(DateTime.UtcNow);
 
-        /* Server A: four CPU samples, two memory snapshots (the newest wins), grant pressure, an Enterprise 8-core row. */
+        /* Server A: 14 CPU samples (a verdict needs ProvisioningVerdict.MinSamples, #6139), two memory snapshots (the newest wins),
+           grant pressure, an Enterprise 8-core row. The first four are the original 10, 20, 30, 95; the ten extras make the sorted
+           13th value 80 and the 14th 95, so p95 = 80 + 0.35 * 15 = 85.25, max 95 and avg 543 / 14 = 38.8: the figures the
+           hand-computed assertions already pin. */
         var cpu = new[] { 10, 20, 30, 95 };
         for (var i = 0; i < cpu.Length; i++)
             await InsertCpuAsync(connection, ServerIdA, ServerNameA, now.AddHours(-1 - i), cpu[i], ct);
+        var extra = new[] { 80, 34, 34, 34, 34, 34, 34, 34, 34, 36 };
+        for (var i = 0; i < extra.Length; i++)
+            await InsertCpuAsync(connection, ServerIdA, ServerNameA, now.AddMinutes(-5 * (i + 1)), extra[i], ct);
         await InsertMemoryAsync(connection, ServerIdA, ServerNameA, now.AddHours(-5), 6000m, 8000m, 16000m, 5000m, 512, 80, ct);
         await InsertMemoryAsync(connection, ServerIdA, ServerNameA, now.AddHours(-2), 7000m, 8000m, 16000m, 6000m, 512, 100, ct);
         await InsertGrantAsync(connection, ServerIdA, ServerNameA, now.AddHours(-3), 100m, 40m, 1000m, 4, 2, 1, 3, ct);
         await InsertGrantAsync(connection, ServerIdA, ServerNameA, now.AddHours(-2), 150m, 60m, 1000m, 6, 0, null, 2, ct);
         await InsertPropertiesAsync(connection, ServerIdA, ServerNameA, now.AddDays(-1), "Enterprise Edition", 3, 8, null, ct);
 
-        /* Server B: four fixed days at 12:00 and 13:00 UTC, varied load, an Azure SQL Database row. */
+        /* Server B: four fixed days at 12:00 and 13:00 UTC, varied load, an Azure SQL Database row. Every CPU reading below for B and
+           C is a run of six samples a minute apart (InsertCpuRunAsync), so each day or window holds the 12 a verdict needs (#6139). */
         var avgCpu = new[] { 5, 22, 45, 80 };
         for (var d = 0; d < 4; d++)
         {
             var day = anchor.AddDays(-4 + d);
-            await InsertCpuAsync(connection, ServerIdB, ServerNameB, day.AddHours(12), avgCpu[d], ct);
-            await InsertCpuAsync(connection, ServerIdB, ServerNameB, day.AddHours(13), avgCpu[d] + 7, ct);
+            await InsertCpuRunAsync(connection, ServerIdB, ServerNameB, day.AddHours(12), avgCpu[d], ct);
+            await InsertCpuRunAsync(connection, ServerIdB, ServerNameB, day.AddHours(13), avgCpu[d] + 7, ct);
             await InsertMemoryAsync(connection, ServerIdB, ServerNameB, day.AddHours(12), 3000m + (d * 400m), 4000m, 8192m, 2000m, 300, 40 + d, ct);
             await InsertGrantAsync(connection, ServerIdB, ServerNameB, day.AddHours(12), 200m + (d * 50m), 90m, 2000m, 5 + d, d, d == 2 ? null : 1, d, ct);
             await InsertGrantAsync(connection, ServerIdB, ServerNameB, day.AddHours(13), 300m + (d * 25m), 120m, 2000m, 3, d, 0, d + 1, ct);
@@ -154,19 +161,19 @@ public sealed class FinOpsUtilizationGoldenLiveTests
         /* Server B, two earlier days. Day -5 has low CPU and no memory pressure (OVER_PROVISIONED). Day -6 sits in the middle
            band with no pressure and no grant rows (RIGHT_SIZED). */
         var overDay = anchor.AddDays(-5);
-        await InsertCpuAsync(connection, ServerIdB, ServerNameB, overDay.AddHours(12), 4, ct);
-        await InsertCpuAsync(connection, ServerIdB, ServerNameB, overDay.AddHours(13), 9, ct);
+        await InsertCpuRunAsync(connection, ServerIdB, ServerNameB, overDay.AddHours(12), 4, ct);
+        await InsertCpuRunAsync(connection, ServerIdB, ServerNameB, overDay.AddHours(13), 9, ct);
         await InsertMemoryAsync(connection, ServerIdB, ServerNameB, overDay.AddHours(12), 2500m, 4000m, 8192m, 1500m, 300, 30, ct);
         await InsertGrantAsync(connection, ServerIdB, ServerNameB, overDay.AddHours(12), 100m, 40m, 2000m, 2, 0, 0, 0, ct);
         await InsertGrantAsync(connection, ServerIdB, ServerNameB, overDay.AddHours(13), 120m, 50m, 2000m, 3, 0, 0, 0, ct);
         var middleDay = anchor.AddDays(-6);
-        await InsertCpuAsync(connection, ServerIdB, ServerNameB, middleDay.AddHours(12), 30, ct);
-        await InsertCpuAsync(connection, ServerIdB, ServerNameB, middleDay.AddHours(13), 50, ct);
+        await InsertCpuRunAsync(connection, ServerIdB, ServerNameB, middleDay.AddHours(12), 30, ct);
+        await InsertCpuRunAsync(connection, ServerIdB, ServerNameB, middleDay.AddHours(13), 50, ct);
         await InsertMemoryAsync(connection, ServerIdB, ServerNameB, middleDay.AddHours(12), 3200m, 4000m, 8192m, 2200m, 300, 60, ct);
 
         /* Server C: an Azure SQL Database. Its vCore count (2) differs from the scheduler count (4), the workers are not collected. */
-        await InsertCpuAsync(connection, ServerIdC, ServerNameC, now.AddHours(-2), 12, ct);
-        await InsertCpuAsync(connection, ServerIdC, ServerNameC, now.AddHours(-1), 25, ct);
+        await InsertCpuRunAsync(connection, ServerIdC, ServerNameC, now.AddHours(-2), 12, ct);
+        await InsertCpuRunAsync(connection, ServerIdC, ServerNameC, now.AddHours(-1), 25, ct);
         await InsertMemoryAsync(connection, ServerIdC, ServerNameC, now.AddHours(-1), 1800m, 2000m, 4096m, 900m, 0, null, ct);
         await InsertPropertiesAsync(connection, ServerIdC, ServerNameC, now.AddDays(-1), "Standard", 5, 4, 2, ct);
 
@@ -176,6 +183,13 @@ public sealed class FinOpsUtilizationGoldenLiveTests
 
         /* Server E: CPU rows, no memory rows. */
         await InsertCpuAsync(connection, ServerIdE, ServerNameE, now.AddHours(-1), 20, ct);
+    }
+
+    /// <summary>Six samples of the same reading, a minute apart from <paramref name="at"/>: a pair of readings becomes the 12 samples a verdict needs (#6139).</summary>
+    private static async Task InsertCpuRunAsync(NpgsqlConnection c, int id, string name, DateTime at, int pct, CancellationToken ct)
+    {
+        for (var i = 0; i < 6; i++)
+            await InsertCpuAsync(c, id, name, at.AddMinutes(i), pct, ct);
     }
 
     private static Task InsertCpuAsync(NpgsqlConnection c, int id, string name, DateTime at, int pct, CancellationToken ct) =>

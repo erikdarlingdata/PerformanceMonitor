@@ -351,6 +351,16 @@ public sealed class DarlingMcpServerTrendTools
             return gated;
         }
 
+        /* #6177: the tempdb reads are fed by the tempdb DMVs, which a contained database user on Azure SQL Database is
+           refused on every run. That is a setup step (a server login in ##MS_ServerStateReader##), so it answers
+           precondition with the one message the Collection Health row and get_tempdb_trend carry, not "check that
+           collection is running". tempdb_file_io is asked about too: its rows arrive with the same tempdb read. */
+        if (metric is "tempdb_size" or "tempdb_file_io"
+            && await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, "tempdb_stats", cancellationToken) is { } refused)
+        {
+            return refused;
+        }
+
         await using var command = postgres.CreateCommand(everSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, resolved.ServerId);
@@ -362,7 +372,9 @@ public sealed class DarlingMcpServerTrendTools
                 $"No {what} recorded for {resolved.ServerName} in the last {hoursBack} hour(s). This server HAS collected them before, so this window is genuinely quiet rather than broken - widen hours_back to find the most recent samples.")
             : McpHelpers.Status(
                 "unavailable",
-                $"No {what} have EVER been recorded for {resolved.ServerName}. This is not an empty window - the {collector} collector has stored nothing at all for this server. Check that collection is running and that the server is enabled.");
+                metric == "tempdb_file_io"
+                    ? $"No {what} have EVER been recorded for {resolved.ServerName}. This is not an empty window - the {collector} collector has stored no rows for the tempdb files of this server (it may have stored other databases' files). Check that collection is running and that the server is enabled."
+                    : $"No {what} have EVER been recorded for {resolved.ServerName}. This is not an empty window - the {collector} collector has stored nothing at all for this server. Check that collection is running and that the server is enabled.");
     }
 
     private static async Task<List<string>> ReadTopNamesAsync(

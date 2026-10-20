@@ -131,7 +131,7 @@ public sealed class SameHostDatabasesKeepTheirOwnIdentityTests : IDisposable
     [Fact]
     public void TheOverviewHandlers_FindTheirServerThroughTheCardsServerId_AndNeverByHostName()
     {
-        var click = MemberCode("Lite/MainWindow.xaml.cs", "private void OverviewCard_MouseLeftButtonDown(");
+        var click = MemberCode("Lite/MainWindow.xaml.cs", "private void OpenOverviewCard(");
         Assert.Contains("summary.FindServer(_serverManager.GetAllServers())", click, StringComparison.Ordinal);
         Assert.DoesNotContain("ServerName", click, StringComparison.Ordinal);
 

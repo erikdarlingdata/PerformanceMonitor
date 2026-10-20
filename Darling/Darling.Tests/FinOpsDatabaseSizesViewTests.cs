@@ -112,6 +112,45 @@ public sealed class FinOpsDatabaseSizesViewTests
         Assert.Equal(80.0m, rows[0].GetProperty("used_pct").GetDecimal());
         Assert.Equal("FULL", rows[0].GetProperty("recovery_model").GetString());
     }
+
+    /// <summary>#6178: the FinOps Database Sizes data file of a Hyperscale database (the database has a log file with no size) says its
+    /// max size is a per-file cap. The log row, and the data file of a database with a sized log, have no note.</summary>
+    [Fact]
+    public void AHyperscaleDataFile_SaysItsMaxSizeIsAPerFileCap()
+    {
+        var data = File(2) with { DatabaseName = "hsdb", MaxSizeMb = 131_072m };
+        var log = File(3) with { DatabaseName = "hsdb", TotalSizeMb = null, MaxSizeMb = 2_097_152m };
+        var other = File(4) with { DatabaseName = "appdb", MaxSizeMb = 131_072m };
+
+        using var doc = System.Text.Json.JsonDocument.Parse(DarlingMcpFinOpsTools.DatabaseSizesPayload("srv", [data, log, other], 0m));
+        var rows = doc.RootElement.GetProperty("rows").EnumerateArray().ToList();
+
+        Assert.Equal(PerformanceMonitor.Common.HyperscaleLogSize.DataFileMaxSizeNote, rows[0].GetProperty("size_note").GetString());
+        Assert.False(rows[1].TryGetProperty("size_note", out _));
+        Assert.False(rows[2].TryGetProperty("size_note", out _));
+        Assert.Contains("one file", doc.RootElement.GetProperty("note").GetString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>#6178: the FinOps Database Sizes data file of a Hyperscale database whose log row is missing is known from the stored server
+    /// properties; without them the log row is the only evidence, and a sized log file rules Hyperscale out.</summary>
+    [Fact]
+    public void AHyperscaleDataFileWithNoLogRow_IsKnownFromTheStoredProperties_AndOnlyThen()
+    {
+        var data = File(2) with { DatabaseName = "hsdb", MaxSizeMb = 131_072m };
+        var sizedLog = File(3) with { DatabaseName = "hsdb", MaxSizeMb = 2_097_152m };
+
+        using var unknown = System.Text.Json.JsonDocument.Parse(DarlingMcpFinOpsTools.DatabaseSizesPayload("srv", [data], 0m));
+        Assert.False(unknown.RootElement.GetProperty("rows")[0].TryGetProperty("size_note", out _));
+        Assert.False(unknown.RootElement.TryGetProperty("note", out var none) && none.ValueKind == System.Text.Json.JsonValueKind.String);
+
+        using var stored = System.Text.Json.JsonDocument.Parse(DarlingMcpFinOpsTools.DatabaseSizesPayload("srv", [data], 0m, serverIsHyperscale: true));
+        Assert.Equal(PerformanceMonitor.Common.HyperscaleLogSize.DataFileMaxSizeNote, stored.RootElement.GetProperty("rows")[0].GetProperty("size_note").GetString());
+        Assert.Equal(PerformanceMonitor.Common.HyperscaleLogSize.DataFileCapNote, stored.RootElement.GetProperty("note").GetString());
+
+        using var contradicted = System.Text.Json.JsonDocument.Parse(DarlingMcpFinOpsTools.DatabaseSizesPayload("srv", [data, sizedLog], 0m, serverIsHyperscale: true));
+        Assert.All(contradicted.RootElement.GetProperty("rows").EnumerateArray(), r => Assert.False(r.TryGetProperty("size_note", out _)));
+    }
+
 }
 
 /* #1776 own-store: the fixture seeds its own scratch database, so nothing here shares rows with another test. */

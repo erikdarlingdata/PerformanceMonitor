@@ -947,6 +947,11 @@ public partial class MainWindow : Window
     private void ServerList_KeyDown(object sender, KeyEventArgs e) =>
         ServerListKeyboard.HandleKeyDown(e, OpenSelectedServerTab);
 
+    /// <summary>#6138: the Invoke (default action) an automation client sends a sidebar row selects it and runs the
+    /// same <see cref="OpenSelectedServerTab"/> the double-click and Enter run.</summary>
+    private void ServerList_ItemInvoked(object? sender, ItemInvokedEventArgs e) =>
+        ServerListKeyboard.HandleInvoke(ServerList, e.Item, OpenSelectedServerTab);
+
     /// <summary>Opens (or focuses) the selected server's per-server tab: the one body behind the list's
     /// double-click and its Enter key. A header row opens nothing.</summary>
     private void OpenSelectedServerTab()
@@ -1816,12 +1821,29 @@ public partial class MainWindow : Window
         if (e.ClickCount == 2
             && sender is FrameworkElement { DataContext: ServerSummaryItem summary })
         {
-            /* Resolved against the whole fleet, so a card click still opens a filtered-out server. */
-            var server = _fleet.Find(summary.ServerId);
-            if (server is not null)
-            {
-                OpenServerTab(server);
-            }
+            OpenOverviewCard(summary);
+        }
+    }
+
+    /// <summary>#6138: the Invoke (default action) an automation client sends a card runs the same
+    /// <see cref="OpenOverviewCard"/> the double-click runs.</summary>
+    private void OverviewItemsControl_ItemInvoked(object? sender, ItemInvokedEventArgs e)
+    {
+        if (e.Item is ServerSummaryItem summary)
+        {
+            OpenOverviewCard(summary);
+        }
+    }
+
+    /// <summary>Opens (or focuses) the tab of the server an Overview card shows: the one body behind the card's
+    /// double-click and its Invoke.</summary>
+    private void OpenOverviewCard(ServerSummaryItem summary)
+    {
+        /* Resolved against the whole fleet, so a card click still opens a filtered-out server. */
+        var server = _fleet.Find(summary.ServerId);
+        if (server is not null)
+        {
+            OpenServerTab(server);
         }
     }
 
@@ -1834,11 +1856,37 @@ public partial class MainWindow : Window
     {
         if (sender is FrameworkElement { DataContext: FleetRankedServer ranked })
         {
-            var server = _fleet.Find(ranked.ServerId);
-            if (server is not null)
-            {
-                OpenServerTab(server);
-            }
+            OpenWorstServer(ranked);
+        }
+    }
+
+    /// <summary>#6138: Enter on a focused Needs Attention row opens its server's tab, as the click does.</summary>
+    private void FleetWorstServer_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (sender is FrameworkElement { DataContext: FleetRankedServer ranked })
+        {
+            ServerListKeyboard.HandleKeyDown(e, () => OpenWorstServer(ranked));
+        }
+    }
+
+    /// <summary>#6138: the Invoke (default action) an automation client sends a Needs Attention row runs the same
+    /// <see cref="OpenWorstServer"/> the click and Enter run.</summary>
+    private void FleetWorstServersList_ItemInvoked(object? sender, ItemInvokedEventArgs e)
+    {
+        if (e.Item is FleetRankedServer ranked)
+        {
+            OpenWorstServer(ranked);
+        }
+    }
+
+    /// <summary>Opens (or focuses) the tab of the server a Needs Attention row ranks: the one body behind the row's click,
+    /// its Enter key and its Invoke.</summary>
+    private void OpenWorstServer(FleetRankedServer ranked)
+    {
+        var server = _fleet.Find(ranked.ServerId);
+        if (server is not null)
+        {
+            OpenServerTab(server);
         }
     }
 

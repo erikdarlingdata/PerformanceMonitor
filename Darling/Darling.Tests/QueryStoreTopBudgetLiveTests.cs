@@ -124,20 +124,81 @@ public sealed class QueryStoreTopBudgetLiveTests
     }
 
     /// <summary>
+    /// #6131: top 200 measured 177 KB with no field saying rows had been left out. The page is cut to the shared response
+    /// budget, heaviest rows kept, and <c>truncated</c> with the budget sentence say so; the window-floor flag keeps its own name.
+    /// A page that fits says <c>truncated: false</c>.
+    /// </summary>
+    [Fact]
+    public async Task Top200_IsCutUnderTheResponseBudget_AndSaysSo()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live query-store-top budget census.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            const int Asked = 200;
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            await SeedAsync(connection, ct, Asked);
+
+            var answer = await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName, top: Asked);
+            Assert.False(McpHelpers.IsErrorEnvelope(answer), $"tool returned an error: {answer}");
+            Assert.True(Encoding.UTF8.GetByteCount(answer) <= McpResponseBudget.DefaultBytes,
+                $"top {Asked} answered {Encoding.UTF8.GetByteCount(answer)} bytes, over the {McpResponseBudget.DefaultBytes}-byte budget.");
+
+            using var doc = JsonDocument.Parse(answer);
+            var root = doc.RootElement;
+            var returned = root.GetProperty("queries").GetArrayLength();
+            Assert.InRange(returned, 1, Asked - 1);
+            Assert.True(root.GetProperty("truncated").GetBoolean());
+            var note = root.GetProperty("budget_note").GetString();
+            Assert.Contains("response budget", note, StringComparison.Ordinal);
+            Assert.Contains($"only {returned}", note, StringComparison.Ordinal);
+            /* window_truncated is the window floor, a separate fact from the page cut; it stays on the answer. */
+            Assert.True(root.TryGetProperty("window_truncated", out _));
+
+            /* The kept rows are the heaviest: the first is the last one seeded (cost grows with the seed index). */
+            Assert.Equal(5_000_000_000L + Asked - 1, root.GetProperty("queries")[0].GetProperty("query_id").GetInt64());
+
+            var small = await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName, top: 5);
+            using var smallDoc = JsonDocument.Parse(small);
+            Assert.False(smallDoc.RootElement.GetProperty("truncated").GetBoolean());
+            Assert.Equal(JsonValueKind.Null, smallDoc.RootElement.GetProperty("budget_note").ValueKind);
+            Assert.Equal(5, smallDoc.RootElement.GetProperty("queries").GetArrayLength());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
     /// Twenty-five distinct (database, query_id, plan_id) groups, twenty minutes apart so all fall inside the
     /// default 24-hour window; execution_count grows with <c>i</c> so the ranking (SUM(execution_count) *
     /// AVG(avg_duration_us)) is deterministic and the most expensive row is the last one seeded -- the one
     /// whose full, untruncated text the full_text assertion checks.
     /// </summary>
-    private static async Task<string> SeedAsync(NpgsqlConnection connection, CancellationToken ct)
+    private static async Task<string> SeedAsync(NpgsqlConnection connection, CancellationToken ct, int rowCount = RowCount)
     {
         var newest = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-2));
+        /* A page bigger than the default seed is packed a minute apart so every group stays inside the 24-hour window. */
+        var stepMinutes = rowCount > RowCount ? 1 : 20;
         string? mostExpensiveQueryText = null;
         var highestCost = -1L;
 
-        for (var i = 0; i < RowCount; i++)
+        for (var i = 0; i < rowCount; i++)
         {
-            var collectionTime = newest.AddMinutes(-20 * (RowCount - i));
+            var collectionTime = newest.AddMinutes(-stepMinutes * (rowCount - i));
             var databaseName = $"query_store_top_budget_db_{i % 4}";
             var queryId = 5_000_000_000L + i;
             var planId = 6_000_000_000L + i;

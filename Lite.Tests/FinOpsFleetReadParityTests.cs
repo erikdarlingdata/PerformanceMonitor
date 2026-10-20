@@ -138,7 +138,7 @@ public class FinOpsFleetReadParityTests : IDisposable
             SeedServerProperties(conn, emptyServerId, "EMPTY", nextId--, now);
 
             Exec(conn, @"INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization)
-                         VALUES ($1,$2,$3,$4,$2,55,5)", nextId--, now, busyServerId, "BUSY");
+                         SELECT $1 - i * 1000000,$2,$3,$4,$2,55,5 FROM range(12) t(i)", nextId--, now, busyServerId, "BUSY");
 
             // Two databases at the latest size snapshot; only DbActive shows up in 7-day query_stats.
             Exec(conn, @"INSERT INTO database_size_stats (collection_id, collection_time, server_id, server_name, database_name, database_id,
@@ -257,7 +257,7 @@ public class FinOpsFleetReadParityTests : IDisposable
             {
                 SeedServerProperties(conn, serverId, name, nextId--, now);
                 Exec(conn, @"INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization)
-                             VALUES ($1,$2,$3,$4,$2,40,5)", nextId--, now, serverId, name);
+                             SELECT $1 - i * 1000000,$2,$3,$4,$2,40,5 FROM range(12) t(i)", nextId--, now, serverId, name);
                 Exec(conn, @"INSERT INTO database_size_stats (collection_id, collection_time, server_id, server_name, database_name, database_id,
                               file_id, file_type_desc, file_name, physical_name, total_size_mb, used_size_mb)
                              VALUES ($1,$2,$3,$4,'DbOne',1,1,'ROWS','a.mdf','a.mdf',20480,8000)", nextId--, now, serverId, name);
@@ -309,7 +309,7 @@ public class FinOpsFleetReadParityTests : IDisposable
                              VALUES ($1,$2,$3,$4,'DbOne',1,1,'ROWS','a.mdf','a.mdf',20480,8000)", nextId--, now, serverId, name);
             }
 
-            foreach (var cpu in new[] { 4, 6, 8 })
+            foreach (var cpu in new[] { 4, 6, 8, 4, 6, 8, 4, 6, 8, 4, 6, 8 })
             {
                 Exec(conn, @"INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization)
                              VALUES ($1,$2,$3,$4,$2,$5,1)", nextId--, now.AddHours(-1), quietServerId, "QUIET", cpu);
@@ -359,7 +359,7 @@ public class FinOpsFleetReadParityTests : IDisposable
                              VALUES ($1,$2,$3,$4,16384,8192,12288,12000,10000)", nextId--, now.AddHours(-1), serverId, name);
             }
 
-            foreach (var cpu in new[] { 4, 6, 8 })
+            foreach (var cpu in new[] { 4, 6, 8, 4, 6, 8, 4, 6, 8, 4, 6, 8 })
             {
                 Exec(conn, @"INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization)
                              VALUES ($1,$2,$3,$4,$2,$5,1)", nextId--, now.AddHours(-1), quietServerId, "QUIET", cpu);
@@ -370,7 +370,7 @@ public class FinOpsFleetReadParityTests : IDisposable
 
         var quiet = await svc.GetUtilizationEfficiencyAsync(quietServerId);
         Assert.NotNull(quiet);
-        Assert.Equal(3L, quiet.CpuSamples);
+        Assert.Equal(12L, quiet.CpuSamples);
         Assert.Equal(PerformanceMonitor.Common.ProvisioningVerdict.OverProvisioned, quiet.ProvisioningStatus);
 
         var noCpu = await svc.GetUtilizationEfficiencyAsync(noCpuServerId);
@@ -436,6 +436,67 @@ public class FinOpsFleetReadParityTests : IDisposable
 
     /// <summary>One collected <c>server_properties</c> row, which is what makes a server known to the fleet read.
     /// The NOT NULL edition and hardware columns are filled with values the read never looks at.</summary>
+    /// <summary>
+    /// #6139, all three Lite reads (the 24-hour card, the fleet grid, the 7-day trend) against stored rows: six samples is no verdict
+    /// (NOT_ENOUGH_DATA, the sentence the tab shows beside it); 72.5% stolen memory is UNDER_PROVISIONED, not the OVER_PROVISIONED a
+    /// quiet CPU and a small buffer pool share of RAM used to give; a quiet server with twelve samples and spare memory is still OVER_PROVISIONED.
+    /// </summary>
+    [Fact]
+    public async Task FewSamplesAndHighStolenMemory_ReachTheCardTheGridAndTheTrend()
+    {
+        using var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeFromTemplateAsync();
+
+        const int fewId = 91;
+        const int stolenId = 92;
+        const int spareId = 93;
+        var now = DateTime.UtcNow;
+        long nextId = -1;
+
+        using (var conn = new DuckDBConnection($"Data Source={_dbPath}"))
+        {
+            await conn.OpenAsync();
+
+            foreach (var (serverId, name, samples, totalMb, bufferPoolMb) in new[]
+            {
+                (fewId, "FEW", 6, 12000, 10000),
+                (stolenId, "STOLEN", 12, 1000, 275),
+                (spareId, "SPARE", 12, 12000, 10000),
+            })
+            {
+                SeedServerProperties(conn, serverId, name, nextId--, now);
+                Exec(conn, @"INSERT INTO memory_stats (collection_id, collection_time, server_id, server_name,
+                              total_physical_memory_mb, available_physical_memory_mb, target_server_memory_mb, total_server_memory_mb, buffer_pool_mb)
+                             VALUES ($1,$2,$3,$4,16384,8192,$5,$5,$6)", nextId--, now.AddHours(-1), serverId, name, totalMb, bufferPoolMb);
+                for (var i = 0; i < samples; i++)
+                {
+                    Exec(conn, @"INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization)
+                                 VALUES ($1,$2,$3,$4,$2,5,1)", nextId--, now.AddMinutes(-5 * (i + 1)), serverId, name);
+                }
+            }
+        }
+
+        var svc = new LocalDataService(initializer);
+
+        var few = await svc.GetUtilizationEfficiencyAsync(fewId);
+        Assert.NotNull(few);
+        Assert.Equal(PerformanceMonitor.Common.ProvisioningVerdict.NotEnoughData, few.ProvisioningStatus);
+        Assert.Equal(6L, few.CpuSamples);
+        Assert.Equal(PerformanceMonitor.Common.ProvisioningVerdict.UnderProvisioned, (await svc.GetUtilizationEfficiencyAsync(stolenId))!.ProvisioningStatus);
+        Assert.Equal(PerformanceMonitor.Common.ProvisioningVerdict.OverProvisioned, (await svc.GetUtilizationEfficiencyAsync(spareId))!.ProvisioningStatus);
+
+        var fleet = await svc.GetServerMetricsAsync();
+        Assert.Equal(PerformanceMonitor.Common.ProvisioningVerdict.NotEnoughData, fleet[fewId].ProvisioningStatus);
+        Assert.Equal(PerformanceMonitor.Common.ProvisioningVerdict.UnderProvisioned, fleet[stolenId].ProvisioningStatus);
+        Assert.Equal(PerformanceMonitor.Common.ProvisioningVerdict.OverProvisioned, fleet[spareId].ProvisioningStatus);
+
+        // The trend is per day: the samples may straddle midnight, so it is the day rows together that carry the rule.
+        var fewDays = await svc.GetProvisioningTrendAsync(fewId);
+        Assert.All(fewDays, d => Assert.Equal(PerformanceMonitor.Common.ProvisioningVerdict.NotEnoughData, d.Status));
+        var stolenDays = await svc.GetProvisioningTrendAsync(stolenId);
+        Assert.DoesNotContain(stolenDays, d => d.Status == PerformanceMonitor.Common.ProvisioningVerdict.OverProvisioned);
+    }
+
     private static void SeedServerProperties(DuckDBConnection conn, int serverId, string serverName, long collectionId, DateTime collectionTime) =>
         Exec(conn, @"INSERT INTO server_properties (collection_id, collection_time, server_id, server_name,
                       edition, product_version, product_level, engine_edition, cpu_count, hyperthread_ratio, physical_memory_mb)
