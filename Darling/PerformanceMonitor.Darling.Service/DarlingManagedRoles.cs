@@ -1497,6 +1497,9 @@ GRANT INSERT, UPDATE, DELETE ON {config}.database_state_expected TO {viewer};
 GRANT INSERT, UPDATE, DELETE ON {config}.config_mute_rules TO {mcp};
 GRANT UPDATE ON {config}.config_alert_settings TO {mcp};
 GRANT UPDATE (config_version, updated_at) ON {config}.config_service TO {mcp};
+-- #6230: pause_collection / resume_collection run the command plane's own pause and resume write as mcp, so mcp may also set the
+--     one paused column. No other service flag (capture_plans, mcp_enabled, mcp_port, ...) is writable by mcp.
+GRANT UPDATE (paused) ON {config}.config_service TO {mcp};
 -- #5085: the fleet server-tag write tools (create/update/delete/assign/unassign_server_tag) run as mcp. The admin
 --    gate is these two single-table grants and nothing else: a role without them gets 42501 on a tag write.
 --    Both tables are non-secret and server_tags.id is GENERATED ALWAYS AS IDENTITY (so no sequence grant). V181 (#5750)

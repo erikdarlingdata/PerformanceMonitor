@@ -286,7 +286,7 @@ public sealed class DarlingSecuritySplitLiveTests
             Assert.Equal("42501", denied.SqlState);
 
             var beaconOnly = await Assert.ThrowsAsync<PostgresException>(async () =>
-                await ExecAsync(viewer, "UPDATE config.config_service SET paused = NOT paused WHERE id = 1", ct));
+                await ExecAsync(viewer, "UPDATE config.config_service SET capture_plans = NOT capture_plans WHERE id = 1", ct));
             Assert.Equal("42501", beaconOnly.SqlState);
 
             bodySucceeded = true;
@@ -420,9 +420,9 @@ public sealed class DarlingSecuritySplitLiveTests
             Assert.Equal("42501", stillDenied.SqlState);
 
             /* And the config_service beacon grant is strictly COLUMN-level: mcp can bump config_version/updated_at
-               (proven above) but CANNOT flip a real service flag like paused. */
+               (proven above) but CANNOT flip a real service flag like capture_plans (paused is the one other column mcp holds, #6230). */
             var beaconOnly = await Assert.ThrowsAsync<PostgresException>(async () =>
-                await ExecAsync(mcp, "UPDATE config.config_service SET paused = NOT paused WHERE id = 1", ct));
+                await ExecAsync(mcp, "UPDATE config.config_service SET capture_plans = NOT capture_plans WHERE id = 1", ct));
             Assert.Equal("42501", beaconOnly.SqlState);
 
             bodySucceeded = true;

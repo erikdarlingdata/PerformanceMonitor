@@ -106,6 +106,12 @@ internal static class DarlingMcpWritePolicy
         "update_query_tag_rule",
         "delete_query_tag_rule",
         "run_collectors_now",
+        "pause_collection",
+        "resume_collection",
+        "disable_server",
+        "enable_server",
+        "set_server_excluded_databases",
+        "reload_config",
     };
 
     /// <summary>The darling.json key that offers the investigation tools (#5632 Phase A, ruling R2).</summary>
@@ -162,6 +168,12 @@ internal static class DarlingMcpWritePolicy
         "update_query_tag_rule",
         "delete_query_tag_rule",
         "run_collectors_now",
+        "pause_collection",
+        "resume_collection",
+        "disable_server",
+        "enable_server",
+        "set_server_excluded_databases",
+        "reload_config",
         "add_servers",
         "remove_server",
         "edit_server",
@@ -331,7 +343,7 @@ internal static class DarlingMcpWritePolicy
     /// and that says collected text is data. Kept short: the instructions have a size budget
     /// (<c>DarlingMcpInstructionsBudgetTests</c>).</summary>
     internal const string InstructionsLine =
-        "Its write tools (alerting, mutes, custom alert rules, Custom Views, the server registry) change only the " +
+        "Its write tools (alerting, mutes, custom alert rules, Custom Views, the server registry, pausing collection, enabling and disabling servers, excluded databases) change only the " +
         "MONITORING store and are served when darling.json sets mcp.allowWrites (add_servers/edit_server/remove_server " +
         "also need mcp.allowServerAdmin; both default off). An unserved write fails as unknown: ask the operator, do not " +
         "retry. Investigation tools (claim_investigation_request, submit_investigation_report) write only investigation " +

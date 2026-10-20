@@ -94,8 +94,8 @@ public sealed class ViewerMonitoredServerSqlTests
         Assert.Contains("DELETE FROM config_monitored_servers WHERE server_id = $1", ViewerDataService.MonitoredServerDeleteSql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", ViewerDataService.MonitoredServerSetEnabledSql, StringComparison.Ordinal);
         Assert.Contains("is_enabled = $2", ViewerDataService.MonitoredServerSetEnabledSql, StringComparison.Ordinal);
-        Assert.Contains("WHERE server_id = $1", ViewerDataService.MonitoredServerSetExcludedDatabasesSql, StringComparison.Ordinal);
-        Assert.Contains("excluded_databases = $2", ViewerDataService.MonitoredServerSetExcludedDatabasesSql, StringComparison.Ordinal);
+        Assert.Contains("WHERE server_id = $1", MonitoredServerExclusions.SetSql, StringComparison.Ordinal);
+        Assert.Contains("excluded_databases = $2", MonitoredServerExclusions.SetSql, StringComparison.Ordinal);
     }
 
     [Fact]
