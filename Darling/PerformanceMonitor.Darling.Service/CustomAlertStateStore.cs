@@ -84,7 +84,8 @@ WHERE s.rule_id = $1 AND s.firing = TRUE";
     /// rule are absent (the FK cascade already dropped them), so this reaches only DISABLED rules (to force-resolve
     /// + clean) and enabled rules whose servers may have left scope.</summary>
     public const string ListAllWithRuleSql = @"
-SELECT s.rule_id, s.server_id, s.firing, r.name, r.enabled
+SELECT s.rule_id, s.server_id, s.firing, r.name, r.enabled,
+       (r.expires_at_utc IS NOT NULL AND r.expires_at_utc <= (now() AT TIME ZONE 'UTC')) AS rule_expired
 FROM custom_alert_state s
 JOIN custom_alert_rules r ON r.id = s.rule_id";
 
@@ -202,7 +203,7 @@ JOIN custom_alert_rules r ON r.id = s.rule_id";
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(new CustomAlertStateRow(
-                reader.GetInt64(0), reader.GetInt32(1), reader.GetBoolean(2), reader.GetString(3), reader.GetBoolean(4)));
+                reader.GetInt64(0), reader.GetInt32(1), reader.GetBoolean(2), reader.GetString(3), reader.GetBoolean(4), reader.GetBoolean(5)));
         }
 
         return rows;
@@ -243,4 +244,4 @@ public sealed record CustomAlertRuleState(
 /// <summary>One <c>custom_alert_state</c> row joined to its rule's name + enabled flag — the #3305 reconcile's
 /// unit of work: whether this (rule, server) subject should be torn down (rule disabled, or server out of scope)
 /// and, if it is <see cref="Firing"/>, force-resolved first.</summary>
-public sealed record CustomAlertStateRow(long RuleId, int ServerId, bool Firing, string RuleName, bool RuleEnabled);
+public sealed record CustomAlertStateRow(long RuleId, int ServerId, bool Firing, string RuleName, bool RuleEnabled, bool RuleExpired = false);

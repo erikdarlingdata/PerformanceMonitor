@@ -118,7 +118,7 @@ public sealed class StoreToastAndCheckpointerTests
         var gate = source.IndexOf("if (freespacemapInstalled)", StringComparison.Ordinal);
         var update = source.IndexOf("new NpgsqlCommand(ToastLiveBytesUpdateSql", StringComparison.Ordinal);
         var checkpointer = source.IndexOf("new NpgsqlCommand(checkpointerSql", StringComparison.Ordinal);
-        var store = source.IndexOf("new NpgsqlCommand(StoreInsertSql", StringComparison.Ordinal);
+        var store = source.IndexOf("new NpgsqlCommand(exact ? StoreInsertSql", StringComparison.Ordinal);
         Assert.True(insert >= 0 && probe > insert && gate > probe && update > gate && checkpointer > update && store > checkpointer,
             $"the sweep's statement order moved: insert {insert}, probe {probe}, gate {gate}, update {update}, checkpointer {checkpointer}, store {store}");
         Assert.Contains("probe.Parameters.AddWithValue(FreespacemapExtensionName)", source, StringComparison.Ordinal);

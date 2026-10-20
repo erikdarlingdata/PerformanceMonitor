@@ -110,6 +110,9 @@ public sealed class McpToolLatencyFilter
             /* #5793: who made the call, worked out once here so the recorder only ever sees the finished string. The
                composed-panel tool records itself through the shared runner, which reads it from the ambient value. */
             var caller = CallerOf(request);
+
+            /* Set for every tool, not just the composed panel: a write tool names its caller in its own log line. */
+            ReadCaller.SetAmbientMcpCaller(caller);
             if (string.Equals(toolName, SkippedToolName, StringComparison.Ordinal))
             {
                 ReadCaller.SetAmbientMcpCaller(caller);
@@ -139,7 +142,21 @@ public sealed class McpToolLatencyFilter
                 return await ServeCachedAsync(admission, next, request, toolName, windowBand, readScope.Scope, caller, cancellationToken);
             }
 
-            var answer = await RunReadAsync(next, request, toolName, windowBand, readScope.Scope, caller, cancellationToken);
+            CallToolResult answer;
+            try
+            {
+                answer = await RunReadAsync(next, request, toolName, windowBand, readScope.Scope, caller, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException && DarlingMcpWritePolicy.IsWrite(toolName))
+            {
+                LogWriteCall(toolName, caller, "failed");
+                throw;
+            }
+
+            if (DarlingMcpWritePolicy.IsWrite(toolName))
+            {
+                LogWriteCall(toolName, caller, WriteOutcomeOf(answer));
+            }
 
             /* A successful write, or a successful unanchored analyze_server (it stores findings, D5), makes every cached
                answer stored before it unreachable. */
@@ -150,6 +167,56 @@ public sealed class McpToolLatencyFilter
 
             return answer;
         };
+
+    /// <summary>One Information line for every call of a write tool: the tool, the caller and the outcome, and never the arguments (a
+    /// write tool can take a webhook URL or a credential). A write tool that changes a collector schedule also logs what it changed,
+    /// from inside the tool.</summary>
+    private void LogWriteCall(string toolName, string caller, string outcome) =>
+        _logger?.LogInformation("MCP write tool {Tool} called by {Caller}: {Outcome}", toolName, caller, outcome);
+
+    /// <summary>The outcome word a write call logs, read from the answer the way <see cref="ClassifyResult"/> reads a read's: a write
+    /// tool answers a refusal and a caught error as text, never as a thrown exception, so the error flag alone would call every one
+    /// of them completed. A <c>refused</c> or <c>invalid</c> status is <c>refused</c> (nothing was changed because the request as
+    /// given cannot be served), the caught-error envelope or an error flag is <c>failed</c>, anything else is <c>completed</c>.
+    /// Internal so a unit test can call it without a running server.</summary>
+    internal static string WriteOutcomeOf(CallToolResult result)
+    {
+        if (result.Content is { Count: 1 } content && content[0] is TextContentBlock block)
+        {
+            var text = EnvelopeText(block.Text);
+            if (McpHelpers.IsErrorEnvelope(text))
+            {
+                return "failed";
+            }
+
+            if (McpHelpers.IsRefusalEnvelope(text) || StatusWordOf(text) == "refused")
+            {
+                return "refused";
+            }
+        }
+
+        return result.IsError == true ? "failed" : "completed";
+    }
+
+    /// <summary>The <c>status</c> word of a JSON object answer, or null when the text is not one.</summary>
+    private static string? StatusWordOf(string text)
+    {
+        if (!text.AsSpan().TrimStart().StartsWith("{".AsSpan(), StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        try
+        {
+            return JsonNode.Parse(text) is JsonObject body && body["status"] is JsonValue status && status.TryGetValue<string>(out var word)
+                ? word
+                : null;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return null;
+        }
+    }
 
     /// <summary>The read itself: admission, then the tool, recording the outcome. A cached read runs it once for every
     /// caller waiting on it, under the flight's token.</summary>

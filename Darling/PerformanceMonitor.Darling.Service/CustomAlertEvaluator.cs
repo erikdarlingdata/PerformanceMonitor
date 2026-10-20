@@ -737,6 +737,9 @@ public sealed class CustomAlertEvaluator
     /// scope, or has been removed from monitoring entirely (#3305).</summary>
     internal const string TeardownReasonOutOfScope = "the server is no longer in the rule's scope";
 
+    /// <summary>The reason a firing (rule, server) subject is force-resolved when its rule has passed its expiry (#6235).</summary>
+    internal const string TeardownReasonExpired = "the rule expired";
+
     /// <summary>The reason a firing (rule, server) subject is force-resolved when the rule is deleted (#3305).</summary>
     internal const string TeardownReasonDeleted = "the rule was deleted";
 
@@ -823,7 +826,7 @@ public sealed class CustomAlertEvaluator
         // refresh under concurrent server sweeps is harmless (last writer wins; both compute the same list).
         if (DateTime.UtcNow - _cacheRefreshedUtc < _cacheTtl)
         {
-            return _cache;
+            return DropExpired(_cache);
         }
 
         var rows = ApplyEnabledCeiling(await _ruleStore.ListEnabledAsync(cancellationToken), _logger);
@@ -867,7 +870,18 @@ public sealed class CustomAlertEvaluator
         _cache = parsed;
         _brokenRules = broken;
         _cacheRefreshedUtc = DateTime.UtcNow;
-        return _cache;
+        return DropExpired(_cache);
+    }
+
+    /// <summary>
+    /// #6235: a rule past its expiry is not evaluated and does not fire. The store's read already leaves an expired rule out, but the
+    /// cache holds a rule for up to its TTL, so the expiry is checked again here against the clock on every read of the cache: a
+    /// rule that expires while it is cached stops at its expiry, not at the next refresh.
+    /// </summary>
+    private static IReadOnlyList<ParsedRule> DropExpired(IReadOnlyList<ParsedRule> rules)
+    {
+        var now = DateTime.UtcNow;
+        return rules.Any(r => r.Row.IsExpiredAt(now)) ? rules.Where(r => !r.Row.IsExpiredAt(now)).ToList() : rules;
     }
 
     /// <summary>
@@ -1024,11 +1038,18 @@ public sealed class CustomAlertEvaluator
     /// </summary>
     internal static string? ClassifyStateTeardown(
         bool ruleEnabled, CustomAlertRuleDefinition? definition, IReadOnlySet<int>? tagServerIds,
-        int serverId, string? serverStorageName)
+        int serverId, string? serverStorageName, bool ruleExpired = false)
     {
         if (!ruleEnabled)
         {
             return TeardownReasonDisabled;
+        }
+
+        /* #6235: an expired rule is no longer evaluated, so an incident it left open would never resolve on its own, the
+           same orphan a disabled rule leaves. Disabled wins when both hold: the operator's switch is the stronger fact. */
+        if (ruleExpired)
+        {
+            return TeardownReasonExpired;
         }
 
         if (definition is null)
@@ -1099,7 +1120,7 @@ public sealed class CustomAlertEvaluator
             var storageName = monitoredServers.TryGetValue(row.ServerId, out var server) ? server.StorageName : null;
             var parsedRule = parsedById.TryGetValue(row.RuleId, out var pr) ? pr : null;
             var reason = ClassifyStateTeardown(
-                row.RuleEnabled, parsedRule?.Definition, parsedRule?.TagServerIds, row.ServerId, storageName);
+                row.RuleEnabled, parsedRule?.Definition, parsedRule?.TagServerIds, row.ServerId, storageName, row.RuleExpired);
             if (reason is null)
             {
                 continue;

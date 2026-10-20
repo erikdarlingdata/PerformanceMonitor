@@ -83,6 +83,13 @@ internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? Own
             ? seat
             : SharedToken;
 
+    /// <summary>Whether this request is a signed-in session whose seat may edit (#6236): the auth middleware stored a seat (it does so
+    /// only for a request that holds a valid session) and that seat is the shared token's or an OIDC admin's. A dashboard with no
+    /// sign-in configured registers no middleware, so nothing is stored and this is false, unlike <see cref="FromContext"/>, whose
+    /// default is the shared-token seat.</summary>
+    internal static bool IsSignedInAdmin(HttpContext context)
+        => context.Items.TryGetValue(HttpContextItemKey, out var value) && value is DarlingWebSeat { CanEdit: true };
+
     /// <summary>Encodes an OIDC seat for the session cookie's subject slot. With an owner key it writes the <c>o2</c> shape
     /// (<c>o2:a:{ownerKey}:{subject}</c>); without one the <c>o1</c> shape an older build wrote.</summary>
     internal static string EncodeCookieSubject(string subject, WebOidcRole role, string? ownerKey = null)

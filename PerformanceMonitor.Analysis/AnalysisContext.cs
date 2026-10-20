@@ -161,7 +161,12 @@ public class AnalysisContext
     public static TimeSpan? LatestValueLookbackFor(int frequencyMinutes) =>
         frequencyMinutes <= 0
             ? null
-            : TimeSpan.FromMinutes(Math.Max(LatestValueLookback.TotalMinutes, 2.0 * frequencyMinutes));
+            : TimeSpan.FromMinutes(Math.Max(LatestValueLookback.TotalMinutes, 2.0 * Math.Min(frequencyMinutes, MaxLookbackFrequencyMinutes)));
+
+    /// <summary>The longest collector frequency the look-back honours, in minutes (one year): the same cap as
+    /// <c>CollectorScheduleDefaults.MaxFrequencyMinutes</c>, which this project cannot reference. A stored frequency above it would
+    /// push the look-back start before the earliest date a timestamp can hold (#6227).</summary>
+    public const int MaxLookbackFrequencyMinutes = 525_600;
 
     /// <summary>
     /// Each latest-value read's lower bound for this pass, keyed by the collector that feeds it (#3896) —

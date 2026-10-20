@@ -31,11 +31,14 @@ namespace PerformanceMonitor.Collectors;
 /// runs inside each database's own statement, so the enumeration is one cheap <c>sys.databases</c> read instead of a
 /// probe cursor.</para>
 ///
-/// <para><b>Load, and what it never reads (#6221).</b> Per database one statement over <c>sys.query_store_plan</c> with
-/// <c>is_forced_plan = 1</c>, bounded by <see cref="MaxRowsPerDatabase"/>. It reads NO plan XML: not the column, not a
-/// <c>CHARINDEX</c> over it. #6171 searched the XML of every later plan of every forced query on every pass to find variants and plan
-/// guides (#6160), and on one production store with about 300 forced plans per server that took 17 to 86 s a pass, 95 percent of it the XML
-/// read on the monitored server. The check lives in the store now (<c>DarlingForcedPlanStateReader</c>): the Query Store collector already
+/// <para><b>Load, and what it never reads (#6221).</b> Per database one statement over <c>sys.query_store_plan</c> alone with
+/// <c>is_forced_plan = 1</c>, bounded by <see cref="MaxRowsPerDatabase"/>, then a second statement that takes each forced row's object id
+/// from <c>sys.query_store_query</c>. The two views are never joined in one statement: on a primary that join took 20 s for 162 forced
+/// plans in one database, against 0.6 s for this whole body (measured on a production primary; a read-only replica showed 0.1 s for the
+/// join, because it has no in-memory Query Store data). It reads NO plan XML: not the column, not a <c>CHARINDEX</c> over it. #6171
+/// searched the XML of every later plan of every forced query on every pass to find variants and plan guides (#6160). On one production
+/// store with about 300 forced plans per server the pass took 17 to 86 s; removing the XML read alone did not fix it there, the view join
+/// was most of the time. The variant check lives in the store now (<c>DarlingForcedPlanStateReader</c>): the Query Store collector already
 /// fetches the XML of every plan that ran and stores it once, and the reader looks at the stored XML of the later plans that ran in the
 /// window it judges. A plain table on every store (<see cref="StaysPlainTable"/>): the volume is a few rows per database per pass, the
 /// same grid decision as the attention table (#3035, #3044, #3107).</para>
@@ -213,7 +216,7 @@ DROP TABLE IF EXISTS #pm_forced_plans;
 SELECT TOP ({MaxRowsPerDatabase})
     plan_id = qsp.plan_id,
     query_id = qsp.query_id,
-    object_id = CONVERT(bigint, qsq.object_id),
+    object_id = CONVERT(bigint, NULL),
     query_plan_hash = CONVERT(varchar(64), qsp.query_plan_hash, 1),
     {forcingTypeColumn}
     force_failure_count = CONVERT(bigint, qsp.force_failure_count),
@@ -222,10 +225,18 @@ SELECT TOP ({MaxRowsPerDatabase})
     last_compile_start_time = CONVERT(datetime2, qsp.last_compile_start_time AT TIME ZONE 'UTC')
 INTO #pm_forced_plans
 FROM sys.query_store_plan AS qsp
-LEFT JOIN sys.query_store_query AS qsq
-    ON qsq.query_id = qsp.query_id
 WHERE qsp.is_forced_plan = 1
 ORDER BY qsp.plan_id
+OPTION(RECOMPILE);
+
+/* #6221: the object id comes from sys.query_store_query in a SECOND statement, joined to the few forced rows in the temp table. On a
+   primary, joining the two Query Store views in one statement took 20 s for 162 forced plans in one database (the same rows in
+   0.6 s for the whole body when split), and a read-only replica does not show it, because it has no in-memory Query Store data. */
+UPDATE f
+SET f.object_id = CONVERT(bigint, qsq.object_id)
+FROM #pm_forced_plans AS f
+JOIN sys.query_store_query AS qsq
+    ON qsq.query_id = f.query_id
 OPTION(RECOMPILE);
 
 SELECT /* PerformanceMonitorLite */

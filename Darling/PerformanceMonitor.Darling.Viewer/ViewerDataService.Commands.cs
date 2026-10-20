@@ -45,6 +45,25 @@ RETURNING command_id";
     public const string CommandPollSql =
         "SELECT status, result_status, result_json FROM config_command WHERE command_id = $1";
 
+    /// <summary>
+    /// Cancels the Viewer's own command when it stops waiting for it (#6247): fails the row, and only while it is still
+    /// <c>pending</c>, so a row the service already claimed is left alone. The same atomic shape as the service's expiry. Nulls
+    /// <c>args_json</c> (a <c>test_connect</c> row carries a credential blob). $1 command_id, $2 the error text, stored as both
+    /// <c>result_status</c> and the <c>error</c> in <c>result_json</c>, like every other failed command.
+    /// </summary>
+    public const string CommandCancelSql = @"
+UPDATE config_command
+SET status = 'failed',
+    completed_at = now() AT TIME ZONE 'UTC',
+    result_status = $2::text,
+    result_json = jsonb_build_object('success', false, 'error', $2::text),
+    args_json = NULL
+WHERE command_id = $1
+  AND status = 'pending'";
+
+    /// <summary>The error text of a command the Viewer cancelled because it stopped waiting.</summary>
+    public const string CommandCancelledErrorText = "cancelled: the Viewer stopped waiting";
+
     /// <summary>Deletes a command row by id. $1 command_id.</summary>
     public const string CommandDeleteSql = "DELETE FROM config_command WHERE command_id = $1";
 
@@ -122,8 +141,14 @@ RETURNING command_id";
 
     /// <summary>
     /// Polls a command row until it reaches a terminal state (<c>succeeded</c>/<c>failed</c>) or the timeout
-    /// elapses, returning the terminal <see cref="CommandResult"/> or null on timeout (the caller shows a
-    /// "still running / try again" message). Polls every <see cref="s_commandPollInterval"/>.
+    /// elapses. Polls every <see cref="s_commandPollInterval"/>. This is the ONE wait every Viewer command goes
+    /// through, so it is also the one place that stops waiting (#6247): on a timeout, or when the caller cancels the
+    /// wait, it cancels its own row (<see cref="CancelPendingCommandAsync"/>) so a command nobody is waiting for
+    /// cannot run later.
+    ///
+    /// <para>Returns the terminal <see cref="CommandResult"/>. On a timeout that cancelled the row that is a
+    /// <c>failed</c> result carrying <see cref="CommandCancelledErrorText"/>. Null means the service had ALREADY
+    /// claimed the command, so it is running and the caller says to check later; it is never reported as cancelled.</para>
     /// </summary>
     public async Task<CommandResult?> PollCommandResultAsync(
         long commandId,
@@ -133,18 +158,66 @@ RETURNING command_id";
         var deadline = Stopwatch.StartNew();
         var budget = timeout ?? DefaultCommandTimeout;
 
-        while (deadline.Elapsed < budget)
+        try
         {
-            var result = await ReadCommandResultAsync(commandId, cancellationToken);
-            if (result is not null && IsTerminal(result.Status))
+            while (deadline.Elapsed < budget)
             {
-                return result;
-            }
+                var result = await ReadCommandResultAsync(commandId, cancellationToken);
+                if (result is not null && IsTerminal(result.Status))
+                {
+                    return result;
+                }
 
-            await Task.Delay(s_commandPollInterval, cancellationToken);
+                await Task.Delay(s_commandPollInterval, cancellationToken);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            /* The caller stopped waiting (the dialog closed): the command is as unwanted as after a timeout. */
+            await StopWaitingAsync(commandId);
+            throw;
         }
 
-        return null;
+        return await StopWaitingAsync(commandId);
+    }
+
+    /// <summary>
+    /// Ends the wait for a command (#6247): cancels it if the service has not claimed it. Returns the cancelled
+    /// (<c>failed</c>) result when this call cancelled it, the terminal result when the service finished it just now, and
+    /// null when the service is running it (or the store cannot be reached, so nothing can be said about it).
+    /// Best-effort: a store failure never replaces the caller's own outcome.
+    /// </summary>
+    private async Task<CommandResult?> StopWaitingAsync(long commandId)
+    {
+        try
+        {
+            if (await CancelPendingCommandAsync(commandId, CancellationToken.None))
+            {
+                return new CommandResult(StatusFailed, CommandCancelledErrorText,
+                    JsonSerializer.Serialize(new { success = false, error = CommandCancelledErrorText }));
+            }
+
+            var current = await ReadCommandResultAsync(commandId, CancellationToken.None);
+            return current is not null && IsTerminal(current.Status) ? current : null;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Fails the command row if, and only if, it is still <c>pending</c> (<see cref="CommandCancelSql"/>). Returns true when this
+    /// call cancelled it, false when the service had already claimed it or it already finished: one statement, so a claim
+    /// and a cancel cannot both win.
+    /// </summary>
+    public async Task<bool> CancelPendingCommandAsync(long commandId, CancellationToken cancellationToken = default)
+    {
+        await using var command = _dataSource.CreateCommand(CommandCancelSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CommandPlaneSeconds;
+        command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = commandId });                      // $1
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = CommandCancelledErrorText });    // $2
+        return await ExecuteWriteAsync(command, cancellationToken) > 0;
     }
 
     /// <summary>Enqueue + poll in one call — the common "run a command and wait for its result" path.</summary>
@@ -163,8 +236,9 @@ RETURNING command_id";
     /// <summary>
     /// Runs a <c>test_connect</c>: enqueue the inline server definition, poll for the probe result, then
     /// DELETE the command row so its <c>args_json</c> DPAPI credential blob does not linger in the store. On a
-    /// poll timeout the row is LEFT in place (the service may still be connecting) — a service-side retention
-    /// sweep is the backstop for that case. Best-effort cleanup: a delete failure never masks the result.
+    /// poll timeout the wait cancels a row the service has not claimed (which also clears its credential blob); a row
+    /// the service IS running is left in place (the service clears <c>args_json</c> when it reports) and the result is
+    /// null. Best-effort cleanup: a delete failure never masks the result.
     /// </summary>
     public async Task<CommandResult?> RunTestConnectAsync(
         string argsJson,

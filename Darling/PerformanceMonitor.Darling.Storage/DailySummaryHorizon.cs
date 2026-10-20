@@ -130,7 +130,7 @@ public static class DarlingRetentionHorizons
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(collectorName);
         return fleetOverrideDays is int days && days >= 1
-            ? days
+            ? Math.Min(days, CollectorScheduleDefaults.MaxRetentionDays)
             : CollectorScheduleDefaults.All[collectorName].RetentionDays;
     }
 
@@ -152,7 +152,7 @@ public static class DarlingRetentionHorizons
             throw new ArgumentException("A collector name is letters, digits and underscores.", nameof(collectorName));
         }
 
-        return $"COALESCE((SELECT o.retention_days FROM config.config_collector_schedules AS o WHERE o.server_id IS NULL AND lower(o.collector_name) = '{name}' AND o.retention_days >= 1 LIMIT 1), {defaultDays.ToString(System.Globalization.CultureInfo.InvariantCulture)})";
+        return $"COALESCE((SELECT LEAST(o.retention_days, {CollectorScheduleDefaults.MaxRetentionDays}) FROM config.config_collector_schedules AS o WHERE o.server_id IS NULL AND lower(o.collector_name) = '{name}' AND o.retention_days >= 1 LIMIT 1), {defaultDays.ToString(System.Globalization.CultureInfo.InvariantCulture)})";
     }
 
     /// <summary>

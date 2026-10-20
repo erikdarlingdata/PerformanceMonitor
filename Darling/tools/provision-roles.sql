@@ -829,6 +829,29 @@ GRANT UPDATE (config_version, updated_at) ON config.config_service TO mcp;
 --     statement-level reload-beacon trigger on each, so a tag write bumps config_service; the config_service column grant above covers it.
 GRANT INSERT, UPDATE, DELETE ON config.server_tags TO mcp;
 GRANT INSERT, UPDATE, DELETE ON config.server_tag_map TO mcp;
+-- #6227: the collector schedule tools (disable_collector, enable_collector, set_collector_frequency, set_collector_run_at,
+--     set_collector_retention) run as mcp and write the two non-secret schedule tables. Both carry a statement-level
+--     reload-beacon trigger that UPDATEs config_service.config_version as the caller; the column grant above covers it.
+--     The run-time table (V160) is skipped, with a warning, on a store the service has not upgraded that far.
+DO $do$
+BEGIN
+   IF pg_catalog.to_regclass('config.config_collector_schedules') IS NOT NULL THEN
+      REVOKE INSERT, UPDATE, DELETE ON config.config_collector_schedules FROM mcp;
+      GRANT INSERT (server_id, collector_name, enabled, frequency_minutes, retention_days) ON config.config_collector_schedules TO mcp;
+      GRANT UPDATE (enabled, frequency_minutes, retention_days) ON config.config_collector_schedules TO mcp;
+   ELSE
+      RAISE WARNING 'config.config_collector_schedules was not found, so its mcp grant was skipped. Run this script again after the service has upgraded the store.';
+   END IF;
+
+   IF pg_catalog.to_regclass('config.config_collector_run_times') IS NOT NULL THEN
+      REVOKE INSERT, UPDATE, DELETE ON config.config_collector_run_times FROM mcp;
+      GRANT INSERT (server_id, collector_name, run_at_minute) ON config.config_collector_run_times TO mcp;
+      GRANT UPDATE (run_at_minute) ON config.config_collector_run_times TO mcp;
+      GRANT DELETE ON config.config_collector_run_times TO mcp;
+   ELSE
+      RAISE WARNING 'config.config_collector_run_times was not found, so its mcp grant was skipped. Run this script again after the service has upgraded the store.';
+   END IF;
+END $do$;
 
 -- 3d-2. Alert History dismiss (#4843): the web dashboard's POST /api/alert-history/dismiss runs as viewer and
 --     writes `UPDATE config_alert_log SET dismissed = TRUE`. Column-level on exactly that one column, so viewer

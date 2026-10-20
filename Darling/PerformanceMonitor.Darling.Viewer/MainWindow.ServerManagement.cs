@@ -435,7 +435,9 @@ public partial class MainWindow
         try
         {
             var bytes = await _dataService.GetStoreSizeBytesAsync();
-            DatabaseSizeText.Text = bytes.HasValue ? $"Database: {FormatBytes(bytes.Value)}" : "Database: --";
+            DatabaseSizeText.Text = bytes.HasValue
+                ? $"Database: {(_dataService.StoreSizeIsEstimate ? "~" : "")}{FormatBytes(bytes.Value)}{(_dataService.StoreSizeIsEstimate ? " (estimate)" : "")}"
+                : "Database: --";
         }
         catch (Exception ex)
         {

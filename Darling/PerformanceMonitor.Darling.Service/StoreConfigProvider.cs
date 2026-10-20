@@ -2293,7 +2293,8 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
                 reader.GetString(1),
                 reader.IsDBNull(2) ? null : reader.GetInt32(2),
                 reader.IsDBNull(3) ? null : reader.GetInt32(3),
-                reader.GetBoolean(4),
+                /* V206 (#6227): NULL = inherit (the fleet row, then the shipped default); ScheduleOverride.Enabled is already nullable. */
+                reader.IsDBNull(4) ? null : reader.GetBoolean(4),
                 /* V125 (#3477): NULL and an empty array are DIFFERENT readings here and both must
                    survive the round trip — NULL falls through the layering, an explicit empty array
                    is "no scope at this level" and stops it. Collapsing them at read time would make
@@ -2665,7 +2666,7 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
 
     /// <summary>A retention override is honored only when &gt;= 1 day; 0/negative would invert the purge
     /// cutoff and delete everything, so it degrades to "no override" (fall through to the default).</summary>
-    private static int? ValidRetention(int? days) => days is int v && v >= 1 ? v : null;
+    private static int? ValidRetention(int? days) => days is int v && v >= 1 ? Math.Min(v, CollectorScheduleDefaults.MaxRetentionDays) : null;
 
     /* ---------------- helpers ---------------- */
 
