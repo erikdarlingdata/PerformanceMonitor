@@ -191,7 +191,7 @@ internal static class DarlingMcpInstructions
 
         ## What this server can and cannot do
 
-        This server reads previously collected performance data. It cannot run SQL on a monitored server, kill sessions, change a monitored server's settings, alter collected data, or run ad-hoc diagnostics.
+        This server reads previously collected performance data. It cannot run SQL on a monitored server, kill sessions, change a monitored server's settings, or run ad-hoc diagnostics. With writes on, purge_now deletes collected history older than the retention given (show, then confirm).
 
         """ + DarlingMcpWritePolicy.InstructionsLine;
 
@@ -218,13 +218,13 @@ internal static class DarlingMcpInstructions
 
         ### Asking about a past window
 
-        Every tool below that takes `hours_back` also takes `as_of`: an ISO-8601 UTC instant that moves the window's end off "now"; `hours_back` stays the length. Use it for any past-time question, and do not substitute a wider `hours_back`: for an aggregate read a wider window is a different answer, not the same answer with more rows.
+        Every tool below that takes `hours_back` also takes `as_of`: an ISO-8601 UTC instant that moves the window's end off "now"; `hours_back` stays the length. Use it for past-time questions, not a wider `hours_back` (a different aggregate).
 
         - Accepted: full ISO-8601 with an offset, or a bare `2026-08-19` (midnight UTC). An unparseable or future `as_of` is refused, not read as "now"; an older one returns the normal `empty` / `unavailable`.
         - Latest-snapshot reads take no `as_of` — read `captured_at` / `age_seconds`. `get_pvs_stats`, `get_fleet_overview`, `get_store_metrics` never take it.
         - The analysis family does take it: `get_analysis_facts`/`analyze_server` re-run fact collection, anomaly detection and scoring over the anchored window (`analyze_server` with `as_of` is exploratory, does not persist).
 
-        Each finding's `confidence` is an evidence score (0.20 for the symptom alone, more as the root fact's amplifier checks match and the chain deepens — a lone uncorroborated symptom is 0.20, never 1.0) and `confidence_basis` says in words what it rests on (an ANOMALY_* fact's `baseline_confidence` is the baseline's trustworthiness, not a finding's `confidence`).
+        Each finding's `confidence` is an evidence score (0.20 for the symptom alone, more as the root fact's amplifier checks match and the chain deepens) and `confidence_basis` says in words what it rests on (an ANOMALY_* fact's `baseline_confidence` is the baseline's trustworthiness, not the finding's `confidence`).
 
         ## Workflow
 

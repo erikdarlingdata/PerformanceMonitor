@@ -117,6 +117,8 @@ public static class McpDataDetailKeys
             "login_name", "login", "loginname", "original_login_name", "nt_user_name", "nt_username", "user_name",
             "username", "usename", "blocked_login_name", "blocking_login_name", "victim_login_name", "ownerloginname",
             "owner_login_name", "session_login_name", "remediation_username",
+            // The command queue and the agent-change log: who asked for a command, who undid a change, who acted.
+            "requested_by", "undone_by", "actor", "paused_by",
             // get_long_running_queries (the trace-based reader): the login that ran the statement.
             "server_principal_name",
             // get_pg_blocking: the chain root's role.

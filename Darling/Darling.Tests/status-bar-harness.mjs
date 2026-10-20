@@ -51,7 +51,7 @@ vm.runInContext(source + "\nthis.updateStatusBar = updateStatusBar; this.notePag
 const fleet = { cards: [{ healthy_collector_count: 3, failed_collector_count: 1 }], total_servers: 1, generated_at: "T" };
 const settle = () => new Promise((r) => setTimeout(r, 20));
 const texts = () => (bar || []).filter((n) => n.cls.includes("sb-item")).map((n) => n.text);
-const poll = async () => { context.updateStatusBar(fleet); await settle(); return texts(); };
+const poll = async (roll = fleet) => { context.updateStatusBar(roll); await settle(); return texts(); };
 
 const run = {
   async seatWrite() { sc.session = { can_edit: true }; return { items: await poll() }; },
@@ -82,6 +82,10 @@ run.storeFailsAfterGood = async () => {
   await poll(); clock.t += 6 * 60 * 1000; sc.storeHost = { kind: "error", message: "x" };
   return { items: await poll() };
 };
+// The fleet roll-up's collection block: paused shows (with who and when when the store has them), not paused adds nothing.
+run.paused = async () => ({ items: await poll({ ...fleet, collection: { paused: true, paused_by: "erik (viewer)", paused_utc: "2026-10-20T10:00:00" } }) });
+run.pausedUnknownWho = async () => ({ items: await poll({ ...fleet, collection: { paused: true } }) });
+run.notPaused = async () => ({ items: await poll({ ...fleet, collection: { paused: false } }) });
 run.pingFails = async () => { sc.ping = new Error("net"); return { items: await poll() }; };
 // W3/W10: the footer's Updated time follows the page's own load, not the fleet roll-up's generated_at.
 run.pageUpdated = async () => {

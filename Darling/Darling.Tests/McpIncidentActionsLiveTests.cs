@@ -13,6 +13,7 @@ using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -47,7 +48,7 @@ public sealed class McpIncidentActionsLiveTests
             {
                 (await DarlingMcpIncidentActionTools.TestConnection(asRole, "snap-target", ct), "test_connect", CommandKind.Probe),
                 (await DarlingMcpIncidentActionTools.AnalyzeNow(asRole, "snap-target", ct), "analyze_now", CommandKind.Analyze),
-                (await DarlingMcpIncidentActionTools.PurgeNow(asRole, confirm: true, retention_days: 30, cancellationToken: ct), "purge_now", CommandKind.Purge),
+                (await DarlingMcpIncidentActionTools.PurgeNow(asRole, confirm: await ConfirmValueAsync(asRole, 30, ct), retention_days: 30, cancellationToken: ct), "purge_now", CommandKind.Purge),
             })
             {
                 var node = Parse(answer);
@@ -125,25 +126,92 @@ public sealed class McpIncidentActionsLiveTests
         });
     }
 
+    private static async Task<string> ConfirmValueAsync(NpgsqlDataSource asRole, int? days, CancellationToken ct) =>
+        (string)Parse(await DarlingMcpIncidentActionTools.PurgeNow(asRole, retention_days: days, cancellationToken: ct))["confirm_value"]!;
+
+    private static async Task<long> CommandCountAsync(NpgsqlDataSource owner, CancellationToken ct)
+    {
+        await using var count = owner.CreateCommand("SELECT count(*) FROM config.config_command");
+        return Convert.ToInt64(await count.ExecuteScalarAsync(ct));
+    }
+
+    /// <summary>The purge is two steps: the first call queues nothing and shows what it would delete (collector retention and the
+    /// oldest time kept) with a confirm value; a wrong echo is refused; only the right echo queues it.</summary>
     [Fact]
-    public async Task PurgeNow_WithoutConfirm_OrWithABadRetention_IsRefused_AndQueuesNothing()
+    public async Task PurgeNow_ShowsFirst_RefusesAWrongEcho_AndQueuesOnlyOnTheRightOne()
     {
         await WithRoleAsync("mcp", grantFunction: true, async (owner, asRole, ct) =>
         {
-            var noConfirm = Parse(await DarlingMcpIncidentActionTools.PurgeNow(asRole, confirm: false, retention_days: 7, cancellationToken: ct));
-            Assert.Equal("refused", (string?)noConfirm["status"]);
-            Assert.Equal("confirm_required", (string?)noConfirm["reason"]);
-            Assert.Contains("cannot be brought back", (string?)noConfirm["message"], StringComparison.Ordinal);
+            var shown = Parse(await DarlingMcpIncidentActionTools.PurgeNow(asRole, retention_days: 7, cancellationToken: ct));
+            Assert.Equal("confirm_required", (string?)shown["status"]);
+            Assert.Contains("cannot be brought back", (string?)shown["message"], StringComparison.Ordinal);
+            var groups = shown["would_delete"]!.AsArray();
+            Assert.NotEmpty(groups);
+            Assert.All(groups, g =>
+            {
+                Assert.True((int)g!["retention_days"]! >= 7);
+                Assert.False(string.IsNullOrWhiteSpace((string?)g["oldest_kept_utc"]));
+                Assert.NotEmpty(g["collectors"]!.AsArray());
+            });
+            var confirm = (string)shown["confirm_value"]!;
+            Assert.Equal(0L, await CommandCountAsync(owner, ct));
 
+            foreach (var wrong in new[] { "true", "yes", "purge-000000000000", confirm + "x" })
+            {
+                var refused = Parse(await DarlingMcpIncidentActionTools.PurgeNow(asRole, confirm: wrong, retention_days: 7, cancellationToken: ct));
+                Assert.Equal("refused", (string?)refused["status"]);
+                Assert.Equal("confirm_mismatch", (string?)refused["reason"]);
+            }
+
+            /* A value shown for one retention does not confirm another. */
+            var otherRetention = Parse(await DarlingMcpIncidentActionTools.PurgeNow(asRole, confirm: confirm, retention_days: 8, cancellationToken: ct));
+            Assert.Equal("confirm_mismatch", (string?)otherRetention["reason"]);
+            Assert.Equal(0L, await CommandCountAsync(owner, ct));
+
+            var queued = Parse(await DarlingMcpIncidentActionTools.PurgeNow(asRole, confirm: confirm, retention_days: 7, cancellationToken: ct));
+            Assert.Equal("queued", (string?)queued["status"]);
+            Assert.Equal(1L, await CommandCountAsync(owner, ct));
+        });
+    }
+
+    [Fact]
+    public async Task PurgeNow_WithABadRetention_IsRefused_AndQueuesNothing()
+    {
+        await WithRoleAsync("mcp", grantFunction: true, async (owner, asRole, ct) =>
+        {
             foreach (var days in new[] { 0, -5, DarlingMcpIncidentActionTools.MaxPurgeRetentionDays + 1 })
             {
-                var bad = Parse(await DarlingMcpIncidentActionTools.PurgeNow(asRole, confirm: true, retention_days: days, cancellationToken: ct));
+                var bad = Parse(await DarlingMcpIncidentActionTools.PurgeNow(asRole, confirm: "purge-000000000000", retention_days: days, cancellationToken: ct));
                 Assert.Equal("refused", (string?)bad["status"]);
                 Assert.Equal("invalid", (string?)bad["reason"]);
             }
 
-            await using var count = owner.CreateCommand("SELECT count(*) FROM config.config_command");
-            Assert.Equal(0L, Convert.ToInt64(await count.ExecuteScalarAsync(ct)));
+            Assert.Equal(0L, await CommandCountAsync(owner, ct));
+        });
+    }
+
+    /// <summary>get_command_result answers only for the command types the MCP tools queue: a command another client queued (the
+    /// Viewer's live reads, a plan fetch) answers as not found, and the person's name it carries is withheld under metadataOnly.</summary>
+    [Fact]
+    public async Task GetCommandResult_RefusesAViewerOnlyCommand_AndMetadataOnlyWithholdsRequestedBy()
+    {
+        await WithRoleAsync("mcp", grantFunction: true, async (owner, asRole, ct) =>
+        {
+            await ExecAsync(owner,
+                "INSERT INTO config.config_command (command_id, command_type, target_server_id, status, requested_by) OVERRIDING SYSTEM VALUE VALUES " +
+                "(9001, 'fetch_active_queries', 41, 'succeeded', 'dana.reyes (viewer)'), (9002, 'test_connect', 41, 'succeeded', 'dana.reyes (viewer)')", ct);
+
+            var viewerOnly = Parse(await DarlingMcpIncidentActionTools.GetCommandResult(asRole, 9001, ct));
+            Assert.Equal("not_found", (string?)viewerOnly["status"]);
+            Assert.DoesNotContain("dana.reyes", viewerOnly.ToJsonString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("fetch_active_queries", viewerOnly.ToJsonString(), StringComparison.Ordinal);
+
+            var answer = await DarlingMcpIncidentActionTools.GetCommandResult(asRole, 9002, ct);
+            Assert.Equal("test_connect", (string?)Parse(answer)["command_type"]);
+            Assert.Equal("dana.reyes (viewer)", (string?)Parse(answer)["requested_by"]);
+
+            var masked = McpDataDetailMasker.MaskJson(answer, McpDataDetail.MetadataOnly, key: PseudonymTestKey.Key);
+            Assert.DoesNotContain("dana.reyes", masked, StringComparison.Ordinal);
         });
     }
 
@@ -260,6 +328,39 @@ public sealed class McpIncidentActionsLiveTests
 
             await using var count = owner.CreateCommand("SELECT count(*) FROM config.investigation_journal WHERE event = 'action_undone'");
             Assert.Equal(0L, Convert.ToInt64(await count.ExecuteScalarAsync(ct)));
+        });
+    }
+
+    /// <summary>M1 (#6230): the fleet roll-up the web status bar reads says whether collection is paused, and who paused it and when
+    /// while the command queue still holds that pause (newer than any resume).</summary>
+    [Fact]
+    public async Task TheFleetRollup_CarriesThePauseFlag_WithWhoAndWhen()
+    {
+        await WithRoleAsync("mcp", grantFunction: true, async (owner, asRole, ct) =>
+        {
+            async Task<FleetCollectionState?> ReadAsync() =>
+                (await DarlingFleetReader.GetFleetOverviewAsync(asRole, DateTime.UtcNow.AddHours(-1), DateTime.UtcNow, cancellationToken: ct)).Collection;
+
+            await ExecAsync(owner, "INSERT INTO config.config_service (id, paused) VALUES (1, FALSE) ON CONFLICT (id) DO UPDATE SET paused = FALSE", ct);
+            Assert.False((await ReadAsync())!.Paused);
+
+            await ExecAsync(owner, "UPDATE config.config_service SET paused = TRUE WHERE id = 1", ct);
+            var unknownWho = (await ReadAsync())!;
+            Assert.True(unknownWho.Paused);
+            Assert.Null(unknownWho.PausedBy);
+
+            await ExecAsync(owner,
+                "INSERT INTO config.config_command (command_type, status, requested_by, claimed_at, completed_at) VALUES " +
+                "('pause', 'succeeded', 'dana.reyes (viewer)', TIMESTAMP '2026-10-20 10:00', TIMESTAMP '2026-10-20 10:00:05')", ct);
+            var named = (await ReadAsync())!;
+            Assert.True(named.Paused);
+            Assert.Equal("dana.reyes (viewer)", named.PausedBy);
+            Assert.Equal(new DateTime(2026, 10, 20, 10, 0, 5), named.PausedUtc);
+
+            /* A later resume means the pause the flag now holds was not that one: nobody is named. */
+            await ExecAsync(owner,
+                "INSERT INTO config.config_command (command_type, status, requested_by, completed_at) VALUES ('resume', 'succeeded', 'dana.reyes (viewer)', TIMESTAMP '2026-10-20 11:00')", ct);
+            Assert.Null((await ReadAsync())!.PausedBy);
         });
     }
 

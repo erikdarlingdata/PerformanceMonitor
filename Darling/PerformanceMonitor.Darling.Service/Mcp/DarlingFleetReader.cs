@@ -957,7 +957,8 @@ GROUP BY server_id, collector_name";
                 windowEndUtc - windowStartUtc, deadlockTiers, collected.RegisteredAt, collected.OlderCollection));
         }
 
-        return BuildRollup(cards, now, windowStartUtc, windowEndUtc, worstCount, tagForest, collectionHealthAgeSeconds);
+        return BuildRollup(cards, now, windowStartUtc, windowEndUtc, worstCount, tagForest, collectionHealthAgeSeconds,
+            await ReadCollectionStateAsync(postgres, logger, cancellationToken));
     }
 
     /// <summary>Builds one pre-banded card from a server's raw cross-server reads (pure — the reduction the WPF
@@ -1221,7 +1222,8 @@ GROUP BY server_id, collector_name";
         DateTime windowEndUtc,
         int worstCount = DefaultWorstCount,
         IReadOnlyList<FleetTagNode>? tags = null,
-        int collectionHealthAgeSeconds = 0)
+        int collectionHealthAgeSeconds = 0,
+        FleetCollectionState? collection = null)
     {
         var healthy = 0;
         var warning = 0;
@@ -1321,6 +1323,7 @@ GROUP BY server_id, collector_name";
             Cards = cards,
             Tags = tags ?? Array.Empty<FleetTagNode>(),
             CollectionHealthAgeSeconds = collectionHealthAgeSeconds,
+            Collection = collection,
         };
     }
 
@@ -1463,6 +1466,54 @@ GROUP BY server_id, collector_name";
         (MonitoredEngineKind.IsPostgres(engineKind), MonitoredEngineKind.IsAurora(engineKind));
 
     /* ─────────────────────────── per-query readers ─────────────────────────── */
+
+    /// <summary>The service's pause flag, and who paused collection and when when the command queue still holds that (a pause queued
+    /// through the command plane, newer than any resume; the queue keeps finished commands for the command-history retention).
+    /// Display only: a store that cannot answer leaves it null and the roll-up is unchanged.</summary>
+    internal const string CollectionStateSql = """
+        SELECT s.paused, c.command_type, c.requested_by, c.completed_at
+        FROM config.config_service s
+        LEFT JOIN LATERAL (
+            SELECT command_type, requested_by, COALESCE(completed_at, claimed_at, created_at) AS completed_at
+            FROM config.config_command
+            WHERE command_type IN ('pause', 'resume') AND status = 'succeeded'
+            ORDER BY command_id DESC
+            LIMIT 1) c ON TRUE
+        WHERE s.id = 1
+        """;
+
+    private static async Task<FleetCollectionState?> ReadCollectionStateAsync(NpgsqlDataSource postgres, ILogger? logger, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var command = postgres.CreateCommand(CollectionStateSql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                return null;
+            }
+
+            var paused = !reader.IsDBNull(0) && reader.GetBoolean(0);
+            if (!paused)
+            {
+                return new FleetCollectionState { Paused = false };
+            }
+
+            var lastWasPause = !reader.IsDBNull(1) && string.Equals(reader.GetString(1), "pause", StringComparison.Ordinal);
+            return new FleetCollectionState
+            {
+                Paused = true,
+                PausedBy = lastWasPause && !reader.IsDBNull(2) ? reader.GetString(2) : null,
+                PausedUtc = lastWasPause && !reader.IsDBNull(3) ? DateTime.SpecifyKind(reader.GetDateTime(3), DateTimeKind.Unspecified) : null,
+            };
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(ex, "Fleet overview: the collection pause state could not be read; the roll-up carries none");
+            return null;
+        }
+    }
 
     private static async Task<List<FleetServerRow>> ReadServersAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
     {
@@ -2810,4 +2861,21 @@ public sealed class FleetOverviewResult
     /// has not moved yet, and because a roll-up that serves a memo without saying so is a roll-up whose
     /// freshness has to be trusted. Trailing and additive.</summary>
     [JsonPropertyName("collection_health_age_seconds")] public int CollectionHealthAgeSeconds { get; init; }
+
+    /// <summary>Whether collection is paused (the service's pause flag), with who paused it and when if the command queue still
+    /// holds that. Absent when the store could not be read for it.</summary>
+    [JsonPropertyName("collection"), System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public FleetCollectionState? Collection { get; init; }
+}
+
+/// <summary>The pause flag on the fleet roll-up: <c>paused_by</c> and <c>paused_utc</c> (naive UTC) are present only when the store still holds the pause that set it.</summary>
+public sealed class FleetCollectionState
+{
+    [JsonPropertyName("paused")] public bool Paused { get; init; }
+
+    [JsonPropertyName("paused_by"), System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? PausedBy { get; init; }
+
+    [JsonPropertyName("paused_utc"), System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public DateTime? PausedUtc { get; init; }
 }

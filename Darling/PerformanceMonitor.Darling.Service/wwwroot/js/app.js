@@ -351,8 +351,10 @@ async function refreshViewList() {
    be read is simply absent (the store size keeps its last good value, marked stale).
 
    Module scope on purpose: the 60s poll rebuilds the bar, so the cached size and the last ping state live here
-   rather than inside updateStatusBar. The operator's own "collection paused" flag is not shown: /api/ping does
-   not carry it (it is the unauthenticated health route) and no read the web seat can call exposes it. */
+   rather than inside updateStatusBar. The operator's "collection paused" flag is not on /api/ping (the
+   unauthenticated health route, which also never names a person); it rides on the /api/fleet response the bar is
+   already drawn from (d.collection: paused, and paused_by / paused_utc when the store still holds who and when),
+   so showing it costs no extra read. */
 const STORE_SIZE_TTL_MS = 5 * 60 * 1000;
 const NON_OK_COLLECTION_STATES = new Set(["starting", "degraded", "stopped"]);
 let statusFleet = null;
@@ -446,6 +448,14 @@ function renderStatusBar() {
   if (statusSeat) items.push(el("span", { class: "sb-item sb-seat", text: statusSeat }));
   if (statusCollection && NON_OK_COLLECTION_STATES.has(statusCollection)) {
     items.push(el("span", { class: "sb-item sb-collection sb-warn", text: "Collection: " + statusCollection[0].toUpperCase() + statusCollection.slice(1) }));
+  }
+  /* A paused service collects and alerts on nothing, and the runtime state above still says "ok", so the bar says so
+     in its own words, with who paused it and when when the store has that. */
+  if (d.collection && d.collection.paused) {
+    let text = "Collection: PAUSED";
+    if (d.collection.paused_by) text += " by " + d.collection.paused_by;
+    if (d.collection.paused_utc) text += " since " + localTime(d.collection.paused_utc);
+    items.push(el("span", { class: "sb-item sb-collection sb-paused sb-warn", text }));
   }
   /* The stamp is the page's own last load (notePageUpdated), not the sidebar's fleet read: the fleet read is the
      shell's, so a server, FinOps or Job History page reloaded by hand or by auto-refresh left the time at the first
