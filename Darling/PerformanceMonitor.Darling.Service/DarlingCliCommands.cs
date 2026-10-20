@@ -63,7 +63,7 @@ public enum StartupAction
 /// that validates from the CLI connects identically under the running service. Pure output formatting
 /// (<see cref="FormatProbeLine"/>) is split out so it is unit-testable without live SQL.
 /// </summary>
-public static class DarlingCliCommands
+public static partial class DarlingCliCommands
 {
     /// <summary>The verb that encrypts a SQL-auth password for darling.json (reads stdin).</summary>
     public static bool IsEncryptPasswordVerb(string arg) =>
@@ -241,6 +241,18 @@ public static class DarlingCliCommands
     public static bool IsListAlertSourcesVerb(string arg) =>
         string.Equals(arg, "--list-alert-sources", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>The <c>mcp.dataDetail</c> level of the config at <paramref name="configPath"/>, for the verbs that serve collected text (#6236).
+    /// Here, not beside the verb, because the CLI's loads of darling.json live in this file (DarlingOwnedSecretsCensusTests).</summary>
+    private static McpDataDetail ReadConfiguredDataDetail(string? configPath)
+    {
+        McpDataDetailModes.TryParse(DarlingConfig.Load(configPath).Mcp.DataDetail, out var mode);
+        return mode;
+    }
+
+    /// <summary>The verb <see cref="ExportInvestigationsAsync"/> handles: write the investigation cases that have feedback as JSON lines (#6236).</summary>
+    public static bool IsExportInvestigationsVerb(string arg) =>
+        string.Equals(arg, "--export-investigations", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>The verb <see cref="ToggleCollectorAsync"/> handles with <c>enable: true</c> — turn one collector ON in the
     /// store's schedule overrides, fleet-wide or for one server (#3752). Until this verb the only writer of that
     /// flag was the WPF Viewer's Collector Schedules window, which needs an interactive desktop and the
@@ -378,6 +390,7 @@ public static class DarlingCliCommands
         || IsRotateAlertSourceVerb(arg)
         || IsRemoveAlertSourceVerb(arg)
         || IsListAlertSourcesVerb(arg)
+        || IsExportInvestigationsVerb(arg)
         || IsEnableCollectorVerb(arg)
         || IsDisableCollectorVerb(arg)
         || IsSetCollectorRunAtVerb(arg)
@@ -468,6 +481,7 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --rotate-alert-source <name> [--config <path>]   Give a source a new password and print its connection string once. The old password stops working." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --remove-alert-source <name> [--config <path>]   Drop a source's login and remove it, along with any alerts of its that are still queued. Alerts it already sent stay in the history." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --list-alert-sources [--config <path>]           List the sources: name, created, last alert sent and alerts not yet delivered. Never shows a password." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --export-investigations <file> [--since <date>] [--until <date>] [--server <name>] [--verdict right|partly|wrong] [--force] [--config <path>]   Write the investigation cases that have feedback, one JSON object per line: the alert, the brief and evidence the agent was given, its report and the recorded verdict and note. Collected text is masked at mcp.dataDetail, as get_investigation_reports masks it. Test your own agent on them." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-collector <name> [--server <server>] [--config <path>]   Turn a collector ON in the store's schedule overrides (fleet-wide by default; --server scopes it to one server) and print the resulting schedule rows. The running service applies it within one sweep." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --disable-collector <name> [--server <server>] [--config <path>]  Turn a collector OFF the same way. Frequency/retention overrides on the row are kept; only enabled changes." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --set-collector-run-at <collector> <HH:MM|none|default> [--server <server>] [--config <path>]   Set the time of day (the monitored server's own clock) a collector that runs once a day or less often starts; none stops a fixed time, default clears the row's time so the next level applies. Fleet-wide by default; --server scopes it to one server. Only the run time changes. The running service applies it within one sweep." + Environment.NewLine +

@@ -345,6 +345,11 @@ if (args.Length > 0 && DarlingCliCommands.IsListAlertSourcesVerb(args[0]))
     return await DarlingCliCommands.ListAlertSourcesAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);
 }
 
+if (args.Length > 0 && DarlingCliCommands.IsExportInvestigationsVerb(args[0]))
+{
+    return await DarlingCliCommands.ExportInvestigationsAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);
+}
+
 /* CLI verbs: --enable-collector / --disable-collector <name> [--server <name>] [--config <path>] (#3752) — flip one
    collector's enabled flag in config.config_collector_schedules, fleet-wide or for one server, and print the rows
    read back from the store. The one collector that ships OFF (long_query_completions, whose enabling is what

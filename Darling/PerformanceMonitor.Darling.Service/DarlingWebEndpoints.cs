@@ -27,6 +27,7 @@ using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Hosting;
+using PerformanceMonitor.Darling.Service.Investigations;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 
@@ -664,6 +665,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         MapServers(app, postgres, logger);
         MapAlertHistoryDismiss(app, postgres, logger);
         MapInvestigationFeedback(app, postgres, logger);
+        MapInvestigationExport(app, postgres, logger);
         MapInvestigationPractice(app, postgres, logger);
         MapWebhookSigningStatus(app, collector);
 
@@ -2759,6 +2761,96 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
             }
         });
+    }
+
+    /// <summary>The 403 sentence the export answers a login that may not record feedback (#6236): the export is gated as the record is.</summary>
+    internal const string InvestigationExportRefusedMessage =
+        "Exporting investigation cases needs the same store login as recording feedback: the admin role. Managed and compose stores connect the web "
+        + "dashboard as the viewer role, which cannot: run --export-investigations on the host, or (bring-your-own store) set postgres.webConnectionString to an admin login.";
+
+    /// <summary>
+    /// The download of the investigation cases that have feedback (#6236): <c>GET /api/investigation-export?since=&amp;until=&amp;server=&amp;verdict=</c>
+    /// answers JSON lines (<c>application/x-ndjson</c>, one case per line, as <c>--export-investigations</c> writes them) as an attachment.
+    /// Gated exactly as the feedback record is (<see cref="InvestigationFeedbackStore.CanRecordAsync"/>: the web login holds INSERT and
+    /// UPDATE on the feedback table, which is the admin role), so a viewer-role login answers 403 and reads nothing. Text is read at
+    /// <see cref="McpDataDetail.Full"/>, as the web's report panel reads it: the role that may record feedback can select these tables itself.
+    /// 400 for a date, verdict or server it cannot use.
+    /// </summary>
+    internal static void MapInvestigationExport(WebApplication app, NpgsqlDataSource postgres, ILogger logger)
+    {
+        var feedbackStore = new InvestigationFeedbackStore(postgres, McpCommandDeadlines.ReadSeconds);
+        var requestStore = new InvestigationRequestStore(postgres, McpCommandDeadlines.ReadSeconds, () => DateTime.UtcNow);
+
+        app.MapGet("/api/investigation-export", async (HttpContext context) =>
+        {
+            var stopwatch = Stopwatch.StartNew();
+            var since = ExportDate(context, "since", out var badSince);
+            var until = ExportDate(context, "until", out var badUntil);
+            if (badSince || badUntil)
+            {
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = "since and until are dates such as 2026-10-01 or 2026-10-01T06:00:00Z." }, "/api/investigation-export", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status400BadRequest);
+            }
+
+            var verdict = context.Request.Query.TryGetValue("verdict", out var verdictText) ? verdictText.ToString() : null;
+            if (InvestigationFeedbackExport.VerdictRefusal(verdict) is { } verdictRefusal)
+            {
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = verdictRefusal }, "/api/investigation-export", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status400BadRequest);
+            }
+
+            try
+            {
+                await using (var connection = await postgres.OpenConnectionAsync(context.RequestAborted))
+                {
+                    if (!await feedbackStore.CanRecordAsync(connection, context.RequestAborted))
+                    {
+                        return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = InvestigationExportRefusedMessage }, "/api/investigation-export", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
+                    }
+                }
+
+                int? serverId = null;
+                if (context.Request.Query.TryGetValue("server", out var serverText) && !string.IsNullOrWhiteSpace(serverText))
+                {
+                    var (resolved, resolveError) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, serverText.ToString(), context.RequestAborted);
+                    if (resolveError is not null)
+                    {
+                        return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = McpHelpers.ErrorMessageOf(resolveError) }, "/api/investigation-export", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status400BadRequest);
+                    }
+
+                    serverId = resolved.ServerId;
+                }
+
+                var (lines, truncated) = await InvestigationFeedbackExport.ReadLinesAsync(
+                    requestStore, since, until, serverId, verdict, McpDataDetail.Full, null, context.RequestAborted);
+                context.Response.Headers.ContentDisposition = "attachment; filename=\"investigation-cases.jsonl\"";
+                if (truncated)
+                {
+                    context.Response.Headers["X-Export-Truncated"] = InvestigationRequestStore.FeedbackExportLimit.ToString(CultureInfo.InvariantCulture);
+                }
+
+                return DarlingWebStatementSweep.JsonText(lines, "/api/investigation-export", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+            }
+            catch (Exception ex) when (IsFeedbackPrivilegeRefusal(ex))
+            {
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = InvestigationExportRefusedMessage }, "/api/investigation-export", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                DarlingWebFailureLog.Report(logger, "/api/investigation-export", stopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
+                return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
+            }
+        });
+    }
+
+    /// <summary>One date query parameter of the export (#6236): null when absent, with <paramref name="bad"/> set when it is not a date.</summary>
+    private static DateTime? ExportDate(HttpContext context, string name, out bool bad)
+    {
+        bad = false;
+        if (!context.Request.Query.TryGetValue(name, out var text) || string.IsNullOrWhiteSpace(text))
+            return null;
+        if (DateTimeOffset.TryParse(text.ToString(), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var when))
+            return when.UtcDateTime;
+        bad = true;
+        return null;
     }
 
     internal static JsonObject FeedbackReceipt(InvestigationFeedbackOutcome outcome, Guid request, string author) => new()

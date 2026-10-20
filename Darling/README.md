@@ -910,6 +910,21 @@ Before you trust an agent with Level 2, watch it work cases you have already jud
 
 Provisioning: the `admin` role holds INSERT on `config.investigation_requests` (the columns a request is opened with) and `config.investigation_request_alerts`, so the Viewer can open a practice request. Run the provisioning script again on a bring-your-own store; managed and compose stores re-apply it on start.
 
+### Export the judged cases to test your own agent (#6236)
+
+Every case somebody gave feedback on (see "Tell Darling whether a report was right" above) is a labelled test case: you know what the alert was, what the agent was given, what it concluded and whether a person agreed. The export writes them all out so you can replay them against your own agent.
+
+```
+PerformanceMonitor.Darling.Service.exe --export-investigations cases.jsonl [--since 2026-09-01] [--until 2026-10-01] [--server <name>] [--verdict wrong] [--force] [--config <path>]
+```
+
+- **One case per line, JSON lines.** Each line is one object: `request_id`, `alert` (the server, the family, the first metric, when and how often it fired), `brief` (the alert and the evidence the agent was given), `report` (what it wrote: verdict, root cause, summary, evidence by basis) and `feedback` (every verdict, corrected verdict, missed step and comment people recorded, with the author).
+- **Filters.** `--since` and `--until` are dates (a date alone is its midnight UTC) and select by when the request was opened. `--server` takes a server name. `--verdict` keeps the cases a person marked `right`, `partly` or `wrong`. Without filters you get every case with feedback, newest first, up to 2000; the verb says so when the filter held more. A practice request is not a case and is left out. An existing file is replaced only with `--force`.
+- **Masked as the reports are.** Query text and other collected text are masked at your `mcp.dataDetail` level, the way `get_investigation_reports` masks them, so a `maskLiterals` or `metadataOnly` install exports masked text.
+- **From the web dashboard.** `GET /api/investigation-export` (the same filters as query parameters: `since`, `until`, `server`, `verdict`) downloads the same lines as `investigation-cases.jsonl`. It needs the store login that can record feedback, the `admin` role (`postgres.webConnectionString` on a bring-your-own store); the viewer role gets a 403. The web download reads at `full`, as the web's report panel does, because the role that may download can select those tables itself. No MCP tool serves the export, so an investigating agent cannot read its own answer key.
+
+**How to use it.** After you change your agent's prompt or model, replay the cases: give your agent each line's `alert` and `brief` the way a claimed request would, collect its new verdict, and compare it with the recorded `feedback`. A person's corrected verdict, when there is one, is the answer; otherwise `right` means the original `report.verdict` was correct, and `wrong` means it was not. Count where the new agent agrees, and read the cases where it now disagrees. For a live trial inside Darling use a practice request (above), which scores the agent for you.
+
 ### mcp
 
 The embedded MCP server, over Streamable HTTP bound to `localhost` by default (see [Opt-in Network Endpoints (LAN)](#opt-in-network-endpoints-lan) to reach it — and the store — from the LAN). It exposes the same tool names Lite and the Dashboard expose, plus small Darling-only WRITE surfaces — Custom Views management, alert tuning, and server onboarding (see the last three bullets). The default path (`/`) serves every tool; a client that only needs the fact-finding path can point at `/core` instead, a fixed subset of about 70-90 tools reachable from `list_servers`, `get_fleet_overview`, `analyze_server` and `get_tool_guide` by following each finding's `next_tools`, served behind the exact same Host, token and CIDR checks as `/`:

@@ -40,18 +40,18 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class InvestigationFeedbackLiveTests
 {
-    private const int ServerId = 7_591_301;
-    private const string ServerName = "LcFeedbackSrv";
+    internal const int ServerId = 7_591_301;
+    internal const string ServerName = "LcFeedbackSrv";
     private const string RolePassword = "feedback-live-pw";
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
-    private static InvestigationAlert Alert(DateTime at, string family) =>
+    internal static InvestigationAlert Alert(DateTime at, string family) =>
         new(1, ServerId, ServerName, family, family == "blocking" ? "Blocking" : "Cpu", at, new[] { ServerId + ":" + family }, null,
             50, 200, LeaseMinutes: 15, ExpiryMinutes: 240);
 
     /* A request an agent claims and reports with the given verdict. */
-    private static async Task<Guid> ReportedAsync(InvestigationRequestStore store, DateTime at, string family, string verdict, CancellationToken ct)
+    internal static async Task<Guid> ReportedAsync(InvestigationRequestStore store, DateTime at, string family, string verdict, CancellationToken ct)
     {
         var requestId = (await store.OpenOrJoinAsync(Alert(at, family), ct)).RequestId!.Value;
         var claim = await store.ClaimAsync(requestId, "agent-a", ct);
@@ -67,13 +67,13 @@ public sealed class InvestigationFeedbackLiveTests
         return Convert.ToString(await command.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
     }
 
-    private static async Task ExecAsync(NpgsqlDataSource source, string sql, CancellationToken ct)
+    internal static async Task ExecAsync(NpgsqlDataSource source, string sql, CancellationToken ct)
     {
         await using var command = source.CreateCommand(sql);
         await command.ExecuteNonQueryAsync(ct);
     }
 
-    private static async Task<NpgsqlDataSource> MigratedAsync(ScratchPostgres scratch, CancellationToken ct)
+    internal static async Task<NpgsqlDataSource> MigratedAsync(ScratchPostgres scratch, CancellationToken ct)
     {
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
@@ -82,7 +82,7 @@ public sealed class InvestigationFeedbackLiveTests
         return NpgsqlDataSource.Create(scratch.ConnectionString);
     }
 
-    private static InvestigationFeedbackSubmission Feedback(Guid request, string verdict, string author, string? corrected = null,
+    internal static InvestigationFeedbackSubmission Feedback(Guid request, string verdict, string author, string? corrected = null,
         string? missed = null, string? comment = null) => new(request, verdict, corrected, missed, comment, author);
 
     [Fact]
@@ -254,7 +254,7 @@ public sealed class InvestigationFeedbackLiveTests
     /// <summary>Runs <paramref name="body"/> against the web routes (a test server over the endpoints) with the web host's data
     /// source logging in as a role holding exactly what the managed <paramref name="managedRole"/> holds, on a scratch store with
     /// one reported request. The body gets the owner source, the reported request, and a sender for the routes.</summary>
-    private static async Task WithWebRoutesAsync(
+    internal static async Task WithWebRoutesAsync(
         string managedRole, Func<NpgsqlDataSource, Guid, Func<string, string, string?, string?, Task<(int Status, JsonNode? Body)>>, CancellationToken, Task> body)
     {
         var baseConnectionString = ConnectionString;
