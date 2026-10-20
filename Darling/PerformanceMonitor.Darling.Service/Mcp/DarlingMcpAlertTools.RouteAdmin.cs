@@ -95,7 +95,8 @@ public sealed partial class DarlingMcpAlertTools
                     : new WebhookProxies("", "", "", "");
                 await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
                 await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-                await using (var command = new NpgsqlCommand("SELECT config.create_notification_route($1, $2, $3, $4, $5, $6)", connection, transaction))
+                const string createSql = "SELECT config.create_notification_route($1, $2, $3, $4, $5, $6)";
+                await using (var command = new NpgsqlCommand(createSql, connection) { Transaction = transaction })
                 {
                     command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
                     command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = match });
@@ -294,7 +295,8 @@ public sealed partial class DarlingMcpAlertTools
                 await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
                 if (columns.Count > 0)
                 {
-                    await using var command = new NpgsqlCommand("SELECT config.update_notification_route($1, $2, $3, $4, $5, $6, $7, $8)", connection, transaction);
+                    const string updateSql = "SELECT config.update_notification_route($1, $2, $3, $4, $5, $6, $7, $8)";
+                    await using var command = new NpgsqlCommand(updateSql, connection) { Transaction = transaction };
                     command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
                     command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = route_id });
                     command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = columns.ToArray() });

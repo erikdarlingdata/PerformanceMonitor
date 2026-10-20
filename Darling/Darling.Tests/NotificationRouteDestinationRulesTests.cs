@@ -34,7 +34,7 @@ public sealed class NotificationRouteDestinationRulesTests
     {
         var refusal = NotificationRouteWriter.RecipientsRefusal(recipients);
         Assert.NotNull(refusal);
-        Assert.DoesNotContain("example", refusal, StringComparison.Ordinal);
+        Assert.DoesNotContain(recipients, refusal, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -215,6 +215,44 @@ WHERE route_id = $1";
         return null;
     }
 
+    /// <summary>
+    /// Stores sealed destinations through <c>config.set_notification_route_destinations</c> on the caller's transaction (#6231): the
+    /// function the <c>mcp</c> login writes a route's destinations through. <paramref name="values"/> holds the teams, slack, generic,
+    /// PagerDuty and recipients values in that order (a webhook value sealed for the route's own row, or empty), and
+    /// <paramref name="columns"/> names the ones to change. Returns the five values stored before, in the same order (sealed text for a
+    /// webhook value). A database refusal propagates as a <see cref="PostgresException"/>.
+    /// </summary>
+    public static async Task<string[]> SetRouteDestinationsAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, int routeId, IReadOnlyList<string> columns, IReadOnlyList<string> values,
+        int timeoutSeconds, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(transaction);
+        ArgumentNullException.ThrowIfNull(columns);
+        ArgumentNullException.ThrowIfNull(values);
+        await using var command = new NpgsqlCommand(
+            "SELECT * FROM config.set_notification_route_destinations($1, $2, $3, $4, $5, $6, $7)", connection, transaction);
+        command.CommandTimeout = timeoutSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });
+        command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = columns.ToArray() });
+        for (var i = 0; i < 5; i++)
+        {
+            command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = i < values.Count ? values[i] ?? "" : "" });
+        }
+
+        var previous = new string[5];
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (await reader.ReadAsync(cancellationToken))
+        {
+            for (var i = 0; i < 5; i++)
+            {
+                previous[i] = reader.IsDBNull(i) ? "" : reader.GetString(i);
+            }
+        }
+
+        return previous;
+    }
+
     /// <summary>The recipient count and the distinct domains of a list, for an answer that must not carry the addresses.</summary>
     public static (int Count, string[] Domains) DescribeRecipients(string? recipients)
     {

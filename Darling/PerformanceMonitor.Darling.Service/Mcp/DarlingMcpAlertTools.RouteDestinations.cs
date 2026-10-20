@@ -100,27 +100,8 @@ public sealed partial class DarlingMcpAlertTools
             return new RouteDestinationChange(Array.Empty<string>(), new Dictionary<string, string>(), new Dictionary<string, string>());
         }
 
-        await using var command = new NpgsqlCommand(
-            "SELECT * FROM config.set_notification_route_destinations($1, $2, $3, $4, $5, $6, $7)", connection, transaction);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });
-        command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = columns.ToArray() });
-        for (var i = 0; i < 5; i++)
-        {
-            command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = values[i] ?? "" });
-        }
-
-        var previousStored = new string[5];
-        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
-        {
-            if (await reader.ReadAsync(cancellationToken))
-            {
-                for (var i = 0; i < 5; i++)
-                {
-                    previousStored[i] = reader.IsDBNull(i) ? "" : reader.GetString(i);
-                }
-            }
-        }
+        var previousStored = await NotificationRouteWriter.SetRouteDestinationsAsync(
+            connection, transaction, routeId, columns, values.Select(v => v ?? "").ToArray(), McpCommandDeadlines.ReadSeconds, cancellationToken);
 
         var now = new Dictionary<string, string>();
         var previous = new Dictionary<string, string>();
