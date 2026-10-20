@@ -166,6 +166,9 @@ function finopsRoute(rest) {
   };
 }
 
+/* #6159: another page, server or tab opens at the top; the poll re-render of the same route keeps the scroll position. */
+const resetScrollOnRouteChange = makeScrollReset(() => window.scrollTo(0, 0));
+
 /**
  * @param {object} [opts] — forwarded to renderServer; `{ poll: true }` marks this call as the 60s poll's own
  * refresh rather than a hashchange (sub-tab click, deep link) or the first paint (#4190/#4191). Also forwarded
@@ -173,8 +176,6 @@ function finopsRoute(rest) {
  * that card's last-fetched payload instead of re-fetching (the profile it reports changes rarely — a hardware
  * or version change, never per-tick). Every other renderX() call below still ignores it.
  */
-const resetScrollOnRouteChange = makeScrollReset(() => window.scrollTo(0, 0));
-
 function route(opts) {
   /* The session-expired takeover owns the DOM from the moment it fires until the operator signs in again —
      see showSignedOutState/onSessionExpired below (#4187). hashchange keeps calling this (a stray click, the
@@ -183,7 +184,7 @@ function route(opts) {
   if (isSessionExpired()) return;
 
   const r = currentRoute();
-  resetScrollOnRouteChange(r, !!(opts && opts.poll === true)); // #6159: another page, server or tab opens at the top
+  resetScrollOnRouteChange(r, !!(opts && opts.poll === true));
   markPageRenderStart(r.name, !!(opts && opts.poll === true));
   setActiveNav(r);
   if (r.name === "server") renderServer(main, r.param, r.tab, opts);
