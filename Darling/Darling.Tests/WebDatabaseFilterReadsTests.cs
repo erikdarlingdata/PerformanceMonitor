@@ -199,14 +199,14 @@ public sealed class WebDatabaseFilterReadsTests
     }
 
     /// <summary>
-    /// plain-text.js lists every MCP tool name in <c>MCP_TOOL_NAMES</c> so the plain-text rule knows which get_ words to rewrite.
-    /// That is a list of names the page never calls, not a read, so it is cut out of the text before the scan. Only that one
-    /// declaration is cut: a module that really names a read keeps being scanned, and the declaration must be there to cut, so
+    /// plain-text.js lists every MCP tool name in <c>MCP_TOOL_NAMES</c> and <c>MCP_ACTION_TOOL_NAMES</c> so the plain-text rule knows which tool words to rewrite.
+    /// That is a list of names the page never calls, not a read, so it is cut out of the text before the scan. Only those two
+    /// declarations are cut: a module that really names a read keeps being scanned, and the declaration must be there to cut, so
     /// renaming it fails this census instead of quietly scanning the list again.
     /// </summary>
     private static string WithoutToolNameList(string text)
     {
-        var declaration = new Regex(@"export\s+const\s+MCP_TOOL_NAMES\s*=\s*\[[^\]]*\]\s*;", RegexOptions.None, TimeSpan.FromSeconds(5));
+        var declaration = new Regex(@"export\s+const\s+MCP_(?:ACTION_)?TOOL_NAMES\s*=\s*\[[^\]]*\]\s*;", RegexOptions.None, TimeSpan.FromSeconds(5));
         return declaration.Replace(text, "");
     }
 

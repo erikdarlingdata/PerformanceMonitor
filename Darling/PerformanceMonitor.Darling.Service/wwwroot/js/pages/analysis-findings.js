@@ -76,8 +76,15 @@ export function groupHeader(group) {
   return title + " · " + (n > 1 ? n + " findings · " : "") + group.label.toUpperCase();
 }
 
-function findingTitle(f) {
-  return (f.advice && f.advice.headline) || f.story_path || f.category || "Finding";
+/** A story key such as CONFIG_PG_TRACK_IO_TIMING as words: "Config PostgreSQL track io timing". Only used when a finding carries no headline. */
+export function readableStory(key) {
+  const words = String(key || "").trim().replace(/[_\s]+/g, " ").toLowerCase().replace(/\bpg\b/g, "PostgreSQL");
+  return words ? words[0].toUpperCase() + words.slice(1) : "";
+}
+
+/** The finding's own headline; a story key in words when it has none. Never the raw key. */
+export function findingTitle(f) {
+  return (f.advice && f.advice.headline) || readableStory(f.story_path) || f.category || "Finding";
 }
 
 /* ─────────────────────────── state ─────────────────────────── */
