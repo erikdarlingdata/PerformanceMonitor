@@ -117,7 +117,7 @@ public sealed class DarlingMcpPgWaitSamplingTools
                 var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
                     postgres, "get_pg_wait_sampling", resolved.ServerName, emptyStart, windowEnd, emptyAnswer: true, logger, cancellationToken);
 
-                return McpHelpers.Status(
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status(
                         "empty",
                         McpHelpers.QuietUnlessCut(
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
@@ -128,7 +128,7 @@ public sealed class DarlingMcpPgWaitSamplingTools
                                 + "server this is the healthy state: the profiler samples backends, and an idle "
                                 + "server has none to sample.",
                             tail: DescribeInstrumentForEmpty(instrument, windowTruncated: emptyNotice.WindowTruncated)),
-                        emptyNotice.AsHints());
+                        emptyNotice.AsHints()), cancellationToken);
             }
 
             /* #4966: where the store's coverage of the window starts, probed on the web's own source for this read (WebDataStartNote).

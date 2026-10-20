@@ -24,7 +24,7 @@ namespace PerformanceMonitorLite.Tests;
 [Trait("Stage", "Guard")]
 public sealed class AzureSqlDatabaseMasterPinsTests
 {
-    private static IDataReader FleetRow(int engineEdition, string edition)
+    internal static IDataReader FleetRow(int engineEdition, string edition, long cpuSamples = 288, int? totalMemoryMb = null, int? bufferPoolMb = null)
     {
         var table = new DataTable();
         table.Columns.Add("server_id", typeof(int));
@@ -41,7 +41,15 @@ public sealed class AzureSqlDatabaseMasterPinsTests
         table.Columns.Add("grant_utilization_pct", typeof(decimal));
         table.Columns.Add("engine_edition", typeof(int));
         table.Columns.Add("edition", typeof(string));
-        table.Rows.Add(1, 6m, 20m, 1, 8m, 7m, DBNull.Value, DBNull.Value, 0L, 0L, 0L, 0m, engineEdition, edition);
+        table.Columns.Add("total_physical_memory_mb", typeof(int));
+        table.Columns.Add("buffer_pool_mb", typeof(int));
+        table.Columns.Add("mem_time", typeof(DateTime));
+        table.Columns.Add("alloc_mb", typeof(decimal));
+        table.Columns.Add("free_mb", typeof(decimal));
+        table.Columns.Add("cpu_samples", typeof(long));
+        table.Columns.Add("total_server_memory_mb", typeof(int));
+        table.Rows.Add(1, 6m, 20m, 1, 8m, 7m, DBNull.Value, DBNull.Value, 0L, 0L, 0L, 0m, engineEdition, edition,
+            (object?)totalMemoryMb ?? DBNull.Value, (object?)bufferPoolMb ?? DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, cpuSamples, (object?)totalMemoryMb ?? DBNull.Value);
         var reader = table.CreateDataReader();
         Assert.True(reader.Read());
         return reader;

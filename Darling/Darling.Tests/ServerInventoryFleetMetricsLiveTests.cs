@@ -256,6 +256,7 @@ LEFT JOIN grants g ON true";
         await InsertCpuAsync(connection, ServerA, now.AddHours(-1), 10, ct);
         await InsertCpuAsync(connection, ServerA, now.AddHours(-2), 50, ct);
         await InsertCpuAsync(connection, ServerA, now.AddHours(-3), 90, ct);
+        await PadCpuAsync(connection, ServerA, 50, ProvisioningVerdict.MinSamples - 3, ct); // 12 samples: enough for a verdict (#6139)
         await InsertMemoryAsync(connection, ServerA, now.AddHours(-5), 999, 999, ct); // superseded — must be ignored
         await InsertMemoryAsync(connection, ServerA, now.AddHours(-1), 300, 250, ct); // latest — must win
         await InsertMemoryGrantAsync(connection, ServerA, now.AddHours(-1), 5, 1, 0, 800, 1000, ct);
@@ -270,6 +271,7 @@ LEFT JOIN grants g ON true";
         // Server B: both databases active, no memory-grant evidence at all (grants CTE empty, must COALESCE to 0).
         await InsertCpuAsync(connection, ServerB, now.AddHours(-1), 20, ct);
         await InsertCpuAsync(connection, ServerB, now.AddHours(-2), 40, ct);
+        await PadCpuAsync(connection, ServerB, 30, ProvisioningVerdict.MinSamples - 2, ct);
         await InsertMemoryAsync(connection, ServerB, now.AddHours(-1), 128, 64, ct);
         await InsertDatabaseSizeAsync(connection, ServerB, "old-new-B", "Db1", now.AddMinutes(-15), 200, ct);
         await InsertDatabaseSizeAsync(connection, ServerB, "old-new-B", "Db2", now.AddMinutes(-15), 150, ct);
@@ -285,7 +287,15 @@ LEFT JOIN grants g ON true";
         // Server D: low CPU and nothing else — the verdict every server with CPU samples kept: OVER_PROVISIONED.
         await InsertCpuAsync(connection, ServerD, now.AddHours(-1), 5, ct);
         await InsertCpuAsync(connection, ServerD, now.AddHours(-2), 7, ct);
+        await PadCpuAsync(connection, ServerD, 6, ProvisioningVerdict.MinSamples - 2, ct);
         await FinOpsIdleCoverageSeed.SeedAsync(connection, ct, ServerD, "old-new-D", now);
+
+        // Server E: the same low CPU as D, one sample short of a verdict (#6139). Not in the per-server loop below: the frozen
+        // legacy statement counts no samples, so the fleet rule is asserted on its own.
+        const int ServerE = -940305;
+        await ExecAsync(connection, "INSERT INTO servers (server_id, server_name) VALUES ($1, $2)", ct, ServerE, "old-new-E");
+        await PadCpuAsync(connection, ServerE, 6, ProvisioningVerdict.MinSamples - 1, ct);
+        await FinOpsIdleCoverageSeed.SeedAsync(connection, ct, ServerE, "old-new-E", now);
 
         await using var viewer = new ViewerDataService(scratch.ConnectionString);
         var metrics = await viewer.GetServerMetricsAsync(ct);
@@ -317,6 +327,7 @@ LEFT JOIN grants g ON true";
         // a server with low CPU still gets it.
         Assert.Null(metrics[ServerC].ProvisioningStatus);
         Assert.Equal(ProvisioningVerdict.OverProvisioned, metrics[ServerD].ProvisioningStatus);
+        Assert.Equal(ProvisioningVerdict.NotEnoughData, metrics[ServerE].ProvisioningStatus);
     }
 
     /// <summary>
@@ -340,6 +351,7 @@ LEFT JOIN grants g ON true";
 
         const int QuietServer = -940311;
         const int NoCpuServer = -940312;
+        const int SparseServer = -940313;
 
         await ExecAsync(connection, "INSERT INTO servers (server_id, server_name) VALUES ($1, $2), ($3, $4)",
             ct, QuietServer, "util-quiet", NoCpuServer, "util-nocpu");
@@ -349,13 +361,22 @@ LEFT JOIN grants g ON true";
         await InsertMemoryAsync(connection, NoCpuServer, now.AddHours(-1), 100, 10, ct);
         await InsertCpuAsync(connection, QuietServer, now.AddHours(-1), 5, ct);
         await InsertCpuAsync(connection, QuietServer, now.AddHours(-2), 7, ct);
+        await PadCpuAsync(connection, QuietServer, 6, ProvisioningVerdict.MinSamples - 2, ct); // enough samples for a verdict (#6139)
+        await ExecAsync(connection, "INSERT INTO servers (server_id, server_name) VALUES ($1, $2)", ct, SparseServer, "util-sparse");
+        await InsertMemoryAsync(connection, SparseServer, now.AddHours(-1), 100, 10, ct);
+        await PadCpuAsync(connection, SparseServer, 6, ProvisioningVerdict.MinSamples - 1, ct); // one short of a verdict
 
         await using var viewer = new ViewerDataService(scratch.ConnectionString);
 
         var quiet = await viewer.GetUtilizationEfficiencyAsync(QuietServer, ct);
         Assert.NotNull(quiet);
-        Assert.Equal(2L, quiet.CpuSamples);
+        Assert.Equal(ProvisioningVerdict.MinSamples, quiet.CpuSamples);
         Assert.Equal(ProvisioningVerdict.OverProvisioned, quiet.ProvisioningStatus);
+
+        var sparse = await viewer.GetUtilizationEfficiencyAsync(SparseServer, ct);
+        Assert.NotNull(sparse);
+        Assert.Equal(ProvisioningVerdict.MinSamples - 1, sparse.CpuSamples);
+        Assert.Equal(ProvisioningVerdict.NotEnoughData, sparse.ProvisioningStatus);
 
         var noCpu = await viewer.GetUtilizationEfficiencyAsync(NoCpuServer, ct);
         Assert.NotNull(noCpu);
@@ -500,6 +521,15 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9, $10)", connection);
         command.Parameters.AddWithValue(cpuPercent);
         command.Parameters.AddWithValue(0);
         await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary><paramref name="count"/> more CPU samples of the same reading, five minutes apart and well inside the last 24 hours (#6139: a verdict needs MinSamples).</summary>
+    private static async Task PadCpuAsync(NpgsqlConnection connection, int serverId, int cpuPercent, long count, CancellationToken ct)
+    {
+        for (var i = 0; i < count; i++)
+        {
+            await InsertCpuAsync(connection, serverId, DateTime.UtcNow.AddMinutes(-10 - (5 * i)), cpuPercent, ct);
+        }
     }
 
     private static async Task InsertMemoryAsync(NpgsqlConnection connection, int serverId, DateTime collectionTime, int maxWorkers, int currentWorkers, CancellationToken ct)

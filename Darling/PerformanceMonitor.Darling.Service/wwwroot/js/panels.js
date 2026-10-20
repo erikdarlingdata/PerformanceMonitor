@@ -1379,8 +1379,11 @@ function vizStat(data, desc) {
       const valueClass = "value" + (s.small ? " small" : "") + (sev ? " " + sevClass(sev) : "");
       const raw = getPath(data, s.key);
       const why = raw == null && s.nullKey ? getPath(data, s.nullKey) : null;
+      /* `appendKey` adds a second field of the payload after the value, when it has one: the product level "RTM" and its update level "CU20" read "RTM CU20" (#6159). */
+      const extra = raw != null && s.appendKey ? getPath(data, s.appendKey) : null;
+      const shownValue = applyFormat(s.format, raw) + (extra != null && extra !== "" ? " " + String(extra) : "");
       return el("div", { class: "stat" }, [
-        el("div", { class: valueClass, text: why != null && why !== "" ? String(why) : applyFormat(s.format, raw) }),
+        el("div", { class: valueClass, text: why != null && why !== "" ? String(why) : shownValue }),
         el("div", { class: "label", text: s.label }),
       ]);
     })

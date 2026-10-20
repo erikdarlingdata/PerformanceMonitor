@@ -229,7 +229,9 @@ try {
       const popover = page.byClass("db-filter-popover")[0];
       page.byClass("db-filter-button")[0].fire("click");
       await settle();
+      out.countAtOpen = popover.byClass("mp-count")[0].textContent;
       for (const box of boxes(popover).slice(0, 50)) { box.checked = true; box.fire("change"); }
+      out.countAtLimit = popover.byClass("mp-count")[0].textContent;
       out.checkedBefore = checked(popover).length;
       const fifty1 = boxes(popover)[50];
       fifty1.checked = true; fifty1.fire("change"); // a hand-fired change past the cap

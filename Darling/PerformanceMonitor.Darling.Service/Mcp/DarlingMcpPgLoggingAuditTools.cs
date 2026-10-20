@@ -61,14 +61,14 @@ public sealed class DarlingMcpPgLoggingAuditTools
                 /* The same miss vocabulary as get_pg_server_config, because it is the same absence: the
                    collector this reads never ran here (engine gate), or has not run YET. Neither is an audit
                    result, and an audit of an empty snapshot would say 'unknown' seven times and look like one. */
-                return await DarlingEngineCapability.NotCollectedStatusAsync(
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, DateTime.UtcNow, await DarlingEngineCapability.NotCollectedStatusAsync(
                         postgres, resolved.ServerId, resolved.DisplayName, "pg_server_config", cancellationToken)
                     ?? McpHelpers.Status(
                         "empty",
                         $"No configuration snapshot has been collected for {resolved.DisplayName} yet, so there "
                         + "is nothing to audit. pg_server_config runs hourly; a server registered in the last "
                         + "hour has not reached its first collection. This is not a verdict about the "
-                        + "server's logging - it is the absence of the evidence.");
+                        + "server's logging - it is the absence of the evidence."), cancellationToken);
             }
 
             /* #4251: the collector's own cached verdict, no store read - see the identical comment on

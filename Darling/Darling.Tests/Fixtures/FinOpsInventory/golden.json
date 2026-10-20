@@ -3,7 +3,7 @@
     {
       "Server": "darling-finops-inv-golden-a",
       "Metrics": {
-        "AvgCpuPct": 38.7500000000000000,
+        "AvgCpuPct": 38.7857142857142857,
         "StorageTotalGb": 3.0488281250000000,
         "IdleDbCount": 1,
         "ProvisioningStatus": "UNDER_PROVISIONED",

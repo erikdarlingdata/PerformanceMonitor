@@ -152,9 +152,9 @@
                                           ToolTip="Off = the classic behavior: the first sighting of a server is a silent baseline, even when it is down."/>
                                 <WrapPanel Orientation="Horizontal" Margin="36,4,0,0"
                                             ToolTip="0 = off (one alert per occurrence). Covers a server that is unreachable, AG Sync Fell Behind, and the other alerts for a lasting problem. Each repeat uses that alert's own metric name, so webhook automation keyed on it re-triggers.">
-                                    <TextBlock TextWrapping="Wrap" Text="Re-alert while a problem lasts every" VerticalAlignment="Center"
+                                    <TextBlock x:Name="ConnectionRefireMinutesLabel" TextWrapping="Wrap" Text="Re-alert while a problem lasts every" VerticalAlignment="Center"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox x:Name="ConnectionRefireMinutesBox" Width="45" Text="0" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=ConnectionRefireMinutesLabel}" x:Name="ConnectionRefireMinutesBox" Width="45" Text="0" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                     <TextBlock Text="min (0 = off)" VerticalAlignment="Center" Margin="4,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
@@ -163,9 +163,9 @@
                                           ToolTip="Failover, replica disconnected / reconnected, sync fell behind, and data movement suspended. Servers with no Availability Groups are unaffected."/>
                                 <WrapPanel Orientation="Horizontal" Margin="36,4,0,0"
                                             ToolTip="0 = off. How far a secondary may fall behind the primary before alerting.">
-                                    <TextBlock TextWrapping="Wrap" Text="Alert when a secondary is behind by" VerticalAlignment="Center"
+                                    <TextBlock x:Name="AgLagAlertSecondsLabel" TextWrapping="Wrap" Text="Alert when a secondary is behind by" VerticalAlignment="Center"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox x:Name="AgLagAlertSecondsBox" Width="55" Text="300" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AgLagAlertSecondsLabel}" x:Name="AgLagAlertSecondsBox" Width="55" Text="300" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                     <TextBlock Text="sec (0 = off)" VerticalAlignment="Center" Margin="4,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
@@ -173,27 +173,27 @@
                                             ToolTip="0 = off. A healthy redo queue size is workload-specific, and a legitimate catch-up after a suspend will spike it, so this ships off - set it once you know your own baseline.">
                                     <TextBlock TextWrapping="Wrap" Text="...or its redo queue reaches" VerticalAlignment="Center"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox x:Name="AgRedoQueueAlertKbBox" Width="95" Text="0" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.Name="Alert when redo queue reaches, KB" x:Name="AgRedoQueueAlertKbBox" Width="95" Text="0" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                     <TextBlock Text="KB (0 = off)" VerticalAlignment="Center" Margin="4,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="36,4,0,0"
                                             ToolTip="0 = off (one alert per outage). Re-alerts use the same 'AG Replica Disconnected' metric name, so webhook automation keyed on it re-triggers.">
-                                    <TextBlock TextWrapping="Wrap" Text="Re-alert while a replica is still disconnected every" VerticalAlignment="Center"
+                                    <TextBlock x:Name="AgDisconnectRefireMinutesLabel" TextWrapping="Wrap" Text="Re-alert while a replica is still disconnected every" VerticalAlignment="Center"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox x:Name="AgDisconnectRefireMinutesBox" Width="45" Text="0" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AgDisconnectRefireMinutesLabel}" x:Name="AgDisconnectRefireMinutesBox" Width="45" Text="0" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                     <TextBlock Text="min (0 = off)" VerticalAlignment="Center" Margin="4,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
                                     <CheckBox x:Name="AlertCpuCheckBox" Content="CPU above" VerticalAlignment="Center"
                                               Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox x:Name="AlertCpuThresholdBox" Width="45" Text="80" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertCpuCheckBox}" x:Name="AlertCpuThresholdBox" Width="45" Text="80" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                     <TextBlock Text="%" VerticalAlignment="Center" Margin="2,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBlock Text="measured as" VerticalAlignment="Center" Margin="8,0,4,0"
+                                    <TextBlock x:Name="AlertCpuModeLabel" Text="measured as" VerticalAlignment="Center" Margin="8,0,4,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <ComboBox x:Name="AlertCpuModeBox" MinWidth="260" VerticalAlignment="Center">
+                                    <ComboBox AutomationProperties.LabeledBy="{Binding ElementName=AlertCpuModeLabel}" x:Name="AlertCpuModeBox" MinWidth="260" VerticalAlignment="Center">
                                         <ComboBoxItem Content="Total non-idle CPU (SQL + other processes)" Tag="Total"/>
                                         <ComboBoxItem Content="SQL Server only (scheduler %)" Tag="SqlOnly"/>
                                     </ComboBox>
@@ -201,19 +201,19 @@
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
                                     <CheckBox x:Name="AlertBlockingCheckBox" Content="Blocking sessions &#x2265;" VerticalAlignment="Center"
                                               Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox x:Name="AlertBlockingThresholdBox" Width="45" Text="1" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertBlockingCheckBox}" x:Name="AlertBlockingThresholdBox" Width="45" Text="1" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
-                                    <TextBlock TextWrapping="Wrap" Text="Total blocked wait &#x2265;" VerticalAlignment="Center" Margin="24,0,0,0"
+                                    <TextBlock x:Name="AlertBlockingWaitSecondsLabel" TextWrapping="Wrap" Text="Total blocked wait &#x2265;" VerticalAlignment="Center" Margin="24,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox x:Name="AlertBlockingWaitSecondsBox" Width="45" Text="0" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertBlockingWaitSecondsLabel}" x:Name="AlertBlockingWaitSecondsBox" Width="45" Text="0" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                     <TextBlock Text="seconds (0 = off)" VerticalAlignment="Center" Margin="4,0,0,0"
                                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
                                     <CheckBox x:Name="AlertDeadlockCheckBox" Content="Deadlocks &#x2265;" VerticalAlignment="Center"
                                               Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox x:Name="AlertDeadlockThresholdBox" Width="45" Text="1" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertDeadlockCheckBox}" x:Name="AlertDeadlockThresholdBox" Width="45" Text="1" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
                                     <!-- #3539 A4: the alert grades wait ACCUMULATED over a rolling ten-minute window against fixed,
@@ -230,11 +230,11 @@
                                     <CheckBox x:Name="AlertRunnableQueueCheckBox" Content="Runnable queue (runnable tasks per scheduler, windowed average) — Warning at" VerticalAlignment="Center"
                                               Foreground="{DynamicResource ForegroundBrush}"
                                               ToolTip="The Runnable Queue alert averages runnable tasks per scheduler over the collections in the last 5 minutes when there are at least 3, otherwise over the newest 3 if all fall in the last 10 minutes (or in 4 times the gap between cpu_scheduler_stats collections when that is longer, so the Low-Impact preset's 5-minute collection still evaluates). It fires WARNING at the first bar and CRITICAL at the second; a Warning that worsens to Critical is delivered at once."/>
-                                    <TextBox x:Name="AlertRunnableQueueWarningBox" Width="45" Text="8" Margin="6,0,0,0" VerticalAlignment="Center"
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertRunnableQueueCheckBox}" x:Name="AlertRunnableQueueWarningBox" Width="45" Text="8" Margin="6,0,0,0" VerticalAlignment="Center"
                                              ToolTip="Warning bar: average runnable tasks per scheduler (the last 5 minutes' collections when there are at least 3, otherwise the newest 3 inside 10 minutes). At least 1. Default 8."/>
                                     <TextBlock Text="Critical at" VerticalAlignment="Center" Margin="6,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox x:Name="AlertRunnableQueueCriticalBox" Width="45" Text="16" Margin="6,0,0,0" VerticalAlignment="Center"
+                                    <TextBox AutomationProperties.Name="Runnable queue, critical at" x:Name="AlertRunnableQueueCriticalBox" Width="45" Text="16" Margin="6,0,0,0" VerticalAlignment="Center"
                                              ToolTip="Critical bar: average runnable tasks per scheduler (same window as the Warning bar). Never below the Warning bar. Default 16."/>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
@@ -244,22 +244,22 @@
                                     <CheckBox x:Name="AlertClientTimeoutsCheckBox" Content="Client timeouts and cancels per minute — Warning at" VerticalAlignment="Center"
                                               Foreground="{DynamicResource ForegroundBrush}"
                                               ToolTip="The Client Timeouts alert counts client timeouts and cancels per minute (the sqlserver.attention event: a client cancelled a query or its timeout expired) over the attention collector's last runs (about 3 minutes). It fires WARNING at the first bar and CRITICAL at the second; a Warning that worsens to Critical is delivered at once. Off by default because no measured normal rate exists yet."/>
-                                    <TextBox x:Name="AlertClientTimeoutsWarningBox" Width="45" Text="10" Margin="6,0,0,0" VerticalAlignment="Center"
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertClientTimeoutsCheckBox}" x:Name="AlertClientTimeoutsWarningBox" Width="45" Text="10" Margin="6,0,0,0" VerticalAlignment="Center"
                                              ToolTip="Warning bar: client timeouts and cancels (attentions) per minute over the covered span. At least 1. Default 10."/>
                                     <TextBlock Text="Critical at" VerticalAlignment="Center" Margin="6,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox x:Name="AlertClientTimeoutsCriticalBox" Width="45" Text="60" Margin="6,0,0,0" VerticalAlignment="Center"
+                                    <TextBox AutomationProperties.Name="Client timeouts, critical at" x:Name="AlertClientTimeoutsCriticalBox" Width="45" Text="60" Margin="6,0,0,0" VerticalAlignment="Center"
                                              ToolTip="Critical bar: client timeouts and cancels (attentions) per minute (same span as the Warning bar). Never below the Warning bar. Default 60."/>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
                                     <CheckBox x:Name="AlertLongRunningQueryCheckBox" Content="Long-running queries over" VerticalAlignment="Center"
                                               Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox x:Name="AlertLongRunningQueryThresholdBox" Width="45" Text="30" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertLongRunningQueryCheckBox}" x:Name="AlertLongRunningQueryThresholdBox" Width="45" Text="30" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                     <TextBlock Text="minutes," VerticalAlignment="Center" Margin="2,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                     <TextBlock Text="return up to" VerticalAlignment="Center" Margin="6,0,6,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox x:Name="AlertLongRunningQueryMaxResultsBox" Width="45" Text="5" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.Name="Long-running queries, maximum results" x:Name="AlertLongRunningQueryMaxResultsBox" Width="45" Text="5" VerticalAlignment="Center"/>
                                     <TextBlock Text="results" VerticalAlignment="Center" Margin="2,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
@@ -290,37 +290,37 @@
                                      clears that default for good, and "Reset to defaults" puts the seeds back. -->
                                 <TextBlock Text="Exclude sessions whose program name STARTS WITH (comma-separated, case-insensitive; no wildcards):"
                                            Foreground="{DynamicResource ForegroundBrush}" Margin="20,6,0,4" FontSize="12"/>
-                                <TextBox x:Name="AlertLrqExcludedProgramNamePrefixesBox" Margin="20,0,0,4"/>
+                                <TextBox AutomationProperties.Name="Excluded program name prefixes" x:Name="AlertLrqExcludedProgramNamePrefixesBox" Margin="20,0,0,4"/>
                                 <TextBlock Text="Exclude sessions whose login IS (comma-separated, case-insensitive, whole name):"
                                            Foreground="{DynamicResource ForegroundBrush}" Margin="20,0,0,4" FontSize="12"/>
-                                <TextBox x:Name="AlertLrqExcludedLoginsBox" Margin="20,0,0,4"/>
+                                <TextBox AutomationProperties.Name="Excluded logins" x:Name="AlertLrqExcludedLoginsBox" Margin="20,0,0,4"/>
                                 <TextBlock Text="Defaults from a 7-day read of one large production store: SQL Agent job steps (program prefix 'SQLAgent - TSQL JobStep', ~460 sessions/week, 35–62 min medians) and the NT AUTHORITY\SYSTEM / NT AUTHORITY\NETWORK SERVICE logins (the multi-day CDC-shaped background). The application's admin login is NOT a default: it runs the job wave but also real ad-hoc long-runners, and the job-step prefix already covers its share. Named humans are never excluded — they are what the alert is for. An excluded session is never evaluated (the opposite of a mute); the alert card counts how many each list removed. Empty a box to disable that default."
                                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                            Margin="20,0,0,0" TextWrapping="Wrap"/>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
                                     <CheckBox x:Name="AlertTempDbSpaceCheckBox" Content="tempdb space usage over" VerticalAlignment="Center"
                                               Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox x:Name="AlertTempDbSpaceThresholdBox" Width="45" Text="80" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertTempDbSpaceCheckBox}" x:Name="AlertTempDbSpaceThresholdBox" Width="45" Text="80" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                     <TextBlock Text="%" VerticalAlignment="Center" Margin="2,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
                                     <CheckBox x:Name="AlertLowDiskCheckBox" Content="Volume free space under" VerticalAlignment="Center"
                                               Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox x:Name="AlertLowDiskThresholdPercentBox" Width="45" Text="10" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertLowDiskCheckBox}" x:Name="AlertLowDiskThresholdPercentBox" Width="45" Text="10" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                     <TextBlock Text="% or" VerticalAlignment="Center" Margin="2,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox x:Name="AlertLowDiskThresholdGbBox" Width="45" Text="5" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.Name="Volume free space under, GB" x:Name="AlertLowDiskThresholdGbBox" Width="45" Text="5" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                     <TextBlock TextWrapping="Wrap" Text="GB free (Azure SQL DB excluded)" VerticalAlignment="Center" Margin="2,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
                                     <CheckBox x:Name="AlertPvsCheckBox" Content="Version store (PVS) over" VerticalAlignment="Center"
                                               Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox x:Name="AlertPvsThresholdPercentBox" Width="45" Text="40" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertPvsCheckBox}" x:Name="AlertPvsThresholdPercentBox" Width="45" Text="40" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                     <TextBlock TextWrapping="Wrap" Text="% of database and at least" VerticalAlignment="Center" Margin="2,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox x:Name="AlertPvsFloorGbBox" Width="45" Text="1" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.Name="Version store minimum size, GB" x:Name="AlertPvsFloorGbBox" Width="45" Text="1" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                     <TextBlock Text="GB (ADR databases only)" VerticalAlignment="Center" Margin="2,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
@@ -328,27 +328,27 @@
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
                                     <CheckBox x:Name="AlertFileGrowthCheckBox" Content="Database file growing over" VerticalAlignment="Center"
                                               Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox x:Name="AlertFileGrowthRiseMbBox" Width="60" Text="10240" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertFileGrowthCheckBox}" x:Name="AlertFileGrowthRiseMbBox" Width="60" Text="10240" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                     <TextBlock Text="MB/hr averaged over" VerticalAlignment="Center" Margin="2,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox x:Name="AlertFileGrowthLookbackMinutesBox" Width="45" Text="60" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.Name="File growth averaging window, minutes" x:Name="AlertFileGrowthLookbackMinutesBox" Width="45" Text="60" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                     <TextBlock Text="min, or is over" VerticalAlignment="Center" Margin="2,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox x:Name="AlertFileGrowthVolumePercentBox" Width="45" Text="60" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.Name="File growth volume fill, percent" x:Name="AlertFileGrowthVolumePercentBox" Width="45" Text="60" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                     <TextBlock TextWrapping="Wrap" Text="% of its volume (0 disables either gate)" VerticalAlignment="Center" Margin="2,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
                                     <CheckBox x:Name="AlertLongRunningJobCheckBox" Content="Agent jobs running over" VerticalAlignment="Center"
                                               Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox x:Name="AlertLongRunningJobMultiplierBox" Width="35" Text="3" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertLongRunningJobCheckBox}" x:Name="AlertLongRunningJobMultiplierBox" Width="35" Text="3" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                     <TextBlock Text="x historical average" VerticalAlignment="Center" Margin="2,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
                                     <CheckBox x:Name="AlertFailedJobCheckBox" Content="Agent job failed in the last" VerticalAlignment="Center"
                                               Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox x:Name="AlertFailedJobLookbackBox" Width="45" Text="60" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertFailedJobCheckBox}" x:Name="AlertFailedJobLookbackBox" Width="45" Text="60" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                     <TextBlock Text="minutes" VerticalAlignment="Center" Margin="2,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
@@ -361,15 +361,15 @@
                                 <!-- Global Alert Filters -->
                                 <TextBlock Text="Global Alert Filters" FontWeight="SemiBold" FontSize="12"
                                            Foreground="{DynamicResource ForegroundBrush}" Margin="20,14,0,4"/>
-                                <TextBlock Text="Exclude databases from alerts (one name per line):"
+                                <TextBlock x:Name="AlertExcludedDatabasesLabel" Text="Exclude databases from alerts (one name per line):"
                                            Foreground="{DynamicResource ForegroundBrush}" Margin="20,0,0,4" FontSize="12"/>
-                                <TextBox x:Name="AlertExcludedDatabasesBox" Margin="20,0,0,4" AcceptsReturn="True" TextWrapping="NoWrap" Height="60" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"/>
+                                <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertExcludedDatabasesLabel}" x:Name="AlertExcludedDatabasesBox" Margin="20,0,0,4" AcceptsReturn="True" TextWrapping="NoWrap" Height="60" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"/>
                                 <TextBlock Text="e.g. DBAtools, msdb and tempdb on three lines; a name may hold a comma — applies to blocking, deadlock, and long-running query alerts"
                                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                            Margin="20,0,0,0" TextWrapping="Wrap"/>
-                                <TextBlock Text="Exclude volumes from the Volume Free Space alert (one per line):"
+                                <TextBlock x:Name="AlertExcludedVolumesLabel" Text="Exclude volumes from the Volume Free Space alert (one per line):"
                                            Foreground="{DynamicResource ForegroundBrush}" Margin="20,10,0,4" FontSize="12"/>
-                                <TextBox x:Name="AlertExcludedVolumesBox" Margin="20,0,0,4" AcceptsReturn="True" TextWrapping="NoWrap" Height="60" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"/>
+                                <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertExcludedVolumesLabel}" x:Name="AlertExcludedVolumesBox" Margin="20,0,0,4" AcceptsReturn="True" TextWrapping="NoWrap" Height="60" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"/>
                                 <TextBlock Text="e.g. S:\, T:\ and /mnt/scratch on three lines (a comma-separated paste also works) — the whole mount point, any case, a trailing \ or / is ignored; applies to every server"
                                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                            Margin="20,0,0,0" TextWrapping="Wrap"/>
@@ -385,30 +385,30 @@
                             <StackPanel>
                                 <TextBlock Text="Alert Delivery" FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <WrapPanel Orientation="Horizontal" Margin="20,10,0,0">
-                                    <TextBlock TextWrapping="Wrap" Text="Tray notification cooldown:" VerticalAlignment="Center" Margin="0,0,8,0"
+                                    <TextBlock x:Name="AlertCooldownLabel" TextWrapping="Wrap" Text="Tray notification cooldown:" VerticalAlignment="Center" Margin="0,0,8,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox x:Name="AlertCooldownBox" Width="40" TextAlignment="Center" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertCooldownLabel}" x:Name="AlertCooldownBox" Width="40" TextAlignment="Center" VerticalAlignment="Center"/>
                                     <TextBlock Text="minutes" VerticalAlignment="Center" Margin="4,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
-                                    <TextBlock Text="Email alert cooldown:" VerticalAlignment="Center" Margin="0,0,8,0"
+                                    <TextBlock x:Name="EmailCooldownLabel" Text="Email alert cooldown:" VerticalAlignment="Center" Margin="0,0,8,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox x:Name="EmailCooldownBox" Width="40" TextAlignment="Center" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=EmailCooldownLabel}" x:Name="EmailCooldownBox" Width="40" TextAlignment="Center" VerticalAlignment="Center"/>
                                     <TextBlock Text="minutes" VerticalAlignment="Center" Margin="4,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
                                 <!-- #1141: deadlock/blocking notification delivery mode + per-event cap -->
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
-                                    <TextBlock TextWrapping="Wrap" Text="Deadlock/blocking delivery:" VerticalAlignment="Center" Margin="0,0,8,0"
+                                    <TextBlock x:Name="AlertDeliveryModeLabel" TextWrapping="Wrap" Text="Deadlock/blocking delivery:" VerticalAlignment="Center" Margin="0,0,8,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <ComboBox x:Name="AlertDeliveryModeBox" Width="260" VerticalAlignment="Center">
+                                    <ComboBox AutomationProperties.LabeledBy="{Binding ElementName=AlertDeliveryModeLabel}" x:Name="AlertDeliveryModeBox" Width="260" VerticalAlignment="Center">
                                         <ComboBoxItem Content="Summary — one card per cycle" Tag="Summary"/>
                                         <ComboBoxItem Content="Per-event — one notification per incident" Tag="PerEvent"/>
                                     </ComboBox>
                                     <TextBlock Text="max" VerticalAlignment="Center" Margin="8,0,4,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox x:Name="AlertPerEventMaxBox" Width="40" TextAlignment="Center" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.Name="Per-event notifications per cycle, maximum" x:Name="AlertPerEventMaxBox" Width="40" TextAlignment="Center" VerticalAlignment="Center"/>
                                     <TextBlock Text="/cycle" VerticalAlignment="Center" Margin="4,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
@@ -439,33 +439,33 @@
                                         <RowDefinition Height="Auto"/>
                                         <RowDefinition Height="Auto"/>
                                     </Grid.RowDefinitions>
-                                    <TextBlock Grid.Row="0" Grid.Column="0" Text="SMTP Server:" VerticalAlignment="Center"
+                                    <TextBlock x:Name="SmtpServerLabel" Grid.Row="0" Grid.Column="0" Text="SMTP Server:" VerticalAlignment="Center"
                                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,4"/>
-                                    <TextBox Grid.Row="0" Grid.Column="1" x:Name="SmtpServerBox" Margin="0,0,0,4"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=SmtpServerLabel}" Grid.Row="0" Grid.Column="1" x:Name="SmtpServerBox" Margin="0,0,0,4"/>
 
                                     <TextBlock Grid.Row="1" Grid.Column="0" Text="Port:" VerticalAlignment="Center"
                                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,4"/>
                                     <WrapPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,4">
-                                        <TextBox x:Name="SmtpPortBox" Width="70" Text="587"/>
+                                        <TextBox AutomationProperties.Name="SMTP port" x:Name="SmtpPortBox" Width="70" Text="587"/>
                                         <CheckBox x:Name="SmtpSslCheckBox" Content="Use SSL/TLS" VerticalAlignment="Center" Margin="16,0,0,0"
                                                   Foreground="{DynamicResource ForegroundBrush}" IsChecked="True"/>
                                     </WrapPanel>
 
-                                    <TextBlock Grid.Row="2" Grid.Column="0" Text="Username:" VerticalAlignment="Center"
+                                    <TextBlock x:Name="SmtpUsernameLabel" Grid.Row="2" Grid.Column="0" Text="Username:" VerticalAlignment="Center"
                                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,4"/>
-                                    <TextBox Grid.Row="2" Grid.Column="1" x:Name="SmtpUsernameBox" Margin="0,0,0,4"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=SmtpUsernameLabel}" Grid.Row="2" Grid.Column="1" x:Name="SmtpUsernameBox" Margin="0,0,0,4"/>
 
-                                    <TextBlock Grid.Row="3" Grid.Column="0" Text="Password:" VerticalAlignment="Center"
+                                    <TextBlock x:Name="SmtpPasswordLabel" Grid.Row="3" Grid.Column="0" Text="Password:" VerticalAlignment="Center"
                                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,4"/>
-                                    <PasswordBox Grid.Row="3" Grid.Column="1" x:Name="SmtpPasswordBox" Margin="0,0,0,4"/>
+                                    <PasswordBox AutomationProperties.LabeledBy="{Binding ElementName=SmtpPasswordLabel}" Grid.Row="3" Grid.Column="1" x:Name="SmtpPasswordBox" Margin="0,0,0,4"/>
 
-                                    <TextBlock Grid.Row="4" Grid.Column="0" Text="From Address:" VerticalAlignment="Center"
+                                    <TextBlock x:Name="SmtpFromLabel" Grid.Row="4" Grid.Column="0" Text="From Address:" VerticalAlignment="Center"
                                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,4"/>
-                                    <TextBox Grid.Row="4" Grid.Column="1" x:Name="SmtpFromBox" Margin="0,0,0,4"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=SmtpFromLabel}" Grid.Row="4" Grid.Column="1" x:Name="SmtpFromBox" Margin="0,0,0,4"/>
 
-                                    <TextBlock Grid.Row="5" Grid.Column="0" Text="Recipients:" VerticalAlignment="Center"
+                                    <TextBlock x:Name="SmtpRecipientsLabel" Grid.Row="5" Grid.Column="0" Text="Recipients:" VerticalAlignment="Center"
                                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,4"/>
-                                    <TextBox Grid.Row="5" Grid.Column="1" x:Name="SmtpRecipientsBox" Margin="0,0,0,4"
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=SmtpRecipientsLabel}" Grid.Row="5" Grid.Column="1" x:Name="SmtpRecipientsBox" Margin="0,0,0,4"
                                              ToolTip="Comma-separated email addresses"/>
 
                                     <WrapPanel Grid.Row="6" Grid.Column="1" Orientation="Horizontal" Margin="0,4,0,0">
@@ -500,12 +500,12 @@
                                     </Grid.RowDefinitions>
                                     <TextBlock Grid.Row="0" Grid.Column="0" Text="Webhook URL:" VerticalAlignment="Center"
                                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,4"/>
-                                    <TextBox Grid.Row="0" Grid.Column="1" x:Name="TeamsWebhookUrlBox" Margin="0,0,0,4"
+                                    <TextBox AutomationProperties.Name="Teams webhook URL" Grid.Row="0" Grid.Column="1" x:Name="TeamsWebhookUrlBox" Margin="0,0,0,4"
                                              ToolTip="Paste your Teams Incoming Webhook or Power Automate Workflows URL here"/>
 
                                     <TextBlock Grid.Row="1" Grid.Column="0" Text="Proxy Address:" VerticalAlignment="Center"
                                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,4"/>
-                                    <TextBox Grid.Row="1" Grid.Column="1" x:Name="TeamsProxyAddressBox" Margin="0,0,0,4"
+                                    <TextBox AutomationProperties.Name="Teams proxy address" Grid.Row="1" Grid.Column="1" x:Name="TeamsProxyAddressBox" Margin="0,0,0,4"
                                              ToolTip="Optional HTTP proxy (e.g. http://proxy.corp:8080). Leave blank for direct connection."/>
 
                                     <WrapPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,4,0,0">
@@ -544,12 +544,12 @@
                                     </Grid.RowDefinitions>
                                     <TextBlock Grid.Row="0" Grid.Column="0" Text="Webhook URL:" VerticalAlignment="Center"
                                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,4"/>
-                                    <TextBox Grid.Row="0" Grid.Column="1" x:Name="SlackWebhookUrlBox" Margin="0,0,0,4"
+                                    <TextBox AutomationProperties.Name="Slack webhook URL" Grid.Row="0" Grid.Column="1" x:Name="SlackWebhookUrlBox" Margin="0,0,0,4"
                                              ToolTip="Paste your Slack Incoming Webhook URL here"/>
 
                                     <TextBlock Grid.Row="1" Grid.Column="0" Text="Proxy Address:" VerticalAlignment="Center"
                                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,4"/>
-                                    <TextBox Grid.Row="1" Grid.Column="1" x:Name="SlackProxyAddressBox" Margin="0,0,0,4"
+                                    <TextBox AutomationProperties.Name="Slack proxy address" Grid.Row="1" Grid.Column="1" x:Name="SlackProxyAddressBox" Margin="0,0,0,4"
                                              ToolTip="Optional HTTP proxy (e.g. http://proxy.corp:8080). Leave blank for direct connection."/>
 
                                     <WrapPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,4,0,0">
@@ -587,25 +587,25 @@
                                     </Grid.RowDefinitions>
                                     <TextBlock Grid.Row="0" Grid.Column="0" Text="URL:" VerticalAlignment="Center"
                                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,4"/>
-                                    <TextBox Grid.Row="0" Grid.Column="1" x:Name="GenericWebhookUrlBox" Margin="0,0,0,4"
+                                    <TextBox AutomationProperties.Name="Generic webhook URL" Grid.Row="0" Grid.Column="1" x:Name="GenericWebhookUrlBox" Margin="0,0,0,4"
                                              ToolTip="The endpoint to POST to, e.g. https://api.github.com/repos/OWNER/REPO/dispatches"/>
 
-                                    <TextBlock Grid.Row="1" Grid.Column="0" Text="Headers (JSON):" VerticalAlignment="Top"
+                                    <TextBlock x:Name="GenericWebhookHeadersLabel" Grid.Row="1" Grid.Column="0" Text="Headers (JSON):" VerticalAlignment="Top"
                                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,4,8,4"/>
-                                    <TextBox Grid.Row="1" Grid.Column="1" x:Name="GenericWebhookHeadersBox" Margin="0,0,0,4"
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=GenericWebhookHeadersLabel}" Grid.Row="1" Grid.Column="1" x:Name="GenericWebhookHeadersBox" Margin="0,0,0,4"
                                              AcceptsReturn="True" TextWrapping="Wrap" MinHeight="44" VerticalScrollBarVisibility="Auto"
                                              ToolTip="A JSON object of request headers. Stored in Windows Credential Manager — it carries your token."/>
 
-                                    <TextBlock Grid.Row="2" Grid.Column="0" Text="Body (JSON):" VerticalAlignment="Top"
+                                    <TextBlock x:Name="GenericWebhookBodyLabel" Grid.Row="2" Grid.Column="0" Text="Body (JSON):" VerticalAlignment="Top"
                                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,4,8,4"/>
-                                    <TextBox Grid.Row="2" Grid.Column="1" x:Name="GenericWebhookBodyBox" Margin="0,0,0,4"
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=GenericWebhookBodyLabel}" Grid.Row="2" Grid.Column="1" x:Name="GenericWebhookBodyBox" Margin="0,0,0,4"
                                              AcceptsReturn="True" TextWrapping="Wrap" MinHeight="80" VerticalScrollBarVisibility="Auto"
                                              FontFamily="Consolas"
                                              ToolTip="The JSON body to POST. Leave blank to use the built-in default. Placeholders are substituted and JSON-escaped."/>
 
                                     <TextBlock Grid.Row="3" Grid.Column="0" Text="Proxy Address:" VerticalAlignment="Center"
                                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,4"/>
-                                    <TextBox Grid.Row="3" Grid.Column="1" x:Name="GenericWebhookProxyAddressBox" Margin="0,0,0,4"
+                                    <TextBox AutomationProperties.Name="Generic webhook proxy address" Grid.Row="3" Grid.Column="1" x:Name="GenericWebhookProxyAddressBox" Margin="0,0,0,4"
                                              ToolTip="Optional HTTP proxy (e.g. http://proxy.corp:8080). Leave blank for direct connection."/>
 
                                     <WrapPanel Grid.Row="4" Grid.Column="1" Orientation="Horizontal" Margin="0,4,0,0">
@@ -675,9 +675,9 @@
                                         <RowDefinition Height="Auto"/>
                                         <RowDefinition Height="Auto"/>
                                     </Grid.RowDefinitions>
-                                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Routing Key:" VerticalAlignment="Center"
+                                    <TextBlock x:Name="PagerDutyRoutingKeyLabel" Grid.Row="0" Grid.Column="0" Text="Routing Key:" VerticalAlignment="Center"
                                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,4"/>
-                                    <TextBox Grid.Row="0" Grid.Column="1" x:Name="PagerDutyRoutingKeyBox" Margin="0,0,0,4"
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=PagerDutyRoutingKeyLabel}" Grid.Row="0" Grid.Column="1" x:Name="PagerDutyRoutingKeyBox" Margin="0,0,0,4"
                                              ToolTip="The 32-character Integration Key from a PagerDuty Events API v2 integration. Stored in Windows Credential Manager."/>
 
                                     <TextBlock Grid.Row="1" Grid.Column="0" Text="" VerticalAlignment="Center" Margin="0,0,8,4"/>
@@ -691,7 +691,7 @@
 
                                     <TextBlock Grid.Row="3" Grid.Column="0" Text="Proxy Address:" VerticalAlignment="Center"
                                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,4"/>
-                                    <TextBox Grid.Row="3" Grid.Column="1" x:Name="PagerDutyProxyAddressBox" Margin="0,0,0,4"
+                                    <TextBox AutomationProperties.Name="PagerDuty proxy address" Grid.Row="3" Grid.Column="1" x:Name="PagerDutyProxyAddressBox" Margin="0,0,0,4"
                                              ToolTip="Optional. HTTP proxy for reaching PagerDuty (e.g. http://proxy.corp.local:8080). Leave blank to connect directly."/>
 
                                     <WrapPanel Grid.Row="4" Grid.Column="1" Orientation="Horizontal" Margin="0,4,0,0">
@@ -758,9 +758,9 @@
                                 <TextBlock Text="Alert Muting" FontWeight="SemiBold" FontSize="12"
                                            Foreground="{DynamicResource ForegroundBrush}" Margin="20,14,0,4"/>
                                 <WrapPanel Orientation="Horizontal" Margin="20,0,0,4">
-                                    <TextBlock TextWrapping="Wrap" Text="Default expiration for new mute rules:" VerticalAlignment="Center" Margin="0,0,8,0"
+                                    <TextBlock x:Name="MuteRuleDefaultExpirationLabel" TextWrapping="Wrap" Text="Default expiration for new mute rules:" VerticalAlignment="Center" Margin="0,0,8,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <ComboBox x:Name="MuteRuleDefaultExpirationCombo" Width="130" VerticalAlignment="Center">
+                                    <ComboBox AutomationProperties.LabeledBy="{Binding ElementName=MuteRuleDefaultExpirationLabel}" x:Name="MuteRuleDefaultExpirationCombo" Width="130" VerticalAlignment="Center">
                                         <ComboBoxItem Content="1 hour"/>
                                         <ComboBoxItem Content="24 hours"/>
                                         <ComboBoxItem Content="7 days"/>
@@ -796,16 +796,16 @@
                                 <CheckBox x:Name="AnalysisNotificationsCheckBox" Content="Send scheduled analysis notifications"
                                           Margin="20,4,0,0" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
-                                    <TextBlock Text="Run analysis every" VerticalAlignment="Center" Margin="0,0,8,0"
+                                    <TextBlock x:Name="AnalysisIntervalLabel" Text="Run analysis every" VerticalAlignment="Center" Margin="0,0,8,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox x:Name="AnalysisIntervalBox" Width="45" TextAlignment="Center" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AnalysisIntervalLabel}" x:Name="AnalysisIntervalBox" Width="45" TextAlignment="Center" VerticalAlignment="Center"/>
                                     <TextBlock Text="minutes" VerticalAlignment="Center" Margin="4,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
-                                    <TextBlock TextWrapping="Wrap" Text="Notify on finding severity at or above" VerticalAlignment="Center" Margin="0,0,8,0"
+                                    <TextBlock x:Name="AnalysisNotifySeverityLabel" TextWrapping="Wrap" Text="Notify on finding severity at or above" VerticalAlignment="Center" Margin="0,0,8,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox x:Name="AnalysisNotifySeverityBox" Width="45" TextAlignment="Center" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AnalysisNotifySeverityLabel}" x:Name="AnalysisNotifySeverityBox" Width="45" TextAlignment="Center" VerticalAlignment="Center"/>
                                     <TextBlock Text="(0.0 - 2.0)" VerticalAlignment="Center" Margin="4,0,0,0"
                                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
                                 </WrapPanel>
@@ -813,9 +813,9 @@
                                      since the key existed, and the Darling viewer has offered it since #2107; Lite simply never
                                      drew the box, so the one knob that quiets chatty analysis notifications was hand-edit-only. -->
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
-                                    <TextBlock TextWrapping="Wrap" Text="Re-notify an unchanged finding after" VerticalAlignment="Center" Margin="0,0,8,0"
+                                    <TextBlock x:Name="AnalysisNotifyCooldownLabel" TextWrapping="Wrap" Text="Re-notify an unchanged finding after" VerticalAlignment="Center" Margin="0,0,8,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox x:Name="AnalysisNotifyCooldownBox" Width="55" TextAlignment="Center" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AnalysisNotifyCooldownLabel}" x:Name="AnalysisNotifyCooldownBox" Width="55" TextAlignment="Center" VerticalAlignment="Center"/>
                                     <TextBlock Text="minutes (30 - 10080)" VerticalAlignment="Center" Margin="4,0,0,0"
                                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
                                 </WrapPanel>
@@ -849,7 +849,7 @@
                                               Foreground="{DynamicResource ForegroundBrush}"/>
                                     <TextBlock Text="Port:" VerticalAlignment="Center" Margin="20,0,6,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox x:Name="McpPortTextBox" Width="70" Text="5151" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.Name="MCP server port" x:Name="McpPortTextBox" Width="70" Text="5151" VerticalAlignment="Center"/>
                                     <Button Content="_Auto" ToolTip="Find an available port"
                                             Margin="6,0,0,0" Padding="8,2"
                                             VerticalAlignment="Center"
@@ -881,25 +881,25 @@
                                     <ui:TimeRangePicker x:Name="DefaultTimeRangePicker" VerticalAlignment="Center"/>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="0,8,0,0">
-                                    <TextBlock Text="Connection timeout:" VerticalAlignment="Center"
+                                    <TextBlock x:Name="ConnectionTimeoutLabel" Text="Connection timeout:" VerticalAlignment="Center"
                                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,0"/>
-                                    <TextBox x:Name="ConnectionTimeoutBox" Width="50" Text="5" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=ConnectionTimeoutLabel}" x:Name="ConnectionTimeoutBox" Width="50" Text="5" VerticalAlignment="Center"/>
                                     <TextBlock TextWrapping="Wrap" Text="seconds (5–60, increase for VPN/remote connections)"
                                                FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                                VerticalAlignment="Center" Margin="6,0,0,0"/>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="0,8,0,0">
-                                    <TextBlock Text="DuckDB memory limit:" VerticalAlignment="Center"
+                                    <TextBlock x:Name="DuckDbMemoryLimitLabel" Text="DuckDB memory limit:" VerticalAlignment="Center"
                                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,0"/>
-                                    <TextBox x:Name="DuckDbMemoryLimitBox" Width="50" Text="2" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=DuckDbMemoryLimitLabel}" x:Name="DuckDbMemoryLimitBox" Width="50" Text="2" VerticalAlignment="Center"/>
                                     <TextBlock TextWrapping="Wrap" x:Name="DuckDbMemoryLimitHint" Text="GB (default 2). Raise it if a tab reports DuckDB out of memory. Takes effect after Lite restarts."
                                                FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                                VerticalAlignment="Center" Margin="6,0,0,0"/>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="0,8,0,0">
-                                    <TextBlock Text="CSV separator:" VerticalAlignment="Center"
+                                    <TextBlock x:Name="CsvSeparatorLabel" Text="CSV separator:" VerticalAlignment="Center"
                                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,0"/>
-                                    <ComboBox x:Name="CsvSeparatorCombo" Width="140" VerticalAlignment="Center">
+                                    <ComboBox AutomationProperties.LabeledBy="{Binding ElementName=CsvSeparatorLabel}" x:Name="CsvSeparatorCombo" Width="140" VerticalAlignment="Center">
                                         <ComboBoxItem Content="Comma (,)" Tag=","/>
                                         <ComboBoxItem Content="Semicolon (;)" Tag=";"/>
                                         <ComboBoxItem Content="Tab" Tag="&#x9;"/>
@@ -909,18 +909,18 @@
                                                VerticalAlignment="Center" Margin="6,0,0,0" x:Name="CsvSeparatorHint"/>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="0,8,0,0">
-                                    <TextBlock Text="Show timestamps in:" VerticalAlignment="Center"
+                                    <TextBlock x:Name="TimeDisplayModeLabel" Text="Show timestamps in:" VerticalAlignment="Center"
                                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,0"/>
-                                    <ComboBox x:Name="TimeDisplayModeCombo" Width="140" VerticalAlignment="Center">
+                                    <ComboBox AutomationProperties.LabeledBy="{Binding ElementName=TimeDisplayModeLabel}" x:Name="TimeDisplayModeCombo" Width="140" VerticalAlignment="Center">
                                         <ComboBoxItem Content="Server Time" Tag="ServerTime"/>
                                         <ComboBoxItem Content="Local Time" Tag="LocalTime"/>
                                         <ComboBoxItem Content="UTC" Tag="UTC"/>
                                     </ComboBox>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="0,8,0,0">
-                                    <TextBlock Text="Color theme:" VerticalAlignment="Center"
+                                    <TextBlock x:Name="ColorThemeLabel" Text="Color theme:" VerticalAlignment="Center"
                                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,0"/>
-                                    <ComboBox x:Name="ColorThemeCombo" Width="140" VerticalAlignment="Center"
+                                    <ComboBox AutomationProperties.LabeledBy="{Binding ElementName=ColorThemeLabel}" x:Name="ColorThemeCombo" Width="140" VerticalAlignment="Center"
                                               SelectionChanged="ColorThemeCombo_SelectionChanged">
                                         <ComboBoxItem Content="Dark" Tag="Dark"/>
                                         <ComboBoxItem Content="Light" Tag="Light"/>

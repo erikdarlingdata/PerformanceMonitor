@@ -107,8 +107,13 @@ const TOP_AVG_COLUMNS = [
 ];
 /* top-keys:end */
 
-function verdictLabel(v) {
-  return v == null ? "No Data" : v === "NOT_APPLICABLE" ? "N/A" : String(v).replace(/_/g, " ");
+/* The Viewer's words for a verdict (ProvisioningVerdict.StatusLabel): "not enough data yet (6 samples)" with a count, the bare phrase where the
+   row carries none (the trend). */
+function verdictLabel(v, samples) {
+  if (v == null) return "No Data";
+  if (v === "NOT_APPLICABLE") return "N/A";
+  if (v === "NOT_ENOUGH_DATA") return samples == null ? "not enough data yet" : "not enough data yet (" + fmtInt(samples) + (samples === 1 ? " sample)" : " samples)");
+  return String(v).replace(/_/g, " ");
 }
 
 function trendDay(s) {
@@ -128,7 +133,7 @@ function loadUtilization(body, server, ctx) {
       const hasCost = data.monthly_cost_usd != null;
       const view = {
         ...data,
-        verdict_label: verdictLabel(data.verdict),
+        verdict_label: verdictLabel(data.verdict, data.cpu && data.cpu.cpu_samples),
         monthly_cost_text: hasCost ? "$" + fmtInt(data.monthly_cost_usd) + "/mo" : null,
         annual_cost_text: data.annual_cost_usd != null ? "$" + fmtInt(data.annual_cost_usd) + "/yr" : null,
         workers_in_use: data.cpu && data.cpu.current_workers != null ? fmtInt(data.cpu.current_workers) : "n/a",
@@ -149,6 +154,7 @@ function loadUtilization(body, server, ctx) {
         el("h3", {}, [SUMMARY_TITLE, el("span", { class: "panel-sub", text: " " + SUMMARY_SUBTITLE })]),
         VIZ.stat(view, { stats }),
         data.health_score_note ? el("p", { class: "finops-note", title: plainText(data.health_score_note), text: plainText(data.health_score_note) }) : null,
+        data.memory && data.memory.stolen_memory_note ? el("p", { class: "finops-note", title: plainText(data.memory.stolen_memory_note), text: plainText(data.memory.stolen_memory_note) }) : null,
         el("p", { class: "finops-reason", text: data.verdict_reason }),
         el("details", {}, [
           el("summary", { text: "7-Day Provisioning Trend" }),

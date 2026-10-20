@@ -50,12 +50,15 @@ SELECT /* PerformanceMonitorLite */
     failover_mode_desc = ar.failover_mode_desc,
     endpoint_url = ar.endpoint_url,
     is_local = ars.is_local,
-    group_id = CONVERT(nvarchar(36), ag.group_id)
+    group_id = CONVERT(nvarchar(36), ag.group_id),
+    primary_replica = ags.primary_replica
 FROM sys.availability_replicas AS ar
 JOIN sys.availability_groups AS ag
   ON ar.group_id = ag.group_id
 JOIN sys.dm_hadr_availability_replica_states AS ars
   ON ar.replica_id = ars.replica_id
+LEFT JOIN sys.dm_hadr_availability_group_states AS ags
+  ON ag.group_id = ags.group_id
 WHERE COALESCE(ag.is_distributed, 0) = 0
 ORDER BY
     ag.name,
@@ -192,6 +195,8 @@ OPTION(RECOMPILE);";
                 /* #4475: appended AFTER is_local, for the same reason - it lands in the same physical
                    position a fresh generated table puts it. */
                 "group_id",
+                /* #6159: the primary's name, appended LAST for the same reason. */
+                "primary_replica",
             },
             names);
 
@@ -286,8 +291,8 @@ OPTION(RECOMPILE);";
     public async Task ReplicaReadAsync_MapsColumns()
     {
         using var reader = new FakeCollectorDataReader(
-            new object[] { "AG1", "NODE1", "PRIMARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", "TCP://NODE1.corp:5022", true, "11111111-1111-1111-1111-111111111111" },
-            new object[] { "AG1", "NODE2", "SECONDARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", "TCP://NODE2.corp:5022", false, "11111111-1111-1111-1111-111111111111" });
+            new object[] { "AG1", "NODE1", "PRIMARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", "TCP://NODE1.corp:5022", true, "11111111-1111-1111-1111-111111111111", "NODE1" },
+            new object[] { "AG1", "NODE2", "SECONDARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", "TCP://NODE2.corp:5022", false, "11111111-1111-1111-1111-111111111111", "NODE1" });
 
         var context = CollectorTestContext.Make(new RecordingCollectorDeltaCalculator());
 
@@ -295,7 +300,7 @@ OPTION(RECOMPILE);";
 
         Assert.Equal(2, rows.Count);
         Assert.Equal(
-            new AgReplicaStatesCollector.Row("AG1", "NODE1", "PRIMARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", "TCP://NODE1.corp:5022", true, "11111111-1111-1111-1111-111111111111"),
+            new AgReplicaStatesCollector.Row("AG1", "NODE1", "PRIMARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", "TCP://NODE1.corp:5022", true, "11111111-1111-1111-1111-111111111111", "NODE1"),
             rows[0]);
         Assert.Equal("NODE2", rows[1].ReplicaServerName);
         Assert.Equal("SECONDARY", rows[1].RoleDesc);
@@ -305,6 +310,9 @@ OPTION(RECOMPILE);";
         Assert.False(rows[1].IsLocal);
         /* #4475: group_id maps like any other trailing text column. */
         Assert.Equal("11111111-1111-1111-1111-111111111111", rows[0].GroupId);
+        /* #6159: the primary's name rides on every row, the secondary's included. */
+        Assert.Equal("NODE1", rows[0].PrimaryReplica);
+        Assert.Equal("NODE1", rows[1].PrimaryReplica);
     }
 
     [Fact]
@@ -314,8 +322,8 @@ OPTION(RECOMPILE);";
            state sys.availability_replicas serves only locally cached metadata — so every column can be
            null. A quorum-loss read must produce a row, not an InvalidCastException. */
         using var reader = new FakeCollectorDataReader(
-            new object[] { "AG1", "NODE1", "PRIMARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", DBNull.Value, DBNull.Value, DBNull.Value },
-            new object[] { DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value });
+            new object[] { "AG1", "NODE1", "PRIMARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value },
+            new object[] { DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value });
 
         var context = CollectorTestContext.Make(new RecordingCollectorDeltaCalculator());
 
@@ -331,6 +339,9 @@ OPTION(RECOMPILE);";
         Assert.Equal(default(AgReplicaStatesCollector.Row), rows[1]);
         /* #4475: group_id is nullable, and NULL here (a pre-v65 row would carry none). */
         Assert.Null(rows[0].GroupId);
+        /* #6159: primary_replica is NULL while no primary is known (and on every row stored before the column existed). */
+        Assert.Null(rows[0].PrimaryReplica);
+        Assert.Null(rows[1].PrimaryReplica);
     }
 
     [Fact]
@@ -455,12 +466,12 @@ OPTION(RECOMPILE);";
 
         var replicaWriter = new RecordingCollectorRowWriter();
         AgReplicaStatesCollector.Instance.WritePayload(
-            new AgReplicaStatesCollector.Row("AG1", "NODE1", "PRIMARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", null, true, null),
+            new AgReplicaStatesCollector.Row("AG1", "NODE1", "PRIMARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", null, true, null, "NODE1"),
             replicaWriter,
             context);
 
         Assert.Equal(
-            new object?[] { "AG1", "NODE1", "PRIMARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", null, true, null },
+            new object?[] { "AG1", "NODE1", "PRIMARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", null, true, null, "NODE1" },
             replicaWriter.Values);
 
         /* Modeled on a real measured sample from the Docker AG fixture: a SUSPEND_FROM_USER replica 62 s

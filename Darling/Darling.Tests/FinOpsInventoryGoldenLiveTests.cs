@@ -140,6 +140,11 @@ public sealed class FinOpsInventoryGoldenLiveTests
             await DarlingMcpTestData.ExecAsync(c, ct,
                 "INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization) VALUES ($1, $2, $3, $4, $5, $6, 1)",
                 CollectionIdGenerator.Next(), now.AddHours(-1 - i), IdA, NameA, now.AddHours(-1 - i), cpu[i]);
+        /* A verdict needs ProvisioningVerdict.MinSamples (12) CPU samples in the window (#6139). Ten extras make A's 14: the sorted
+           13th is 80 and the 14th 95, so p95 stays 85.25 with max 95. */
+        var extraA = new[] { 80, 34, 34, 34, 34, 34, 34, 34, 34, 36 };
+        for (var i = 0; i < extraA.Length; i++)
+            await InsertCpuAsync(c, IdA, NameA, now.AddMinutes(-5 * (i + 1)), extraA[i], ct);
         await DarlingMcpTestData.ExecAsync(c, ct,
             "INSERT INTO memory_stats (collection_id, collection_time, server_id, server_name, max_workers_count, current_workers_count) VALUES ($1, $2, $3, $4, 512, 100)",
             CollectionIdGenerator.Next(), now.AddHours(-2), IdA, NameA);
@@ -169,6 +174,9 @@ public sealed class FinOpsInventoryGoldenLiveTests
         await DarlingMcpTestData.ExecAsync(c, ct,
             "INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization) VALUES ($1, $2, $3, $4, $5, 7, 1)",
             CollectionIdGenerator.Next(), now.AddHours(-3), IdC, NameC, now.AddHours(-3));
+        /* Eleven more readings of 7 make the 12 a verdict needs (#6139), with the same average and p95. */
+        for (var i = 0; i < 11; i++)
+            await InsertCpuAsync(c, IdC, NameC, now.AddMinutes(-5 * (i + 1)), 7, ct);
         await InsertPropertiesAsync(c, IdC, NameC, anchor.AddDays(-4), "Standard Edition", "14.0.1000.169", "SP1", "", 2, null, null, null, null, null, null, null, null, null, null, ct);
         await DarlingMcpTestData.ExecAsync(c, ct,
             "INSERT INTO memory_stats (collection_id, collection_time, server_id, server_name, max_workers_count, current_workers_count) VALUES ($1, $2, $3, $4, 256, NULL)",
@@ -181,6 +189,9 @@ public sealed class FinOpsInventoryGoldenLiveTests
             await DarlingMcpTestData.ExecAsync(c, ct,
                 "INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization) VALUES ($1, $2, $3, $4, $5, $6, 1)",
                 CollectionIdGenerator.Next(), now.AddHours(-1 - i), IdD, NameD, now.AddHours(-1 - i), cpuD[i]);
+        /* Three more rounds of the same three readings make D's 12 samples (#6139), with the same average. */
+        for (var i = 0; i < 9; i++)
+            await InsertCpuAsync(c, IdD, NameD, now.AddMinutes(-5 * (i + 1)), cpuD[i % 3], ct);
         await DarlingMcpTestData.ExecAsync(c, ct,
             "INSERT INTO database_size_stats (collection_id, collection_time, server_id, server_name, database_name, total_size_mb) VALUES ($1, $2, $3, $4, 'UserDbOnly', 512)",
             CollectionIdGenerator.Next(), now.AddHours(-3), IdD, NameD);
@@ -190,6 +201,11 @@ public sealed class FinOpsInventoryGoldenLiveTests
         await FinOpsIdleCoverageSeed.SeedAsync(c, ct, IdD, NameD, now);
         await InsertPropertiesAsync(c, IdD, NameD, anchor.AddDays(-5), "Standard Edition", "15.0.4000.1", "RTM", null, 2, 4, 16384L, 1, 4, false, false, null, null, null, null, ct);
     }
+
+    private static Task InsertCpuAsync(NpgsqlConnection c, int id, string name, DateTime at, int pct, CancellationToken ct) =>
+        DarlingMcpTestData.ExecAsync(c, ct,
+            "INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization) VALUES ($1, $2, $3, $4, $5, $6, 1)",
+            CollectionIdGenerator.Next(), at, id, name, at, pct);
 
     private static Task InsertPropertiesAsync(NpgsqlConnection c, int id, string name, DateTime at, string edition, string version,
         string level, string? updateLevel, int engineEdition, int? cpuCount, long? memoryMb, int? sockets, int? coresPerSocket,

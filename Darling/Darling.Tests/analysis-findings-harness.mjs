@@ -89,6 +89,7 @@ try {
       return {
         headers: groups.map(sum),
         cardsPerGroup: groups.map((g) => byTag(g, "h4").length),
+        headlineCounts: groups.map((g, i) => g.textContent.split(["Major", "Config", "Solo info"][i]).length - 1),
         open: groups.map((g) => g.open),
         order: ["Critical", "Warning", "Info"].map((l) => root.textContent.indexOf(l)),
         badgeClasses: byTag(root, "span").filter((s) => /^badge /.test(s.className)).map((s) => s.className),

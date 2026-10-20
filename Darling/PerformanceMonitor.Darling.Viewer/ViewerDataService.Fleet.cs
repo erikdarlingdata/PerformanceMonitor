@@ -241,6 +241,12 @@ public sealed class FleetRankedServer
     /// default text is the type name ("PerformanceMonitor.Darling.Viewer.FleetRankedServer").</summary>
     public override string ToString() => DisplayName;
 
+    /// <summary>What a screen reader announces for the row (#6138): the server and why it needs attention, since the painted row
+    /// reads as a dot, a band word, a name and a reason that a reader would otherwise say as unrelated pieces.</summary>
+    public string AutomationName => string.IsNullOrWhiteSpace(Reason)
+        ? DisplayName + ", needs attention"
+        : DisplayName + ", needs attention: " + Reason;
+
     public FleetHealthBand Band { get; init; }
 
     /// <summary>The composite worst-first ordering score (band rank + severity magnitude + incident tiebreak).</summary>

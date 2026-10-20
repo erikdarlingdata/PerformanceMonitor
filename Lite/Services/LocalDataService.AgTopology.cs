@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using PerformanceMonitor.Common;
 
@@ -51,7 +52,8 @@ SELECT
     availability_mode_desc,
     failover_mode_desc,
     endpoint_url,
-    group_id
+    group_id,
+    primary_replica
 FROM ag_replica_states AS r
 WHERE r.collection_time = (SELECT MAX(x.collection_time) FROM ag_replica_states AS x WHERE x.server_id = r.server_id)
 ORDER BY r.server_name, r.ag_name, r.replica_server_name";
@@ -94,7 +96,11 @@ ORDER BY d.server_name, d.ag_name, d.database_name, d.replica_server_name";
             return new List<AgTopologyCard>();
         }
 
-        return AgTopology.BuildCards(replicas, await ReadAgTopologyDatabasesAsync(), DateTime.UtcNow);
+        /* #6159: a primary learned from the stored column is shown by its display name when it is a monitored server. */
+        var names = replicas.Any(r => !string.IsNullOrWhiteSpace(r.PrimaryReplica)) ? DisplayNames?.Invoke() : null;
+        Func<int, string?>? displayNameOf = names is null ? null : id => names.TryGetValue(id, out var name) ? name : null;
+
+        return AgTopology.BuildCards(replicas, await ReadAgTopologyDatabasesAsync(), DateTime.UtcNow, displayNameOf);
     }
 
     private async Task<List<AgTopologyReplicaRow>> ReadAgTopologyReplicasAsync()
@@ -125,6 +131,7 @@ ORDER BY d.server_name, d.ag_name, d.database_name, d.replica_server_name";
                 FailoverModeDesc = AgText(reader, 12),
                 EndpointUrl = AgText(reader, 13),
                 GroupId = AgText(reader, 14),
+                PrimaryReplica = AgText(reader, 15),
             });
         }
 
