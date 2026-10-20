@@ -106,6 +106,8 @@ internal static class DarlingMcpWritePolicy
         "update_query_tag_rule",
         "delete_query_tag_rule",
         "run_collectors_now",
+        "set_quiet_window",
+        "clear_quiet_window",
     };
 
     /// <summary>The darling.json key that offers the investigation tools (#5632 Phase A, ruling R2).</summary>
@@ -162,6 +164,8 @@ internal static class DarlingMcpWritePolicy
         "update_query_tag_rule",
         "delete_query_tag_rule",
         "run_collectors_now",
+        "set_quiet_window",
+        "clear_quiet_window",
         "add_servers",
         "remove_server",
         "edit_server",

@@ -384,6 +384,12 @@ ALTER TABLE IF EXISTS collect.ag_replica_states DROP COLUMN IF EXISTS primary_re
 ALTER TABLE IF EXISTS config.config_monitored_servers
     DROP COLUMN IF EXISTS hypothetical_index_username,
     DROP COLUMN IF EXISTS hypothetical_index_encrypted_password;"),
+
+        // /// V205 (#6231): the start time on the mute rules. The column is the probe's newest sentinel. The rewind drops it, so a re-run of V205
+        // adds it again. Safe on a store that never had it.
+        new(205, "hasMuteRuleStartsAt",
+            @"
+ALTER TABLE IF EXISTS config.config_mute_rules DROP COLUMN IF EXISTS starts_at_utc;"),
     ];
 
     /// <summary>

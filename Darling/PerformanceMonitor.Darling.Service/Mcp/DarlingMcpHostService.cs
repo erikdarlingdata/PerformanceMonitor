@@ -1596,6 +1596,8 @@ public sealed class DarlingMcpHostService : BackgroundService
                buttons use. The mcp role queues through config.request_snapshot_now (fixed command type, collector names only),
                never a grant on the command queue. */
             .WithGeminiCompatibleTools<DarlingMcpCollectorRunTools>()
+            /* #6231: set_quiet_window / clear_quiet_window - a mute rule with only a server scope (or none) and an end, optionally a start. */
+            .WithGeminiCompatibleTools<DarlingMcpQuietWindowTools>()
             /* The server-onboarding WRITE tools — add_servers (BULK) / remove_server: an MCP client can stand up
                or tear down FLEET monitoring conversationally. The service-side twin of the Viewer's Add / Add-
                Multiple dialogs: add_servers validates each entry, probes the connection IN-PROCESS (the service

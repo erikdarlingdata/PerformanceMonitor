@@ -967,7 +967,7 @@ public sealed class DarlingMcpAlertTools
             return JsonSerializer.Serialize(new
             {
                 total_count = list.Count,
-                mute_rules = list.Select(BuildMuteRulePayload)
+                mute_rules = list.Select(r => BuildMuteRuleWithState(r, DateTime.UtcNow))
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -979,8 +979,18 @@ public sealed class DarlingMcpAlertTools
     /// <summary>The per-rule shape get_mute_rules returns AND create_mute_rule echoes back for the stored rule.</summary>
     /// <summary>The mute rule's wire shape, and the image the Level 2 mute tools journal: <see cref="MuteRuleImage"/> (#5917), one type for both.</summary>
     internal static MuteRuleImage BuildMuteRulePayload(MuteRule r) => new(
-        r.Id, r.Enabled, r.CreatedAtUtc.ToString("o"), r.ExpiresAtUtc?.ToString("o"), r.Reason, r.ServerName, r.ServerId, r.MetricName,
+        r.Id, r.Enabled, r.CreatedAtUtc.ToString("o"), r.ExpiresAtUtc?.ToString("o"), r.StartsAtUtc?.ToString("o"), r.Reason, r.ServerName, r.ServerId, r.MetricName,
         r.ExternalSource, r.DatabasePattern, r.QueryTextPattern, r.WaitTypePattern, r.JobNamePattern, r.ClientAppPattern, r.Summary);
+
+    /// <summary>The rule's wire shape plus its <c>state</c> as of <paramref name="nowUtc"/> (#6231): <c>active</c>, <c>upcoming</c> (its
+    /// <c>starts_at_utc</c> is ahead, so it mutes nothing yet), <c>expired</c> or <c>disabled</c>. The state is a reading of the clock, not
+    /// a stored column, so it is added to the read and never to the journal image.</summary>
+    internal static JsonObject BuildMuteRuleWithState(MuteRule r, DateTime nowUtc)
+    {
+        var node = (JsonObject)JsonSerializer.SerializeToNode(BuildMuteRulePayload(r), McpHelpers.JsonOptions)!;
+        node["state"] = r.StateAt(nowUtc);
+        return node;
+    }
 
     [McpServerTool(Name = "update_alert_settings"), Description(
         "PARTIAL update of the single global alert-settings row the service delivers on. Call " +
@@ -1225,7 +1235,7 @@ public sealed class DarlingMcpAlertTools
         "fields are case-insensitive substring matches. external_source (optional, lower case, e.g. nagios) limits " +
         "the rule to alerts that one external source raised through Darling's alert intake: it never mutes a " +
         "built-in alert or another source's alert, and a rule without it still mutes an external alert whose other " +
-        "fields match; a name that is not a valid source name is refused. expires_at is an optional ISO-8601 UTC timestamp after " +
+        "fields match; a name that is not a valid source name is refused. starts_at is an optional ISO-8601 UTC timestamp before which the rule is stored but mutes nothing (a window set ahead of planned work; it must be before expires_at, and for a window with no other scope use set_quiet_window); expires_at is an optional ISO-8601 UTC timestamp after " +
         "which the rule stops applying; omit it for a permanent rule. Returns the stored rule, including its " +
         "generated id (for delete_mute_rule). Repeating a call is safe: when an enabled, unexpired rule already " +
         "holds the same seven scope and pattern fields, the same external_source and the same expires_at, nothing is created and the answer is " +
@@ -1251,12 +1261,13 @@ public sealed class DarlingMcpAlertTools
         [Description("Optional external alert source name (lower case, e.g. 'nagios'): mute only that source's alerts. Omit for any source.")] string? external_source = null,
         [Description("Level 2 only: under mcp.allowInvestigations this change needs agent_action (request_id, claim_id, agent_id, reason, evidence); see the tool guide. Ignored when mcp.allowWrites is on.")] string? agent_action = null,
         DarlingAgentActionSeat? agentSeat = null,
-        ILogger? logger = null) =>
+        ILogger? logger = null,
+        [Description("Optional ISO-8601 UTC start (e.g. 2026-08-01T00:00:00Z): the rule is stored now but mutes nothing until this moment. Must be before expires_at. Omit for a rule that applies at once.")] string? starts_at = null) =>
         DarlingAgentActionSeat.IsGated(agentSeat)
             ? DarlingMcpAgentActions.CreateMuteAsync(agentSeat!, postgres, logger, agent_action, server_name, metric_name, database_pattern,
-                query_text_pattern, wait_type_pattern, job_name_pattern, reason, expires_at, server_id, client_app_pattern, external_source)
+                query_text_pattern, wait_type_pattern, job_name_pattern, reason, expires_at, server_id, client_app_pattern, external_source, starts_at)
             : CreateMuteRuleOver(new PgMuteRuleStore(postgres), server_name, metric_name, database_pattern, query_text_pattern,
-            wait_type_pattern, job_name_pattern, reason, expires_at, server_id, id => MonitoredServerDisplayNameAsync(postgres, id), client_app_pattern, external_source);
+            wait_type_pattern, job_name_pattern, reason, expires_at, server_id, id => MonitoredServerDisplayNameAsync(postgres, id), client_app_pattern, external_source, starts_at);
 
     /// <summary>The refusal for a <c>server_id</c> no registered server has: a rule keyed on it would mute
     /// nothing while reading as if it muted something.</summary>
@@ -1300,7 +1311,8 @@ public sealed class DarlingMcpAlertTools
         int? server_id = null,
         Func<int, Task<string?>>? serverNameLookup = null,
         string? client_app_pattern = null,
-        string? external_source = null)
+        string? external_source = null,
+        string? starts_at = null)
     {
         try
         {
@@ -1334,6 +1346,23 @@ public sealed class DarlingMcpAlertTools
                 expiresAtUtc = DateTime.SpecifyKind(parsed, DateTimeKind.Utc);
             }
 
+            DateTime? startsAtUtc = null;
+            if (!string.IsNullOrWhiteSpace(starts_at))
+            {
+                if (!DateTime.TryParse(starts_at, CultureInfo.InvariantCulture,
+                        DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var parsedStart))
+                {
+                    return Outcome("invalid", $"starts_at '{starts_at}' is not a valid ISO-8601 timestamp (e.g. 2026-08-01T00:00:00Z).");
+                }
+
+                startsAtUtc = DateTime.SpecifyKind(parsedStart, DateTimeKind.Utc);
+            }
+
+            if (startsAtUtc.HasValue && expiresAtUtc.HasValue && expiresAtUtc.Value <= startsAtUtc.Value)
+            {
+                return Outcome("invalid", $"expires_at ({expiresAtUtc.Value:o}) must be after starts_at ({startsAtUtc.Value:o}). Nothing was written.");
+            }
+
             /* A server_id keys the rule on the store id; it must be a monitored server's, or the rule would mute
                nothing and look like it muted something. server_name then only labels the rule, so an omitted
                one is filled from the registry. Without a server_id the rule is name-keyed, as it always was. */
@@ -1354,6 +1383,7 @@ public sealed class DarlingMcpAlertTools
                 Enabled = true,
                 CreatedAtUtc = DateTime.UtcNow,
                 ExpiresAtUtc = expiresAtUtc,
+                StartsAtUtc = startsAtUtc,
                 Reason = Trimmed(reason),
                 ServerName = Trimmed(server_name) ?? labelFromRegistry,
                 ServerId = server_id,
@@ -1440,6 +1470,11 @@ public sealed class DarlingMcpAlertTools
             foreach (var change in changes)
             {
                 change.Apply(rule);
+            }
+
+            if (WindowRefusal(rule) is { } coreWindowProblem)
+            {
+                return Outcome("invalid", coreWindowProblem);
             }
 
             /* The web route creates through here, so a server_id in its body is held to the create tool's rule:
@@ -1643,7 +1678,7 @@ public sealed class DarlingMcpAlertTools
         "{\"job_name_pattern\":null} stops constraining that dimension (external_source clears the same way: null " +
         "makes the rule stop being limited to one source, and a blank string is refused). Editable fields: server_name, server_id, " +
         "metric_name, external_source, database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, client_app_pattern, reason, " +
-        "expires_at_utc (create_mute_rule's expires_at spelling is accepted as a write-only alias; send only " +
+        "starts_at_utc (null clears it; it must stay before expires_at_utc), expires_at_utc (create_mute_rule's expires_at spelling is accepted as a write-only alias; send only " +
         "one). enabled is NOT editable here — use set_mute_rule_enabled, the dedicated reversible verb. USE THIS " +
         "rather than delete_mute_rule followed by create_mute_rule: a re-created rule is a NEW rule with a new " +
         "id and a new creation date, and the Stale Mute Rules self-alert ages a rule from its creation date — so " +
@@ -1752,6 +1787,11 @@ public sealed class DarlingMcpAlertTools
             foreach (var change in changes)
             {
                 change.Apply(merged);
+            }
+
+            if (WindowRefusal(merged) is { } windowProblem)
+            {
+                return Outcome("invalid", windowProblem);
             }
 
             if (merged.ServerId.HasValue && merged.ServerId != existing.ServerId
@@ -1924,11 +1964,34 @@ public sealed class DarlingMcpAlertTools
             }
         }
 
+        /* #6231: the optional start. null clears it (the rule applies from now on); the canonical field is starts_at_utc. */
+        void AddStart(string spelling, JsonNode? node)
+        {
+            if (error != null) return;
+            if (node is null)
+            {
+                changes.Add(new MuteRuleFieldChange("starts_at_utc", r => r.StartsAtUtc = null));
+            }
+            else if (node is JsonValue v && v.TryGetValue<string>(out var s)
+                && DateTime.TryParse(s, CultureInfo.InvariantCulture,
+                    DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var parsed))
+            {
+                var utc = DateTime.SpecifyKind(parsed, DateTimeKind.Utc);
+                changes.Add(new MuteRuleFieldChange("starts_at_utc", r => r.StartsAtUtc = utc));
+            }
+            else
+            {
+                error = $"'{spelling}' must be an ISO-8601 UTC timestamp (e.g. 2026-08-01T00:00:00Z), or null for a rule that applies from now.";
+            }
+        }
+
         foreach (var prop in body)
         {
             if (error != null) break;
             switch (prop.Key)
             {
+                case "starts_at_utc": AddStart("starts_at_utc", prop.Value); break;
+                case "starts_at": AddStart("starts_at", prop.Value); break;
                 case "server_name": AddText("server_name", prop.Value, (r, v) => r.ServerName = v); break;
                 case "server_id": AddInt("server_id", prop.Value, (r, v) => r.ServerId = v); break;
                 case "metric_name": AddText("metric_name", prop.Value, (r, v) => r.MetricName = v); break;
@@ -1968,11 +2031,19 @@ public sealed class DarlingMcpAlertTools
            tell the caller both applied. */
         if (error == null && changes.GroupBy(c => c.Field, StringComparer.Ordinal).Any(g => g.Count() > 1))
         {
-            error = "'expires_at' and 'expires_at_utc' are two names for the same field; send only one of them.";
+            error = "'expires_at' and 'expires_at_utc' are two names for the same field (and 'starts_at' and 'starts_at_utc' likewise); send only one of each pair.";
         }
 
         return (changes, error);
     }
+
+    /// <summary>The refusal for a rule whose end is not after its start (#6231), or null. A window that ends before it starts would
+    /// never apply and would read as if it did, so every write that can set either bound runs this on the rule it is about to
+    /// store. A rule with only one bound, or none, is never refused here.</summary>
+    internal static string? WindowRefusal(MuteRule rule) =>
+        rule.StartsAtUtc.HasValue && rule.ExpiresAtUtc.HasValue && rule.ExpiresAtUtc.Value <= rule.StartsAtUtc.Value
+            ? $"The end ({rule.ExpiresAtUtc.Value.ToString("o", CultureInfo.InvariantCulture)}) must be after the start ({rule.StartsAtUtc.Value.ToString("o", CultureInfo.InvariantCulture)}). Nothing was written."
+            : null;
 
     /// <summary>Whether two rules agree on every field update_mute_rule can move — the 'unchanged'
     /// comparison. ORDINAL on the text fields (see the core's doc for why a case-only edit counts);
@@ -1989,7 +2060,8 @@ public sealed class DarlingMcpAlertTools
         && string.Equals(a.JobNamePattern, b.JobNamePattern, StringComparison.Ordinal)
         && string.Equals(a.ClientAppPattern, b.ClientAppPattern, StringComparison.Ordinal)
         && string.Equals(a.Reason, b.Reason, StringComparison.Ordinal)
-        && a.ExpiresAtUtc == b.ExpiresAtUtc;
+        && a.ExpiresAtUtc == b.ExpiresAtUtc
+        && a.StartsAtUtc == b.StartsAtUtc;
 
     /// <summary>One rule by id, or null — an ordinal id match over the store's full read, which is the only
     /// read <see cref="IMuteRuleStore"/> offers.</summary>
@@ -2059,7 +2131,8 @@ public sealed class DarlingMcpAlertTools
         && string.Equals(a.WaitTypePattern, b.WaitTypePattern, StringComparison.Ordinal)
         && string.Equals(a.JobNamePattern, b.JobNamePattern, StringComparison.Ordinal)
         && string.Equals(a.ClientAppPattern, b.ClientAppPattern, StringComparison.Ordinal)
-        && SameExpiry(a.ExpiresAtUtc, b.ExpiresAtUtc);
+        && SameExpiry(a.ExpiresAtUtc, b.ExpiresAtUtc)
+        && SameExpiry(a.StartsAtUtc, b.StartsAtUtc);
 
     /// <summary>Two expiries are the same instant to the store's precision. Postgres keeps microseconds and a .NET
     /// tick is 100 ns, so an expiry sent with seven fractional digits comes back from the store truncated: compared

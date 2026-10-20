@@ -1906,6 +1906,19 @@ ALTER TABLE config.config_monitored_servers ADD COLUMN IF NOT EXISTS hypothetica
 ALTER TABLE config.config_monitored_servers ADD COLUMN IF NOT EXISTS hypothetical_index_encrypted_password text;";
 
     /// <summary>
+    /// V205 (#6231): <c>config.config_mute_rules.starts_at_utc</c>, the moment a mute rule begins to apply. A quiet window for planned
+    /// work is a mute rule with only a server scope (or none, for the fleet) and an end time; what it lacked was a START, so work
+    /// planned for tonight could not be set up this afternoon.
+    ///
+    /// <para><b>NULL means the rule applies from the moment it exists</b>, exactly as every stored rule did, so there is no backfill.
+    /// Nullable, no DEFAULT, one catalog-only <c>ADD COLUMN</c>. Needs no GRANT (the roles' table-level grants cover a new column)
+    /// and no trigger (the V117 reload beacon fires on any change to the table). An older build ignores the column and would apply a
+    /// rule that has not started yet, so a window set ahead of its start mutes early on a rolled-back build.</para>
+    /// </summary>
+    private const string V205Sql = @"
+ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS starts_at_utc timestamp;";
+
+    /// <summary>
     /// V196 (#5632, step 5): Level 3 and the per-server action switches. <b>Nothing here turns an action on.</b>
     ///
     /// <para><b>Levels.</b> <c>ck_config_notification_routes_agent</c> now allows <c>agent_level</c> NULL and 0 to 3, and
@@ -2283,6 +2296,7 @@ $rung$;";
         new Migration(201, "forced-plan-variants-and-guides", V201Sql),
         new Migration(202, "ag-primary-replica", V202Sql),
         new Migration(203, "hypothetical-index-login", V203Sql),
+        new Migration(205, "mute-rule-starts-at", V205Sql),
     };
 
     /// <summary>
