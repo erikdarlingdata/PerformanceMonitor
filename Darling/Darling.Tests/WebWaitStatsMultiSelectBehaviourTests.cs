@@ -80,7 +80,7 @@ public sealed class WebWaitStatsMultiSelectBehaviourTests
         Assert.Equal(FirstTen, Strings(r.GetProperty("checked")).ToArray());
         Assert.Equal(FirstTen, Strings(r.GetProperty("reads")));
         Assert.Equal(FirstTen, Strings(r.GetProperty("chart").GetProperty("labels")));
-        Assert.Equal("10 / 10 selected", r.GetProperty("count").GetString());
+        Assert.Equal("10 selected (up to 10)", r.GetProperty("count").GetString());
         Assert.Equal("wait-trend|SRV1|wait_time_ms_per_second", r.GetProperty("chart").GetProperty("id").GetString());
     }
 

@@ -101,7 +101,31 @@ internal static class DarlingAgReader
             ? new List<DatabaseRow>()
             : await ReadDatabasesAsync(postgres, serverIdFilter, effectiveNow, cancellationToken);
 
-        return Build(replicas, databases, effectiveNow, limit, responseByteBudget);
+        /* #6159: a primary learned from the stored column is shown by its display name when it is a monitored server. The names are read only
+           when some row carries a stored primary. */
+        Func<int, string?>? displayNameOf = null;
+        if (replicas.Any(r => !string.IsNullOrWhiteSpace(r.PrimaryReplica)))
+        {
+            var names = await ReadDisplayNamesAsync(postgres, cancellationToken);
+            displayNameOf = id => names.TryGetValue(id, out var name) ? name : null;
+        }
+
+        return Build(replicas, databases, effectiveNow, limit, responseByteBudget, displayNameOf);
+    }
+
+    /// <summary>The registered servers' display names by server id, for naming a stored primary (#6159). A server with no display name is absent.</summary>
+    private static async Task<Dictionary<int, string>> ReadDisplayNamesAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    {
+        var names = new Dictionary<int, string>();
+        await using var command = postgres.CreateCommand("SELECT server_id, display_name FROM servers WHERE display_name IS NOT NULL AND display_name <> ''");
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            names[reader.GetInt32(0)] = reader.GetString(1);
+        }
+
+        return names;
     }
 
     /// <summary>
@@ -131,7 +155,8 @@ internal static class DarlingAgReader
         IReadOnlyList<DatabaseRow> databases,
         DateTime nowUtc,
         int? limit = null,
-        int? responseByteBudget = McpResponseBudget.DefaultBytes)
+        int? responseByteBudget = McpResponseBudget.DefaultBytes,
+        Func<int, string?>? displayNameOf = null)
     {
         /* Group key is (server_id, ag_name) — one card per reporting server's view of an AG. A NULL ag_name is
            possible under quorum loss (the catalog views fall back to cached metadata); it groups under an empty
@@ -186,12 +211,26 @@ internal static class DarlingAgReader
                honest "something needs a look" reading; the label stays "Stale". Otherwise a group with no PRIMARY in view is never Healthy: with
                nobody holding the role the group is not serving, and all-green replicas around a missing primary
                were the "Healthy, No primary reported" card. Warning is the floor, a worse band stays. */
+            /* #6159: a card built from a SECONDARY's own view lists the replicas that secondary can see, and the primary's row is not always among
+               them. The local replica holding the SECONDARY role means a primary exists, so a missing primary row here is a limit of the view, not a
+               group with no primary: the card says so and is not raised to Warning for it. */
+            var hasPrimaryRow = replicaViews.Any(r => r.IsPrimary);
+            var storedPrimary = rows.Select(r => r.PrimaryReplica).FirstOrDefault(p => !string.IsNullOrWhiteSpace(p));
+            var primaryName = replicaViews.FirstOrDefault(r => r.IsPrimary)?.ReplicaServerName;
+            if (primaryName is null && storedPrimary is not null)
+            {
+                /* The engine's own answer to "who is the primary", readable from a secondary: the group has one, so it is not raised to Warning below. */
+                primaryName = AgTopology.PrimaryNameFor(storedPrimary, replicas.Select(r => (r.ServerId, r.ReplicaServerName, r.IsLocal)), displayNameOf);
+            }
+
+            var primaryNotVisible = !hasPrimaryRow && storedPrimary is null
+                && replicaViews.Any(r => r.IsLocal == true && string.Equals(r.RoleDesc, "SECONDARY", StringComparison.OrdinalIgnoreCase));
             var isStale = nowUtc - first.CollectionTime > ServerHealthThresholds.OfflineThreshold;
             if (isStale)
             {
                 worst = HealthSeverity.Warning;
             }
-            else if (!replicaViews.Any(r => r.IsPrimary) && worst < HealthSeverity.Warning)
+            else if (!hasPrimaryRow && storedPrimary is null && !primaryNotVisible && worst < HealthSeverity.Warning)
             {
                 worst = HealthSeverity.Warning;
             }
@@ -206,7 +245,8 @@ internal static class DarlingAgReader
                 GroupId = replicaViews.Select(r => r.GroupId).FirstOrDefault(g => !string.IsNullOrWhiteSpace(g)),
                 CollectionTime = first.CollectionTime,
                 DatabaseCollectionTime = dbRows is { Count: > 0 } ? dbRows[0].CollectionTime : null,
-                PrimaryReplica = replicaViews.FirstOrDefault(r => r.IsPrimary)?.ReplicaServerName,
+                PrimaryReplica = primaryName,
+                PrimaryNotVisible = primaryNotVisible,
                 Severity = worst,
                 SeverityLabel = isStale ? "Stale" : SeverityLabel(worst),
                 IsStale = isStale,
@@ -437,6 +477,7 @@ internal static class DarlingAgReader
             ReplicaServerName = row.ReplicaServerName,
             RoleDesc = row.RoleDesc,
             RoleSeverity = role,
+            IsLocal = row.IsLocal,
             IsPrimary = string.Equals(row.RoleDesc, "PRIMARY", StringComparison.OrdinalIgnoreCase),
             OperationalStateDesc = row.OperationalStateDesc,
             OperationalStateSeverity = operational,
@@ -632,7 +673,7 @@ internal static class DarlingAgReader
                 row.ServerId, row.ServerName, row.CollectionTime, row.AgName, row.ReplicaServerName, row.RoleDesc,
                 row.IsLocal, row.OperationalStateDesc, row.ConnectedStateDesc, row.RecoveryHealthDesc,
                 row.SynchronizationHealthDesc, row.AvailabilityModeDesc, row.FailoverModeDesc, row.EndpointUrl,
-                row.GroupId));
+                row.GroupId, row.PrimaryReplica));
         }
 
         return rows;
@@ -674,7 +715,8 @@ internal static class DarlingAgReader
         string? AvailabilityModeDesc,
         string? FailoverModeDesc,
         string? EndpointUrl,
-        string? GroupId);
+        string? GroupId,
+        string? PrimaryReplica = null);
 
     /// <summary>One database-grain row, exactly as <c>collect.ag_database_replica_states</c> stores it. Queue sizes
     /// are KB and rates KB/s (the DMV's units), both instantaneous gauges rather than counters.</summary>
@@ -797,8 +839,13 @@ public sealed class AvailabilityGroupView
     /// <see cref="CollectionTime"/> (separate collector sweeps) and is null when the group has no database rows.</summary>
     [JsonPropertyName("database_collection_time")] public DateTime? DatabaseCollectionTime { get; init; }
 
-    /// <summary>The replica currently holding the PRIMARY role in this view, or null when no row reports one.</summary>
+    /// <summary>The primary: the replica holding the PRIMARY role in this view, else the primary the engine reported to this replica (stored, #6159; the
+    /// monitored server's display name when it is one). Null when neither is known.</summary>
     [JsonPropertyName("primary_replica")] public string? PrimaryReplica { get; init; }
+
+    /// <summary>True when no primary is known (no PRIMARY row, none stored) but the reporting replica is a SECONDARY, which means a primary
+    /// exists and this view just does not list it (#6159). Not a finding; the card says the primary is not visible from this secondary.</summary>
+    [JsonPropertyName("primary_not_visible")] public bool PrimaryNotVisible { get; init; }
 
     /// <summary>The worst band anywhere in the group — across the replicas' sync health / connected /
     /// operational state and every database's synchronization state.</summary>

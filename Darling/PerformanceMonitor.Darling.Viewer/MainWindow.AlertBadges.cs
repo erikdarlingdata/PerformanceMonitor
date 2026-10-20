@@ -153,6 +153,7 @@ public partial class MainWindow
                     text.Text = state.AlertCount > 99
                         ? "99+"
                         : state.AlertCount.ToString(CultureInfo.InvariantCulture);
+                    System.Windows.Automation.AutomationProperties.SetName(text, PerformanceMonitor.Ui.UnreadAlertsName.For(state.AlertCount));
                 }
 
                 var summaryLine = string.IsNullOrEmpty(state.Summary) ? "" : state.Summary + "\n";

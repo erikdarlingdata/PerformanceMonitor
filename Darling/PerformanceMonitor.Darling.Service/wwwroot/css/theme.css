@@ -87,5 +87,16 @@ tr.alert-dismissed { opacity: 0.55; font-style: italic; }
 .feedback-form textarea { width: 100%; max-width: 640px; }
 .tag-status { margin-top: 6px; font-size: 12px; opacity: 0.9; }
 .tag-input { width: 100%; max-width: 420px; }
+/* #6159: a drop-down drew as the browser's own white control on the dark page (the Server filter on Manage Query Tags); it takes the same look as the page's other selects. */
+select.tag-input {
+  padding: 0.3rem 0.5rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-dark);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: 0.85rem;
+}
+select.tag-input:focus { outline: none; border-color: var(--accent); }
 .tags-server { display: block; margin: 2px 0; }
 .tags-rules ul { margin: 4px 0 8px 18px; }

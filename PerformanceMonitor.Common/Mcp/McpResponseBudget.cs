@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 
 namespace PerformanceMonitor.Common;
 
@@ -105,5 +106,77 @@ public static class McpResponseBudget
         }
 
         return (best, bestJson ?? serializeFirst(best));
+    }
+
+    /// <summary>
+    /// How many leading rows of a page fit <paramref name="budgetBytes"/> (#6131). <paramref name="serializedBytes"/>
+    /// returns the byte size of the WHOLE answer carrying its first n rows, built the way the tool really writes it
+    /// (envelope, cut note and all), so the count is exact rather than an estimate from one row's size. The answer
+    /// grows with n, so the largest n that fits is found by bisection (about eight serializations for the 200-row
+    /// ceiling) instead of one per row. Never below one row when there is one: a single row wider than the budget is
+    /// still the answer, as <c>get_collection_log</c> and the Availability Group read treat it.
+    /// </summary>
+    public static int RowsThatFit(int rowCount, Func<int, int> serializedBytes, int budgetBytes = DefaultBytes)
+    {
+        if (rowCount <= 1 || serializedBytes(rowCount) <= budgetBytes)
+        {
+            return rowCount;
+        }
+
+        var low = 1;
+        var high = rowCount - 1;
+        while (low < high)
+        {
+            var mid = (low + high + 1) / 2;
+            if (serializedBytes(mid) <= budgetBytes)
+            {
+                low = mid;
+            }
+            else
+            {
+                high = mid - 1;
+            }
+        }
+
+        return low;
+    }
+
+    /// <summary>
+    /// The one sentence a tool prints when <see cref="RowsThatFit"/> cut its page (#6131), in the wording the Availability
+    /// Group read uses ("fit the N-byte response budget").
+    /// </summary>
+    public static string PageCutNote(int rowsInScope, int rowsReturned, string order, string noun = "rows") =>
+        string.Create(System.Globalization.CultureInfo.InvariantCulture,
+            $"TRUNCATED: {rowsInScope:#,0} {noun} were read; only {rowsReturned:#,0} fit the {DefaultBytes:#,0}-byte response budget ({order}). Lower the row count asked for, or narrow the window or database, to see the rest.");
+
+    /// <summary>
+    /// Cuts <paramref name="payload"/>'s <paramref name="arrayKey"/> array to the rows that fit <paramref name="budgetBytes"/> and says
+    /// so (#6131): <c>truncated</c> (true when rows were left out, false when none were) and <c>budget_note</c> (the
+    /// <see cref="PageCutNote"/> sentence, null when nothing was cut) are written onto the payload, and the answer is returned
+    /// serialized with <see cref="McpHelpers.JsonOptions"/>. The rows keep their order, so a ranked page loses its lightest rows.
+    /// <c>truncated</c> here is the budget cut only: a tool whose own payload also carries a window-floor flag keeps that
+    /// flag under its own name.
+    /// </summary>
+    public static string CapPage(System.Text.Json.Nodes.JsonObject payload, string arrayKey, string order, string noun, int budgetBytes = DefaultBytes)
+    {
+        if (payload[arrayKey] is not System.Text.Json.Nodes.JsonArray page)
+        {
+            return payload.ToJsonString(McpHelpers.JsonOptions);
+        }
+
+        var rowNodes = page.ToList();
+        var inScope = rowNodes.Count;
+
+        string Measure(int n)
+        {
+            var cut = n < inScope;
+            payload[arrayKey] = new System.Text.Json.Nodes.JsonArray(rowNodes.Take(n).Select(x => x?.DeepClone()).ToArray());
+            payload["truncated"] = cut;
+            payload["budget_note"] = cut ? PageCutNote(inScope, n, order, noun) : null;
+            return payload.ToJsonString(McpHelpers.JsonOptions);
+        }
+
+        var fit = RowsThatFit(inScope, n => System.Text.Encoding.UTF8.GetByteCount(Measure(n)), budgetBytes);
+        return Measure(fit);
     }
 }

@@ -1,10 +1,10 @@
 {
   "utilizationEfficiency": {
     "a": {
-      "AvgCpuPct": 38.7500000000000000,
+      "AvgCpuPct": 38.7857142857142857,
       "MaxCpuPct": 95,
       "P95CpuPct": 85.25,
-      "CpuSamples": 4,
+      "CpuSamples": 14,
       "TotalMemoryMb": 7000,
       "TargetMemoryMb": 8000,
       "PhysicalMemoryMb": 16000,
@@ -26,8 +26,8 @@
     "c": {
       "AvgCpuPct": 18.5000000000000000,
       "MaxCpuPct": 25,
-      "P95CpuPct": 24.35,
-      "CpuSamples": 2,
+      "P95CpuPct": 25,
+      "CpuSamples": 12,
       "TotalMemoryMb": 1800,
       "TargetMemoryMb": 2000,
       "PhysicalMemoryMb": 4096,
@@ -76,7 +76,7 @@
       "Day": "anchor-6d",
       "AvgCpuPct": 40.0000000000000000,
       "MaxCpuPct": 50,
-      "P95CpuPct": 49,
+      "P95CpuPct": 50,
       "MemoryRatio": 0.80000000000000000000,
       "Status": "RIGHT_SIZED"
     },
@@ -84,7 +84,7 @@
       "Day": "anchor-5d",
       "AvgCpuPct": 6.5000000000000000,
       "MaxCpuPct": 9,
-      "P95CpuPct": 8.75,
+      "P95CpuPct": 9,
       "MemoryRatio": 0.62500000000000000000,
       "Status": "OVER_PROVISIONED"
     },
@@ -92,7 +92,7 @@
       "Day": "anchor-4d",
       "AvgCpuPct": 8.5000000000000000,
       "MaxCpuPct": 12,
-      "P95CpuPct": 11.65,
+      "P95CpuPct": 12,
       "MemoryRatio": 0.75000000000000000000,
       "Status": "UNDER_PROVISIONED"
     },
@@ -100,7 +100,7 @@
       "Day": "anchor-3d",
       "AvgCpuPct": 25.5000000000000000,
       "MaxCpuPct": 29,
-      "P95CpuPct": 28.65,
+      "P95CpuPct": 29,
       "MemoryRatio": 0.85000000000000000000,
       "Status": "UNDER_PROVISIONED"
     },
@@ -108,7 +108,7 @@
       "Day": "anchor-2d",
       "AvgCpuPct": 48.5000000000000000,
       "MaxCpuPct": 52,
-      "P95CpuPct": 51.65,
+      "P95CpuPct": 52,
       "MemoryRatio": 0.95000000000000000000,
       "Status": "UNDER_PROVISIONED"
     },
@@ -116,7 +116,7 @@
       "Day": "anchor-1d",
       "AvgCpuPct": 83.5000000000000000,
       "MaxCpuPct": 87,
-      "P95CpuPct": 86.65,
+      "P95CpuPct": 87,
       "MemoryRatio": 1.05000000000000000000,
       "Status": "UNDER_PROVISIONED"
     }

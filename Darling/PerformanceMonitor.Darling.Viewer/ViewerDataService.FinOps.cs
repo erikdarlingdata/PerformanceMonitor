@@ -53,7 +53,7 @@ public sealed class ProvisioningTrendRow
     };
 
     public string DayDisplay => Day.ToString("ddd MM/dd");
-    public string StatusDisplay => Status == ProvisioningVerdict.NotApplicable ? ProvisioningVerdict.NotApplicableLabel : Status.Replace("_", " ");
+    public string StatusDisplay => ProvisioningVerdict.StatusLabel(Status);
 }
 
 /// <summary>Pool-level memory-grant vs used efficiency per day (Optimization sub-tab).</summary>
@@ -617,7 +617,7 @@ public sealed class ServerPropertyRow
     public string HadrDisplay => IsHadrEnabled.HasValue ? (IsHadrEnabled.Value ? "Yes" : "No") : "";
     public string ClusteredDisplay => IsClustered.HasValue ? (IsClustered.Value ? "Yes" : "No") : "";
     public string AgReplicaRoleDisplay => string.Equals(AgReplicaRole, "Standalone", StringComparison.OrdinalIgnoreCase) ? "—" : AgReplicaRole;
-    public string ProvisioningDisplay => ProvisioningStatus == ProvisioningVerdict.NotApplicable ? ProvisioningVerdict.NotApplicableLabel : ProvisioningStatus?.Replace("_", " ") ?? "";
+    public string ProvisioningDisplay => string.IsNullOrEmpty(ProvisioningStatus) ? "" : ProvisioningVerdict.StatusLabel(ProvisioningStatus);
 
     /// <summary>License-limit warning for Standard edition (CPU/RAM caps). Same math as Lite.</summary>
     public string? LicenseWarning => FinOpsInventoryFigures.LicenseWarning(Edition, EngineEdition, _cpuCount, _physicalMemoryMb);

@@ -281,7 +281,7 @@ function lowerEmphasisWords(text) {
  */
 export function plainText(text) {
   if (typeof text !== "string" || text === "") return text;
-  if (text.includes(ENGINE_GATE_MARK)) return NOT_COLLECTED_LINE;
+  if (text.includes(ENGINE_GATE_MARK)) return AZURE_SQL_DATABASE_MARK.test(text) ? AZURE_SQL_DATABASE_NOT_COLLECTED_LINE : NOT_COLLECTED_LINE;
   let t = text;
   t = namedTokenText(t);
 
@@ -360,6 +360,12 @@ export function plainText(text) {
 /** The one short line the page shows where the server says a collector can never run on this kind of server. The
     server's own sentence names the collector, the engine gate and the way it is decided, none of which helps a reader. */
 export const NOT_COLLECTED_LINE = "This server does not collect this data (it does not apply to this kind of server).";
+
+/** The line for the same answer when the server's engine is Azure SQL Database (#6178): it names the engine, as the Memory tab does. */
+export const AZURE_SQL_DATABASE_NOT_COLLECTED_LINE = "Azure SQL Database does not have this data.";
+
+/** How the server's engine-gate sentence names an Azure SQL Database ("<server> runs on Azure SQL Database (EngineEdition 5)."). */
+const AZURE_SQL_DATABASE_MARK = /runs on Azure SQL Database \(EngineEdition 5\)/;
 
 /** The words every engine-gate sentence ends on (CollectorEngineCapability's permanent-gap epilogue). A "not collected"
     answer that is something else, such as a plan that was never stored, does not carry them and keeps its own sentence.

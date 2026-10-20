@@ -194,7 +194,7 @@ public sealed class CollectionOutputBesideCostTests
 
     /// <summary>
     /// The finding's signature read off the TYPE rather than asserted over a hand-written list, so a
-    /// SEVENTH parameter reports itself here instead of passing unnoticed — the discipline
+    /// NINTH parameter reports itself here instead of passing unnoticed — the discipline
     /// <see cref="TheBandingSignature_TakesNoOutputAndNoDenialCurrency"/> applies to the band, one method
     /// over. Six since #3754: the faulted-run count (a RUN-CLASS count, like the note count beside it) and
     /// the event-collector bool, which is computed by the caller from the name on
@@ -220,10 +220,12 @@ public sealed class CollectionOutputBesideCostTests
         /* The precondition, named so a signature change reports itself rather than turning the assertions
            below into a vacuous pass over a list that no longer means what this test thinks. */
         /* #5644: the zero-is-normal bool joined the event bool, computed from a name list the same way. */
-        Assert.Equal(7, parameters.Length);
+        /* #6177: the NO_PERMISSIONS-band bool joined them. The caller reduces the band word to a bool, so it is
+           a run-class fact like the others: no string, no note text, nothing that changes from run to run. */
+        Assert.Equal(8, parameters.Length);
 
         Assert.Equal(
-            new[] { "rowsStored", "totalRuns", "deniedSinceLastSuccess", "noteCount", "faultedRuns", "isEventCollector", "isZeroNormal" },
+            new[] { "rowsStored", "totalRuns", "deniedSinceLastSuccess", "noteCount", "faultedRuns", "isEventCollector", "isZeroNormal", "bandedNoPermissions" },
             parameters.Select(p => p.Name!).ToArray());
 
         Assert.DoesNotContain(parameters, p => p.ParameterType == typeof(string));

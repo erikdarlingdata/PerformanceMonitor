@@ -729,7 +729,13 @@ export function metricBands(c) {
         ? c.total_threads - c.available_threads
         : c.current_workers ?? 0
       : null;
-  const threadsDetail = c.total_threads != null ? fmtInt(threadsInUse) + " in use / " + fmtInt(c.total_threads) + " threads" : null;
+  /* #6178: an Azure SQL Database (engine_edition 5) has no scheduler data, so its Threads chip is "n/a" for good. Say why under the "n/a". */
+  const threadsDetail =
+    c.total_threads != null
+      ? fmtInt(threadsInUse) + " in use / " + fmtInt(c.total_threads) + " threads"
+      : threadsValue === "n/a" && c.engine_edition === 5
+      ? "Azure SQL Database has no thread data"
+      : null;
 
   const cpuValue =
     c.total_cpu_percent != null || c.cpu_percent != null ? fmtPct(c.total_cpu_percent ?? c.cpu_percent) : "n/a";

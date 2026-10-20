@@ -116,6 +116,7 @@ const sandbox = {
   initSidebarCollapse() {},
   initSidebarSearch() {},
   paintServerList() {},
+  makeScrollReset: () => () => false,
   initSeverityColorSettings() {},
   readTool: async () => ({ kind: "empty" }),
   getSession: async () => null,

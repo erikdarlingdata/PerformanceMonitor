@@ -110,7 +110,7 @@ public sealed class DarlingMcpPgSlotTools
                     return gated;
                 }
 
-                return JsonSerializer.Serialize(new
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, JsonSerializer.Serialize(new
                 {
                     server = resolved.DisplayName,
                     hours_back,
@@ -119,7 +119,7 @@ public sealed class DarlingMcpPgSlotTools
                             + "retaining WAL or pinning vacuum through one.",
                     scope = "Per-instance. Slots live on the writer, so if this target is a replica, check "
                           + "the cluster's writer before concluding the cluster has no abandoned slot.",
-                }, McpHelpers.JsonOptions);
+                }, McpHelpers.JsonOptions), cancellationToken);
             }
 
             var slots = rows.Select(r =>

@@ -24,7 +24,7 @@ public class ProvisioningTrendRow
     public decimal MemoryRatio { get; set; }
     public string Status { get; set; } = "";
     public string DayDisplay => Day.ToString("ddd MM/dd");
-    public string StatusDisplay => Status == ProvisioningVerdict.NotApplicable ? ProvisioningVerdict.NotApplicableLabel : Status.Replace("_", " ");
+    public string StatusDisplay => ProvisioningVerdict.StatusLabel(Status);
 }
 
 public class MemoryGrantEfficiencyRow
@@ -406,7 +406,7 @@ public class ServerPropertyRow
     public string HadrDisplay => IsHadrEnabled.HasValue ? (IsHadrEnabled.Value ? "Yes" : "No") : "";
     public string ClusteredDisplay => IsClustered.HasValue ? (IsClustered.Value ? "Yes" : "No") : "";
     public string AgReplicaRoleDisplay => string.Equals(AgReplicaRole, "Standalone", StringComparison.OrdinalIgnoreCase) ? "—" : AgReplicaRole;
-    public string ProvisioningDisplay => ProvisioningStatus == ProvisioningVerdict.NotApplicable ? ProvisioningVerdict.NotApplicableLabel : ProvisioningStatus?.Replace("_", " ") ?? "";
+    public string ProvisioningDisplay => string.IsNullOrEmpty(ProvisioningStatus) ? "" : ProvisioningVerdict.StatusLabel(ProvisioningStatus);
 
     // FinOps cost — from server config
     public decimal MonthlyCost { get; set; }

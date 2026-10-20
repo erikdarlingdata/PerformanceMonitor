@@ -43,6 +43,21 @@ public static class ServerListKeyboard
     }
 
     /// <summary>
+    /// The Invoke (default action) body both lists run (#6138): selects the invoked row, then runs
+    /// <paramref name="openSelected"/>, the same method the double-click and Enter run, so an automation client opens a
+    /// tab by the one open path. A group header's selection toggles the group and moves the selection on to a server
+    /// row, so the open runs only when the invoked row is still the selected one.
+    /// </summary>
+    public static void HandleInvoke(ListBox list, object item, Action openSelected)
+    {
+        list.SelectedItem = item;
+        if (ReferenceEquals(list.SelectedItem, item))
+        {
+            openSelected();
+        }
+    }
+
+    /// <summary>
     /// The row for the server <paramref name="previousId"/> names, or null when there is none (no previous server,
     /// or it is no longer in <paramref name="rows"/>). The match is by the server's identity, never by its index:
     /// after the list's items are replaced the same server sits at a different position, and a group header may be

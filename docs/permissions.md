@@ -106,7 +106,12 @@ Azure SQL Database doesn't support server-level logins. Create a **contained dat
 CREATE USER [SQLServerPerfMon] WITH PASSWORD = 'YourStrongPassword';
 GRANT VIEW DATABASE STATE TO [SQLServerPerfMon];
 GRANT VIEW DEFINITION     TO [SQLServerPerfMon];
+GRANT ALTER ANY DATABASE EVENT SESSION TO [SQLServerPerfMon];
 ```
+
+The third grant, `ALTER ANY DATABASE EVENT SESSION`, lets the monitor create its Extended Events sessions in the database. Without it, the Extended Events collectors have no session to read.
+
+The contained user cannot read the tempdb space DMVs, and no grant changes that. The `tempdb_stats` collector is refused on every run, and Collection Health shows `NO_PERMISSIONS` for it. To collect tempdb data, create a server login in `master`, add it to the `##MS_ServerStateReader##` server role, and map it into the database. A contained user cannot be put in that role.
 
 For [Managed Identity or Service Principal](authentication.md#authentication) authentication, create the contained user from the identity's display name instead of a password — an Azure AD admin must already be configured on the logical server:
 
@@ -115,6 +120,7 @@ For [Managed Identity or Service Principal](authentication.md#authentication) au
 CREATE USER [your-managed-identity-or-app-registration-name] FROM EXTERNAL PROVIDER;
 GRANT VIEW DATABASE STATE TO [your-managed-identity-or-app-registration-name];
 GRANT VIEW DEFINITION     TO [your-managed-identity-or-app-registration-name];
+GRANT ALTER ANY DATABASE EVENT SESSION TO [your-managed-identity-or-app-registration-name];
 ```
 
 For a large fleet, grant an Entra **group** instead of provisioning each identity individually where your architecture allows it. SQL Agent and msdb are not available on Azure SQL Database — those collectors are skipped automatically.

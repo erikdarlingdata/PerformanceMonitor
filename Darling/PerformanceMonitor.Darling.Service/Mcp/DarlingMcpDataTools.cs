@@ -572,6 +572,7 @@ public sealed class DarlingMcpDataTools
             var points = await DarlingDataReader.GetTempDbBucketsAsync(postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, bucketMinutes, cancellationToken);
             if (points.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "tempdb_stats", cancellationToken)
+                    ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, "tempdb_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No TempDB data available.");
 
             return TrendPayloads.TempDbTrend(resolved.ServerName, hours_back, points, bucketMinutes, bucket_minutes is not null, budget.AutoPoints);
@@ -1400,7 +1401,7 @@ public sealed class DarlingMcpDataTools
         return message is null ? null : McpHelpers.Status("unavailable", message);
     }
 
-    [McpServerTool(Name = "get_query_store_top"), Description("Cost-ranked top Query Store queries (heaviest first), not time-ordered. Requires Query Store enabled on target databases. window_truncated marks a window floor, not a page cut — no limit changes it — because stored history can be shorter than asked; effective_start / effective_hours_back give the reach actually served. <<GUIDE>> effective_start is where complete history begins. Long windows may read whole days from a daily summary; approximate: true says so. approximation_note says what the summary can miss; summary_days names the days it covered. Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database and module filtering. Reads the raw tier, and the per-interval table for the older part of a long window (the corrected rollups carry no query_id or plan_id); history_source says which served. Rows are per Query Store execution outcome (execution_type: Regular, Aborted, Exception): a plan with aborted executions returns one row per outcome, each with its own counts and averages. The execution_type filter keeps one outcome, and module_name keeps one module: the exact, case-sensitive schema-qualified name the collector records (get_top_procedures_by_cpu's full_name; Adhoc for ad-hoc statements, Unknown for an object it could not resolve), applied after interval deduplication and before ranking. When a filter matches nothing but the same read without the filters has rows, the answer is empty (a measured zero), not a Query Store precondition; a module_name miss also carries the window read (effective_start, effective_hours_back, window_truncated) as hints. query_text is a 400-character preview by default (query_text_truncated marks a cut row); full_text=true returns each row's whole statement." + McpHelpers.WindowTruncatedDescription)]
+    [McpServerTool(Name = "get_query_store_top"), Description("Cost-ranked top Query Store queries (heaviest first), not time-ordered. Requires Query Store enabled on target databases. window_truncated marks a window floor, not a page cut — no limit changes it — because stored history can be shorter than asked; effective_start / effective_hours_back give the reach actually served. <<GUIDE>> effective_start is where complete history begins. Long windows may read whole days from a daily summary; approximate: true says so. approximation_note says what the summary can miss; summary_days names the days it covered. Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database and module filtering. Reads the raw tier, and the per-interval table for the older part of a long window (the corrected rollups carry no query_id or plan_id); history_source says which served. Rows are per Query Store execution outcome (execution_type: Regular, Aborted, Exception): a plan with aborted executions returns one row per outcome, each with its own counts and averages. The execution_type filter keeps one outcome, and module_name keeps one module: the exact, case-sensitive schema-qualified name the collector records (get_top_procedures_by_cpu's full_name; Adhoc for ad-hoc statements, Unknown for an object it could not resolve), applied after interval deduplication and before ranking. When a filter matches nothing but the same read without the filters has rows, the answer is empty (a measured zero), not a Query Store precondition; a module_name miss also carries the window read (effective_start, effective_hours_back, window_truncated) as hints. query_text is a 400-character preview by default (query_text_truncated marks a cut row); full_text=true returns each row's whole statement. The page is also capped at the shared ~32 KB response budget, heaviest rows kept: truncated says rows were cut for that, and budget_note says how many fit (window_truncated stays the window floor)." + McpHelpers.WindowTruncatedDescription)]
     public static Task<string> GetQueryStoreTop(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -1413,7 +1414,7 @@ public sealed class DarlingMcpDataTools
         [Description("Return each row's full query_text instead of a 400-character preview. Default false.")] bool full_text = false,
         [Description(QueryTagReadJoin.TagParameterDescription)] string? tag = null,
         CancellationToken cancellationToken = default) =>
-        GetQueryStoreTop(postgres, server_name, hours_back, top, database_name, as_of, execution_type, module_name, full_text, QueryTextPreviewLength, cancellationToken, tag);
+        GetQueryStoreTop(postgres, server_name, hours_back, top, database_name, as_of, execution_type, module_name, full_text, QueryTextPreviewLength, cancellationToken, tag, McpResponseBudget.DefaultBytes);
 
     /// <summary>The sentence beside <c>approximate: true</c> on get_query_store_top (#5094): whole days of the window came from the
     /// daily summary, which is built after each day ends.</summary>
@@ -1431,10 +1432,11 @@ public sealed class DarlingMcpDataTools
     #pragma warning disable CA1068 // #5984: tag trails the token on purpose; putting it before would shift every positional caller
     internal static Task<string> GetQueryStoreTop(
         NpgsqlDataSource postgres, string? server_name, int hours_back, int top, string? database_name, string? as_of,
-        string? execution_type, string? module_name, bool full_text, int previewLength, CancellationToken cancellationToken = default, string? tag = null) =>
+        string? execution_type, string? module_name, bool full_text, int previewLength, CancellationToken cancellationToken = default, string? tag = null,
+        int? responseByteBudget = McpResponseBudget.DefaultBytes) =>
     #pragma warning restore CA1068
         GetQueryStoreTop(
-            postgres, server_name, hours_back, top, DatabaseFilter.One(database_name), as_of, execution_type, module_name, full_text, previewLength, cancellationToken, tag);
+            postgres, server_name, hours_back, top, DatabaseFilter.One(database_name), as_of, execution_type, module_name, full_text, previewLength, cancellationToken, tag, responseByteBudget);
 
     /// <summary>
     /// #5245: <see cref="GetQueryStoreTop(NpgsqlDataSource,string,int,int,string,string,string,string,bool,int,CancellationToken)"/>
@@ -1446,7 +1448,8 @@ public sealed class DarlingMcpDataTools
     #pragma warning disable CA1068 // #5984: tag trails the token on purpose; putting it before would shift every positional caller
     internal static async Task<string> GetQueryStoreTop(
         NpgsqlDataSource postgres, string? server_name, int hours_back, int top, DatabaseFilter databases, string? as_of,
-        string? execution_type, string? module_name, bool full_text, int previewLength, CancellationToken cancellationToken = default, string? tag = null)
+        string? execution_type, string? module_name, bool full_text, int previewLength, CancellationToken cancellationToken = default, string? tag = null,
+        int? responseByteBudget = McpResponseBudget.DefaultBytes)
     {
     #pragma warning restore CA1068
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -1659,6 +1662,15 @@ public sealed class DarlingMcpDataTools
             if (tagFilter.Named is { } storeTagName)
             {
                 storePayload["tag_filter"] = storeTagName;
+            }
+
+            /* #6131: the page is capped under the shared response budget, as the other read tools' pages are. top 200 measured
+               177 KB with nothing to say rows had been left out. The rows are heaviest first, so the cut drops the lightest.
+               `truncated` is this page cut ONLY: the window floor keeps its own flag, window_truncated, and its own note.
+               The web viewer's mirror passes a null budget and keeps its page exactly. */
+            if (responseByteBudget is int budget)
+            {
+                return McpResponseBudget.CapPage(storePayload, "queries", "heaviest first", "queries", budget);
             }
 
             return storePayload.ToJsonString(McpHelpers.JsonOptions);

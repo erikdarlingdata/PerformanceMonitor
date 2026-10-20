@@ -121,7 +121,7 @@ public sealed class DarlingMcpPgAutovacuumTools
                     return gated;
                 }
 
-                return JsonSerializer.Serialize(new
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, JsonSerializer.Serialize(new
                 {
                     server = resolved.DisplayName,
                     hours_back,
@@ -129,7 +129,7 @@ public sealed class DarlingMcpPgAutovacuumTools
                     finding = "No table on this server has dead tuples, pending analyze work, inserts since "
                             + "its last vacuum, or autovacuum disabled. The collector records only tables with "
                             + "pending work, so an empty result is the healthy case rather than missing data.",
-                }, McpHelpers.JsonOptions);
+                }, McpHelpers.JsonOptions), cancellationToken);
             }
 
             /* #3603: the cost half, read once for every table on the page and attached per table below. The

@@ -73,7 +73,8 @@ public sealed class AgReplicaStatesCollector : CollectorDefinitionBase<AgReplica
         string? FailoverModeDesc,
         string? EndpointUrl,
         bool? IsLocal,
-        string? GroupId);
+        string? GroupId,
+        string? PrimaryReplica = null);
 
     private const string QueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -90,12 +91,15 @@ SELECT /* PerformanceMonitorLite */
     failover_mode_desc = ar.failover_mode_desc,
     endpoint_url = ar.endpoint_url,
     is_local = ars.is_local,
-    group_id = CONVERT(nvarchar(36), ag.group_id)
+    group_id = CONVERT(nvarchar(36), ag.group_id),
+    primary_replica = ags.primary_replica
 FROM sys.availability_replicas AS ar
 JOIN sys.availability_groups AS ag
   ON ar.group_id = ag.group_id
 JOIN sys.dm_hadr_availability_replica_states AS ars
   ON ar.replica_id = ars.replica_id
+LEFT JOIN sys.dm_hadr_availability_group_states AS ags
+  ON ag.group_id = ags.group_id
 WHERE COALESCE(ag.is_distributed, 0) = 0
 ORDER BY
     ag.name,
@@ -139,6 +143,11 @@ OPTION(RECOMPILE);";
            string rather than doing arithmetic on it, same reasoning as last_hardened_lsn/last_commit_lsn on
            the sibling collector. */
         new CollectorColumn("group_id", CollectorColumnType.Varchar),
+        /* Appended LAST (#6159): sys.dm_hadr_availability_group_states.primary_replica, the name of the replica that is the
+           primary right now. A secondary can read it, which is how a card built from a secondary's own view can name the
+           primary that its replica list does not show. NULL while no primary is known (a resolving group, a lost quorum),
+           and NULL on every row stored before this column existed. */
+        new CollectorColumn("primary_replica", CollectorColumnType.Varchar),
     };
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
@@ -159,7 +168,8 @@ OPTION(RECOMPILE);";
                 FailoverModeDesc: reader.IsDBNull(8) ? null : reader.GetString(8),
                 EndpointUrl: reader.IsDBNull(9) ? null : reader.GetString(9),
                 IsLocal: reader.IsDBNull(10) ? null : reader.GetBoolean(10),
-                GroupId: reader.IsDBNull(11) ? null : reader.GetString(11)));
+                GroupId: reader.IsDBNull(11) ? null : reader.GetString(11),
+                PrimaryReplica: !reader.IsDBNull(12) ? reader.GetString(12) : null));
         }
 
         return rows;
@@ -179,6 +189,7 @@ OPTION(RECOMPILE);";
             .Value(row.FailoverModeDesc)           /* failover_mode_desc VARCHAR */
             .Value(row.EndpointUrl)                /* endpoint_url VARCHAR */
             .Value(row.IsLocal)                    /* is_local BOOLEAN */
-            .Value(row.GroupId);                   /* group_id VARCHAR (uuid text, #4475) */
+            .Value(row.GroupId)                    /* group_id VARCHAR (uuid text, #4475) */
+            .Value(row.PrimaryReplica);            /* primary_replica VARCHAR (#6159) */
     }
 }

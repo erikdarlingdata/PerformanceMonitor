@@ -365,6 +365,17 @@ public sealed class WebPlainTextTests
         Assert.DoesNotContain("AppliesTo", o[0]);
         Assert.Equal("No stored plan for this query. pg_stat_statements has none.", o[1]);
     }
+
+    /// <summary>#6178: the sentence the service writes for an Azure SQL Database names the engine on the page, from the real gate text; the
+    /// PostgreSQL sentence keeps the generic line.</summary>
+    [Fact]
+    public void TheEngineGateSentence_NamesAzureSqlDatabase_WhenThatIsTheEngine()
+    {
+        var azure = PerformanceMonitor.Collectors.CollectorEngineCapability.NotCollectedMessage("example-azure-db", 5, null, "cpu_scheduler_stats")!;
+        var o = Run([azure], out var generic);
+        Assert.Equal("Azure SQL Database does not have this data.", o[0]);
+        Assert.NotEqual(generic, o[0]);
+    }
 }
 
 /// <summary>Collection Health on a server without Always On lists the two AG collectors as not applicable.</summary>
