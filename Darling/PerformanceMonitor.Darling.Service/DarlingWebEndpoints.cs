@@ -192,6 +192,14 @@ public static class DarlingWebEndpoints
         "list_query_tag_rules",
         "test_query_tag_rule",
         "run_collectors_now",
+        /* #6227: the five collector schedule writes are MCP-only (the Viewer's schedule editor is the page for a person), and the
+           get_collector_schedules read is for an agent checking its own change before and after; no page read mirrors it. */
+        "disable_collector",
+        "enable_collector",
+        "set_collector_frequency",
+        "set_collector_run_at",
+        "set_collector_retention",
+        "get_collector_schedules",
         "get_tool_guide",
         "wait_for_investigation_requests",
         /* #6033: an agent's read of one claimed request's frozen evidence, served by claim; no page read mirrors it. */
