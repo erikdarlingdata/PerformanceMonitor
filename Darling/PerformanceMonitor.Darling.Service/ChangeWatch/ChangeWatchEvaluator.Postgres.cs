@@ -23,7 +23,7 @@ namespace PerformanceMonitor.Darling.Service.ChangeWatch;
 /// #6234, the PostgreSQL pass: the evaluation of a PostgreSQL target's watch. The same three windows (the after-window from the first
 /// change to the window's end, the 60 minutes before it, and the after-window shifted back 7 days), the same thresholds
 /// (<see cref="WaitMoved"/>, <see cref="CpuMoved"/>, <see cref="DurationMoved"/>) and the same week-earlier rule as the SQL Server
-/// evaluation, over the PostgreSQL readers: wait load from <see cref="DarlingPgWaitReader"/>, CPU from
+/// evaluation, over the PostgreSQL readers: wait load from <see cref="DarlingPgWaitReader"/> (Aurora) or <see cref="DarlingPgWaitSamplingReader"/> (pg_wait_sampling), CPU from
 /// <see cref="DarlingPgCpuUtilizationReader"/>, and statement duration from <see cref="DarlingPgStatementReader"/>.
 /// <para>A target that lacks a signal (no CPU source, no wait collection, no statement statistics) reports that measure as NOT
 /// MEASURED with the reason, in <see cref="ChangeWatchEvaluation.NotMeasured"/>: absent data is never read as flat.</para>
@@ -35,7 +35,8 @@ public sealed partial class ChangeWatchEvaluator
 
     private const string EngineSql = "SELECT engine_kind FROM servers WHERE server_id = $1";
 
-    private const string WaitRowsSql = "SELECT count(*) FROM pg_wait_stats WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3";
+    /// <summary>The most (event type, event, query) series read from the sampled profile for one window: far more than a server holds.</summary>
+    private const int PostgresWaitSamplingRows = 100000;
 
     private const string StatementRowsSql = "SELECT count(*) FROM pg_statement_stats WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3";
 
@@ -62,10 +63,99 @@ public sealed partial class ChangeWatchEvaluator
         return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
     }
 
-    private async Task<(double AvgPercent, int Samples)> ReadCpuAsync(int serverId, DateTime start, DateTime end, CancellationToken cancellationToken)
+    /* Seconds the Aurora wait collector covered in a window, and how many collections it holds (#6234): one interval per collection_time (every
+       wait row of a collection carries the same sample_interval_seconds; 0 means no delta was knowable, NULL a legacy row that falls back to the
+       gap since the previous collection). Columns: seconds covered, seconds covered again (the same figure, so both wait sources read alike), collections. */
+    private const string PgWaitStatsCoverageSql = @"
+WITH c AS (
+    SELECT collection_time, max(sample_interval_seconds) AS stored_seconds
+    FROM pg_wait_stats
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+    GROUP BY collection_time
+), d AS (
+    SELECT coalesce(stored_seconds::double precision,
+                    extract(epoch FROM collection_time - lag(collection_time) OVER (ORDER BY collection_time))::double precision) AS seconds
+    FROM c
+)
+SELECT coalesce(sum(seconds) FILTER (WHERE seconds > 0), 0)::double precision,
+       coalesce(sum(seconds) FILTER (WHERE seconds > 0), 0)::double precision,
+       count(*)::bigint
+FROM d";
+
+    /* The pg_wait_sampling profile is cumulative and DarlingPgWaitSamplingReader differences its newest reading against its oldest in the
+       window, so the figure covers the span between the window's first and last collection. The time the profile was OBSERVED over that span is
+       each later collection's sampled_ms (the service-sampled arm watches only part of each cycle), or the gap since the previous collection
+       where sampled_ms is NULL (the extension arm samples in-engine the whole time, and any row before V133). Columns: seconds observed, span
+       seconds, collections. */
+    private const string PgWaitSamplingCoverageSql = @"
+WITH c AS (
+    SELECT collection_time, max(sampled_ms) AS sampled_ms
+    FROM pg_wait_sampling
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+    GROUP BY collection_time
+), d AS (
+    SELECT collection_time, sampled_ms,
+           extract(epoch FROM collection_time - lag(collection_time) OVER (ORDER BY collection_time))::double precision AS gap_seconds
+    FROM c
+)
+SELECT coalesce(sum(coalesce(sampled_ms / 1000.0, gap_seconds)) FILTER (WHERE gap_seconds IS NOT NULL), 0)::double precision,
+       coalesce(extract(epoch FROM max(collection_time) - min(collection_time)), 0)::double precision,
+       count(*)::bigint
+FROM d";
+
+    private async Task<(double First, double Second, long Rows)> ReadCoverageAsync(
+        string sql, int serverId, DateTime start, DateTime end, CancellationToken cancellationToken)
     {
-        var samples = await DarlingPgCpuUtilizationReader.GetHistoryAsync(_dataSource, serverId, Open(start), end, cancellationToken);
-        return samples.Count == 0 ? (0, 0) : (samples.Average(s => s.CpuPercent), samples.Count);
+        await using var command = _dataSource.CreateCommand(sql);
+        command.CommandTimeout = _commandTimeoutSeconds;
+        command.Parameters.Add(new NpgsqlParameter { Value = serverId });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Naive(Open(start)) });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Naive(end) });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await reader.ReadAsync(cancellationToken);
+        return (reader.GetDouble(0), reader.GetDouble(1), reader.GetInt64(2));
+    }
+
+    /// <summary>Total wait time per second from the Aurora wait collector (<c>pg_wait_stats</c>), through the reader <c>get_pg_wait_stats</c> uses.</summary>
+    private async Task<RateSample> ReadPgWaitStatsRateAsync(int serverId, DateTime start, DateTime end, CancellationToken cancellationToken)
+    {
+        var coverage = await ReadCoverageAsync(PgWaitStatsCoverageSql, serverId, start, end, cancellationToken);
+        if (coverage.Rows == 0)
+        {
+            return default;
+        }
+
+        var totalMs = (await DarlingPgWaitReader.GetPgWaitStatsPageAsync(_dataSource, serverId, Open(start), end, 1, cancellationToken)).WindowTotalWaitTimeMs;
+        return new RateSample(coverage.First > 0 ? totalMs / coverage.First : 0, coverage.First, coverage.Rows);
+    }
+
+    /// <summary>Total wait time per second from the sampled profile (<c>pg_wait_sampling</c>), through the reader <c>get_pg_wait_sampling</c> uses.
+    /// Time on the CPU is not waiting, so the <c>CPU</c> event type is left out.</summary>
+    private async Task<RateSample> ReadPgWaitSamplingRateAsync(int serverId, DateTime start, DateTime end, CancellationToken cancellationToken)
+    {
+        var coverage = await ReadCoverageAsync(PgWaitSamplingCoverageSql, serverId, start, end, cancellationToken);
+        if (coverage.Rows == 0)
+        {
+            return default;
+        }
+
+        var page = await DarlingPgWaitSamplingReader.GetPgWaitSamplingPageAsync(_dataSource, serverId, Open(start), end, PostgresWaitSamplingRows, cancellationToken);
+        var waitedMs = page.Rows.Where(r => !string.Equals(r.EventType, "CPU", StringComparison.OrdinalIgnoreCase)).Sum(r => (double)r.EstimatedWaitMs);
+        return new RateSample(coverage.First > 0 ? waitedMs / coverage.First : 0, coverage.Second, coverage.Rows);
+    }
+
+    private async Task<RateSample> ReadCpuAsync(int serverId, DateTime start, DateTime end, CancellationToken cancellationToken)
+    {
+        var all = await DarlingPgCpuUtilizationReader.GetHistoryAsync(_dataSource, serverId, Open(start), end, cancellationToken);
+        /* A sample counts in the window its own instant falls in: a backlog ingested after a gap carries the later collection_time. */
+        var samples = all.Where(s => s.SampleTimeUtc > start && s.SampleTimeUtc <= end).ToList();
+        if (samples.Count == 0)
+        {
+            return default;
+        }
+
+        var minutes = samples.Select(s => s.SampleTimeUtc.Ticks / TimeSpan.TicksPerMinute).Distinct().Count();
+        return new RateSample(samples.Average(s => s.CpuPercent), minutes * 60.0, samples.Count);
     }
 
     private async Task<Dictionary<(long QueryId, long DatabaseId), DarlingPgStatementReader.PgStatementRow>> ReadStatementsAsync(
@@ -97,43 +187,41 @@ public sealed partial class ChangeWatchEvaluator
         var notes = new List<string>();
         var hadData = false;
 
-        /* Wait load: the wait collector's window totals (pg_wait_stats). No rows in the after or before window means the target does not
-           collect waits (pg_wait_sampling or Performance Insights is missing, or the collector has not run), which is not "no waits". */
-        var waitRowsAfter = await CountRowsAsync(WaitRowsSql, id, afterStart, afterEnd, cancellationToken);
-        var waitRowsBefore = await CountRowsAsync(WaitRowsSql, id, beforeStart, afterStart, cancellationToken);
-        if (waitRowsAfter > 0 && waitRowsBefore > 0)
+        /* Wait load: pg_wait_stats where the target is an Aurora one (Performance Insights), pg_wait_sampling where it is stock PostgreSQL with
+           the extension. Whichever source holds rows for this target is the one read; with neither, the reason names both. A window with no
+           rows or too little coverage is not "no waits". */
+        var waitAfter = await ReadPgWaitStatsRateAsync(id, afterStart, afterEnd, cancellationToken);
+        var waitBefore = await ReadPgWaitStatsRateAsync(id, beforeStart, afterStart, cancellationToken);
+        RateSample waitWeek;
+        string waitSource;
+        if (waitAfter.Rows > 0 || waitBefore.Rows > 0)
         {
-            hadData = true;
-            var after = (await DarlingPgWaitReader.GetPgWaitStatsPageAsync(_dataSource, id, Open(afterStart), afterEnd, 1, cancellationToken)).WindowTotalWaitTimeMs / afterSeconds;
-            var before = (await DarlingPgWaitReader.GetPgWaitStatsPageAsync(_dataSource, id, Open(beforeStart), afterStart, 1, cancellationToken)).WindowTotalWaitTimeMs / beforeSeconds;
-            double? week = await CountRowsAsync(WaitRowsSql, id, weekStart, weekEnd, cancellationToken) > 0
-                ? (await DarlingPgWaitReader.GetPgWaitStatsPageAsync(_dataSource, id, Open(weekStart), weekEnd, 1, cancellationToken)).WindowTotalWaitTimeMs / afterSeconds
-                : null;
-            measures.Add(new ChangeWatchMeasure("total_wait_ms_per_second", "ms/s", before, after, week,
-                WaitMoved(before, after) && (week is null || WaitMoved(week.Value, after))));
+            waitSource = "the Aurora wait collector (pg_wait_stats)";
+            waitWeek = await ReadPgWaitStatsRateAsync(id, weekStart, weekEnd, cancellationToken);
         }
         else
         {
-            notMeasured.Add(new ChangeWatchNotMeasured("total_wait_ms_per_second",
-                $"the wait collector stored no rows for this target in the {(waitRowsAfter == 0 ? "after" : "before")} window (pg_wait_sampling or Performance Insights is not collecting)"));
+            waitAfter = await ReadPgWaitSamplingRateAsync(id, afterStart, afterEnd, cancellationToken);
+            waitBefore = await ReadPgWaitSamplingRateAsync(id, beforeStart, afterStart, cancellationToken);
+            waitWeek = await ReadPgWaitSamplingRateAsync(id, weekStart, weekEnd, cancellationToken);
+            waitSource = waitAfter.Rows > 0 || waitBefore.Rows > 0 ? "the pg_wait_sampling collector" : string.Empty;
         }
+
+        hadData |= AddRateMeasure("total_wait_ms_per_second", "ms/s", waitAfter, afterSeconds, waitBefore, beforeSeconds, waitWeek, afterSeconds,
+            WaitMoved,
+            window => waitSource.Length > 0
+                ? $"{waitSource} stored no rows for this target in the {window} window"
+                : $"no wait source stored rows for this target in the {window} window: pg_wait_stats (the Aurora wait collector) and pg_wait_sampling (the extension's collector) are both empty, so the extension is not installed or not collecting",
+            measures, notMeasured, notes);
 
         /* CPU: only a target with a CPU source (Performance Insights) has samples. */
         var cpuAfter = await ReadCpuAsync(id, afterStart, afterEnd, cancellationToken);
         var cpuBefore = await ReadCpuAsync(id, beforeStart, afterStart, cancellationToken);
-        if (cpuAfter.Samples > 0 && cpuBefore.Samples > 0)
-        {
-            hadData = true;
-            var cpuWeek = await ReadCpuAsync(id, weekStart, weekEnd, cancellationToken);
-            double? week = cpuWeek.Samples > 0 ? cpuWeek.AvgPercent : null;
-            measures.Add(new ChangeWatchMeasure("avg_cpu_percent", "%", cpuBefore.AvgPercent, cpuAfter.AvgPercent, week,
-                CpuMoved(cpuBefore.AvgPercent, cpuAfter.AvgPercent) && (week is null || CpuMoved(week.Value, cpuAfter.AvgPercent))));
-        }
-        else
-        {
-            notMeasured.Add(new ChangeWatchNotMeasured("avg_cpu_percent",
-                $"this target has no CPU samples in the {(cpuAfter.Samples == 0 ? "after" : "before")} window (no CPU source: only a target with Performance Insights supplies one)"));
-        }
+        var cpuWeek = await ReadCpuAsync(id, weekStart, weekEnd, cancellationToken);
+        hadData |= AddRateMeasure("avg_cpu_percent", "%", cpuAfter, afterSeconds, cpuBefore, beforeSeconds, cpuWeek, afterSeconds,
+            CpuMoved,
+            window => $"this target has no CPU samples in the {window} window (no CPU source: only a target with Performance Insights supplies one)",
+            measures, notMeasured, notes);
 
         /* Statement duration per query id: the top 20 by total execution time in the after-window, each compared with the same query in the
            hour before and the week-earlier window (average duration at least doubled, 10 or more calls in each window compared). */
@@ -146,16 +234,20 @@ public sealed partial class ChangeWatchEvaluator
             {
                 var beforeQueries = await ReadStatementsAsync(id, beforeStart, afterStart, PostgresComparisonRows, cancellationToken);
                 var weekQueries = await ReadStatementsAsync(id, weekStart, weekEnd, PostgresComparisonRows, cancellationToken);
+                var missingBefore = 0;
+                var belowFloor = 0;
                 foreach (var (key, after) in afterQueries)
                 {
                     if (!beforeQueries.TryGetValue(key, out var before))
                     {
+                        missingBefore++;
                         continue;
                     }
 
                     hadData = true;
                     if (before.Calls < MinExecutions || after.Calls < MinExecutions)
                     {
+                        belowFloor++;
                         continue;
                     }
 
@@ -168,6 +260,13 @@ public sealed partial class ChangeWatchEvaluator
                             $"query id {key.QueryId} in database id {key.DatabaseId}; {before.Calls} -> {after.Calls} calls"));
                     }
                 }
+
+                /* pg_stat_statements_reset() or a restart empties the before window's statements: every top query is then "new". */
+                AddQuerySkips(notMeasured, afterQueries.Count, missingBefore, belowFloor, "pg_stat_statements");
+            }
+            else
+            {
+                notMeasured.Add(new ChangeWatchNotMeasured("query_avg_duration_ms", "no statement with calls was recorded in the after window"));
             }
         }
         else
@@ -176,11 +275,6 @@ public sealed partial class ChangeWatchEvaluator
                 $"the statement collector stored no rows for this target in the {(statementRowsAfter == 0 ? "after" : "before")} window (pg_stat_statements is not installed or not collecting)"));
         }
 
-        foreach (var n in notMeasured)
-        {
-            notes.Add($"not measured: {n.Measure}: {n.Reason}");
-        }
-
-        return new ChangeWatchEvaluation(hadData, measures, DetailText(watch, measures), ResultJson(watch, measures, hadData, notes, notMeasured), notes, notMeasured);
+        return Complete(watch, measures, hadData, notes, notMeasured);
     }
 }

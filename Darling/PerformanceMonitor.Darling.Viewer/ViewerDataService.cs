@@ -1531,9 +1531,6 @@ SELECT
            newest-first, and the TOP rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling
            through to 181 and showing a spurious upgrade banner on a store that is current. Named only in the probe line, not this
            prose, per the V71 finding. */
-        /* V203 (#6170): the hypothetical-index login columns on the server registry. Column-existence sentinel, newest-first, and the TOP
-           rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 201 and showing a
-           spurious upgrade banner on a store that is current. Named only in the probe line, not this prose, per the V71 finding. */
         /* V207 (#6234): the change watch tables. Newest-first, and the TOP rung, so a fully-migrated store maps to EXACTLY
            StorageVersion.SchemaVersion rather than falling through to 204 and showing a spurious upgrade banner on a store that is current.
            Named only in the probe line, not this prose, per the V71 finding. */
@@ -1541,6 +1538,9 @@ SELECT
         {
             return 207;
         }
+        /* V203 (#6170): the hypothetical-index login columns on the server registry. Column-existence sentinel, newest-first, and the TOP
+           rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 201 and showing a
+           spurious upgrade banner on a store that is current. Named only in the probe line, not this prose, per the V71 finding. */
         /* V204 (#6214): the folder, personal flag and creator on the custom views. Column-existence sentinel, newest-first, and the TOP
            rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 203 and showing a
            spurious upgrade banner on a store that is current. Named only in the probe line, not this prose, per the V71 finding. */

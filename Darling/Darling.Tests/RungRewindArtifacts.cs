@@ -404,6 +404,17 @@ BEGIN
         ALTER TABLE config.custom_views ADD CONSTRAINT custom_views_name_key UNIQUE (name);
     END IF;
 END $$;"),
+
+        // /// V207 (#6234): the change watch tables and the request trigger column. The tables are the probe's newest sentinel. The rewind
+        // drops the three watch tables and the trigger column on the investigation requests, so a re-run of V207 builds them all again.
+        // Safe on a store that never had them.
+        new(207, "hasChangeWatches",
+            @"
+DROP TABLE IF EXISTS config.change_watch_changes;
+DROP TABLE IF EXISTS config.change_watch_marks;
+DROP TABLE IF EXISTS config.change_watches;
+ALTER TABLE IF EXISTS config.investigation_requests
+    DROP COLUMN IF EXISTS trigger_kind;"),
     ];
 
     /// <summary>

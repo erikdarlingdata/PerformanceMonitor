@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Darling.Service.ChangeWatch;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 using static Darling.Tests.ChangeWatchLiveTests;
@@ -67,14 +68,15 @@ public sealed class ChangeWatchPostgresLiveTests
             await SeedAsync(c, "pg_wait_stats", new Dictionary<string, object>
             {
                 ["server_id"] = PgServerId, ["server_name"] = PgServerName, ["collection_time"] = Naive(start.AddMinutes(minute)),
-                ["wait_type"] = "IO", ["wait_event"] = "DataFileRead", ["delta_waits"] = 100L, ["delta_wait_time_us"] = (long)(msPerSecond * 60 * 1000),
+                ["wait_type"] = "IO", ["wait_event"] = "DataFileRead", ["delta_waits"] = 100L, ["delta_wait_time_us"] = (long)(msPerSecond * 60 * 1000), ["sample_interval_seconds"] = 60,
             }, ct);
         }
     }
 
+    /// <summary>One CPU sample a minute, as Performance Insights supplies them: the evaluator needs at least half of a window covered.</summary>
     private static async Task CpuAsync(NpgsqlConnection c, DateTime start, double percent, CancellationToken ct)
     {
-        for (var minute = 10; minute <= 50; minute += 10)
+        for (var minute = 1; minute <= 60; minute++)
         {
             await SeedAsync(c, "pg_cpu_utilization", new Dictionary<string, object>
             {
@@ -289,6 +291,110 @@ public sealed class ChangeWatchPostgresLiveTests
             mixed["pg_extensions"] = s3;
             Assert.Equal(2, (await pass.ReadPostgresChangesAsync(PgServerId, mixed, h.Now, ct)).Count);
             Assert.Equal(found.Count, Keys(found).Distinct().Count());
+        });
+    }
+
+    /// <summary>
+    /// The cumulative pg_wait_sampling profile for one wait event, one collection every 5 minutes over (start, start + 60 minutes], the profile
+    /// growing by <paramref name="msPerSecond"/> of waiting per second at a 10 ms period.
+    /// </summary>
+    private static async Task SamplingAsync(NpgsqlConnection c, DateTime start, string eventType, string waitEvent, double msPerSecond, long baseSamples, CancellationToken ct)
+    {
+        var perStep = (long)(msPerSecond * 300 / 10);
+        for (var step = 1; step <= 12; step++)
+        {
+            await SeedAsync(c, "pg_wait_sampling", new Dictionary<string, object>
+            {
+                ["server_id"] = PgServerId, ["server_name"] = PgServerName, ["collection_time"] = Naive(start.AddMinutes(step * 5)),
+                ["event_type"] = eventType, ["event"] = waitEvent, ["query_id"] = 0L,
+                ["sample_count"] = baseSamples + step * perStep, ["profile_period_ms"] = 10, ["backend_count"] = 1,
+            }, ct);
+        }
+    }
+
+    [Fact]
+    public async Task AStockPostgresTargetWithPgWaitSampling_HasItsWaitsMeasured_AndAWaitRegressionOpensTheRequest()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            await AddPgServerAsync(h.Connection, ct);
+            var start = h.Now.AddHours(-3);
+            await ConfigAsync(h.Connection, start.AddMinutes(-50), "work_mem", "4096", null, ct);
+            await ConfigAsync(h.Connection, start.AddMinutes(-10), "work_mem", "4096", null, ct);
+            await h.NewPassAt(() => start).DetectAsync(ct);
+            var change = start.AddMinutes(5);
+            await ConfigAsync(h.Connection, change, "work_mem", "65536", null, ct);
+            await h.NewPassAt(() => start.AddMinutes(10)).DetectAsync(ct);
+
+            /* Waits 100 ms/s before and 1000 after; a CPU-event series at 3000 ms/s in both windows is time on the CPU, not waiting. */
+            await SamplingAsync(h.Connection, change.AddMinutes(-60), "IO", "DataFileRead", 100, 1_000, ct);
+            await SamplingAsync(h.Connection, change, "IO", "DataFileRead", 1000, 1_000 + 12 * 3_000, ct);
+            await SamplingAsync(h.Connection, change.AddMinutes(-60), "CPU", "CPU", 3000, 0, ct);
+            await SamplingAsync(h.Connection, change, "CPU", "CPU", 3000, 12 * 90_000, ct);
+            await h.NewPass().EvaluateDueAsync(ct);
+
+            var json = await ResultAsync(h.Connection, ct);
+            var wait = json["measures"]!.AsArray().Single(m => m!["measure"]!.GetValue<string>() == "total_wait_ms_per_second")!;
+            Assert.InRange(wait["before"]!.GetValue<double>(), 95, 105);
+            Assert.InRange(wait["after"]!.GetValue<double>(), 950, 1050);
+            Assert.True(wait["moved"]!.GetValue<bool>());
+            Assert.DoesNotContain(json["not_measured"]!.AsArray(), n => n!["measure"]!.GetValue<string>() == "total_wait_ms_per_second");
+            Assert.Equal("request_opened", await TextAsync(h.Connection, "SELECT result FROM config.change_watches", ct));
+        });
+    }
+
+    [Fact]
+    public async Task ATargetWithNeitherWaitSource_NamesBothMissingPieces_AndAStatementAbsentBeforeIsListed()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            await AddPgServerAsync(h.Connection, ct);
+            var start = h.Now.AddHours(-3);
+            await ConfigAsync(h.Connection, start.AddMinutes(-50), "work_mem", "4096", null, ct);
+            await ConfigAsync(h.Connection, start.AddMinutes(-10), "work_mem", "4096", null, ct);
+            await h.NewPassAt(() => start).DetectAsync(ct);
+            var change = start.AddMinutes(5);
+            await ConfigAsync(h.Connection, change, "work_mem", "65536", null, ct);
+            await h.NewPassAt(() => start.AddMinutes(10)).DetectAsync(ct);
+
+            /* Statement rows exist in both windows, but the one after-query is not in the before window (a statistics reset or a new query). */
+            await SeedAsync(h.Connection, "pg_statement_stats", new Dictionary<string, object>
+            {
+                ["server_id"] = PgServerId, ["server_name"] = PgServerName, ["collection_time"] = Naive(change.AddMinutes(-30)),
+                ["queryid"] = 41L, ["database_id"] = 5L, ["user_id"] = 10L, ["toplevel"] = true, ["delta_calls"] = 50L, ["delta_total_exec_time_ms"] = 500L,
+            }, ct);
+            await StatementAsync(h.Connection, change, 50, 5_000, ct);
+            await h.NewPass().EvaluateDueAsync(ct);
+
+            var notMeasured = (await ResultAsync(h.Connection, ct))["not_measured"]!.AsArray();
+            var wait = notMeasured.Single(n => n!["measure"]!.GetValue<string>() == "total_wait_ms_per_second")!["reason"]!.GetValue<string>();
+            Assert.Contains("pg_wait_stats", wait, StringComparison.Ordinal);
+            Assert.Contains("pg_wait_sampling", wait, StringComparison.Ordinal);
+            var statement = notMeasured.Single(n => n!["measure"]!.GetValue<string>() == "query_avg_duration_ms")!["reason"]!.GetValue<string>();
+            Assert.Contains("no pg_stat_statements rows in the before window", statement, StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public async Task TheEmptyReadNamesTheChangeKindsOfTheTargetsOwnEngine()
+    {
+        await RunAsync(false, async (h, ct) =>
+        {
+            await AddPgServerAsync(h.Connection, ct);
+            await using (var insert = new NpgsqlCommand(
+                "INSERT INTO servers (server_id, server_name, display_name, is_enabled, engine_kind, created_date, modified_date) " +
+                "VALUES (22, 'sql-twentytwo', 'sql-twentytwo', true, 'sqlserver', now(), now())", h.Connection))
+            {
+                await insert.ExecuteNonQueryAsync(ct);
+            }
+
+            var postgres = await DarlingMcpChangeWatchTools.GetChangeWatches(h.Source, PgServerName, cancellationToken: ct);
+            Assert.Contains("extension", postgres, StringComparison.Ordinal);
+            Assert.DoesNotContain("trace flag", postgres, StringComparison.Ordinal);
+
+            var sqlServer = await DarlingMcpChangeWatchTools.GetChangeWatches(h.Source, "sql-twentytwo", cancellationToken: ct);
+            Assert.Contains("trace flag", sqlServer, StringComparison.Ordinal);
+            Assert.DoesNotContain("extension", sqlServer, StringComparison.Ordinal);
         });
     }
 }

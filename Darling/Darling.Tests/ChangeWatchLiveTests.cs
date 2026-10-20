@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -265,6 +266,64 @@ public sealed class ChangeWatchLiveTests
             Assert.Null(await h.Store.RecordChangesAsync(ServerId, ServerName, changes, ct));
             Assert.Equal(1, await CountAsync(h.Connection, "SELECT count(*) FROM config.change_watch_changes", ct));
             Assert.Empty(await h.Store.DueAsync(ct));
+        });
+    }
+
+    /// <summary>Wait rows for the minutes first..last after <paramref name="start"/>, each carrying its 60 second interval, at <paramref name="msPerSecond"/>.</summary>
+    private static async Task SeedWaitMinutesAsync(NpgsqlConnection connection, DateTime start, int firstMinute, int lastMinute, double msPerSecond, CancellationToken ct)
+    {
+        for (var minute = firstMinute; minute <= lastMinute; minute++)
+        {
+            await SeedAsync(connection, "wait_stats", new Dictionary<string, object>
+            {
+                ["server_id"] = ServerId,
+                ["server_name"] = ServerName,
+                ["collection_time"] = DateTime.SpecifyKind(start.AddMinutes(minute), DateTimeKind.Unspecified),
+                ["wait_type"] = "PAGEIOLATCH_SH",
+                ["delta_wait_time_ms"] = (long)(msPerSecond * 60),
+                ["sample_interval_seconds"] = 60,
+            }, ct);
+        }
+    }
+
+    [Fact]
+    public async Task ABeforeWindowCollectedForAThirdOfItsLength_IsNotCompared_AndIsListedWithItsCoverage()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            /* The service was down for 40 of the 60 minutes before the change; the load itself never changed (1000 ms/s throughout). */
+            var change = h.Now.AddMinutes(-90);
+            await SeedWaitMinutesAsync(h.Connection, change.AddMinutes(-60), 1, 20, 1000, ct);
+            await SeedWaitMinutesAsync(h.Connection, change, 1, 60, 1000, ct);
+            await h.Store.RecordChangesAsync(ServerId, ServerName, await OneChange(change, "max degree of parallelism"), ct);
+
+            await h.NewPass().EvaluateDueAsync(ct);
+
+            Assert.Equal(0, await CountAsync(h.Connection, "SELECT count(*) FROM config.investigation_requests", ct));
+            var json = JsonNode.Parse((await TextAsync(h.Connection, "SELECT result_json FROM config.change_watches", ct))!)!;
+            var entry = json["not_measured"]!.AsArray().Single(n => n!["measure"]!.GetValue<string>() == "total_wait_ms_per_second")!;
+            Assert.Contains("before window was collected for 33%", entry["reason"]!.GetValue<string>(), StringComparison.Ordinal);
+            Assert.Empty(json["measures"]!.AsArray());
+        });
+    }
+
+    [Fact]
+    public async Task AWeekEarlierWindowOfTwoRows_DoesNotCount_AndTheMeasureSaysItWasNotCompared()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            var change = h.Now.AddMinutes(-90);
+            await SeedWaitMinutesAsync(h.Connection, change.AddMinutes(-60), 1, 60, 1000, ct);
+            await SeedWaitMinutesAsync(h.Connection, change, 1, 60, 2000, ct);
+            await SeedWaitMinutesAsync(h.Connection, change.AddDays(-7), 1, 2, 1, ct);
+            await h.Store.RecordChangesAsync(ServerId, ServerName, await OneChange(change, "max degree of parallelism"), ct);
+
+            await h.NewPass().EvaluateDueAsync(ct);
+
+            var json = JsonNode.Parse((await TextAsync(h.Connection, "SELECT result_json FROM config.change_watches", ct))!)!;
+            var measure = json["measures"]!.AsArray().Single(m => m!["measure"]!.GetValue<string>() == "total_wait_ms_per_second")!;
+            Assert.Null(measure["week_earlier"]);
+            Assert.Contains("week-earlier window was collected for", json["notes"]!.AsArray().Single(n => n!.GetValue<string>().Contains("week-earlier", StringComparison.Ordinal))!.GetValue<string>(), StringComparison.Ordinal);
         });
     }
 }

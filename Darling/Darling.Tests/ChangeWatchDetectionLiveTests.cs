@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -346,8 +347,111 @@ public sealed class ChangeWatchDetectionLiveTests
             await h.NewPass().EvaluateDueAsync(ct);
 
             var json = await TextAsync(h.Connection, "SELECT result_json FROM config.change_watches", ct);
-            Assert.Contains("Query Store has no intervals for query 42 in Sales", json, StringComparison.Ordinal);
+            Assert.Contains("Query Store holds no interval for query 42 in Sales", json, StringComparison.Ordinal);
             Assert.Contains("top 20 queries by total duration", json, StringComparison.Ordinal);
+        });
+    }
+
+    /// <summary>Query Store intervals of <paramref name="lengthMinutes"/> minutes, one per start in <paramref name="starts"/>, each holding the same executions at one average duration.</summary>
+    private static async Task SeedQueryStoreIntervalsAsync(
+        NpgsqlConnection c, IReadOnlyList<DateTime> starts, int lengthMinutes, string database, long queryId, long executions, long avgUs, CancellationToken ct)
+    {
+        var id = 100L;
+        foreach (var start in starts)
+        {
+            await SeedAsync(c, "query_store_stats", new Dictionary<string, object>
+            {
+                ["server_id"] = ServerId, ["server_name"] = ServerName, ["collection_time"] = Naive(start.AddMinutes(lengthMinutes)), ["database_name"] = database,
+                ["query_id"] = queryId, ["plan_id"] = 1L, ["runtime_stats_interval_id"] = id++,
+                ["first_execution_time"] = Naive(start), ["execution_type_desc"] = "Regular", ["replica_role"] = "PRIMARY",
+                ["interval_start_time_utc"] = Naive(start), ["interval_end_time_utc"] = Naive(start.AddMinutes(lengthMinutes)),
+                ["execution_count"] = executions, ["avg_duration_us"] = (double)avgUs,
+            }, ct);
+        }
+    }
+
+    private static ChangeWatchChange PlanForce(DateTime at) =>
+        new("plan_force:action:1", "plan_force", at, "plan 7 of query 42 in Sales: force by the plan-force ledger", "Sales", 42);
+
+    [Fact]
+    public async Task APlanChangeInsideAOneHourQueryStoreInterval_ComparesTheIntervalBeforeItWithTheOneAfter()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            /* Query Store's default 60-minute interval. The change lands 5 minutes into the middle interval, so that interval holds the
+               regressed plan's executions and must count as neither the baseline nor the after-window. */
+            var change = h.Now.AddMinutes(-90);
+            var before = change.AddMinutes(-65);        /* ends 5 minutes before the change: the clean baseline, 1 ms */
+            var straddling = change.AddMinutes(-5);     /* starts before the change, ends 55 minutes into the watch: 9 ms */
+            var after = change.AddMinutes(55);          /* starts inside the watch: 9 ms */
+            await SeedQueryStoreIntervalsAsync(h.Connection, new[] { before }, 60, "Sales", 42, 30, 1_000, ct);
+            await SeedQueryStoreIntervalsAsync(h.Connection, new[] { straddling, after }, 60, "Sales", 42, 30, 9_000, ct);
+            await h.Store.RecordChangesAsync(ServerId, ServerName, new[] { PlanForce(change) }, ct);
+
+            await h.NewPass().EvaluateDueAsync(ct);
+
+            Assert.Equal("request_opened", await TextAsync(h.Connection, "SELECT result FROM config.change_watches", ct));
+            var measure = JsonNode.Parse((await TextAsync(h.Connection, "SELECT result_json FROM config.change_watches", ct))!)!["measures"]!.AsArray()
+                .Single(m => m!["measure"]!.GetValue<string>() == "query_avg_duration_ms:Sales:42")!;
+            Assert.Equal(1.0, measure["before"]!.GetValue<double>(), 3);
+            Assert.Equal(9.0, measure["after"]!.GetValue<double>(), 3);
+        });
+    }
+
+    [Fact]
+    public async Task APlanChangeWhoseHourBeforeHoldsNoWholeInterval_IsListedAsNotMeasured_NeverFlat()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            /* Only the interval the change landed in, and the one after it: no interval ended at or before the change. */
+            var change = h.Now.AddMinutes(-90);
+            await SeedQueryStoreIntervalsAsync(h.Connection, new[] { change.AddMinutes(-5), change.AddMinutes(55) }, 60, "Sales", 42, 30, 9_000, ct);
+            await h.Store.RecordChangesAsync(ServerId, ServerName, new[] { PlanForce(change) }, ct);
+
+            await h.NewPass().EvaluateDueAsync(ct);
+
+            Assert.Equal(0, await CountAsync(h.Connection, "SELECT count(*) FROM config.investigation_requests", ct));
+            var json = JsonNode.Parse((await TextAsync(h.Connection, "SELECT result_json FROM config.change_watches", ct))!)!;
+            var entry = json["not_measured"]!.AsArray().Single(n => n!["measure"]!.GetValue<string>() == "query_avg_duration_ms:Sales:42")!;
+            Assert.Contains("ended at or before the change", entry["reason"]!.GetValue<string>(), StringComparison.Ordinal);
+            Assert.Empty(json["measures"]!.AsArray());
+            Assert.NotEqual("flat", await TextAsync(h.Connection, "SELECT result FROM config.change_watches", ct));
+        });
+    }
+
+    [Fact]
+    public async Task ATargetWithNoWaitCpuOrQueryRows_ListsEachMeasureAsNotMeasured_OnTheSqlServerPathToo()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            var change = h.Now.AddMinutes(-90);
+            await h.Store.RecordChangesAsync(ServerId, ServerName,
+                new[] { new ChangeWatchChange("server_config:x:1", "server_config", change, "max degree of parallelism") }, ct);
+
+            await h.NewPass().EvaluateDueAsync(ct);
+
+            var json = JsonNode.Parse((await TextAsync(h.Connection, "SELECT result_json FROM config.change_watches", ct))!)!;
+            var names = json["not_measured"]!.AsArray().Select(n => n!["measure"]!.GetValue<string>()).OrderBy(n => n, StringComparer.Ordinal).ToArray();
+            Assert.Equal(new[] { "avg_cpu_percent", "query_avg_duration_ms", "total_wait_ms_per_second" }, names);
+            Assert.Equal("no_data", await TextAsync(h.Connection, "SELECT result FROM config.change_watches", ct));
+        });
+    }
+
+    [Fact]
+    public async Task APlanQueryUnderTheTenExecutionFloor_IsListedAsNotMeasured()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            var change = h.Now.AddMinutes(-90);
+            await SeedQueryStoreAsync(h.Connection, change.AddMinutes(-60), "Sales", 42, 1, 1_000, ct);
+            await SeedQueryStoreAsync(h.Connection, change, "Sales", 42, 5, 9_000, ct);
+            await h.Store.RecordChangesAsync(ServerId, ServerName, new[] { PlanForce(change) }, ct);
+
+            await h.NewPass().EvaluateDueAsync(ct);
+
+            var json = JsonNode.Parse((await TextAsync(h.Connection, "SELECT result_json FROM config.change_watches", ct))!)!;
+            var entry = json["not_measured"]!.AsArray().Single(n => n!["measure"]!.GetValue<string>() == "query_avg_duration_ms:Sales:42")!;
+            Assert.Contains("fewer than 10 executions", entry["reason"]!.GetValue<string>(), StringComparison.Ordinal);
         });
     }
 }

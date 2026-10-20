@@ -14,6 +14,7 @@ using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using Npgsql;
 using PerformanceMonitor.Darling.Storage;
@@ -46,8 +47,8 @@ public sealed class DarlingMcpChangeWatchTools
         "request_opened (something moved and ONE investigation request opened, request_id names it), moved_no_request (something moved and " +
         "no investigation could open: investigations are off or no agent route matched), or no_data (the before or after hour had no " +
         "collected rows, so nothing was compared). result_detail.notes says when a plan-change watch could not read the query from Query " +
-        "Store and measured the top 20 queries instead. A PostgreSQL target reads waits from the wait collector, CPU from Performance " +
-        "Insights samples and statements from pg_stat_statements; a measure it has no source for is listed in not_measured with the reason " +
+        "Store and measured the top 20 queries instead. A PostgreSQL target reads waits from pg_wait_sampling, or from the Aurora wait " +
+        "collector where that is its source, CPU from Performance Insights samples and statements from pg_stat_statements; a measure it has no source for is listed in not_measured with the reason " +
         "(for example no CPU source), never as flat. An open watch has no measures yet: it is still collecting its window. Pass state " +
         "open or closed to see only those. A read over the monitoring store; no monitored server is touched.")]
     public static async Task<string> GetChangeWatches(
@@ -74,11 +75,15 @@ public sealed class DarlingMcpChangeWatchTools
             var watches = await store.ListAsync(resolved.ServerId, state, limit, cancellationToken);
             if (watches.Count == 0)
             {
+                /* The change kinds belong to the target's engine: a PostgreSQL target records settings and extensions, never trace flags or plans. */
+                var (_, engineKind) = await DarlingEngineCapability.PostgresTargetFactsAsync(postgres, resolved.ServerId, cancellationToken);
+                var kinds = MonitoredEngineKind.IsPostgres(engineKind)
+                    ? "a server setting, a per-database or per-role setting, or an extension install, drop or version change"
+                    : "a server, database or database-scoped configuration change, a trace flag change or a Query Store plan force or unforce";
                 return McpHelpers.Status(
                     "empty",
-                    $"No change watch{(state is null ? "" : $" in state {state}")} is recorded for {resolved.DisplayName}. A watch opens when a server, database or " +
-                    "database-scoped configuration change, a trace flag change or a Query Store plan force or unforce is recorded; none has been since " +
-                    "change watching began, or the 90 day retention removed it.");
+                    $"No change watch{(state is null ? "" : $" in state {state}")} is recorded for {resolved.DisplayName}. A watch opens when {kinds} " +
+                    "is recorded; none has been since change watching began, or the 90 day retention removed it.");
             }
 
             return JsonSerializer.Serialize(new

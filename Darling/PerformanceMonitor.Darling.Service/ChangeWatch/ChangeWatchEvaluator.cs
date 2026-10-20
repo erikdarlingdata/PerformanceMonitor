@@ -60,15 +60,46 @@ public sealed partial class ChangeWatchEvaluator
     /// <summary>The queries read for a change that is not a plan change: the top by total duration in the after-window.</summary>
     public const int TopQueries = 20;
 
+    /* Total wait time per second over the time actually collected (#6234). wait_stats holds one row per wait type per collection, every one
+       carrying the collection's sample_interval_seconds, so the interval counts once per collection_time. A collection whose stored interval
+       is 0 (the first sighting or a counter reset: no delta is knowable) adds nothing, and a legacy row with no stored interval falls back
+       to the gap since the previous collection. The rate is the window's delta over those seconds, so a gap in collection thins the window's
+       coverage instead of its rate, and the first row after a gap, which carries the whole gap's delta over the gap's seconds, stays a rate.
+       Columns: the rate, the seconds covered, the collections read. */
     private const string WaitSql = @"
-SELECT coalesce(sum(delta_wait_time_ms), 0)::double precision, count(*)
-FROM v_wait_stats
-WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3 AND delta_wait_time_ms > 0";
+WITH c AS (
+    SELECT collection_time,
+           sum(CASE WHEN delta_wait_time_ms > 0 THEN delta_wait_time_ms ELSE 0 END)::double precision AS wait_ms,
+           max(sample_interval_seconds) AS stored_seconds
+    FROM v_wait_stats
+    WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3
+    GROUP BY collection_time
+), d AS (
+    SELECT wait_ms,
+           coalesce(stored_seconds::double precision,
+                    extract(epoch FROM collection_time - lag(collection_time) OVER (ORDER BY collection_time))::double precision) AS seconds
+    FROM c
+)
+SELECT CASE WHEN coalesce(sum(seconds) FILTER (WHERE seconds > 0), 0) > 0
+            THEN (sum(wait_ms) FILTER (WHERE seconds > 0) / sum(seconds) FILTER (WHERE seconds > 0))::double precision
+            ELSE 0::double precision END,
+       coalesce(sum(seconds) FILTER (WHERE seconds > 0), 0)::double precision,
+       count(*)::bigint
+FROM d";
 
+    /* Average CPU over the samples whose own instant is in the window (#6234): the ring-buffer collector ingests a backlog of up to hours of
+       samples under the post-gap collection_time, so the window rides sample_time_utc (collection_time on a row from before V134 that has
+       none). collection_time only bounds the scan: a sample is never collected before it was taken. The ring buffer holds one sample per
+       minute, so the covered seconds are the distinct minutes seen times 60. Columns: the average, the seconds covered, the samples read. */
     private const string CpuSql = @"
-SELECT coalesce(avg(sqlserver_cpu_utilization), 0)::double precision, count(*)
+SELECT coalesce(avg(sqlserver_cpu_utilization), 0)::double precision,
+       (count(DISTINCT date_trunc('minute', coalesce(sample_time_utc, collection_time))) * 60)::double precision,
+       count(*)::bigint
 FROM v_cpu_utilization_stats
-WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3 AND sqlserver_cpu_utilization IS NOT NULL";
+WHERE server_id = $1
+  AND collection_time > $2 AND collection_time <= $3 + interval '1 day'
+  AND coalesce(sample_time_utc, collection_time) > $2 AND coalesce(sample_time_utc, collection_time) <= $3
+  AND sqlserver_cpu_utilization IS NOT NULL";
 
     /* $4 is the query-hash list (text[]) or NULL for the top-N read; $5 the databases (text[]) or NULL; $6 the row cap. */
     private const string QuerySql = @"
@@ -82,9 +113,20 @@ HAVING sum(delta_execution_count) > 0
 ORDER BY sum(delta_elapsed_time) DESC
 LIMIT $6";
 
-    /* $1 server, $2 database, $3 query_id, $4/$5 the window on the interval's start. The same dedup the Query Store duration trend runs: an
-       interval is snapshotted many times, so each interval counts at its last (cumulative) snapshot. */
-    private const string QueryStoreSql = @"
+    /* $1 server, $2 database, $3 query_id, $4/$5 the window. The same dedup the Query Store duration trend runs: an interval is snapshotted
+       many times, so each interval counts at its last (cumulative) snapshot. {placement} puts an interval in the window (#6234): by its
+       START for the after-window and the week-earlier window, and by its END for the before-window, so the baseline holds only intervals
+       that ended at or before the change. An interval is as long as Query Store's interval length (60 minutes by default), so one that
+       straddles the change holds executions from both sides and belongs to neither. A row from before V155 has no stored end; its end is its
+       start plus the interval length the database last reported (v_query_store_health), and an interval whose end cannot be known is left out
+       of the before-window rather than guessed at. */
+    private const string QueryStoreSqlTemplate = @"
+WITH len AS (
+    SELECT max(interval_length_minutes) AS minutes
+    FROM v_query_store_health
+    WHERE server_id = $1 AND database_name = $2 AND interval_length_minutes > 0
+      AND capture_time >= $4 - interval '2 days' AND capture_time <= $5 + interval '1 day'
+)
 SELECT coalesce(sum(execution_count), 0)::bigint,
        coalesce(sum(execution_count::double precision * avg_duration_us::double precision), 0)::double precision,
        count(*)
@@ -94,10 +136,18 @@ FROM (
                               ORDER BY collection_time DESC, execution_count DESC) AS rn
     FROM query_store_stats
     WHERE server_id = $1 AND database_name = $2 AND query_id = $3
-      AND interval_start_time_utc >= $4 AND interval_start_time_utc < $5
+      AND {placement}
       AND collection_time >= $4 - interval '1 day' AND collection_time <= $5 + interval '1 day'
 ) AS x
 WHERE rn = 1";
+
+    private const string IntervalEndSql = "coalesce(interval_end_time_utc, interval_start_time_utc + (SELECT minutes FROM len) * interval '1 minute')";
+
+    private static readonly string QueryStoreByStartSql =
+        QueryStoreSqlTemplate.Replace("{placement}", "interval_start_time_utc >= $4 AND interval_start_time_utc < $5", StringComparison.Ordinal);
+
+    private static readonly string QueryStoreByEndSql =
+        QueryStoreSqlTemplate.Replace("{placement}", IntervalEndSql + " > $4 AND " + IntervalEndSql + " <= $5", StringComparison.Ordinal);
 
     private readonly NpgsqlDataSource _dataSource;
     private readonly int _commandTimeoutSeconds;
@@ -129,13 +179,89 @@ WHERE rn = 1";
     /// <summary>The duration test: the after-window's average is at least <see cref="DurationFactor"/> times the baseline's.</summary>
     public static bool DurationMoved(double baselineAvgUs, double afterAvgUs) => baselineAvgUs > 0 && afterAvgUs >= baselineAvgUs * DurationFactor;
 
-    private async Task<(double Value, long Rows)> ReadScalarAsync(
+    /// <summary>One window's rate from a statement that returns (rate, seconds covered, rows read).</summary>
+    private async Task<RateSample> ReadRateAsync(
         NpgsqlConnection connection, string sql, int serverId, DateTime start, DateTime end, CancellationToken cancellationToken)
     {
         await using var command = Command(connection, sql, serverId, start, end);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         await reader.ReadAsync(cancellationToken);
-        return (reader.GetDouble(0), reader.GetInt64(1));
+        return new RateSample(reader.GetDouble(0), reader.GetDouble(1), reader.GetInt64(2));
+    }
+
+    /// <summary>One window's reading of a rate (#6234): the rate over the time collected, the seconds the collection actually covered, and how many collections held rows.</summary>
+    internal readonly record struct RateSample(double Rate, double CoveredSeconds, long Rows);
+
+    /// <summary>A window is compared only when at least this fraction of its length was collected (#6234).</summary>
+    public const double MinCoverage = 0.5;
+
+    internal static double Coverage(RateSample sample, double nominalSeconds) => Math.Min(1, sample.CoveredSeconds / Math.Max(1, nominalSeconds));
+
+    private static string Percent(double fraction) => (fraction * 100).ToString("0", CultureInfo.InvariantCulture) + "%";
+
+    /// <summary>
+    /// Decides one rate measure (#6234), the same way for both engines. The after and before windows must each hold rows AND cover at least
+    /// <see cref="MinCoverage"/> of their length, or the measure is listed under not-measured with the coverage and never read as flat. A
+    /// week-earlier window below that coverage is treated as absent (the measure is compared with the before-window alone) and a note says so.
+    /// </summary>
+    internal static bool AddRateMeasure(
+        string name, string unit, RateSample after, double afterSeconds, RateSample before, double beforeSeconds,
+        RateSample week, double weekSeconds, Func<double, double, bool> moved, Func<string, string> noRows,
+        List<ChangeWatchMeasure> measures, List<ChangeWatchNotMeasured> notMeasured, List<string> notes)
+    {
+        var problems = new List<string>();
+        Check("after", after, afterSeconds);
+        Check("before", before, beforeSeconds);
+        if (problems.Count > 0)
+        {
+            notMeasured.Add(new ChangeWatchNotMeasured(name, string.Join("; ", problems)));
+            return false;
+        }
+
+        double? weekRate = null;
+        if (week.Rows > 0)
+        {
+            var weekCoverage = Coverage(week, weekSeconds);
+            if (weekCoverage >= MinCoverage)
+            {
+                weekRate = week.Rate;
+            }
+            else
+            {
+                notes.Add($"{name}: the week-earlier window was collected for {Percent(weekCoverage)} of its length (under {Percent(MinCoverage)}), so it was not compared");
+            }
+        }
+
+        measures.Add(new ChangeWatchMeasure(name, unit, before.Rate, after.Rate, weekRate,
+            moved(before.Rate, after.Rate) && (weekRate is null || moved(weekRate.Value, after.Rate))));
+        return true;
+
+        void Check(string label, RateSample sample, double nominal)
+        {
+            if (sample.Rows == 0)
+            {
+                problems.Add(noRows(label));
+                return;
+            }
+
+            var coverage = Coverage(sample, nominal);
+            if (coverage < MinCoverage)
+            {
+                problems.Add($"the {label} window was collected for {Percent(coverage)} of its length (at least {Percent(MinCoverage)} is needed to compare)");
+            }
+        }
+    }
+
+    /// <summary>Folds each not-measured entry into the notes and builds the evaluation; both engines end here so they answer in one shape.</summary>
+    internal static ChangeWatchEvaluation Complete(
+        ChangeWatchRow watch, List<ChangeWatchMeasure> measures, bool hadData, List<string> notes, List<ChangeWatchNotMeasured> notMeasured)
+    {
+        foreach (var n in notMeasured)
+        {
+            notes.Add($"not measured: {n.Measure}: {n.Reason}");
+        }
+
+        return new ChangeWatchEvaluation(hadData, measures, DetailText(watch, measures), ResultJson(watch, measures, hadData, notes, notMeasured), notes, notMeasured);
     }
 
     private async Task<Dictionary<string, (string? Database, long Executions, double ElapsedUs)>> ReadQueriesAsync(
@@ -175,42 +301,34 @@ WHERE rn = 1";
 
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         var measures = new List<ChangeWatchMeasure>();
+        var notMeasured = new List<ChangeWatchNotMeasured>();
+        var notes = new List<string>();
         var hadData = false;
 
-        /* Total wait time per second. */
-        var waitAfter = await ReadScalarAsync(connection, WaitSql, watch.ServerId, afterStart, afterEnd, cancellationToken);
-        var waitBefore = await ReadScalarAsync(connection, WaitSql, watch.ServerId, beforeStart, afterStart, cancellationToken);
-        var waitWeek = await ReadScalarAsync(connection, WaitSql, watch.ServerId, weekStart, weekEnd, cancellationToken);
-        if (waitAfter.Rows > 0 && waitBefore.Rows > 0)
-        {
-            hadData = true;
-            var after = waitAfter.Value / afterSeconds;
-            var before = waitBefore.Value / beforeSeconds;
-            double? week = waitWeek.Rows > 0 ? waitWeek.Value / afterSeconds : null;
-            measures.Add(new ChangeWatchMeasure("total_wait_ms_per_second", "ms/s", before, after, week,
-                WaitMoved(before, after) && (week is null || WaitMoved(week.Value, after))));
-        }
+        /* Total wait time per second, over the time the wait collector actually covered in each window. */
+        var waitAfter = await ReadRateAsync(connection, WaitSql, watch.ServerId, afterStart, afterEnd, cancellationToken);
+        var waitBefore = await ReadRateAsync(connection, WaitSql, watch.ServerId, beforeStart, afterStart, cancellationToken);
+        var waitWeek = await ReadRateAsync(connection, WaitSql, watch.ServerId, weekStart, weekEnd, cancellationToken);
+        hadData |= AddRateMeasure("total_wait_ms_per_second", "ms/s", waitAfter, afterSeconds, waitBefore, beforeSeconds, waitWeek, afterSeconds,
+            WaitMoved, window => $"the wait_stats collector stored no rows for this target in the {window} window", measures, notMeasured, notes);
 
         /* Average CPU. */
-        var cpuAfter = await ReadScalarAsync(connection, CpuSql, watch.ServerId, afterStart, afterEnd, cancellationToken);
-        var cpuBefore = await ReadScalarAsync(connection, CpuSql, watch.ServerId, beforeStart, afterStart, cancellationToken);
-        var cpuWeek = await ReadScalarAsync(connection, CpuSql, watch.ServerId, weekStart, weekEnd, cancellationToken);
-        if (cpuAfter.Rows > 0 && cpuBefore.Rows > 0)
-        {
-            hadData = true;
-            double? week = cpuWeek.Rows > 0 ? cpuWeek.Value : null;
-            measures.Add(new ChangeWatchMeasure("avg_cpu_percent", "%", cpuBefore.Value, cpuAfter.Value, week,
-                CpuMoved(cpuBefore.Value, cpuAfter.Value) && (week is null || CpuMoved(week.Value, cpuAfter.Value))));
-        }
+        var cpuAfter = await ReadRateAsync(connection, CpuSql, watch.ServerId, afterStart, afterEnd, cancellationToken);
+        var cpuBefore = await ReadRateAsync(connection, CpuSql, watch.ServerId, beforeStart, afterStart, cancellationToken);
+        var cpuWeek = await ReadRateAsync(connection, CpuSql, watch.ServerId, weekStart, weekEnd, cancellationToken);
+        hadData |= AddRateMeasure("avg_cpu_percent", "%", cpuAfter, afterSeconds, cpuBefore, beforeSeconds, cpuWeek, afterSeconds,
+            CpuMoved, window => $"the cpu_utilization_stats collector stored no samples for this target in the {window} window", measures, notMeasured, notes);
 
         /* Query duration. A watch of plan changes alone measures THAT query (Query Store's own runtime intervals, the source the duration
-           trend reads, keyed by database and query_id); where Query Store has no intervals for it in a window, the top 20 by total duration
-           of the changed databases are measured instead and the result says so. Any other mix reads the top 20 server-wide. */
+           trend reads, keyed by database and query_id); where Query Store has no usable intervals for it, the top 20 by total duration
+           of the changed databases are measured instead and the result says so. Any other mix reads the top 20 server-wide.
+           The before-window holds only intervals that ENDED at or before the change and the after-window only intervals that STARTED at or
+           after it (QueryStoreByEndSql, QueryStoreByStartSql): at Query Store's default 60-minute interval an interval that straddles the change
+           holds executions from both sides, and counting it as "before" compared the regressed plan with itself. */
         var planDatabases = watch.Changes.Where(c => c.Kind == "plan_force" && c.DatabaseName is not null)
             .Select(c => c.DatabaseName!).Distinct(StringComparer.Ordinal).ToArray();
         var onlyPlan = watch.Changes.Count > 0 && watch.Changes.All(c => c.Kind == "plan_force");
         var scope = onlyPlan && planDatabases.Length > 0 ? planDatabases : null;
-        var notes = new List<string>();
         var needTopQueries = true;
         if (onlyPlan)
         {
@@ -221,28 +339,35 @@ WHERE rn = 1";
                 needTopQueries = false;
                 foreach (var (database, queryId) in planQueries)
                 {
-                    var queryAfter = await ReadQueryStoreAsync(connection, watch.ServerId, database, queryId, afterStart, afterEnd, cancellationToken);
-                    var queryBefore = await ReadQueryStoreAsync(connection, watch.ServerId, database, queryId, beforeStart, afterStart, cancellationToken);
+                    var measureName = $"query_avg_duration_ms:{database}:{queryId}";
+                    var queryAfter = await ReadQueryStoreAsync(connection, watch.ServerId, database, queryId, afterStart, afterEnd, false, cancellationToken);
+                    var queryBefore = await ReadQueryStoreAsync(connection, watch.ServerId, database, queryId, beforeStart, afterStart, true, cancellationToken);
                     if (queryAfter.Intervals == 0 || queryBefore.Intervals == 0)
                     {
                         needTopQueries = true;
-                        notes.Add($"Query Store has no intervals for query {queryId} in {database} in the {(queryAfter.Intervals == 0 ? "after" : "before")} window, so the top {TopQueries} queries by total duration in the changed databases were measured instead");
+                        var reason = queryBefore.Intervals == 0
+                            ? $"Query Store holds no interval for query {queryId} in {database} that ended at or before the change (the interval length leaves no whole interval in the hour before it), so there is no pre-change baseline"
+                            : $"Query Store holds no interval for query {queryId} in {database} that started at or after the change yet, so there is no post-change measure";
+                        notMeasured.Add(new ChangeWatchNotMeasured(measureName, reason));
+                        notes.Add($"{reason}; the top {TopQueries} queries by total duration in the changed databases were measured instead");
                         continue;
                     }
 
                     hadData = true;
                     if (queryBefore.Executions < MinExecutions || queryAfter.Executions < MinExecutions)
                     {
+                        notMeasured.Add(new ChangeWatchNotMeasured(measureName,
+                            $"fewer than {MinExecutions} executions in the before or after window ({queryBefore.Executions} before, {queryAfter.Executions} after)"));
                         continue;
                     }
 
-                    var queryWeek = await ReadQueryStoreAsync(connection, watch.ServerId, database, queryId, weekStart, weekEnd, cancellationToken);
+                    var queryWeek = await ReadQueryStoreAsync(connection, watch.ServerId, database, queryId, weekStart, weekEnd, false, cancellationToken);
                     var queryBeforeAvg = queryBefore.ElapsedUs / queryBefore.Executions;
                     var queryAfterAvg = queryAfter.ElapsedUs / queryAfter.Executions;
                     double? queryWeekAvg = queryWeek.Executions >= MinExecutions ? queryWeek.ElapsedUs / queryWeek.Executions : null;
                     if (DurationMoved(queryBeforeAvg, queryAfterAvg) && (queryWeekAvg is null || DurationMoved(queryWeekAvg.Value, queryAfterAvg)))
                     {
-                        measures.Add(new ChangeWatchMeasure($"query_avg_duration_ms:{database}:{queryId}", "ms", queryBeforeAvg / 1000, queryAfterAvg / 1000,
+                        measures.Add(new ChangeWatchMeasure(measureName, "ms", queryBeforeAvg / 1000, queryAfterAvg / 1000,
                             queryWeekAvg / 1000, true, $"Query Store query {queryId} in {database}; {queryBefore.Executions} -> {queryAfter.Executions} executions"));
                     }
                 }
@@ -252,21 +377,29 @@ WHERE rn = 1";
         var afterQueries = needTopQueries
             ? await ReadQueriesAsync(connection, watch.ServerId, afterStart, afterEnd, null, scope, TopQueries, cancellationToken)
             : new Dictionary<string, (string? Database, long Executions, double ElapsedUs)>(StringComparer.Ordinal);
-        if (afterQueries.Count > 0)
+        if (needTopQueries && afterQueries.Count == 0)
+        {
+            notMeasured.Add(new ChangeWatchNotMeasured("query_avg_duration_ms", "the query_stats collector stored no query with executions in the after window"));
+        }
+        else if (afterQueries.Count > 0)
         {
             var hashes = afterQueries.Keys.ToArray();
             var beforeQueries = await ReadQueriesAsync(connection, watch.ServerId, beforeStart, afterStart, hashes, null, hashes.Length, cancellationToken);
             var weekQueries = await ReadQueriesAsync(connection, watch.ServerId, weekStart, weekEnd, hashes, null, hashes.Length, cancellationToken);
+            var missingBefore = 0;
+            var belowFloor = 0;
             foreach (var (hash, after) in afterQueries)
             {
                 if (!beforeQueries.TryGetValue(hash, out var before))
                 {
+                    missingBefore++;
                     continue;
                 }
 
                 hadData = true;
                 if (before.Executions < MinExecutions || after.Executions < MinExecutions)
                 {
+                    belowFloor++;
                     continue;
                 }
 
@@ -279,17 +412,40 @@ WHERE rn = 1";
                         weekAvg / 1000, true, $"database {after.Database}; {before.Executions} -> {after.Executions} executions"));
                 }
             }
+
+            AddQuerySkips(notMeasured, afterQueries.Count, missingBefore, belowFloor, "query_stats");
         }
 
-        return new ChangeWatchEvaluation(hadData, measures, DetailText(watch, measures), ResultJson(watch, measures, hadData, notes), notes);
+        return Complete(watch, measures, hadData, notes, notMeasured);
+    }
+
+    /// <summary>The queries of the top list that could not be compared, one entry per engine pass (#6234): none of their executions are in the before window, or fewer than <see cref="MinExecutions"/> in either window.</summary>
+    internal static void AddQuerySkips(List<ChangeWatchNotMeasured> notMeasured, int top, int missingBefore, int belowFloor, string source)
+    {
+        var reasons = new List<string>();
+        if (missingBefore > 0)
+        {
+            reasons.Add($"{missingBefore} of the {top} top queries have no {source} rows in the before window (new since then, or the statistics were reset), so they were not compared");
+        }
+
+        if (belowFloor > 0)
+        {
+            reasons.Add($"{belowFloor} of the {top} top queries ran fewer than {MinExecutions} times in the before or after window, so they were not compared");
+        }
+
+        if (reasons.Count > 0)
+        {
+            notMeasured.Add(new ChangeWatchNotMeasured("query_avg_duration_ms", string.Join("; ", reasons)));
+        }
     }
 
     /// <summary>One query's Query Store runtime in a window: executions, total elapsed microseconds, and how many intervals it had.
-    /// Each interval counts once, at its final cumulative snapshot, the way the duration trend counts it, and is placed by its start.</summary>
+    /// Each interval counts once, at its final cumulative snapshot, the way the duration trend counts it. <paramref name="byEnd"/> places an
+    /// interval by its end (the before-window) instead of its start.</summary>
     private async Task<(long Executions, double ElapsedUs, long Intervals)> ReadQueryStoreAsync(
-        NpgsqlConnection connection, int serverId, string database, long queryId, DateTime start, DateTime end, CancellationToken cancellationToken)
+        NpgsqlConnection connection, int serverId, string database, long queryId, DateTime start, DateTime end, bool byEnd, CancellationToken cancellationToken)
     {
-        await using var command = new NpgsqlCommand(QueryStoreSql, connection) { CommandTimeout = _commandTimeoutSeconds };
+        await using var command = new NpgsqlCommand(byEnd ? QueryStoreByEndSql : QueryStoreByStartSql, connection) { CommandTimeout = _commandTimeoutSeconds };
         command.Parameters.Add(new NpgsqlParameter { Value = serverId });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = database });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = queryId });
