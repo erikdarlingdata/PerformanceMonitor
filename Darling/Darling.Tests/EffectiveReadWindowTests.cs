@@ -249,7 +249,7 @@ public sealed class EffectiveReadWindowTests
         {
             using var opened = ReadScope.Open(null);
             var thrown = await Record.ExceptionAsync(() => DarlingMcpFinOpsTools.ReadStorageGrowthAsync(
-                postgres, (1, "SRV1"), hoursBack, 10, database, null, cancelled.Token));
+                postgres, (1, "SRV1", "SRV1"), hoursBack, 10, database, null, cancelled.Token));
             Assert.NotNull(thrown); // the read reached the store, so every check before it passed
             var record = SlowReadLog.Build(opened.Scope, ReadSurface.Mcp, "get_finops", ReadOutcome.Ok, 9_000,
                 new JsonObject { ["view"] = DarlingMcpFinOpsTools.StorageGrowthView }, null, DateTime.UtcNow);
@@ -267,7 +267,7 @@ public sealed class EffectiveReadWindowTests
         /* utilization's rows span its 7-day trend, the wider of its two windows. */
         using (var utilization = ReadScope.Open(null))
         {
-            Assert.NotNull(await Record.ExceptionAsync(() => DarlingMcpFinOpsTools.ReadUtilizationAsync(postgres, (1, "SRV1"), 24, 10, cancelled.Token)));
+            Assert.NotNull(await Record.ExceptionAsync(() => DarlingMcpFinOpsTools.ReadUtilizationAsync(postgres, (1, "SRV1", "SRV1"), 24, 10, cancelled.Token)));
             var row = SlowReadLog.Build(utilization.Scope, ReadSurface.Mcp, "get_finops", ReadOutcome.Ok, 9_000,
                 new JsonObject { ["view"] = DarlingMcpFinOpsTools.UtilizationView }, null, DateTime.UtcNow);
             Assert.Equal(DarlingMcpFinOpsTools.UtilizationTrendDays * 24, Hours(row), 3);
@@ -275,13 +275,13 @@ public sealed class EffectiveReadWindowTests
 
         using (var utilizationRefused = ReadScope.Open(null))
         {
-            Assert.NotNull(await DarlingMcpFinOpsTools.ReadUtilizationAsync(postgres, (1, "SRV1"), 48, 10, cancelled.Token));
+            Assert.NotNull(await DarlingMcpFinOpsTools.ReadUtilizationAsync(postgres, (1, "SRV1", "SRV1"), 48, 10, cancelled.Token));
             Assert.Null(utilizationRefused.Scope.WindowStartUtc);
         }
 
         /* A refused window notes nothing and never reaches the store. */
         using var refused = ReadScope.Open(null);
-        Assert.NotNull(await DarlingMcpFinOpsTools.ReadStorageGrowthAsync(postgres, (1, "SRV1"), 25, 10, "db", null, cancelled.Token));
+        Assert.NotNull(await DarlingMcpFinOpsTools.ReadStorageGrowthAsync(postgres, (1, "SRV1", "SRV1"), 25, 10, "db", null, cancelled.Token));
         Assert.Null(refused.Scope.WindowStartUtc);
     }
 

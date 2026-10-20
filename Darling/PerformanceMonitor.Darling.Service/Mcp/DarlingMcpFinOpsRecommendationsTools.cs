@@ -68,7 +68,7 @@ public sealed class DarlingMcpFinOpsRecommendationsTools
             cancellationToken.ThrowIfCancellationRequested();
 
             return JsonSerializer.Serialize(
-                Envelope(resolved.ServerName, monthly, skipped, rows, AgReplicaScope.SkippedNote(secondary)), McpHelpers.JsonOptions);
+                Envelope(resolved.DisplayName, monthly, skipped, rows, AgReplicaScope.SkippedNote(secondary)), McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

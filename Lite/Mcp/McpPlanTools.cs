@@ -128,12 +128,12 @@ public sealed class McpPlanTools
             /* Lite never fills query_stats.query_plan_xml, so a miss here is not "evicted from the plan cache":
                it is "Lite does not keep plans". The engine-capability answer still comes first. */
             if (string.IsNullOrEmpty(xml))
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_stats")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_stats")
                     ?? PlansNotKept();
 
             // #4530: one store read per call so rule 38 can see the server's edition/MAXDOP.
             var metadata = await dataService.GetServerMetadataForPlanAnalysisAsync(resolved.ServerId);
-            return AnalyzeFilteredPlan(xml, resolved.ServerName, "query_stats", query_hash, App.AnalyzerConfig, metadata, cancellationToken);
+            return AnalyzeFilteredPlan(xml, resolved.DisplayName, "query_stats", query_hash, App.AnalyzerConfig, metadata, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -167,12 +167,12 @@ public sealed class McpPlanTools
             /* GetCachedProcedurePlanAsync reads the same query_stats.query_plan_xml (matched on plan_handle), which
                Lite never fills, so this miss is "Lite does not keep plans" too. The engine answer stays first. */
             if (string.IsNullOrEmpty(xml))
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "procedure_stats")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "procedure_stats")
                     ?? PlansNotKept();
 
             // #4530: one store read per call so rule 38 can see the server's edition/MAXDOP.
             var metadata = await dataService.GetServerMetadataForPlanAnalysisAsync(resolved.ServerId);
-            return AnalyzeFilteredPlan(xml, resolved.ServerName, "procedure_stats", plan_handle, App.AnalyzerConfig, metadata, cancellationToken);
+            return AnalyzeFilteredPlan(xml, resolved.DisplayName, "procedure_stats", plan_handle, App.AnalyzerConfig, metadata, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -209,7 +209,7 @@ public sealed class McpPlanTools
             });
 
             if (server == null)
-                return $"Could not find connection details for server '{resolved.ServerName}'.";
+                return $"Could not find connection details for server '{resolved.DisplayName}'.";
 
             var connectionString = serverManager.CredentialResolver.GetConnectionString(server);
 
@@ -219,14 +219,14 @@ public sealed class McpPlanTools
             var xml = await ReadQueryStorePlanAsync(connectionString, database_name, plan_id);
 
             if (string.IsNullOrEmpty(xml))
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_store")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_store")
                     ?? McpHelpers.Status(
                         "unavailable",
                         $"No plan found for plan_id {plan_id} in database '{database_name}'. Query Store may not be enabled or the plan may have been purged.");
 
             // #4530: one store read per call so rule 38 can see the server's edition/MAXDOP.
             var metadata = await dataService.GetServerMetadataForPlanAnalysisAsync(resolved.ServerId);
-            return AnalyzeFilteredPlan(xml, resolved.ServerName, "query_store", $"{database_name}:{plan_id}", App.AnalyzerConfig, metadata, cancellationToken);
+            return AnalyzeFilteredPlan(xml, resolved.DisplayName, "query_store", $"{database_name}:{plan_id}", App.AnalyzerConfig, metadata, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -287,7 +287,7 @@ public sealed class McpPlanTools
         {
             var xml = await ReadQueryStatsPlanAsync(dataService, resolved.ServerId, query_hash, PlanXmlOutputChars);
             if (string.IsNullOrEmpty(xml))
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_stats")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_stats")
                     ?? PlansNotKept();
 
             return McpHelpers.Truncate(xml, PlanXmlOutputChars) ?? "No plan XML available.";

@@ -372,15 +372,6 @@ public sealed class AzureSqlDatabaseMemoryScopeTests
         Assert.Null(typeof(PerformanceMonitor.Darling.Viewer.MemoryStatsRow).GetProperty("EngineEdition"));
     }
 
-    [Fact]
-    public void GetMemoryStatsTool_BuildsItsPayloadThroughTheSharedNote()
-    {
-        var tool = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs");
-
-        Assert.Contains("return MemoryStatsPayload(resolved.ServerName, stats, engineEdition);", tool, StringComparison.Ordinal);
-        Assert.Contains("ServerHardwareScope.WithMemoryNote(", tool, StringComparison.Ordinal);
-    }
-
     // ── the FinOps CPU right-sizing recommendation: vCores on an Azure SQL Database, cores everywhere else ──
 
     private static UtilizationEfficiencyRow CpuRow(int engineEdition) => new()

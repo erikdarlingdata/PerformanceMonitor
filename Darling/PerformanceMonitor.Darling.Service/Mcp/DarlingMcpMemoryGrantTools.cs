@@ -65,7 +65,7 @@ public sealed class DarlingMcpMemoryGrantTools
             var rows = await DarlingMemoryGrantReader.GetResourceSemaphoreLatestAsync(
                 postgres, resolved.ServerId, windowStart, now, cancellationToken);
             if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "memory_grant_stats", cancellationToken)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "memory_grant_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No memory grant data available.");
 
             /* Same window bounds as the latest read, so the window's last_snapshot_at IS captured_at and the
@@ -104,7 +104,7 @@ public sealed class DarlingMcpMemoryGrantTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 window_start = windowStart.ToString("o"),
                 window_end = now.ToString("o"),
@@ -145,7 +145,7 @@ public sealed class DarlingMcpMemoryGrantTools
             var rows = await DarlingMemoryGrantReader.GetMemoryGrantsLatestAsync(
                 postgres, resolved.ServerId, windowStart, now, cancellationToken);
             if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "memory_grant_stats", cancellationToken)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "memory_grant_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No memory grant data available.");
 
             var window = await DarlingMemoryGrantReader.GetMemoryGrantsWindowAsync(
@@ -166,7 +166,7 @@ public sealed class DarlingMcpMemoryGrantTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 window_start = windowStart.ToString("o"),
                 window_end = now.ToString("o"),
@@ -241,7 +241,7 @@ public sealed class DarlingMcpMemoryGrantTools
             if (rows.Count == 0)
             {
                 /* not_collected first: it carries no notice, so a probe before it would be thrown away. */
-                var notCollected = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "memory_pressure_events", cancellationToken);
+                var notCollected = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "memory_pressure_events", cancellationToken);
                 if (notCollected is not null)
                 {
                     return notCollected;
@@ -257,7 +257,7 @@ public sealed class DarlingMcpMemoryGrantTools
 
             var payload = new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,

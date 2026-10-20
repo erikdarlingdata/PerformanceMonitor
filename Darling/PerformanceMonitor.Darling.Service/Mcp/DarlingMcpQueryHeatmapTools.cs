@@ -146,7 +146,7 @@ public sealed class DarlingMcpQueryHeatmapTools
                 start, end, "query_stats", emptyAnswer: rows.Count == 0, logger: logger, cancellationToken: cancellationToken);
 
             if (rows.Count == 0)
-                return await EmptyAsync(postgres, resolved.ServerName, resolved.ServerId, start, end, hours_back, notice, databaseFilter, cancellationToken: cancellationToken);
+                return await EmptyAsync(postgres, resolved.DisplayName, resolved.ServerId, start, end, hours_back, notice, databaseFilter, cancellationToken: cancellationToken);
 
             var truncated = rows.Count > limit;
             var cells = rows.Take(limit).ToList();
@@ -179,7 +179,7 @@ public sealed class DarlingMcpQueryHeatmapTools
 
             var json = JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 /* The window floor, always present (false and null when the table covered the window). No effective_hours_back:
                    this payload carries a page `truncated`, and the census holds that key apart for the window floor. */

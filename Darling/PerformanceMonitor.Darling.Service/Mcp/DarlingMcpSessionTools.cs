@@ -55,7 +55,7 @@ public sealed class DarlingMcpSessionTools
         {
             var rows = await DarlingSessionReader.GetLatestSessionStatsAsync(postgres, resolved.ServerId, cancellationToken);
             if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "session_stats", cancellationToken)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "session_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No session statistics available. The session collector may not have run yet.");
 
             var totalConnections = rows.Sum(r => r.ConnectionCount);
@@ -65,7 +65,7 @@ public sealed class DarlingMcpSessionTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 /* #3653: captured_at, the #3637 census's one spelling for a latest read's stamp. This was the
                    one of the four pre-vocabulary stamps the web surface READ by the old key (server-tabs.js'
                    SESSION_STATS "Collected" tile), which is what held all four out of the roster; the tile
@@ -213,14 +213,14 @@ public sealed class DarlingMcpSessionTools
                 {
                     return McpHelpers.Status(
                         "empty",
-                        $"No active query snapshots on {resolved.ServerName} in the last {hours_back} hour(s) matched "
+                        $"No active query snapshots on {resolved.DisplayName} in the last {hours_back} hour(s) matched "
                         + DescribeActiveQueryFilters(databases, blocking_only, waitFilter)
                         + (tagFilter.Active ? $" (query tag '{tagFilter.Requested}')" : "")
                         + ". The filters were applied in SQL over the whole window, so unfiltered snapshots may well exist — drop them to see what the window holds.",
                         notice.AsHints());
                 }
 
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_snapshots", cancellationToken)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_snapshots", cancellationToken)
                     ?? McpHelpers.Status("empty", "No active query snapshots found in the requested time range.", notice.AsHints());
             }
 
@@ -272,7 +272,7 @@ public sealed class DarlingMcpSessionTools
 
             var payload = new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 /* #4966: the window floor. Written only when the store did NOT cover the window (see below). No
                    effective_hours_back: this payload carries a page `truncated`, and the census holds that key apart for the window
@@ -431,14 +431,14 @@ public sealed class DarlingMcpSessionTools
                question is asked first (never collected stays unavailable), and only then does the answer say the CHOSEN databases had
                none. The unfiltered sentence below is the one it always was. */
             if (rows.Count == 0 && !databases.IsAll)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "waiting_tasks", cancellationToken)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "waiting_tasks", cancellationToken)
                     ?? McpHelpers.Status(
                         "empty",
                         $"No waiting tasks captured in the specified time range{DarlingMcpBlockingTools.ForChosenDatabases(databases)}. "
                         + "The filter was applied in SQL over the whole window, so waiting tasks of other databases may well exist; drop it to see what the window holds.",
                         notice.AsHints());
             if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "waiting_tasks", cancellationToken)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "waiting_tasks", cancellationToken)
                     ?? McpHelpers.Status("empty", "No waiting tasks captured in the specified time range.", notice.AsHints());
 
             var truncated = rows.Count > limit;
@@ -465,7 +465,7 @@ public sealed class DarlingMcpSessionTools
 
             var json = JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 /* #3541 A3: the envelope was bare — server and rows, no window, no count, no bound. Now the
                    span requested, the page described as a page, and the span the page covers. */
                 hours_back,

@@ -113,7 +113,7 @@ public sealed class DarlingMcpAlertTools
             var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
             if (error != null) return error;
             serverId = resolved.ServerId;
-            scope = resolved.ServerName;
+            scope = resolved.DisplayName;
         }
 
         try
@@ -348,7 +348,7 @@ public sealed class DarlingMcpAlertTools
 
             var node = JsonSerializer.SerializeToNode(BuildAlertSettingsPayload(s, deliveryCooldown), McpHelpers.JsonOptions)!.AsObject();
             node["server_view"] = JsonSerializer.SerializeToNode(
-                await DarlingMcpThresholdOverrideTools.BuildServerViewAsync(postgres, s, resolved.ServerId, resolved.ServerName, cancellationToken),
+                await DarlingMcpThresholdOverrideTools.BuildServerViewAsync(postgres, s, resolved.ServerId, resolved.DisplayName, cancellationToken),
                 McpHelpers.JsonOptions);
             return node.ToJsonString(McpHelpers.JsonOptions);
         }

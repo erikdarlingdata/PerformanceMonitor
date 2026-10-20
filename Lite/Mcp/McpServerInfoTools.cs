@@ -23,10 +23,10 @@ public sealed class McpServerInfoTools
         {
             var row = await dataService.GetLatestServerPropertiesAsync(resolved.ServerId);
             if (row == null)
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "server_properties")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "server_properties")
                     ?? McpHelpers.Status("unavailable", "No server properties available. The properties collector may not have run yet.");
 
-            return ServerPropertiesPayload(resolved.ServerName, row);
+            return ServerPropertiesPayload(resolved.DisplayName, row);
         }
         catch (Exception ex)
         {
@@ -108,20 +108,20 @@ public sealed class McpServerInfoTools
                    collection: the probe is the same newest-snapshot read, unfiltered (Darling's twin words it the same). */
                 if (names != null && await dataService.GetLatestDatabaseSizeStatsAsync(resolved.ServerId) is { Count: > 0 } snapshot)
                     return McpHelpers.StatusForDatabase("empty",
-                        $"No database size rows for {McpDatabaseSelection.Scope(names)} on {resolved.ServerName} in the snapshot captured at "
+                        $"No database size rows for {McpDatabaseSelection.Scope(names)} on {resolved.DisplayName} in the snapshot captured at "
                         + $"{snapshot[0].CollectionTime:o}. Check the database name against the server's unfiltered get_database_sizes: the filter "
                         + "matches exactly, and an excluded or renamed database looks identical to one with no files.",
                         McpDatabaseSelection.Describe(names));
 
                 /* #5244: every answer shape says which database it was limited to (null for every database). */
                 return McpHelpers.WithDatabase(
-                           await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "database_size_stats"),
+                           await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "database_size_stats"),
                            McpDatabaseSelection.Describe(names))
                     ?? McpHelpers.StatusForDatabase("unavailable", "No database size data available. The size collector may not have run yet.", McpDatabaseSelection.Describe(names));
             }
 
             var serverIsHyperscale = await McpEngineCapability.IsHyperscaleAsync(dataService, resolved.ServerId);
-            return DatabaseSizesPayload(resolved.ServerName, rows, McpDatabaseSelection.Describe(names), serverIsHyperscale);
+            return DatabaseSizesPayload(resolved.DisplayName, rows, McpDatabaseSelection.Describe(names), serverIsHyperscale);
         }
         catch (Exception ex)
         {

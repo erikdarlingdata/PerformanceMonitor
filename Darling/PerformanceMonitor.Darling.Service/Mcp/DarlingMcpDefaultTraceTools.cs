@@ -97,7 +97,7 @@ public sealed class DarlingMcpDefaultTraceTools
             if (significant.Count == 0)
             {
                 var notCollected = McpHelpers.WithDatabase(
-                    await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "default_trace_events", cancellationToken),
+                    await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "default_trace_events", cancellationToken),
                     databases.Describe());
                 if (notCollected is not null)
                     return notCollected;
@@ -151,7 +151,7 @@ public sealed class DarlingMcpDefaultTraceTools
 
             var json = JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,

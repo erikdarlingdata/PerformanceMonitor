@@ -92,14 +92,14 @@ public sealed class DarlingMcpLongQueryTools
             {
                 /* #5244 round 2 (L2): not_collected and precondition echo database_name like every other shape. */
                 var unmet = McpHelpers.WithDatabase(
-                    await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "long_query_completions", cancellationToken),
+                    await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "long_query_completions", cancellationToken),
                     databaseFilter.Describe())
                     /* #2546: this collector is opt-in, so the fall-through below already sends the reader to
                        the schedule, which is the wrong place when the collector IS enabled and its session
                        is missing. The precondition answer names that state instead of quietly blaming a knob
                        that is already switched on. */
                     ?? McpHelpers.WithDatabase(
-                        await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, "long_query_completions", cancellationToken),
+                        await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "long_query_completions", cancellationToken),
                         databaseFilter.Describe());
                 if (unmet != null)
                 {
@@ -161,7 +161,7 @@ public sealed class DarlingMcpLongQueryTools
 
             var payloadNode = JsonSerializer.SerializeToNode(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 /* #4966: where the store's data starts, always present on a data answer (false and null when the store covered the
                    window). No effective_hours_back: this payload carries a page `truncated`, and the census holds that key apart
