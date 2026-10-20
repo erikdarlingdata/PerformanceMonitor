@@ -48,6 +48,19 @@ public sealed class PostgresTargetProvider : ITargetProvider
     internal static NpgsqlConnection CreatePinnedConnection(string connectionString) =>
         s_dataSources.GetOrAdd(connectionString, static cs => new Lazy<NpgsqlDataSource>(() => BuildDataSource(cs))).Value.CreateConnection();
 
+    /// <summary>Clears the idle connections of every data source <see cref="CreatePinnedConnection"/> made, as
+    /// <see cref="NpgsqlConnection.ClearAllPools"/> does for Npgsql's own pools; for tests that drop a database.</summary>
+    internal static void ClearPools()
+    {
+        foreach (var source in s_dataSources.Values)
+        {
+            if (source.IsValueCreated)
+            {
+                source.Value.Clear();
+            }
+        }
+    }
+
     private static NpgsqlDataSource BuildDataSource(string connectionString)
     {
         var builder = new NpgsqlDataSourceBuilder(connectionString);

@@ -6550,7 +6550,7 @@ LIMIT 1";
     /// forever, and made test_hypothetical_index (#2612) unable to resolve a statement on the one platform
     /// it can be tested against.</para>
     /// </summary>
-    private static async Task<(List<long> QueryIds, List<string> Texts)> ReadPgStatementTextAsync(
+    internal static async Task<(List<long> QueryIds, List<string> Texts)> ReadPgStatementTextAsync(
         ServerRuntime runtime, CancellationToken cancellationToken)
     {
         var queryIds = new List<long>();

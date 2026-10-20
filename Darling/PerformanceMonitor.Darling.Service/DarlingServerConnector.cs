@@ -544,10 +544,16 @@ SELECT
     /// <see cref="CollectorCatalog.AppliesTo(ICollectorSchemaInfo, CollectorTargetInfo)"/> keeps every
     /// T-SQL definition away from this target regardless of their values.</para>
     /// </summary>
-    private static async Task<ServerRuntime> ConnectPostgresAsync(
-        MonitoredServer config, ILogger? logger, CancellationToken cancellationToken)
+    private static Task<ServerRuntime> ConnectPostgresAsync(
+        MonitoredServer config, ILogger? logger, CancellationToken cancellationToken) =>
+        ConnectPostgresAsync(config, ResolveConnectionString(config, logger), logger, cancellationToken);
+
+    /// <summary><see cref="ConnectPostgresAsync(MonitoredServer, ILogger?, CancellationToken)"/> over a connection
+    /// string already resolved from <paramref name="config"/>; a test passes one without the pin, as a pooler that
+    /// drops the startup options would leave it (#6143).</summary>
+    internal static async Task<ServerRuntime> ConnectPostgresAsync(
+        MonitoredServer config, string connectionString, ILogger? logger, CancellationToken cancellationToken)
     {
-        var connectionString = ResolveConnectionString(config, logger);
         var storageName = config.StorageName;
 
         /* #6143: an RDS Proxy endpoint accepts only the startup parameters AWS lists, and 'options' is not one. */

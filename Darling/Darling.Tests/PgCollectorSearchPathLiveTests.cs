@@ -34,6 +34,8 @@ public sealed class PgCollectorSearchPathLiveTests
     private const string Database = "pm6143_owned";
     private const string HypoDatabase = "pm6143_hypo";
     private const string AuroraDatabase = "pm6143_aurora";
+    private const string InfoDatabase = "pm6143_info";
+    private const string TextDatabase = "pm6143_text";
     private const string Owner = "pm6143_owner";
     private const string Monitor = "pm6143_monitor";
     private const int ServerId = 6143;
@@ -486,6 +488,263 @@ public sealed class PgCollectorSearchPathLiveTests
         }
     }
 
+    /// <summary>
+    /// pg_stat_statements below 1.9 has no pg_stat_statements_info view, so another role with CREATE on the extension's
+    /// schema can create a view of that name there. The statements epoch and eviction reads give NULL for it and never
+    /// read it: the function under the view never runs. Once the extension's own view exists (1.9), both are read.
+    /// </summary>
+    [Fact]
+    public async Task StatementsInfoView_ThatIsNotAMemberOfTheExtension_IsNeverRead()
+    {
+        var adminConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(adminConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the search_path live test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var admin = new NpgsqlConnectionStringBuilder(adminConnectionString) { Pooling = false };
+        var infoAdmin = new NpgsqlConnectionStringBuilder(admin.ConnectionString) { Database = InfoDatabase };
+        var epochAndDealloc = $"SELECT {PgStatementStatsCollector.StatementsEpochSql} AS epoch, {PgStatementStatsCollector.StatementsDeallocSql} AS dealloc";
+
+        var bodySucceeded = false;
+        try
+        {
+            await ResetAsync(admin.ConnectionString, ct);
+            await ExecAsync(admin.ConnectionString, $"CREATE ROLE {Owner} LOGIN NOSUPERUSER", ct);
+            await ExecAsync(admin.ConnectionString, $"CREATE DATABASE {InfoDatabase}", ct);
+            await ExecAsync(infoAdmin.ConnectionString, $"""
+                CREATE SCHEMA stmts;
+                CREATE EXTENSION pg_stat_statements SCHEMA stmts VERSION '1.8';
+                GRANT USAGE, CREATE ON SCHEMA stmts TO {Owner};
+                SET ROLE {Owner};
+                CREATE SEQUENCE stmts.info_calls;
+                GRANT USAGE ON SEQUENCE stmts.info_calls TO PUBLIC;
+                CREATE FUNCTION stmts.info_row() RETURNS TABLE (dealloc bigint, stats_reset timestamptz) LANGUAGE plpgsql AS $$
+                BEGIN PERFORM pg_catalog.nextval('stmts.info_calls'); RETURN QUERY SELECT 7::bigint, pg_catalog.now(); END $$;
+                CREATE VIEW stmts.pg_stat_statements_info AS SELECT * FROM stmts.info_row();
+                RESET ROLE;
+                """, ct);
+
+            /* The fixture is live: reading the view runs the function. */
+            await ExecAsync(infoAdmin.ConnectionString, "SELECT * FROM stmts.pg_stat_statements_info", ct);
+            Assert.Equal(1, await CountAsync(infoAdmin.ConnectionString, "stmts.info_calls", ct));
+            await ExecAsync(infoAdmin.ConnectionString, "SELECT pg_catalog.setval('stmts.info_calls', 1, false)", ct);
+
+            var runtime = await RuntimeAsync(admin, InfoDatabase, admin.Username!, ct);
+            await using (var connection = new NpgsqlConnection(runtime.ConnectionString))
+            {
+                await connection.OpenAsync(ct);
+                await using var command = new NpgsqlCommand(epochAndDealloc, connection);
+                await using var reader = await command.ExecuteReaderAsync(ct);
+                Assert.True(await reader.ReadAsync(ct));
+                Assert.True(reader.IsDBNull(0));
+                Assert.True(reader.IsDBNull(1));
+            }
+
+            Assert.Equal(0, await CountAsync(infoAdmin.ConnectionString, "stmts.info_calls", ct));
+
+            /* The extension's own view, at 1.9, is a member: both are read. */
+            await ExecAsync(infoAdmin.ConnectionString, """
+                DROP VIEW stmts.pg_stat_statements_info;
+                ALTER EXTENSION pg_stat_statements UPDATE TO '1.9';
+                """, ct);
+            await using (var connection = new NpgsqlConnection(runtime.ConnectionString))
+            {
+                await connection.OpenAsync(ct);
+                await using var command = new NpgsqlCommand(epochAndDealloc, connection);
+                await using var reader = await command.ExecuteReaderAsync(ct);
+                Assert.True(await reader.ReadAsync(ct));
+                Assert.False(reader.IsDBNull(0));
+                Assert.False(reader.IsDBNull(1));
+            }
+
+            Assert.Equal(0, await CountAsync(infoAdmin.ConnectionString, "stmts.info_calls", ct));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(admin.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DropAsync(admin.ConnectionString, cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// The hourly statement-text fetch reads pg_stat_statements from the schema the extension was created in. With the
+    /// extension in its own schema and a view named pg_stat_statements in public, made by a role with CREATE there, the
+    /// fetch never reads the view: the function under it never runs.
+    /// </summary>
+    [Fact]
+    public async Task StatementTextFetch_ReadsTheExtensionSchema_NeverASameNamedViewInPublic()
+    {
+        var adminConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(adminConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the search_path live test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var admin = new NpgsqlConnectionStringBuilder(adminConnectionString) { Pooling = false };
+        var textAdmin = new NpgsqlConnectionStringBuilder(admin.ConnectionString) { Database = TextDatabase };
+
+        var bodySucceeded = false;
+        try
+        {
+            await ResetAsync(admin.ConnectionString, ct);
+            await ExecAsync(admin.ConnectionString, $"CREATE ROLE {Owner} LOGIN NOSUPERUSER", ct);
+            await ExecAsync(admin.ConnectionString, $"CREATE DATABASE {TextDatabase}", ct);
+            await ExecAsync(textAdmin.ConnectionString, $"""
+                CREATE SCHEMA stmts;
+                CREATE EXTENSION pg_stat_statements SCHEMA stmts;
+                GRANT USAGE, CREATE ON SCHEMA public TO {Owner};
+                SET ROLE {Owner};
+                CREATE SEQUENCE public.view_calls;
+                GRANT USAGE ON SEQUENCE public.view_calls TO PUBLIC;
+                CREATE FUNCTION public.statement_rows()
+                RETURNS TABLE (queryid bigint, query text, total_exec_time float8, toplevel boolean) LANGUAGE plpgsql AS $$
+                BEGIN PERFORM pg_catalog.nextval('public.view_calls'); RETURN QUERY SELECT 6143::bigint, 'SELECT 6143'::text, 1::float8, true; END $$;
+                CREATE VIEW public.pg_stat_statements AS SELECT * FROM public.statement_rows();
+                RESET ROLE;
+                SELECT pg_catalog.count(*) FROM pg_catalog.pg_class;
+                """, ct);
+
+            /* The fixture is live: reading the view runs the function. */
+            await ExecAsync(textAdmin.ConnectionString, "SELECT * FROM public.pg_stat_statements", ct);
+            Assert.Equal(1, await CountAsync(textAdmin.ConnectionString, "public.view_calls", ct));
+            await ExecAsync(textAdmin.ConnectionString, "SELECT pg_catalog.setval('public.view_calls', 1, false)", ct);
+
+            var runtime = await RuntimeAsync(admin, TextDatabase, admin.Username!, ct);
+            var (queryIds, _) = await DarlingWorker.ReadPgStatementTextAsync(runtime, ct);
+
+            Assert.DoesNotContain(6143L, queryIds);
+            Assert.NotEmpty(queryIds);
+            Assert.Equal(0, await CountAsync(textAdmin.ConnectionString, "public.view_calls", ct));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(admin.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DropAsync(admin.ConnectionString, cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// A session that lost the pin on the way in, on a database whose own search_path puts another role's schema
+    /// first. The connect-time detection refuses it, and nothing but the detection query ran on it first: Npgsql's
+    /// type-loading query compares oids, and the = in that schema would have run.
+    /// </summary>
+    [Fact]
+    public async Task ConnectWithoutThePin_RunsNothingBeforeTheCheck()
+    {
+        var adminConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(adminConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the search_path live test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var admin = new NpgsqlConnectionStringBuilder(adminConnectionString) { Pooling = false };
+        var ownedAdmin = new NpgsqlConnectionStringBuilder(admin.ConnectionString) { Database = Database };
+
+        var bodySucceeded = false;
+        try
+        {
+            await ResetAsync(admin.ConnectionString, ct);
+            await ExecAsync(admin.ConnectionString, $"CREATE ROLE {Owner} LOGIN NOSUPERUSER", ct);
+            await ExecAsync(admin.ConnectionString, $"CREATE ROLE {Monitor} LOGIN SUPERUSER", ct);
+            await ExecAsync(admin.ConnectionString, $"CREATE DATABASE {Database} OWNER {Owner}", ct);
+            await ExecAsync(ownedAdmin.ConnectionString, SetupSql, ct);
+            await ExecAsync(
+                new NpgsqlConnectionStringBuilder(ownedAdmin.ConnectionString) { Username = Owner }.ConnectionString,
+                $"ALTER DATABASE {Database} SET search_path = lookalike, pg_catalog, public", ct);
+
+            var runtime = await RuntimeAsync(admin, Database, Monitor, ct);
+            var stripped = new NpgsqlConnectionStringBuilder(runtime.ConnectionString) { Options = null }.ConnectionString;
+
+            var refused = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                DarlingServerConnector.ConnectPostgresAsync(runtime.Config, stripped, null, ct));
+            Assert.StartsWith("precondition:", refused.Message, StringComparison.Ordinal);
+            Assert.Contains("lookalike", refused.Message, StringComparison.Ordinal);
+            Assert.Equal(0L, await ScalarLongAsync(ownedAdmin.ConnectionString, "SELECT pg_catalog.count(*) FROM lookalike.calls", ct));
+
+            /* With the pin the same database connects, and nothing of that schema ran either. */
+            var connected = await DarlingServerConnector.ConnectPostgresAsync(runtime.Config, runtime.ConnectionString, null, ct);
+            Assert.Equal(Database, connected.ConnectedDatabase);
+            Assert.Equal(0L, await ScalarLongAsync(ownedAdmin.ConnectionString, "SELECT pg_catalog.count(*) FROM lookalike.calls", ct));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(admin.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DropAsync(admin.ConnectionString, cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// Every new physical connection a monitoring connection string opens reads its search_path before any caller's
+    /// statement. Npgsql's own Search Path keyword is applied after the startup options and replaces the pin, which
+    /// stands in for a session that lost it: that session is refused. The pinned string opens.
+    /// </summary>
+    [Fact]
+    public async Task PhysicalConnection_WithoutThePin_IsRefusedAtOpen()
+    {
+        var adminConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(adminConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the search_path live test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var admin = new NpgsqlConnectionStringBuilder(adminConnectionString) { Pooling = false };
+        var runtime = await RuntimeAsync(admin, admin.Database!, admin.Username!, ct);
+
+        await using (var pinned = PostgresTargetProvider.CreatePinnedConnection(runtime.ConnectionString))
+        {
+            await pinned.OpenAsync(ct);
+            await using var command = new NpgsqlCommand("SHOW search_path", pinned);
+            Assert.Equal("pg_catalog,pg_temp", (string?)await command.ExecuteScalarAsync(ct));
+        }
+
+        var replaced = new NpgsqlConnectionStringBuilder(runtime.ConnectionString) { SearchPath = "public" }.ConnectionString;
+        await using var unpinned = PostgresTargetProvider.CreatePinnedConnection(replaced);
+        var refused = await Assert.ThrowsAsync<InvalidOperationException>(() => unpinned.OpenAsync(ct));
+        Assert.StartsWith("precondition:", refused.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The search_path check ignores only the whitespace PostgreSQL skips between schema names. A no-break space or
+    /// another Unicode space is part of a schema name to PostgreSQL, so a search_path holding one is refused. What the
+    /// server reported reaches the message without control characters and capped in length.
+    /// </summary>
+    [Theory]
+    [InlineData("pg_catalog,pg_temp", true)]
+    [InlineData("pg_catalog, pg_temp", true)]
+    [InlineData(" pg_catalog,\tpg_temp\r\n\f", true)]
+    [InlineData("pg_catalog,\u00A0pg_temp", false)]
+    [InlineData("\u2003pg_catalog,pg_temp", false)]
+    [InlineData("pg_catalog,pg_temp\u3000", false)]
+    [InlineData("pg_catalog\u2009,pg_temp", false)]
+    [InlineData("pg_catalog,\u200Bpg_temp", false)]
+    [InlineData("pg_catalog,pg_temp,public", false)]
+    public void SearchPathCheck_IgnoresOnlyPostgresWhitespace(string observed, bool accepted)
+    {
+        if (accepted)
+        {
+            DarlingServerConnector.EnsureSearchPathPinned(observed, "pm6143-target");
+            return;
+        }
+
+        var refused = Assert.Throws<InvalidOperationException>(() => DarlingServerConnector.EnsureSearchPathPinned(observed, "pm6143-target"));
+        Assert.StartsWith("precondition:", refused.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ServerTextInMessages_HasNoControlCharacters_AndIsCapped()
+    {
+        var observed = "lookalike\r\n2026-10-19 [ERROR] another line\u0007" + new string('x', 5000);
+        var refused = Assert.Throws<InvalidOperationException>(() => DarlingServerConnector.EnsureSearchPathPinned(observed, "pm6143-target"));
+        Assert.DoesNotContain(refused.Message, char.IsControl);
+        Assert.True(refused.Message.Length < 1000, $"message is {refused.Message.Length} characters");
+
+        var pooler = DarlingServerConnector.PoolerPrecondition(
+            "pm6143-target",
+            "it refused the sign-in: " + DarlingServerConnector.CleanServerText("bad\nparameter\u001b[31m" + new string('y', 5000), DarlingServerConnector.MaxPoolerTextLength));
+        Assert.DoesNotContain(pooler.Message, char.IsControl);
+        Assert.True(pooler.Message.Length < 1000, $"message is {pooler.Message.Length} characters");
+    }
+
     private static async Task<long> CountAsync(string connectionString, string sequence, CancellationToken ct) =>
         await ScalarLongAsync(connectionString, $"SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM {sequence}", ct);
 
@@ -713,6 +972,7 @@ public sealed class PgCollectorSearchPathLiveTests
     private static async Task ResetAsync(string adminConnectionString, CancellationToken ct)
     {
         NpgsqlConnection.ClearAllPools();
+        PostgresTargetProvider.ClearPools();
         await using var connection = new NpgsqlConnection(adminConnectionString);
         await connection.OpenAsync(ct);
         await DropAsync(adminConnectionString, connection, ct);
@@ -720,7 +980,7 @@ public sealed class PgCollectorSearchPathLiveTests
 
     private static async Task DropAsync(string adminConnectionString, NpgsqlConnection connection, CancellationToken ct)
     {
-        foreach (var database in new[] { Database, HypoDatabase, AuroraDatabase })
+        foreach (var database in new[] { Database, HypoDatabase, AuroraDatabase, InfoDatabase, TextDatabase })
         {
             await using (var exists = new NpgsqlCommand($"SELECT pg_catalog.count(*) FROM pg_catalog.pg_database WHERE datname = '{database}'", connection))
             {
