@@ -345,6 +345,11 @@ if (args.Length > 0 && DarlingCliCommands.IsListAlertSourcesVerb(args[0]))
     return await DarlingCliCommands.ListAlertSourcesAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);
 }
 
+if (args.Length > 0 && DarlingCliCommands.IsExportInvestigationsVerb(args[0]))
+{
+    return await DarlingCliCommands.ExportInvestigationsAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);
+}
+
 /* CLI verbs: --enable-collector / --disable-collector <name> [--server <name>] [--config <path>] (#3752) — flip one
    collector's enabled flag in config.config_collector_schedules, fleet-wide or for one server, and print the rows
    read back from the store. The one collector that ships OFF (long_query_completions, whose enabling is what
@@ -387,6 +392,20 @@ if (args.Length > 0 && DarlingCliCommands.IsSelfCheckPasswordKeyVerb(args[0]))
 if (args.Length > 0 && DarlingCliCommands.IsSetCollectorRunAtVerb(args[0]))
 {
     return await DarlingCliCommands.SetCollectorRunAtAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);
+}
+
+/* CLI verbs: --set-collector-frequency <collector> <minutes|default> and --set-collector-retention <collector> <days|default>, each with
+   [--server <name>] [--config <path>] (#6227) — set or clear one value of a collector's schedule row, fleet-wide or for one server, and
+   print the rows read back. Same shape and posture as --set-collector-run-at directly above: no SQL of their own (they execute the
+   command plane's plan), trailing arguments parsed STRICTLY inside the verb. */
+if (args.Length > 0 && DarlingCliCommands.IsSetCollectorFrequencyVerb(args[0]))
+{
+    return await DarlingCliCommands.SetCollectorColumnAsync(PerformanceMonitor.Darling.Storage.CollectorScheduleColumn.FrequencyMinutes, args[1..], Console.Out, Console.Error, CancellationToken.None);
+}
+
+if (args.Length > 0 && DarlingCliCommands.IsSetCollectorRetentionVerb(args[0]))
+{
+    return await DarlingCliCommands.SetCollectorColumnAsync(PerformanceMonitor.Darling.Storage.CollectorScheduleColumn.RetentionDays, args[1..], Console.Out, Console.Error, CancellationToken.None);
 }
 
 /* CLI verb: --drop-xe-sessions <server-name> [--dry-run] [--config <path>] | --print-sql (#4732) — drop the Extended

@@ -9982,7 +9982,7 @@ LIMIT $3";
     /// </summary>
     private async Task EvaluateStoreDiskPressureAsync(DarlingConfig config, CancellationToken cancellationToken)
     {
-        long? storeSizeBytes = await ReadStoreSizeBytesAsync(cancellationToken);
+        var (storeSizeBytes, storeSizeEstimated) = await ReadStoreSizeBytesAsync(cancellationToken);
 
         long? freeBytes = null;
         long? totalBytes = null;
@@ -10006,7 +10006,7 @@ LIMIT $3";
            Matches() in the pre-deliver mute check — is isolated inside the evaluator, exactly like the
            per-server EvaluateStoreAlertsAsync. This sweep-loop body has no catch-all of its own, so an
            un-isolated throw here would stop collection for the whole fleet. */
-        await _selfAlerts!.EvaluateDiskPressureAsync(freeBytes, totalBytes, storeSizeBytes, cancellationToken);
+        await _selfAlerts!.EvaluateDiskPressureAsync(freeBytes, totalBytes, storeSizeBytes, cancellationToken, storeSizeEstimated);
     }
 
     /// <summary>
@@ -10159,8 +10159,10 @@ LIMIT $3";
     /// <summary>
     /// The store database's on-disk size in bytes — context for the disk-pressure alert text, read from the
     /// whole-store row the hourly self-metrics sweep records
-    /// (<see cref="StoreSelfMetrics.LatestStoreSizeSql"/>). Failure-isolated to null (Debug) so a transient
-    /// store hiccup never breaks the disk-pressure check.
+    /// (<see cref="StoreSelfMetrics.LatestStoreSizeWithTimeSql"/>, the same predicate and ordering as
+    /// <see cref="StoreSelfMetrics.LatestStoreSizeSql"/>). #6245: the same row's <c>size_estimated</c> comes back with
+    /// the size, in the one statement, so the alert text can say when the figure is the hourly catalog estimate.
+    /// Failure-isolated to null (Debug) so a transient store hiccup never breaks the disk-pressure check.
     ///
     /// <para><b>Why this is not <c>pg_database_size_stats</c> (#3199).</b> This method is one of the ten commands
     /// awaited inline on the collection loop's serial thread, under
@@ -10198,14 +10200,20 @@ LIMIT $3";
     /// on this path (3,177 ms against 0.101 ms cold, same store) and is never the change's overall
     /// effect.</para>
     /// </summary>
-    private async Task<long?> ReadStoreSizeBytesAsync(CancellationToken cancellationToken)
+    internal async Task<(long? Bytes, bool Estimated)> ReadStoreSizeBytesAsync(CancellationToken cancellationToken)
     {
         try
         {
             await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
-            using var command = new NpgsqlCommand(StoreSelfMetrics.LatestStoreSizeSql, connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
-            var result = await command.ExecuteScalarAsync(cancellationToken);
-            return result is null || result == DBNull.Value ? null : Convert.ToInt64(result, CultureInfo.InvariantCulture);
+            using var command = new NpgsqlCommand(StoreSelfMetrics.LatestStoreSizeWithTimeSql, connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken) || reader.IsDBNull(0))
+            {
+                return (null, false);
+            }
+
+            /* size_estimated is NULL on a row from before the column: that figure is not marked, so it reads as exact. */
+            return (reader.GetInt64(0), !reader.IsDBNull(2) && reader.GetBoolean(2));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -10213,7 +10221,7 @@ LIMIT $3";
                evidence the alert is judged on - that is freeBytes/totalBytes above. Losing it costs the message a
                number; it does not make the condition unjudgeable. */
             _logger.LogDebug("Store disk-pressure check: could not read the recorded store size: {Message}", ex.Message);
-            return null;
+            return (null, false);
         }
     }
 

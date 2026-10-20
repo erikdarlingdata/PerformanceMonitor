@@ -97,7 +97,7 @@ public static class DarlingRetention
     /// </summary>
     internal static int EffectivePurgeRetentionDays(string collectorName, int resolvedDays)
     {
-        var retentionDays = Math.Max(1, resolvedDays);
+        var retentionDays = Math.Clamp(resolvedDays, 1, CollectorScheduleDefaults.MaxRetentionDays);
         return BaselineServingRawCollectors.Contains(collectorName)
             ? Math.Max(retentionDays, BaselineMath.BaselineWindowDays)
             : retentionDays;

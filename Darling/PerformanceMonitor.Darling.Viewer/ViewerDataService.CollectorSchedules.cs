@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -64,26 +65,12 @@ public sealed partial class ViewerDataService
     /// <c>ux_config_collector_schedules_fleet</c>. $1 collector_name, $2 frequency (nullable), $3 retention
     /// (nullable), $4 enabled, $5 databases (nullable — the V125 scope; NULL and empty are distinct,
     /// see <see cref="CollectorScheduleRow.Databases"/>).</summary>
-    public const string CollectorScheduleFleetUpsertSql = @"
-INSERT INTO config_collector_schedules (server_id, collector_name, frequency_minutes, retention_days, enabled, databases)
-VALUES (NULL, $1, $2, $3, $4, $5)
-ON CONFLICT (collector_name) WHERE server_id IS NULL DO UPDATE SET
-    frequency_minutes = EXCLUDED.frequency_minutes,
-    retention_days = EXCLUDED.retention_days,
-    enabled = EXCLUDED.enabled,
-    databases = EXCLUDED.databases";
+    public const string CollectorScheduleFleetUpsertSql = CollectorScheduleSql.FleetRowUpsert;
 
     /// <summary>Upserts one PER-SERVER override row. Arbiter matches V17's
     /// <c>ux_config_collector_schedules_server</c>. $1 server_id, $2 collector_name, $3 frequency (nullable),
     /// $4 retention (nullable), $5 enabled, $6 databases (nullable — the V125 scope).</summary>
-    public const string CollectorScheduleServerUpsertSql = @"
-INSERT INTO config_collector_schedules (server_id, collector_name, frequency_minutes, retention_days, enabled, databases)
-VALUES ($1, $2, $3, $4, $5, $6)
-ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SET
-    frequency_minutes = EXCLUDED.frequency_minutes,
-    retention_days = EXCLUDED.retention_days,
-    enabled = EXCLUDED.enabled,
-    databases = EXCLUDED.databases";
+    public const string CollectorScheduleServerUpsertSql = CollectorScheduleSql.ServerRowUpsert;
 
     /// <summary>Deletes every fleet-wide override row (revert the fleet scope to code defaults).</summary>
     public const string CollectorScheduleDeleteFleetScopeSql =
@@ -168,7 +155,7 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
                 reader.GetString(1),
                 reader.IsDBNull(2) ? null : reader.GetInt32(2),
                 reader.IsDBNull(3) ? null : reader.GetInt32(3),
-                reader.GetBoolean(4),
+                reader.IsDBNull(4) ? null : reader.GetBoolean(4),
                 /* V125 (#3477): NULL and empty stay distinct through the round trip — the service's
                    ReadScheduleOverridesAsync says why the collapse would be a semantic change. */
                 reader.IsDBNull(5) ? null : reader.GetFieldValue<string[]>(5)));
@@ -485,7 +472,7 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
                 upsert.Parameters.Add(new NpgsqlParameter<string> { TypedValue = row.CollectorName });       // $1 fleet / $2 server
                 AddNullableInt(upsert, row.FrequencyMinutes);                                                 // frequency
                 AddNullableInt(upsert, row.RetentionDays);                                                    // retention
-                upsert.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = row.Enabled });               // enabled
+                upsert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Boolean, Value = (object?)row.Enabled ?? DBNull.Value }); // enabled (V206: NULL = inherit)
                 AddNullableTextArray(upsert, row.Databases);                                                  // databases (V125 scope)
                 await upsert.ExecuteNonQueryAsync(cancellationToken);
             }
@@ -525,7 +512,7 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
 /// null = column NULL (falls through), empty = the explicit "no scope" that stops the fall-through,
 /// non-empty = collect only those databases (<c>excludedDatabases</c> still wins downstream).
 /// </summary>
-public sealed record CollectorScheduleRow(int? ServerId, string CollectorName, int? FrequencyMinutes, int? RetentionDays, bool Enabled, IReadOnlyList<string>? Databases = null)
+public sealed record CollectorScheduleRow(int? ServerId, string CollectorName, int? FrequencyMinutes, int? RetentionDays, bool? Enabled, IReadOnlyList<string>? Databases = null)
     : PerformanceMonitor.Collectors.IScheduleFrequencyOverride;
 
 /// <summary>

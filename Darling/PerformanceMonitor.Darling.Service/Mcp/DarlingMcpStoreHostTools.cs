@@ -70,7 +70,10 @@ public sealed class DarlingMcpStoreHostTools
         + "act on the summary without walking the whole table. gathered_at (UTC) is when this snapshot was "
         + "taken; the store/settings facts are cached for up to 5 minutes and shared across callers, so a burst "
         + "of calls costs one live read. store.size_bytes is the hourly sweep's recorded figure, not a live read: "
-        + "size_as_of is when the sweep recorded it and size_age_seconds how old it is as of this response. Before "
+        + "size_as_of is when the sweep recorded it and size_age_seconds how old it is as of this response. "
+        + "size_estimated is true when that figure is the hourly catalog estimate (page counts the last vacuum or "
+        + "analyze recorded, so it lags the files and reads a little low) and false for the exact size the sweep "
+        + "writes once a day; null on a row from before the marker. Before "
         + "the first sweep, or when the stored figure cannot be read, size_bytes, size_as_of and size_age_seconds "
         + "are null and size_unavailable_reason says why. The uncompressed_chunk_* figures are read live on every "
         + "call; if that read times out or the role is refused it (any error but TimescaleDB being absent) they are "
@@ -180,6 +183,9 @@ public sealed class DarlingMcpStoreHostTools
                     /* #5718: the hourly sweep's metric_time (naive UTC) the size above was recorded at, and its age
                        in seconds as of this response; both null, with size_unavailable_reason set, when there is
                        no stored figure or the read failed. */
+                    /* #6245: true when the stored figure is the hourly catalog estimate (reads a little low and lags the
+                       files), false for the once-a-day exact one, null when read live or on a row from before the marker. */
+                    size_estimated = profile.Store.StoreSizeEstimated,
                     size_as_of = profile.Store.StoreSizeAsOfUtc,
                     size_age_seconds = sizeAgeSeconds,
                     size_unavailable_reason = profile.Store.StoreSizeUnavailableReason,

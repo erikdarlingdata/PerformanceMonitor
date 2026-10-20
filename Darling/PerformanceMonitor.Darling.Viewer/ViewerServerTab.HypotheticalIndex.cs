@@ -135,10 +135,9 @@ public partial class ViewerServerTab
         if (result is null)
         {
             MessageBox.Show(
-                "The service did not answer within 90 seconds. The experiment plans a statement twice, which "
-                + "is normally instant — a wait this long usually means the service is not running or cannot "
-                + "reach that server. Nothing was left behind on it either way: the session is reset even "
-                + "when the call is abandoned.",
+                "The service has started the experiment and has not answered within 90 seconds. It plans a statement twice, "
+                + "which is normally instant — a wait this long usually means the service cannot reach that server. "
+                + "Nothing is left behind on it: the session is reset even when the call is abandoned. Try again later.",
                 "Test an index", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }

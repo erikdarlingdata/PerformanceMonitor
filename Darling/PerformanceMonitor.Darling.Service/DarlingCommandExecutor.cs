@@ -44,6 +44,17 @@ public sealed class DarlingCommandExecutor
     /// concurrent service instances never claim the same row. Public const so a test can pin the shape.
     /// </summary>
     public const string ClaimCommandSql = @"
+WITH expired AS (
+    UPDATE config.config_command
+    SET status = 'failed',
+        completed_at = now() AT TIME ZONE 'UTC',
+        result_status = $3::text,
+        result_json = jsonb_build_object('success', false, 'error', $3::text),
+        args_json = NULL
+    WHERE status = 'pending'
+      AND created_at < (now() AT TIME ZONE 'UTC') - $2
+    RETURNING command_id
+)
 UPDATE config.config_command
 SET status = 'in_progress',
     claimed_at = now() AT TIME ZONE 'UTC',
@@ -52,11 +63,32 @@ WHERE command_id = (
     SELECT command_id
     FROM config.config_command
     WHERE status = 'pending'
+      AND created_at >= (now() AT TIME ZONE 'UTC') - $2
     ORDER BY command_id
     LIMIT 1
     FOR UPDATE SKIP LOCKED
 )
 RETURNING command_id, command_type, target_server_id, args_json, requested_by";
+
+    /// <summary>
+    /// How long a <c>pending</c> command stays runnable (#6247). A command nobody claimed within this many
+    /// minutes of its <c>created_at</c> is failed, never run: the service may have been stopped when it was
+    /// queued, and a pause, purge or undo that fires days later acts on a request the person gave up on. Age
+    /// is measured on the STORE's clock (<c>now() AT TIME ZONE 'UTC'</c> against <c>created_at</c>, which the
+    /// store also stamped), never the service host's clock. Applies to every <c>config_command</c> row, so a
+    /// command queued by the Viewer, the web or MCP gets the same lifetime. A hardcoded default, not a setting.
+    /// </summary>
+    public const int CommandLifetimeMinutes = 15;
+
+    /// <summary>The same lifetime as the interval the claim statement binds as <c>$2</c>.</summary>
+    public static readonly TimeSpan CommandLifetime = TimeSpan.FromMinutes(CommandLifetimeMinutes);
+
+    /// <summary>
+    /// The error text an expired command is failed with (bound as <c>$3</c> of <see cref="ClaimCommandSql"/>), shown
+    /// as-is wherever the command's result is read.
+    /// </summary>
+    public static readonly string ExpiredErrorText =
+        FormattableString.Invariant($"expired: the service did not pick this up within {CommandLifetimeMinutes} minutes of the request");
 
     /// <summary>
     /// Writes the terminal outcome back on the claimed row (succeeded/failed + result_status/json). Internal
@@ -198,13 +230,19 @@ WHERE status = 'in_progress'
         }
     }
 
-    /// <summary>Atomically claims the oldest pending command (or null when the queue is empty).</summary>
+    /// <summary>
+    /// Atomically claims the oldest pending command that is still inside its <see cref="CommandLifetime"/> (or null
+    /// when the queue is empty). The same statement fails every older pending row (#6247), so an expired command
+    /// is never claimed and the next fresh one is.
+    /// </summary>
     public async Task<ClaimedCommand?> ClaimNextAsync(CancellationToken cancellationToken)
     {
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
         using var command = new NpgsqlCommand(ClaimCommandSql, connection);
         command.CommandTimeout = ServiceCommandDeadlines.CommandPlaneSeconds;
-        command.Parameters.AddWithValue(_serviceInstance);
+        command.Parameters.AddWithValue(_serviceInstance);                                                          // $1
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Interval, Value = CommandLifetime }); // $2
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = ExpiredErrorText });                       // $3
 
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
@@ -413,6 +451,12 @@ WHERE status = 'in_progress'
             case "set_collector_run_at":
                 return ResolveCollectorRunAt(command);
 
+            case "set_collector_frequency":
+                return ResolveCollectorColumn(command, CollectorScheduleColumn.FrequencyMinutes);
+
+            case "set_collector_retention":
+                return ResolveCollectorColumn(command, CollectorScheduleColumn.RetentionDays);
+
             case "test_connect":
                 return string.IsNullOrWhiteSpace(command.ArgsJson)
                     ? Fail("test_connect requires args_json with the server definition")
@@ -548,6 +592,16 @@ WHERE status = 'in_progress'
         var successStatus = enabled ? "collector enabled" : "collector disabled";
         var serverId = command.TargetServerId ?? TryReadInt(command.ArgsJson, "server_id", "serverId");
 
+        /* V206 (#6227): inherit = true puts the row's enabled flag back to NULL, which reads "the fleet-wide row's value, else the shipped
+           default", so a later fleet-wide enable or disable reaches this scope again. It is the same command for either verb: the flag
+           it would have set is not written. A row that is not there is left alone. */
+        if (TryReadBool(command.ArgsJson, "inherit") == true)
+        {
+            return serverId is int inheritId
+                ? StoreWrite(CollectorScheduleSql.InheritServerEnabled, new object?[] { inheritId, collectorName }, "collector enabled state set to inherit")
+                : StoreWrite(CollectorScheduleSql.InheritFleetEnabled, new object?[] { collectorName }, "collector enabled state set to inherit (fleet-wide)");
+        }
+
         if (serverId is int scopedId)
         {
             return StoreWrite(
@@ -647,6 +701,75 @@ WHERE status = 'in_progress'
             "INSERT INTO config.config_collector_run_times (server_id, collector_name, run_at_minute) VALUES (NULL, $1, $2) " +
             "ON CONFLICT (collector_name) WHERE server_id IS NULL DO UPDATE SET run_at_minute = EXCLUDED.run_at_minute",
             new object?[] { collectorName, stored }, "collector run time set (fleet-wide)");
+    }
+
+    /// <summary>
+    /// set_collector_frequency / set_collector_retention (#6227) -> set or clear ONE column of the collector's
+    /// <c>config_collector_schedules</c> row, scoped the way <see cref="ResolveCollectorToggle"/> scopes it: <c>target_server_id</c>,
+    /// else args_json.server_id, else the fleet-wide row. args_json carries <c>collector_name</c> and the value: a whole number
+    /// (<c>frequency_minutes</c> or <c>retention_days</c>) or the word <c>default</c> (also <c>none</c>) to clear it, so the
+    /// collector falls back to the next level (the fleet row for a server, else the code default).
+    ///
+    /// <para>The name goes through the catalog like the other collector commands, and the value through
+    /// <see cref="CollectorScheduleBounds"/>, the bounds the Viewer's schedule editor enforces: nothing about either is
+    /// re-decided here. The statements are <see cref="CollectorScheduleSql"/>'s, and write ONE column: the enabled flag, the other
+    /// column and the database scope on an existing row are kept. A row this creates stores a NULL enabled state (V206, "inherit"), so setting a frequency never switches a
+    /// collector on or off and a later fleet-wide enable or disable still reaches it. Clearing a column on a row that is not there
+    /// writes nothing.</para>
+    /// </summary>
+    private static CommandPlan ResolveCollectorColumn(ClaimedCommand command, CollectorScheduleColumn column)
+    {
+        var frequency = column == CollectorScheduleColumn.FrequencyMinutes;
+        var verb = frequency ? "set_collector_frequency" : "set_collector_retention";
+        var valueName = frequency ? "frequency_minutes" : "retention_days";
+
+        var collectorName = TryReadString(command.ArgsJson, "collector_name", "collectorName");
+        if (string.IsNullOrWhiteSpace(collectorName))
+        {
+            return Fail($"{verb} requires args_json.collector_name");
+        }
+
+        if (DarlingCliCommands.CanonicalCollectorName(collectorName) is not string canonical)
+        {
+            return Fail($"{verb}: unknown collector '{collectorName}'");
+        }
+
+        collectorName = canonical;
+
+        var raw = TryReadProperty(command.ArgsJson, new[] { valueName });
+        var clear = raw is { ValueKind: JsonValueKind.String } word
+            && (string.Equals(word.GetString()?.Trim(), "default", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(word.GetString()?.Trim(), "none", StringComparison.OrdinalIgnoreCase));
+        var value = 0;
+        if (!clear)
+        {
+            if (raw is not { ValueKind: JsonValueKind.Number } number || !number.TryGetInt32(out value))
+            {
+                return Fail($"{verb} requires args_json.{valueName} as a whole number, or \"default\" to clear it");
+            }
+
+            var error = frequency
+                ? CollectorScheduleBounds.FrequencyError(collectorName, value)
+                : CollectorScheduleBounds.RetentionError(collectorName, value);
+            if (error is not null)
+            {
+                return Fail(error);
+            }
+        }
+
+        var serverId = command.TargetServerId ?? TryReadInt(command.ArgsJson, "server_id", "serverId");
+        var what = frequency ? "collector frequency" : "collector retention";
+
+        if (clear)
+        {
+            return serverId is int clearedId
+                ? StoreWrite(CollectorScheduleSql.ClearServerColumn(column), new object?[] { clearedId, collectorName }, what + " cleared")
+                : StoreWrite(CollectorScheduleSql.ClearFleetColumn(column), new object?[] { collectorName }, what + " cleared (fleet-wide)");
+        }
+
+        return serverId is int scopedId
+            ? StoreWrite(CollectorScheduleSql.SetServerColumn(column), new object?[] { scopedId, collectorName, value }, what + " set")
+            : StoreWrite(CollectorScheduleSql.SetFleetColumn(column), new object?[] { collectorName, value }, what + " set (fleet-wide)");
     }
 
     /// <summary>test_connect result mapping (pure): success carries the probe facts, failure the error.</summary>
@@ -828,6 +951,12 @@ WHERE status = 'in_progress'
     {
         var value = TryReadProperty(json, names);
         return value.HasValue && value.Value.ValueKind == JsonValueKind.Number && value.Value.TryGetInt32(out var i) ? i : null;
+    }
+
+    private static bool? TryReadBool(string? json, params string[] names)
+    {
+        var value = TryReadProperty(json, names);
+        return value.HasValue && value.Value.ValueKind is JsonValueKind.True or JsonValueKind.False ? value.Value.GetBoolean() : null;
     }
 
     private static JsonElement? TryReadProperty(string? json, string[] names)

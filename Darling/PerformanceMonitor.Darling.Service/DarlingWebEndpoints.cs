@@ -27,6 +27,7 @@ using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Hosting;
+using PerformanceMonitor.Darling.Service.Investigations;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 
@@ -192,6 +193,14 @@ public static class DarlingWebEndpoints
         "list_query_tag_rules",
         "test_query_tag_rule",
         "run_collectors_now",
+        /* #6227: the five collector schedule writes are MCP-only (the Viewer's schedule editor is the page for a person), and the
+           get_collector_schedules read is for an agent checking its own change before and after; no page read mirrors it. */
+        "disable_collector",
+        "enable_collector",
+        "set_collector_frequency",
+        "set_collector_run_at",
+        "set_collector_retention",
+        "get_collector_schedules",
         "get_tool_guide",
         "wait_for_investigation_requests",
         /* #6033: an agent's read of one claimed request's frozen evidence, served by claim; no page read mirrors it. */
@@ -346,7 +355,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// and the MCP host's analysis fill — so compare_analysis' banding here reads a series the store was already asked
     /// for this analysis hour from memory. Null keeps the analysis service's baselines private to it.</para>
     /// </summary>
-    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null, PostgresConfig? postgresConfig = null, ReadLatencyAccumulator? readLatency = null, PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null, MonitoredServerRegistryState? registryState = null, SlowReadLog? slowReads = null, ReadAdmission? readAdmission = null, StoreOwnerSource? ownerSource = null)
+    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null, PostgresConfig? postgresConfig = null, ReadLatencyAccumulator? readLatency = null, PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null, MonitoredServerRegistryState? registryState = null, SlowReadLog? slowReads = null, ReadAdmission? readAdmission = null, StoreOwnerSource? ownerSource = null, McpDataDetail dataDetail = McpDataDetail.MetadataOnly, IPseudonymKeySource? pseudonymKeys = null, InvestigationExportGate? investigationExportGate = null)
     {
         /* #4442 scope 2, #4782: the read-latency seat THIS call's routes record into -- the accumulator and
            logger this call was given, held in a per-call object that the two record sites close over: the
@@ -664,6 +673,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         MapServers(app, postgres, logger);
         MapAlertHistoryDismiss(app, postgres, logger);
         MapInvestigationFeedback(app, postgres, logger);
+        MapInvestigationExport(
+            app, postgres, logger, dataDetail, pseudonymKeys, readAdmission, readLatencyRecorder,
+            investigationExportGate ?? new InvestigationExportGate(InvestigationExportGate.FolderFor(
+                DarlingManagedPostgres.ResolveDataDirectory(postgresConfig ?? new PostgresConfig()))));
         MapInvestigationPractice(app, postgres, logger);
         MapWebhookSigningStatus(app, collector);
 
@@ -1029,11 +1042,18 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 return ErrorResult(definitionError ?? "definition is invalid.", StatusCodes.Status400BadRequest);
             }
 
+            var (createExpiry, createExpiryError) = Mcp.DarlingMcpCustomAlertTools.ResolveCreateExpiry(request.ExpiresAtText);
+            if (createExpiryError is not null)
+            {
+                return ErrorResult(createExpiryError, StatusCodes.Status400BadRequest);
+            }
+
             /* #4283: no local catch — an unexpected throw here (never ex.Message on the wire) is exactly what
                the #4281 top-of-pipeline backstop exists to answer, and MapAll wires this route after it. */
             var result = await store.CreateAsync(
                 request.Name, request.Description, request.DefinitionJson, request.Enabled,
-                updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
+                updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, expiresAtUtc: createExpiry,
+                cancellationToken: context.RequestAborted);
             return result switch
             {
                 CustomAlertRuleResult.Ok ok => CreatedResult(context, $"/api/alerts/{ok.Rule!.Id}", BuildFullRuleNode(ok.Rule)),
@@ -1070,10 +1090,26 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 return ErrorResult(definitionError ?? "definition is invalid.", StatusCodes.Status400BadRequest);
             }
 
+            /* #6235: a full replace, so an absent expiry clears it. A value that is in the past is refused only when it is a CHANGE: an
+               editor that re-saves an already-expired rule sends its old expiry back, and that must still save. */
+            var existing = await store.GetAsync(id, context.RequestAborted);
+            if (existing is not CustomAlertRuleResult.Ok { Rule: { } existingRule })
+            {
+                return AlertNotFoundResult();
+            }
+
+            var (updateExpiry, updateExpiryError) = Mcp.DarlingMcpCustomAlertTools.ResolveUpdateExpiry(
+                request.ExpiresAtText ?? string.Empty, existingRule.ExpiresAtUtc);
+            if (updateExpiryError is not null)
+            {
+                return ErrorResult(updateExpiryError, StatusCodes.Status400BadRequest);
+            }
+
             /* #4283: no local catch — see the create route's comment above. */
             var result = await store.UpdateAsync(
                 id, request.Name, request.Description, request.DefinitionJson, request.Enabled, expectedVersion,
-                updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
+                updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, expiresAtUtc: updateExpiry,
+                cancellationToken: context.RequestAborted);
             return result switch
             {
                 CustomAlertRuleResult.Ok ok => JsonNodeResult(BuildFullRuleNode(ok.Rule!)),
@@ -2807,6 +2843,172 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
             }
         });
+    }
+
+    /// <summary>The 403 sentence the export answers a login that may not record feedback (#6236).</summary>
+    internal const string InvestigationExportRefusedMessage =
+        "Exporting investigation cases needs the same store login as recording feedback: the admin role. Managed and compose stores connect the web "
+        + "dashboard as the viewer role, which cannot: run --export-investigations on the host, or (bring-your-own store) set postgres.webConnectionString to an admin login.";
+
+    /// <summary>The 403 sentence the export answers a request that is not a signed-in admin session (#6236).</summary>
+    internal const string InvestigationExportSeatMessage =
+        "Exporting investigation cases needs a signed-in dashboard account with the admin role. A viewer account, and a dashboard with no sign-in "
+        + "configured, cannot: run --export-investigations on the host instead.";
+
+    /// <summary>The route name the export is admitted and recorded under (#6236).</summary>
+    internal const string InvestigationExportRoute = "investigation_export";
+
+    /// <summary>The seconds a second export is told to wait when one is already running (#6236).</summary>
+    internal const int InvestigationExportRetryAfterSeconds = 30;
+
+    /// <summary>
+    /// The download of the investigation cases that have feedback (#6236): <c>GET /api/investigation-export?since=&amp;until=&amp;server=&amp;verdict=</c>
+    /// answers JSON lines (<c>application/x-ndjson</c>, one case per line, the same bytes <c>--export-investigations</c> writes) as an attachment.
+    /// Two gates, both required: the request is a signed-in dashboard session whose account holds the admin role
+    /// (<see cref="DarlingWebSeat.IsSignedInAdmin"/>; a viewer account and a dashboard with no sign-in are refused), and the web login holds INSERT and
+    /// UPDATE on the feedback table (<see cref="InvestigationFeedbackStore.CanRecordAsync"/>). The route is heavy from its first call (<see cref="ReadAdmission.AlwaysHeavyRoutes"/>), only one
+    /// export runs at a time (a second answers 429 with Retry-After), and the read-admission slot is released before the file is sent.
+    /// Text is masked at the <c>mcp.dataDetail</c> the service started with, with the store's pseudonym key, by <see cref="InvestigationFeedbackExport"/>,
+    /// the same code the command line runs. The cases are written one at a time to a work file in the service's own data folder and the file is then sent
+    /// through the same handle (deleted when it closes), so a refused case refuses the whole download and no case is held in memory. 400 for a date, verdict or server it cannot use.
+    /// </summary>
+    internal static void MapInvestigationExport(
+        WebApplication app, NpgsqlDataSource postgres, ILogger logger, McpDataDetail dataDetail, IPseudonymKeySource? pseudonymKeys,
+        ReadAdmission? readAdmission = null, ReadLatencyRecorder? readLatencyRecorder = null, InvestigationExportGate? exportGate = null)
+    {
+        exportGate ??= new InvestigationExportGate(InvestigationExportGate.FolderFor(DarlingManagedPostgres.ResolveDataDirectory(new PostgresConfig())));
+        var feedbackStore = new InvestigationFeedbackStore(postgres, McpCommandDeadlines.ReadSeconds);
+        var requestStore = new InvestigationRequestStore(postgres, McpCommandDeadlines.ReadSeconds, () => DateTime.UtcNow);
+
+        app.MapGet("/api/investigation-export", async (HttpContext context) =>
+        {
+            var stopwatch = Stopwatch.StartNew();
+            if (!DarlingWebSeat.IsSignedInAdmin(context))
+            {
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = InvestigationExportSeatMessage }, "/api/investigation-export", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
+            }
+
+            var since = ExportDate(context, "since", out var badSince);
+            var until = ExportDate(context, "until", out var badUntil);
+            if (badSince || badUntil)
+            {
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = "since and until are dates such as 2026-10-01 or 2026-10-01T06:00:00Z." }, "/api/investigation-export", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status400BadRequest);
+            }
+
+            var verdict = context.Request.Query.TryGetValue("verdict", out var verdictText) ? verdictText.ToString() : null;
+            if (InvestigationFeedbackExport.FilterRefusal(since, until, verdict) is { } filterRefusal)
+            {
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = filterRefusal }, "/api/investigation-export", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status400BadRequest);
+            }
+
+            /* One export runs at a time, from before its work file exists until the file is gone: a second request answers busy and
+               creates nothing. */
+            if (!exportGate.TryEnter())
+            {
+                return BusyResult(new ReadAdmissionRefusal(
+                    "An investigation export is already running. Try again when it has finished.", InvestigationExportRetryAfterSeconds, 1, 0));
+            }
+
+            /* Up to 2000 cases are read, so the route is heavy from its first call (ReadAdmission.AlwaysHeavyRoutes). The slot covers the
+               store read into the work file only: it is released before the file is sent. */
+            using var readScope = ReadScope.Open(logger);
+            using var ticket = await AdmitWebRouteAsync(readAdmission, InvestigationExportRoute, ReadWindowBand.None, context, readLatencyRecorder, readScope.Scope);
+            if (ticket.Refusal is { } refusal)
+            {
+                exportGate.Exit();
+                return BusyResult(refusal);
+            }
+
+            using var run = new WebRouteRun(readLatencyRecorder, InvestigationExportRoute, ReadWindowBand.None, context, readScope.Scope);
+            try
+            {
+                await using (var connection = await postgres.OpenConnectionAsync(context.RequestAborted))
+                {
+                    if (!await feedbackStore.CanRecordAsync(connection, context.RequestAborted))
+                    {
+                        run.Complete(ReadOutcome.GateFailed);
+                        return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = InvestigationExportRefusedMessage }, "/api/investigation-export", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
+                    }
+                }
+
+                var (serverId, serverLabel, serverError) = await InvestigationFeedbackExport.ResolveServerAsync(postgres, context.Request.Query.TryGetValue("server", out var serverText) ? serverText.ToString() : null, context.RequestAborted);
+                if (serverError is not null)
+                {
+                    run.Complete(ReadOutcome.Ok);
+                    return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = serverError }, "/api/investigation-export", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status400BadRequest);
+                }
+
+                var key = await PseudonymKeySources.KeyForAsync(pseudonymKeys, dataDetail, context.RequestAborted);
+                /* One handle for the whole life of the file: written, rewound and sent through the same handle, never reopened by name. */
+                await using var file = InvestigationExportFile.CreateScratch(exportGate.Folder);
+                var outcome = await InvestigationFeedbackExport.WriteAsync(
+                    requestStore, since, until, serverId, verdict, dataDetail, key, file, context.RequestAborted);
+                await file.FlushAsync(context.RequestAborted);
+                file.Position = 0;
+
+                if (outcome.Refused)
+                {
+                    return DarlingWebStatementSweep.Refusal("/api/investigation-export", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+                }
+
+                context.Response.ContentType = "application/x-ndjson; charset=utf-8";
+                context.Response.Headers.ContentDisposition = "attachment; filename=\"investigation-cases.jsonl\"";
+                if (outcome.Truncated)
+                {
+                    context.Response.Headers["X-Export-Truncated"] = InvestigationRequestStore.FeedbackExportLimit.ToString(CultureInfo.InvariantCulture);
+                }
+
+                if (outcome.HeldBack > 0)
+                {
+                    context.Response.Headers["X-Export-Held-Back"] = outcome.HeldBack.ToString(CultureInfo.InvariantCulture);
+                }
+
+                if (serverLabel is not null)
+                {
+                    context.Response.Headers["X-Export-Server"] = Uri.EscapeDataString(serverLabel);
+                }
+
+                /* The store work is done: the slot and the route's timing end here, so a slow download holds neither. The one-export gate
+                   stays held until the file is gone. */
+                run.Complete(ReadOutcome.Ok);
+                run.Dispose();
+                ticket.Dispose();
+                if (exportGate.BeforeSend is { } beforeSend)
+                {
+                    await beforeSend();
+                }
+
+                context.Response.ContentLength = file.Length;
+                await file.CopyToAsync(context.Response.Body, context.RequestAborted);
+                return Results.Empty;
+            }
+            catch (Exception ex) when (IsFeedbackPrivilegeRefusal(ex))
+            {
+                run.Complete(ReadOutcome.GateFailed);
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = InvestigationExportRefusedMessage }, "/api/investigation-export", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                DarlingWebFailureLog.Report(logger, "/api/investigation-export", stopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
+                return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
+            }
+            finally
+            {
+                exportGate.Exit();
+            }
+        });
+    }
+
+    /// <summary>One date query parameter of the export (#6236): null when absent, with <paramref name="bad"/> set when it is not a date.</summary>
+    private static DateTime? ExportDate(HttpContext context, string name, out bool bad)
+    {
+        bad = false;
+        if (!context.Request.Query.TryGetValue(name, out var text) || string.IsNullOrWhiteSpace(text))
+            return null;
+        if (DateTimeOffset.TryParse(text.ToString(), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var when))
+            return when.UtcDateTime;
+        bad = true;
+        return null;
     }
 
     internal static JsonObject FeedbackReceipt(InvestigationFeedbackOutcome outcome, Guid request, string author) => new()
@@ -6690,7 +6892,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_query_store_clutter"] = R(CatData, "The Query Store CLUTTER view: per database the collector's read cost (how often and by how much it was the slowest fan-out item), plan churn (plans per query, arrivals per day, one-shot plans) and the options row, each with raw numbers and a decomposed verdict; ONE per-server overhead block (non-sleep QDS_* wait deltas with the excluded sleep waits named, and the Query Store memory clerk). Replicas excluded by architecture with the reason on the row; query_capture_mode (ALL / AUTO / CUSTOM / NONE) carried with capture_mode_known beside it, null meaning a capture older than the V137 rung rather than NONE. window_truncated says the raw tier did not hold the whole window. Composed from collected rows - no new query against the server.", PServer(), PHours(24), PLimit(DarlingMcpQueryStoreClutterTools.DefaultLimit), PBool("include_fleet_median", false), PAsOf(), PDatabases()),
             ["get_resource_use_by_tag"] = R(CatData, "Resource use rolled up by query tag, one section per source (plan cache, Query Store, procedures, blocking, deadlocks); sections are never summed. Omit the server for the fleet.", PServer(), PHours(24), PText("tag"), PLimit(DarlingMcpQueryTagRollupTools.DefaultLimit), PAsOf()),
             ["get_query_store_query_history"] = R(CatData, "One Query Store query's executions, duration and CPU per plan over the window (requires database_name, query_id).", PReqText("database_name"), PReqInt("query_id"), PServer(), PHours(24), PAsOf()),
-            ["get_forced_plans"] = R(CatData, "Whether each Query Store force works: one entry per plan forced in its database's newest capture, with a state (WORKING, NOT_EXERCISED, IGNORED, FAILING or REMOVED) and the evidence (database_name optional).", PServer(), PHours(24), PAsOf(), PDatabases()),
+            ["get_forced_plans"] = R(CatData, "Whether each Query Store force works: one entry per plan forced in its database's newest capture, with a state (WORKING, NOT_EXERCISED, IGNORED, FAILING, UNKNOWN_PLAN_NOT_COLLECTED or REMOVED) and the evidence (database_name optional).", PServer(), PHours(24), PAsOf(), PDatabases()),
             ["get_plan_force_precheck"] = R(CatData, "Reads one Query Store plan before anyone forces it: verdict blocked (plan_not_found or plan_already_forced, a force that cannot work) or not_blocked (never safe), the warnings with stable codes for the agent's own instructions to weigh, what a person should read first, and the checks the store could not answer (requires database_name, query_id, plan_id; compare_plan_id optional).", PReqText("database_name"), PReqInt("query_id"), PReqInt("plan_id"), PInt("compare_plan_id"), PServer(), PHours(24), PAsOf()),
             ["get_query_store_aborts"] = R(CatData, "Queries ranked by Query Store runs that ended aborted (a client timeout or cancel) or with an exception, with each query's share of its own runs, the average aborted duration and the newest failure time; window_truncated says the store did not hold the whole window.", PServer(), PHours(24), PTop(20), PText("database_name"), PAsOf(), PBool("full_text", false)),
             ["get_cpu_by_database"] = R(CatData, "Databases ranked by CPU over the window with each one's share of the server total, its heaviest statement and the procedure stats' CPU beside it (never added to it).", PServer(), PHours(24), PTop(20), PAsOf()),
@@ -7386,7 +7588,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// definition as raw JSON text (re-serialized from the parsed node), <c>enabled</c> (defaults true when the
     /// key is absent, matching create's default and a full-replace PUT), and version (present only on updates).
     /// The definition's STRUCTURE is validated separately by <see cref="CustomAlertRuleDefinition.TryParse"/>.</summary>
-    private sealed record AlertWriteRequest(string Name, string? Description, string DefinitionJson, bool Enabled, int? Version);
+    private sealed record AlertWriteRequest(string Name, string? Description, string DefinitionJson, bool Enabled, int? Version, string? ExpiresAtText = null);
 
     /// <summary>Parses an alert create/update body into an <see cref="AlertWriteRequest"/>, or a caller-facing
     /// error. Mirrors <see cref="ParseViewBodyAsync"/>, adding the <c>enabled</c> field alert rules carry.</summary>
@@ -7437,7 +7639,20 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             version = v;
         }
 
-        return (new AlertWriteRequest(name.Trim(), description, definitionJson, enabled, version), null);
+        /* #6235: the optional expiry. Absent, null or empty means the rule does not expire (a full-replace PUT clears it, like every
+           other field the editor sends); anything else is parsed by the store call below, so a bad value is a 400, not a throw. */
+        string? expiresText = null;
+        if (obj["expires_at_utc"] is JsonValue expiresValue)
+        {
+            if (!expiresValue.TryGetValue<string>(out var expiresString))
+            {
+                return (null, $"'expires_at_utc' must be {CustomAlertExpiry.Spelling}, or null for a rule that does not expire.");
+            }
+
+            expiresText = string.IsNullOrWhiteSpace(expiresString) ? null : expiresString;
+        }
+
+        return (new AlertWriteRequest(name.Trim(), description, definitionJson, enabled, version, expiresText), null);
     }
 
     /// <summary>Extracts just the embedded <c>definition</c> object from a body as raw JSON text — the
@@ -7505,7 +7720,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// shape.</summary>
     internal static JsonObject BuildFullRuleNode(CustomAlertRule rule) =>
         JsonSerializer.SerializeToNode(new CustomAlertRuleImage(rule.Id, rule.Name, rule.Description, JsonNode.Parse(rule.DefinitionJson),
-            rule.Enabled, rule.Version, rule.CreatedAt, rule.UpdatedAt, rule.UpdatedBy))!.AsObject();
+            rule.Enabled, rule.Version, rule.CreatedAt, rule.UpdatedAt, rule.UpdatedBy,
+            CustomAlertExpiry.Format(rule.ExpiresAtUtc), rule.IsExpiredAt(DateTime.UtcNow)))!.AsObject();
 
     /// <summary>The bare-array list wire shape (no definition body), carrying <c>enabled</c> so the list can
     /// badge a paused rule without fetching each full definition — plus <c>last_fired</c> (#3360), the naive-UTC
@@ -7527,6 +7743,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 ["updated_at"] = rule.UpdatedAt,
                 ["updated_by"] = rule.UpdatedBy,
                 ["last_fired"] = rule.LastFired,
+                ["expires_at_utc"] = CustomAlertExpiry.Format(rule.ExpiresAtUtc),
+                ["expired"] = rule.IsExpiredAt(DateTime.UtcNow),
             });
         }
 

@@ -254,6 +254,7 @@ RETURNING route_id, server_id, server_name";
         ForcedPlanState.NotExercised => "not_exercised",
         ForcedPlanState.Ignored => "ignored",
         ForcedPlanState.Failing => "failing",
+        ForcedPlanState.UnknownPlanNotCollected => "unknown_plan_not_collected",
         _ => "removed",
     };
 
@@ -304,8 +305,18 @@ RETURNING route_id, server_id, server_name";
                 sincePlans.Add(numbers);
             }
 
-            foreach (var other in fact.OtherPlans.Take(Math.Max(0, ForceCheckPlansShown - 1 - Math.Min(fact.VariantPlans.Count, ForceCheckPlansShown - 1))))
+            /* A definite other plan is the evidence for IGNORED, which beats an unknown, so other plans are listed before the unknown ones and
+               an unknown can't push them out of the shown plans. */
+            foreach (var other in fact.OtherPlans.Take(Math.Max(0, ForceCheckPlansShown - sincePlans.Count)))
                 sincePlans.Add(PlanNumbers(other.PlanId, other.Run ?? new DarlingForcedPlanStateReader.Ran(other.Executions, other.LastExecution)));
+
+            /* #6221: a later plan whose stored XML is not there yet is neither a variant nor another plan; it is listed, marked, and the state says so. */
+            foreach (var unknown in fact.UnknownPlans.Take(Math.Max(0, ForceCheckPlansShown - sincePlans.Count)))
+            {
+                var numbers = PlanNumbers(unknown.PlanId, unknown.Run ?? new DarlingForcedPlanStateReader.Ran(unknown.Executions, unknown.LastExecution));
+                numbers["plan_xml_not_stored"] = true;
+                sincePlans.Add(numbers);
+            }
         }
         else
         {
@@ -353,6 +364,10 @@ RETURNING route_id, server_id, server_name";
                 /* From the fact, not the shown list: with many variants listed first, another plan can fall off the list (#6160). */
                 ["other_plans_ran"] = fact is not null ? fact.OtherPlans.Count > 0 : sincePlans.Any(p => p is JsonObject o && o["plan_id"] is JsonValue v && v.TryGetValue(out long id) && id != force.PlanId && o["variant_of_forced"] is null),
                 ["variant_plans_ran"] = sincePlans.Any(p => p is JsonObject o && o["variant_of_forced"] is not null),
+                /* #6221: later plans that ran whose stored XML is not there, so a variant or another plan is not known. The check stays open to the
+                   next one (only a removed force closes the sweep). */
+                ["unknown_plans_ran"] = fact is not null && fact.UnknownPlans.Count > 0,
+                ["unknown_reason"] = fact?.UnknownReason,
                 ["stats_complete"] = read.StatsComplete,
             },
             ["before_force"] = new JsonObject

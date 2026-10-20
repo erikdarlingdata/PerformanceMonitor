@@ -58,7 +58,7 @@ public sealed partial class ViewerDataService
         var result = await PollCommandResultAsync(commandId, UndoPlanChangeTimeout, cancellationToken);
         if (result is null)
         {
-            return new PlanUndoAnswer(PlanUndoAnswer.Failed, "timed_out", "The service has not answered yet. Check that it is running, then look at the list again before trying twice.");
+            return new PlanUndoAnswer(PlanUndoAnswer.Failed, "timed_out", "The service is running the undo and has not answered yet. Look at the list again later before trying twice.");
         }
 
         try

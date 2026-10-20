@@ -69,7 +69,9 @@ public sealed class DataWindowFloorTests
     /// A collector table the schedule's retention governs (waiting_tasks and query_snapshots keep 7 days) takes its
     /// edge from the purge cutoff, so the probe reads nothing older than the window: no row of the table is read
     /// without the window's lower bound, and the first collection (the registry's created_date) is the other bound.
-    /// A quiet start, or a server whose first row came late, cannot raise a notice the store does not owe.
+    /// A quiet start, or a server whose first row came late, cannot raise a notice the store does not owe. What the
+    /// edge is (the schedule's retention, the default with no row, the cap, the registration) is checked against a
+    /// store in <see cref="DataWindowFloorScheduleLiveTests"/>; this test keeps the default days and the absence of a walk.
     /// </summary>
     [Theory]
     [InlineData("waiting_tasks", 7)]
@@ -81,8 +83,6 @@ public sealed class DataWindowFloorTests
 
         var sql = DataWindowFloor.FloorSql([source], DataWindowFloor.Scope.Fleet);
 
-        Assert.Contains("GREATEST($3 - make_interval(days => COALESCE((SELECT o.retention_days FROM config.config_collector_schedules AS o", sql, StringComparison.Ordinal);
-        Assert.Contains($"lower(o.collector_name) = '{table}' AND o.retention_days >= 1 LIMIT 1), {defaultDays})), s.created_date)", sql, StringComparison.Ordinal);
         Assert.DoesNotContain(" AS h", sql, StringComparison.Ordinal);
     }
 
@@ -184,7 +184,7 @@ public sealed class DataWindowFloorTests
     /// <summary>
     /// The two config snapshot tables have no index, so the probe never walks them: it reads only the window's rows
     /// (the window's lower bound lets TimescaleDB leave every other chunk alone). The edge is the schedule's, 30 days
-    /// with a fleet override winning, like any collector the schedule governs; a row older than the edge moves the
+    /// with a fleet override winning (<see cref="DataWindowFloorScheduleLiveTests"/> reads it from a store); a row older than the edge moves the
     /// answer earlier (<c>LEAST(coverage, w.t)</c>), so the answer is never later than a row the config grids show;
     /// and a logged run of the config collector counts the server, since a snapshot is written once a day.
     /// </summary>
@@ -199,9 +199,6 @@ public sealed class DataWindowFloorTests
 
         var sql = DataWindowFloor.FloorSql([source], DataWindowFloor.Scope.ServerId);
 
-        Assert.Contains(
-            $"GREATEST($3 - make_interval(days => COALESCE((SELECT o.retention_days FROM config.config_collector_schedules AS o WHERE o.server_id IS NULL AND lower(o.collector_name) = '{table}' AND o.retention_days >= 1 LIMIT 1), 30)), s.created_date)",
-            sql, StringComparison.Ordinal);
         Assert.Contains($"FROM collect.{table} AS f", sql, StringComparison.Ordinal);
         Assert.Contains($"AND   f.{timeColumn} >= $2", sql, StringComparison.Ordinal);
         Assert.Contains($"AND   f.{timeColumn} <= $1", sql, StringComparison.Ordinal);

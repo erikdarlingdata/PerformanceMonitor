@@ -91,6 +91,16 @@ public sealed class ReadAdmission
         ["list_servers"] = "health read: the registry every other read names a server from",
     };
 
+    /// <summary>
+    /// The routes that are heavy from their first call, whatever the learned p90 or the window band says (#6236): each is a
+    /// read whose cost does not follow a time window, so neither the stored histogram nor the band prior can classify it.
+    /// The investigation export reads up to 2,000 cases through the store, so it takes a heavy slot from the start.
+    /// </summary>
+    internal static readonly IReadOnlyDictionary<string, string> AlwaysHeavyRoutes = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        [DarlingWebEndpoints.InvestigationExportRoute] = "reads up to 2,000 cases with their reports, briefs and feedback into one file",
+    };
+
     /// <summary>Whether a tool or web read goes through admission: not a health read (<see cref="SkippedRoutes"/>) and not
     /// an MCP write tool (writes never wait).</summary>
     internal static bool IsAdmitted(string name) =>
@@ -170,6 +180,12 @@ public sealed class ReadAdmission
     /// heavy, and the p90 it is expected to take (the threshold for a pair known only by its band prior).</summary>
     internal bool IsHeavy(ReadSurface surface, string route, string band, out long expectedMs)
     {
+        if (AlwaysHeavyRoutes.ContainsKey(route))
+        {
+            expectedMs = HeavyThresholdMs;
+            return true;
+        }
+
         if (_p90.TryGetValue((surface, route, band), out var p90))
         {
             expectedMs = p90;

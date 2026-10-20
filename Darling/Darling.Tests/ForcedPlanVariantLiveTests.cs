@@ -187,7 +187,13 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,'Regular',$8,$9,$9,$10,$11,5000,7000,1,FALSE,0)",
                 await using (var reader = await command.ExecuteReaderAsync(ct))
                     while (await reader.ReadAsync(ct)) ids.Add(reader.GetInt64(0));
                 foreach (var id in ids.Where(i => i != setup.ScanPlan))
+                {
                     await StatsAsync(connection, database, setup.QueryId, id, baseTime.AddMinutes(30), await EngineExecutionsAsync(database, id, ct), ct);
+
+                    /* #6221: the collector reads no plan XML, so the XML the store judges a later plan by is the one the Query Store collector stores: here the engine's own. */
+                    var planXml = Convert.ToString(await SqlScalarAsync(database, $"SELECT CONVERT(nvarchar(max), query_plan) FROM sys.query_store_plan WHERE plan_id = {id};", ct), CultureInfo.InvariantCulture);
+                    await StoredPlanSeed.AddAsync(connection, ct, ServerId, database, id, planXml);
+                }
             }
 
             await body(new Rig(connection, postgres, setup, baseTime, rows), ct);
@@ -222,13 +228,15 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,'Regular',$8,$9,$9,$10,$11,5000,7000,1,FALSE,0)",
     {
         await RunAsync(null, async (rig, ct) =>
         {
-            var variants = rig.Rows.Single(r => r.PlanId == rig.Setup.ForcedPlan).VariantPlanIds;
-            Assert.False(string.IsNullOrEmpty(variants), "the engine compiled the force under a new plan id; the collector reads it as a variant");
-            Assert.DoesNotContain(rig.Setup.ScanPlan.ToString(CultureInfo.InvariantCulture), variants!.Split(','));
+            /* #6221: the collector reads no plan XML, so it names no variant; the store finds them in the stored plans. */
+            Assert.Null(rig.Rows.Single(r => r.PlanId == rig.Setup.ForcedPlan).VariantPlanIds);
 
             var force = await ForceAsync(rig, ct);
             Assert.Equal("WORKING", force.GetProperty("state").GetString());
-            Assert.Equal(variants, string.Join(',', force.GetProperty("variant_plans").EnumerateArray().Select(v => v.GetProperty("plan_id").GetInt64()).OrderBy(i => i)));
+            var variants = force.GetProperty("variant_plans").EnumerateArray().Select(v => v.GetProperty("plan_id").GetInt64()).ToList();
+            Assert.NotEmpty(variants);
+            Assert.DoesNotContain(rig.Setup.ScanPlan, variants);
+            Assert.All(variants, v => Assert.True(v > rig.Setup.ForcedPlan, "a variant is a LATER plan id of the query"));
             Assert.True(force.GetProperty("variant_plans")[0].GetProperty("execution_count").GetInt64() >= 1);
             Assert.Equal(0, force.GetProperty("other_plans_total").GetInt32());
             Assert.Equal(JsonValueKind.Null, force.GetProperty("plan_guide").ValueKind);

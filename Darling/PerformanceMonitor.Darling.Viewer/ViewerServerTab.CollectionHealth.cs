@@ -250,7 +250,7 @@ public partial class ViewerServerTab
             var result = await _dataService.RequestPurgeNowAsync();
             if (result is null)
             {
-                PurgeNowIndicator.Text = "The service has not answered yet — the purge may not have started. Try again in a moment";
+                PurgeNowIndicator.Text = "The service is running the purge and has not answered yet. Check the collection log later";
             }
             else if (result.Status != ViewerDataService.StatusSucceeded)
             {

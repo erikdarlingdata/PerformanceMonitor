@@ -457,7 +457,16 @@ SET state = $2, decided_by = $3, decided_at = $4
 WHERE note_id = $1 AND state = 'pending'
 RETURNING source_request_id, server_id";
 
-    internal static readonly string ReportsRequestsSql = $@"
+    internal static string ReportsRequestsSql => ReportsRequestsSelect + @"
+WHERE ($2::uuid IS NULL OR r.request_id = $2)
+  AND ($3::integer IS NULL OR r.server_id = $3)
+  AND ($2::uuid IS NOT NULL OR r.opened_at >= $4)
+ORDER BY r.opened_at DESC, r.request_id
+LIMIT $5";
+
+    /// <summary>The request columns <see cref="ReportsRequestRow"/> reads, shared by the report read and the feedback export (#6236).
+    /// $1 is now, as the state is computed.</summary>
+    internal static readonly string ReportsRequestsSelect = $@"
 SELECT r.request_id, r.route_id, r.server_id, r.server_name, r.family, r.first_metric, r.first_alert_at, r.last_alert_at,
        r.alert_count,
        CASE
@@ -470,12 +479,7 @@ SELECT r.request_id, r.route_id, r.server_id, r.server_name, r.family, r.first_m
        r.opened_at, r.expires_at, r.claimed_by, r.lease_until, r.claim_count, r.reported_at, r.brief::text, r.practice_of,
        {RegistryNamesSelect("r", "sv")}
 FROM config.investigation_requests AS r
-LEFT JOIN collect.servers AS sv ON sv.server_id = r.server_id
-WHERE ($2::uuid IS NULL OR r.request_id = $2)
-  AND ($3::integer IS NULL OR r.server_id = $3)
-  AND ($2::uuid IS NOT NULL OR r.opened_at >= $4)
-ORDER BY r.opened_at DESC, r.request_id
-LIMIT $5";
+LEFT JOIN collect.servers AS sv ON sv.server_id = r.server_id";
 
     /* #5918: the one definition of "a LIVE practice request": a practice request that reads open or claimed (the computed state,
        as ListSql computes it), so a submitted, released-to-expiry or expired practice is not live. It returns
@@ -1094,6 +1098,39 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
             return new InvestigationReportsRead(requests, reports, journal, brief, requestsTruncated, false, [], requestId is null ? [] : null, EvidenceByBasis: true);
         }
 
+        reports.AddRange(await ReadReportsForAsync(connection, ids, cancellationToken));
+
+        await using (var command = Command(connection, null, ReportsJournalSql, P(ids), P(journalLimit + 1)))
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                journal.Add(new InvestigationJournalRow(
+                    reader.GetFieldValue<DateTime>(0), reader.IsDBNull(1) ? null : reader.GetGuid(1),
+                    reader.IsDBNull(2) ? null : reader.GetInt32(2), reader.GetString(3), reader.GetString(4),
+                    reader.IsDBNull(5) ? null : reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6)));
+            }
+        }
+
+        var journalTruncated = journal.Count > journalLimit;
+        if (journalTruncated)
+        {
+            journal.RemoveRange(journalLimit, journal.Count - journalLimit);
+        }
+
+        /* #5913: the people's feedback on these reports, and (for a window, not one request) the false-positive counts per family
+           over the same window and server. The V191 table is SELECT-able by every role that reads these tables. */
+        var feedbackStore = new InvestigationFeedbackStore(_dataSource, _commandTimeoutSeconds);
+        var feedback = await feedbackStore.ReadAsync(connection, ids, cancellationToken);
+        var familyCounts = requestId is null ? await feedbackStore.FamilyCountsAsync(connection, sinceUtc, serverId, cancellationToken) : null;
+        return new InvestigationReportsRead(requests, reports, journal, brief, requestsTruncated, journalTruncated, feedback, familyCounts, EvidenceByBasis: true);
+    }
+
+    /// <summary>The reports of the requests in <paramref name="ids"/> with their links (#5914), as the report read and the feedback
+    /// export (#6236) serve them.</summary>
+    private async Task<List<InvestigationReportRow>> ReadReportsForAsync(NpgsqlConnection connection, Guid[] ids, CancellationToken cancellationToken)
+    {
+        var reports = new List<InvestigationReportRow>();
         await using (var command = Command(connection, null, ReportsSql, P(ids)))
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
@@ -1130,30 +1167,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
             }
         }
 
-        await using (var command = Command(connection, null, ReportsJournalSql, P(ids), P(journalLimit + 1)))
-        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
-        {
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                journal.Add(new InvestigationJournalRow(
-                    reader.GetFieldValue<DateTime>(0), reader.IsDBNull(1) ? null : reader.GetGuid(1),
-                    reader.IsDBNull(2) ? null : reader.GetInt32(2), reader.GetString(3), reader.GetString(4),
-                    reader.IsDBNull(5) ? null : reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6)));
-            }
-        }
-
-        var journalTruncated = journal.Count > journalLimit;
-        if (journalTruncated)
-        {
-            journal.RemoveRange(journalLimit, journal.Count - journalLimit);
-        }
-
-        /* #5913: the people's feedback on these reports, and (for a window, not one request) the false-positive counts per family
-           over the same window and server. The V191 table is SELECT-able by every role that reads these tables. */
-        var feedbackStore = new InvestigationFeedbackStore(_dataSource, _commandTimeoutSeconds);
-        var feedback = await feedbackStore.ReadAsync(connection, ids, cancellationToken);
-        var familyCounts = requestId is null ? await feedbackStore.FamilyCountsAsync(connection, sinceUtc, serverId, cancellationToken) : null;
-        return new InvestigationReportsRead(requests, reports, journal, brief, requestsTruncated, journalTruncated, feedback, familyCounts, EvidenceByBasis: true);
+        return reports;
     }
 
     /// <summary>

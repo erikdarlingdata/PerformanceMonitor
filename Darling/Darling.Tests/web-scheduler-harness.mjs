@@ -121,6 +121,7 @@ const sandbox = {
   readTool: async () => ({ kind: "empty" }),
   getSession: async () => null,
   listViews: async () => [],
+  onViewsChanged() {},
 };
 
 vm.createContext(sandbox);

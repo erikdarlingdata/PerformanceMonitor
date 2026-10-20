@@ -1600,6 +1600,11 @@ public sealed class DarlingMcpHostService : BackgroundService
                buttons use. The mcp role queues through config.request_snapshot_now (fixed command type, collector names only),
                never a grant on the command queue. */
             .WithGeminiCompatibleTools<DarlingMcpCollectorRunTools>()
+            /* #6227: disable_collector / enable_collector / set_collector_frequency / set_collector_run_at / set_collector_retention
+               (writes, mcp.allowWrites, never offered to an investigation agent) and get_collector_schedules (a read). They run the
+               command plane's own plans on config.config_collector_schedules and config_collector_run_times; the mcp role holds the
+               narrow write grant on those two tables. */
+            .WithGeminiCompatibleTools<DarlingMcpCollectorScheduleTools>()
             /* The server-onboarding WRITE tools — add_servers (BULK) / remove_server: an MCP client can stand up
                or tear down FLEET monitoring conversationally. The service-side twin of the Viewer's Add / Add-
                Multiple dialogs: add_servers validates each entry, probes the connection IN-PROCESS (the service
