@@ -116,8 +116,8 @@ public sealed class RemediationLiveSqlTests
             }
         }
 
-        public SqlServerRemediationExecutor Executor(CapturingLogger logger, int serverId = 7) =>
-            new(serverId, new RemediationServer(Host!, null, "Optional", TrustServerCertificate: true), Login, SecretSlot, logger);
+        public SqlServerRemediationExecutor Executor(CapturingLogger logger, int serverId = 7, string? monitoringUser = null) =>
+            new(serverId, new RemediationServer(Host!, null, "Optional", TrustServerCertificate: true), Login, SecretSlot, logger, monitoringUser);
     }
 
     private static ServerActionPermit Permit(string serverAction, string? id, string? database, int serverId = 7) =>
@@ -336,7 +336,10 @@ public sealed class RemediationLiveSqlTests
     private static async Task<(SqlConnection Victim, int SessionId, DateTime LoginTime)> OpenVictimAsync(Scratch scratch, CancellationToken ct)
     {
         /* No connection resiliency: with it the driver quietly reconnects after a kill, and the test could not see the session end. */
-        var victimBuilder = Builder(scratch.Login, scratch.Password, app: "PerformanceMonitorDarling-RemediationVictim");
+        /* The test server's admin login with an ordinary program name: the remediation login is the scratch one, and Darling's own sessions
+           (its program name, its remediation login) are never killed (#5632). */
+        var victimBuilder = Admin();
+        victimBuilder.ApplicationName = "pm5632_victim";
         victimBuilder.ConnectRetryCount = 0;
         var victim = await OpenAsync(victimBuilder, ct);
         var sessionId = Convert.ToInt32(await ScalarAsync(victim, "SELECT @@SPID;", ct), CultureInfo.InvariantCulture);
@@ -416,6 +419,74 @@ public sealed class RemediationLiveSqlTests
         }
     }
 
+    /// <summary>
+    /// A session of a given login and program name on the test server, opened by the test: the administrator login or the scratch (remediation)
+    /// login. <see cref="OpenVictimAsync"/> is the ordinary one.
+    /// </summary>
+    private static async Task<(SqlConnection Victim, int SessionId, DateTime LoginTime)> OpenSessionAsync(Scratch scratch, bool asRemediationLogin, string program, CancellationToken ct)
+    {
+        var builder = asRemediationLogin ? Builder(scratch.Login, scratch.Password, scratch.Database, program) : Admin();
+        builder.ApplicationName = program;
+        builder.ConnectRetryCount = 0;
+        var victim = await OpenAsync(builder, ct);
+        var sessionId = Convert.ToInt32(await ScalarAsync(victim, "SELECT @@SPID;", ct), CultureInfo.InvariantCulture);
+        await using var admin = await OpenAsync(Admin(), ct);
+        var loginTime = (DateTime)(await ScalarAsync(admin, $"SELECT login_time FROM sys.dm_exec_sessions WHERE session_id = {sessionId};", ct))!;
+        return (victim, sessionId, loginTime);
+    }
+
+    /// <summary>
+    /// #5632: a session counts as Darling's own when its program name starts with PerformanceMonitorDarling AND its login is the monitoring login,
+    /// or when it is the remediation login with any program name. An ordinary login with Darling's program name is not Darling's.
+    /// </summary>
+    [Fact]
+    public async Task ASessionIsDarlings_OnlyByProgramNameTogetherWithTheMonitoringLogin_OrByTheRemediationLogin()
+    {
+        NeedServer();
+        var ct = TestContext.Current.CancellationToken;
+        var scratch = new Scratch();
+        var opened = new List<SqlConnection>();
+        try
+        {
+            await scratch.CreateAsync(ct);
+            var admin = Environment.GetEnvironmentVariable("DARLING_TEST_SQL_USER")!;
+            const string darlingProgram = "PerformanceMonitorDarling-Collector";
+            var permitFor = (int id) => Permit(ServerActionNames.KillSession, id.ToString(CultureInfo.InvariantCulture), null);
+
+            /* The monitoring login with the Darling program name: refused, with no facts, dry run and real. */
+            var (monitoring, monitoringId, monitoringTime) = await OpenSessionAsync(scratch, false, darlingProgram, ct);
+            opened.Add(monitoring);
+            foreach (var dry in new[] { true, false })
+            {
+                var refused = await scratch.Executor(new CapturingLogger(), monitoringUser: admin).KillSessionAsync(permitFor(monitoringId), monitoringId, monitoringTime, dry, ct);
+                Assert.Equal(RemediationResult.Reasons.ToolLoginSession, refused.Reason);
+                Assert.Null(refused.Session);
+                Assert.True(await SessionExistsAsync(monitoringId, monitoringTime, ct));
+            }
+
+            /* An ordinary login with the Darling program name is not Darling's: it is a session this tool may end. */
+            var (ordinary, ordinaryId, ordinaryTime) = await OpenSessionAsync(scratch, false, darlingProgram, ct);
+            opened.Add(ordinary);
+            var ordinaryDry = await scratch.Executor(new CapturingLogger(), monitoringUser: "pm5632_someone_else").KillSessionAsync(permitFor(ordinaryId), ordinaryId, ordinaryTime, dryRun: true, ct);
+            Assert.True(ordinaryDry is { Outcome: RemediationOutcome.Done, Wrote: false }, ordinaryDry.Message);
+            Assert.NotNull(ordinaryDry.Session);
+
+            /* The remediation login with any program name: refused. */
+            var (own, ownId, ownTime) = await OpenSessionAsync(scratch, true, "pm5632_victim", ct);
+            opened.Add(own);
+            var ownRefused = await scratch.Executor(new CapturingLogger(), monitoringUser: "pm5632_someone_else").KillSessionAsync(permitFor(ownId), ownId, ownTime, dryRun: false, ct);
+            Assert.Equal(RemediationResult.Reasons.ToolLoginSession, ownRefused.Reason);
+            Assert.Null(ownRefused.Session);
+            Assert.True(await SessionExistsAsync(ownId, ownTime, ct));
+        }
+        finally
+        {
+            foreach (var connection in opened)
+                connection.Dispose();
+            await scratch.DropAsync();
+        }
+    }
+
     /// <summary>The kill batch run on a connection that names its OWN session: it refuses before anything else, and the connection survives. Run as the administrator, so no grant is in the way.</summary>
     [Fact]
     public async Task TheKillBatch_RefusesItsOwnSession_BeforeAnythingElse_AndDoesNotKillIt()
@@ -430,6 +501,7 @@ public sealed class RemediationLiveSqlTests
             command.Parameters.Add(new SqlParameter("@session_id", SqlDbType.Int) { Value = spid });
             command.Parameters.Add(new SqlParameter("@login_time", SqlDbType.DateTime) { Value = new DateTime(2000, 1, 1) });
             command.Parameters.Add(new SqlParameter("@dry", SqlDbType.Bit) { Value = dry });
+            command.Parameters.Add(new SqlParameter("@monitoring_login", SqlDbType.NVarChar, 128) { Value = DBNull.Value });
             await using var reader = await command.ExecuteReaderAsync(ct);
             Assert.True(await reader.ReadAsync(ct));
             Assert.Equal("own_session", reader.GetString(0));
