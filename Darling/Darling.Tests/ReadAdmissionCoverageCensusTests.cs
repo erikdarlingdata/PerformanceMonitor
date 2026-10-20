@@ -193,6 +193,7 @@ public sealed class ReadAdmissionCoverageCensusTests
         ["DarlingServerDatabasesEndpoint.cs: GET Route"] = null, // the database picker, /api/server-databases
         [WebFile + "POST \"/api/compose/run\""] = null,
         [WebFile + "POST \"/api/alerts/test\""] = null,
+        [WebFile + "GET \"/api/investigation-export\""] = null, // #6236: admitted like the other heavy reads; up to 2000 cases, read a page at a time
         [WebFile + "GET \"/api/catalog\""] = null, // round 2, L5: it reads the schedule overrides and resolves ?server=
         [WebFile + "GET \"/api/ping\""] = "health: answers without reading the store (D8)",
         [WebFile + "GET \"/api/webhook-signing\""] = "status: answers from what the worker read when it applied the configuration, no store read (#5998)",

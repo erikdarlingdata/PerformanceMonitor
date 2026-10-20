@@ -40,7 +40,7 @@ public sealed class InvestigationFeedbackExportLiveTests
 {
     private const int OtherServerId = 7_591_302;
     private const string OtherServerName = "LcExportOther";
-    private const string Secret = "hunter2-secret";
+    private const string Secret = "zebra-42-literal";
     private const string Credential = "pw-Zq93-NotAWord";
     private static readonly string CredentialStatement = $"CREATE LOGIN exporter WITH PASSWORD = '{Credential}'";
 
