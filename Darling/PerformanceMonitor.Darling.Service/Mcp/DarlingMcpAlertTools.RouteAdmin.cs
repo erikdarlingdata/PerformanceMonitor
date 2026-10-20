@@ -33,8 +33,8 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// a route's own destinations (Slack, Teams, a generic webhook, PagerDuty, email recipients), with the Viewer's own rules
 /// (<see cref="NotificationRouteWriter"/>): the service seals each webhook value for the route's own row, in the transaction that creates
 /// or edits the route. Update changes the match or scope only on a route with no explicit agent setting; the store function refuses the
-/// rest, in plain words. An answer shows a route the way <c>get_notification_routes</c> does (channels by name) and a destination as its
-/// channel and host (the recipient count and domains for email), never the value. Every tool here is in
+/// rest, in plain words. An answer shows a route the way <c>get_notification_routes</c> does (channels by name) and a destination as saved
+/// or none (with the host for Teams and Slack only) and the recipient list in full, never a URL or key. Every tool here is in
 /// <see cref="DarlingMcpWritePolicy.WriteTools"/> (served only with <c>mcp.allowWrites</c> and a token) and in
 /// <see cref="DarlingMcpWritePolicy.NeverAgentTools"/> (an agent working an alert can never call it).
 /// </summary>

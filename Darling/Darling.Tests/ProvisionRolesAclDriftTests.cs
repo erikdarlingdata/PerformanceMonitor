@@ -164,8 +164,9 @@ public sealed class ProvisionRolesAclDriftTests
 
         var begin = Regex.Matches(code, @"(?m)^BEGIN;[ \t]*$");
         var commit = Regex.Matches(code, @"(?m)^COMMIT;[ \t]*$");
-        Assert.Single(begin);
-        Assert.Single(commit);
+        /* Two transactions: this one, and the route functions' create, REVOKE and GRANT (#6231), which sits after step 3. */
+        Assert.Equal(2, begin.Count);
+        Assert.Equal(2, commit.Count);
 
         var firstGrant = code.IndexOf("GRANT USAGE ON SCHEMA collect, config TO admin, viewer;", StringComparison.Ordinal);
         var adminWrites = code.IndexOf("GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA config TO admin;", StringComparison.Ordinal);
