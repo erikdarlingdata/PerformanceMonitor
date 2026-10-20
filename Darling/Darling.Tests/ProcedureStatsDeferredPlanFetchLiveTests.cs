@@ -254,7 +254,34 @@ END;";
     /// </summary>
     private static string NoteOf(CollectorRunResult result) => result.Note ?? "";
 
+    /// <summary>
+    /// Runs the test body on a fresh scratch database. When the target flushes the scratch modules' plans between two cycles
+    /// (<see cref="PlanCacheLostException"/>, raised only by the precondition check), the earlier cycles' state is gone and
+    /// the whole body runs again on a new database, up to three attempts in all; the last attempt fails the test with the
+    /// precondition's message. An assertion failure or any other exception is never retried.
+    /// </summary>
     private static async Task WithRigAsync(string name, Func<Rig, string, CancellationToken, Task> body)
+    {
+        const int attempts = 3;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                await WithRigOnceAsync(name, body);
+                return;
+            }
+            catch (PlanCacheLostException) when (attempt < attempts)
+            {
+                // The attempt's own finally dropped its scratch database and deleted its stored rows; start over.
+            }
+            catch (PlanCacheLostException lost)
+            {
+                Assert.Fail("attempt " + attempt + " of " + attempts + " lost the plan cache mid-test: " + lost.Message);
+            }
+        }
+    }
+
+    private static async Task WithRigOnceAsync(string name, Func<Rig, string, CancellationToken, Task> body)
     {
         var ct = TestContext.Current.CancellationToken;
         var (_, sqlHost, user, password) = Env();
@@ -317,29 +344,132 @@ END;";
         }
     }
 
+    private static readonly string[] ScratchModules = { "pm_a", "pm_b", "pm_s", "pm_d" };
+
+    /// <summary>The scratch modules the target's <c>sys.dm_exec_procedure_stats</c> holds right now (read only, runs nothing).</summary>
+    private static async Task<HashSet<string>> CachedModulesAsync(string targetConnectionString, CancellationToken ct)
+    {
+        await using var target = new SqlConnection(targetConnectionString);
+        await target.OpenAsync(ct);
+        using var command = new SqlCommand(
+            "SELECT o.name FROM sys.dm_exec_procedure_stats AS ps JOIN sys.objects AS o ON o.object_id = ps.object_id "
+            + "WHERE ps.database_id = DB_ID() AND o.name IN (" + string.Join(", ", ScratchModules.Select(m => "N'" + m + "'")) + ");",
+            target) { CommandTimeout = 30 };
+        var cached = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            cached.Add(reader.GetString(0));
+        }
+
+        return cached;
+    }
+
+    private static string MissingFrom(HashSet<string> cached) => string.Join(",", ScratchModules.Where(m => !cached.Contains(m)));
+
+    /// <summary>
+    /// Thrown when the target flushed the scratch modules' plans out of its plan cache between two cycles of one test, so the
+    /// state the test built (the cycle before this one) is gone. It is raised by the precondition check only, never by an
+    /// assertion, and <see cref="WithRigAsync"/> answers it by running the whole test again on a fresh scratch database.
+    /// </summary>
+    private sealed class PlanCacheLostException(string message) : Exception(message);
+
+    /// <summary>
+    /// The cache state a cycle needs, checked rather than hoped for: all four scratch modules are in the target's
+    /// <c>sys.dm_exec_procedure_stats</c>. A small target flushes its plan cache within seconds, and a cycle that starts
+    /// without them fails on a count that says nothing about the collector.
+    /// <para>The first cycle of a test has no earlier cycle to preserve, so a missing module is run again (the existing
+    /// helper), up to three times within about five seconds, and read again; if that does not bring them all back the test
+    /// fails. Any later cycle follows an earlier one whose plans it needs to see unchanged; running a flushed module again
+    /// would give it a new plan that no cycle has seen, so a missing module throws <see cref="PlanCacheLostException"/>
+    /// and nothing is run. A test that runs nothing between its cycles is checked the same way.</para>
+    /// <para>The cycle itself is never repeated and no assertion is retried: a failed assertion after the precondition held
+    /// still fails the test.</para>
+    /// </summary>
+    private static async Task<string> EnsureModulesCachedAsync(string targetConnectionString, string label, bool first, CancellationToken ct)
+    {
+        var cached = await CachedModulesAsync(targetConnectionString, ct);
+        var reruns = 0;
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        while (first && MissingFrom(cached).Length > 0 && reruns < 3 && clock.Elapsed < TimeSpan.FromSeconds(5))
+        {
+            reruns++;
+            await RunModulesAgainAsync(targetConnectionString, ct);
+            cached = await CachedModulesAsync(targetConnectionString, ct);
+        }
+
+        var missing = MissingFrom(cached);
+        if (missing.Length > 0)
+        {
+            var message = label + ": the scratch module(s) " + missing + " left the plan cache before the cycle (the target's sys.dm_exec_procedure_stats no longer holds them"
+                + (first ? ", and running them again " + reruns + " time(s) did not bring them back" : ", so the plans the earlier cycle saw are gone and are not run again")
+                + "). This is the target's plan cache, not the collector.";
+            if (first)
+            {
+                Assert.Fail(message);
+            }
+
+            throw new PlanCacheLostException(message);
+        }
+
+        return reruns == 0 ? "precondition held: all four modules cached" : "precondition re-ran the modules " + reruns + " time(s) first";
+    }
+
+    /// <summary>One collector cycle with the plan cache precondition checked right before it, and a description of the state around it for the assertions' messages.</summary>
+    private sealed record Cycle(CollectorRunResult Result, string Context);
+
+    /// <summary>
+    /// Runs one cycle after checking the precondition. <paramref name="first"/> marks the first cycle of a test.
+    /// <paramref name="runModulesFirst"/> runs the four modules again before the cycle so their counters move (the idle skip), but
+    /// only after the check proves the plans survived since the earlier cycle; without it nothing is run.
+    /// </summary>
+    private static async Task<Cycle> RunCycleAsync(
+        DarlingCollectorRunner runner, Rig rig, string target, string label, CancellationToken ct, bool first = false, bool runModulesFirst = false)
+    {
+        if (runModulesFirst && !first)
+        {
+            await EnsureModulesCachedAsync(target, label, first: false, ct);
+            await RunModulesAgainAsync(target, ct);
+        }
+
+        var precondition = await EnsureModulesCachedAsync(target, label, first, ct);
+        var result = await runner.RunAsync(ProcedureStatsCollector.Instance, rig.Server, ct);
+        var missingAfter = MissingFrom(await CachedModulesAsync(target, ct));
+        var context = label + ": " + precondition + "; the cycle returned " + result.Rows + " row(s), measurements ["
+            + string.Join(", ", result.Measurements.Select(m => m.Label + "=" + m.Value)) + "]; after the cycle the target's sys.dm_exec_procedure_stats "
+            + (missingAfter.Length == 0 ? "still holds all four scratch modules (a missing row is a collector miss)" : "no longer holds " + missingAfter + " (a missing row can be a cache eviction)");
+        return new Cycle(result, context);
+    }
+
+    private static long Measured(Cycle cycle, string label) => Measured(cycle.Result, label);
+
+    private static string NoteOf(Cycle cycle) => NoteOf(cycle.Result);
+
+    private static string Describe(IEnumerable<StoredRow> rows) =>
+        "stored rows [" + string.Join(", ", rows.Select(r => r.Object + " digest=" + r.HasDigest + " resolves=" + r.PlanResolves + " bytes=" + r.Bytes)) + "]";
+
     [Fact]
     public Task On_CycleTwoRendersNothing_AndTheRowsCarryTheDigest() => WithRigAsync("pm5158p-two", async (rig, target, ct) =>
     {
         var runner = NewRunner(rig.Store, "on");
 
-        var first = await runner.RunAsync(ProcedureStatsCollector.Instance, rig.Server, ct);
-        Assert.True(first.Rows >= 4, "four scratch procedures, one row each");
-        Assert.True(Measured(first, "plans_rendered") >= 4, "a cold cache renders every module plan");
+        var first = await RunCycleAsync(runner, rig, target, "cycle 1", ct, first: true);
+        Assert.True(first.Result.Rows >= 4, "four scratch procedures, one row each; " + first.Context);
+        Assert.True(Measured(first, "plans_rendered") >= 4, "a cold cache renders every module plan; " + first.Context);
 
-        await RunModulesAgainAsync(target, ct);
-        var second = await runner.RunAsync(ProcedureStatsCollector.Instance, rig.Server, ct);
-        Assert.True(second.Rows >= 4);
+        var second = await RunCycleAsync(runner, rig, target, "cycle 2", ct, runModulesFirst: true);
+        Assert.True(second.Result.Rows >= 4, "the second cycle returns a row for each unchanged scratch procedure; " + second.Context);
         Assert.Equal(0, Measured(second, "plans_rendered"));
         Assert.Equal(0, Measured(second, "plans_rendered_bytes"));
-        Assert.True(Measured(second, "deferred_hit") >= 4);
+        Assert.True(Measured(second, "deferred_hit") >= 4, "every unchanged module hits the first cycle's cached digest; " + second.Context);
 
         var stored = await StoredAsync(rig, ct);
-        Assert.True(stored.Count >= 8);
+        Assert.True(stored.Count >= 8, "two cycles of four modules store at least eight rows; " + Describe(stored) + "; " + second.Context);
         Assert.All(stored, row =>
         {
-            Assert.True(row.HasDigest, "every row, reused or rendered, carries the plan digest");
-            Assert.True(row.PlanResolves, "and resolves its plan through the dimension");
-            Assert.True(row.Bytes > 0, "reused rows keep the measured plan size");
+            Assert.True(row.HasDigest, "every row, reused or rendered, carries the plan digest; " + Describe(stored));
+            Assert.True(row.PlanResolves, "and resolves its plan through the dimension; " + Describe(stored));
+            Assert.True(row.Bytes > 0, "reused rows keep the measured plan size; " + Describe(stored));
         });
 
         var note = NoteOf(second);
@@ -351,15 +481,10 @@ END;";
     public Task On_TheCadenceGateStillDecidesWhenMissesRender_AndHitsCarryTheirDigestOnEveryCycle() => WithRigAsync("pm5158p-gate", async (rig, target, ct) =>
     {
         var runner = NewRunner(rig.Store, "on", planCycleInterval: 2);
-        var runs = new List<CollectorRunResult>();
+        var runs = new List<Cycle>();
         for (var i = 0; i < 6; i++)
         {
-            if (i > 0)
-            {
-                await RunModulesAgainAsync(target, ct);
-            }
-
-            runs.Add(await runner.RunAsync(ProcedureStatsCollector.Instance, rig.Server, ct));
+            runs.Add(await RunCycleAsync(runner, rig, target, "cycle " + (i + 1), ct, first: i == 0, runModulesFirst: i > 0));
         }
 
         var firstCapture = runs.FindIndex(r => Measured(r, "plans_rendered") > 0);
@@ -369,7 +494,7 @@ END;";
         for (var i = 0; i < firstCapture; i++)
         {
             Assert.Equal(0, Measured(runs[i], "plans_rendered"));
-            Assert.True(Measured(runs[i], "deferred_miss") >= 4);
+            Assert.True(Measured(runs[i], "deferred_miss") >= 4, "a gated cold cycle misses every module; " + runs[i].Context);
             Assert.Equal(0, Measured(runs[i], "deferred_hit"));
         }
 
@@ -377,41 +502,39 @@ END;";
         for (var i = firstCapture + 1; i < runs.Count; i++)
         {
             Assert.Equal(0, Measured(runs[i], "plans_rendered"));
-            Assert.True(Measured(runs[i], "deferred_hit") >= 4);
+            Assert.True(Measured(runs[i], "deferred_hit") >= 4, "a cycle after the capture hits every module; " + runs[i].Context);
         }
 
         var stored = await StoredAsync(rig, ct);
-        Assert.True(stored.Count(r => r.HasDigest) >= 4 * (runs.Count - firstCapture), "hits on gated cycles carry the digest");
-        Assert.True(stored.Count(r => !r.HasDigest && !r.PlanResolves) >= 4 * firstCapture, "gated cold cycles ship no plan");
+        Assert.True(stored.Count(r => r.HasDigest) >= 4 * (runs.Count - firstCapture), "hits on gated cycles carry the digest; first capture at cycle index " + firstCapture + "; " + Describe(stored));
+        Assert.True(stored.Count(r => !r.HasDigest && !r.PlanResolves) >= 4 * firstCapture, "gated cold cycles ship no plan; first capture at cycle index " + firstCapture + "; " + Describe(stored));
     });
 
     [Fact]
     public Task On_AStatementCompiledForTheFirstTime_ChangesTheFingerprint_AndIsRenderedAgain() => WithRigAsync("pm5158p-new", async (rig, target, ct) =>
     {
         var runner = NewRunner(rig.Store, "on");
-        await runner.RunAsync(ProcedureStatsCollector.Instance, rig.Server, ct);
-        await RunModulesAgainAsync(target, ct);
-        var warm = await runner.RunAsync(ProcedureStatsCollector.Instance, rig.Server, ct);
-        Assert.True(warm.Rows >= 4, "the unchanged modules ran again, so they are rows");
+        await RunCycleAsync(runner, rig, target, "cycle 1", ct, first: true);
+        var warm = await RunCycleAsync(runner, rig, target, "cycle 2 (warm)", ct, runModulesFirst: true);
+        Assert.True(warm.Result.Rows >= 4, "the unchanged modules ran again, so they are rows; " + warm.Context);
         Assert.Equal(0, Measured(warm, "plans_rendered"));
 
         /* pm_d's second branch compiles the first time it is taken: same plan handle, same cached_time, one more statement
            in the module's plan. A key without the fingerprint would hit and keep the old plan's digest. */
         await ExecOnTargetAsync(target, ct, "", "pm_d 1");
 
-        var changed = await runner.RunAsync(ProcedureStatsCollector.Instance, rig.Server, ct);
+        var changed = await RunCycleAsync(runner, rig, target, "cycle 3 (pm_d took its second branch)", ct);
         Assert.Equal(1, Measured(changed, "plans_rendered"));
-        Assert.True(Measured(changed, "deferred_miss") >= 1);
+        Assert.True(Measured(changed, "deferred_miss") >= 1, "the changed module misses; " + changed.Context);
     });
 
     [Fact]
     public Task On_AStatementRecompiledInPlace_ChangesTheFingerprint_AndIsRenderedAgain() => WithRigAsync("pm5158p-recomp", async (rig, target, ct) =>
     {
         var runner = NewRunner(rig.Store, "on");
-        await runner.RunAsync(ProcedureStatsCollector.Instance, rig.Server, ct);
-        await RunModulesAgainAsync(target, ct);
-        var warm = await runner.RunAsync(ProcedureStatsCollector.Instance, rig.Server, ct);
-        Assert.True(warm.Rows >= 4, "the unchanged modules ran again, so they are rows");
+        await RunCycleAsync(runner, rig, target, "cycle 1", ct, first: true);
+        var warm = await RunCycleAsync(runner, rig, target, "cycle 2 (warm)", ct, runModulesFirst: true);
+        Assert.True(warm.Result.Rows >= 4, "the unchanged modules ran again, so they are rows; " + warm.Context);
         Assert.Equal(0, Measured(warm, "plans_rendered"));
 
         /* New statistics make the next execution recompile pm_s's one statement inside the cached module plan. */
@@ -420,7 +543,7 @@ END;";
             "INSERT dbo.pm_data (k, v) SELECT TOP (5000) 2, ROW_NUMBER() OVER (ORDER BY (SELECT 1)) FROM sys.all_columns AS a CROSS JOIN sys.all_columns AS b; UPDATE STATISTICS dbo.pm_data WITH FULLSCAN;",
             "pm_s");
 
-        var changed = await runner.RunAsync(ProcedureStatsCollector.Instance, rig.Server, ct);
+        var changed = await RunCycleAsync(runner, rig, target, "cycle 3 (pm_s recompiled)", ct);
         Assert.Equal(1, Measured(changed, "plans_rendered"));
     });
 
@@ -430,25 +553,26 @@ END;";
         var log = new CapturingTestLogger();
         var runner = NewRunner(rig.Store, "shadow", logger: log);
 
-        var first = await runner.RunAsync(ProcedureStatsCollector.Instance, rig.Server, ct);
+        var first = await RunCycleAsync(runner, rig, target, "cycle 1", ct, first: true);
         Assert.Equal(0, Measured(first, "deferred_would_hit"));
-        Assert.True(Measured(first, "deferred_miss") >= 4);
-        Assert.True(Measured(first, "plans_rendered") >= 4, "shadow renders inline, exactly as off");
+        Assert.True(Measured(first, "deferred_miss") >= 4, "a cold shadow cycle misses every module; " + first.Context);
+        Assert.True(Measured(first, "plans_rendered") >= 4, "shadow renders inline, exactly as off; " + first.Context);
 
-        await RunModulesAgainAsync(target, ct);
-        var second = await runner.RunAsync(ProcedureStatsCollector.Instance, rig.Server, ct);
-        Assert.True(Measured(second, "deferred_would_hit") >= 4);
+        var second = await RunCycleAsync(runner, rig, target, "cycle 2", ct, runModulesFirst: true);
+        Assert.True(Measured(second, "deferred_would_hit") >= 4, "every unchanged module would have hit; " + second.Context);
         Assert.Equal(0, Measured(second, "deferred_false_hit"));
-        Assert.True(Measured(second, "plans_rendered") >= 4, "shadow still renders every plan");
+        Assert.True(Measured(second, "plans_rendered") >= 4, "shadow still renders every plan; " + second.Context);
 
         var stored = await StoredAsync(rig, ct);
-        Assert.All(stored, row => Assert.True(row.PlanResolves, "shadow stores every row's plan inline, as off does"));
+        Assert.All(stored, row => Assert.True(row.PlanResolves, "shadow stores every row's plan inline, as off does; " + Describe(stored)));
 
         var note = NoteOf(second);
         Assert.Contains("deferred_would_hit=", note, StringComparison.Ordinal);
         Assert.Contains("deferred_false_hit=0", note, StringComparison.Ordinal);
         Assert.Contains("plans_rendered=", note, StringComparison.Ordinal);
-        Assert.Contains(log.Lines, line => line.Contains("deferred: would_hit=", StringComparison.Ordinal) && line.Contains("false_hit=0", StringComparison.Ordinal));
+        Assert.True(
+            log.Lines.Any(line => line.Contains("deferred: would_hit=", StringComparison.Ordinal) && line.Contains("false_hit=0", StringComparison.Ordinal)),
+            "the cycle logs its deferred counters with no false hit; log lines [" + string.Join(" | ", log.Lines) + "]; " + second.Context);
         Assert.Equal(0, log.CountAtLevel(LogLevel.Warning));
     });
 
@@ -472,18 +596,19 @@ END;";
     }
 
     [Fact]
-    public Task Shadow_StoresExactlyTheColumnsOffStores_ForTheSameProcedures() => WithRigAsync("pm5158p-equal", async (rig, _, ct) =>
+    public Task Shadow_StoresExactlyTheColumnsOffStores_ForTheSameProcedures() => WithRigAsync("pm5158p-equal", async (rig, target, ct) =>
     {
         /* One cycle in off, then one in shadow, each from a fresh runner (so each has an empty cache and a fresh delta
            baseline), over procedures nothing runs in between. */
         var offRunner = NewRunner(rig.Store, "off");
-        await offRunner.RunAsync(ProcedureStatsCollector.Instance, rig.Server, ct);
+        var offCycle = await RunCycleAsync(offRunner, rig, target, "off cycle", ct, first: true);
         var offRows = await StoredColumnsAsync(rig, ct);
-        Assert.True(offRows.Count >= 4, "four scratch procedures in the off cycle");
+        Assert.True(offRows.Count >= 4, "four scratch procedures in the off cycle; stored [" + string.Join(", ", offRows.Values.Select(v => v.Object)) + "]; " + offCycle.Context);
 
+        /* Nothing may run between the two cycles, so the precondition here only checks the modules are still cached. */
         var shadowRunner = NewRunner(rig.Store, "shadow");
-        var shadowRun = await shadowRunner.RunAsync(ProcedureStatsCollector.Instance, rig.Server, ct);
-        Assert.True(Measured(shadowRun, "deferred_miss") >= 4, "the shadow cycle ran in shadow");
+        var shadowCycle = await RunCycleAsync(shadowRunner, rig, target, "shadow cycle", ct);
+        Assert.True(Measured(shadowCycle, "deferred_miss") >= 4, "the shadow cycle ran in shadow; " + shadowCycle.Context);
         var shadowRows = (await StoredColumnsAsync(rig, ct)).Where(r => !offRows.ContainsKey(r.Key)).Select(r => r.Value).ToList();
         Assert.Equal(offRows.Count, shadowRows.Count);
 
@@ -492,7 +617,8 @@ END;";
         var offByObject = offRows.Values.ToDictionary(v => v.Object, v => v.Json, StringComparer.Ordinal);
         foreach (var (name, json) in shadowRows)
         {
-            Assert.True(offByObject.TryGetValue(name, out var offJson), "shadow stored a row off did not: " + name);
+            Assert.True(offByObject.TryGetValue(name, out var offJson),
+                "shadow stored a row off did not: " + name + "; off stored [" + string.Join(", ", offByObject.Keys) + "]; " + shadowCycle.Context);
             Assert.Equal(offJson, json);
         }
 
@@ -504,7 +630,7 @@ END;";
     {
         var log = new CapturingTestLogger();
         var runner = NewRunner(rig.Store, "shadow", logger: log);
-        await runner.RunAsync(ProcedureStatsCollector.Instance, rig.Server, ct);
+        var first = await RunCycleAsync(runner, rig, target, "cycle 1", ct, first: true);
 
         /* Replace every cached digest with one that cannot match the rendered plan, as a fingerprint that missed a change would. */
         var caches = (System.Collections.IDictionary)typeof(DarlingCollectorRunner)
@@ -515,7 +641,7 @@ END;";
             .GetField("_entries", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
             .GetValue(cache)!;
         var keys = entries.Keys.ToList();
-        Assert.True(keys.Count >= 4);
+        Assert.True(keys.Count >= 4, "the first shadow cycle caches a key for each scratch module, found " + keys.Count + "; " + first.Context);
         foreach (var key in keys)
         {
             cache.AddPending(key, "00FF", 1, DateTime.UtcNow, 1);
@@ -523,9 +649,8 @@ END;";
 
         cache.ConfirmPending(keys, DateTime.UtcNow);
 
-        await RunModulesAgainAsync(target, ct);
-        var second = await runner.RunAsync(ProcedureStatsCollector.Instance, rig.Server, ct);
-        Assert.True(Measured(second, "deferred_false_hit") >= 4);
+        var second = await RunCycleAsync(runner, rig, target, "cycle 2", ct, runModulesFirst: true);
+        Assert.True(Measured(second, "deferred_false_hit") >= 4, "every forced stale entry is a false hit; " + second.Context);
         Assert.Equal(Measured(second, "deferred_would_hit"), Measured(second, "deferred_false_hit"));
 
         var note = NoteOf(second);
@@ -533,7 +658,7 @@ END;";
         Assert.DoesNotContain("deferred_false_hit=0", note, StringComparison.Ordinal);
 
         var warnings = log.Lines.Where(l => l.StartsWith("Warning:", StringComparison.Ordinal) && l.Contains("false hit", StringComparison.Ordinal)).ToList();
-        Assert.True(warnings.Count >= 4);
+        Assert.True(warnings.Count >= 4, "one false hit warning per scratch module, found " + warnings.Count + "; " + second.Context);
         Assert.All(warnings, w =>
         {
             Assert.Contains("plan_handle 0x", w, StringComparison.Ordinal);
@@ -542,6 +667,7 @@ END;";
         });
 
         /* The stale cache changed nothing that was written. */
-        Assert.All(await StoredAsync(rig, ct), row => Assert.True(row.PlanResolves));
+        var stored = await StoredAsync(rig, ct);
+        Assert.All(stored, row => Assert.True(row.PlanResolves, "a stale cache changes nothing that was written; " + Describe(stored)));
     });
 }
