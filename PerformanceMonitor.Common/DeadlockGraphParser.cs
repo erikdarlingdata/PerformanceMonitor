@@ -144,6 +144,7 @@ namespace PerformanceMonitor.Common
                     HostName = proc.Attribute("hostname")?.Value ?? string.Empty,
                     IsolationLevel = proc.Attribute("isolationlevel")?.Value ?? string.Empty,
                     ProcName = ExtractProcName(proc),
+                    StackFrames = ExtractStackFrames(proc),
                     Status = proc.Attribute("status")?.Value ?? string.Empty
                 });
             }
@@ -250,6 +251,43 @@ namespace PerformanceMonitor.Common
                 .Select(f => f.Value?.Trim())
                 .FirstOrDefault(v => !string.IsNullOrEmpty(v));
             return frame ?? string.Empty;
+        }
+
+        /// <summary>
+        /// The execution-stack frames that carry a usable <c>sqlhandle</c>, in stack order (#6205), each with its
+        /// <c>stmtstart</c>/<c>stmtend</c>. A missing <c>stmtend</c> reads as <c>-1</c> (to the end of the batch).
+        /// A frame with no handle, or the all-zero handle SQL Server writes for dynamic SQL and system contexts, is
+        /// skipped; a frame identical to an earlier one is listed once.
+        /// </summary>
+        internal static IReadOnlyList<DeadlockStackFrame> ExtractStackFrames(XElement proc)
+        {
+            var stack = proc.Element("executionStack");
+            if (stack == null)
+                return Array.Empty<DeadlockStackFrame>();
+
+            var frames = new List<DeadlockStackFrame>();
+            foreach (var frame in stack.Elements("frame"))
+            {
+                var handle = frame.Attribute("sqlhandle")?.Value?.Trim();
+                if (string.IsNullOrEmpty(handle) || IsZeroSqlHandle(handle))
+                    continue;
+
+                var start = int.TryParse(frame.Attribute("stmtstart")?.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var s) ? s : 0;
+                var end = int.TryParse(frame.Attribute("stmtend")?.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var e) ? e : -1;
+                var item = new DeadlockStackFrame(handle, start, end);
+                if (!frames.Contains(item))
+                    frames.Add(item);
+            }
+            return frames;
+        }
+
+        /// <summary>True for <c>0x</c> followed only by zeros (any length): the "no persistent handle" sentinel.</summary>
+        private static bool IsZeroSqlHandle(string handle)
+        {
+            var digits = handle.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? handle.AsSpan(2) : handle.AsSpan();
+            foreach (var c in digits)
+                if (c != '0') return false;
+            return true;
         }
 
         /// <summary>The first real procedure on the execution stack (skipping adhoc/unknown); blank for ad hoc.</summary>

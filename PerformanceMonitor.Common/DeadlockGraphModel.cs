@@ -126,6 +126,14 @@ namespace PerformanceMonitor.Common
         /// <summary>Process status (e.g. <c>suspended</c>).</summary>
         public string Status { get; init; } = string.Empty;
 
+        /// <summary>
+        /// The <c>sqlhandle</c> of each execution-stack frame, in stack order (#6205): the keys that locate this
+        /// process's statement in the plan cache. The all-zero handle SQL Server writes for dynamic SQL and
+        /// system contexts is left out (no plan can be recovered from it), and a frame that repeats an earlier one
+        /// (same handle and statement range) shows once. Empty when the stack has no usable handle.
+        /// </summary>
+        public IReadOnlyList<DeadlockStackFrame> StackFrames { get; init; } = Array.Empty<DeadlockStackFrame>();
+
         /// <summary>Layout position (ring placement), assigned by <see cref="DeadlockGraphLayout"/>.</summary>
         public double X { get; set; }
         public double Y { get; set; }
@@ -138,6 +146,13 @@ namespace PerformanceMonitor.Common
     /// cycles form. For a parallel <c>exchangeEvent</c> the waiter and owner can be the same process — a
     /// self-edge the layout draws as a small self-loop.
     /// </summary>
+    /// <summary>
+    /// One execution-stack frame of a deadlock process that carries a usable <c>sqlhandle</c> (#6205): the handle
+    /// plus the <c>stmtstart</c>/<c>stmtend</c> byte offsets a plan lookup needs (<c>-1</c> end means "to the end
+    /// of the batch", as in SQL Server's own graphs).
+    /// </summary>
+    public sealed record DeadlockStackFrame(string SqlHandle, int StmtStart, int StmtEnd);
+
     public sealed class DeadlockWaitEdge
     {
         public string WaiterProcessId { get; init; } = string.Empty;

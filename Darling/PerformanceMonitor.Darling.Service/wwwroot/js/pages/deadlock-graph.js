@@ -287,6 +287,11 @@ export function drawDeadlockGraph(graph, row) {
       if (v == null || v === "") continue;
       side.appendChild(el("div", { class: "dlg-prop" }, [el("span", { class: "fk", text: k + ": " }), el("span", { class: "fv", text: v })]));
     }
+    /* #6205: the execution-stack sql_handles in stack order, as selectable text for a plan-cache lookup. */
+    if (Array.isArray(p.sql_handles) && p.sql_handles.length) {
+      side.appendChild(el("div", { class: "dlg-prop" }, [el("span", { class: "fk", text: (p.sql_handles.length === 1 ? "SQL handle" : "SQL handles (stack order)") + ":" })]));
+      side.appendChild(el("pre", { class: "code", text: p.sql_handles.join("\n") }));
+    }
     if (p.sql_text) {
       side.appendChild(el("pre", { class: "code", text: p.sql_text }));
       if (p.sql_text_cut) side.appendChild(el("div", { class: "dlg-prop", text: "The statement is cut here; the whole text is in the XML." }));

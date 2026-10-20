@@ -726,10 +726,19 @@ public partial class ServerTab : UserControl
         var grid = FindParentDataGrid(menuItem);
         if (grid?.CurrentItem is not DeadlockProcessDetail row) return;
 
-        var sideLabel = row.IsVictim ? "Victim" : "Deadlocker";
-        var label = $"Est Plan - {sideLabel} SPID {row.Spid}";
+        await ViewDeadlockProcessPlanAsync(
+            row.DeadlockGraphXml, row.ProcessId, row.IsVictim, row.Spid, row.DatabaseName, row.SqlText);
+    }
 
-        var frames = ExtractDeadlockProcessFrames(row.DeadlockGraphXml, row.ProcessId);
+    /* The deadlock-process plan lookup behind both the grid's context item and the graph viewer's Properties
+       panel button (#6205): one lookup, keyed by the process id inside the graph XML. */
+    private async System.Threading.Tasks.Task ViewDeadlockProcessPlanAsync(
+        string graphXml, string processId, bool isVictim, int spid, string databaseName, string sqlText)
+    {
+        var sideLabel = isVictim ? "Victim" : "Deadlocker";
+        var label = $"Est Plan - {sideLabel} SPID {spid}";
+
+        var frames = ExtractDeadlockProcessFrames(graphXml, processId);
         if (frames.Count == 0)
         {
             MessageBox.Show(
@@ -747,7 +756,7 @@ public partial class ServerTab : UserControl
             foreach (var f in frames)
             {
                 planXml = await LivePlanDisplay.FilterAsync(await LocalDataService.FetchPlanBySqlHandleAsync(
-                    connStr, row.DatabaseName, f.SqlHandle, f.StmtStart, f.StmtEnd));
+                    connStr, databaseName, f.SqlHandle, f.StmtStart, f.StmtEnd));
                 if (!string.IsNullOrEmpty(planXml)) break;
             }
         }
@@ -755,7 +764,7 @@ public partial class ServerTab : UserControl
 
         if (!string.IsNullOrEmpty(planXml))
         {
-            _ = OpenPlanTab(planXml, label, row.SqlText);
+            _ = OpenPlanTab(planXml, label, sqlText);
             PlanViewerTabItem.IsSelected = true;
         }
         else

@@ -79,6 +79,20 @@ switch (process.argv[3]) {
     out.headAfterEnter = cell.all((n) => n.hasClass("dlg-side-head"))[0].textContent;
     break;
   }
+  case "sqlHandles": {
+    const g = graph();
+    g.processes[1].sql_handles = ["0x0300AA", "0x0300BB"];
+    const cell = mod.deadlockGraphCell("srv", { dedup_key: "k1", deadlock_time: "2026-01-01T00:00:00Z", graph: g });
+    open(cell);
+    const nodes = cell.all((n) => n.hasClass("dlg-node"));
+    nodes[1].fire("click");
+    out.pres = cell.tags("pre").map((n) => n.textContent);
+    out.labels = cell.all((n) => n.hasClass("dlg-prop")).map((n) => n.textContent).filter((t) => t.includes("handle"));
+    nodes[0].fire("click");
+    out.presNoHandles = cell.tags("pre").map((n) => n.textContent);
+    out.labelsNoHandles = cell.all((n) => n.hasClass("dlg-prop")).map((n) => n.textContent).filter((t) => t.includes("handle"));
+    break;
+  }
   case "hostile": {
     const g = graph();
     g.processes[0].sql_text = '<script>alert(1)</script><img src=x onerror=alert(1)>';

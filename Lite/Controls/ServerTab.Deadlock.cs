@@ -49,6 +49,9 @@ public partial class ServerTab : UserControl
             var model = await Task.Run(() => DeadlockGraphParser.Parse(row.DeadlockGraphXml));
 
             var control = new DeadlockGraphControl();
+            // #6205: the Properties panel's "View Cached Plan" runs the same lookup as the grid's context item.
+            control.ViewCachedPlanRequested += node => _ = ViewDeadlockProcessPlanAsync(
+                row.DeadlockGraphXml, node.Id, node.IsVictim, node.Spid, node.DatabaseName, node.SqlText);
             control.LoadModel(model);
             GraphViewerWindow.ShowGraph(
                 Window.GetWindow(this),

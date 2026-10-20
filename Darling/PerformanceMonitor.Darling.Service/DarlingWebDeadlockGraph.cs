@@ -75,6 +75,10 @@ public static class DarlingWebDeadlockGraph
             Put(node, "isolation_level", p.IsolationLevel);
             Put(node, "proc_name", p.ProcName);
             Put(node, "status", p.Status);
+            /* #6205: the execution-stack sql_handles in stack order (the zero handle already dropped), so the page's
+               detail pane can show them for a plan-cache lookup. Omitted when the process has none. */
+            var handles = p.StackFrames.Select(f => f.SqlHandle).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            if (handles.Count > 0) node["sql_handles"] = handles;
             /* #4348: judged WHOLE, before the cut. The web sweep after this sees only the first SqlTextCap
                characters, and a statement named by what follows them would pass as an innocent prefix. */
             var sqlText = SensitiveStatements.Text(p.SqlText) ?? "";

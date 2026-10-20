@@ -94,15 +94,26 @@ public partial class ViewerServerTab
         var grid = FindParentDataGrid(menuItem);
         if (grid?.CurrentItem is not DeadlockProcessDetail row) return;
 
-        var sideLabel = row.IsVictim ? "Victim" : "Deadlocker";
-        var frames = PlanFrameExtractor.ExtractDeadlockProcessFrames(row.DeadlockGraphXml, row.ProcessId);
+        await FetchDeadlockProcessLivePlanAsync(
+            row.DeadlockGraphXml, row.ProcessId, row.IsVictim, row.Spid, row.DatabaseName, row.SqlText);
+    }
+
+    /// <summary>
+    /// The deadlock-process plan fetch behind both the grid's "View Cached Plan (This Process)" item and the graph
+    /// viewer's Properties panel button (#6205): one lookup, keyed by the process id inside the graph XML.
+    /// </summary>
+    private async Task FetchDeadlockProcessLivePlanAsync(
+        string graphXml, string processId, bool isVictim, int spid, string databaseName, string sqlText)
+    {
+        var sideLabel = isVictim ? "Victim" : "Deadlocker";
+        var frames = PlanFrameExtractor.ExtractDeadlockProcessFrames(graphXml, processId);
         if (frames.Count == 0)
         {
             ShowNoResolvableHandle(sideLabel.ToLowerInvariant() + " process");
             return;
         }
 
-        await FetchAndOpenBySqlHandleFramesAsync(frames, row.DatabaseName, $"Cached Plan - {sideLabel} SPID {row.Spid}", row.SqlText);
+        await FetchAndOpenBySqlHandleFramesAsync(frames, databaseName, $"Cached Plan - {sideLabel} SPID {spid}", sqlText);
     }
 
     // ── Blocked Process Reports grid: fetch the live plan for the blocked / blocking process by its sql_handle ──
