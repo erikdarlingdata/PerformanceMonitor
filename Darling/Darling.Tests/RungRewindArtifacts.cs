@@ -405,9 +405,16 @@ BEGIN
     END IF;
 END $$;"),
 
-        // /// V205 (#6227): the collector schedule rows may hold a NULL enabled state. The rewind turns every NULL into TRUE and puts NOT NULL
-        // back, so a re-run of V205 drops it again. Safe on a store that never had the table.
-        new(205, "hasInheritableCollectorEnabled",
+        // /// V205 (#6235): the optional expiry on the custom alert rules. The column is the probe's newest sentinel. The rewind drops it,
+        // so a re-run of V205 adds it again. Safe on a store that never had it.
+        new(205, "hasCustomAlertRuleExpiry",
+            @"
+ALTER TABLE IF EXISTS config.custom_alert_rules
+    DROP COLUMN IF EXISTS expires_at_utc;"),
+
+        // /// V206 (#6227): the collector schedule rows may hold a NULL enabled state. The rewind turns every NULL into TRUE and puts NOT NULL
+        // back, so a re-run of V206 drops it again. Safe on a store that never had the table.
+        new(206, "hasInheritableCollectorEnabled",
             @"
 DO $$
 BEGIN

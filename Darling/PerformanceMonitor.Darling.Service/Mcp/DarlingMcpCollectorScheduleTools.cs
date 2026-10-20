@@ -225,7 +225,7 @@ public sealed class DarlingMcpCollectorScheduleTools
         ["collector"] = e.Collector,
         ["scope"] = e.ServerId is null ? "fleet-wide" : "server",
         ["server"] = e.ServerId is null ? null : e.ServerLabel ?? $"server_id {e.ServerId}",
-        /* V205 (#6227): a schedule row whose enabled flag is NULL inherits (the fleet-wide row, then the shipped default). */
+        /* V206 (#6227): a schedule row whose enabled flag is NULL inherits (the fleet-wide row, then the shipped default). */
         ["enabled"] = e.Enabled is bool enabled ? enabled : e.HasScheduleRow ? "inherited" : null,
         ["frequency_minutes"] = e.FrequencyMinutes,
         ["retention_days"] = e.RetentionDays,
@@ -447,7 +447,7 @@ public sealed class DarlingMcpCollectorScheduleTools
             {
                 var wanted = edit.Kind == Change.Enable;
                 /* The state the scope resolved to before: its own row, else (for a server) the fleet row, else the code default. A NULL
-                   enabled flag (V205) inherits, so it falls through like a missing row. */
+                   enabled flag (V206) inherits, so it falls through like a missing row. */
                 var effectiveBefore = rowBefore?.Enabled ?? (serverId is null ? null : fleetBefore?.Enabled) ?? def.DefaultEnabled;
                 previous = new { enabled = rowBefore?.Enabled, inherited = rowBefore is not null && rowBefore.Enabled is null, effective_enabled = effectiveBefore };
                 /* The undo puts back what the row held: an explicit true or false, or "inherited" (no explicit value). */

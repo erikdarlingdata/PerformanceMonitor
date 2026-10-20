@@ -209,7 +209,7 @@ public sealed class DarlingMcpCollectorScheduleToolsLiveTests
     {
         await WithStoreAsync(async (source, owner, ct) =>
         {
-            /* A frequency set on a server stores no enabled flag, so a later fleet-wide disable still reaches that server (V205). */
+            /* A frequency set on a server stores no enabled flag, so a later fleet-wide disable still reaches that server (V206). */
             await DarlingMcpCollectorScheduleTools.SetCollectorFrequency(source, Delta, 5, false, "sched-alpha", cancellationToken: ct);
             Assert.Equal(1, await ScalarAsync(owner, $"SELECT count(*) FROM config.config_collector_schedules WHERE server_id = {ServerA} AND enabled IS NULL", ct));
             await DarlingMcpCollectorScheduleTools.DisableCollector(source, Delta, null, cancellationToken: ct);

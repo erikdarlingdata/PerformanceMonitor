@@ -2293,7 +2293,7 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
                 reader.GetString(1),
                 reader.IsDBNull(2) ? null : reader.GetInt32(2),
                 reader.IsDBNull(3) ? null : reader.GetInt32(3),
-                /* V205 (#6227): NULL = inherit (the fleet row, then the shipped default); ScheduleOverride.Enabled is already nullable. */
+                /* V206 (#6227): NULL = inherit (the fleet row, then the shipped default); ScheduleOverride.Enabled is already nullable. */
                 reader.IsDBNull(4) ? null : reader.GetBoolean(4),
                 /* V125 (#3477): NULL and an empty array are DIFFERENT readings here and both must
                    survive the round trip — NULL falls through the layering, an explicit empty array

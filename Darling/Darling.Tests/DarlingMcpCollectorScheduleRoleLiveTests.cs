@@ -144,7 +144,7 @@ public sealed class DarlingMcpCollectorScheduleRoleLiveTests
             Assert.Equal("changed", (string?)enabled["status"]);
             Assert.Equal((true, null, null), await RowAsync(owner, ServerA, Delta, ct));
 
-            /* enable_collector with inherit=true: the UPDATE writes NULL, which the V205 column allows and the role may write. */
+            /* enable_collector with inherit=true: the UPDATE writes NULL, which the V206 column allows and the role may write. */
             var inherited = Parse(await DarlingMcpCollectorScheduleTools.EnableCollector(mcp, Delta, "role-alpha", inherit: true, cancellationToken: ct));
             Assert.Equal("changed", (string?)inherited["status"]);
             Assert.Equal((null, null, null), await RowAsync(owner, ServerA, Delta, ct));

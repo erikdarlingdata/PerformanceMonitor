@@ -56,7 +56,7 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
 
     /// <summary>
     /// Sets one column on the fleet-wide row, creating the row when there is none. A NEW row stores <c>enabled</c> as NULL
-    /// ("inherit": V205), so setting a frequency on a collector that ships OFF does not switch it on, and a later fleet-wide enable or
+    /// ("inherit": V206), so setting a frequency on a collector that ships OFF does not switch it on, and a later fleet-wide enable or
     /// disable still decides it. An existing row keeps its enabled flag and every other column. The row is found the way the resolver
     /// finds it, ignoring the case of the collector name, because the unique index does not: a row an older writer left as
     /// <c>Wait_Stats</c> is the one updated, not a second row beside it. $1 collector_name, $2 the value.
@@ -70,7 +70,7 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
 
     /// <summary>
     /// Sets one column on one server's row, creating the row when there is none. A NEW row stores <c>enabled</c> as NULL ("inherit":
-    /// V205): it changes no collector's on/off state, and a later fleet-wide disable still reaches this server. The row is found the way
+    /// V206): it changes no collector's on/off state, and a later fleet-wide disable still reaches this server. The row is found the way
     /// the resolver finds it, ignoring the case of the collector name (see <see cref="SetFleetColumn"/>). $1 server_id, $2 collector_name,
     /// $3 the value.
     /// </summary>

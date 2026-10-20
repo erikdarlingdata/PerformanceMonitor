@@ -472,7 +472,7 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
                 upsert.Parameters.Add(new NpgsqlParameter<string> { TypedValue = row.CollectorName });       // $1 fleet / $2 server
                 AddNullableInt(upsert, row.FrequencyMinutes);                                                 // frequency
                 AddNullableInt(upsert, row.RetentionDays);                                                    // retention
-                upsert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Boolean, Value = (object?)row.Enabled ?? DBNull.Value }); // enabled (V205: NULL = inherit)
+                upsert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Boolean, Value = (object?)row.Enabled ?? DBNull.Value }); // enabled (V206: NULL = inherit)
                 AddNullableTextArray(upsert, row.Databases);                                                  // databases (V125 scope)
                 await upsert.ExecuteNonQueryAsync(cancellationToken);
             }

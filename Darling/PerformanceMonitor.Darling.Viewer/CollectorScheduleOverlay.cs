@@ -165,7 +165,7 @@ public static class CollectorScheduleOverlay
                 item.DatabasesText = FormatDatabases(row.Databases);
             }
 
-            /* V205 (#6227): a NULL enabled is "inherit", so it leaves the value the lower layer set. On the scope being edited it
+            /* V206 (#6227): a NULL enabled is "inherit", so it leaves the value the lower layer set. On the scope being edited it
                is remembered, so the Save writes NULL back instead of freezing what it inherits. */
             if (row.Enabled is bool enabled)
             {

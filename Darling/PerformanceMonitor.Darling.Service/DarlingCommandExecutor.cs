@@ -554,7 +554,7 @@ WHERE status = 'in_progress'
         var successStatus = enabled ? "collector enabled" : "collector disabled";
         var serverId = command.TargetServerId ?? TryReadInt(command.ArgsJson, "server_id", "serverId");
 
-        /* V205 (#6227): inherit = true puts the row's enabled flag back to NULL, which reads "the fleet-wide row's value, else the shipped
+        /* V206 (#6227): inherit = true puts the row's enabled flag back to NULL, which reads "the fleet-wide row's value, else the shipped
            default", so a later fleet-wide enable or disable reaches this scope again. It is the same command for either verb: the flag
            it would have set is not written. A row that is not there is left alone. */
         if (TryReadBool(command.ArgsJson, "inherit") == true)
@@ -675,7 +675,7 @@ WHERE status = 'in_progress'
     /// <para>The name goes through the catalog like the other collector commands, and the value through
     /// <see cref="CollectorScheduleBounds"/>, the bounds the Viewer's schedule editor enforces: nothing about either is
     /// re-decided here. The statements are <see cref="CollectorScheduleSql"/>'s, and write ONE column: the enabled flag, the other
-    /// column and the database scope on an existing row are kept. A row this creates stores a NULL enabled state (V205, "inherit"), so setting a frequency never switches a
+    /// column and the database scope on an existing row are kept. A row this creates stores a NULL enabled state (V206, "inherit"), so setting a frequency never switches a
     /// collector on or off and a later fleet-wide enable or disable still reaches it. Clearing a column on a row that is not there
     /// writes nothing.</para>
     /// </summary>

@@ -40,7 +40,7 @@ public sealed class CollectorScheduleEditItem
         }
     }
 
-    /// <summary>True when the edited scope's own row holds NULL for enabled (V205, #6227: "inherit the fleet row, then the
+    /// <summary>True when the edited scope's own row holds NULL for enabled (V206, #6227: "inherit the fleet row, then the
     /// shipped default"), as the MCP tools write it. <see cref="Enabled"/> then shows the value it inherits, and a Save writes
     /// NULL back until the cell is changed, so a Save that never touched the cell does not freeze the inherited state.</summary>
     public bool EnabledInherited { get; set; }
