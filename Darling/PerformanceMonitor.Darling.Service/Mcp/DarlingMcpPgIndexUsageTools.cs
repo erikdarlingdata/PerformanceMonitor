@@ -442,7 +442,7 @@ public sealed class DarlingMcpPgIndexUsageTools
            snapshots in the window mean rows were returned. It stays, with its NothingFoundStatusByRead entry, in case the two ever diverge. */
         if (probe.SnapshotsInWindow >= MinimumSamplesForADisuseClaim)
         {
-            return McpHelpers.Status(
+            return await DarlingServerOfflineNote.EmptyAsync(postgres, serverId, displayName, end, McpHelpers.Status(
                 "empty",
                 McpHelpers.QuietUnlessCut(
                     notice is { IsUnavailable: false, WindowTruncated: true }, notice.EffectiveStart,
@@ -451,7 +451,7 @@ public sealed class DarlingMcpPgIndexUsageTools
                         + "under the collector's 64 KB size floor, which is the state of a schema whose indexes are "
                         + "all trivially small",
                     coveredClaim: ". That is a genuine all-clear rather than missing data."),
-                hints);
+                hints), cancellationToken);
         }
 
         if (probe.SnapshotsInWindow == 1)

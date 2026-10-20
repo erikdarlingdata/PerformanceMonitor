@@ -297,17 +297,17 @@ public partial class LocalDataService
     /// one (no row and no logged run of that collector in the window) gives way to the other's. A tool that reads only the
     /// first collector's rows (the report XML) passes <c>includeAlsoCovered: false</c> to probe that collector alone.</para>
     /// </summary>
-    public async Task<DateTime?> GetQueryWindowFloorAsync(QueryWindowRelation relation, int serverId, DateTime startUtc, DateTime endUtc, ServerClock? serverClock = null, bool includeAlsoCovered = true, CancellationToken cancellationToken = default)
+    public async Task<DateTime?> GetQueryWindowFloorAsync(QueryWindowRelation relation, int serverId, DateTime startUtc, DateTime endUtc, ServerClock? serverClock = null, bool includeAlsoCovered = true, CancellationToken cancellationToken = default, DateTime? rowsNotBeforeUtc = null)
     {
-        var own = await GetOwnQueryWindowFloorAsync(relation, serverId, startUtc, endUtc, serverClock, cancellationToken);
+        var own = await GetOwnQueryWindowFloorAsync(relation, serverId, startUtc, endUtc, serverClock, cancellationToken, rowsNotBeforeUtc);
         return includeAlsoCovered && QueryWindowRelationAlsoCoveredBy(relation) is QueryWindowRelation also
-            ? EarlierCoverageFloor(own, await GetOwnQueryWindowFloorAsync(also, serverId, startUtc, endUtc, serverClock, cancellationToken))
+            ? EarlierCoverageFloor(own, await GetOwnQueryWindowFloorAsync(also, serverId, startUtc, endUtc, serverClock, cancellationToken, rowsNotBeforeUtc))
             : own;
     }
 
     /// <summary>One relation's own probe, which <see cref="GetQueryWindowFloorAsync"/> documents. Each call opens and releases its
     /// own connection, so the two answers of a grid fed by two collectors never nest the non-recursive read lock.</summary>
-    private async Task<DateTime?> GetOwnQueryWindowFloorAsync(QueryWindowRelation relation, int serverId, DateTime startUtc, DateTime endUtc, ServerClock? serverClock, CancellationToken cancellationToken = default)
+    private async Task<DateTime?> GetOwnQueryWindowFloorAsync(QueryWindowRelation relation, int serverId, DateTime startUtc, DateTime endUtc, ServerClock? serverClock, CancellationToken cancellationToken = default, DateTime? rowsNotBeforeUtc = null)
     {
         var view = QueryWindowRelationView(relation);
         using var _q = TimeQuery("GetQueryWindowFloorAsync", $"{view} window floor");
@@ -326,6 +326,11 @@ public partial class LocalDataService
                 connection, view, timeColumn, collector, serverId, startUtc, endUtc, serverClock ?? ServerTimeHelper.ActiveServerClock);
         }
 
+        /* #6180: the rows' own first time can be bounded below (rowsNotBeforeUtc). A page whose size cut left its oldest rows off
+           reads the store without them: the collector's runs, and any row before the start, still prove coverage, and the first
+           row counted inside the window is no older than the bound (the newest row the page serves), so the caller's own floor
+           (the oldest row it serves, EarlierCoverageFloor) is what a left-out row can no longer pull earlier. */
+        var rowsFloorInline = rowsNotBeforeUtc is null ? "" : $" AND {timeColumn} >= $4";
         DateTime? firstInWindow;
         using (var windowCommand = connection.CreateCommand())
         {
@@ -337,14 +342,18 @@ SELECT MIN({timeColumn})
 FROM {view}
 WHERE server_id = $1
 AND   {timeColumn} >= $2
-AND   {timeColumn} <= $3"
+AND   {timeColumn} <= $3{rowsFloorInline}"
                 : $@"
 SELECT LEAST(
-    (SELECT MIN({timeColumn}) FROM {view} WHERE server_id = $1 AND {timeColumn} >= $2 AND {timeColumn} <= $3),
+    (SELECT MIN({timeColumn}) FROM {view} WHERE server_id = $1 AND {timeColumn} >= $2 AND {timeColumn} <= $3{rowsFloorInline}),
     (SELECT MIN(collection_time) FROM v_collection_log WHERE server_id = $1 AND collector_name = '{collector}' AND collection_time >= $2 AND collection_time <= $3))";
             windowCommand.Parameters.Add(new DuckDBParameter { Value = serverId });
             windowCommand.Parameters.Add(new DuckDBParameter { Value = startUtc });
             windowCommand.Parameters.Add(new DuckDBParameter { Value = endUtc });
+            if (rowsNotBeforeUtc is DateTime rowsFloor)
+            {
+                windowCommand.Parameters.Add(new DuckDBParameter { Value = rowsFloor });
+            }
             firstInWindow = await windowCommand.ExecuteScalarAsync(cancellationToken) is DateTime first ? first : null;
         }
 

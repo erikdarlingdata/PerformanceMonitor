@@ -393,13 +393,30 @@ public sealed class McpBlockingTools
 
             /* #4966: the XML exists only in the XE arm, so the probe is the XE collector's alone (the DMV snapshots are not
                a source of these rows). Where this server's blocked_process_report data starts for the window. An event list, so the floor is the
-               earlier of the coverage probe and the oldest event the page shows. */
+               earlier of the coverage probe and the oldest event the page shows.
+               #6180: "shown" is the reports the page SERVES, and the size target decides how many that is after this point, so the
+               probe is read once and a notice is built for every possible page length; the one for the length that fits is the one
+               published. Built from every report selected, it would claim a reach that only the reports left out have. */
             var requestedStart = windowEnd.AddHours(-hours_back);
-            var notice = await McpQueryTools.EventWindowNoticeAsync(
-                () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.BlockedProcessReports, resolved.ServerId, requestedStart, windowEnd, includeAlsoCovered: false),
-                withXml.Min(r => r.EventTime), requestedStart, windowEnd, "blocked_process_report");
+            var coverageProbe = new Lazy<Task<DateTime?>>(
+                () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.BlockedProcessReports, resolved.ServerId, requestedStart, windowEnd, includeAlsoCovered: false));
+            /* Lite's probe also reads the stored event times, so on its own it names the store's oldest report in the window, which a
+               size cut can have left out (Darling's probe reads the collector's own times, never these events). A page shorter than
+               the selection therefore probes with the reports it can serve as the only event times: the newest served report bounds
+               the event side, the collector's runs and any older row still prove coverage, and the notice's earlier-of with the oldest
+               report served (EventWindowNoticeAsync) then names that report when nothing proves more. */
+            var newestSelected = withXml.Max(r => r.EventTime);
+            var servedProbe = new Lazy<Task<DateTime?>>(
+                () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.BlockedProcessReports, resolved.ServerId, requestedStart, windowEnd, includeAlsoCovered: false, rowsNotBeforeUtc: newestSelected));
+            var noticeByCount = new McpQueryTools.McpWindowNotice[withXml.Count + 1];
+            for (var shown = 1; shown <= withXml.Count; shown++)
+            {
+                var probe = shown < withXml.Count && newestSelected != null ? servedProbe : coverageProbe;
+                noticeByCount[shown] = await McpQueryTools.EventWindowNoticeAsync(
+                    () => probe.Value, withXml.Take(shown).Min(r => r.EventTime), requestedStart, windowEnd, "blocked_process_report");
+            }
 
-            var result = withXml.Select(r => new
+            var allReports = withXml.Select(r => new
             {
                 event_time = r.EventTime?.ToString("o"),
                 database_name = r.DatabaseName,
@@ -407,8 +424,16 @@ public sealed class McpBlockingTools
                 blocking_spid = r.BlockingSpid,
                 wait_time_ms = r.WaitTimeMs,
                 blocked_process_report_xml = r.BlockedProcessReportXml
-            });
+            }).ToList();
 
+            /* #6180: each report is a whole XML document (about 18 KB), so the default limit of 5 passes the shared response
+               target. The page keeps the newest reports that fit WHOLE (always at least one) and lists the ones it left out by
+               their identifying fields, so a report is never cut mid-way and any one of them can be fetched by itself. */
+            return McpResponseBudget.FitPrefix(allReports.Count, fitCount =>
+            {
+            var notice = noticeByCount[fitCount];
+            var page = withXml.Take(fitCount).ToList();
+            var leftOut = allReports.Count - fitCount;
             return JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
@@ -424,13 +449,24 @@ public sealed class McpBlockingTools
                 database_name = database,
                 /* #3541 A3: the page bounds, on get_blocked_process_reports' names. truncated means "more
                    reports WITH XML in the window than limit". */
-                reports_returned = withXml.Count,
-                truncated,
-                oldest_returned_event_time = McpHelpers.FormatEffectiveStart(withXml.Min(r => r.EventTime)),
-                newest_returned_event_time = McpHelpers.FormatEffectiveStart(withXml.Max(r => r.EventTime)),
+                reports_returned = fitCount,
+                truncated = truncated || leftOut > 0,
+                oldest_returned_event_time = McpHelpers.FormatEffectiveStart(page.Min(r => r.EventTime)),
+                newest_returned_event_time = McpHelpers.FormatEffectiveStart(page.Max(r => r.EventTime)),
                 order = "event_time_desc",
-                reports = result
+                /* #6180: the reports the size target left off, newest first, by the fields that identify each (a report's
+                   event_time with as_of and limit 1 fetches it alone). Capped so a very large limit cannot grow the list. */
+                left_out_count = leftOut,
+                left_out_reports = allReports.Skip(fitCount).Take(20).Select(r => new
+                {
+                    r.event_time, r.database_name, r.blocked_spid, r.blocking_spid, r.wait_time_ms
+                }).ToList(),
+                size_note = leftOut > 0
+                    ? $"{leftOut} of the {allReports.Count} report(s) this page selected were left out so the answer stays within about 32 KB; a report is never cut mid-way, so each one returned is whole. left_out_reports lists the ones left out (first 20). Fetch one by calling again with as_of set to its event_time (hours_back wide enough to reach it) and limit 1, or narrow with database_name."
+                    : null,
+                reports = allReports.Take(fitCount)
             }, McpHelpers.JsonOptions);
+            }).Json;
         }
         catch (Exception ex)
         {

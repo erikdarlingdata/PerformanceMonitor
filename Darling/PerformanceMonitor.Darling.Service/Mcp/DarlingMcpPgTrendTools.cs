@@ -55,13 +55,13 @@ public sealed class DarlingMcpPgTrendTools
 
             if (string.IsNullOrWhiteSpace(chosen))
             {
-                return await DarlingEngineCapability.NotCollectedStatusAsync(
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, await DarlingEngineCapability.NotCollectedStatusAsync(
                     postgres, resolved.ServerId, resolved.DisplayName, "pg_wait_sampling", cancellationToken)
                     ?? McpHelpers.Status(
                         "empty",
                         $"No wait event was sampled on {resolved.DisplayName} in the last {hours_back} "
                         + "hour(s), so there is nothing to follow. pg_wait_sampling needs the extension "
-                        + "loaded; get_pg_extensions reports whether it is.");
+                        + "loaded; get_pg_extensions reports whether it is."), cancellationToken);
             }
 
             var points = await DarlingPgTrendReader.GetWaitTrendAsync(
@@ -69,14 +69,14 @@ public sealed class DarlingMcpPgTrendTools
 
             if (points.Count == 0)
             {
-                return await DarlingEngineCapability.NotCollectedStatusAsync(
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, await DarlingEngineCapability.NotCollectedStatusAsync(
                     postgres, resolved.ServerId, resolved.DisplayName, "pg_wait_sampling", cancellationToken)
                     ?? McpHelpers.Status(
                         "empty",
                         $"No samples for wait event '{chosen}' on {resolved.DisplayName} in the last "
                         + $"{hours_back} hour(s). A trend needs at least TWO snapshots to difference, so a "
                         + "window holding one collection is legitimately empty here even when the event is "
-                        + "being sampled. get_pg_wait_sampling lists the events this server does record.");
+                        + "being sampled. get_pg_wait_sampling lists the events this server does record."), cancellationToken);
             }
 
             var resets = points.Count(p => p.CounterReset);
@@ -179,12 +179,12 @@ public sealed class DarlingMcpPgTrendTools
 
                 if (top is null)
                 {
-                    return await DarlingEngineCapability.NotCollectedStatusAsync(
+                    return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, await DarlingEngineCapability.NotCollectedStatusAsync(
                         postgres, resolved.ServerId, resolved.DisplayName, "pg_statement_stats", cancellationToken)
                         ?? McpHelpers.Status(
                             "empty",
                             $"No statement recorded execution time on {resolved.DisplayName} in the last "
-                            + $"{hours_back} hour(s), so there is nothing to follow.");
+                            + $"{hours_back} hour(s), so there is nothing to follow."), cancellationToken);
                 }
 
                 parsedQueryId = top.Value;
@@ -199,14 +199,14 @@ public sealed class DarlingMcpPgTrendTools
 
             if (points.Count == 0)
             {
-                return await DarlingEngineCapability.NotCollectedStatusAsync(
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, await DarlingEngineCapability.NotCollectedStatusAsync(
                     postgres, resolved.ServerId, resolved.DisplayName, "pg_statement_stats", cancellationToken)
                     ?? McpHelpers.Status(
                         "empty",
                         $"No samples for queryid {parsedQueryId} on {resolved.DisplayName} in the last "
                         + $"{hours_back} hour(s). pg_stat_statements evicts statements under memory "
                         + "pressure, so a queryid that was there yesterday can be gone rather than idle - "
-                        + "get_pg_top_queries shows what the server currently tracks.");
+                        + "get_pg_top_queries shows what the server currently tracks."), cancellationToken);
             }
 
             var ran = points.Where(p => p.Calls > 0).ToList();
@@ -319,7 +319,7 @@ public sealed class DarlingMcpPgTrendTools
 
                 if (dominant is null)
                 {
-                    return await DarlingEngineCapability.NotCollectedStatusAsync(
+                    return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, await DarlingEngineCapability.NotCollectedStatusAsync(
                         postgres, resolved.ServerId, resolved.DisplayName, "pg_io_stats", cancellationToken)
                         ?? McpHelpers.Status(
                             "empty",
@@ -334,7 +334,7 @@ public sealed class DarlingMcpPgTrendTools
                                   + $"recorded any I/O or buffer activity on {resolved.DisplayName} in the "
                                   + $"last {hours_back} hour(s). get_pg_io_stats lists the combinations "
                                   + "this server reports; omit both parameters to follow whichever pair is "
-                                  + "busiest.");
+                                  + "busiest."), cancellationToken);
                 }
 
                 chosenBackend = dominant.Value.BackendType;
@@ -346,7 +346,7 @@ public sealed class DarlingMcpPgTrendTools
 
             if (points.Count == 0)
             {
-                return await DarlingEngineCapability.NotCollectedStatusAsync(
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, await DarlingEngineCapability.NotCollectedStatusAsync(
                     postgres, resolved.ServerId, resolved.DisplayName, "pg_io_stats", cancellationToken)
                     ?? McpHelpers.Status(
                         "empty",
@@ -354,7 +354,7 @@ public sealed class DarlingMcpPgTrendTools
                         + $"{resolved.DisplayName} in the last {hours_back} hour(s). A trend needs at least "
                         + "TWO snapshots to difference, so a window holding one collection is legitimately "
                         + "empty here even while the combination is being collected. get_pg_io_stats lists "
-                        + "the combinations this server actually reports.");
+                        + "the combinations this server actually reports."), cancellationToken);
             }
 
             /* Asked of the server's OWN configuration rather than inferred from the zeros, because the two
@@ -575,12 +575,12 @@ public sealed class DarlingMcpPgTrendTools
 
                 if (chosen is null)
                 {
-                    return await DarlingEngineCapability.NotCollectedStatusAsync(
+                    return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, await DarlingEngineCapability.NotCollectedStatusAsync(
                         postgres, resolved.ServerId, resolved.DisplayName, "pg_database_stats", cancellationToken)
                         ?? McpHelpers.Status(
                             "empty",
                             $"No database recorded block accesses or temp files on {resolved.DisplayName} in "
-                            + $"the last {hours_back} hour(s), so there is nothing to follow.");
+                            + $"the last {hours_back} hour(s), so there is nothing to follow."), cancellationToken);
                 }
             }
 
@@ -606,7 +606,7 @@ public sealed class DarlingMcpPgTrendTools
                 var (samplesInWindow, everCollected) = await DarlingPgDatabaseReader.GetCoverageAsync(
                     postgres, resolved.ServerId, start, windowEnd, cancellationToken);
 
-                return McpHelpers.Status(
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status(
                     "empty",
                     $"No differenced intervals for database '{label}' on {resolved.DisplayName} in the last "
                     + $"{hours_back} hour(s). "
@@ -622,7 +622,7 @@ public sealed class DarlingMcpPgTrendTools
                                 ? "No snapshot at all landed in this window, though this server has been "
                                   + "collected before. get_collection_health says whether the sweep is "
                                   + "running."
-                                : "This server has never had pg_database_stats collected."));
+                                : "This server has never had pg_database_stats collected.")), cancellationToken);
             }
 
             var totalTempFiles = points.Sum(p => p.TempFiles);

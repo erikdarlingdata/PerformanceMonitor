@@ -43,15 +43,11 @@ public sealed class McpPerfmonTools
                its delta over the stored interval, so the running total in value is never the only number a
                reader gets. */
             var result = filtered.Select(r => TrendPayloads.PerfmonLatestRow(
-                r.CounterName, r.InstanceName, r.Value, r.DeltaValue, r.SampleIntervalSeconds, r.CntrType));
+                r.CounterName, r.InstanceName, r.Value, r.DeltaValue, r.SampleIntervalSeconds, r.CntrType)).ToList();
 
-            return JsonSerializer.Serialize(new
-            {
-                server = resolved.DisplayName,
-                /* #3541 A10: taken from the unfiltered snapshot, so a filter that matches nothing still says when. */
-                captured_at = rows[0].CollectionTime.ToString("o"),
-                counters = result
-            }, McpHelpers.JsonOptions);
+            /* #3541 A10: captured_at is taken from the unfiltered snapshot, so a filter that matches nothing still says when.
+               #6180: the page is cut to the shared response target (see TrendPayloads.PerfmonLatestReply). */
+            return TrendPayloads.PerfmonLatestReply(resolved.DisplayName, rows[0].CollectionTime.ToString("o"), result);
         }
         catch (Exception ex)
         {

@@ -69,6 +69,8 @@
     <Compile Include="..\Darling\Darling.Tests\StaTestThread.cs" Link="StaTestThread.cs" />
     <!-- #6136: finds the text a laid-out window cuts off, shared so both apps are held to the one rule. -->
     <Compile Include="..\Darling\Darling.Tests\ClippedTextProbe.cs" Link="ClippedTextProbe.cs" />
+    <!-- #6138: finds the Settings inputs a screen reader cannot name, shared so both apps are held to the one rule. -->
+    <Compile Include="..\Darling\Darling.Tests\InputNamesProbe.cs" Link="InputNamesProbe.cs" />
     <!-- #5602: the timing scanner, so both suites keep a clock-starting class in the one `timing` collection by one detector. -->
     <Compile Include="..\Darling\Darling.Tests\TimingTestScanner.cs" Link="TimingTestScanner.cs" />
     <!-- #5943: TestWait (WaitUntil, Elapse) and AnchorClock, the replacements for Thread.Sleep and for reading the clock twice. Its own tests stay in Darling.Tests. -->

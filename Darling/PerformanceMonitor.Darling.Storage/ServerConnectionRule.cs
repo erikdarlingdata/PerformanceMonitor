@@ -26,10 +26,10 @@ public static class ServerConnectionRule
     public const string ReferenceRefusedText =
         "Enter the password itself. References (env: or file:) can only be set in the configuration file.";
 
-    /// <summary>The sentence a refused change of how a server is reached gives when the row holds a remediation login. The
+    /// <summary>The sentence a refused change of how a server is reached gives when the row holds a remediation or a hypothetical-index login (#6170). The
     /// same text in the store's trigger and edit function.</summary>
     public const string RemediationKeptText =
-        "This server has a remediation login stored. Change how it is reached on the service host, in the configuration file or with --add-server.";
+        "This server has a remediation or hypothetical-index login stored. Change how it is reached on the service host, in the configuration file or with --add-server.";
 
     /// <summary>
     /// "The server is at the same address": the host text is equal ordinally (a request's host is trimmed when it is

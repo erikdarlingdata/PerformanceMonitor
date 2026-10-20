@@ -170,7 +170,8 @@ public static class AgTopology
     public static List<AgTopologyCard> BuildCards(
         IReadOnlyList<AgTopologyReplicaRow> replicas,
         IReadOnlyList<AgTopologyDatabaseRow> databases,
-        DateTime? nowUtc = null)
+        DateTime? nowUtc = null,
+        Func<int, string?>? displayNameOf = null)
     {
         ArgumentNullException.ThrowIfNull(replicas);
         ArgumentNullException.ThrowIfNull(databases);
@@ -216,6 +217,23 @@ public static class AgTopology
                 worst = HealthSeverity.Warning;
             }
 
+            /* #6159: a card built from a SECONDARY's own view lists only what that secondary can see, and the primary's row is not
+               always among it. The stored primary (sys.dm_hadr_availability_group_states.primary_replica, which a secondary can read)
+               names the primary anyway. A row from before the column existed carries none; then a local SECONDARY replica still
+               proves a primary exists, and the card says it is not visible from here rather than that none is reported. */
+            var primaryName = replicaItems.FirstOrDefault(r => r.IsPrimary)?.ReplicaServerName;
+            if (primaryName is null)
+            {
+                var stored = rows.Select(r => r.PrimaryReplica).FirstOrDefault(p => !string.IsNullOrWhiteSpace(p));
+                if (stored is not null)
+                {
+                    primaryName = PrimaryNameFor(stored, replicas.Select(r => (r.ServerId, r.ReplicaServerName, r.IsLocal)), displayNameOf);
+                }
+            }
+
+            var primaryNotVisible = primaryName is null
+                && replicaItems.Any(r => r.IsLocal == true && string.Equals(r.RoleDesc, "SECONDARY", StringComparison.OrdinalIgnoreCase));
+
             var card = new AgTopologyCard
             {
                 IsStale = isStale,
@@ -224,7 +242,8 @@ public static class AgTopology
                 AgName = first.AgName,
                 CollectionTime = first.CollectionTime,
                 DatabaseCollectionTime = dbRows is { Count: > 0 } ? dbRows[0].CollectionTime : null,
-                PrimaryReplica = replicaItems.FirstOrDefault(r => r.IsPrimary)?.ReplicaServerName,
+                PrimaryReplica = primaryName,
+                PrimaryNotVisible = primaryNotVisible,
                 Severity = worst,
                 /* Every replica row of one AG carries the SAME group_id (the engine stamps one id per AG), so
                    the first non-null one found is the card's — tolerant of a row or two still NULL mid-upgrade
@@ -472,6 +491,41 @@ public static class AgTopology
 
     private static HealthSeverity Worse(HealthSeverity a, HealthSeverity b) => a > b ? a : b;
 
+    /// <summary>
+    /// The name a card shows for the primary it learned from the stored column (#6159): the display name of the monitored server
+    /// that IS the primary, otherwise the replica name. A monitored server is recognised by its own row: the row it reports for
+    /// itself (<c>is_local</c>) carries its own <c>replica_server_name</c>, which is exact where matching the registered address
+    /// against the replica name is not (instance names, aliases, listeners). <paramref name="replicaRows"/> is every replica row
+    /// read, from every reporting server.
+    /// </summary>
+    public static string PrimaryNameFor(
+        string primaryReplica,
+        IEnumerable<(int ServerId, string? ReplicaServerName, bool? IsLocal)> replicaRows,
+        Func<int, string?>? displayNameOf)
+    {
+        ArgumentNullException.ThrowIfNull(primaryReplica);
+        ArgumentNullException.ThrowIfNull(replicaRows);
+
+        if (displayNameOf is null)
+        {
+            return primaryReplica;
+        }
+
+        foreach (var row in replicaRows)
+        {
+            if (row.IsLocal == true && string.Equals(row.ReplicaServerName, primaryReplica, StringComparison.OrdinalIgnoreCase))
+            {
+                var display = displayNameOf(row.ServerId);
+                if (!string.IsNullOrWhiteSpace(display))
+                {
+                    return display;
+                }
+            }
+        }
+
+        return primaryReplica;
+    }
+
     private static AgTopologyReplica ToReplica(AgTopologyReplicaRow row)
     {
         var syncHealth = SynchronizationHealthSeverity(row.SynchronizationHealthDesc);
@@ -603,6 +657,7 @@ public static class AgTopology
             hash.Add(card.CollectionTime);
             hash.Add(card.DatabaseCollectionTime);
             hash.Add(card.PrimaryReplica);
+            hash.Add(card.PrimaryNotVisible);
             hash.Add(card.Severity);
             hash.Add(card.IsStale);
 
@@ -667,6 +722,11 @@ public sealed class AgTopologyReplicaRow
     /// <summary><c>sys.availability_groups.group_id</c> as text (V151, #4475) — the same GUID on every replica
     /// of one AG, stamped by the engine. Null on a row collected before this column existed.</summary>
     public string? GroupId { get; init; }
+
+    /// <summary><c>sys.dm_hadr_availability_group_states.primary_replica</c> (V202, #6159) — the name of the replica that was the
+    /// primary when the row was collected, readable from a secondary. Null on a row collected before this column existed, and while
+    /// the group has no primary.</summary>
+    public string? PrimaryReplica { get; init; }
 }
 
 /// <summary>One database-grain row as collected. Queue sizes are KB and rates KB/s (the DMV's units), both
@@ -887,6 +947,11 @@ public sealed class AgTopologyCard : AgTopologyObservable
     public DateTime CollectionTime { get; set; }
     public DateTime? DatabaseCollectionTime { get; set; }
     public string? PrimaryReplica { get; set; }
+
+    /// <summary>True when this view lists no primary and none is stored, but the local replica is a SECONDARY, so a primary exists
+    /// and this view just does not show it (#6159). Not a finding.</summary>
+    public bool PrimaryNotVisible { get; set; }
+
     public HealthSeverity Severity { get; set; }
 
     /// <summary>True when the newest replica snapshot is older than <see cref="ServerHealthThresholds.OfflineThreshold"/>
@@ -913,9 +978,9 @@ public sealed class AgTopologyCard : AgTopologyObservable
     public string SeverityLabel => IsStale ? "Stale" : AgTopology.SeverityLabel(Severity);
     public bool HasDatabases => Databases.Count > 0;
 
-    public string PrimaryDisplay => string.IsNullOrWhiteSpace(PrimaryReplica)
-        ? "No primary reported"
-        : "Primary: " + PrimaryReplica;
+    public string PrimaryDisplay => !string.IsNullOrWhiteSpace(PrimaryReplica)
+        ? "Primary: " + PrimaryReplica
+        : PrimaryNotVisible ? "Primary not visible from this secondary" : "No primary reported";
 
     /// <summary>Whose view this is, and how fresh. The two collector sweeps land independently, so the database
     /// grain gets its own "as of" whenever it differs — surfaced rather than hidden, because the collectors write
@@ -959,6 +1024,7 @@ public sealed class AgTopologyCard : AgTopologyObservable
         CollectionTime = latest.CollectionTime;
         DatabaseCollectionTime = latest.DatabaseCollectionTime;
         PrimaryReplica = latest.PrimaryReplica;
+        PrimaryNotVisible = latest.PrimaryNotVisible;
         Severity = latest.Severity;
         IsStale = latest.IsStale;
         GroupId = latest.GroupId;

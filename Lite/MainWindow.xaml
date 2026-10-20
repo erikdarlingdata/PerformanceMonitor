@@ -3,6 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:controls="clr-namespace:PerformanceMonitorLite.Controls"
         xmlns:local="clr-namespace:PerformanceMonitorLite"
+        xmlns:ui="clr-namespace:PerformanceMonitor.Ui;assembly=PerformanceMonitor.Ui"
         Title="Performance Monitor Lite"
         Height="700" Width="1200"
         MinHeight="600" MinWidth="900"
@@ -264,7 +265,7 @@
                 <!-- Server List -->
                 <!-- #2020 2b-i-b: a ListBox rendering the FleetView projection (group headers + servers)
                      via the template selector, replacing the flat ListView of ServerConnection rows. -->
-                <ListBox Grid.Row="1" x:Name="ServerListView" AutomationProperties.AutomationId="ServerPicker"
+                <ui:InvokableListBox Grid.Row="1" x:Name="ServerListView" ItemInvoked="ServerListView_ItemInvoked" AutomationProperties.AutomationId="ServerPicker"
                          SelectionMode="Single"
                          SelectionChanged="ServerListView_SelectionChanged"
                          MouseDoubleClick="ServerListView_MouseDoubleClick"
@@ -285,7 +286,7 @@
                             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
                         </Style>
                     </ListBox.ItemContainerStyle>
-                </ListBox>
+                </ui:InvokableListBox>
 
                 <!-- Sidebar Footer -->
                 <Border Grid.Row="2" Padding="12" Background="{DynamicResource BackgroundLightBrush}"
@@ -414,7 +415,7 @@
                                        Foreground="{DynamicResource ForegroundMutedBrush}" Visibility="Collapsed"/>
                         </StackPanel>
                         <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="8">
-                            <ItemsControl x:Name="OverviewItemsControl">
+                            <ui:InvokableItemsControl x:Name="OverviewItemsControl" ItemInvoked="OverviewItemsControl_ItemInvoked">
                                 <ItemsControl.ItemsPanel>
                                     <ItemsPanelTemplate>
                                         <WrapPanel/>
@@ -550,7 +551,7 @@
                                         </controls:OverviewCardBorder>
                                     </DataTemplate>
                                 </ItemsControl.ItemTemplate>
-                            </ItemsControl>
+                            </ui:InvokableItemsControl>
                         </ScrollViewer>
                         </DockPanel>
                     </TabItem>

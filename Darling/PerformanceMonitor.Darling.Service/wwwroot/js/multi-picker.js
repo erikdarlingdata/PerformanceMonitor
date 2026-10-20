@@ -128,7 +128,8 @@ export function multiPicker(opts) {
     const full = state.checked.size >= max;
     const limitHint = "Limit reached: uncheck a " + noun + " to pick another.";
     const blocked = (o) => (refuse && !state.checked.has(o) ? refuse(o, state.checked) : null);
-    count.textContent = state.checked.size + " / " + max + " selected";
+    /* #6159: "0 / 50 selected" read as 50 items listed; the 50 is the most a person may pick. */
+    count.textContent = state.checked.size + " selected (up to " + max + ")";
     hint.textContent = full ? limitHint : (listedValues.map(blocked).find((r) => r) || "");
     const rows = visible().map((o) => {
       const on = state.checked.has(o);

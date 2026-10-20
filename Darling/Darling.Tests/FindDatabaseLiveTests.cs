@@ -86,4 +86,107 @@ public sealed class FindDatabaseLiveTests
         var blank = JsonDocument.Parse(await DarlingMcpFindDatabaseTools.FindDatabase(dataSource, "  ", ct)).RootElement;
         Assert.Equal("invalid", blank.GetProperty("status").GetString());
     }
+
+    /// <summary>
+    /// #6178: with no database list anywhere, the answer is not_collected when every registered server is an Azure SQL Database
+    /// (that engine never writes the list), and stays empty when at least one server could have had it.
+    /// </summary>
+    [Fact]
+    public async Task FindDatabase_WithNoList_AnswersNotCollectedOnlyWhenEveryServerIsAzureSqlDb()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), BaseSkip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var (azure, box) = (ServerIdHelper.GetDeterministicHashCode("fd-azure"), ServerIdHelper.GetDeterministicHashCode("fd-box"));
+        await DarlingMcpTestData.RegisterServerAsync(connection, azure, "fd-azure", ct);
+        await DarlingMcpTestData.RegisterServerAsync(connection, box, "fd-box", ct);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET sql_engine_edition = 5 WHERE server_id = $1", azure);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET sql_engine_edition = 3 WHERE server_id = $1", box);
+
+        var mixed = JsonDocument.Parse(await DarlingMcpFindDatabaseTools.FindDatabase(dataSource, "Tenant1", ct)).RootElement;
+        Assert.Equal("empty", mixed.GetProperty("status").GetString());
+
+        await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM servers WHERE server_id = $1", box);
+        var azureOnly = JsonDocument.Parse(await DarlingMcpFindDatabaseTools.FindDatabase(dataSource, "Tenant1", ct)).RootElement;
+        Assert.Equal("not_collected", azureOnly.GetProperty("status").GetString());
+        var message = azureOnly.GetProperty("message").GetString();
+        Assert.Contains("Azure SQL Database", message, StringComparison.Ordinal);
+        Assert.Contains("database_states", message, StringComparison.Ordinal);
+    }
+}
+
+
+/* #1776 own-store: each test seeds its own scratch database, so nothing here shares rows with another test. */
+/// <summary>
+/// #6178 (gated, DARLING_TEST_PG): <c>get_job_history</c> with no server named answers not_collected when every registered server is an
+/// Azure SQL Database (no SQL Agent), and stays empty when at least one server could have jobs. The stored Hyperscale read of
+/// <c>get_database_sizes</c> comes from the newest server_properties row.
+/// </summary>
+public sealed class AzureEngineWordingLiveTests
+{
+    private const string BaseSkip = "Set DARLING_TEST_PG to a Postgres connection string to run the Azure wording live tests.";
+
+    [Fact]
+    public async Task JobHistory_OfEveryServer_AnswersNotCollectedOnlyWhenEveryServerIsAzureSqlDb()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), BaseSkip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var (azure, azure2, box) = (ServerIdHelper.GetDeterministicHashCode("jh-azure"), ServerIdHelper.GetDeterministicHashCode("jh-azure2"),
+            ServerIdHelper.GetDeterministicHashCode("jh-box"));
+        await DarlingMcpTestData.RegisterServerAsync(connection, azure, "jh-azure", ct);
+        await DarlingMcpTestData.RegisterServerAsync(connection, azure2, "jh-azure2", ct);
+        await DarlingMcpTestData.RegisterServerAsync(connection, box, "jh-box", ct);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET sql_engine_edition = 5 WHERE server_id = $1 OR server_id = $2", azure, azure2);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET sql_engine_edition = 3 WHERE server_id = $1", box);
+
+        var mixed = JsonDocument.Parse(await DarlingMcpJobTools.GetJobHistory(dataSource, cancellationToken: ct)).RootElement;
+        Assert.Equal("empty", mixed.GetProperty("status").GetString());
+
+        await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM servers WHERE server_id = $1", box);
+        var azureOnly = JsonDocument.Parse(await DarlingMcpJobTools.GetJobHistory(dataSource, cancellationToken: ct)).RootElement;
+        Assert.Equal("not_collected", azureOnly.GetProperty("status").GetString());
+        var message = azureOnly.GetProperty("message").GetString();
+        Assert.Contains("Azure SQL Database", message, StringComparison.Ordinal);
+        Assert.Contains("job_history", message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task IsHyperscale_ReadsTheNewestStoredEditionOrServiceObjective()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), BaseSkip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var id = ServerIdHelper.GetDeterministicHashCode("hs-server");
+        await DarlingMcpTestData.RegisterServerAsync(connection, id, "hs-server", ct);
+        Assert.False(await DarlingEngineCapability.IsHyperscaleAsync(dataSource, id, ct));
+
+        async Task StoreAsync(TimeSpan age, string edition, string objective) =>
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, service_objective, engine_edition) VALUES ($1,$2,$3,$4,$5,$6,5)",
+                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(DateTime.UtcNow - age), id, "hs-server", edition, objective);
+
+        await StoreAsync(TimeSpan.FromHours(2), "Azure SQL Database (General Purpose)", "GP_Gen5_4");
+        Assert.False(await DarlingEngineCapability.IsHyperscaleAsync(dataSource, id, ct));
+        await StoreAsync(TimeSpan.FromMinutes(5), "Azure SQL Database (Hyperscale)", "HS_Gen5_4");
+        Assert.True(await DarlingEngineCapability.IsHyperscaleAsync(dataSource, id, ct));
+    }
 }

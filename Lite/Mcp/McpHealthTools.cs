@@ -576,7 +576,11 @@ public sealed class McpHealthTools
                WRITES nulls, so a property would ship analysis_caveats: null on every clean answer — and it reads
                the process-wide ledger because the scheduled sweep builds a fresh analysis service per pass.
                A different layer from the collector rows above: 43 healthy collectors above a family the pass timed out reading. */
-            return JsonSerializer.Serialize(CollectionCaveatLedger.Shared.Attach(new
+            /* #6180: full_detail serves ~30 fields for every collector (52 KB measured), past the shared response target. The
+               collectors are cut from the end to fit it, whole rows only, and the reply says how many it kept and how to
+               get the compact form that carries them all. */
+            var collectorRows = result.ToList();
+            return McpResponseBudget.FitPrefix(collectorRows.Count, collectorCount => JsonSerializer.Serialize(CollectionCaveatLedger.Shared.Attach(new
             {
                 server = resolved.DisplayName,
                 /* #3453: the build-attribution read, and deliberately the same block Darling's twin
@@ -725,8 +729,15 @@ public sealed class McpHealthTools
                 collector_detail_note = full_detail
                     ? "full_detail=true: every field is served for every collector below."
                     : $"{compactCount} of {rows.Count} collector(s) below are HEALTHY with nothing to report (no errors, denials, session/extension-missing runs or abandoned cycles this window) and are compacted to collector/status/compact/total_runs/rows_stored/avg_duration_ms/last_success. {partialCount} need a look (failing, stale, stopped, erroring, denied, regressed, or an unexplained zero) and carry a leaner partial_detail shape instead of full detail: in a partial row a missing key means null, false or 0, and only collector, status, partial_detail, total_runs and errors are always present. Pass full_detail=true for every field on every collector.",
-                collectors = result
-            }, resolved.ServerId, McpHelpers.JsonOptions), McpHelpers.JsonOptions);
+                /* #6180: the response-size cut, observed. Null note and false flag when every collector fit. */
+                truncated = collectorCount < collectorRows.Count,
+                collectors_returned = collectorCount,
+                collectors_total = collectorRows.Count,
+                size_note = collectorCount < collectorRows.Count
+                    ? $"{collectorRows.Count - collectorCount} of {collectorRows.Count} collector row(s) were left off the end to keep this answer within about 32 KB. Call again without full_detail: healthy collectors are then compacted and every collector fits."
+                    : null,
+                collectors = collectorRows.Take(collectorCount)
+            }, resolved.ServerId, McpHelpers.JsonOptions), McpHelpers.JsonOptions)).Json;
         }
         catch (Exception ex)
         {
@@ -1172,6 +1183,13 @@ public sealed class McpHealthTools
                 error_message_truncated = !full_text && r.ErrorMessage is not null && r.ErrorMessage.Length > ErrorMessagePreviewLength,
             });
 
+            /* #6180: a large limit (1000 measured at 70-86 KB) passes the shared response target, so the newest-first (or
+               slowest-first) prefix of whole runs that fits is served, with the page fields describing what was served. */
+            var runRows = result.ToList();
+            return McpResponseBudget.FitPrefix(rows.Count, pageCount =>
+            {
+            var pageRows = rows.Take(pageCount).ToList();
+            var cut = pageCount < rows.Count;
             return JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
@@ -1186,9 +1204,9 @@ public sealed class McpHealthTools
                    collection_cycle/SKIPPED rows (CollectionCycleSkip: a late cycle's skipped slots; filterable with
                    status = SKIPPED), which are not runs, so they are counted in skipped_cycle_rows and not here.
                    Every returned-time span field below describes the PAGE, cycle rows included. */
-                run_count = rows.Count(r => r.CollectorName != CollectionCycleSkip.CollectorName),
-                skipped_cycle_rows = rows.Count(r => r.CollectorName == CollectionCycleSkip.CollectorName),
-                truncated,
+                run_count = pageRows.Count(r => r.CollectorName != CollectionCycleSkip.CollectorName),
+                skipped_cycle_rows = pageRows.Count(r => r.CollectorName == CollectionCycleSkip.CollectorName),
+                truncated = truncated || cut,
                 /*
                     #3287, field-identical to Darling's twin: the span this PAGE covers, beside the span
                     requested. `hours_back = 24` next to `truncated = true` said the cap bit and then showed
@@ -1209,8 +1227,8 @@ public sealed class McpHealthTools
                     the time-ordered test kept passing.
                 */
                 /* #4966: where the page's rows stop describes the window it covers, so it prints like effective_start (UTC, with the Z), and so does the newest bound (#5015); the rows' own times stay as the store holds them. */
-                oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(rows.Min(r => r.CollectionTime)),
-                newest_returned_collection_time = McpHelpers.FormatEffectiveStart(rows.Max(r => r.CollectionTime)),
+                oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(pageRows.Min(r => r.CollectionTime)),
+                newest_returned_collection_time = McpHelpers.FormatEffectiveStart(pageRows.Max(r => r.CollectionTime)),
                 /* Which ordering this page came back in, stated rather than left to be inferred from the
                    filters sent. Same two tokens as Darling's twin, from the shared constants. */
                 order = min_duration_ms is null
@@ -1228,8 +1246,14 @@ public sealed class McpHealthTools
                    key meaning two unrelated things by branch is the collision the name avoids. Each ROW
                    keeps its own `status`, where nothing collides. */
                 status_filter = string.IsNullOrWhiteSpace(status) ? null : status.Trim().ToUpperInvariant(),
-                runs = result,
+                runs_returned = pageCount,
+                runs_total = rows.Count,
+                size_note = cut
+                    ? $"{rows.Count - pageCount} of the {rows.Count} run(s) this read selected were left off the end to keep this answer within about 32 KB. Ask for fewer rows (limit), a narrower window (hours_back or as_of), or one collector_name / status to read the rest in full."
+                    : null,
+                runs = runRows.Take(pageCount),
             }, McpHelpers.JsonOptions);
+            }).Json;
         }
         catch (Exception ex)
         {
@@ -1318,27 +1342,39 @@ public sealed class McpHealthTools
                 rows_collected = r.RowsCollected,
                 status = r.Status,
                 error_message = r.ErrorMessage,
-            });
+            }).ToList();
 
+            /* #6180: a large limit passes the shared response target, so the page is cut to the newest (or slowest) whole runs
+               that fit, with the page fields describing what was served. */
+            return McpResponseBudget.FitPrefix(rows.Count, pageCount =>
+            {
+            var pageRows = rows.Take(pageCount).ToList();
+            var cut = pageCount < rows.Count;
             return JsonSerializer.Serialize(new
             {
                 scope = "fleet",
                 hours_back = hours,
                 /* #5731: collector runs only; the collection_cycle/SKIPPED rows the page also shows are counted apart. The returned-time span fields describe the page, cycle rows included. */
-                run_count = rows.Count(r => r.CollectorName != CollectionCycleSkip.CollectorName),
-                skipped_cycle_rows = rows.Count(r => r.CollectorName == CollectionCycleSkip.CollectorName),
-                truncated,
+                run_count = pageRows.Count(r => r.CollectorName != CollectionCycleSkip.CollectorName),
+                skipped_cycle_rows = pageRows.Count(r => r.CollectorName == CollectionCycleSkip.CollectorName),
+                truncated = truncated || cut,
                 /* #4966: where the page's rows stop describes the window it covers, so it prints like effective_start (UTC, with the Z), and so does the newest bound (#5015); the rows' own times stay as the store holds them. */
-                oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(rows.Min(r => r.CollectionTime)),
-                newest_returned_collection_time = McpHelpers.FormatEffectiveStart(rows.Max(r => r.CollectionTime)),
+                oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(pageRows.Min(r => r.CollectionTime)),
+                newest_returned_collection_time = McpHelpers.FormatEffectiveStart(pageRows.Max(r => r.CollectionTime)),
                 order = min_duration_ms is null
                     ? McpHelpers.CollectionLogOrderNewestFirst
                     : McpHelpers.CollectionLogOrderSlowestFirst,
                 collector_name = string.IsNullOrWhiteSpace(collector_name) ? null : collector_name.Trim(),
                 min_duration_ms,
                 status_filter = string.IsNullOrWhiteSpace(status) ? null : status.Trim().ToUpperInvariant(),
-                runs = result,
+                runs_returned = pageCount,
+                runs_total = rows.Count,
+                size_note = cut
+                    ? $"{rows.Count - pageCount} of the {rows.Count} run(s) this read selected were left off the end to keep this answer within about 32 KB. Ask for fewer rows (limit), a narrower window (hours_back or as_of), or one server_name / collector_name / status to read the rest in full."
+                    : null,
+                runs = result.Take(pageCount),
             }, McpHelpers.JsonOptions);
+            }).Json;
         }
         catch (Exception ex)
         {

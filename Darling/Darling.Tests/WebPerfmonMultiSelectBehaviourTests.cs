@@ -80,7 +80,7 @@ public sealed class WebPerfmonMultiSelectBehaviourTests
         Assert.Equal(Defaults, Strings(r.GetProperty("checked")));
         Assert.Equal(Defaults, Strings(r.GetProperty("reads")));
         Assert.Equal(Defaults, Strings(r.GetProperty("chart").GetProperty("labels")));
-        Assert.Equal("5 / 10 selected", r.GetProperty("count").GetString());
+        Assert.Equal("5 selected (up to 10)", r.GetProperty("count").GetString());
         Assert.Equal(0, r.GetProperty("selects").GetInt32());
     }
 

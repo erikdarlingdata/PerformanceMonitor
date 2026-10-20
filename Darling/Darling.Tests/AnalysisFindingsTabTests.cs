@@ -86,7 +86,10 @@ public sealed class AnalysisFindingsTabTests
     {
         var r = Run("grouping");
         Assert.Equal(new[] { "Major · 2 findings · CRITICAL", "Config · CRITICAL", "Solo info · INFO" }, Strings(r.GetProperty("headers")));
-        Assert.Equal(new[] { 2, 1, 1 }, r.GetProperty("cardsPerGroup").EnumerateArray().Select(x => x.GetInt32()).ToArray());
+        // #6159: a group of one finding does not repeat the title its summary line carries; a group of two keeps each card's heading.
+        Assert.Equal(new[] { 2, 0, 0 }, r.GetProperty("cardsPerGroup").EnumerateArray().Select(x => x.GetInt32()).ToArray());
+        // The lone finding's title appears once in its group (the summary line); the two-finding group names "Major" on the summary and on its card.
+        Assert.Equal(new[] { 2, 1, 1 }, r.GetProperty("headlineCounts").EnumerateArray().Select(x => x.GetInt32()).ToArray());
         // Info-only groups start collapsed, the rest open.
         Assert.Equal(new[] { true, true, false }, r.GetProperty("open").EnumerateArray().Select(x => x.GetBoolean()).ToArray());
         var classes = Strings(r.GetProperty("badgeClasses"));

@@ -67,7 +67,7 @@ public sealed class DarlingMcpPgServerStateTools
 
             if (rows.Count == 0)
             {
-                return await DarlingEngineCapability.NotCollectedStatusAsync(
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, await DarlingEngineCapability.NotCollectedStatusAsync(
                     postgres, resolved.ServerId, resolved.DisplayName, "pg_buffer_usage", cancellationToken)
                     ?? await DarlingRuntimePrecondition.StatusAsync(
                         postgres, resolved.ServerId, resolved.DisplayName, "pg_buffer_usage", cancellationToken)
@@ -75,7 +75,7 @@ public sealed class DarlingMcpPgServerStateTools
                         "empty",
                         $"No buffer pool contents recorded for {resolved.DisplayName} in the last "
                         + $"{hours_back} hour(s). This needs the pg_buffercache extension in the database "
-                        + "the collector connects to.");
+                        + "the collector connects to."), cancellationToken);
             }
 
             var newest = rows[0];
@@ -152,7 +152,7 @@ public sealed class DarlingMcpPgServerStateTools
 
             if (fetched.Count == 0)
             {
-                return await DarlingEngineCapability.NotCollectedStatusAsync(
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, await DarlingEngineCapability.NotCollectedStatusAsync(
                     postgres, resolved.ServerId, resolved.DisplayName, "pg_extension_availability", cancellationToken)
                     ?? McpHelpers.Status(
                         "empty",
@@ -164,7 +164,7 @@ public sealed class DarlingMcpPgServerStateTools
                             : $" You filtered to database_name '{scope}': check the spelling and "
                               + "that the collector enumerates it, because a name that matches nothing is "
                               + "indistinguishable here from a server with no inventory. Re-run without the "
-                              + "filter to see which databases are reported."));
+                              + "filter to see which databases are reported.")), cancellationToken);
             }
 
             /* The result is capped at `limit`, so a summary count taken over the returned rows describes
@@ -434,7 +434,7 @@ public sealed class DarlingMcpPgServerStateTools
                 var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
                     postgres, "get_pg_lock_stats", resolved.ServerName, emptyStart, windowEnd, emptyAnswer: true, logger, cancellationToken);
 
-                return McpHelpers.Status(
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status(
                         "empty",
                         McpHelpers.QuietUnlessCut(
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
@@ -443,7 +443,7 @@ public sealed class DarlingMcpPgServerStateTools
                             coveredClaim: ", so this is the "
                                 + "healthy state on a server without sustained contention — and it is not proof "
                                 + "that nothing was ever locked."),
-                        emptyNotice.AsHints());
+                        emptyNotice.AsHints()), cancellationToken);
             }
 
             /* #4966: where the store's coverage of the window starts, probed on the web's own source for this read (WebDataStartNote).
@@ -525,7 +525,7 @@ public sealed class DarlingMcpPgServerStateTools
 
             if (row is null)
             {
-                return await DarlingEngineCapability.NotCollectedStatusAsync(
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, await DarlingEngineCapability.NotCollectedStatusAsync(
                     postgres, resolved.ServerId, resolved.DisplayName, "pg_write_stats", cancellationToken)
                     ?? McpHelpers.Status(
                         "empty",
@@ -536,7 +536,7 @@ public sealed class DarlingMcpPgServerStateTools
                         /* #4966: the window keys ride on an empty answer under hints, from the coverage probe; not_collected (above) stays bare. */
                         (await DarlingMcpWindowNotice.ReadAsync(
                             () => DarlingMcpWindowNotice.Probe(postgres, WriteStatsTable, resolved.ServerName, requestedStart, windowEnd, cancellationToken),
-                            requestedStart, windowEnd, WriteStatsTable, emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints());
+                            requestedStart, windowEnd, WriteStatsTable, emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints()), cancellationToken);
             }
 
             /* #4966: ONE row whose every figure is a first-to-last difference, so the span it covers IS the row's own first sample
@@ -700,13 +700,13 @@ public sealed class DarlingMcpPgServerStateTools
                 /* Empty on the default view can mean two things: no snapshot, or a snapshot in which nothing
                    is set and nothing is pending. SnapshotNonDefaultCount cannot tell them apart (it rides on
                    rows that did not come back), so the capability read decides as it always has. */
-                return await DarlingEngineCapability.NotCollectedStatusAsync(
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, DateTime.UtcNow, await DarlingEngineCapability.NotCollectedStatusAsync(
                     postgres, resolved.ServerId, resolved.DisplayName, "pg_server_config", cancellationToken)
                     ?? McpHelpers.Status(
                         "empty",
                         $"No configuration snapshot has been collected for {resolved.DisplayName} yet. "
                         + "This collector runs hourly, so a server registered in the last hour has not "
-                        + "reached its first collection.");
+                        + "reached its first collection."), cancellationToken);
             }
 
             var truncated = page.Rows.Count > limit;
@@ -888,7 +888,7 @@ public sealed class DarlingMcpPgServerStateTools
                 var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
                     postgres, "get_pg_server_config_changes", resolved.ServerName, emptyStart, windowEnd, emptyAnswer: true, logger, cancellationToken);
 
-                return McpHelpers.Status(
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status(
                         "empty",
                         McpHelpers.QuietUnlessCut(
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
@@ -896,7 +896,7 @@ public sealed class DarlingMcpPgServerStateTools
                                 + $"{hours_back} hour(s)",
                             coveredClaim: ". That is a real finding rather than missing data - this "
                                 + "read compares consecutive snapshots, so an unchanged server produces no rows."),
-                        emptyNotice.AsHints());
+                        emptyNotice.AsHints()), cancellationToken);
             }
 
             var truncated = fetched.Count > limit;

@@ -26,8 +26,10 @@ namespace PerformanceMonitor.Darling.Service.Targets;
 /// This is the one place the product ACTS on a monitored PostgreSQL server rather than reading it, so the
 /// blast radius is worth stating precisely rather than reassuringly. A hypothetical index costs no disk,
 /// is visible only inside the session that created it, and is never written anywhere.
-/// <c>EXPLAIN</c> without <c>ANALYZE</c> does not execute the statement. The whole experiment runs inside a
-/// transaction that is ROLLED BACK, so even the session-local catalog entry does not outlive the call.
+/// <c>EXPLAIN</c> without <c>ANALYZE</c> does not run the statement, but it does plan it, and planning can evaluate an
+/// IMMUTABLE function whose arguments are all constants, and a STABLE one while it estimates selectivity (#6170). So the connection is the hypothetical-index login
+/// (<see cref="HypotheticalIndexLogin"/>), never the monitoring login, and the experiment takes SELECT statements only. The
+/// whole experiment runs inside a transaction that is ROLLED BACK, so even the session-local catalog entry does not outlive the call.
 /// </para>
 ///
 /// <para>
@@ -195,6 +197,14 @@ public static class HypotheticalIndexExperiment
                 + "terminator, so this is text that did not come from one.");
         }
 
+        if (!IsSelectStatement(normalizedStatementText))
+        {
+            return new Result(
+                false, 0, 0, null, null, null,
+                "Only SELECT statements are tested. Planning an INSERT, UPDATE or DELETE needs write grants on its table, and the "
+                + "hypothetical-index login holds none, so this statement is not planned. No command reached the monitored server.");
+        }
+
         /* ROLLED BACK unconditionally: the hypothetical index is session-local, but the session is pooled
            and would carry it into the next caller's work. */
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
@@ -204,6 +214,12 @@ public static class HypotheticalIndexExperiment
 
         try
         {
+            /* #6170: nothing in the experiment writes. A function that planning evaluates (an IMMUTABLE one, and a STABLE one when
+               selectivity is estimated, each with constant arguments) runs under this read-only transaction, so it cannot write.
+               hypopg keeps its indexes in the backend's memory, not in a catalog, and works under it. First in the transaction,
+               before any other statement. */
+            await ExecuteAsync(connection, transaction, "SET TRANSACTION READ ONLY", cancellationToken);
+
             await ExecuteAsync(connection, transaction,
                 $"SET LOCAL statement_timeout = '{StatementTimeoutSeconds}s'", cancellationToken);
 
@@ -245,7 +261,7 @@ public static class HypotheticalIndexExperiment
                     ? $"The planner WOULD use this index: estimated cost falls from {beforeText} to "
                       + $"{afterText}, a {savedText}% reduction. That is an ESTIMATE from the planner's own "
                       + "cost model on this server's current statistics, not a measured runtime — no "
-                      + "statement was executed and no index was built."
+                      + "statement was run and no index was built."
                     : $"The planner would NOT use this index. The plan is unchanged at an estimated cost of "
                       + $"{beforeText}. This is a real answer rather than an inconclusive run: on this "
                       + "server's current statistics, building it would cost write throughput and disk and "
@@ -373,6 +389,71 @@ public static class HypotheticalIndexExperiment
 
         var value = await command.ExecuteScalarAsync(cancellationToken);
         return value as string;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="statementText"/> starts with <c>SELECT</c> or <c>WITH</c>, after white space and comments (#6170).
+    /// The hypothetical-index login holds SELECT and no write grant, so planning an INSERT, UPDATE or DELETE would fail on its
+    /// table's privileges. The check refuses those with a plain sentence instead. This is a courtesy and not the barrier: a
+    /// <c>WITH</c> statement that writes in a CTE is stopped by the login's missing grants, whatever this returns.
+    /// </summary>
+    public static bool IsSelectStatement(string? statementText)
+    {
+        if (string.IsNullOrWhiteSpace(statementText))
+        {
+            return false;
+        }
+
+        var text = statementText;
+        var index = 0;
+        while (index < text.Length)
+        {
+            if (char.IsWhiteSpace(text[index]))
+            {
+                index++;
+            }
+            else if (text[index] == '-' && index + 1 < text.Length && text[index + 1] == '-')
+            {
+                var next = EndOfLineComment(text, index);
+                if (next < 0)
+                {
+                    return false;
+                }
+
+                index = next;
+            }
+            else if (text[index] == '/' && index + 1 < text.Length && text[index + 1] == '*')
+            {
+                var next = EndOfBlockComment(text, index);
+                if (next < 0)
+                {
+                    return false;
+                }
+
+                index = next;
+            }
+            else
+            {
+                break;
+            }
+        }
+
+        var rest = text.AsSpan(index);
+        if (rest.Length > 0 && rest[0] == '(')
+        {
+            /* A parenthesised SELECT. A write cannot start with a parenthesis, and the login stops anything else. */
+            return true;
+        }
+
+        var end = 0;
+        while (end < rest.Length && char.IsLetter(rest[end]))
+        {
+            end++;
+        }
+
+        var word = rest[..end];
+        return word.Equals("select", StringComparison.OrdinalIgnoreCase)
+               || word.Equals("with", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -652,11 +733,12 @@ public static class HypotheticalIndexExperiment
     /// placeholder problem above; it does NOT sanitize the value at the point it is concatenated. And the text
     /// is untrusted: it originates in the monitored server's <c>pg_stat_statements</c> (resolved from this
     /// product's <c>pg_statement_text</c> store by queryid), so anyone who can run queries on a monitored
-    /// server can influence it, and this EXPLAIN runs as the monitoring credential ON that server. Safety
-    /// rests, in order, on: (1) <c>EXPLAIN</c> WITHOUT <c>ANALYZE</c> only PLANS — the statement itself is never
-    /// executed, but planning is not free of side effects: the planner can evaluate an IMMUTABLE function with
-    /// constant arguments while it folds constants, so a function the text names can run during the EXPLAIN, as the
-    /// monitoring login. Running the experiment under a separate, narrower login is issue #6170; (2) the text is a single NORMALIZED <c>pg_stat_statements</c> entry, not a script;
+    /// server can influence it, and this EXPLAIN runs as the hypothetical-index login ON that server. Safety
+    /// rests, in order, on: (1) <c>EXPLAIN</c> WITHOUT <c>ANALYZE</c> only PLANS — the statement itself is not
+    /// run, but planning is not free of side effects: the planner can evaluate an IMMUTABLE function (and a STABLE one, while it estimates selectivity) with
+    /// constant arguments while it folds constants, so a function the text names can run during the EXPLAIN, under the
+    /// roles of the login that plans. That login is the hypothetical-index login (#6170), which holds CONNECT, USAGE and
+    /// SELECT and nothing else, and never the monitoring login; (2) the text is a single NORMALIZED <c>pg_stat_statements</c> entry, not a script;
     /// (3) <c>FOR line IN EXECUTE</c> rejects a multi-statement string outright; (4) the whole call runs in a
     /// ROLLED-BACK transaction as a least-privilege role. Barrier (1) is the strong one and stays first:
     /// <see cref="IsSingleStatement"/> is defence in depth beneath it, never a replacement for it. That

@@ -32,7 +32,7 @@ public sealed class StoreServerPasswordRulesLiveTests
 {
     private const string ReferenceSentence = "Enter the password itself. References (env: or file:) can only be set in the configuration file.";
     private const string MoveSentence = "Changing how this server is reached needs its password again: it is stored encrypted and this surface cannot read it back.";
-    private const string RemediationSentence = "This server has a remediation login stored. Change how it is reached on the service host, in the configuration file or with --add-server.";
+    private const string RemediationSentence = "This server has a remediation or hypothetical-index login stored. Change how it is reached on the service host, in the configuration file or with --add-server.";
     private const string ReferenceState = "PW001";
     private const string MoveState = "PW002";
     private const string RemediationState = "PW003";
@@ -417,6 +417,144 @@ public sealed class StoreServerPasswordRulesLiveTests
             Assert.Equal(before, await TextAsync(owner, "SELECT COALESCE(remediation_username, '(none)') FROM config_monitored_servers WHERE server_id = 8003", ct));
             await ExecAsync(mcp, "UPDATE config_monitored_servers SET remediation_username = 'another-login' WHERE server_id = 8004", ct);
             Assert.Equal("another-login", await TextAsync(owner, "SELECT remediation_username FROM config_monitored_servers WHERE server_id = 8004", ct));
+        });
+    }
+
+    private static async Task InsertHypotheticalServerAsync(
+        NpgsqlConnection connection, int id, string host, string? hypotheticalUser, string? hypotheticalSecret, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(
+            "INSERT INTO config_monitored_servers (server_id, name, host, database, auth, username, encrypted_password, " +
+            "hypothetical_index_username, hypothetical_index_encrypted_password, engine, port) " +
+            "VALUES ($1, $2, $3, 'postgres', 'sql', 'monitor', $4, $5, $6, 'postgresql', 5432)", connection);
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = id });
+        command.Parameters.AddWithValue("srv-" + id);
+        command.Parameters.AddWithValue(host);
+        command.Parameters.AddWithValue(ProtectedBlob);
+        command.Parameters.AddWithValue(hypotheticalUser is null ? DBNull.Value : hypotheticalUser);
+        command.Parameters.AddWithValue(hypotheticalSecret is null ? DBNull.Value : hypotheticalSecret);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>
+    /// The hypothetical-index login's password column (V203, #6170) is held to the rule the remediation one is: the viewer and mcp roles,
+    /// and a direct admin write, never set an <c>env:</c> or <c>file:</c> reference in it, so a reference to a file or variable on the
+    /// service host cannot be put there from those surfaces. The store's owner (the configuration-file seed) still can.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TheViewerAndMcpRoles_NeverSetAReferenceInTheHypotheticalIndexPasswordColumn(bool selfManagedText)
+    {
+        await RunScenarioAsync(selfManagedText, async (ownerString, owner, ct) =>
+        {
+            await using var viewer = await ConnectAsync(ownerString, "viewer", ProvisioningTestSecrets.ViewerPassword, ct);
+            await using var mcp = await ConnectAsync(ownerString, "mcp", ProvisioningTestSecrets.McpPassword, ct);
+            await using var admin = await ConnectAsync(ownerString, "admin", ProvisioningTestSecrets.AdminPassword, ct);
+
+            var id = 8100;
+            foreach (var role in new[] { viewer, mcp, admin })
+            {
+                await RefusedAsync(() => InsertHypotheticalServerAsync(role, ++id, "h-env", "check_login", "env:SOME_SECRET", ct), ReferenceState, ReferenceSentence);
+                await RefusedAsync(() => InsertHypotheticalServerAsync(role, ++id, "h-file", "check_login", "file:/run/secrets/check", ct), ReferenceState, ReferenceSentence);
+            }
+
+            Assert.Equal("0", await TextAsync(owner, "SELECT count(*) FROM config_monitored_servers", ct));
+
+            /* The configuration-file seed is the store's owner, and sets what the file declares. */
+            await InsertHypotheticalServerAsync(owner, 8190, "seeded", "check_login", "env:PM_INDEX_CHECK_PASSWORD", ct);
+            Assert.Equal("env:PM_INDEX_CHECK_PASSWORD",
+                await TextAsync(owner, "SELECT hypothetical_index_encrypted_password FROM config_monitored_servers WHERE server_id = 8190", ct));
+
+            /* A direct write by a role that may update the table does not change a held reference to another, or set one where there is none. */
+            await InsertHypotheticalServerAsync(owner, 8191, "no-pair", null, null, ct);
+            await RefusedAsync(() => ExecAsync(admin, "UPDATE config_monitored_servers SET hypothetical_index_encrypted_password = 'env:OTHER' WHERE server_id = 8190", ct), ReferenceState, ReferenceSentence);
+            await RefusedAsync(() => ExecAsync(admin, "UPDATE config_monitored_servers SET hypothetical_index_encrypted_password = 'file:/etc/other' WHERE server_id = 8191", ct), ReferenceState, ReferenceSentence);
+            Assert.Equal("env:PM_INDEX_CHECK_PASSWORD",
+                await TextAsync(owner, "SELECT hypothetical_index_encrypted_password FROM config_monitored_servers WHERE server_id = 8190", ct));
+        });
+    }
+
+    /// <summary>
+    /// A change to how a server is reached on a row that holds a hypothetical-index login is refused by the edit function whatever else the
+    /// call sends, and nothing is written, exactly as for a row with a remediation login (#6170); the same call on a row without one
+    /// saves. The store's own trigger refuses the same change made directly, and a change to the login name the secret was stored for.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AChangeToHowAServerIsReached_OnARowWithAHypotheticalIndexLogin_IsRefusedAndWritesNothing(bool selfManagedText)
+    {
+        await RunScenarioAsync(selfManagedText, async (ownerString, owner, ct) =>
+        {
+            await InsertHypotheticalServerAsync(owner, 8201, "hyp-viewer", "check_login", "env:PM_INDEX_CHECK_PASSWORD", ct);
+            await InsertHypotheticalServerAsync(owner, 8202, "plain-viewer", null, null, ct);
+            await InsertHypotheticalServerAsync(owner, 8203, "hyp-mcp", "check_login", "env:PM_INDEX_CHECK_PASSWORD", ct);
+            await InsertHypotheticalServerAsync(owner, 8204, "plain-mcp", null, null, ct);
+            await using var viewer = await ConnectAsync(ownerString, "viewer", ProvisioningTestSecrets.ViewerPassword, ct);
+            await using var mcp = await ConnectAsync(ownerString, "mcp", ProvisioningTestSecrets.McpPassword, ct);
+            await using var admin = await ConnectAsync(ownerString, "admin", ProvisioningTestSecrets.AdminPassword, ct);
+
+            foreach (var (role, heldId, plainId, host) in new[] { (viewer, 8201, 8202, "hyp-viewer"), (mcp, 8203, 8204, "hyp-mcp") })
+            {
+                Assert.Equal("remediation_kept", await EditOutcomeAsync(role, heldId, "'host','encrypted_password'", "moved-host", "typed-anything", owner, ct));
+                Assert.Equal("remediation_kept", await EditOutcomeAsync(role, heldId, "'host'", "moved-host", null, owner, ct));
+                Assert.Equal(host + "|env:PM_INDEX_CHECK_PASSWORD|check_login",
+                    await TextAsync(owner, $"SELECT host || '|' || hypothetical_index_encrypted_password || '|' || hypothetical_index_username FROM config_monitored_servers WHERE server_id = {heldId}", ct));
+
+                /* A change that is not to how the row is reached still saves, and leaves the pair alone. */
+                Assert.Equal("saved", await EditOutcomeAsync(role, heldId, "'encrypted_password'", null, "a-new-protected-blob", owner, ct));
+                Assert.Equal("env:PM_INDEX_CHECK_PASSWORD",
+                    await TextAsync(owner, $"SELECT hypothetical_index_encrypted_password FROM config_monitored_servers WHERE server_id = {heldId}", ct));
+
+                Assert.Equal("saved", await EditOutcomeAsync(role, plainId, "'host','encrypted_password'", "moved-host", "a-new-protected-blob", owner, ct));
+                Assert.Equal("moved-host", await TextAsync(owner, $"SELECT host FROM config_monitored_servers WHERE server_id = {plainId}", ct));
+            }
+
+            await RefusedAsync(() => ExecAsync(mcp, "UPDATE config_monitored_servers SET host = 'moved-host' WHERE server_id = 8203", ct), RemediationState, RemediationSentence);
+            await RefusedAsync(() => ExecAsync(admin, "UPDATE config_monitored_servers SET host = 'moved-host', encrypted_password = 'typed-anything' WHERE server_id = 8203", ct), RemediationState, RemediationSentence);
+            await RefusedAsync(() => ExecAsync(admin, "UPDATE config_monitored_servers SET hypothetical_index_username = 'another-login' WHERE server_id = 8203", ct), RemediationState, RemediationSentence);
+            Assert.Equal("hyp-mcp|check_login",
+                await TextAsync(owner, "SELECT host || '|' || hypothetical_index_username FROM config_monitored_servers WHERE server_id = 8203", ct));
+            await ExecAsync(admin, "UPDATE config_monitored_servers SET hypothetical_index_username = 'another-login' WHERE server_id = 8204", ct);
+            Assert.Equal("another-login", await TextAsync(owner, "SELECT hypothetical_index_username FROM config_monitored_servers WHERE server_id = 8204", ct));
+        });
+    }
+
+    /// <summary>
+    /// A self-managed store whose script was not re-run keeps the edit function from before the hypothetical-index pair existed,
+    /// which looks only at the remediation password: through it, a change of host on a row that holds a pair saves (#6170).
+    /// The service's start replaces both overloads, and the same call is then refused and writes nothing.
+    /// </summary>
+    [Fact]
+    public async Task AStoreHoldingTheOlderEditFunction_GetsItReplacedByTheServicesStart_AndAHostChangeOnAHeldPairIsRefused()
+    {
+        await RunScenarioAsync(selfManagedText: false, async (ownerString, owner, ct) =>
+        {
+            const string pairCheck = " OR COALESCE((to_jsonb(s) ->> 'hypothetical_index_encrypted_password'), '') <> ''";
+            var older = DarlingManagedRoles.BuildEditMonitoredServerFunctionSql("config");
+            Assert.Contains(pairCheck, older, StringComparison.Ordinal);
+            await ExecAsync(owner, older.Replace(pairCheck, "", StringComparison.Ordinal), ct);
+
+            await InsertHypotheticalServerAsync(owner, 8301, "held-before", "check_login", "env:PM_INDEX_CHECK_PASSWORD", ct);
+            await InsertHypotheticalServerAsync(owner, 8302, "held-after", "check_login", "env:PM_INDEX_CHECK_PASSWORD", ct);
+            await using var viewer = await ConnectAsync(ownerString, "viewer", ProvisioningTestSecrets.ViewerPassword, ct);
+
+            /* The older function lets the host change through on a held pair: the store really is in the state the start must fix. */
+            Assert.Equal("saved", await EditOutcomeAsync(viewer, 8301, "'host','encrypted_password'", "moved-host", "typed-anything", owner, ct));
+            Assert.Equal("moved-host", await TextAsync(owner, "SELECT host FROM config_monitored_servers WHERE server_id = 8301", ct));
+
+            var log = new CapturingTestLogger();
+            await using (var ownerSource = NpgsqlDataSource.Create(ownerString))
+            {
+                Assert.True(await DarlingManagedRoles.EnsureServerPasswordRulesAsync(ownerSource, log, ct), log.Joined);
+            }
+
+            Assert.Equal(0, log.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
+            Assert.Equal("remediation_kept", await EditOutcomeAsync(viewer, 8302, "'host','encrypted_password'", "moved-host", "typed-anything", owner, ct));
+            Assert.Equal("held-after", await TextAsync(owner, "SELECT host FROM config_monitored_servers WHERE server_id = 8302", ct));
+            Assert.Equal("env:PM_INDEX_CHECK_PASSWORD",
+                await TextAsync(owner, "SELECT hypothetical_index_encrypted_password FROM config_monitored_servers WHERE server_id = 8302", ct));
         });
     }
 

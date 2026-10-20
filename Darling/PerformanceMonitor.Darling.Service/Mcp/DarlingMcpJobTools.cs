@@ -177,6 +177,13 @@ public sealed class DarlingMcpJobTools
                     var notCollected = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, s1.ServerId, s1.ServerName, "job_history", cancellationToken);
                     if (notCollected != null) return notCollected;
                 }
+                else
+                {
+                    /* #6178: no server named. When no registered server can have an Agent (every one an Azure SQL Database),
+                       "no runs matched" is not_collected, not a true negative. One server that could have jobs keeps the empty answer. */
+                    var fleetNotCollected = await DarlingEngineCapability.FleetNotCollectedStatusAsync(postgres, "job_history", cancellationToken);
+                    if (fleetNotCollected != null) return fleetNotCollected;
+                }
 
                 /* An empty answer is where "the Agent was stopped" matters most, so its hints carry the Agent state too. */
                 var emptyHints = new Dictionary<string, object?>();

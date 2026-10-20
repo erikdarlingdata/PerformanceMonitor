@@ -572,6 +572,7 @@ public sealed class DarlingMcpDataTools
             var points = await DarlingDataReader.GetTempDbBucketsAsync(postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, bucketMinutes, cancellationToken);
             if (points.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "tempdb_stats", cancellationToken)
+                    ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "tempdb_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No TempDB data available.");
 
             return TrendPayloads.TempDbTrend(resolved.DisplayName, hours_back, points, bucketMinutes, bucket_minutes is not null, budget.AutoPoints);
@@ -611,14 +612,10 @@ public sealed class DarlingMcpDataTools
                calls too: counter_kind is the stored type's three-way reading (V132, #3653 A7), delta_value is null
                on a gauge because the collector writes none, and a rate row adds per_second, its delta over the
                stored interval, so the running total in value is never the only number a reader gets. */
-            var result = filtered.Select(PerfmonRowPayload);
+            var result = filtered.Select(PerfmonRowPayload).ToList();
 
-            return JsonSerializer.Serialize(new
-            {
-                server = resolved.DisplayName,
-                captured_at = snapshot.CapturedAt!.Value.ToString("o"),
-                counters = result
-            }, McpHelpers.JsonOptions);
+            /* #6180: the page is cut to the shared response target (see TrendPayloads.PerfmonLatestReply). */
+            return TrendPayloads.PerfmonLatestReply(resolved.DisplayName, snapshot.CapturedAt!.Value.ToString("o"), result);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1404,7 +1401,7 @@ public sealed class DarlingMcpDataTools
         return message is null ? null : McpHelpers.Status("unavailable", message);
     }
 
-    [McpServerTool(Name = "get_query_store_top"), Description("Cost-ranked top Query Store queries (heaviest first), not time-ordered. Requires Query Store enabled on target databases. window_truncated marks a window floor, not a page cut — no limit changes it — because stored history can be shorter than asked; effective_start / effective_hours_back give the reach actually served. <<GUIDE>> effective_start is where complete history begins. Long windows may read whole days from a daily summary; approximate: true says so. approximation_note says what the summary can miss; summary_days names the days it covered. Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database and module filtering. Reads the raw tier, and the per-interval table for the older part of a long window (the corrected rollups carry no query_id or plan_id); history_source says which served. Rows are per Query Store execution outcome (execution_type: Regular, Aborted, Exception): a plan with aborted executions returns one row per outcome, each with its own counts and averages. The execution_type filter keeps one outcome, and module_name keeps one module: the exact, case-sensitive schema-qualified name the collector records (get_top_procedures_by_cpu's full_name; Adhoc for ad-hoc statements, Unknown for an object it could not resolve), applied after interval deduplication and before ranking. When a filter matches nothing but the same read without the filters has rows, the answer is empty (a measured zero), not a Query Store precondition; a module_name miss also carries the window read (effective_start, effective_hours_back, window_truncated) as hints. query_text is a 400-character preview by default (query_text_truncated marks a cut row); full_text=true returns each row's whole statement." + McpHelpers.WindowTruncatedDescription)]
+    [McpServerTool(Name = "get_query_store_top"), Description("Cost-ranked top Query Store queries (heaviest first), not time-ordered. Requires Query Store enabled on target databases. window_truncated marks a window floor, not a page cut — no limit changes it — because stored history can be shorter than asked; effective_start / effective_hours_back give the reach actually served. <<GUIDE>> effective_start is where complete history begins. Long windows may read whole days from a daily summary; approximate: true says so. approximation_note says what the summary can miss; summary_days names the days it covered. Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database and module filtering. Reads the raw tier, and the per-interval table for the older part of a long window (the corrected rollups carry no query_id or plan_id); history_source says which served. Rows are per Query Store execution outcome (execution_type: Regular, Aborted, Exception): a plan with aborted executions returns one row per outcome, each with its own counts and averages. The execution_type filter keeps one outcome, and module_name keeps one module: the exact, case-sensitive schema-qualified name the collector records (get_top_procedures_by_cpu's full_name; Adhoc for ad-hoc statements, Unknown for an object it could not resolve), applied after interval deduplication and before ranking. When a filter matches nothing but the same read without the filters has rows, the answer is empty (a measured zero), not a Query Store precondition; a module_name miss also carries the window read (effective_start, effective_hours_back, window_truncated) as hints. query_text is a 400-character preview by default (query_text_truncated marks a cut row); full_text=true returns each row's whole statement. The page is also capped at the shared ~32 KB response budget, heaviest rows kept: truncated says rows were cut for that, and budget_note says how many fit (window_truncated stays the window floor)." + McpHelpers.WindowTruncatedDescription)]
     public static Task<string> GetQueryStoreTop(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -1417,7 +1414,7 @@ public sealed class DarlingMcpDataTools
         [Description("Return each row's full query_text instead of a 400-character preview. Default false.")] bool full_text = false,
         [Description(QueryTagReadJoin.TagParameterDescription)] string? tag = null,
         CancellationToken cancellationToken = default) =>
-        GetQueryStoreTop(postgres, server_name, hours_back, top, database_name, as_of, execution_type, module_name, full_text, QueryTextPreviewLength, cancellationToken, tag);
+        GetQueryStoreTop(postgres, server_name, hours_back, top, database_name, as_of, execution_type, module_name, full_text, QueryTextPreviewLength, cancellationToken, tag, McpResponseBudget.DefaultBytes);
 
     /// <summary>The sentence beside <c>approximate: true</c> on get_query_store_top (#5094): whole days of the window came from the
     /// daily summary, which is built after each day ends.</summary>
@@ -1435,10 +1432,11 @@ public sealed class DarlingMcpDataTools
     #pragma warning disable CA1068 // #5984: tag trails the token on purpose; putting it before would shift every positional caller
     internal static Task<string> GetQueryStoreTop(
         NpgsqlDataSource postgres, string? server_name, int hours_back, int top, string? database_name, string? as_of,
-        string? execution_type, string? module_name, bool full_text, int previewLength, CancellationToken cancellationToken = default, string? tag = null) =>
+        string? execution_type, string? module_name, bool full_text, int previewLength, CancellationToken cancellationToken = default, string? tag = null,
+        int? responseByteBudget = McpResponseBudget.DefaultBytes) =>
     #pragma warning restore CA1068
         GetQueryStoreTop(
-            postgres, server_name, hours_back, top, DatabaseFilter.One(database_name), as_of, execution_type, module_name, full_text, previewLength, cancellationToken, tag);
+            postgres, server_name, hours_back, top, DatabaseFilter.One(database_name), as_of, execution_type, module_name, full_text, previewLength, cancellationToken, tag, responseByteBudget);
 
     /// <summary>
     /// #5245: <see cref="GetQueryStoreTop(NpgsqlDataSource,string,int,int,string,string,string,string,bool,int,CancellationToken)"/>
@@ -1450,7 +1448,8 @@ public sealed class DarlingMcpDataTools
     #pragma warning disable CA1068 // #5984: tag trails the token on purpose; putting it before would shift every positional caller
     internal static async Task<string> GetQueryStoreTop(
         NpgsqlDataSource postgres, string? server_name, int hours_back, int top, DatabaseFilter databases, string? as_of,
-        string? execution_type, string? module_name, bool full_text, int previewLength, CancellationToken cancellationToken = default, string? tag = null)
+        string? execution_type, string? module_name, bool full_text, int previewLength, CancellationToken cancellationToken = default, string? tag = null,
+        int? responseByteBudget = McpResponseBudget.DefaultBytes)
     {
     #pragma warning restore CA1068
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -1663,6 +1662,15 @@ public sealed class DarlingMcpDataTools
             if (tagFilter.Named is { } storeTagName)
             {
                 storePayload["tag_filter"] = storeTagName;
+            }
+
+            /* #6131: the page is capped under the shared response budget, as the other read tools' pages are. top 200 measured
+               177 KB with nothing to say rows had been left out. The rows are heaviest first, so the cut drops the lightest.
+               `truncated` is this page cut ONLY: the window floor keeps its own flag, window_truncated, and its own note.
+               The web viewer's mirror passes a null budget and keeps its page exactly. */
+            if (responseByteBudget is int budget)
+            {
+                return McpResponseBudget.CapPage(storePayload, "queries", "heaviest first", "queries", budget);
             }
 
             return storePayload.ToJsonString(McpHelpers.JsonOptions);
@@ -2230,7 +2238,12 @@ ORDER BY server_name";
                the process-wide ledger because the scheduled sweep builds a fresh analysis service per pass.
                A different layer from the collector rows above: 43 healthy collectors above a family the pass timed out reading. */
             var collectionCaveats = await DarlingCollectionCaveatReader.ReadAsync(postgres, resolved.ServerId, logger, cancellationToken);
-            var healthJson = JsonSerializer.Serialize(CollectionCaveatLedger.Shared.Attach(new
+            /* #6180: full_detail serves ~30 fields for every collector (52 KB measured), past the shared response target. The
+               collectors are cut from the end to fit it, whole rows only, and the reply says how many it kept and how to
+               get the compact form that carries them all. The reply is built per count so the caveats attached below count
+               against the budget too. */
+            var collectorRows = result.ToList();
+            Func<int, string> healthReply = collectorCount => DarlingCollectionCaveatReader.AttachToJson(JsonSerializer.Serialize(CollectionCaveatLedger.Shared.Attach(new
             {
                 server = resolved.DisplayName,
                 /* #3453: the build-attribution read. Nothing else on the MCP surface says WHAT build is
@@ -2388,7 +2401,14 @@ ORDER BY server_name";
                 collector_detail_note = full_detail
                     ? "full_detail=true: every field is served for every collector below."
                     : $"{compactCount} of {rows.Count} collector(s) below are HEALTHY with nothing to report (no errors, denials, session/extension-missing runs or abandoned cycles this window) and are compacted to collector/status/compact/total_runs/rows_stored/avg_duration_ms/last_success. {partialCount} need a look (failing, stale, stopped, erroring, denied, regressed, or an unexplained zero) and carry a leaner partial_detail shape instead of full detail: in a partial row a missing key means null, false or 0, and only collector, status, partial_detail, total_runs and errors are always present. Pass full_detail=true for every field on every collector.",
-                collectors = result,
+                /* #6180: the response-size cut, observed (see healthReply above). Null note and false flag when every collector fit. */
+                truncated = collectorCount < collectorRows.Count,
+                collectors_returned = collectorCount,
+                collectors_total = collectorRows.Count,
+                size_note = collectorCount < collectorRows.Count
+                    ? $"{collectorRows.Count - collectorCount} of {collectorRows.Count} collector row(s) were left off the end to keep this answer within about 32 KB. Call again without full_detail: healthy collectors are then compacted and every collector fits."
+                    : null,
+                collectors = collectorRows.Take(collectorCount),
                 /* #3856: how old the collector half of this payload is, in whole seconds — the same field, the
                    same name and the same semantics get_fleet_overview has carried since #3735, because it is
                    now the same kind of reading: one 7-day scan per minute per host per server, shared by every
@@ -2401,8 +2421,8 @@ ORDER BY server_name";
                    nothing an existing consumer indexes by position moved — the same placement rule every
                    column of the statement behind it follows. */
                 collection_health_age_seconds = collectionHealthAgeSeconds
-            }, resolved.ServerId, McpHelpers.JsonOptions), McpHelpers.JsonOptions);
-            return DarlingCollectionCaveatReader.AttachToJson(healthJson, collectionCaveats);
+            }, resolved.ServerId, McpHelpers.JsonOptions), McpHelpers.JsonOptions), collectionCaveats);
+            return McpResponseBudget.FitPrefix(collectorRows.Count, healthReply).Json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -3146,6 +3166,14 @@ ORDER BY server_name";
             });
 
             var notice = await ReadNoticeAsync();
+            /* #6180: a large limit (1000 measured at 70-86 KB) passes the shared response target, so the reply is built per page
+               size and the newest-first (or slowest-first) prefix that fits is served: whole runs only, with the page fields
+               (run_count, the returned-time span, truncated) describing the page actually served. */
+            var runRows = result.ToList();
+            string LogReply(int pageCount)
+            {
+            var pageRows = rows.Take(pageCount).ToList();
+            var cut = pageCount < rows.Count;
             var payload = new
             {
                 server = resolved.DisplayName,
@@ -3162,10 +3190,10 @@ ORDER BY server_name";
                    which are not runs, so they are counted in skipped_cycle_rows and not here. #5824: nor is the analysis pass's
                    analysis_pass row, which the page shows and neither count holds. The returned-time span fields below
                    describe the PAGE, cycle rows included. */
-                run_count = rows.Count(r => CollectionCycleRow.IsCollectorRun(r.CollectorName)),
-                skipped_cycle_rows = rows.Count(r => r.CollectorName == CollectionCycleRow.CollectorName),
-                /* Observed by the over-fetch above, not inferred from the row count. */
-                truncated,
+                run_count = pageRows.Count(r => CollectionCycleRow.IsCollectorRun(r.CollectorName)),
+                skipped_cycle_rows = pageRows.Count(r => r.CollectorName == CollectionCycleRow.CollectorName),
+                /* Observed by the over-fetch above, not inferred from the row count; also true when the size target cut the page. */
+                truncated = truncated || cut,
                 /*
                     #3287: the span this PAGE covers, beside the span requested.
 
@@ -3197,8 +3225,8 @@ ORDER BY server_name";
                     while the time-ordered test kept passing.
                 */
                 /* #4966: where the page's rows stop describes the window it covers, so it prints like effective_start (UTC, with the Z), and so does the newest bound (#5015); the rows' own times stay as the store holds them. */
-                oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(rows.Min(r => r.CollectionTime)),
-                newest_returned_collection_time = McpHelpers.FormatEffectiveStart(rows.Max(r => r.CollectionTime)),
+                oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(pageRows.Min(r => r.CollectionTime)),
+                newest_returned_collection_time = McpHelpers.FormatEffectiveStart(pageRows.Max(r => r.CollectionTime)),
                 /* Which ordering the page actually came back in. Stated rather than left to be inferred
                    from whether min_duration_ms was sent, because the first sentence of this tool's
                    description is the only other place that coupling is written down. */
@@ -3224,10 +3252,18 @@ ORDER BY server_name";
                     with.
                 */
                 status_filter = string.IsNullOrWhiteSpace(status) ? null : status.Trim().ToUpperInvariant(),
-                runs = result,
+                runs_returned = pageCount,
+                runs_total = rows.Count,
+                size_note = cut
+                    ? $"{rows.Count - pageCount} of the {rows.Count} run(s) this read selected were left off the end to keep this answer within about 32 KB. Ask for fewer rows (limit), a narrower window (hours_back or as_of), or one collector_name / status to read the rest in full."
+                    : null,
+                runs = runRows.Take(pageCount),
             };
             var json = JsonSerializer.Serialize(payload, McpHelpers.JsonOptions);
             return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
+            }
+
+            return McpResponseBudget.FitPrefix(rows.Count, LogReply).Json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -3356,8 +3392,14 @@ ORDER BY server_name";
                     ids_attempted = fr.Entry.TextFetchIdsAttempted,
                     probe_ids = fr.Entry.TextFetchProbeIds,
                 },
-            });
+            }).ToList();
 
+            /* #6180: a large limit passes the shared response target, so the page is cut to the newest (or slowest) whole runs
+               that fit, with the page fields describing what was served. */
+            return McpResponseBudget.FitPrefix(rows.Count, pageCount =>
+            {
+            var pageRows = rows.Take(pageCount).ToList();
+            var cut = pageCount < rows.Count;
             return JsonSerializer.Serialize(new
             {
                 /* No single `server`: `scope` is the fleet-form's own signal, so a client branching on
@@ -3365,20 +3407,26 @@ ORDER BY server_name";
                 scope = "fleet",
                 hours_back,
                 /* #5735: collector runs only; the collection_cycle/SKIPPED rows the page also shows are counted apart. #5824: the analysis_pass rows are in neither count. The returned-time span fields describe the page, cycle rows included. */
-                run_count = rows.Count(r => CollectionCycleRow.IsCollectorRun(r.Entry.CollectorName)),
-                skipped_cycle_rows = rows.Count(r => r.Entry.CollectorName == CollectionCycleRow.CollectorName),
-                truncated,
+                run_count = pageRows.Count(r => CollectionCycleRow.IsCollectorRun(r.Entry.CollectorName)),
+                skipped_cycle_rows = pageRows.Count(r => r.Entry.CollectorName == CollectionCycleRow.CollectorName),
+                truncated = truncated || cut,
                 /* #4966: where the page's rows stop describes the window it covers, so it prints like effective_start (UTC, with the Z), and so does the newest bound (#5015); the rows' own times stay as the store holds them. */
-                oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(rows.Min(r => r.Entry.CollectionTime)),
-                newest_returned_collection_time = McpHelpers.FormatEffectiveStart(rows.Max(r => r.Entry.CollectionTime)),
+                oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(pageRows.Min(r => r.Entry.CollectionTime)),
+                newest_returned_collection_time = McpHelpers.FormatEffectiveStart(pageRows.Max(r => r.Entry.CollectionTime)),
                 order = min_duration_ms is null
                     ? McpHelpers.CollectionLogOrderNewestFirst
                     : McpHelpers.CollectionLogOrderSlowestFirst,
                 collector_name = string.IsNullOrWhiteSpace(collector_name) ? null : collector_name.Trim(),
                 min_duration_ms,
                 status_filter = string.IsNullOrWhiteSpace(status) ? null : status.Trim().ToUpperInvariant(),
-                runs = result,
+                runs_returned = pageCount,
+                runs_total = rows.Count,
+                size_note = cut
+                    ? $"{rows.Count - pageCount} of the {rows.Count} run(s) this read selected were left off the end to keep this answer within about 32 KB. Ask for fewer rows (limit), a narrower window (hours_back or as_of), or one server_name / collector_name / status to read the rest in full."
+                    : null,
+                runs = result.Take(pageCount),
             }, McpHelpers.JsonOptions);
+            }).Json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

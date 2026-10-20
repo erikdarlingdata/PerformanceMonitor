@@ -56,8 +56,57 @@ internal static class McpEngineCapability
            Server collector on a SQL Server target makes no kind claim either way) and cannot become wrong.
            The parameter is REQUIRED rather than defaulted so that decision is visible at the call site
            instead of being made by omission. */
+        return Envelope(serverName, engineEdition, collectorName);
+    }
+
+    /// <summary>The <c>not_collected</c> envelope for this engine and collector, or <c>null</c> when the collector can run there.
+    /// No engine-kind claim, for the reason given in <see cref="NotCollectedStatusAsync"/>.</summary>
+    private static string? Envelope(string serverName, int engineEdition, string collectorName)
+    {
         var message = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind: null, collectorName);
         return message is null ? null : McpHelpers.Status("not_collected", message);
+    }
+
+    /// <summary>
+    /// #6178: the <c>not_collected</c> envelope for a read that covers every registered server and found nothing, when
+    /// <paramref name="collectorName"/> cannot run on ANY of them (a fleet of only Azure SQL Databases). It asks
+    /// <see cref="NotCollectedStatusAsync"/> about each server and returns the first envelope, which names the engine and the
+    /// collector (for a fleet of several, the first server). It returns <c>null</c> when at least one server could have had the
+    /// data, or when the fleet is empty, so the caller keeps its own <c>empty</c> answer.
+    /// </summary>
+    public static async Task<string?> FleetNotCollectedStatusAsync(
+        LocalDataService dataService,
+        IReadOnlyList<(int ServerId, string ServerName)> fleet,
+        string collectorName)
+    {
+        string? first = null;
+        foreach (var (serverId, serverName) in fleet)
+        {
+            /* The same answer NotCollectedStatusAsync gives one server; a store read that fails makes no claim. */
+            var envelope = Envelope(serverName, await EngineEditionAsync(dataService, serverId), collectorName);
+            if (envelope is null) return null;
+            first ??= envelope;
+        }
+
+        return first;
+    }
+
+    /// <summary>
+    /// #6178: whether the newest stored server properties say this server's database is on Azure SQL Database Hyperscale (the
+    /// stored edition or an <c>HS_</c> service objective). A missing row or a failed read is false, so the caller falls back to
+    /// reading Hyperscale from its own rows.
+    /// </summary>
+    public static async Task<bool> IsHyperscaleAsync(LocalDataService dataService, int serverId)
+    {
+        try
+        {
+            var row = await dataService.GetLatestServerPropertiesAsync(serverId);
+            return row is not null && HyperscaleLogSize.IsHyperscaleTier(row.Edition, row.ServiceObjective);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
     }
 
     /// <summary>

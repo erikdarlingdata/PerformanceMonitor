@@ -586,7 +586,11 @@ public sealed class DarlingMcpTools
                 ? null
                 : string.Join(" ", new[] { emptyCaveat }.Concat(coverageCaveats).Where(s => s is not null));
 
-            return JsonSerializer.Serialize(new
+            /* #6180: the fact rows are the bulk of this answer (about 650 bytes each, 48-57 KB measured), so they are cut to the
+               shared response target. Rows are already worse first, then better, then stable, so what is left off the end is
+               the stable tail; summary and families above still count every fact. */
+            var factRows = comparison.Rows.Select(r => r.ToPayload()).ToList();
+            return McpResponseBudget.FitPrefix(factRows.Count, factCount => JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 /* Null when both windows produced facts at full coverage — the ordinary case, where
@@ -615,8 +619,14 @@ public sealed class DarlingMcpTools
                 summary = comparison.SummaryPayload(),
                 families = comparison.Families.Select(f => f.ToPayload()).ToList(),
                 plan_cache_churn = comparison.Churn.ToPayload(),
-                facts = comparison.Rows.Select(r => r.ToPayload()).ToList()
-            }, McpHelpers.JsonOptions);
+                truncated = factCount < factRows.Count,
+                facts_returned = factCount,
+                facts_total = factRows.Count,
+                size_note = factCount < factRows.Count
+                    ? $"{factRows.Count - factCount} of {factRows.Count} fact rows were left off the end (the lowest-ranked: stable rows come last) to keep this answer within about 32 KB. summary and families above still count every fact. For the rest, compare a shorter hours_back, or read one window's facts with get_analysis_facts (source / min_severity filters)."
+                    : null,
+                facts = factRows.Take(factCount)
+            }, McpHelpers.JsonOptions)).Json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

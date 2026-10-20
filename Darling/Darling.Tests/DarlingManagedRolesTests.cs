@@ -144,7 +144,7 @@ public sealed class DarlingManagedRolesTests
         /* A change to how a row is reached while it holds a remediation login has its own outcome and its own state. */
         Assert.Contains("'remediation_kept'", function, StringComparison.Ordinal);
         Assert.Contains("USING ERRCODE = 'PW003'", rules, StringComparison.Ordinal);
-        Assert.Contains("This server has a remediation login stored. Change how it is reached on the service host, in the configuration file or with --add-server.", rules, StringComparison.Ordinal);
+        Assert.Contains("This server has a remediation or hypothetical-index login stored. Change how it is reached on the service host, in the configuration file or with --add-server.", rules, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -373,7 +373,7 @@ public sealed class DarlingManagedRolesTests
             /* V113 (#2138 phase 1): the remediation credential's blob is the same kind of thing as the
                monitoring one beside it — a DPAPI secret — and it authenticates a WRITE, so if anything on
                this table is secret it is. */
-            ["config_monitored_servers"] = new[] { "encrypted_password", "remediation_encrypted_password", "aws_external_id" },
+            ["config_monitored_servers"] = new[] { "encrypted_password", "remediation_encrypted_password", "aws_external_id", "hypothetical_index_encrypted_password" },
             ["config_command"] = new[] { "args_json" },
             /* generic_url is a bearer secret like the sibling webhook URLs, and generic_headers holds the
                Authorization token itself (#1506 / V26). pagerduty_routing_key is the Events API v2 integration

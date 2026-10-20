@@ -59,17 +59,24 @@ public sealed partial class DarlingMcpFinOpsTools
         }
 
         var monthly = await FinOpsUtilizationFigures.GetMonthlyCostUsdAsync(postgres, resolved.ServerId, McpCommandDeadlines.ReadSeconds, ct);
-        return DatabaseSizesPayload(resolved.DisplayName, files, monthly, DatabaseSizeRowCap(limit));
+        var serverIsHyperscale = await DarlingEngineCapability.IsHyperscaleAsync(postgres, resolved.ServerId, ct);
+        return DatabaseSizesPayload(resolved.DisplayName, files, monthly, DatabaseSizeRowCap(limit), serverIsHyperscale);
     }
 
     /// <summary>The database_sizes payload, shaped apart from the read so it can be pinned without a store.</summary>
-    internal static string DatabaseSizesPayload(string serverName, IReadOnlyList<DatabaseSizeFileDto> files, decimal monthly, int rowCap = DefaultDatabaseSizeRows)
+    internal static string DatabaseSizesPayload(string serverName, IReadOnlyList<DatabaseSizeFileDto> files, decimal monthly, int rowCap = DefaultDatabaseSizeRows, bool serverIsHyperscale = false)
     {
         var hasCost = monthly > 0m;
         var totalMb = files.Sum(f => f.TotalSizeMb ?? 0m);
+        /* #6178: a data file's max size is a per-file cap on Hyperscale. The stored server properties say so when the read has
+           them; a log file with no size says so in the rows (and is the fallback when the properties are missing). */
+        var hyperscaleDatabases = HyperscaleLogSize.HyperscaleDatabases(
+            files.Select(f => (f.DatabaseName, (string?)f.FileTypeDesc, f.TotalSizeMb is not null)), serverIsHyperscale);
         var note = AzureSiblingDatabaseSize.DatabaseSizesNote(
             hasLogServiceFile: files.Any(f => f.TotalSizeMb is null),
-            hasSiblingRow: files.Any(f => AzureSiblingDatabaseSize.IsSiblingRow(f.FileId, f.FileName)));
+            hasSiblingRow: files.Any(f => AzureSiblingDatabaseSize.IsSiblingRow(f.FileId, f.FileName)),
+            hasHyperscaleDataFileCap: files.Any(f => !AzureSiblingDatabaseSize.IsSiblingRow(f.FileId, f.FileName)
+                && HyperscaleLogSize.IsDataFileWithFileCap(f.FileTypeDesc, hyperscaleDatabases.Contains(f.DatabaseName), f.MaxSizeMb is > 0)));
         return JsonSerializer.Serialize(new
         {
             server = serverName,
@@ -80,12 +87,12 @@ public sealed partial class DarlingMcpFinOpsTools
             file_count = files.Count,
             truncated = files.Count > rowCap,
             note,
-            rows = files.Take(rowCap).Select(f => DatabaseSizesRow(f, totalMb, monthly)).ToList(),
+            rows = files.Take(rowCap).Select(f => DatabaseSizesRow(f, totalMb, monthly, hyperscaleDatabases.Contains(f.DatabaseName))).ToList(),
         }, McpHelpers.JsonOptions);
     }
 
     /// <summary>One database-sizes row in the wire shape: snake_case keys.</summary>
-    internal static Dictionary<string, object?> DatabaseSizesRow(DatabaseSizeFileDto f, decimal totalMb, decimal monthly)
+    internal static Dictionary<string, object?> DatabaseSizesRow(DatabaseSizeFileDto f, decimal totalMb, decimal monthly, bool hyperscaleDatabase = false)
     {
         var isLog = string.Equals(f.FileTypeDesc, "LOG", StringComparison.OrdinalIgnoreCase);
         var row = new Dictionary<string, object?>
@@ -110,6 +117,8 @@ public sealed partial class DarlingMcpFinOpsTools
         };
         if (AzureSiblingDatabaseSize.IsSiblingRow(f.FileId, f.FileName))
             row[AzureSiblingDatabaseSize.RowNoteKey] = AzureSiblingDatabaseSize.LogNote;
+        else if (HyperscaleLogSize.IsDataFileWithFileCap(f.FileTypeDesc, hyperscaleDatabase, f.MaxSizeMb is > 0))
+            row[AzureSiblingDatabaseSize.RowNoteKey] = HyperscaleLogSize.DataFileMaxSizeNote;
         return row;
     }
 }

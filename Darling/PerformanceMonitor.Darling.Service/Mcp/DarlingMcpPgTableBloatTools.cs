@@ -444,13 +444,13 @@ public sealed class DarlingMcpPgTableBloatTools
 
         if (probe.SnapshotsInWindow >= 1)
         {
-            return McpHelpers.Status(
+            return await DarlingServerOfflineNote.EmptyAsync(postgres, serverId, serverName, end, McpHelpers.Status(
                 "empty",
                 $"No tables were recorded for {serverName} in the last {hoursBack} hour(s) even though "
                 + "collection ran. Every table on every collected database is under the collector's 1 MB "
                 + "floor, below which bloat is not an actionable amount of space. That is a genuine "
                 + "all-clear rather than missing data.",
-                hints);
+                hints), cancellationToken);
         }
 
         return await DarlingServerOfflineNote.UnavailableAsync(

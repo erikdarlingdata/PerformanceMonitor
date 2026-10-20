@@ -422,7 +422,7 @@ public sealed class DarlingMcpPgSessionStatesTools
             /* #4966: the all-clear carries the window floor beside its own hints; the unavailable answer below stays bare. */
             var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
                 postgres, "get_pg_session_states", serverName, start, end, emptyAnswer: true, logger, cancellationToken);
-            return McpHelpers.Status(
+            return await DarlingServerOfflineNote.EmptyAsync(postgres, serverId, displayName, end, McpHelpers.Status(
                 "empty",
                 McpHelpers.QuietUnlessCut(
                     notice.WindowTruncated, notice.EffectiveStart,
@@ -445,7 +445,7 @@ public sealed class DarlingMcpPgSessionStatesTools
                     effective_start = notice.EffectiveStart,
                     window_truncated = notice.WindowTruncated,
                     truncation_note = notice.TruncationNote,
-                });
+                }), cancellationToken);
         }
 
         return await DarlingServerOfflineNote.UnavailableAsync(

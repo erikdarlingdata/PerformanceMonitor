@@ -102,6 +102,9 @@ public static class AzureDmvPermissionHint
         + "tempdb permissions are not persistable, and in an elastic pool the database is not the "
         + "permission boundary. Reach tempdb's space DMVs through server-level state access instead "
         + "— the server admin, the Microsoft Entra admin, or a login added to the "
-        + "##MS_ServerStateReader## server role from the master database. Only the collectors that read "
+        + "##MS_ServerStateReader## server role from the master database. A contained database user, "
+        + "which is the setup the docs describe, cannot be put in that role and cannot be granted this at "
+        + "all, so reading tempdb needs a separate server login in ##MS_ServerStateReader## (create it in "
+        + "master and map it into this database). Only the collectors that read "
         + "tempdb are affected; everything else keeps running.";
 }

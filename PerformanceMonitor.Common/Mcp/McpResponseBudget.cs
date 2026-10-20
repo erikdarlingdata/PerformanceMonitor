@@ -6,6 +6,9 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
+using System.Linq;
+
 namespace PerformanceMonitor.Common;
 
 /// <summary>
@@ -55,4 +58,125 @@ public static class McpResponseBudget
     /// numbers this was set from.
     /// </summary>
     public const int CollectionLogPerServerDefaultLimit = 58;
+
+    /// <summary>
+    /// #6180: how many LEADING items of a list a reply can carry and still fit <paramref name="budgetBytes"/>, for the
+    /// reads that answer a caller who asked for more than the budget holds (<c>full_detail</c>, a large <c>limit</c>) or
+    /// whose defaults were over it (<c>get_perfmon_stats</c>' whole counter set). The reply is serialized through
+    /// <paramref name="serializeFirst"/> with the first <c>n</c> items, so the envelope's own digits, flags and notes
+    /// count against the budget, and the largest <c>n</c> that fits wins (binary search: the size only grows with
+    /// <c>n</c>). At least <paramref name="minimum"/> items are always kept, so one item bigger than the budget is still
+    /// answered whole rather than cut mid-way or replaced by nothing. Items are never trimmed, only left off the end.
+    /// </summary>
+    /// <param name="total">How many items there are.</param>
+    /// <param name="serializeFirst">The full reply for the first <c>n</c> items.</param>
+    /// <param name="budgetBytes">The UTF-8 byte target, normally <see cref="DefaultBytes"/>.</param>
+    /// <param name="minimum">The fewest items to keep, even when they are over the budget. Default 1.</param>
+    /// <returns>The count that fits and that count's reply.</returns>
+    public static (int Count, string Json) FitPrefix(int total, Func<int, string> serializeFirst, int budgetBytes = DefaultBytes, int minimum = 1)
+    {
+        ArgumentNullException.ThrowIfNull(serializeFirst);
+        var floor = Math.Clamp(minimum, 0, Math.Max(total, 0));
+
+        var whole = serializeFirst(total);
+        if (total <= floor || System.Text.Encoding.UTF8.GetByteCount(whole) <= budgetBytes)
+        {
+            return (total, whole);
+        }
+
+        /* Largest n in [floor, total) whose reply fits; floor when none does. */
+        var lo = floor;
+        var hi = total - 1;
+        var best = floor;
+        string? bestJson = null;
+        while (lo <= hi)
+        {
+            var mid = lo + ((hi - lo) / 2);
+            var json = serializeFirst(mid);
+            if (mid == floor || System.Text.Encoding.UTF8.GetByteCount(json) <= budgetBytes)
+            {
+                best = mid;
+                bestJson = json;
+                lo = mid + 1;
+            }
+            else
+            {
+                hi = mid - 1;
+            }
+        }
+
+        return (best, bestJson ?? serializeFirst(best));
+    }
+
+    /// <summary>
+    /// How many leading rows of a page fit <paramref name="budgetBytes"/> (#6131). <paramref name="serializedBytes"/>
+    /// returns the byte size of the WHOLE answer carrying its first n rows, built the way the tool really writes it
+    /// (envelope, cut note and all), so the count is exact rather than an estimate from one row's size. The answer
+    /// grows with n, so the largest n that fits is found by bisection (about eight serializations for the 200-row
+    /// ceiling) instead of one per row. Never below one row when there is one: a single row wider than the budget is
+    /// still the answer, as <c>get_collection_log</c> and the Availability Group read treat it.
+    /// </summary>
+    public static int RowsThatFit(int rowCount, Func<int, int> serializedBytes, int budgetBytes = DefaultBytes)
+    {
+        if (rowCount <= 1 || serializedBytes(rowCount) <= budgetBytes)
+        {
+            return rowCount;
+        }
+
+        var low = 1;
+        var high = rowCount - 1;
+        while (low < high)
+        {
+            var mid = (low + high + 1) / 2;
+            if (serializedBytes(mid) <= budgetBytes)
+            {
+                low = mid;
+            }
+            else
+            {
+                high = mid - 1;
+            }
+        }
+
+        return low;
+    }
+
+    /// <summary>
+    /// The one sentence a tool prints when <see cref="RowsThatFit"/> cut its page (#6131), in the wording the Availability
+    /// Group read uses ("fit the N-byte response budget").
+    /// </summary>
+    public static string PageCutNote(int rowsInScope, int rowsReturned, string order, string noun = "rows") =>
+        string.Create(System.Globalization.CultureInfo.InvariantCulture,
+            $"TRUNCATED: {rowsInScope:#,0} {noun} were read; only {rowsReturned:#,0} fit the {DefaultBytes:#,0}-byte response budget ({order}). Lower the row count asked for, or narrow the window or database, to see the rest.");
+
+    /// <summary>
+    /// Cuts <paramref name="payload"/>'s <paramref name="arrayKey"/> array to the rows that fit <paramref name="budgetBytes"/> and says
+    /// so (#6131): <c>truncated</c> (true when rows were left out, false when none were) and <c>budget_note</c> (the
+    /// <see cref="PageCutNote"/> sentence, null when nothing was cut) are written onto the payload, and the answer is returned
+    /// serialized with <see cref="McpHelpers.JsonOptions"/>. The rows keep their order, so a ranked page loses its lightest rows.
+    /// <c>truncated</c> here is the budget cut only: a tool whose own payload also carries a window-floor flag keeps that
+    /// flag under its own name.
+    /// </summary>
+    public static string CapPage(System.Text.Json.Nodes.JsonObject payload, string arrayKey, string order, string noun, int budgetBytes = DefaultBytes)
+    {
+        if (payload[arrayKey] is not System.Text.Json.Nodes.JsonArray page)
+        {
+            return payload.ToJsonString(McpHelpers.JsonOptions);
+        }
+
+        var rowNodes = page.ToList();
+        var inScope = rowNodes.Count;
+
+        string Measure(int n)
+        {
+            var cut = n < inScope;
+            payload[arrayKey] = new System.Text.Json.Nodes.JsonArray(rowNodes.Take(n).Select(x => x?.DeepClone()).ToArray());
+            payload["truncated"] = cut;
+            payload["budget_note"] = cut ? PageCutNote(inScope, n, order, noun) : null;
+            return payload.ToJsonString(McpHelpers.JsonOptions);
+        }
+
+        var fit = RowsThatFit(inScope, n => System.Text.Encoding.UTF8.GetByteCount(Measure(n)), budgetBytes);
+        return Measure(fit);
+    }
 }

@@ -370,6 +370,20 @@ ALTER TABLE IF EXISTS collect.query_store_forced_plans
     DROP COLUMN IF EXISTS plan_guide_name,
     DROP COLUMN IF EXISTS plan_guide_enabled,
     DROP COLUMN IF EXISTS plan_guide_scope;"),
+
+        // /// V202 (#6159): the primary replica's name on the AG replica states. The column is the probe's newest sentinel. The rewind drops
+        // it, so a re-run of V202 adds it again. Safe on a store that never had it.
+        new(202, "hasAgPrimaryReplica",
+            @"
+ALTER TABLE IF EXISTS collect.ag_replica_states DROP COLUMN IF EXISTS primary_replica;"),
+
+        // /// V203 (#6170): the hypothetical-index login pair on the server registry. The password column is the probe's newest sentinel. The
+        // rewind drops both, so a re-run of V203 adds them again. Safe on a store that never had them.
+        new(203, "hasHypotheticalIndexLogin",
+            @"
+ALTER TABLE IF EXISTS config.config_monitored_servers
+    DROP COLUMN IF EXISTS hypothetical_index_username,
+    DROP COLUMN IF EXISTS hypothetical_index_encrypted_password;"),
     ];
 
     /// <summary>

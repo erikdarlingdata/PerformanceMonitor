@@ -919,6 +919,9 @@ public sealed class RegisteredServerSettingDriftTests
         {
             "password", "encryptedPassword",
             "remediationUsername", "remediationEncryptedPassword",
+            /* #6170: the hypothetical-index login. Excluded for the remediation credential's reasons: it is a credential the monitoring
+               connection never uses, and its password slot holds an env: or file: reference that is not read back for a compare. */
+            "hypotheticalIndexUsername", "hypotheticalIndexEncryptedPassword",
             /* #5452: the external ID sent with a server's AWS role. Excluded for the credential's reasons: it is a
                stored secret, and a stored secret is never read back for a compare (the comparison read does not
                select it), so it cannot reach a log line. The role beside it, awsRoleArn, is compared. */
@@ -1001,10 +1004,10 @@ public sealed class RegisteredServerSettingDriftTests
         /* And that the exclusion list has not quietly grown past the credential. The literal IS the
            mechanism: an exclusion is only legitimate with an argument, and the argument belongs in the
            comment above beside the key, so growing this list has to show up in a diff. V113 (#2138 phase 1)
-           added the remediation credential's two keys, and V169 (#5452) the AWS external ID, which is why it is
-           five rather than two. */
+           added the remediation credential's two keys, V169 (#5452) the AWS external ID, and V203 (#6170) the
+           hypothetical-index login's two keys, which is why it is seven rather than two. */
         Assert.Equal(
-            new[] { "awsExternalId", "encryptedPassword", "password", "remediationEncryptedPassword", "remediationUsername" },
+            new[] { "awsExternalId", "encryptedPassword", "hypotheticalIndexEncryptedPassword", "hypotheticalIndexUsername", "password", "remediationEncryptedPassword", "remediationUsername" },
             excluded.OrderBy(k => k).ToArray());
 
         /* The property behind the literal, so this is not purely a frozen list that the next lane bumps

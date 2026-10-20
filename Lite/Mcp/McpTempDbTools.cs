@@ -35,6 +35,7 @@ public sealed class McpTempDbTools
             if (points.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "tempdb_stats")
+                    ?? await McpRuntimePrecondition.StatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "tempdb_stats")
                     ?? McpHelpers.Status("unavailable", "No TempDB data available.");
             }
 

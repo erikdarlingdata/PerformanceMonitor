@@ -8,6 +8,7 @@
 
 using System;
 using PerformanceMonitor.Darling.Viewer;
+using PerformanceMonitor.Ui;
 using Xunit;
 
 namespace Darling.Tests;
@@ -18,10 +19,11 @@ namespace Darling.Tests;
 /// three fuller history SQL reads' shape + parameterization, the row models' delta / average / total
 /// derivations, the metric-selector chart projection, and the row → window-parameter mapping (which fields
 /// identify the double-clicked item, and when a row can't open a window). Pure logic + SQL pins only — no live
-/// Postgres, and nothing here mutates <see cref="ViewerTimeHelper"/>'s process-wide statics (the execution-stamp
-/// display pin READS them, deriving its expected through the row's own renderer — the unserialized display
-/// classes' pattern).
+/// Postgres. The execution-stamp display pin sets <see cref="ViewerTimeHelper"/>'s process-wide display mode
+/// itself (and restores it), so the class is in the <c>viewer-time-statics</c> collection: that collection
+/// runs on its own, so no other class can swap the statics between the pin's two reads (#6199).
 /// </summary>
+[Collection("viewer-time-statics")]
 public sealed class ViewerHistoryWindowTests
 {
     // ── History reads' SQL shape (both-sides window-bound, positional PG params) ──
@@ -160,10 +162,21 @@ public sealed class ViewerHistoryWindowTests
         var firstUtc = new DateTime(2026, 7, 1, 9, 30, 15, DateTimeKind.Unspecified);
         var lastUtc = new DateTime(2026, 7, 2, 21, 5, 59, DateTimeKind.Unspecified);
         var row = new ViewerQueryStoreHistoryRow { FirstExecutionTime = firstUtc, LastExecutionTime = lastUtc };
-        Assert.Equal(ViewerTimeHelper.ForDisplay(firstUtc).ToString("yyyy-MM-dd HH:mm:ss"), row.FirstExecutionTimeLocal);
-        Assert.Equal(ViewerTimeHelper.ForDisplay(lastUtc).ToString("yyyy-MM-dd HH:mm:ss"), row.LastExecutionTimeLocal);
-        Assert.Equal("", new ViewerQueryStoreHistoryRow().FirstExecutionTimeLocal);
-        Assert.Equal("", new ViewerQueryStoreHistoryRow().LastExecutionTimeLocal);
+        /* The display mode is a process-wide static another class may have left changed (#6199): pin it to
+           local time here, and put it back. */
+        var savedMode = ViewerTimeHelper.CurrentDisplayMode;
+        try
+        {
+            ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.LocalTime;
+            Assert.Equal(ViewerTimeHelper.ForDisplay(firstUtc).ToString("yyyy-MM-dd HH:mm:ss"), row.FirstExecutionTimeLocal);
+            Assert.Equal(ViewerTimeHelper.ForDisplay(lastUtc).ToString("yyyy-MM-dd HH:mm:ss"), row.LastExecutionTimeLocal);
+            Assert.Equal("", new ViewerQueryStoreHistoryRow().FirstExecutionTimeLocal);
+            Assert.Equal("", new ViewerQueryStoreHistoryRow().LastExecutionTimeLocal);
+        }
+        finally
+        {
+            ViewerTimeHelper.CurrentDisplayMode = savedMode;
+        }
     }
 
     // ── Metric-selector chart projection (each window's GetMetricValue switch) ──

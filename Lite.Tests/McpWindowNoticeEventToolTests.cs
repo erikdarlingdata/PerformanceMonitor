@@ -12,6 +12,7 @@ using System.IO;
 using System.Text.Json;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
@@ -367,8 +368,8 @@ VALUES ($1, $2, $3, $4, $5, 'rpc_completed', 'Db', 'SELECT 1', 5000000)",
         Assert.True(root.GetProperty("window_truncated").GetBoolean());
         var text = root.GetProperty("effective_start").GetString()!;
         Assert.EndsWith("Z", text, StringComparison.Ordinal);
-        Assert.True(Math.Abs((ParseUtc(text) - floor).TotalSeconds) < 5,
-            $"effective_start {text} should be the seeded floor {floor:o}");
+        /* The shared notice's value, to the instant and in the shared formatter's format (UTC with the Z). */
+        Assert.Equal(McpHelpers.FormatEffectiveStart(floor), text);
         var note = root.GetProperty("truncation_note").GetString();
         Assert.NotNull(note);
         Assert.Contains($"raw {table} retains", note, StringComparison.Ordinal);
@@ -393,8 +394,7 @@ VALUES ($1, $2, $3, $4, $5, 'rpc_completed', 'Db', 'SELECT 1', 5000000)",
         Assert.Equal(JsonValueKind.Null, root.GetProperty("truncation_note").ValueKind);
         var text = root.GetProperty("effective_start").GetString()!;
         Assert.EndsWith("Z", text, StringComparison.Ordinal);
-        Assert.True(Math.Abs((ParseUtc(text) - firstInstant).TotalSeconds) < 5,
-            $"effective_start {text} should be the first event {firstInstant:o}");
+        Assert.Equal(McpHelpers.FormatEffectiveStart(firstInstant), text);
         AssertNoReachKey(root);
     }
 

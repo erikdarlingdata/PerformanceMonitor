@@ -462,6 +462,7 @@ public partial class FinOpsTab : UserControl
             AvgCpuBar.Width = P95CpuBar.Width = MaxCpuBar.Width = 0;
             MemoryUtilBar.Width = MemoryRatioBar.Width = 0;
             MemoryUtilText.Text = MemoryRatioText.Text = "-";
+            MemoryUtilText.ToolTip = MemoryUtilBar.ToolTip = null;
             PhysicalMemoryText.Text = TargetMemoryText.Text = TotalMemoryText.Text = BufferPoolText.Text = "-";
             ClassificationExplanation.Text = "";
             UtilizationContent.Visibility = Visibility.Collapsed;
@@ -471,9 +472,7 @@ public partial class FinOpsTab : UserControl
         UtilizationContent.Visibility = Visibility.Visible;
 
         /* An empty status is "no verdict" (no CPU sample in the window), not a blank label. */
-        ProvisioningStatusText.Text = string.IsNullOrEmpty(data.ProvisioningStatus) ? "No Data"
-            : data.ProvisioningStatus == ProvisioningVerdict.NotApplicable ? ProvisioningVerdict.NotApplicableLabel
-            : data.ProvisioningStatus.Replace("_", " ");
+        ProvisioningStatusText.Text = ProvisioningVerdict.StatusLabel(data.ProvisioningStatus, data.CpuSamples);
         switch (data.ProvisioningStatus)
         {
             case "RIGHT_SIZED":
@@ -512,11 +511,12 @@ public partial class FinOpsTab : UserControl
         SetBar(MaxCpuBar, MaxCpuFilled, MaxCpuEmpty, data.HasCpuSample ? data.MaxCpuPct : 0);
 
         /* Stolen Memory % = (Total Server Memory - Buffer Pool) / Total Server Memory */
-        var stolenPct = data.TotalMemoryMb > 0
-            ? (double)(data.TotalMemoryMb - data.BufferPoolMb) / data.TotalMemoryMb * 100.0
-            : 0;
+        var stolenPct = (double)ProvisioningVerdict.StolenMemoryPercent(data.TotalMemoryMb, data.BufferPoolMb);
         MemoryUtilText.Text = $"{stolenPct:N0}%";
         SetBar(MemoryUtilBar, MemUtilFilled, MemUtilEmpty, stolenPct);
+        /* A figure that reads amber or red says why (#6139); below amber there is nothing to say. */
+        var stolenNote = ProvisioningVerdict.StolenMemoryNote(stolenPct);
+        MemoryUtilText.ToolTip = MemoryUtilBar.ToolTip = stolenNote.Length == 0 ? null : stolenNote;
 
         /* Buffer Pool % = Buffer Pool / Physical Memory */
         var bpPct = data.PhysicalMemoryMb > 0
@@ -547,7 +547,9 @@ public partial class FinOpsTab : UserControl
                decides anything, citing a threshold the code does not check (#2246). */
             "UNDER_PROVISIONED" => ProvisioningVerdict.UnderProvisionedReason(
                 data.P95CpuPct, data.MaxGrantWaiters, data.GrantTimeouts, data.ForcedGrants,
-                data.MaxWorkersCount, data.CurrentWorkersCount),
+                data.MaxWorkersCount, data.CurrentWorkersCount,
+                (decimal)stolenPct, data.EngineEdition),
+            ProvisioningVerdict.NotEnoughData => ProvisioningVerdict.NotEnoughDataExplanation(data.CpuSamples),
             ProvisioningVerdict.NotApplicable => ProvisioningVerdict.NotApplicableExplanation,
             _ => ""
         };

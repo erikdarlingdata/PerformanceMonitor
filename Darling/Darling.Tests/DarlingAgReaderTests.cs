@@ -201,6 +201,69 @@ public sealed class DarlingAgReaderTests
         Assert.Equal(HealthSeverity.Warning, group.Severity);
     }
 
+    [Fact]
+    public void Build_ACardFromASecondaryThatDoesNotListThePrimary_IsNotWarning_AndSaysThePrimaryIsNotVisible()
+    {
+        // #6159: the reporting replica (is_local) is a SECONDARY, so a primary exists; its own view just does not list it.
+        var replicas = new[] { Replica(1, "NODE2", "AG1", "NODE2", "SECONDARY", isLocal: true) };
+
+        var group = Assert.Single(Reader.Build(replicas, Array.Empty<Reader.DatabaseRow>(), At(0)).AvailabilityGroups);
+        Assert.Null(group.PrimaryReplica);
+        Assert.True(group.PrimaryNotVisible);
+        Assert.Equal(HealthSeverity.Healthy, group.Severity);
+    }
+
+    [Fact]
+    public void Build_NoPrimaryAndNoLocalSecondary_StillWarns_AndIsNotCalledNotVisible()
+    {
+        // Nothing says the reporter is a secondary (no is_local row), so a missing primary is still a finding.
+        var replicas = new[] { Replica(1, "NODE1", "AG1", "NODE1", "RESOLVING", isLocal: true), Replica(1, "NODE1", "AG1", "NODE2", "SECONDARY", isLocal: false) };
+
+        var group = Assert.Single(Reader.Build(replicas, Array.Empty<Reader.DatabaseRow>(), At(0)).AvailabilityGroups);
+        Assert.False(group.PrimaryNotVisible);
+        Assert.Equal(HealthSeverity.Warning, group.Severity);
+    }
+
+    [Fact]
+    public void Build_ACardFromASecondaryWithAStoredPrimary_NamesIt_AndIsNotWarning()
+    {
+        // #6159: the primary's row is not in this secondary's view, but the engine told this replica who the primary is.
+        var replicas = new[] { Replica(1, "NODE2", "AG1", "NODE2", "SECONDARY", isLocal: true, primary: "NODE1") };
+
+        var group = Assert.Single(Reader.Build(replicas, Array.Empty<Reader.DatabaseRow>(), At(0)).AvailabilityGroups);
+        Assert.Equal("NODE1", group.PrimaryReplica);
+        Assert.False(group.PrimaryNotVisible);
+        Assert.Equal(HealthSeverity.Healthy, group.Severity);
+    }
+
+    [Fact]
+    public void Build_AStoredPrimaryThatIsAMonitoredServer_IsShownByItsDisplayName()
+    {
+        // The monitored server whose own (is_local) row names the primary replica is the primary; the card shows that server's display name.
+        var replicas = new[]
+        {
+            Replica(1, "node1-key", "AG1", "NODE1", "PRIMARY", isLocal: true, primary: "NODE1"),
+            Replica(2, "node2-key", "AG1", "NODE2", "SECONDARY", isLocal: true, primary: "NODE1"),
+        };
+
+        var secondary = Assert.Single(
+            Reader.Build(replicas, Array.Empty<Reader.DatabaseRow>(), At(0), displayNameOf: id => id == 1 ? "Orders primary" : null).AvailabilityGroups,
+            g => g.ServerId == 2);
+        Assert.Equal("Orders primary", secondary.PrimaryReplica);
+
+        // A monitored primary with no display name, or no monitored server at all, shows the replica name.
+        var unnamed = Assert.Single(
+            Reader.Build(replicas, Array.Empty<Reader.DatabaseRow>(), At(0), displayNameOf: _ => null).AvailabilityGroups,
+            g => g.ServerId == 2);
+        Assert.Equal("NODE1", unnamed.PrimaryReplica);
+
+        // The card reported from the primary itself keeps the primary row's replica name.
+        var fromPrimary = Assert.Single(
+            Reader.Build(replicas, Array.Empty<Reader.DatabaseRow>(), At(0), displayNameOf: _ => "Orders primary").AvailabilityGroups,
+            g => g.ServerId == 1);
+        Assert.Equal("NODE1", fromPrimary.PrimaryReplica);
+    }
+
     /* ─────────────────────────── database-grain banding ─────────────────────────── */
 
     [Fact]
@@ -289,8 +352,9 @@ public sealed class DarlingAgReaderTests
         string? operational = "ONLINE",
         string? recoveryHealth = "ONLINE",
         bool? isLocal = null,
-        string? groupId = null) =>
-        new(serverId, serverName, At(1), agName, replicaName, role, isLocal, operational, connected, recoveryHealth, syncHealth, "SYNCHRONOUS_COMMIT", "AUTOMATIC", "TCP://" + replicaName + ":5022", groupId);
+        string? groupId = null,
+        string? primary = null) =>
+        new(serverId, serverName, At(1), agName, replicaName, role, isLocal, operational, connected, recoveryHealth, syncHealth, "SYNCHRONOUS_COMMIT", "AUTOMATIC", "TCP://" + replicaName + ":5022", groupId, primary);
 
     private static Reader.DatabaseRow Database(
         int serverId,

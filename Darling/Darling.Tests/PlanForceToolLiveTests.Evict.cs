@@ -244,19 +244,39 @@ VALUES ($1, $2, 7, 'srv-7', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
     {
         await RunAsync(without, async c =>
         {
-            var marker = "ev4" + Guid.NewGuid().ToString("N")[..8];
-            await RunMarkerAsync(c.Sql, marker, 2, c.Ct);
-            var cached = await ReadCachedAsync(marker, c.Ct);
-            foreach (var dryRun in new[] { true, false })
+            /* The plan cache is shared with the whole server, and memory pressure can trim any plan. A second, untouched control plan tells the two
+               apart: the marker plan gone with the control plan still cached means the refused call evicted it (a defect); both gone means the cache was
+               trimmed under the test, so it is primed again and tried once more. */
+            var trimmed = true;
+            for (var attempt = 0; attempt < 2 && trimmed; attempt++)
             {
-                var answer = await EvictAsync(c, cached.PlanHandle, dryRun);
-                var json = Parse(answer);
-                Assert.Equal("refused", (string?)json["status"]);
-                Assert.Equal(reason, (string?)json["reason"]);
-                AssertNoSecret(c, answer);
+                var marker = "ev4" + Guid.NewGuid().ToString("N")[..8];
+                var control = "ev4c" + Guid.NewGuid().ToString("N")[..8];
+                await RunMarkerAsync(c.Sql, marker, 2, c.Ct);
+                await RunMarkerAsync(c.Sql, control, 2, c.Ct);
+                var cached = await ReadCachedAsync(marker, c.Ct);
+                var controlPlan = await ReadCachedAsync(control, c.Ct);
+                foreach (var dryRun in new[] { true, false })
+                {
+                    var answer = await EvictAsync(c, cached.PlanHandle, dryRun);
+                    var json = Parse(answer);
+                    Assert.Equal("refused", (string?)json["status"]);
+                    Assert.Equal(reason, (string?)json["reason"]);
+                    AssertNoSecret(c, answer);
+                }
+
+                if (await IsCachedAsync(c.Sql, cached.PlanHandle, c.Ct))
+                {
+                    trimmed = false;
+                }
+                else
+                {
+                    Assert.False(await IsCachedAsync(c.Sql, controlPlan.PlanHandle, c.Ct),
+                        "The refused call evicted the plan: the marker plan is gone while an untouched control plan is still cached.");
+                }
             }
 
-            Assert.True(await IsCachedAsync(c.Sql, cached.PlanHandle, c.Ct));
+            Assert.False(trimmed, "The plan cache was trimmed under the test twice in a row (both the marker plan and the control plan were gone).");
             Assert.Equal(0, await JournalActionRowsAsync(c));
             Assert.Equal("1", await PgScalarAsync(c.Connection, $"SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND reason = '{reason}'", c.Ct));
         });
