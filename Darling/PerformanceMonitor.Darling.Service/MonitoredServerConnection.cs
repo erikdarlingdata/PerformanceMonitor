@@ -264,6 +264,11 @@ public static class MonitoredServerConnection
 
     /* True when the pin is the whole string or its last two tokens: preceded by whitespace that no backslash escapes
        (the server splits options on unescaped whitespace, so an escaped space would join the pin to the token before). */
+    /// <summary>Whether <paramref name="options"/> ends with <see cref="PinnedSearchPathOption"/> as its own option, as
+    /// <see cref="PinSearchPath"/> leaves it (#6143).</summary>
+    internal static bool CarriesPin(string? options) =>
+        !string.IsNullOrWhiteSpace(options) && EndsWithPinOption(options.TrimEnd());
+
     private static bool EndsWithPinOption(string options)
     {
         if (!options.EndsWith(PinnedSearchPathOption, StringComparison.Ordinal))
@@ -277,7 +282,7 @@ public static class MonitoredServerConnection
             return true;
         }
 
-        if (!char.IsWhiteSpace(options[start - 1]))
+        if (!DarlingServerConnector.IsPgListSpace(options[start - 1]))
         {
             return false;
         }

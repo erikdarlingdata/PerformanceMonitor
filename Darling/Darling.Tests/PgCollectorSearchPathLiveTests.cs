@@ -45,35 +45,35 @@ public sealed class PgCollectorSearchPathLiveTests
        the owner's schema first resolves an unqualified call to the copy. public.pg_qualstats() stands where the
        extension's function would be if it were created in public; pg_qualstats is not created in this database. */
     private const string SetupSql = """"
-        CREATE SCHEMA planted AUTHORIZATION pm6143_owner;
+        CREATE SCHEMA lookalike AUTHORIZATION pm6143_owner;
         SET ROLE pm6143_owner;
-        CREATE TABLE planted.calls (what text NOT NULL);
-        GRANT USAGE ON SCHEMA planted TO PUBLIC;
-        GRANT INSERT ON planted.calls TO PUBLIC;
+        CREATE TABLE lookalike.calls (what text NOT NULL);
+        GRANT USAGE ON SCHEMA lookalike TO PUBLIC;
+        GRANT INSERT ON lookalike.calls TO PUBLIC;
 
-        CREATE FUNCTION planted.int4_eq(integer, integer) RETURNS boolean LANGUAGE plpgsql AS $$
-        BEGIN INSERT INTO planted.calls VALUES ('=(int4,int4)'); RETURN $1 OPERATOR(pg_catalog.=) $2; END $$;
-        CREATE OPERATOR planted.= (LEFTARG = integer, RIGHTARG = integer, FUNCTION = planted.int4_eq);
+        CREATE FUNCTION lookalike.int4_eq(integer, integer) RETURNS boolean LANGUAGE plpgsql AS $$
+        BEGIN INSERT INTO lookalike.calls VALUES ('=(int4,int4)'); RETURN $1 OPERATOR(pg_catalog.=) $2; END $$;
+        CREATE OPERATOR lookalike.= (LEFTARG = integer, RIGHTARG = integer, FUNCTION = lookalike.int4_eq);
 
-        CREATE FUNCTION planted.oid_eq(oid, oid) RETURNS boolean LANGUAGE plpgsql AS $$
-        BEGIN INSERT INTO planted.calls VALUES ('=(oid,oid)'); RETURN $1 OPERATOR(pg_catalog.=) $2; END $$;
-        CREATE OPERATOR planted.= (LEFTARG = oid, RIGHTARG = oid, FUNCTION = planted.oid_eq);
+        CREATE FUNCTION lookalike.oid_eq(oid, oid) RETURNS boolean LANGUAGE plpgsql AS $$
+        BEGIN INSERT INTO lookalike.calls VALUES ('=(oid,oid)'); RETURN $1 OPERATOR(pg_catalog.=) $2; END $$;
+        CREATE OPERATOR lookalike.= (LEFTARG = oid, RIGHTARG = oid, FUNCTION = lookalike.oid_eq);
 
-        CREATE FUNCTION planted.current_database() RETURNS name LANGUAGE plpgsql AS $$
-        BEGIN INSERT INTO planted.calls VALUES ('current_database'); RETURN pg_catalog.current_database(); END $$;
-        CREATE FUNCTION planted.now() RETURNS timestamptz LANGUAGE plpgsql AS $$
-        BEGIN INSERT INTO planted.calls VALUES ('now'); RETURN pg_catalog.now(); END $$;
-        CREATE FUNCTION planted.pg_relation_size(regclass) RETURNS bigint LANGUAGE plpgsql AS $$
-        BEGIN INSERT INTO planted.calls VALUES ('pg_relation_size'); RETURN pg_catalog.pg_relation_size($1); END $$;
-        CREATE FUNCTION planted.pg_total_relation_size(regclass) RETURNS bigint LANGUAGE plpgsql AS $$
-        BEGIN INSERT INTO planted.calls VALUES ('pg_total_relation_size'); RETURN pg_catalog.pg_total_relation_size($1); END $$;
-        CREATE FUNCTION planted.current_setting(text, boolean) RETURNS text LANGUAGE plpgsql AS $$
-        BEGIN INSERT INTO planted.calls VALUES ('current_setting'); RETURN pg_catalog.current_setting($1, $2); END $$;
-        CREATE FUNCTION planted.quote_ident(text) RETURNS text LANGUAGE plpgsql AS $$
-        BEGIN INSERT INTO planted.calls VALUES ('quote_ident'); RETURN pg_catalog.quote_ident($1); END $$;
+        CREATE FUNCTION lookalike.current_database() RETURNS name LANGUAGE plpgsql AS $$
+        BEGIN INSERT INTO lookalike.calls VALUES ('current_database'); RETURN pg_catalog.current_database(); END $$;
+        CREATE FUNCTION lookalike.now() RETURNS timestamptz LANGUAGE plpgsql AS $$
+        BEGIN INSERT INTO lookalike.calls VALUES ('now'); RETURN pg_catalog.now(); END $$;
+        CREATE FUNCTION lookalike.pg_relation_size(regclass) RETURNS bigint LANGUAGE plpgsql AS $$
+        BEGIN INSERT INTO lookalike.calls VALUES ('pg_relation_size'); RETURN pg_catalog.pg_relation_size($1); END $$;
+        CREATE FUNCTION lookalike.pg_total_relation_size(regclass) RETURNS bigint LANGUAGE plpgsql AS $$
+        BEGIN INSERT INTO lookalike.calls VALUES ('pg_total_relation_size'); RETURN pg_catalog.pg_total_relation_size($1); END $$;
+        CREATE FUNCTION lookalike.current_setting(text, boolean) RETURNS text LANGUAGE plpgsql AS $$
+        BEGIN INSERT INTO lookalike.calls VALUES ('current_setting'); RETURN pg_catalog.current_setting($1, $2); END $$;
+        CREATE FUNCTION lookalike.quote_ident(text) RETURNS text LANGUAGE plpgsql AS $$
+        BEGIN INSERT INTO lookalike.calls VALUES ('quote_ident'); RETURN pg_catalog.quote_ident($1); END $$;
 
         CREATE FUNCTION public.pg_qualstats() RETURNS SETOF record LANGUAGE plpgsql AS $$
-        BEGIN INSERT INTO planted.calls VALUES ('pg_qualstats'); RETURN; END $$;
+        BEGIN INSERT INTO lookalike.calls VALUES ('pg_qualstats'); RETURN; END $$;
 
         CREATE TABLE public.pm6143_rows (id integer PRIMARY KEY, label text NOT NULL);
         INSERT INTO public.pm6143_rows SELECT g, 'row ' || g FROM pg_catalog.generate_series(1, 40000) AS g; -- over the bloat collectors' 1 MB floor
@@ -113,7 +113,7 @@ public sealed class PgCollectorSearchPathLiveTests
             await ExecAsync(admin.ConnectionString, $"CREATE DATABASE {Database} OWNER {Owner}", ct);
             await ExecAsync(ownedAdmin.ConnectionString, SetupSql, ct);
 
-            const string Path = "planted, pg_catalog, public";
+            const string Path = "lookalike, pg_catalog, public";
             await ExecAsync(
                 setting == "database" ? new NpgsqlConnectionStringBuilder(ownedAdmin.ConnectionString) { Username = Owner }.ConnectionString : admin.ConnectionString,
                 setting switch
@@ -127,9 +127,9 @@ public sealed class PgCollectorSearchPathLiveTests
             /* The fixture is live: on the monitoring role's connection without the pin, an unqualified = and
                current_database() run the copies. */
             await ExecAsync(ownedMonitor.ConnectionString, "SELECT 1 = 1, current_database()", ct);
-            var unpinnedCalls = await ScalarLongAsync(ownedAdmin.ConnectionString, "SELECT pg_catalog.count(*) FROM planted.calls", ct);
+            var unpinnedCalls = await ScalarLongAsync(ownedAdmin.ConnectionString, "SELECT pg_catalog.count(*) FROM lookalike.calls", ct);
             Assert.True(unpinnedCalls >= 2, $"the copies did not run on an unpinned connection ({unpinnedCalls} calls)");
-            await ExecAsync(ownedAdmin.ConnectionString, "TRUNCATE planted.calls", ct);
+            await ExecAsync(ownedAdmin.ConnectionString, "TRUNCATE lookalike.calls", ct);
 
             var runtime = await RuntimeAsync(admin, Database, Monitor, ct);
             Assert.Equal("pg_catalog,pg_temp", await ScalarTextAsync(runtime.ConnectionString, "SHOW search_path", ct));
@@ -182,7 +182,7 @@ public sealed class PgCollectorSearchPathLiveTests
 
             Assert.True(qualstatsFailure is null || qualstatsFailure.SqlState == PostgresErrorCodes.UndefinedFunction,
                 $"pg_predicate_stats failed with {qualstatsFailure?.SqlState}: {qualstatsFailure?.MessageText}");
-            Assert.Equal(0L, await ScalarLongAsync(ownedAdmin.ConnectionString, "SELECT pg_catalog.count(*) FROM planted.calls", ct));
+            Assert.Equal(0L, await ScalarLongAsync(ownedAdmin.ConnectionString, "SELECT pg_catalog.count(*) FROM lookalike.calls", ct));
 
             bodySucceeded = true;
         }
@@ -387,108 +387,6 @@ public sealed class PgCollectorSearchPathLiveTests
     }
 
     /// <summary>
-    /// When pg_proc shows no Aurora function (measured on Aurora, #2340), aurora_stat_statements, whose call fails in
-    /// pg_catalog with 42883, is found in the pg_stat_statements extension's schema as a member of the extension, the
-    /// statement collector reads through it, and the schema is remembered for the target. A same-named copy in public
-    /// is never called.
-    /// </summary>
-    [Fact]
-    public async Task AuroraFunction_PgProcShowsNothing_FallsBackToTheStatementsExtensionSchema_AndRemembersIt()
-    {
-        var adminConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-        Assert.SkipWhen(string.IsNullOrWhiteSpace(adminConnectionString),
-            "Set DARLING_TEST_PG to a Postgres connection string to run the search_path live test.");
-
-        var ct = TestContext.Current.CancellationToken;
-        var admin = new NpgsqlConnectionStringBuilder(adminConnectionString) { Pooling = false };
-        var auroraAdmin = new NpgsqlConnectionStringBuilder(admin.ConnectionString) { Database = AuroraDatabase };
-        const string Unquoted = "Ext \"q\"";
-        var targetKey = "pm6143-aurora-fallback-" + Guid.NewGuid().ToString("N");
-
-        var bodySucceeded = false;
-        try
-        {
-            await ResetAsync(admin.ConnectionString, ct);
-            await ExecAsync(admin.ConnectionString, $"CREATE DATABASE {AuroraDatabase}", ct);
-            /* The stand-in has Aurora's column list: the extension's view plus the six Aurora-only columns. */
-            await ExecAsync(auroraAdmin.ConnectionString, $"""
-                CREATE SCHEMA {ExtSchema};
-                CREATE EXTENSION pg_stat_statements SCHEMA {ExtSchema};
-                CREATE TABLE public.calls (what text NOT NULL);
-                CREATE VIEW {ExtSchema}.aurora_shape AS
-                SELECT s.*, 0::bigint AS storage_blks_read, 0::bigint AS orcache_blks_hit,
-                       0::float8 AS storage_blk_read_time, 0::float8 AS orcache_blk_read_time,
-                       0::bigint AS total_exec_peakmem, 0::bigint AS max_exec_peakmem
-                FROM {ExtSchema}.pg_stat_statements AS s;
-                CREATE FUNCTION {ExtSchema}.aurora_stat_statements(boolean) RETURNS SETOF {ExtSchema}.aurora_shape
-                LANGUAGE plpgsql AS $$
-                BEGIN INSERT INTO public.calls VALUES ('extension schema'); RETURN QUERY SELECT * FROM {ExtSchema}.aurora_shape; END $$;
-                ALTER EXTENSION pg_stat_statements ADD FUNCTION {ExtSchema}.aurora_stat_statements(boolean);
-                CREATE FUNCTION public.aurora_stat_statements(boolean) RETURNS SETOF {ExtSchema}.aurora_shape
-                LANGUAGE plpgsql AS $$
-                BEGIN INSERT INTO public.calls VALUES ('public'); RETURN QUERY SELECT * FROM {ExtSchema}.aurora_shape; END $$;
-                GRANT INSERT ON public.calls TO PUBLIC;
-                ALTER DATABASE {AuroraDatabase} SET search_path = public, pg_catalog;
-                SELECT pg_catalog.count(*) FROM pg_catalog.pg_class;
-                """, ct);
-
-            var runtime = await RuntimeAsync(admin, AuroraDatabase, admin.Username!, ct);
-            await using var connection = new NpgsqlConnection(runtime.ConnectionString);
-            await connection.OpenAsync(ct);
-
-            /* pg_proc rows: none, as measured on Aurora. pg_catalog fails with 42883, the extension's schema resolves. */
-            var empty = new Dictionary<string, string>(StringComparer.Ordinal);
-            var filled = await AuroraFunctionSchemaFallback.FillAsync(
-                connection, empty, new[] { "aurora_stat_statements" }, Unquoted, targetKey, null, ct);
-            Assert.Equal(Unquoted, filled["aurora_stat_statements"]);
-            Assert.Equal(Unquoted, AuroraFunctionSchemaFallback.Remembered(targetKey, "aurora_stat_statements", Unquoted));
-            Assert.Equal(0, await ScalarLongAsync(auroraAdmin.ConnectionString, "SELECT pg_catalog.count(*) FROM public.calls", ct));
-
-            /* Collection reads through the extension's schema. */
-            var context = NewContext(new CollectorTargetInfo
-            {
-                Engine = CollectorTargetEngine.PostgreSql, PostgresMajorVersion = connection.PostgreSqlVersion.Major, IsAurora = true,
-            });
-            context.PgExtensionSchemas = new Dictionary<string, string>(StringComparer.Ordinal) { ["pg_stat_statements"] = Unquoted };
-            context.PgFunctionSchemas = filled;
-            var plan = PgStatementStatsCollector.Instance.BuildQuery(context);
-            Assert.Contains($"FROM {ExtSchema}.aurora_stat_statements(false)", plan.Text, StringComparison.Ordinal);
-            await using (var command = new NpgsqlCommand(plan.Text, connection))
-            await using (var reader = await command.ExecuteReaderAsync(ct))
-            {
-                await PgStatementStatsCollector.Instance.ReadAsync(reader, context, ct);
-            }
-
-            Assert.Equal(1, await ScalarLongAsync(auroraAdmin.ConnectionString, "SELECT pg_catalog.count(*) FROM public.calls WHERE what = 'extension schema'", ct));
-            Assert.Equal(0, await ScalarLongAsync(auroraAdmin.ConnectionString, "SELECT pg_catalog.count(*) FROM public.calls WHERE what = 'public'", ct));
-
-            /* Remembered: with the function gone, the target's answer is reused without testing again. A caller that
-               remembers nothing tests again, finds neither schema, and calls pg_catalog. Public is never chosen. */
-            await ExecAsync(auroraAdmin.ConnectionString, $"""
-                ALTER EXTENSION pg_stat_statements DROP FUNCTION {ExtSchema}.aurora_stat_statements(boolean);
-                DROP FUNCTION {ExtSchema}.aurora_stat_statements(boolean);
-                """, ct);
-            Assert.Equal(Unquoted, (await AuroraFunctionSchemaFallback.FillAsync(
-                connection, empty, new[] { "aurora_stat_statements" }, Unquoted, targetKey, null, ct))["aurora_stat_statements"]);
-            var retested = await AuroraFunctionSchemaFallback.FillAsync(
-                connection, empty, new[] { "aurora_stat_statements" }, Unquoted, null, null, ct);
-            Assert.Equal("pg_catalog", CollectorContext.QuotePgFunctionSchema(retested, "aurora_stat_statements"));
-
-            /* With no extension there is nothing to choose between: nothing is tested, and the call goes to pg_catalog. */
-            Assert.Empty(await AuroraFunctionSchemaFallback.FillAsync(
-                connection, empty, new[] { "aurora_stat_statements" }, null, targetKey + "-none", null, ct));
-            Assert.Equal(0, await ScalarLongAsync(auroraAdmin.ConnectionString, "SELECT pg_catalog.count(*) FROM public.calls WHERE what = 'public'", ct));
-
-            bodySucceeded = true;
-        }
-        finally
-        {
-            await LiveStoreCleanup.RunAsync(admin.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
-                await DropAsync(admin.ConnectionString, cleanup, cleanupCt));
-        }
-    }
-
-    /// <summary>
     /// A stock PostgreSQL target where pg_stat_statements is created in public and someone with CREATE there made
     /// IMMUTABLE public.aurora_version() and public.aurora_stat_statements(boolean). PostgreSQL evaluates an IMMUTABLE
     /// call with constant arguments while it plans, so planning such a call (EXPLAIN) runs it. Neither the connect-time
@@ -506,7 +404,6 @@ public sealed class PgCollectorSearchPathLiveTests
         var ct = TestContext.Current.CancellationToken;
         var admin = new NpgsqlConnectionStringBuilder(adminConnectionString) { Pooling = false };
         var auroraAdmin = new NpgsqlConnectionStringBuilder(admin.ConnectionString) { Database = AuroraDatabase };
-        var targetKey = "pm6143-stock-" + Guid.NewGuid().ToString("N");
 
         var bodySucceeded = false;
         try
@@ -534,37 +431,28 @@ public sealed class PgCollectorSearchPathLiveTests
             await using var connection = new NpgsqlConnection(runtime.ConnectionString);
             await connection.OpenAsync(ct);
 
-            /* The fallback on its own, as when pg_proc shows nothing (#2340): nothing outside pg_catalog is chosen, and
-               nothing is planned there. */
-            var nothing = await AuroraFunctionSchemaFallback.FillAsync(
-                connection, new Dictionary<string, string>(StringComparer.Ordinal), CollectorContext.AuroraFunctionNames, "public", null, null, ct);
-            Assert.Equal(0, await CountAsync(auroraAdmin.ConnectionString, "public.version_calls", ct));
-            Assert.Equal(0, await CountAsync(auroraAdmin.ConnectionString, "public.statements_calls", ct));
-            Assert.Empty(nothing);
-
             /* The connect-time probe: not Aurora. */
             Assert.False(await DarlingServerConnector.ProbeAuroraAsync(connection, ct));
             Assert.Equal("pg_catalog", await DarlingServerConnector.ResolveAuroraFunctionSchemaAsync(connection, "aurora_version", ct));
 
             /* A collector cycle that reads Aurora functions (the host gates it on IsAurora; forced here so the lookup
-               runs): nothing outside pg_catalog is chosen, and pg_catalog is remembered for the target. */
+               runs): nothing outside pg_catalog is chosen. */
             var aurora = NewContext(new CollectorTargetInfo
             {
                 Engine = CollectorTargetEngine.PostgreSql, PostgresMajorVersion = connection.PostgreSqlVersion.Major, IsAurora = true,
             });
             Assert.True(await DarlingCollectorRunner.ResolvePgExtensionSchemasAsync(
-                aurora, PgStatementStatsCollector.Instance, connection, null, ct, targetKey));
+                aurora, PgStatementStatsCollector.Instance, connection, null, ct));
             Assert.Empty(aurora.PgFunctionSchemas!);
-            Assert.Equal("pg_catalog", AuroraFunctionSchemaFallback.Remembered(targetKey, "aurora_stat_statements", "public"));
             Assert.Contains("FROM pg_catalog.aurora_stat_statements(false)", PgStatementStatsCollector.Instance.BuildQuery(aurora).Text, StringComparison.Ordinal);
             Assert.True(await DarlingCollectorRunner.ResolvePgExtensionSchemasAsync(
-                aurora, PgWaitStatsCollector.Instance, connection, null, ct, targetKey));
+                aurora, PgWaitStatsCollector.Instance, connection, null, ct));
             Assert.Empty(aurora.PgFunctionSchemas!);
 
             /* The cycle a stock target really gets: the statement collector reads pg_stat_statements. */
             var stock = NewContext(new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql, PostgresMajorVersion = connection.PostgreSqlVersion.Major });
             Assert.True(await DarlingCollectorRunner.ResolvePgExtensionSchemasAsync(
-                stock, PgStatementStatsCollector.Instance, connection, null, ct, targetKey));
+                stock, PgStatementStatsCollector.Instance, connection, null, ct));
             await using (var command = new NpgsqlCommand(PgStatementStatsCollector.Instance.BuildQuery(stock).Text, connection))
             await using (var reader = await command.ExecuteReaderAsync(ct))
             {
@@ -575,19 +463,15 @@ public sealed class PgCollectorSearchPathLiveTests
             Assert.Equal(0, await CountAsync(auroraAdmin.ConnectionString, "public.statements_calls", ct));
 
             /* Members of the extension: aurora_stat_statements(boolean) is found in the extension's schema by the catalog
-               read and by the fallback, without being planned or run; aurora_version still is not. */
+               read, without being planned or run; aurora_version still is not. */
             await ExecAsync(auroraAdmin.ConnectionString, """
                 ALTER EXTENSION pg_stat_statements ADD FUNCTION public.aurora_stat_statements(boolean);
                 ALTER EXTENSION pg_stat_statements ADD FUNCTION public.aurora_version();
                 """, ct);
             Assert.True(await DarlingCollectorRunner.ResolvePgExtensionSchemasAsync(
-                aurora, PgStatementStatsCollector.Instance, connection, null, ct, targetKey + "-member"));
+                aurora, PgStatementStatsCollector.Instance, connection, null, ct));
             Assert.Equal("public", aurora.PgFunctionSchemas!["aurora_stat_statements"]);
             Assert.False(aurora.PgFunctionSchemas.ContainsKey("aurora_version"));
-            var filled = await AuroraFunctionSchemaFallback.FillAsync(
-                connection, new Dictionary<string, string>(StringComparer.Ordinal), CollectorContext.AuroraFunctionNames, "public", null, null, ct);
-            Assert.Equal("public", Assert.Single(filled).Value);
-            Assert.Equal("aurora_stat_statements", Assert.Single(filled).Key);
             Assert.False(await DarlingServerConnector.ProbeAuroraAsync(connection, ct));
 
             Assert.Equal(0, await CountAsync(auroraAdmin.ConnectionString, "public.version_calls", ct));

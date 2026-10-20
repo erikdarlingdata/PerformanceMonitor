@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Data.Common;
 using Npgsql;
@@ -28,7 +29,47 @@ public sealed class PostgresTargetProvider : ITargetProvider
 
     public CollectorTargetEngine Engine => CollectorTargetEngine.PostgreSql;
 
-    public DbConnection CreateConnection(string connectionString) => new NpgsqlConnection(connectionString);
+    public DbConnection CreateConnection(string connectionString) => CreatePinnedConnection(connectionString);
+
+    /* #6143: one data source per connection string, as Npgsql's own pool keeps one per connection string. */
+    private static readonly ConcurrentDictionary<string, Lazy<NpgsqlDataSource>> s_dataSources = new(StringComparer.Ordinal);
+
+    /// <summary>The read the physical-connection check runs (#6143).</summary>
+    internal const string SearchPathSql = "SELECT pg_catalog.current_setting('search_path')";
+
+    /// <summary>
+    /// #6143: a connection to a PostgreSQL target. When the connection string carries the search_path pin
+    /// (<see cref="MonitoredServerConnection.PinnedSearchPathOption"/>), every new physical connection reads its
+    /// search_path once, before any caller's statement, and is refused with
+    /// <see cref="DarlingServerConnector.EnsureSearchPathPinned"/>'s precondition when a pooler dropped the pin. The
+    /// connect-time check covers only the first session; this covers each one opened after it. A connection string
+    /// without the pin is not a monitoring connection the service built and is opened as before.
+    /// </summary>
+    internal static NpgsqlConnection CreatePinnedConnection(string connectionString) =>
+        s_dataSources.GetOrAdd(connectionString, static cs => new Lazy<NpgsqlDataSource>(() => BuildDataSource(cs))).Value.CreateConnection();
+
+    private static NpgsqlDataSource BuildDataSource(string connectionString)
+    {
+        var builder = new NpgsqlDataSourceBuilder(connectionString);
+        var settings = builder.ConnectionStringBuilder;
+        if (MonitoredServerConnection.CarriesPin(settings.Options))
+        {
+            var label = $"{settings.Host}/{settings.Database}";
+            builder.UsePhysicalConnectionInitializer(
+                connection =>
+                {
+                    using var command = new NpgsqlCommand(SearchPathSql, connection);
+                    DarlingServerConnector.EnsureSearchPathPinned(command.ExecuteScalar() as string, label);
+                },
+                async connection =>
+                {
+                    await using var command = new NpgsqlCommand(SearchPathSql, connection);
+                    DarlingServerConnector.EnsureSearchPathPinned(await command.ExecuteScalarAsync() as string, label);
+                });
+        }
+
+        return builder.Build();
+    }
 
     public DbCommand CreateCommand(CollectorQuery query, DbConnection connection, int commandTimeoutSeconds)
     {

@@ -280,11 +280,13 @@ SELECT
     /// <summary>
     /// #6143: refuses a PostgreSQL target whose monitoring session does not have the search_path the service sent at
     /// sign-in (<see cref="MonitoredServerConnection.PinnedSearchPathOption"/>). The collectors' SQL relies on it, so a
-    /// session without it is not collected from at all. Whitespace is ignored; anything else must match.
+    /// session without it is not collected from at all. Only the whitespace PostgreSQL itself skips between schema
+    /// names (space, tab, line feed, carriage return, form feed) is ignored; anything else must match. Other Unicode
+    /// spaces, such as U+00A0, are part of a schema name to PostgreSQL, so a search_path that holds one is refused.
     /// </summary>
     internal static void EnsureSearchPathPinned(string? observedSearchPath, string serverName)
     {
-        var normalized = string.Concat((observedSearchPath ?? string.Empty).Where(c => !char.IsWhiteSpace(c)));
+        var normalized = string.Concat((observedSearchPath ?? string.Empty).Where(c => !IsPgListSpace(c)));
         if (string.Equals(normalized, "pg_catalog,pg_temp", StringComparison.Ordinal))
         {
             return;
@@ -292,11 +294,41 @@ SELECT
 
         throw new InvalidOperationException(
             $"precondition: the monitoring session on PostgreSQL target '{serverName}' has search_path "
-            + $"'{observedSearchPath}', not the 'pg_catalog, pg_temp' this service sends when it signs in, so nothing "
+            + $"'{CleanServerText(observedSearchPath, MaxSearchPathLength)}', not the 'pg_catalog, pg_temp' this service sends when it signs in, so nothing "
             + "is collected from it. The usual cause is a connection pooler that drops the startup 'options' "
             + "parameter, as PgBouncer does when 'options' is listed in ignore_startup_parameters. Monitoring needs a "
             + "direct connection to the PostgreSQL server: point the target at the server's own host and port.");
     }
+
+    /// <summary>#6143: the characters PostgreSQL's identifier-list parser skips (scanner_isspace).</summary>
+    internal static bool IsPgListSpace(char c) => c is ' ' or '\t' or '\n' or '\r' or '\f';
+
+    /// <summary>
+    /// #6143: an unpooled data source over <paramref name="connectionString"/> that loads no types, so a session opened
+    /// from it runs no statement but the caller's own. Npgsql otherwise reads pg_type on the first open, naming its
+    /// relations and operators without a schema.
+    /// </summary>
+    internal static NpgsqlDataSource OpenWithoutTypeLoading(string connectionString)
+    {
+        var builder = new NpgsqlDataSourceBuilder(connectionString);
+        builder.ConnectionStringBuilder.Pooling = false;
+        builder.ConfigureTypeLoading(typeLoading => typeLoading.EnableTypeLoading(false));
+        return builder.Build();
+    }
+
+    /// <summary>The most of the observed search_path a message quotes (#6143).</summary>
+    internal const int MaxSearchPathLength = 200;
+
+    /// <summary>The most of a pooler's sign-in error a message quotes (#6143).</summary>
+    internal const int MaxPoolerTextLength = 300;
+
+    /// <summary>
+    /// #6143: text the monitored server or a pooler sent, made fit for a log line and a precondition message: control
+    /// and line-break characters become a space, characters that hide or reorder text are dropped, and the result is
+    /// capped at <paramref name="maxLength"/>.
+    /// </summary>
+    internal static string CleanServerText(string? value, int maxLength) =>
+        CustomAlertEvaluator.SanitizeDisplayText(value, maxLength);
 
     /// <summary>
     /// #6143: PgBouncer refuses a startup parameter it does not know with SQLSTATE 08P01 and "unsupported startup
@@ -404,17 +436,9 @@ SELECT
             }
         }
 
-        /* #6143: when pg_proc shows nothing (measured on Aurora for a pg_monitor login, #2340), the call is tested in
-           pg_catalog only: aurora_version is not shipped by pg_stat_statements, so it is never looked for in the
-           extension's schema. Once per connection, so nothing is remembered. */
-        var chosen = await AuroraFunctionSchemaFallback.FillAsync(
-            connection,
-            CollectorContext.ChoosePgFunctionSchemas(functions, statementsSchema),
-            new[] { functionName },
-            statementsSchema,
-            targetKey: null,
-            logger: null,
-            cancellationToken);
+        /* #6143: when pg_proc shows nothing (measured on Aurora for a pg_monitor login, #2340), the call goes to
+           pg_catalog: aurora_version is not shipped by pg_stat_statements, so no other schema is looked in. */
+        var chosen = CollectorContext.ChoosePgFunctionSchemas(functions, statementsSchema);
         return CollectorContext.QuotePgFunctionSchema(chosen, functionName);
     }
 
@@ -533,14 +557,21 @@ SELECT
             throw PoolerPrecondition(config.DisplayName, $"'{host}' is an RDS Proxy endpoint");
         }
 
-        using var connection = new NpgsqlConnection(connectionString);
+        /* #6143: no type loading and no pool, so the only statement this session runs before EnsureSearchPathPinned
+           is the detection query itself. Npgsql's type-loading query names pg_type and its operators without a schema,
+           and on a session whose pin a pooler dropped it would resolve them through the database's own search_path.
+           Unpooled, so this session is never handed to a collector either. The detection and probe reads that follow
+           use only built-in types. */
+        await using var detectionSource = OpenWithoutTypeLoading(connectionString);
+        using var connection = detectionSource.CreateConnection();
         try
         {
             await connection.OpenAsync(cancellationToken);
         }
         catch (PostgresException ex) when (IsStartupParameterRejection(ex))
         {
-            throw PoolerPrecondition(config.DisplayName, $"it refused the sign-in: {ex.MessageText}", ex);
+            throw PoolerPrecondition(
+                config.DisplayName, $"it refused the sign-in: {CleanServerText(ex.MessageText, MaxPoolerTextLength)}", ex);
         }
 
         using var command = new NpgsqlCommand(PostgresDetectionQueryText, connection) { CommandTimeout = 30 };

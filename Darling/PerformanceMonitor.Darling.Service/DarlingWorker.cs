@@ -6568,10 +6568,23 @@ LIMIT 1";
            occurrence of a queryid is the row the SQL already chose. */
         var seen = new HashSet<long>();
 
-        await using var connection = new Npgsql.NpgsqlConnection(runtime.ConnectionString);
+        await using var connection = PostgresTargetProvider.CreatePinnedConnection(runtime.ConnectionString);
         await connection.OpenAsync(cancellationToken);
+
+        /* #6143: the view and the Aurora function are named by the schema read on this connection, as the collectors
+           name them, never by public. */
+        var schemas = new CollectorContext
+        {
+            ServerId = runtime.ServerId,
+            ServerName = runtime.Config.DisplayName,
+            CollectionTime = DateTime.UtcNow,
+            Deltas = new CollectorDeltaCalculator(),
+            Target = runtime.Target,
+        };
+        await DarlingCollectorRunner.ResolvePgExtensionSchemasAsync(
+            schemas, PgStatementStatsCollector.Instance, connection, logger: null, cancellationToken);
         await using var command = new Npgsql.NpgsqlCommand(
-            PgStatementText.FetchSqlFor(runtime.Target.IsAurora, runtime.Target.PostgresMajorVersion),
+            PgStatementText.FetchSqlFor(runtime.Target.IsAurora, runtime.Target.PostgresMajorVersion, schemas),
             connection) { CommandTimeout = PgStatementText.FetchCommandTimeoutSeconds };
         command.Parameters.AddWithValue(PgStatementTextRowCap);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -15000,7 +15013,7 @@ AND   j.hypertable_name = '{relation}'", connection))
         {
             /* #6143: pinned like every other monitoring connection. The experiment sets the database's own
                search_path only around the EXPLAIN and the hypothetical index it plans against. */
-            await using var connection = new NpgsqlConnection(runtime.ConnectionString);
+            await using var connection = PostgresTargetProvider.CreatePinnedConnection(runtime.ConnectionString);
             await connection.OpenAsync(cancellationToken);
 
             var result = await Targets.HypotheticalIndexExperiment.RunAsync(

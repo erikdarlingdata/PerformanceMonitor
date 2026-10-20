@@ -335,32 +335,49 @@ WHERE calls > 0";
        The same form on both flavors: Aurora's aurora_stat_statements() is the extension's data plus
        columns, and the extension's own info view sits beside it wherever the extension was created. */
     public const string StatementsEpochSql = @"(SELECT CASE
-            WHEN to_regclass(format('%I.pg_stat_statements_info', n.nspname)) IS NULL THEN NULL::timestamp with time zone
-            ELSE substring(
-                     query_to_xml(format('SELECT stats_reset FROM %I.pg_stat_statements_info', n.nspname), true, false, '')::text
-                     FROM '<stats_reset>([^<]+)</stats_reset>')::timestamp with time zone
+            WHEN NOT EXISTS (
+                SELECT 1
+                FROM pg_catalog.pg_depend AS d
+                WHERE d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+                AND d.objid OPERATOR(pg_catalog.=) pg_catalog.to_regclass(pg_catalog.format('%I.pg_stat_statements_info', n.nspname))::pg_catalog.oid
+                AND d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_extension'::pg_catalog.regclass
+                AND d.refobjid OPERATOR(pg_catalog.=) e.oid
+                AND d.deptype OPERATOR(pg_catalog.=) 'e') THEN NULL::timestamp with time zone
+            ELSE pg_catalog.substring(
+                     pg_catalog.query_to_xml(pg_catalog.format('SELECT stats_reset FROM %I.pg_stat_statements_info', n.nspname), true, false, '')::text,
+                     '<stats_reset>([^<]+)</stats_reset>')::timestamp with time zone
         END
      FROM pg_catalog.pg_extension AS e
      JOIN pg_catalog.pg_namespace AS n
-       ON n.oid = e.extnamespace
-    WHERE e.extname = 'pg_stat_statements')";
+       ON n.oid OPERATOR(pg_catalog.=) e.extnamespace
+    WHERE e.extname OPERATOR(pg_catalog.=) 'pg_stat_statements')";
 
     /* #4677: the statements EVICTION counter, appended at ordinal 30 on both flavors (27 epoch, 28 stats_since,
        29 target_now, 30 stats_dealloc). pg_stat_statements_info.dealloc counts the times the module had to drop its
        least-used entries because pg_stat_statements.max was reached (each pass drops about 5% of max); it restarts
        from zero with stats_reset. Same existence-gated query_to_xml form as StatementsEpochSql and for the same
        measured reasons (#3818/#3830): NULL, never an error, where the info view is absent (extension below 1.9, or
-       no pg_extension row), so ServerEpoch reads it as "unknown". */
+       no pg_extension row), so ServerEpoch reads it as "unknown". Both gate on MEMBERSHIP, not on the name (#6143): below 1.9 the
+       extension has no such view, so a role with CREATE on the extension's schema could create a view of that name
+       there over a function of its own, and query_to_xml would run it under the monitoring login. pg_depend's 'e' row
+       ties the relation to this extension; anything else reads NULL, as an absent view does. */
     public const string StatementsDeallocSql = @"(SELECT CASE
-            WHEN to_regclass(format('%I.pg_stat_statements_info', n.nspname)) IS NULL THEN NULL::bigint
-            ELSE substring(
-                     query_to_xml(format('SELECT dealloc FROM %I.pg_stat_statements_info', n.nspname), true, false, '')::text
-                     FROM '<dealloc>([^<]+)</dealloc>')::bigint
+            WHEN NOT EXISTS (
+                SELECT 1
+                FROM pg_catalog.pg_depend AS d
+                WHERE d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+                AND d.objid OPERATOR(pg_catalog.=) pg_catalog.to_regclass(pg_catalog.format('%I.pg_stat_statements_info', n.nspname))::pg_catalog.oid
+                AND d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_extension'::pg_catalog.regclass
+                AND d.refobjid OPERATOR(pg_catalog.=) e.oid
+                AND d.deptype OPERATOR(pg_catalog.=) 'e') THEN NULL::bigint
+            ELSE pg_catalog.substring(
+                     pg_catalog.query_to_xml(pg_catalog.format('SELECT dealloc FROM %I.pg_stat_statements_info', n.nspname), true, false, '')::text,
+                     '<dealloc>([^<]+)</dealloc>')::bigint
         END
      FROM pg_catalog.pg_extension AS e
      JOIN pg_catalog.pg_namespace AS n
-       ON n.oid = e.extnamespace
-    WHERE e.extname = 'pg_stat_statements')";
+       ON n.oid OPERATOR(pg_catalog.=) e.extnamespace
+    WHERE e.extname OPERATOR(pg_catalog.=) 'pg_stat_statements')";
 
     public override string Name => "pg_statement_stats";
 
