@@ -105,6 +105,101 @@ public sealed class CollectorContext
     public string? CurrentDatabaseName { get; set; }
 
     /// <summary>
+    /// Extension name to the schema it was created in, read from <c>pg_catalog.pg_extension</c> on the connection
+    /// that is about to run the query (#6143). Null until the host has read it; the per-database path reads it again
+    /// for each database, because an extension is created per database.
+    /// </summary>
+    public IReadOnlyDictionary<string, string>? PgExtensionSchemas { get; set; }
+
+    /// <summary>
+    /// The schema of <paramref name="extensionName"/>, quoted as an identifier, for collector SQL to name the
+    /// extension's objects with (#6143). Monitoring connections pin search_path to pg_catalog, so an extension object
+    /// named without its schema would not resolve. An extension the host did not find (not created in this
+    /// database) gives <c>pg_catalog</c>, never <c>public</c>: only a superuser can create an object there, so a
+    /// same-named function or view another role put in <c>public</c> is never reached, and the query still fails
+    /// with the "does not exist" error (42883 / 42P01) the host classifies as a missing extension. The host does
+    /// not guess when the lookup itself fails: that run fails instead.
+    /// </summary>
+    public string PgExtensionSchema(string extensionName) =>
+        PgExtensionSchemas is not null && PgExtensionSchemas.TryGetValue(extensionName, out var schema)
+            ? PgIdentifier.Quote(schema)
+            : "pg_catalog";
+
+    /// <summary>
+    /// The Aurora built-in functions collector SQL calls (#6143). <see cref="PgFunctionSchema"/> names each one by a
+    /// schema read from <c>pg_catalog.pg_proc</c> at run time.
+    /// </summary>
+    public static IReadOnlyList<string> AuroraFunctionNames { get; } = new[]
+    {
+        "aurora_version", "aurora_stat_statements", "aurora_stat_system_waits", "aurora_stat_wait_type",
+        "aurora_stat_wait_event",
+    };
+
+    /// <summary>
+    /// Function name to the schema it was found in (#6143), for the Aurora built-ins in
+    /// <see cref="AuroraFunctionNames"/>. The host fills it only from <see cref="ChoosePgFunctionSchemas"/>, so every
+    /// value is <c>pg_catalog</c> or the schema pg_stat_statements was created in. Null until the host has read it.
+    /// </summary>
+    public IReadOnlyDictionary<string, string>? PgFunctionSchemas { get; set; }
+
+    /// <summary>
+    /// The schema of an Aurora built-in function, quoted as an identifier (#6143). A function the host did not find
+    /// gives <c>pg_catalog</c>: on a server that is not Aurora the call fails there as it always did.
+    /// </summary>
+    public string PgFunctionSchema(string functionName) => QuotePgFunctionSchema(PgFunctionSchemas, functionName);
+
+    /// <summary><see cref="PgFunctionSchema"/> over a map from <see cref="ChoosePgFunctionSchemas"/>, for a host that
+    /// has no context at hand (the connect-time Aurora probe).</summary>
+    public static string QuotePgFunctionSchema(IReadOnlyDictionary<string, string>? schemas, string functionName) =>
+        schemas is not null && schemas.TryGetValue(functionName, out var schema)
+            ? PgIdentifier.Quote(schema)
+            : "pg_catalog";
+
+    /// <summary>
+    /// The one Aurora function the pg_stat_statements extension itself ships (#6143), and the argument types the
+    /// collector calls it with. It is the only one that can live outside <c>pg_catalog</c>: in the schema the extension
+    /// was created in, as a member of the extension. Every other Aurora built-in is in <c>pg_catalog</c> or nowhere.
+    /// </summary>
+    public const string StatementsExtensionAuroraFunction = "aurora_stat_statements";
+
+    /// <summary>
+    /// <see cref="StatementsExtensionAuroraFunction"/>'s argument types as <c>pg_catalog.oidvectortypes</c> prints
+    /// them: the collector calls <c>aurora_stat_statements(false)</c>.
+    /// </summary>
+    public const string StatementsExtensionAuroraFunctionArguments = "boolean";
+
+    /// <summary>
+    /// Picks the schema for each function from the (function, schema) rows <c>pg_catalog.pg_proc</c> returned
+    /// (#6143). <c>pg_catalog</c> is accepted for every function, and wins when a function is in both.
+    /// <paramref name="statementsExtensionSchema"/> (the schema pg_stat_statements was created in, null when it is not
+    /// created) is accepted only for <see cref="StatementsExtensionAuroraFunction"/>; the host's query returns that row
+    /// only when the function is a member of the extension. A row in any other schema, or for any other function in
+    /// the extension's schema, is ignored, whatever the query that produced it said.
+    /// </summary>
+    public static IReadOnlyDictionary<string, string> ChoosePgFunctionSchemas(
+        IEnumerable<(string Function, string Schema)> rows, string? statementsExtensionSchema)
+    {
+        ArgumentNullException.ThrowIfNull(rows);
+        var chosen = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (function, schema) in rows)
+        {
+            if (string.Equals(schema, "pg_catalog", StringComparison.Ordinal))
+            {
+                chosen[function] = schema;
+            }
+            else if (statementsExtensionSchema is not null
+                     && string.Equals(function, StatementsExtensionAuroraFunction, StringComparison.Ordinal)
+                     && string.Equals(schema, statementsExtensionSchema, StringComparison.Ordinal)
+                     && !chosen.ContainsKey(function))
+            {
+                chosen[function] = schema;
+            }
+        }
+
+        return chosen;
+    }
+
+    /// <summary>
     /// The most recent already-collected value of the definition's <c>NumericWatermarkColumn</c>,
     /// fetched by the host from ITS store (Lite: DuckDB; Darling: Postgres) before the query is
     /// built — the numeric (bigint) twin of <see cref="Watermark"/>, for collectors that dedup on a

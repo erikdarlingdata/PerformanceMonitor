@@ -11,6 +11,7 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -39,7 +40,7 @@ public sealed class PgStatementTextSourceTests
     [Fact]
     public void AuroraStillReadsItsOwnFunction()
     {
-        var sql = PgStatementText.FetchSqlFor(isAurora: true, postgresMajorVersion: 17);
+        var sql = PgStatementText.FetchSqlFor(isAurora: true, postgresMajorVersion: 17, Schemas());
 
         Assert.Contains("aurora_stat_statements(true)", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("pg_stat_statements", sql, StringComparison.Ordinal);
@@ -48,11 +49,36 @@ public sealed class PgStatementTextSourceTests
     [Fact]
     public void EveryOtherPostgresReadsTheVanillaView()
     {
-        var sql = PgStatementText.FetchSqlFor(isAurora: false, postgresMajorVersion: 17);
+        var sql = PgStatementText.FetchSqlFor(isAurora: false, postgresMajorVersion: 17, Schemas());
 
-        Assert.Contains("public.pg_stat_statements", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM \"Ext q\".pg_stat_statements AS s", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("aurora_", sql, StringComparison.OrdinalIgnoreCase);
     }
+
+    /// <summary>#6143: with no schema read for the extension, the view is named in pg_catalog, never in public.</summary>
+    [Fact]
+    public void AnExtensionNotFound_IsNamedInPgCatalog_NeverInPublic()
+    {
+        var empty = Schemas();
+        empty.PgExtensionSchemas = new System.Collections.Generic.Dictionary<string, string>(StringComparer.Ordinal);
+        Assert.Contains("FROM pg_catalog.pg_stat_statements AS s",
+            PgStatementText.FetchSqlFor(isAurora: false, postgresMajorVersion: 17, empty), StringComparison.Ordinal);
+        Assert.Contains("FROM pg_catalog.aurora_stat_statements(true) AS s",
+            PgStatementText.FetchSqlFor(isAurora: true, postgresMajorVersion: 17, empty), StringComparison.Ordinal);
+    }
+
+    private static CollectorContext Schemas() => new()
+    {
+        ServerId = 1,
+        ServerName = "pm6143-target",
+        CollectionTime = DateTime.UtcNow,
+        Deltas = new CollectorDeltaCalculator(),
+        Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql, PostgresMajorVersion = 17 },
+        PgExtensionSchemas = new System.Collections.Generic.Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["pg_stat_statements"] = "Ext q",
+        },
+    };
 
     /// <summary>
     /// The second defect, and it only appeared once the first was fixed.
@@ -73,7 +99,7 @@ public sealed class PgStatementTextSourceTests
     [InlineData(false)]
     public void EveryFetchDeduplicatesByQueryId_OrTheUpsertAbandonsTheBatch(bool isAurora)
     {
-        var sql = PgStatementText.FetchSqlFor(isAurora, postgresMajorVersion: 17);
+        var sql = PgStatementText.FetchSqlFor(isAurora, postgresMajorVersion: 17, Schemas());
 
         Assert.Contains("DISTINCT ON (s.queryid)", sql, StringComparison.Ordinal);
 
@@ -92,7 +118,7 @@ public sealed class PgStatementTextSourceTests
     [InlineData(false)]
     public void TheCostliestStatementsStillWinTheCap(bool isAurora)
     {
-        var sql = PgStatementText.FetchSqlFor(isAurora, postgresMajorVersion: 17);
+        var sql = PgStatementText.FetchSqlFor(isAurora, postgresMajorVersion: 17, Schemas());
 
         var dedupe = sql.IndexOf("DISTINCT ON (s.queryid)", StringComparison.Ordinal);
         var outerOrder = sql.IndexOf("ORDER BY d.total_exec_time DESC", StringComparison.Ordinal);
@@ -114,7 +140,7 @@ public sealed class PgStatementTextSourceTests
     [InlineData(17, "s.toplevel")]
     public void ToplevelIsGuardedForPostgresBefore14(int major, string expected)
     {
-        var sql = PgStatementText.FetchSqlFor(isAurora: false, postgresMajorVersion: major);
+        var sql = PgStatementText.FetchSqlFor(isAurora: false, postgresMajorVersion: major, Schemas());
 
         Assert.Matches(new Regex($@"AND\s+{Regex.Escape(expected)}\b"), sql);
         Assert.DoesNotContain("{TOPLEVEL}", sql, StringComparison.Ordinal);

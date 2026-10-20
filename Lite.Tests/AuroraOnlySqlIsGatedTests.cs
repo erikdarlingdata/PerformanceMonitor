@@ -99,6 +99,10 @@ public class AuroraOnlySqlIsGatedTests
             "never the target; the dependency itself is PgWaitStatsCollector's GATED entry, and the detector " +
             "that emits the fact baselines pg_wait_stats, which is empty off Aurora.",
 
+        ["CollectorContext.cs"] =
+            "PROSE (#6143). AuroraFunctionNames lists the functions so the host can look up the schema each one " +
+            "lives in. It calls none of them; the collectors that do are the entries above.",
+
         ["PgTargetFactCollector.Queries.cs"] =
             "PROSE. PgTargetTopStatementsSql selects MAX(max_exec_peakmem_bytes), a STORED column in " +
             "collect.pg_statement_stats, never an Aurora function. PgStatementStatsCollector's vanilla path " +

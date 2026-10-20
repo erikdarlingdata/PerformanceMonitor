@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -257,12 +259,12 @@ SELECT /* PerformanceMonitorLite */
        here are read as-is and the store's convention is naive UTC either way. */
     public const string PostgresDetectionQueryText = @"
 SELECT
-    version() AS server_version_text,
-    current_setting('server_version_num')::int / 10000 AS major_version,
-    pg_is_in_recovery() AS is_in_recovery,
-    current_setting('server_version_num')::int AS server_version_num,
+    pg_catalog.version() AS server_version_text,
+    pg_catalog.current_setting('server_version_num')::int OPERATOR(pg_catalog./) 10000 AS major_version,
+    pg_catalog.pg_is_in_recovery() AS is_in_recovery,
+    pg_catalog.current_setting('server_version_num')::int AS server_version_num,
     -- #2228: which database this connection actually landed in. Appended; see the comment above.
-    current_database() AS connected_database,
+    pg_catalog.current_database() AS connected_database,
     -- #3830: the pg_stat_statements catalog version in THIS database, or NULL when pg_extension has no
     -- row for it. A column on the read that was already being made rather than a probe of its own: one
     -- scalar on one statement, and pg_extension is world-readable, so it adds no round trip and no grant.
@@ -270,7 +272,84 @@ SELECT
     -- the collector's own RequiredPgExtensions declaration, so the two cannot drift apart unnoticed.
     (SELECT e.extversion
      FROM pg_catalog.pg_extension AS e
-     WHERE e.extname = 'pg_stat_statements') AS pg_stat_statements_extversion";
+     WHERE e.extname OPERATOR(pg_catalog.=) 'pg_stat_statements') AS pg_stat_statements_extversion,
+    -- #6143: the search_path this session actually has. The service sends search_path=pg_catalog,pg_temp at
+    -- sign-in; a connection pooler can drop that startup option without an error, and then this differs.
+    pg_catalog.current_setting('search_path') AS search_path";
+
+    /// <summary>
+    /// #6143: refuses a PostgreSQL target whose monitoring session does not have the search_path the service sent at
+    /// sign-in (<see cref="MonitoredServerConnection.PinnedSearchPathOption"/>). The collectors' SQL relies on it, so a
+    /// session without it is not collected from at all. Only the whitespace PostgreSQL itself skips between schema
+    /// names (space, tab, line feed, carriage return, form feed) is ignored; anything else must match. Other Unicode
+    /// spaces, such as U+00A0, are part of a schema name to PostgreSQL, so a search_path that holds one is refused.
+    /// </summary>
+    internal static void EnsureSearchPathPinned(string? observedSearchPath, string serverName)
+    {
+        var normalized = string.Concat((observedSearchPath ?? string.Empty).Where(c => !IsPgListSpace(c)));
+        if (string.Equals(normalized, "pg_catalog,pg_temp", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(
+            $"precondition: the monitoring session on PostgreSQL target '{serverName}' has search_path "
+            + $"'{CleanServerText(observedSearchPath, MaxSearchPathLength)}', not the 'pg_catalog, pg_temp' this service sends when it signs in, so nothing "
+            + "is collected from it. The usual cause is a connection pooler that drops the startup 'options' "
+            + "parameter, as PgBouncer does when 'options' is listed in ignore_startup_parameters. Monitoring needs a "
+            + "direct connection to the PostgreSQL server: point the target at the server's own host and port.");
+    }
+
+    /// <summary>#6143: the characters PostgreSQL's identifier-list parser skips (scanner_isspace).</summary>
+    internal static bool IsPgListSpace(char c) => c is ' ' or '\t' or '\n' or '\r' or '\f';
+
+    /// <summary>
+    /// #6143: an unpooled data source over <paramref name="connectionString"/> that loads no types, so a session opened
+    /// from it runs no statement but the caller's own. Npgsql otherwise reads pg_type on the first open, naming its
+    /// relations and operators without a schema.
+    /// </summary>
+    internal static NpgsqlDataSource OpenWithoutTypeLoading(string connectionString)
+    {
+        var builder = new NpgsqlDataSourceBuilder(connectionString);
+        builder.ConnectionStringBuilder.Pooling = false;
+        builder.ConfigureTypeLoading(typeLoading => typeLoading.EnableTypeLoading(false));
+        return builder.Build();
+    }
+
+    /// <summary>The most of the observed search_path a message quotes (#6143).</summary>
+    internal const int MaxSearchPathLength = 200;
+
+    /// <summary>The most of a pooler's sign-in error a message quotes (#6143).</summary>
+    internal const int MaxPoolerTextLength = 300;
+
+    /// <summary>
+    /// #6143: text the monitored server or a pooler sent, made fit for a log line and a precondition message: control
+    /// and line-break characters become a space, characters that hide or reorder text are dropped, and the result is
+    /// capped at <paramref name="maxLength"/>.
+    /// </summary>
+    internal static string CleanServerText(string? value, int maxLength) =>
+        CustomAlertEvaluator.SanitizeDisplayText(value, maxLength);
+
+    /// <summary>
+    /// #6143: PgBouncer refuses a startup parameter it does not know with SQLSTATE 08P01 and "unsupported startup
+    /// parameter: options" (PgBouncer's own text, never translated). PostgreSQL itself accepts 'options', so this
+    /// error at sign-in means a pooler is in the way.
+    /// </summary>
+    internal static bool IsStartupParameterRejection(PostgresException ex)
+    {
+        ArgumentNullException.ThrowIfNull(ex);
+        return string.Equals(ex.SqlState, PostgresErrorCodes.ProtocolViolation, StringComparison.Ordinal)
+            && ex.MessageText.Contains("startup parameter", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>#6143: the message for a PostgreSQL target reached through a connection pooler.</summary>
+    internal static InvalidOperationException PoolerPrecondition(string serverName, string detail, Exception? inner = null) =>
+        new(
+            $"precondition: PostgreSQL target '{serverName}' is reached through a connection pooler ({detail}). "
+            + "Monitoring needs a direct connection to the PostgreSQL server, because a pooler cannot carry the "
+            + "search_path setting this service sends when it signs in. Point the target at the server's own host "
+            + "and port; on AWS, use the instance or cluster endpoint, not the RDS Proxy endpoint.",
+            inner);
 
     /// <summary>
     /// The Aurora probe (#2340), a SEPARATE statement because it decides by CALLING the marker function
@@ -290,7 +369,10 @@ SELECT
     /// <c>42883 undefined_function</c> be caught and read as "not Aurora" instead of failing the whole
     /// probe — the wrapping the old column comment claimed but a catalog subquery never actually needed.</para>
     /// </summary>
-    public const string PostgresAuroraProbeQueryText = @"SELECT aurora_version()";
+    /// <para>#6143: <c>{0}</c> is the schema, quoted, from <see cref="ResolveAuroraFunctionSchemaAsync"/>. For
+    /// <c>aurora_version</c> that is always pg_catalog: the pg_stat_statements extension does not ship it, so a function
+    /// of that name in any other schema is never called. Whether the target is Aurora is still decided by the call.</para>
+    public const string PostgresAuroraProbeQueryText = @"SELECT {0}.aurora_version()";
 
     /// <summary>
     /// Whether this target is Aurora, decided by CALLING <c>aurora_version()</c> (#2340). True when the call
@@ -307,12 +389,14 @@ SELECT
     /// reading as stock PostgreSQL" is answerable from the service log instead of requiring a live psql
     /// session against the target, which is what diagnosing #2340 actually took.</para>
     /// </summary>
-    private static async Task<bool> ProbeAuroraAsync(
+    internal static async Task<bool> ProbeAuroraAsync(
         NpgsqlConnection connection, CancellationToken cancellationToken, ILogger? logger = null)
     {
         try
         {
-            using var command = new NpgsqlCommand(PostgresAuroraProbeQueryText, connection) { CommandTimeout = 15 };
+            var schema = await ResolveAuroraFunctionSchemaAsync(connection, "aurora_version", cancellationToken);
+            using var command = new NpgsqlCommand(
+                PostgresAuroraProbeQueryText.Replace("{0}", schema, StringComparison.Ordinal), connection) { CommandTimeout = 15 };
             var version = await command.ExecuteScalarAsync(cancellationToken);
             return version is not null and not DBNull;
         }
@@ -321,6 +405,41 @@ SELECT
             logger?.LogDebug(ex, "aurora_version() probe did not succeed; treating the target as stock PostgreSQL");
             return false;
         }
+    }
+
+    /// <summary>
+    /// #6143: the quoted schema to call an Aurora built-in by, from <see cref="DarlingCollectorRunner.PgExtensionSchemasSql"/>
+    /// and <see cref="CollectorContext.ChoosePgFunctionSchemas"/>: pg_catalog, or, only for the function the
+    /// pg_stat_statements extension ships and only as a member of it, the schema the extension was created in; never
+    /// any other. pg_catalog when the catalog shows neither.
+    /// </summary>
+    internal static async Task<string> ResolveAuroraFunctionSchemaAsync(
+        NpgsqlConnection connection, string functionName, CancellationToken cancellationToken)
+    {
+        string? statementsSchema = null;
+        var functions = new List<(string Function, string Schema)>();
+        using (var command = new NpgsqlCommand(DarlingCollectorRunner.PgExtensionSchemasSql, connection)
+               { CommandTimeout = DarlingCollectorRunner.PgExtensionSchemasTimeoutSeconds })
+        {
+            command.Parameters.AddWithValue("functions", new[] { functionName });
+            using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (reader.GetString(0) == "function")
+                {
+                    functions.Add((reader.GetString(1), reader.GetString(2)));
+                }
+                else if (reader.GetString(1) == "pg_stat_statements")
+                {
+                    statementsSchema = reader.GetString(2);
+                }
+            }
+        }
+
+        /* #6143: when pg_proc shows nothing (measured on Aurora for a pg_monitor login, #2340), the call goes to
+           pg_catalog: aurora_version is not shipped by pg_stat_statements, so no other schema is looked in. */
+        var chosen = CollectorContext.ChoosePgFunctionSchemas(functions, statementsSchema);
+        return CollectorContext.QuotePgFunctionSchema(chosen, functionName);
     }
 
     /// <summary>
@@ -425,14 +544,41 @@ SELECT
     /// <see cref="CollectorCatalog.AppliesTo(ICollectorSchemaInfo, CollectorTargetInfo)"/> keeps every
     /// T-SQL definition away from this target regardless of their values.</para>
     /// </summary>
-    private static async Task<ServerRuntime> ConnectPostgresAsync(
-        MonitoredServer config, ILogger? logger, CancellationToken cancellationToken)
+    private static Task<ServerRuntime> ConnectPostgresAsync(
+        MonitoredServer config, ILogger? logger, CancellationToken cancellationToken) =>
+        ConnectPostgresAsync(config, ResolveConnectionString(config, logger), logger, cancellationToken);
+
+    /// <summary><see cref="ConnectPostgresAsync(MonitoredServer, ILogger?, CancellationToken)"/> over a connection
+    /// string already resolved from <paramref name="config"/>; a test passes one without the pin, as a pooler that
+    /// drops the startup options would leave it (#6143).</summary>
+    internal static async Task<ServerRuntime> ConnectPostgresAsync(
+        MonitoredServer config, string connectionString, ILogger? logger, CancellationToken cancellationToken)
     {
-        var connectionString = ResolveConnectionString(config, logger);
         var storageName = config.StorageName;
 
-        using var connection = new NpgsqlConnection(connectionString);
-        await connection.OpenAsync(cancellationToken);
+        /* #6143: an RDS Proxy endpoint accepts only the startup parameters AWS lists, and 'options' is not one. */
+        var host = new NpgsqlConnectionStringBuilder(connectionString).Host;
+        if (RdsEndpoint.IsProxyHost(host))
+        {
+            throw PoolerPrecondition(config.DisplayName, $"'{host}' is an RDS Proxy endpoint");
+        }
+
+        /* #6143: no type loading and no pool, so the only statement this session runs before EnsureSearchPathPinned
+           is the detection query itself. Npgsql's type-loading query names pg_type and its operators without a schema,
+           and on a session whose pin a pooler dropped it would resolve them through the database's own search_path.
+           Unpooled, so this session is never handed to a collector either. The detection and probe reads that follow
+           use only built-in types. */
+        await using var detectionSource = OpenWithoutTypeLoading(connectionString);
+        using var connection = detectionSource.CreateConnection();
+        try
+        {
+            await connection.OpenAsync(cancellationToken);
+        }
+        catch (PostgresException ex) when (IsStartupParameterRejection(ex))
+        {
+            throw PoolerPrecondition(
+                config.DisplayName, $"it refused the sign-in: {CleanServerText(ex.MessageText, MaxPoolerTextLength)}", ex);
+        }
 
         using var command = new NpgsqlCommand(PostgresDetectionQueryText, connection) { CommandTimeout = 30 };
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -442,6 +588,7 @@ SELECT
         string versionText = "";
         string? connectedDatabase = null;
         var statementsExtension = PgExtensionRowObservation.NotObserved;
+        string? observedSearchPath = null;
         if (await reader.ReadAsync(cancellationToken))
         {
             versionText = reader.IsDBNull(0) ? "" : reader.GetString(0);
@@ -455,10 +602,14 @@ SELECT
                present in the result, never inferred from the value being null. */
             statementsExtension = PgExtensionRowObservation.From(
                 reader.IsDBNull(5) ? null : reader.GetString(5), connectedDatabase);
+            observedSearchPath = reader.IsDBNull(6) ? null : reader.GetString(6);   /* #6143 */
         }
 
         /* The reader must be closed before another command runs on this connection. */
         await reader.CloseAsync();
+
+        /* #6143: before any other read, and before the runtime exists, so no collector runs on this session. */
+        EnsureSearchPathPinned(observedSearchPath, config.DisplayName);
 
         var isAurora = await ProbeAuroraAsync(connection, cancellationToken, logger);
 
@@ -567,7 +718,10 @@ SELECT
                 IsAzureManagedInstance: false,
                 IsAwsRds: false,
                 HasMsdbAccess: false,
-                Error: ex.Message);
+                /* #6183: SqlClient's native library failing to load reads "The type initializer for ... TdsParser
+                   threw an exception" and says nothing about why. One shared explanation, for every caller. */
+                Error: SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ex.Message,
+                SqlClientNativeLoadFailed: SqlClientNativeLoadFailure.IsMatch(ex));
         }
     }
 
@@ -663,7 +817,11 @@ public sealed record ConnectionProbeResult(
     string? ConnectedDatabase = null,
     /* #3604: the wait-tier fact, so --test-connection's "which collectors would run" count is computed
        against the same shape the gate reads. Trailing and defaulted for the #2280 reason. */
-    bool HasPgWaitSamplingExtension = false)
+    bool HasPgWaitSamplingExtension = false,
+    /* #6183: the failure was SqlClient's native library not loading. No SQL Server connection can work from this
+       install, so a caller that probes several servers says so once instead of once per server. Trailing and
+       defaulted, like the fields above. */
+    bool SqlClientNativeLoadFailed = false)
 {
     /// <summary>
     /// Rebuilds the gate's-eye view of this target, so a caller can ask which collectors would actually
