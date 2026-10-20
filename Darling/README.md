@@ -519,7 +519,7 @@ What each grant buys you, and what breaks without it:
 
 The msdb grants live inside a system database SQL Server setup can rewrite — re-check them after a CU or version upgrade.
 
-**Azure SQL Database:** connect to the one database you monitor (set the server entry's `"database"`), using a contained user with `VIEW DATABASE STATE` and `VIEW DEFINITION`, matching the product's existing Azure guidance. The XE sessions are created database-scoped there (`ALTER ANY DATABASE EVENT SESSION`); SQL Agent collectors are skipped automatically.
+**Azure SQL Database:** connect to the one database you monitor (set the server entry's `"database"`), using a contained user with `VIEW DATABASE STATE`, `VIEW DEFINITION` and `ALTER ANY DATABASE EVENT SESSION`, matching the product's existing Azure guidance. The third grant lets the monitor create its Extended Events sessions, which are database-scoped there. A contained user cannot read the tempdb DMVs: `tempdb_stats` shows `NO_PERMISSIONS`, and only a server login in `##MS_ServerStateReader##` fixes that. SQL Agent collectors are skipped automatically.
 
 Collectors that hit a permission error (SQL errors 229/297/300, plus 8189 from `sys.traces`) log a `PERMISSIONS` row in `collection_log` and retry on their next scheduled run — one denied collector never stops the rest.
 

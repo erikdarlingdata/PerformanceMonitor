@@ -5671,7 +5671,8 @@ internal sealed class CollectorHealth
                     RowsStored, TotalRuns, DeniedSinceLastSuccess, NoteCount,
                     faultedRuns: ErrorCount + SessionMissingCount,
                     isEventCollector: CollectorHealthClassifier.IsEventCollector(CollectorName),
-                    isZeroNormal: CollectorHealthClassifier.IsZeroNormalCollector(CollectorName))
+                    isZeroNormal: CollectorHealthClassifier.IsZeroNormalCollector(CollectorName),
+                    bandedNoPermissions: string.Equals(HealthStatus, CollectorHealthClassifier.NoPermissions, StringComparison.Ordinal))
                 is { Length: > 0 } finding
                 ? finding
                 : null;

@@ -2798,11 +2798,26 @@ namespace PerformanceMonitor.Common
             long noteCount,
             long faultedRuns,
             bool isEventCollector,
-            bool isZeroNormal = false)
+            bool isZeroNormal = false,
+            bool bandedNoPermissions = false)
         {
             if (rowsStored > 0 || totalRuns <= 0)
             {
                 return string.Empty;
+            }
+
+            /* #6177: a row banded NO_PERMISSIONS had every attempt in the window refused (no success, no error),
+               so it could not read, whatever the denial-currency flag below says. Without this arm a window
+               whose newest instants tied or whose notes counted fell through to "read rather than being unable
+               to read", the opposite of the band beside it. */
+            if (bandedNoPermissions)
+            {
+                return string.Format(
+                    CultureInfo.InvariantCulture,
+                    "Stored 0 rows across {0:N0} runs because every attempt in the window was refused for lack of "
+                    + "permission (status NO_PERMISSIONS), so this collector was unable to read. last_error carries "
+                    + "what the monitored server said and the grant or setup step that answers it.",
+                    totalRuns);
             }
 
             if (deniedSinceLastSuccess)
