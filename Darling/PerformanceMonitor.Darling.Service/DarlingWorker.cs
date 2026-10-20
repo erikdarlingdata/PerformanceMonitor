@@ -14574,20 +14574,6 @@ AND   j.hypertable_name = '{relation}'", connection))
                         continue;
                     }
 
-                    /* #6186: a collector the server refused with the same answer run after run waits out its backoff instead
-                       of writing a PERMISSIONS row every interval. The slot is consumed (the stamp moves on, nothing counts
-                       as skipped, and it is not a slot the fleet gate counts: it was never going to run) so the first try after the
-                       wait is an ordinary slot, not a burst of missed ones. */
-                    if (server.RefusedBackoff.IsBackedOff(name, now, intervalSpan))
-                    {
-                        var movedOn = CollectorCadence.NextDue(due, now, intervalSpan);
-                        server.NextDue[name] = movedOn;
-                        _logger.LogDebug(
-                            "  [{Server}] {Collector} not run this slot: the server has refused it {Streak} times in a row, so it is tried less often until that changes (#6186)",
-                            server.Config.DisplayName, name, server.RefusedBackoff.Streak(name));
-                        continue;
-                    }
-
                     /* #4636: advance on a fixed grid from the previous due time, not from this body's start, so a
                        late start is not carried into the next slot; a slot missed in a stall is skipped, not replayed.
                        #4732: and the skipped slots are counted, next to the slot that ran, so a fleet that cannot keep
@@ -14601,6 +14587,21 @@ AND   j.hypertable_name = '{relation}'", connection))
                     _fleetGateStats?.RecordSlot(gridSkipped);
                     server.CycleSkips.AddGrid(name, gridSkipped, due);
                     server.NextDue[name] = CollectorCadence.NextDue(due, now, intervalSpan);
+
+                    /* #6186: a collector the server refused with the same answer run after run waits out its backoff instead
+                       of writing a PERMISSIONS row every interval. The slot is served like any other: counted above, with the
+                       grid slots the loop stepped over, and the stamp moved on, because the fleet gate measures whether the
+                       sweep loop keeps cadence and those slots are real whether or not this collector then runs. The backoff
+                       only decides not to run it, so the first try after the wait is an ordinary slot, not a burst of missed
+                       ones. The continue skips the whole run for this pass (the detached query_store and daily dispatches
+                       below included), so no collection_log row is written. */
+                    if (server.RefusedBackoff.IsBackedOff(name, now, intervalSpan))
+                    {
+                        _logger.LogDebug(
+                            "  [{Server}] {Collector} not run this slot: the server has refused it {Streak} times in a row, so it is tried less often until that changes (#6186)",
+                            server.Config.DisplayName, name, server.RefusedBackoff.Streak(name));
+                        continue;
+                    }
                 }
 
                 /* #2700: query_store is split off this sequential body rather than awaited inline. Its

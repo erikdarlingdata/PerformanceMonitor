@@ -192,6 +192,26 @@ public sealed class RefusedCollectorBackoffTests
     }
 
     [Fact]
+    public async Task ABackedOffSlot_IsCountedByTheFleetGate_LikeAnyOtherSlot()
+    {
+        /* The fleet gate measures whether the sweep loop keeps cadence. A slot the grid served is counted whether or not the
+           refusal backoff then holds the collector back from running it, and so are the slots the loop stepped over on the way. */
+        var (worker, server, runs, _) = Rig(7603);
+        worker.SkipCreditFloorForTest.Resume(DateTime.UtcNow.AddHours(-1));
+        const int passes = 12;
+
+        for (var pass = 0; pass < passes; pass++)
+        {
+            await PassAsync(worker, server);
+        }
+
+        Assert.True(runs[0] < passes, "some of the passes were held back by the backoff");
+        var snapshot = worker.FleetGateStatsForTest!.Snapshot();
+        Assert.Equal(passes, snapshot.Run);
+        Assert.Equal(passes * 5, snapshot.Skipped); // each pass finds the stamp five intervals old: five slots stepped over
+    }
+
+    [Fact]
     public void ACollectorBackedOffForHours_StillBandsAsNoPermissions_NotStoppedOrStale()
     {
         /* Seven days of an hourly refusal: 168 runs, every one a PERMISSIONS run, the newest under an hour old. The runs are
