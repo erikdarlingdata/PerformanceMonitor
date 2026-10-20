@@ -47,7 +47,7 @@ public sealed class DarlingMcpCollectorRunTools
     {
         try
         {
-            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken, NameClash.Refuse);
             if (error is not null)
             {
                 return error;

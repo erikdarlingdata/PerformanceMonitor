@@ -407,7 +407,7 @@ public sealed partial class DarlingMcpServerAdminTools
                whichever sorted first, and said so only after the fact (#3541 A14). So the partial match survives,
                as documented, but only when it is UNIQUE; anything else is refused with the candidates named. */
             var definitions = await LoadDefinitionsForRemovalAsync(postgres);
-            var target = ResolveForRemoval(definitions.Select(d => d.Server).ToList(), server_name);
+            var target = ResolveForRemoval(definitions.Select(d => d.Server).ToList(), server_name, nameClash: NameClash.Refuse);
             var everConnected = definitions.ToDictionary(d => d.Server.ServerId, d => d.EverConnected);
 
             if (target.Candidates.Count == 0)
@@ -420,7 +420,7 @@ public sealed partial class DarlingMcpServerAdminTools
                    over the definition rows; with zero candidates it cannot resolve to anything, so reusing it cannot
                    pick a server this method declined to). */
                 var registry = await DarlingServerResolver.LoadEnabledAsync(postgres);
-                var connectedOnly = ResolveForRemoval(registry, server_name);
+                var connectedOnly = ResolveForRemoval(registry, server_name, nameClash: NameClash.Refuse);
                 if (connectedOnly.Candidates.Count > 0)
                 {
                     return JsonSerializer.Serialize(new
@@ -713,13 +713,19 @@ ORDER BY d.host, d.database";
     /// deliberately narrow, because this rule also chooses what a delete removes: the match is case-SENSITIVE, so the
     /// same name in another case, a display-name match and a partial all keep the old behavior and still answer
     /// ambiguous when they name several registrations. And a tier that finds anything other than exactly one
-    /// registration falls through to the matching above unchanged. The one addition: when that single storage-name
-    /// match is also the display name of a different registration that is not of the same host (a colon-suffixed
-    /// sibling, or the same name in another case), the name answers ambiguous with both listed (#6230), so a name never silently picks one of two
-    /// servers it names.</para>
+    /// registration falls through to the matching above unchanged.</para>
+    ///
+    /// <para><b>A storage name that is also another server's display name (#6230) is the caller's choice,
+    /// <paramref name="nameClash"/>.</b> <see cref="NameClash.Refuse"/> (the default, and the mode every caller that changes
+    /// state passes) answers ambiguous with both registrations listed when that single storage-name match is also the display
+    /// name of a different registration that is not of the same host (a colon-suffixed sibling, or the same name in another
+    /// case), so a write never silently picks one of two servers its name matches. <see cref="NameClash.StoredNameWins"/> is
+    /// for a read: the exact stored name keeps winning over another server's display name (#5633), so a saved Custom View
+    /// scope and a read tool that named the stored name keep working.</para>
     /// </summary>
     internal static RemovalTarget ResolveForRemoval(
-        IReadOnlyList<DarlingServerResolver.RegisteredServer> servers, string serverName, bool storageNameIgnoresCase = false)
+        IReadOnlyList<DarlingServerResolver.RegisteredServer> servers, string serverName, bool storageNameIgnoresCase = false,
+        NameClash nameClash = NameClash.Refuse)
     {
         var name = (serverName ?? string.Empty).Trim();
         if (name.Length == 0)
@@ -747,7 +753,9 @@ ORDER BY d.host, d.database";
                    registrations that share the machine name as their display name, #4734) or differs only in case (its
                    display name is its own storage name). */
                 var only = byStorageName[0];
-                var sharedDisplayName = servers
+                var sharedDisplayName = nameClash == NameClash.StoredNameWins
+                    ? new List<DarlingServerResolver.RegisteredServer>()
+                    : servers
                     .Where(s => !ReferenceEquals(s, only)
                              && s.ServerId != only.ServerId
                              && string.Equals(s.DisplayName, name, StringComparison.OrdinalIgnoreCase)

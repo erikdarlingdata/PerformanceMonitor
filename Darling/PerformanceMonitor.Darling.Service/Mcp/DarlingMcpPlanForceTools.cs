@@ -176,7 +176,7 @@ public sealed class DarlingMcpPlanForceTools
         logger ??= NullLogger.Instance;
         try
         {
-            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, ct);
+            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, ct, NameClash.Refuse);
             if (error is not null)
                 return error;
             if (string.IsNullOrWhiteSpace(database_name))
@@ -311,7 +311,7 @@ public sealed class DarlingMcpPlanForceTools
         logger ??= NullLogger.Instance;
         try
         {
-            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, ct);
+            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, ct, NameClash.Refuse);
             if (error is not null)
                 return error;
 
@@ -416,7 +416,7 @@ public sealed class DarlingMcpPlanForceTools
         logger ??= NullLogger.Instance;
         try
         {
-            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, ct);
+            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, ct, NameClash.Refuse);
             if (error is not null)
                 return error;
 

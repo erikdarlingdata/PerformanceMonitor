@@ -331,7 +331,7 @@ public sealed class DarlingMcpIncidentActionTools
     {
         try
         {
-            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, serverName, cancellationToken);
+            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, serverName, cancellationToken, NameClash.Refuse);
             if (error is not null)
             {
                 return error;

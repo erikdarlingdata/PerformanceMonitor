@@ -1529,7 +1529,7 @@ WHERE d.server_id = $1";
         string serverName,
         string storyPathHash)
     {
-        var target = DarlingMcpServerAdminTools.ResolveForRemoval(registry, serverName);
+        var target = DarlingMcpServerAdminTools.ResolveForRemoval(registry, serverName, nameClash: NameClash.Refuse);
 
         if (target.Candidates.Count == 1)
         {

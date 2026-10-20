@@ -213,7 +213,7 @@ public sealed partial class DarlingMcpServerAdminTools
 
             submittedSecrets = [changes!.Password, changes.AwsExternalId];
             var definitions = await LoadDefinitionsForRemovalAsync(postgres);
-            var target = ResolveForRemoval(definitions.Select(d => d.Server).ToList(), server_name);
+            var target = ResolveForRemoval(definitions.Select(d => d.Server).ToList(), server_name, nameClash: NameClash.Refuse);
             if (target.Candidates.Count == 0)
             {
                 if (definitions.Count == 0)

@@ -67,6 +67,48 @@ public sealed class ServerNameCollisionRemoveLiveTests
         Assert.Equal(1L, await CountAsync(source, "SELECT count(*) FROM config_monitored_servers WHERE server_id = 7201", ct));
     }
 
+    /// <summary>A READ tool given the same clashing name resolves the server whose storage name it is (#6230, #5633): only a
+    /// write refuses, so a saved scope and a caller that was handed the stored name keep reading that server.</summary>
+    [Theory]
+    [InlineData("name-collide.example.test")]
+    [InlineData("  name-collide.example.test  ")]
+    [InlineData("NAME-COLLIDE.EXAMPLE.TEST")]
+    public async Task ReadTool_ANameThatIsOneServersStorageNameAndAnothersDisplayName_ResolvesTheStoredName(string typed)
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live server-name test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var connectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { SearchPath = PgSchemaGenerator.SearchPath }.ConnectionString;
+        var when = DateTime.SpecifyKind(new DateTime(2026, 10, 20, 12, 0, 0), DateTimeKind.Unspecified);
+        await using (var seed = new NpgsqlConnection(connectionString))
+        {
+            await seed.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(seed, null, ct);
+
+            /* Server 7301's storage name is the text server 7302 shows as its display name; each has its own edition so the answer says which one it read. */
+            await DarlingMcpTestData.ExecAsync(seed, ct,
+                @"INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_major_version, sql_engine_edition, created_date, modified_date)
+VALUES (7301, 'name-collide.example.test', 'Stored name server', TRUE, 15, 3, $1, $1),
+       (7302, 'name-collide-b.example.test', 'name-collide.example.test', TRUE, 15, 3, $1, $1)", when);
+            foreach (var (id, key, edition) in new[] { (7301, "name-collide.example.test", "Enterprise Edition (64-bit)"), (7302, "name-collide-b.example.test", "Standard Edition (64-bit)") })
+            {
+                await DarlingMcpTestData.ExecAsync(seed, ct,
+                    @"INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, engine_edition,
+    cpu_count, hyperthread_ratio, physical_memory_mb, socket_count, cores_per_socket, is_hadr_enabled, is_clustered, service_objective, vcore_count)
+VALUES ($1,$2,$3,$4,$5,'15.0.2000.5','RTM',3,2,64,933888,2,16,false,false,NULL,NULL)",
+                    PerformanceMonitor.Collectors.CollectionIdGenerator.Next(), when, id, key, edition);
+            }
+        }
+
+        await using var source = NpgsqlDataSource.Create(connectionString);
+        using var doc = JsonDocument.Parse(await DarlingMcpDataTools.GetServerProperties(source, typed, ct));
+        Assert.Equal("Stored name server", doc.RootElement.GetProperty("server").GetString());
+        Assert.Contains("Enterprise", doc.RootElement.GetProperty("edition").GetString(), StringComparison.Ordinal);
+    }
+
     private static async Task ExecAsync(NpgsqlDataSource source, string sql, System.Threading.CancellationToken ct)
     {
         await using var command = source.CreateCommand(sql);

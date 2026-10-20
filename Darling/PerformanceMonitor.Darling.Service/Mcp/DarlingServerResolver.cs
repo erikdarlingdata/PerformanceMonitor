@@ -37,7 +37,9 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 ///
 /// <para>The matching is <see cref="DarlingMcpServerAdminTools.ResolveForRemoval"/>, the one rule
 /// <c>remove_server</c> and <c>mute_analysis_finding</c> apply, so a read and a write given the same
-/// name see the same candidates.</para>
+/// name see the same candidates. The one difference is a name that is one server's storage name and another's display
+/// name (#6230): a read keeps the stored name winning (<see cref="NameClash.StoredNameWins"/>, the default here), and a caller
+/// that changes state passes <see cref="NameClash.Refuse"/> to get both servers listed.</para>
 ///
 /// <para>One headless-only addition (#2339): the miss message also discloses the DECLARED PEER STORES, so a
 /// fleet split across several Darling boxes does not answer "unknown server" where the true answer is "the
@@ -90,7 +92,8 @@ ORDER BY server_name";
     public static async Task<((int ServerId, string ServerName, string DisplayName) resolved, string? error)> ResolveOrErrorAsync(
         NpgsqlDataSource postgres,
         string? serverName,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        NameClash nameClash = NameClash.StoredNameWins)
     {
         var (servers, fault) = await LoadEnabledOrFaultAsync(postgres, cancellationToken);
         if (fault is not null)
@@ -98,7 +101,7 @@ ORDER BY server_name";
             return (default, fault);
         }
 
-        var answer = ResolveOrErrorForAnswer(servers, serverName);
+        var answer = ResolveOrErrorForAnswer(servers, serverName, nameClash);
         if (answer.error is null)
         {
             /* #5097: the slow-read record names the server a read resolved; one site covers every server-scoped tool. */
@@ -124,9 +127,9 @@ ORDER BY server_name";
 
     /// <summary>The pure half of <see cref="ResolveOrErrorForAnswerAsync"/>, over an already-read registry.</summary>
     internal static ((int ServerId, string ServerName, string DisplayName) resolved, string? error) ResolveOrErrorForAnswer(
-        IReadOnlyList<RegisteredServer> servers, string? serverName)
+        IReadOnlyList<RegisteredServer> servers, string? serverName, NameClash nameClash = NameClash.StoredNameWins)
     {
-        var (resolved, error) = ResolveOrError(servers, serverName);
+        var (resolved, error) = ResolveOrError(servers, serverName, nameClash);
         if (error != null)
         {
             return (default, error);
@@ -283,8 +286,9 @@ ORDER BY server_name";
     /// </summary>
     internal static ((int ServerId, string ServerName) resolved, string? error) ResolveOrError(
         IReadOnlyList<RegisteredServer> servers,
-        string? serverName) =>
-        ResolveOrError(servers, serverName, DarlingPeerDirectory.Current);
+        string? serverName,
+        NameClash nameClash = NameClash.StoredNameWins) =>
+        ResolveOrError(servers, serverName, DarlingPeerDirectory.Current, nameClash);
 
     /// <summary>
     /// The resolution rules over an EXPLICIT peer declaration — the pure form, so the miss message's peer
@@ -303,7 +307,8 @@ ORDER BY server_name";
     internal static ((int ServerId, string ServerName) resolved, string? error) ResolveOrError(
         IReadOnlyList<RegisteredServer> servers,
         string? serverName,
-        DarlingPeerDirectory.Snapshot peers)
+        DarlingPeerDirectory.Snapshot peers,
+        NameClash nameClash = NameClash.StoredNameWins)
     {
         if (string.IsNullOrWhiteSpace(serverName))
         {
@@ -313,7 +318,7 @@ ORDER BY server_name";
                 : (default, McpHelpers.Refusal("server_name", MissSentence(servers, serverName, peers)));
         }
 
-        var match = DarlingMcpServerAdminTools.ResolveForRemoval(servers, serverName, storageNameIgnoresCase: true);
+        var match = DarlingMcpServerAdminTools.ResolveForRemoval(servers, serverName, storageNameIgnoresCase: true, nameClash: nameClash);
 
         if (match.Candidates.Count == 1)
         {

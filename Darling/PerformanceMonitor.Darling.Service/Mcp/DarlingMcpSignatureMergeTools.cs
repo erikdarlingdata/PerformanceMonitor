@@ -71,7 +71,7 @@ public sealed class DarlingMcpSignatureMergeTools
             if (!gated && (string.IsNullOrWhiteSpace(reason) || reason.Trim().Length > InvestigationToolCore.MaxActionReasonChars))
                 return Refused("invalid", $"reason is required: 1 to {InvestigationToolCore.MaxActionReasonChars} characters saying why the two are one pattern.");
 
-            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, ct);
+            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, ct, NameClash.Refuse);
             if (error is not null)
                 return error;
 

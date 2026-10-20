@@ -7520,7 +7520,7 @@ ORDER BY rt.server_id NULLS FIRST, server_label, rt.server_id";
             return CollectorScope.Failed(CollectorToggleExitCode.StoreUnavailable);
         }
 
-        var target = DarlingMcpServerAdminTools.ResolveForRemoval(servers, serverName);
+        var target = DarlingMcpServerAdminTools.ResolveForRemoval(servers, serverName, nameClash: NameClash.Refuse);
         if (target.Candidates.Count == 0)
         {
             /* The read resolver's miss message: the local listing (a typo is the commonest miss) plus the
