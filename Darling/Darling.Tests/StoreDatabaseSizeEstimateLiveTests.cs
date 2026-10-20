@@ -165,4 +165,75 @@ public sealed class StoreDatabaseSizeEstimateLiveTests
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
         }
     }
+
+    /// <summary>
+    /// #6245: the disk-pressure alert quotes the whole-store size the hourly sweep recorded. When the newest row is the catalog
+    /// estimate the sentence says so (the form <c>get_store_host</c> and the Viewer use), and when it is exact the text is
+    /// unchanged. Runs the worker's real read of the row (size and <c>size_estimated</c> in one statement) into the evaluator.
+    /// </summary>
+    [Fact]
+    public async Task DiskPressureAlert_MarksTheRecordedStoreSizeAsAnEstimate_OnlyWhenTheLatestRowIsOne()
+    {
+        var baseConnectionString = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live store database-size estimate test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        const long Gib = 1024L * 1024 * 1024;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+            await using var connection = await postgres.OpenConnectionAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+
+            var worker = SelfAlertFleetPassTests.MakeWorker();
+            worker.StoreForTests = postgres;
+
+            async Task InsertAsync(DateTime metricTime, long totalBytes, bool? estimated)
+            {
+                await using var insert = new NpgsqlCommand(
+                    "INSERT INTO collect.store_metrics (metric_time, object_name, object_kind, total_bytes, size_estimated) "
+                    + "VALUES ($1, 'scratch', $2, $3, $4)", connection);
+                insert.Parameters.AddWithValue(DateTime.SpecifyKind(metricTime, DateTimeKind.Unspecified));
+                insert.Parameters.AddWithValue(StoreSelfMetrics.StoreObjectKind);
+                insert.Parameters.AddWithValue(totalBytes);
+                insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Boolean, Value = (object?)estimated ?? DBNull.Value });
+                await insert.ExecuteNonQueryAsync(ct);
+            }
+
+            async Task<string> AlertDetailAsync()
+            {
+                var (bytes, estimated) = await worker.ReadStoreSizeBytesAsync(ct);
+                var harness = new DarlingSelfAlertTests.Harness();
+                await harness.Build().ApplyDiskPressureAsync(5 * Gib, 100 * Gib, bytes, ct, estimated);
+                return Assert.Single(harness.Deliverer.Outcomes).DetailText!;
+            }
+
+            var now = new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
+
+            /* An older exact row, then the hourly estimate on top of it: the newest row is the one the alert reads. */
+            await InsertAsync(now.AddHours(-1), 20 * Gib, estimated: false);
+            await InsertAsync(now, 30 * Gib, estimated: true);
+            var estimatedDetail = await AlertDetailAsync();
+            Assert.Contains("The store measured ~30 GB (estimate) at its last self-metrics sample.", estimatedDetail, StringComparison.Ordinal);
+
+            /* The daily exact sweep is newest: today's wording, no marker. */
+            await InsertAsync(now.AddHours(1), 40 * Gib, estimated: false);
+            var exactDetail = await AlertDetailAsync();
+            Assert.Contains("The store measured 40 GB at its last self-metrics sample.", exactDetail, StringComparison.Ordinal);
+            Assert.DoesNotContain("estimate", exactDetail, StringComparison.OrdinalIgnoreCase);
+
+            /* A row from before the column (NULL marker) is not marked either. */
+            await InsertAsync(now.AddHours(2), 50 * Gib, estimated: null);
+            Assert.Contains("The store measured 50 GB at its last", await AlertDetailAsync(), StringComparison.Ordinal);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
+        }
+    }
 }

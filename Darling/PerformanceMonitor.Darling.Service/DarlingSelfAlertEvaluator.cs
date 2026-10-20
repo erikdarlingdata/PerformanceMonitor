@@ -4971,11 +4971,12 @@ internal sealed class DarlingSelfAlertEvaluator
     /// Cancellation still propagates.
     /// </summary>
     public async Task EvaluateDiskPressureAsync(
-        long? freeBytes, long? totalBytes, long? storeSizeBytes, CancellationToken cancellationToken)
+        long? freeBytes, long? totalBytes, long? storeSizeBytes, CancellationToken cancellationToken,
+        bool storeSizeEstimated = false)
     {
         try
         {
-            await ApplyDiskPressureAsync(freeBytes, totalBytes, storeSizeBytes, cancellationToken);
+            await ApplyDiskPressureAsync(freeBytes, totalBytes, storeSizeBytes, cancellationToken, storeSizeEstimated);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -4998,12 +4999,15 @@ internal sealed class DarlingSelfAlertEvaluator
     /// so it never false-alarms; the managed store's own volume is what it exists to protect.
     /// <paramref name="storeSizeBytes"/> is the last size the hourly self-metrics sweep recorded — context
     /// for the alert text only, never the trigger, which is why the sentence it renders names the sample
-    /// rather than claiming the current byte count (#3199).
+    /// rather than claiming the current byte count (#3199). <paramref name="storeSizeEstimated"/> (#6245) is that
+    /// row's <c>size_estimated</c>: true when the figure is the hourly catalog estimate, which the sentence then marks
+    /// "~" and "(estimate)" like every other place that shows the store size.
     /// Internal (tested directly, like the sibling Apply methods); the worker calls the isolating
     /// <see cref="EvaluateDiskPressureAsync"/>. Testable directly with a recording deliverer + a controllable clock.
     /// </summary>
     internal async Task ApplyDiskPressureAsync(
-        long? freeBytes, long? totalBytes, long? storeSizeBytes, CancellationToken cancellationToken)
+        long? freeBytes, long? totalBytes, long? storeSizeBytes, CancellationToken cancellationToken,
+        bool storeSizeEstimated = false)
     {
         if (!_settings.AlertsEnabled)
         {
@@ -5052,7 +5056,7 @@ internal sealed class DarlingSelfAlertEvaluator
                    gaps in the series run past it, so naming it here would imply an age the row does not
                    carry. */
                 var storeText = storeSizeBytes is long size
-                    ? $" The store measured {FormatGb(size)} at its last self-metrics sample."
+                    ? $" The store measured {(storeSizeEstimated ? "~" : "")}{FormatGb(size)}{(storeSizeEstimated ? " (estimate)" : "")} at its last self-metrics sample."
                     : "";
                 var delivery = await FireAsync(
                     StoreKey(DiskKey), _storeLabel, DiskPressureMetric, reason,
