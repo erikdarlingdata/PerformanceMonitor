@@ -38,6 +38,7 @@
  */
 
 import { el, mount, apiGet, apiGetFleet, readTool, localTime, hasInFlightReads, readErrorCount, isSessionExpired, onSessionExpired } from "./util.js";
+import { makeScrollReset } from "./scroll-reset.js";
 import { renderFleet } from "./pages/fleet.js";
 import { renderAg } from "./pages/ag.js";
 import { renderSweeps } from "./pages/sweeps.js";
@@ -165,6 +166,9 @@ function finopsRoute(rest) {
   };
 }
 
+/* #6159: another page, server or tab opens at the top; the poll re-render of the same route keeps the scroll position. */
+const resetScrollOnRouteChange = makeScrollReset(() => window.scrollTo(0, 0));
+
 /**
  * @param {object} [opts] — forwarded to renderServer; `{ poll: true }` marks this call as the 60s poll's own
  * refresh rather than a hashchange (sub-tab click, deep link) or the first paint (#4190/#4191). Also forwarded
@@ -180,6 +184,7 @@ function route(opts) {
   if (isSessionExpired()) return;
 
   const r = currentRoute();
+  resetScrollOnRouteChange(r, !!(opts && opts.poll === true));
   markPageRenderStart(r.name, !!(opts && opts.poll === true));
   setActiveNav(r);
   if (r.name === "server") renderServer(main, r.param, r.tab, opts);

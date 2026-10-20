@@ -77,7 +77,7 @@ public sealed class DarlingMcpPgIoTools
                 /* #4966: the nothing-found word is an empty answer, so it carries the window floor under hints. */
                 var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
                     postgres, "get_pg_io_stats", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: true, logger, cancellationToken);
-                return DarlingMcpWindowNotice.FinishEmpty(JsonSerializer.Serialize(new
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, DarlingMcpWindowNotice.FinishEmpty(JsonSerializer.Serialize(new
                 {
                     server = resolved.DisplayName,
                     hours_back,
@@ -87,7 +87,7 @@ public sealed class DarlingMcpPgIoTools
                             + "hit activity in this window. On a busy server that more likely means the "
                             + "collector has not run yet than that the server is idle — pg_stat_io needs "
                             + "PostgreSQL 16 or later, so check the target's major version.",
-                }, McpHelpers.JsonOptions), emptyNotice);
+                }, McpHelpers.JsonOptions), emptyNotice), cancellationToken);
             }
 
             /* Asked of the server's OWN configuration rather than inferred from the zeros, exactly as the

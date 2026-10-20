@@ -1051,6 +1051,11 @@ public partial class MainWindow : Window
     private void ServerListView_KeyDown(object sender, KeyEventArgs e) =>
         ServerListKeyboard.HandleKeyDown(e, OpenSelectedServerTab);
 
+    /// <summary>#6138: the Invoke (default action) an automation client sends a sidebar row selects it and runs the
+    /// same <see cref="OpenSelectedServerTab"/> the double-click and Enter run.</summary>
+    private void ServerListView_ItemInvoked(object? sender, ItemInvokedEventArgs e) =>
+        ServerListKeyboard.HandleInvoke(ServerListView, e.Item, OpenSelectedServerTab);
+
     /// <summary>Opens (or focuses) the selected server's tab: the one body behind the list's double-click and its
     /// Enter key.</summary>
     private void OpenSelectedServerTab()
@@ -1067,13 +1072,29 @@ public partial class MainWindow : Window
     {
         if (e.ClickCount == 2 && sender is FrameworkElement fe && fe.DataContext is ServerSummaryItem summary)
         {
-            /* By the card's storage server id, never its host name: databases on one Azure SQL Database server
-               share a host name, so a name match opens the first of them for every card. */
-            var server = summary.FindServer(_serverManager.GetAllServers());
-            if (server != null)
-            {
-                ConnectToServer(server);
-            }
+            OpenOverviewCard(summary);
+        }
+    }
+
+    /// <summary>#6138: the Invoke (default action) an automation client sends a card runs the same
+    /// <see cref="OpenOverviewCard"/> the double-click runs.</summary>
+    private void OverviewItemsControl_ItemInvoked(object? sender, ItemInvokedEventArgs e)
+    {
+        if (e.Item is ServerSummaryItem summary)
+        {
+            OpenOverviewCard(summary);
+        }
+    }
+
+    /// <summary>Opens the server an Overview card shows: the one body behind the card's double-click and its Invoke.</summary>
+    private void OpenOverviewCard(ServerSummaryItem summary)
+    {
+        /* By the card's storage server id, never its host name: databases on one Azure SQL Database server
+           share a host name, so a name match opens the first of them for every card. */
+        var server = summary.FindServer(_serverManager.GetAllServers());
+        if (server != null)
+        {
+            ConnectToServer(server);
         }
     }
 
@@ -1542,6 +1563,9 @@ public partial class MainWindow : Window
                         text.Text = totalAlerts > 0
                             ? (totalAlerts > 99 ? "99+" : totalAlerts.ToString())
                             : "!";
+
+                        /* #6138: the painted "3" or "!" alone says nothing to a screen reader. */
+                        System.Windows.Automation.AutomationProperties.SetName(text, totalAlerts > 0 ? UnreadAlertsName.For(totalAlerts) : "Unread alert");
 
                         var extras = new System.Collections.Generic.List<string>();
                         if (hasLowDisk) extras.Add("low disk");

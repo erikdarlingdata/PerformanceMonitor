@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -120,12 +121,51 @@ public partial class ViewerServerTab
         var gap = CollectorEngineCapability.NotCollectedMessage(
             _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName);
 
+        return EmptyNote(gap, _pgOffline, rowCount, healthyEmptyText);
+    }
+
+    /// <summary>The words a panel with no rows shows when the shared Overview card calls this server Offline (#6155).</summary>
+    internal const string OfflineEmptyText =
+        "This server is offline: nothing has been collected from it recently, so an empty panel here may be missing data, not a healthy answer.";
+
+    /// <summary>
+    /// The pure half of <see cref="PanelNote"/>. An engine gap speaks first. An offline server's empty panel says it may be
+    /// missing data, whatever healthy sentence the caller passed (#6155): nothing is arriving from an offline server, so
+    /// "no replication slots" or "nothing held the xmin horizon" would be an all-clear built from no reading. A caller that
+    /// passed no sentence has nothing to claim and gets none.
+    /// </summary>
+    internal static string EmptyNote(string? gap, bool offline, int rowCount, string healthyEmptyText)
+    {
         if (gap is not null)
         {
             return gap;
         }
 
-        return rowCount > 0 ? string.Empty : healthyEmptyText;
+        if (rowCount > 0)
+        {
+            return string.Empty;
+        }
+
+        return offline && healthyEmptyText.Length > 0 ? OfflineEmptyText : healthyEmptyText;
+    }
+
+    /// <summary>True when the Overview card's rule (<see cref="ServerSummaryItem.ClassifyFreshness(DateTime?, DateTime?, DateTime)"/>)
+    /// calls this server Offline; read before each PostgreSQL tab loads, and false when the read fails.</summary>
+    private bool _pgOffline;
+
+    private async Task RefreshPgOfflineAsync()
+    {
+        try
+        {
+            var freshness = await _dataService.GetServerFreshnessAsync();
+            _pgOffline = ServerSummaryItem.ClassifyFreshness(
+                freshness.TryGetValue(_server.ServerId, out var lastUtc) ? lastUtc : null,
+                _server.RegisteredAt, DateTime.UtcNow) == ServerFreshness.Offline;
+        }
+        catch
+        {
+            _pgOffline = false;
+        }
     }
 
     /// <summary>True when a panel's collector cannot run here — used to skip the read entirely rather than

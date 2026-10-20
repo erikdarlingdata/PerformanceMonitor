@@ -45,17 +45,26 @@ public sealed partial class ViewerDataService
             return new List<AgTopologyCard>();
         }
 
-        var cards = AgTopology.BuildCards(replicas, await ReadAgDatabasesAsync(nowUtc, cancellationToken), nowUtc);
-        ApplyDisplayNames(cards, await GetServersAsync(cancellationToken));
+        /* One display-name lookup serves both uses (#6157, #6159): the card's "As reported by" server, and a primary learned from the
+           stored column, which is shown by its display name when it is a monitored server. */
+        var byId = DisplayNamesByServerId(await GetServersAsync(cancellationToken));
+        Func<int, string?> displayNameOf = id => byId.TryGetValue(id, out var name) ? name : null;
+        var cards = AgTopology.BuildCards(replicas, await ReadAgDatabasesAsync(nowUtc, cancellationToken), nowUtc, displayNameOf);
+        ApplyNames(cards, byId);
         return cards;
     }
+
+    private static Dictionary<int, string?> DisplayNamesByServerId(IEnumerable<DarlingServer> servers) =>
+        servers.GroupBy(s => s.ServerId).ToDictionary(g => g.Key, g => (string?)g.First().DisplayName);
 
     /// <summary>#6157: the card's "As reported by" line names the reporting server the way the server list does, by display name,
     /// not by the connection key the store rows carry. A server with no display name keeps the key (GetServersAsync already
     /// falls back to it), and a card whose server is not in the list is left alone.</summary>
-    internal static void ApplyDisplayNames(IEnumerable<AgTopologyCard> cards, IEnumerable<DarlingServer> servers)
+    internal static void ApplyDisplayNames(IEnumerable<AgTopologyCard> cards, IEnumerable<DarlingServer> servers) =>
+        ApplyNames(cards, DisplayNamesByServerId(servers));
+
+    private static void ApplyNames(IEnumerable<AgTopologyCard> cards, Dictionary<int, string?> byId)
     {
-        var byId = servers.GroupBy(s => s.ServerId).ToDictionary(g => g.Key, g => g.First().DisplayName);
         foreach (var card in cards)
         {
             if (byId.TryGetValue(card.ServerId, out var name) && !string.IsNullOrWhiteSpace(name))
@@ -91,6 +100,7 @@ public sealed partial class ViewerDataService
                 FailoverModeDesc = row.FailoverModeDesc,
                 EndpointUrl = row.EndpointUrl,
                 GroupId = row.GroupId,
+                PrimaryReplica = row.PrimaryReplica,
             });
         }
 

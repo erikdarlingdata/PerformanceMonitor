@@ -79,6 +79,9 @@ public sealed class QueryStoreReadBudgetLiveTests
         /// </summary>
         public TimeSpan DecompressPerPlan { get; set; }
 
+        /// <summary>#6196: as <see cref="HoldTextUntilCut"/>, for the plan fetch.</summary>
+        public bool HoldPlanUntilCut { get; set; }
+
         /// <summary>#5813 plan fetch: how long each plan row then takes to arrive.</summary>
         public TimeSpan ShipPerPlan { get; set; }
 
@@ -91,6 +94,11 @@ public sealed class QueryStoreReadBudgetLiveTests
         /// <summary>#6102 text fetch: how long the statement takes per requested id before it ships its first row, the stand-in
         /// for the real statement's materialising every requested text into a temp table.</summary>
         public TimeSpan MaterialisePerText { get; set; }
+
+        /// <summary>#6196 text fetch: when set, the statement ships nothing until its token is cancelled, so only the time
+        /// budget can end it. A timed delay longer than the budget is not certain to be cut: a runner that stalls past the
+        /// budget lets the delay finish first and the fetch then receives rows.</summary>
+        public bool HoldTextUntilCut { get; set; }
 
         /// <summary>#6102 text fetch: how long each text row then takes to arrive.</summary>
         public TimeSpan ShipPerText { get; set; }
@@ -578,7 +586,7 @@ public sealed class QueryStoreReadBudgetLiveTests
 
     /// <summary>
     /// #5813 (b): the binding catch. The fetch statement decompresses every requested plan before it ships the first row,
-    /// so a cut usually receives nothing. Eight plans at 400 ms of decompression each against a 2 s budget: the first
+    /// so a cut usually receives nothing. Eight plans held until the 2 s budget cuts the statement: the first
     /// pass is cut empty, which counts as a fetch failure (the #2776 backoff narrows the next pass) and leaves a time per
     /// plan that asks for at most half as many next pass, which then fits; every plan is fetched exactly once.
     /// </summary>
@@ -591,7 +599,8 @@ public sealed class QueryStoreReadBudgetLiveTests
         rig.Runner.QueryStorePlanFetchBudgetSpan = TimeSpan.FromSeconds(2);
 
         var now = WholeSecondNow();
-        var target = new Target { DecompressPerPlan = TimeSpan.FromMilliseconds(400) };
+        /* #6196: held until the budget cuts it, as the text twin below; later passes decompress at a speed that fits. */
+        var target = new Target { HoldPlanUntilCut = true };
         target.Rows[Alpha] = Enumerable.Range(1, 8).Select(id => Row(id, now.AddMinutes(-8))).ToList();
 
         await PassAsync(rig, target, token, Alpha);
@@ -614,6 +623,8 @@ public sealed class QueryStoreReadBudgetLiveTests
             $"a cut-empty pass of 8 plans recorded {cutMsPerPlan} ms a plan, which asks for more than half as many next pass");
         Assert.Equal(1, rig.Log.PlanFetchBudgetLines(Alpha));
 
+        target.HoldPlanUntilCut = false;
+        target.DecompressPerPlan = TimeSpan.FromMilliseconds(100);
         await PassAsync(rig, target, token, Alpha);
         var widths = target.WidthsFor(Alpha);
         Assert.InRange(widths[1], 1, 4);
@@ -727,7 +738,7 @@ public sealed class QueryStoreReadBudgetLiveTests
 
     /// <summary>
     /// #6102 (b): the binding catch, as on the plan side. The text statement materialises every requested text before it
-    /// ships the first row, so a cut usually receives nothing. Eight texts at 400 ms each against a 2 s budget: the first
+    /// ships the first row, so a cut usually receives nothing. Eight texts held until the 2 s budget cuts the statement: the first
     /// pass is cut empty, which counts as a text-fetch failure and leaves a time per id that asks for at most half as many
     /// next pass, which then fits; a pass that receives texts clears the failure; every text is fetched exactly once.
     /// </summary>
@@ -741,7 +752,10 @@ public sealed class QueryStoreReadBudgetLiveTests
         var collector = QueryStoreCollector.Instance.Name;
 
         var now = WholeSecondNow();
-        var target = new Target { MaterialisePerText = TimeSpan.FromMilliseconds(400) };
+        /* #6196: the first pass's statement is held until the budget cuts it, so it receives nothing on any runner. A timed
+           delay (8 x 400 ms against 2 s) is cut only if the runner is not stalled past the budget; when it was, the
+           delay finished first and the fetch received rows. Later passes materialise at a speed that fits the budget. */
+        var target = new Target { HoldTextUntilCut = true };
         target.Rows[Alpha] = Enumerable.Range(1, 8).Select(id => Row(id, now.AddMinutes(-8))).ToList();
 
         await PassAsync(rig, target, token, Alpha);
@@ -757,6 +771,8 @@ public sealed class QueryStoreReadBudgetLiveTests
             $"a cut-empty pass of 8 texts recorded {cutMsPerText} ms an id, which asks for more than half as many next pass");
         Assert.Equal(1, rig.Log.TextFetchBudgetLines(Alpha));
 
+        target.HoldTextUntilCut = false;
+        target.MaterialisePerText = TimeSpan.FromMilliseconds(100);
         await PassAsync(rig, target, token, Alpha);
         Assert.InRange(target.TextWidthsFor(Alpha)[1], 1, 4);
         Assert.NotEmpty(await StoredTextsAsync(rig, Alpha, token));
@@ -937,6 +953,11 @@ public sealed class QueryStoreReadBudgetLiveTests
                     target.RequestedWidths.Add((owner.DatabaseName, ids.Length));
                 }
 
+                if (target.HoldPlanUntilCut)
+                {
+                    await Task.Delay(Timeout.Infinite, cancellationToken);
+                }
+
                 if (target.DecompressPerPlan > TimeSpan.Zero)
                 {
                     await Task.Delay(target.DecompressPerPlan * ids.Length, cancellationToken);
@@ -957,6 +978,11 @@ public sealed class QueryStoreReadBudgetLiveTests
                 lock (target.RequestedTextWidths)
                 {
                     target.RequestedTextWidths.Add((owner.DatabaseName, ids.Length));
+                }
+
+                if (target.HoldTextUntilCut)
+                {
+                    await Task.Delay(Timeout.Infinite, cancellationToken);
                 }
 
                 if (target.MaterialisePerText > TimeSpan.Zero)

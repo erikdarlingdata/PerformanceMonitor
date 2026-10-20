@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
@@ -30,7 +31,22 @@ public sealed record FleetSweepServerReading(
     string ServerName,
     DailyHealthSignals Signals,
     long PeakBlockWaitMs,
-    string? ReadFault);
+    string? ReadFault,
+    DateTime? LastCollectionUtc = null,
+    DateTime? RegisteredUtc = null)
+{
+    /// <summary>
+    /// #6155: this server reported nothing in the span AND was already Offline, by <c>list_servers</c>'s rule, at the instant the service
+    /// started. Its silence is older than the restart, so the post-restart settle window does not explain it. A server last collected a
+    /// minute before the restart is not Offline by that rule and stays inside the window.
+    /// </summary>
+    public bool WasOfflineBeforeRestart(DateTime serviceStartedUtc) =>
+        ReadFault is null
+        && !Signals.HasData
+        && (LastCollectionUtc is not null || RegisteredUtc is not null)
+        && (LastCollectionUtc is null || LastCollectionUtc < serviceStartedUtc)
+        && DarlingMcpDataTools.FreshnessStatus(LastCollectionUtc, RegisteredUtc, serviceStartedUtc) == "Offline";
+}
 
 /// <summary>The in-process counters the sweep cites as its instrument-liveness evidence: the service's
 /// own start instant (the restart detector — the same instant <c>get_collection_health</c> reports as
@@ -227,6 +243,12 @@ public static class FleetSweepEngine
                 reason = classified switch
                 {
                     DailyHealthBand.Healthy => null,
+                    DailyHealthBand.NoData when reading.WasOfflineBeforeRestart(instruments.ServiceStartedUtc) =>
+                        "No collection inside the sweep span. " + (reading.LastCollectionUtc is { } lastSeen
+                            ? "The server's last collection was " + lastSeen.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " UTC, "
+                            : "The store holds no collection from it within its retained history, ")
+                        + "before the service started (" + instruments.ServiceStartedUtc.ToString("o")
+                        + "), so it was already offline before the restart: classified offline, not startup-transient.",
                     DailyHealthBand.NoData when inSettleWindow =>
                         "No collection inside the sweep span — inside the post-restart settle window (service started "
                         + instruments.ServiceStartedUtc.ToString("o") + "), classified startup-transient, not an outage.",
@@ -274,7 +296,7 @@ public static class FleetSweepEngine
         /* ---- watch items, through lane 1's state machine ---- */
 
         var watchItems = AdvanceWatchItems(
-            nowUtc, sweepId, verdicts, readings, activeWatchItems, liveness.Alive, inSettleWindow);
+            nowUtc, sweepId, verdicts, readings, activeWatchItems, liveness.Alive, inSettleWindow, instruments.ServiceStartedUtc);
 
         /* ---- the document, then the run row that carries it ---- */
 
@@ -561,8 +583,11 @@ public static class FleetSweepEngine
         IReadOnlyList<FleetSweepServerReading> readings,
         IReadOnlyList<FleetSweepWatchItem> activeWatchItems,
         bool instrumentsAlive,
-        bool inSettleWindow)
+        bool inSettleWindow,
+        DateTime serviceStartedUtc)
     {
+        /* #6155: a server already offline before the restart is judged for staleness even inside the settle window. */
+        var offlineBeforeRestart = readings.Where(r => r.WasOfflineBeforeRestart(serviceStartedUtc)).Select(r => r.ServerId).ToHashSet();
         var criticalLabel = DailyHealthBandCalculator.Label(DailyHealthBand.Critical);
         var faultedServers = readings.Where(r => r.ReadFault is not null).Select(r => r.ServerId).ToHashSet();
         var readingsById = readings.Where(r => r.ReadFault is null).ToDictionary(r => r.ServerId);
@@ -583,10 +608,14 @@ public static class FleetSweepEngine
                 SerializeSignals(reading));
         }
 
-        if (!inSettleWindow)
         {
             foreach (var reading in readings)
             {
+                if (inSettleWindow && !offlineBeforeRestart.Contains(reading.ServerId))
+                {
+                    continue;
+                }
+
                 if (reading.ReadFault is null && !reading.Signals.HasData)
                 {
                     hits[(reading.ServerId, CollectionStaleItemKey)] = (
@@ -612,7 +641,7 @@ public static class FleetSweepEngine
             evaluated.Add(key);
 
             /* The two cannot-judge carve-outs: omitted whole, so the row's counters stand. */
-            if (item.ItemKey == CollectionStaleItemKey && inSettleWindow)
+            if (item.ItemKey == CollectionStaleItemKey && inSettleWindow && !offlineBeforeRestart.Contains(item.ServerId))
             {
                 continue;
             }
@@ -999,7 +1028,17 @@ public static class FleetSweepEngine
                 Window = spanEndUtc - spanStartUtc,
             };
 
-            return new FleetSweepServerReading(serverId, serverName, signals, peakBlock, ReadFault: null);
+            /* #6155: a server with nothing in the span gets its newest collection read, through the probe list_servers uses, so the
+               sweep can tell a server that went quiet after the restart from one that was already offline before it. */
+            DateTime? lastCollection = null;
+            DateTime? registered = null;
+            if (!signals.HasData && await DarlingServerOfflineNote.ReadFreshnessAsync(postgres, serverId, cancellationToken).ConfigureAwait(false) is var (reg, last))
+            {
+                registered = reg;
+                lastCollection = last;
+            }
+
+            return new FleetSweepServerReading(serverId, serverName, signals, peakBlock, ReadFault: null, lastCollection, registered);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

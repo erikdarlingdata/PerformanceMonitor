@@ -383,7 +383,7 @@ public sealed class DarlingMcpPgDatabaseTools
             /* #4966: the empty answer carries the window floor under hints; the unavailable ones below stay as they were. */
             var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
                 postgres, "get_pg_database_stats", serverName, start, end, emptyAnswer: true, logger, cancellationToken);
-            return McpHelpers.Status(
+            return await DarlingServerOfflineNote.EmptyAsync(postgres, serverId, displayName, end, McpHelpers.Status(
                 "empty",
                 McpHelpers.QuietUnlessCut(
                     notice.WindowTruncated, notice.EffectiveStart,
@@ -401,7 +401,7 @@ public sealed class DarlingMcpPgDatabaseTools
                     effective_start = notice.EffectiveStart,
                     window_truncated = notice.WindowTruncated,
                     truncation_note = notice.TruncationNote,
-                });
+                }), cancellationToken);
         }
 
         if (samplesInWindow == 1)

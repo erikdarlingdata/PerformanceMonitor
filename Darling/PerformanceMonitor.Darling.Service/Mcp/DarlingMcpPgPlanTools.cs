@@ -157,7 +157,7 @@ public sealed class DarlingMcpPgPlanTools
 
             if (rows.Count == 0)
             {
-                return await NoReadinessStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, hours_back, cancellationToken);
+                return await NoReadinessStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, cancellationToken);
             }
 
             return BuildReadinessJson(resolved.DisplayName, hours_back, rows, limit);
@@ -184,7 +184,7 @@ public sealed class DarlingMcpPgPlanTools
     /// that order.</para>
     /// </summary>
     private static async Task<string> NoReadinessStatusAsync(
-        NpgsqlDataSource postgres, int serverId, string serverName, int hoursBack,
+        NpgsqlDataSource postgres, int serverId, string serverName, int hoursBack, DateTime windowEnd,
         CancellationToken cancellationToken = default)
     {
         var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
@@ -201,13 +201,13 @@ public sealed class DarlingMcpPgPlanTools
             return precondition;
         }
 
-        return McpHelpers.Status(
+        return await DarlingServerOfflineNote.EmptyAsync(postgres, serverId, serverName, windowEnd, McpHelpers.Status(
             "empty",
             $"No plan-capture readiness state for {serverName} in the last {hoursBack} hour(s). This is NOT "
             + "the healthy case for this read: the collector writes one row per facet on every run whatever "
             + "it finds, so an absence means nothing was collected rather than that nothing was wrong. It "
             + "runs HOURLY, so widen hours_back before concluding anything — a window shorter than the "
-            + "cadence is legitimately empty on a server that is collecting normally.");
+            + "cadence is legitimately empty on a server that is collecting normally."), cancellationToken);
     }
 
     /// <summary>
@@ -319,7 +319,7 @@ public sealed class DarlingMcpPgPlanTools
         /* #4966: only the empty answer carries the window floor; not_collected and precondition above stay bare. */
         var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
                 postgres, "get_pg_plans", serverName, start, end, emptyAnswer: true, logger, cancellationToken);
-        return McpHelpers.Status("empty", NoPlanCapturedMessage(wantedQueryId, hoursBack), notice.AsHints());
+        return await DarlingServerOfflineNote.EmptyAsync(postgres, serverId, serverName, end, McpHelpers.Status("empty", NoPlanCapturedMessage(wantedQueryId, hoursBack), notice.AsHints()), cancellationToken);
     }
 
     /// <summary>

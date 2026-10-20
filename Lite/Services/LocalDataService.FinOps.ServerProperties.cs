@@ -229,7 +229,8 @@ cpu_24h AS (
         server_id,
         AVG(CAST(sqlserver_cpu_utilization AS DECIMAL(5,2))) AS avg_cpu_pct,
         MAX(sqlserver_cpu_utilization) AS max_cpu_pct,
-        PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY sqlserver_cpu_utilization) AS p95_cpu_pct
+        PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY sqlserver_cpu_utilization) AS p95_cpu_pct,
+        COUNT(*) AS cpu_samples
     FROM v_cpu_utilization_stats
     WHERE collection_time >= $1
     GROUP BY server_id
@@ -244,10 +245,11 @@ mem_latest AS (
         latest.current_workers_count,
         latest.total_physical_memory_mb,
         latest.buffer_pool_mb,
+        latest.total_server_memory_mb,
         latest.collection_time AS mem_time
     FROM known_servers s
     LEFT JOIN LATERAL (
-        SELECT max_workers_count, current_workers_count, total_physical_memory_mb, buffer_pool_mb, collection_time
+        SELECT max_workers_count, current_workers_count, total_physical_memory_mb, buffer_pool_mb, total_server_memory_mb, collection_time
         FROM v_memory_stats
         WHERE server_id = s.server_id
         ORDER BY collection_time DESC
@@ -354,7 +356,9 @@ SELECT
     m.buffer_pool_mb,
     m.mem_time,
     st.alloc_mb,
-    st.free_mb
+    st.free_mb,
+    c.cpu_samples,
+    m.total_server_memory_mb
 FROM known_servers s
 LEFT JOIN LATERAL (
     SELECT engine_edition, edition
@@ -430,7 +434,8 @@ LEFT JOIN grants g ON g.server_id = s.server_id";
     /// Inventory grid already shows a null status as blank. A server WITH CPU samples gets the same verdict as
     /// before, except that a logical server's master gets the N/A verdict. Ordinals match the fleet SELECT: 1 avg CPU,
     /// 4 max CPU, 5 p95 CPU, 6 max workers, 7 current workers, 8 grant waiters, 9 grant timeouts, 10 forced grants,
-    /// 11 grant utilization, 12 engine edition, 13 edition.</para>
+    /// 11 grant utilization, 12 engine edition, 13 edition, 15 buffer pool, 19 CPU sample count, 20 total server memory. Under
+    /// <see cref="ProvisioningVerdict.MinSamples"/> samples the verdict is NOT_ENOUGH_DATA; high stolen memory is UNDER_PROVISIONED (#6139).</para>
     /// </summary>
     internal static string? FleetProvisioningStatusFor(System.Data.Common.DbDataReader reader)
     {
@@ -447,6 +452,9 @@ LEFT JOIN grants g ON g.server_id = s.server_id";
             maxWorkers: reader.IsDBNull(6) ? 0 : Convert.ToInt32(reader.GetValue(6)),
             currentWorkers: reader.IsDBNull(7) ? (int?)null : Convert.ToInt32(reader.GetValue(7)),
             engineEdition: reader.IsDBNull(12) ? null : Convert.ToInt32(reader.GetValue(12)),
-            edition: reader.IsDBNull(13) ? null : reader.GetString(13));
+            edition: reader.IsDBNull(13) ? null : reader.GetString(13),
+            cpuSamples: reader.IsDBNull(19) ? 0L : ToInt64(reader.GetValue(19)),
+            stolenMemoryPercent: ProvisioningVerdict.StolenMemoryPercent(
+                reader.IsDBNull(20) ? 0 : Convert.ToInt32(reader.GetValue(20)), reader.IsDBNull(15) ? 0 : Convert.ToInt32(reader.GetValue(15))));
     }
 }

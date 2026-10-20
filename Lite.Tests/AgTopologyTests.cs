@@ -110,8 +110,10 @@ public sealed class AgTopologyTests
     /* ─────────────────────────── shared projection ─────────────────────────── */
 
     private static AgTopologyReplicaRow Replica(int serverId, string server, string ag, string replica, string role,
-        string syncHealth = "HEALTHY", string? connected = "CONNECTED", string? operational = "ONLINE") => new()
+        string syncHealth = "HEALTHY", string? connected = "CONNECTED", string? operational = "ONLINE", bool? local = null, string? primary = null) => new()
     {
+        IsLocal = local,
+        PrimaryReplica = primary,
         ServerId = serverId,
         ServerName = server,
         CollectionTime = new DateTime(2026, 7, 26, 12, 0, 0, DateTimeKind.Utc),
@@ -154,6 +156,33 @@ public sealed class AgTopologyTests
         Assert.Single(card.Replicas);
         Assert.Null(card.PrimaryReplica);
         Assert.Equal("No primary reported", card.PrimaryDisplay);
+    }
+
+    [Fact]
+    public void Build_ASecondaryCard_NamesTheStoredPrimary_ByDisplayNameWhenItIsMonitored()
+    {
+        /* #6159: the secondary's view lists only itself, but the engine told it who the primary is. */
+        var secondary = Replica(2, "SQL02", "AG1", "SQL02", "SECONDARY", local: true, primary: "SQL01");
+        var primary = Replica(1, "SQL01", "AG1", "SQL01", "PRIMARY", local: true, primary: "SQL01");
+
+        var named = AgTopology.BuildCards(new[] { primary, secondary }, Array.Empty<AgTopologyDatabaseRow>(), displayNameOf: id => id == 1 ? "Orders primary" : null);
+        var card = Assert.Single(named, c => c.ServerId == 2);
+        Assert.Equal("Primary: Orders primary", card.PrimaryDisplay);
+        Assert.False(card.PrimaryNotVisible);
+        Assert.Equal(HealthSeverity.Healthy, card.Severity);
+
+        var plain = AgTopology.BuildCards(new[] { secondary }, Array.Empty<AgTopologyDatabaseRow>());
+        Assert.Equal("Primary: SQL01", Assert.Single(plain).PrimaryDisplay);
+    }
+
+    [Fact]
+    public void Build_ASecondaryCardWithNoStoredPrimary_KeepsTheNotVisibleNote()
+    {
+        var card = Assert.Single(AgTopology.BuildCards(
+            new[] { Replica(2, "SQL02", "AG1", "SQL02", "SECONDARY", local: true) }, Array.Empty<AgTopologyDatabaseRow>()));
+        Assert.Null(card.PrimaryReplica);
+        Assert.True(card.PrimaryNotVisible);
+        Assert.Equal("Primary not visible from this secondary", card.PrimaryDisplay);
     }
 
     [Fact]

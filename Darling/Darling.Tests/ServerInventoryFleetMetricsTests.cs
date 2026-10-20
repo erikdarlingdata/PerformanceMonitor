@@ -164,10 +164,11 @@ public sealed class ServerInventoryFleetMetricsTests
 
     // ── A server with no CPU sample gets no verdict ──
 
-    /// <summary>One fleet-read row shaped like <c>ServerMetricsSql</c>'s SELECT list (ordinals 0-13), so the
+    /// <summary>One fleet-read row shaped like <c>ServerMetricsSql</c>'s SELECT list (ordinals 0-20), so the
     /// verdict decision can be exercised without a store. Workers come back NULL, as they do for a server with
     /// no memory sample; the grant columns are COALESCEd to 0 by the SELECT.</summary>
-    private static DbDataReader FleetRow(decimal? avgCpu, decimal? maxCpu, decimal? p95Cpu, int? engineEdition = null, string? edition = null)
+    private static DbDataReader FleetRow(decimal? avgCpu, decimal? maxCpu, decimal? p95Cpu, int? engineEdition = null, string? edition = null,
+        long cpuSamples = 288, int? totalMemoryMb = null, int? bufferPoolMb = null)
     {
         var table = new DataTable();
         table.Columns.Add("server_id", typeof(int));
@@ -184,6 +185,13 @@ public sealed class ServerInventoryFleetMetricsTests
         table.Columns.Add("grant_utilization_pct", typeof(decimal));
         table.Columns.Add("engine_edition", typeof(int));
         table.Columns.Add("edition", typeof(string));
+        table.Columns.Add("total_physical_memory_mb", typeof(int));
+        table.Columns.Add("buffer_pool_mb", typeof(int));
+        table.Columns.Add("mem_server_id", typeof(int));
+        table.Columns.Add("alloc_mb", typeof(decimal));
+        table.Columns.Add("free_mb", typeof(decimal));
+        table.Columns.Add("cpu_samples", typeof(long));
+        table.Columns.Add("total_server_memory_mb", typeof(int));
 
         table.Rows.Add(
             1,
@@ -199,7 +207,14 @@ public sealed class ServerInventoryFleetMetricsTests
             0L,
             0m,
             (object?)engineEdition ?? DBNull.Value,
-            (object?)edition ?? DBNull.Value);
+            (object?)edition ?? DBNull.Value,
+            (object?)totalMemoryMb ?? DBNull.Value,
+            (object?)bufferPoolMb ?? DBNull.Value,
+            DBNull.Value,
+            DBNull.Value,
+            DBNull.Value,
+            cpuSamples,
+            (object?)totalMemoryMb ?? DBNull.Value);
 
         var reader = table.CreateDataReader();
         Assert.True(reader.Read());
@@ -250,5 +265,37 @@ public sealed class ServerInventoryFleetMetricsTests
 
         Assert.Equal(ProvisioningVerdict.UnderProvisioned, ViewerDataService.FleetProvisioningStatusFor(hot));
         Assert.Equal(ProvisioningVerdict.RightSized, ViewerDataService.FleetProvisioningStatusFor(busy));
+    }
+
+    /// <summary>#6139: the fleet row counts its samples, so a server back from a long gap with 6 of them gets no verdict, the same answer the drill-down gives.</summary>
+    [Fact]
+    public void FleetProvisioningStatusFor_ServerWithSixSamples_GetsNotEnoughData()
+    {
+        using var few = FleetRow(avgCpu: 6m, maxCpu: 8m, p95Cpu: 7m, cpuSamples: 6);
+        using var enough = FleetRow(avgCpu: 6m, maxCpu: 8m, p95Cpu: 7m, cpuSamples: 12);
+
+        Assert.Equal(ProvisioningVerdict.NotEnoughData, ViewerDataService.FleetProvisioningStatusFor(few));
+        Assert.Equal(ProvisioningVerdict.OverProvisioned, ViewerDataService.FleetProvisioningStatusFor(enough));
+    }
+
+    /// <summary>#6139: 1,000 MB held and 275 MB of it buffer pool is 72.5% stolen. That is memory pressure, not a server with RAM to give back.</summary>
+    [Fact]
+    public void FleetProvisioningStatusFor_HighStolenMemory_IsUnderProvisionedNotOver()
+    {
+        using var stolen = FleetRow(avgCpu: 6m, maxCpu: 8m, p95Cpu: 7m, totalMemoryMb: 1000, bufferPoolMb: 275);
+        using var spare = FleetRow(avgCpu: 6m, maxCpu: 8m, p95Cpu: 7m, totalMemoryMb: 1000, bufferPoolMb: 800);
+
+        Assert.Equal(ProvisioningVerdict.UnderProvisioned, ViewerDataService.FleetProvisioningStatusFor(stolen));
+        Assert.Equal(ProvisioningVerdict.OverProvisioned, ViewerDataService.FleetProvisioningStatusFor(spare));
+    }
+
+    /// <summary>#6139: the grid shows the Viewer's words for the new verdict, not the raw token.</summary>
+    [Fact]
+    public void TheGridShowsNotEnoughDataInTheBadgesWords()
+    {
+        Assert.Equal("not enough data yet", new ServerPropertyRow { ProvisioningStatus = ProvisioningVerdict.NotEnoughData }.ProvisioningDisplay);
+        Assert.Equal("not enough data yet", new ProvisioningTrendRow { Status = ProvisioningVerdict.NotEnoughData }.StatusDisplay);
+        Assert.Equal("not enough data yet (6 samples)", ProvisioningVerdict.StatusLabel(ProvisioningVerdict.NotEnoughData, 6));
+        Assert.Equal("OVER PROVISIONED", new ServerPropertyRow { ProvisioningStatus = ProvisioningVerdict.OverProvisioned }.ProvisioningDisplay);
     }
 }

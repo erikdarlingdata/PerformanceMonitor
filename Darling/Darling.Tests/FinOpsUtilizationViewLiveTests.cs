@@ -215,7 +215,7 @@ VALUES ($1, $2, $3, $4, 'Db', NULL, $5, 'ROWS', $6, NULL, $7, $8)",
             new[]
             {
                 "buffer_pool_mb", "buffer_pool_pct", "forced_grants", "grant_timeouts", "grant_utilization_pct", "max_grant_waiters",
-                "memory_basis", "memory_ratio", "physical_memory_mb", "stolen_memory_pct", "target_memory_mb", "total_memory_mb",
+                "memory_basis", "memory_ratio", "physical_memory_mb", "stolen_memory_note", "stolen_memory_pct", "target_memory_mb", "total_memory_mb",
             },
             doc.RootElement.GetProperty("memory").EnumerateObject().Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal).ToArray());
     });

@@ -56,10 +56,31 @@ internal static class DarlingServerOfflineNote
     /// that into an error.
     /// </summary>
     internal static async Task<string?> LeadAsync(
-        NpgsqlDataSource postgres, int serverId, string displayName, DateTime nowUtc, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, int serverId, string displayName, DateTime nowUtc, CancellationToken cancellationToken,
+        DateTime? windowEndUtc = null)
     {
-        DateTime? registered = null;
-        DateTime? last = null;
+        if (await ReadFreshnessAsync(postgres, serverId, cancellationToken) is not var (registered, last))
+        {
+            return null;
+        }
+
+        /* #6155: a window that ends at or before the newest collection lies inside collected history, so an empty read there is a true
+           negative even though the server has gone quiet since. Only a window that reaches into the silence is missing data. */
+        if (windowEndUtc is { } windowEnd && last is { } newest && windowEnd <= newest)
+        {
+            return null;
+        }
+
+        return LeadFor(displayName, last, registered, nowUtc);
+    }
+
+    /// <summary>
+    /// The <see cref="FreshnessSql"/> probe for one server: its registration instant and its newest collection. Null when the server is
+    /// not registered or the read fails, so a caller's diagnostic never turns a finding into an error.
+    /// </summary>
+    internal static async Task<(DateTime? Registered, DateTime? Last)?> ReadFreshnessAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+    {
         try
         {
             await using var command = postgres.CreateCommand(FreshnessSql);
@@ -71,15 +92,12 @@ internal static class DarlingServerOfflineNote
                 return null;
             }
 
-            registered = reader.IsDBNull(0) ? null : reader.GetDateTime(0);
-            last = reader.IsDBNull(1) ? null : reader.GetDateTime(1);
+            return (reader.IsDBNull(0) ? null : reader.GetDateTime(0), reader.IsDBNull(1) ? null : reader.GetDateTime(1));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return null;
         }
-
-        return LeadFor(displayName, last, registered, nowUtc);
     }
 
     /// <summary>The pure half of <see cref="LeadAsync"/>, over an already-read freshness probe.</summary>
@@ -110,6 +128,46 @@ internal static class DarlingServerOfflineNote
     internal static Task<string> UnavailableAsync(
         NpgsqlDataSource postgres, int serverId, string displayName, string message, CancellationToken cancellationToken) =>
         UnavailableAsync(postgres, serverId, displayName, message, null, cancellationToken);
+
+    /// <summary>
+    /// #6155: <paramref name="answer"/>, when it says <c>empty</c> (the read looked and found nothing) for a server that is Offline by
+    /// <c>list_servers</c>'s rule, as an <c>unavailable</c> answer that opens with <see cref="LeadAsync"/>'s sentence. An offline server's
+    /// empty read is not a true negative: nothing has been arriving, so "no dead tuples", "no replication slots" or "nothing held the
+    /// xmin horizon" would be a healthy all-clear built from missing data. The original answer's own wording is dropped with its word.
+    /// Any other answer, any answer for a server that is not offline, and any answer whose window ends at or before the server's newest
+    /// collection (it is inside collected history, so its emptiness is a real finding), comes back unchanged.
+    /// </summary>
+    internal static async Task<string> EmptyAsync(
+        NpgsqlDataSource postgres, int serverId, string displayName, DateTime windowEndUtc, string answer, CancellationToken cancellationToken)
+    {
+        if (!IsEmptyAnswer(answer))
+        {
+            return answer;
+        }
+
+        /* The caller's window end is the read's anchor (as_of, or now for a live read), so offline is judged as of it, not as of the
+           clock: an as_of read of a past window must not answer as the server is today. */
+        var lead = await LeadAsync(postgres, serverId, displayName, windowEndUtc, cancellationToken, windowEndUtc);
+        return lead is null ? answer : OfflineInsteadOfEmpty(lead);
+    }
+
+    /// <summary>The <c>unavailable</c> answer that replaces an offline server's empty read.</summary>
+    internal static string OfflineInsteadOfEmpty(string lead) =>
+        McpHelpers.Status("unavailable", lead + " An empty result here is missing data, not a finding.", null);
+
+    /// <summary>True when <paramref name="answer"/> is a JSON object whose <c>status</c> is <c>empty</c>.</summary>
+    internal static bool IsEmptyAnswer(string answer)
+    {
+        try
+        {
+            return JsonNode.Parse(answer) is JsonObject node
+                && node["status"] is JsonValue status && status.TryGetValue<string>(out var word) && word == "empty";
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return false;
+        }
+    }
 
     /// <summary>
     /// <paramref name="answer"/>, when it is an <c>unavailable</c> envelope for an offline server, with <see cref="LeadAsync"/>'s

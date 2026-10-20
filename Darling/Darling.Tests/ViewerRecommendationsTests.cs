@@ -743,6 +743,10 @@ public sealed class ViewerRecommendationGroupingTests
         var b = vm.Sections[1];
         Assert.Equal(1, b.Count);
         Assert.Equal($"CPU is on fire {MidDot} CRITICAL", b.Header);
+
+        // #6159: the lone card does not repeat the title its expander header carries; a two-card incident keeps each title.
+        Assert.False(b.Cards[0].ShowTitle);
+        Assert.All(a.Cards, c => Assert.True(c.ShowTitle));
     }
 
     [Fact]

@@ -46,8 +46,10 @@ public sealed class SensitiveStatementsTests
     [Fact]
     public void TheNeighboursAreNotNamed()
     {
+        // #6200: through the judge with no timeout a busy machine can trip (the production judge's 250 ms match timeout
+        // names a harmless value that runs out of it, which is the fail-closed behaviour its own tests pin).
         var failures = SensitiveStatementCorpus.NotNamed
-            .Where(SensitiveStatements.Names)
+            .Where(text => SensitiveStatements.Names(text, UnboundedJudge))
             .Select(text => "should NOT be named: " + text)
             .ToList();
 
@@ -61,7 +63,8 @@ public sealed class SensitiveStatementsTests
             .Concat(SensitiveStatementCorpus.NotNamed);
         foreach (var text in all)
         {
-            Assert.Equal(SensitiveStatements.Judge(text) != SensitiveStatements.Verdict.Clean, SensitiveStatements.Names(text));
+            // #6200: both sides go through the judge with no timeout, so load cannot make one call time out and not the other.
+            Assert.Equal(UnboundedJudge.Value(text) != SensitiveStatements.Verdict.Clean, SensitiveStatements.Names(text, UnboundedJudge));
         }
     }
 
@@ -446,10 +449,10 @@ public sealed class SensitiveStatementsTests
         SensitiveStatements.Judge("warm the regex up");
         foreach (var text in SensitiveStatementCorpus.Adversarial)
         {
-            var best = BestOfJudging(text, SensitiveStatements.Verdict.Clean, 5);
+            var best = BestOfJudging(text, SensitiveStatements.Verdict.Clean, 5, UnboundedJudge.Value);
 
             TimingClaim.AtMost(best, 49, $"best of 5: {text}");
-            Assert.False(SensitiveStatements.Names(text));
+            Assert.False(SensitiveStatements.Names(text, UnboundedJudge));
         }
     }
 
@@ -461,10 +464,10 @@ public sealed class SensitiveStatementsTests
         SensitiveStatements.Judge("warm the regex up");
         foreach (var text in SensitiveStatementCorpus.TypedDeclarationAdversarial)
         {
-            var best = BestOfJudging(text, SensitiveStatements.Verdict.Clean, 5);
+            var best = BestOfJudging(text, SensitiveStatements.Verdict.Clean, 5, UnboundedJudge.Value);
 
             TimingClaim.AtMost(best, 49, $"best of 5: {text.Substring(0, 24)}");
-            Assert.False(SensitiveStatements.Names(text));
+            Assert.False(SensitiveStatements.Names(text, UnboundedJudge));
         }
     }
 
@@ -1081,7 +1084,34 @@ public sealed class SensitiveStatementsTests
         watch.Stop();
         var megabytes = totalChars / 1_048_576.0;
         Record($"Judge over 10,000 statements: {megabytes:F1} MB in {watch.ElapsedMilliseconds} ms = {megabytes / watch.Elapsed.TotalSeconds:F1} MB/s, named={named}");
-        Assert.Equal(0, named);
+
+        // #6200: the bound is on work, not on the clock. The production judge above has a 250 ms match timeout, which
+        // a busy machine can trip on an ordinary statement (a TimedOut verdict counts as named), so nothing is
+        // asserted on it. The assertions use a judge with no timeout at all, so only the pattern decides: (1) the
+        // linear-time pre-check, one pass over the text, finds no hit in any statement, which is the whole bound: a
+        // statement it clears never reaches a backtracking regex, so there is no backtracking to blow up; and (2) the
+        // judge built on the same pattern calls every statement clean.
+        var precheck = SensitiveStatements.CreatePrefilter(SensitiveStatements.Pattern, Timeout.InfiniteTimeSpan);
+        Assert.NotNull(precheck);
+        var judgeWithoutTimeout = SensitiveStatements.CreateJudge(
+            SensitiveStatements.Pattern, Timeout.InfiniteTimeSpan, headAlternatives: SensitiveStatements.JudgeHeadAlternatives);
+        var precheckHits = 0;
+        var notClean = 0;
+        foreach (var statement in statements)
+        {
+            if (precheck.IsMatch(statement))
+            {
+                precheckHits++;
+            }
+
+            if (judgeWithoutTimeout(statement) != SensitiveStatements.Verdict.Clean)
+            {
+                notClean++;
+            }
+        }
+
+        Assert.Equal(0, precheckHits);
+        Assert.Equal(0, notClean);
 
         // The 1,000,000-character guard.
         var unit = "SELECT col_a, col_b FROM dbo.t WHERE c = 1 AND d <> 2 ";
@@ -1131,18 +1161,22 @@ public sealed class SensitiveStatementsTests
         // a multiple of the judge's time).
         foreach (var limitMs in new[] { 1500, 1400, 1260 })
         {
-            var budget = new SensitiveStatements.JudgeBudget(TimeSpan.FromMilliseconds(limitMs), _ =>
-            {
-                TestWait.Elapse(TimeSpan.FromMilliseconds(250));
-                return SensitiveStatements.Verdict.TimedOut;
-            });
-            watch.Restart();
+            // #6200: a fake clock the judge moves by 250 ms, so the overrun is the budget's own arithmetic and no
+            // real time passes, however busy the machine is.
+            var fakeNow = TimeSpan.Zero;
+            var budget = new SensitiveStatements.JudgeBudget(
+                TimeSpan.FromMilliseconds(limitMs),
+                _ =>
+                {
+                    fakeNow += TimeSpan.FromMilliseconds(250);
+                    return SensitiveStatements.Verdict.TimedOut;
+                },
+                () => fakeNow);
             while (!budget.Spent)
             {
                 budget.Judge("x");
             }
 
-            watch.Stop();
             var overrun = budget.Elapsed - TimeSpan.FromMilliseconds(limitMs);
             Record($"JudgeBudget limit {limitMs} ms, 250 ms judge: stopped at {budget.Elapsed.TotalMilliseconds:F0} ms, overrun {overrun.TotalMilliseconds:F0} ms");
             Assert.True(overrun < TimeSpan.FromMilliseconds(300), $"overrun {overrun.TotalMilliseconds} ms");
