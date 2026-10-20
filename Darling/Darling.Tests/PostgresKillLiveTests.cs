@@ -873,7 +873,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
                     {
                         var json = Parse(await c.Kill(id, dryRun));
                         Assert.Equal("refused", (string?)json["status"]);
-                        Assert.Equal(RemediationResult.Reasons.SignInNotStrongEnough, (string?)json["reason"]);
+                        Assert.Equal(RemediationResult.Reasons.SearchPathNotPinned, (string?)json["reason"]);
                         Assert.Contains("search_path", (string?)json["message"], StringComparison.Ordinal);
                         Assert.Contains("planted", (string?)json["message"], StringComparison.Ordinal);
                         Assert.Contains("Nothing was run", (string?)json["message"], StringComparison.Ordinal);

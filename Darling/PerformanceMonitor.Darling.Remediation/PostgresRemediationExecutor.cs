@@ -249,7 +249,7 @@ WHERE a.pid OPERATOR(pg_catalog.=) @pid;";
             var observed = await searchPath.ExecuteScalarAsync(ct) as string;
             if (!PostgresSearchPathPin.IsPinned(observed))
             {
-                return RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.SignInNotStrongEnough,
+                return RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.SearchPathNotPinned,
                     $"The remediation connection did not get the search_path this service sends when it signs in ('pg_catalog, pg_temp'): it has '{CleanSearchPath(observed)}'. "
                     + "The usual cause is a connection pooler that drops the startup 'options' parameter, as PgBouncer does when 'options' is listed in ignore_startup_parameters. "
                     + "The kill needs a direct connection to the PostgreSQL server: point the server entry at the server's own host and port. Nothing was run.");

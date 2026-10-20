@@ -73,6 +73,7 @@ public sealed record RemediationResult(
         public const string SecretEmpty = "secret_empty";
         public const string SignInFailed = "sign_in_failed";
         public const string SignInNotStrongEnough = "sign_in_not_strong_enough";
+        public const string SearchPathNotPinned = "search_path_not_pinned";
         public const string OutcomeUnknown = "outcome_unknown";
         public const string BackendIdHoldsServerStart = "backend_id_has_no_session_start";
     }
