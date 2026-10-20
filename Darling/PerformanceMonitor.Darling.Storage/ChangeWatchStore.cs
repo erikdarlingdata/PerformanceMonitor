@@ -24,7 +24,8 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <param name="Description">One line in words, for the investigation brief.</param>
 /// <param name="DatabaseName">The database a plan change belongs to, or null.</param>
 /// <param name="QueryId">The Query Store query a plan change belongs to, or null; a watch of plan changes alone measures these queries.</param>
-public sealed record ChangeWatchChange(string Key, string Kind, DateTime ChangeTimeUtc, string Description, string? DatabaseName = null, long? QueryId = null);
+/// <param name="PlanId">The Query Store plan a plan change forced or unforced, or null: the agent-only test (#6239 round 3, M1) matches an agent's action to a change by server, database and this plan id.</param>
+public sealed record ChangeWatchChange(string Key, string Kind, DateTime ChangeTimeUtc, string Description, string? DatabaseName = null, long? QueryId = null, long? PlanId = null);
 
 /// <summary>A watch window and what it saw (#6234).</summary>
 public sealed record ChangeWatchRow(
@@ -55,6 +56,12 @@ public sealed class ChangeWatchStore
 
     /// <summary>The <c>result</c> of a watch that saw something move but whose every change was an agent's own plan change made while it handled a change-watch request: it is recorded and measured, and opens no further request (no loop, #6234).</summary>
     public const string ResultAgentChange = "moved_agent_change";
+
+    /// <summary>The <c>state</c> and <c>result</c> of a watch whose evaluation, or whose request open, failed <see cref="MaxAttempts"/> times (#6239 round 3, M2): it is closed for good with the last error in its <c>result_json</c>, and pruned like a closed one.</summary>
+    public const string StateFailed = "failed";
+
+    /// <summary>How many times a watch is claimed (an evaluation or a request open that throws, or a claimer that dies, each counts one) before it is closed as <see cref="StateFailed"/>.</summary>
+    public const int MaxAttempts = 5;
 
     /// <summary>The most a watch may span from its first change (#6234): extension stops there, and a later change starts a new watch once this one has closed.</summary>
     public static readonly TimeSpan MaxSpan = TimeSpan.FromMinutes(180);
@@ -88,13 +95,15 @@ CREATE TABLE IF NOT EXISTS config.change_watches
     request_id uuid,
     result_json text,
     claimed_at timestamptz,
-    CONSTRAINT ck_change_watches_state CHECK (state IN ('open', 'evaluating', 'closed'))
+    attempts smallint NOT NULL DEFAULT 0,
+    CONSTRAINT ck_change_watches_state CHECK (state IN ('open', 'evaluating', 'closed', 'failed'))
 );
 
 /* A store that took an earlier draft of this rung has the table without the claim column and with the two-state check. */
 ALTER TABLE config.change_watches ADD COLUMN IF NOT EXISTS claimed_at timestamptz;
+ALTER TABLE config.change_watches ADD COLUMN IF NOT EXISTS attempts smallint NOT NULL DEFAULT 0;
 ALTER TABLE config.change_watches DROP CONSTRAINT IF EXISTS ck_change_watches_state;
-ALTER TABLE config.change_watches ADD CONSTRAINT ck_change_watches_state CHECK (state IN ('open', 'evaluating', 'closed'));
+ALTER TABLE config.change_watches ADD CONSTRAINT ck_change_watches_state CHECK (state IN ('open', 'evaluating', 'closed', 'failed'));
 
 /* One request per watch: the request's first dedup key is the watch id, so a retry, a crash between the open and the close, or a second
    instance cannot open a second one (the loser's insert fails and it reads the winner's). */
@@ -114,8 +123,11 @@ CREATE TABLE IF NOT EXISTS config.change_watch_changes
     description text NOT NULL,
     database_name text,
     query_id bigint,
+    plan_id bigint,
     PRIMARY KEY (server_id, change_key)
 );
+
+ALTER TABLE config.change_watch_changes ADD COLUMN IF NOT EXISTS plan_id bigint;
 
 CREATE INDEX IF NOT EXISTS ix_change_watch_changes_watch ON config.change_watch_changes (watch_id);
 
@@ -127,7 +139,12 @@ CREATE TABLE IF NOT EXISTS config.change_watch_marks
     source text NOT NULL,
     mark timestamptz NOT NULL,
     PRIMARY KEY (server_id, source)
-);";
+);
+
+/* #6239 round 3, L5: plan detection finds a database's previous forced-plan capture by its marker row (plan_id IS NULL), one index seek per new capture,
+   and no longer reads a day of forced-plan rows per server per pass. A few rows per database per pass, so the build is a read of a small plain table. */
+CREATE INDEX IF NOT EXISTS idx_query_store_forced_plans_markers
+    ON collect.query_store_forced_plans (server_id, database_name, collection_time) WHERE plan_id IS NULL;";
 
     private readonly NpgsqlDataSource _dataSource;
     private readonly int _commandTimeoutSeconds;
@@ -259,10 +276,10 @@ WHERE watch_id = $1", watchId, Utc(fresh.Min(c => c.ChangeTimeUtc)), Utc(fresh.M
         foreach (var change in fresh)
         {
             await using var insert = Command(connection, transaction, @"
-INSERT INTO config.change_watch_changes (server_id, change_key, watch_id, change_kind, change_time, description, database_name, query_id)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+INSERT INTO config.change_watch_changes (server_id, change_key, watch_id, change_kind, change_time, description, database_name, query_id, plan_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 ON CONFLICT (server_id, change_key) DO NOTHING",
-                serverId, change.Key, watchId, change.Kind, Utc(change.ChangeTimeUtc), change.Description, change.DatabaseName, change.QueryId);
+                serverId, change.Key, watchId, change.Kind, Utc(change.ChangeTimeUtc), change.Description, change.DatabaseName, change.QueryId, change.PlanId);
             await insert.ExecuteNonQueryAsync(cancellationToken);
         }
 
@@ -318,18 +335,49 @@ ON CONFLICT (server_id, source) DO UPDATE SET mark = greatest(config.change_watc
 
     /// <summary>
     /// Takes a due watch for evaluation: one UPDATE from <c>open</c> to <c>evaluating</c> (or from an <c>evaluating</c> whose claim has gone stale), guarded
-    /// by the status it reads, with RETURNING. False when another pass or instance holds it, so each watch is evaluated, and its request opened, by one.
+    /// by the status it reads, with RETURNING. Null when another pass or instance holds it, so each watch is evaluated, and its request opened, by one.
+    /// Each claim counts one attempt (#6239 round 3, M2); the count is returned.
     /// </summary>
-    public async Task<bool> ClaimAsync(Guid watchId, CancellationToken cancellationToken = default)
+    public async Task<int?> ClaimAsync(Guid watchId, CancellationToken cancellationToken = default)
     {
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var claim = Command(connection, null, @"
 UPDATE config.change_watches
-SET state = 'evaluating', claimed_at = $2
+SET state = 'evaluating', claimed_at = $2, attempts = attempts + 1
 WHERE watch_id = $1 AND window_ends_at <= $2
   AND (state = 'open' OR (state = 'evaluating' AND claimed_at <= $3))
-RETURNING watch_id", watchId, Now(), Now() - StaleClaim);
-        return await claim.ExecuteScalarAsync(cancellationToken) is Guid;
+RETURNING attempts", watchId, Now(), Now() - StaleClaim);
+        return await claim.ExecuteScalarAsync(cancellationToken) is short attempts ? attempts : null;
+    }
+
+    /// <summary>
+    /// #6239 round 3, M2: a claimed watch's evaluation, or its request open, failed. Below <see cref="MaxAttempts"/> attempts the watch stays claimed and is tried
+    /// again once the claim is stale (a transient error); at <see cref="MaxAttempts"/> it is closed as <see cref="StateFailed"/> with the error in its
+    /// <c>result_json</c>, so a permanent error (a read that always times out, a row that always throws) neither loops for ever nor stays in the table for ever.
+    /// True when this call closed it.
+    /// </summary>
+    public async Task<bool> FailAttemptAsync(Guid watchId, string error, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = Command(connection, null, @"
+UPDATE config.change_watches
+SET state = 'failed', closed_at = $2, result = 'failed', result_json = $3
+WHERE watch_id = $1 AND state = 'evaluating' AND attempts >= $4",
+            watchId, Now(), System.Text.Json.JsonSerializer.Serialize(new { error, attempts = MaxAttempts }), (short)MaxAttempts);
+        var closed = await command.ExecuteNonQueryAsync(cancellationToken) > 0;
+        if (closed)
+        {
+            await PruneAsync(connection, cancellationToken);
+        }
+
+        return closed;
+    }
+
+    private async Task PruneAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        await using var prune = Command(connection, null,
+            "DELETE FROM config.change_watches WHERE state IN ('closed', 'failed') AND closed_at < $1", Now() - ClosedRetention);
+        await prune.ExecuteNonQueryAsync(cancellationToken);
     }
 
     /// <summary>The request already opened for this watch (its dedup key is the watch id), or null: a pass that took over a stale claim reads it instead of opening a second.</summary>
@@ -342,9 +390,11 @@ RETURNING watch_id", watchId, Now(), Now() - StaleClaim);
     }
 
     /// <summary>
-    /// True when the watch has changes and every one is an agent's plan force or unforce made while it handled a change-watch request (an
-    /// <c>action_called</c> journal row of a <c>plan_force</c> or <c>plan_unforce</c> kind, by an agent, on a change-watch request of this server, up to
-    /// 30 minutes before the capture that saw the change). Such a watch is recorded and measured but opens no request, so an agent's fix cannot start the next.
+    /// True when the watch has changes and every one is an agent's plan force or unforce made while it handled a change-watch request: an
+    /// <c>action_called</c> journal row of a <c>plan_force</c> or <c>plan_unforce</c> kind, by an agent, on a change-watch request of the change's server, whose
+    /// target is the change's database and plan (#6239 round 3, M1: matched by plan, not by time alone, so a person's change near an agent's unrelated one still
+    /// opens a request), up to 30 minutes before the capture that saw the change. Such a watch is recorded and measured but opens no request, so an agent's fix
+    /// cannot start the next.
     /// </summary>
     public async Task<bool> IsAgentOnlyAsync(Guid watchId, CancellationToken cancellationToken = default)
     {
@@ -361,6 +411,7 @@ SELECT EXISTS (SELECT 1 FROM config.change_watch_changes WHERE watch_id = $1)
                     WHERE j.event = 'action_called' AND j.actor LIKE 'agent:%'
                       AND j.detail->>'kind' IN ('plan_force', 'plan_unforce')
                       AND r.trigger_kind = 'change_watch' AND r.server_id = c.server_id
+                      AND j.detail->'target'->>'database' = c.database_name AND j.detail->'target'->>'id' = c.plan_id::text
                       AND j.event_time >= c.change_time - interval '30 minutes' AND j.event_time <= c.change_time + interval '5 minutes')))", watchId);
         return await command.ExecuteScalarAsync(cancellationToken) is true;
     }
@@ -394,7 +445,7 @@ LIMIT {limit.ToString(CultureInfo.InvariantCulture)}", parameters))
         if (rows.Count > 0)
         {
             await using var command = Command(connection, null, @"
-SELECT watch_id, change_key, change_kind, change_time, description, database_name, query_id
+SELECT watch_id, change_key, change_kind, change_time, description, database_name, query_id, plan_id
 FROM config.change_watch_changes
 WHERE watch_id = ANY($1)
 ORDER BY change_time, change_key", rows.Select(r => r.Item1).ToArray());
@@ -408,7 +459,7 @@ ORDER BY change_time, change_key", rows.Select(r => r.Item1).ToArray());
                 }
 
                 list.Add(new ChangeWatchChange(reader.GetString(1), reader.GetString(2), Utc(reader.GetDateTime(3)), reader.GetString(4),
-                    reader.IsDBNull(5) ? null : reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetInt64(6)));
+                    reader.IsDBNull(5) ? null : reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetInt64(6), reader.IsDBNull(7) ? null : reader.GetInt64(7)));
             }
         }
 
@@ -425,9 +476,7 @@ UPDATE config.change_watches
 SET state = 'closed', closed_at = $2, result = $3, request_id = $4, result_json = $5
 WHERE watch_id = $1 AND state IN ('open', 'evaluating')", watchId, Now(), result, requestId, resultJson);
         var closed = await close.ExecuteNonQueryAsync(cancellationToken) > 0;
-        await using var prune = Command(connection, null,
-            "DELETE FROM config.change_watches WHERE state = 'closed' AND closed_at < $1", Now() - ClosedRetention);
-        await prune.ExecuteNonQueryAsync(cancellationToken);
+        await PruneAsync(connection, cancellationToken);
         return closed;
     }
 }

@@ -67,38 +67,50 @@ WHERE server_id = $1 AND outcome = 'succeeded' AND action_time > $2 AND action_t
        ONE marker row per CAPTURED database per pass (database_name set, plan_id and query_id NULL), so a database's captures are the distinct
        (collection_time, database_name) pairs. For each capture after the mark ($2) the plans are compared with the SAME database's previous capture: a plan in
        the newer one and not the older was forced, the reverse was unforced. A database with no previous capture is a baseline, and a database that has no
-       capture in a run (failover, Query Store off, the collector failed for it) has nothing to compare, so it is never read as an unforce. The previous
-       capture is looked for a day back. A change the plan-force ledger explains (a succeeded action on the plan within 30 minutes before the capture) is skipped. */
-    private const string PlanSnapshotChangesSql = @"
-WITH caps AS (
-    SELECT t, database_name, LAG(t) OVER (PARTITION BY database_name ORDER BY t) AS prev_t
+       capture in a run (failover, Query Store off, the collector failed for it) has nothing to compare, so it is never read as an unforce.
+       #6239 round 3, L5: the read covers only the captures after the mark ($2) up to $3. Each one's previous capture is the newest marker row (plan_id IS NULL) of
+       the same database in the day before it, found by a LATERAL seek on idx_query_store_forced_plans_markers (V207), so a pass no longer sorts a day of forced-plan
+       rows per server. #6239 round 3, L4: a database whose previous capture is more than 30 minutes before this one (it came back after a failback, a
+       Query Store that was read-only, a collector that failed for hours) has this capture treated as a NEW BASELINE: what was forced or unforced during the gap
+       cannot be dated, and reporting it at the return capture would open a watch bracketing the failback and not the change. #6239 round 3, L3: a change the
+       plan-force ledger explains (a succeeded action on the plan AFTER the previous capture and up to this one) is skipped; a fixed 30 minutes missed an action
+       early in a longer gap. The other capture's plans are probed with a LATERAL LIMIT 1 per plan row (an index probe on the capture's time), because as an
+       anti-join the planner hashes the whole day's rows on the other side. */
+    internal const string PlanSnapshotChangesSql = @"
+WITH fresh AS (
+    SELECT m.t, m.database_name, p.prev_t
     FROM (SELECT DISTINCT collection_time AS t, database_name
           FROM collect.query_store_forced_plans
-          WHERE server_id = $1 AND collection_time > $2 - interval '1 day' AND collection_time <= $3 AND database_name IS NOT NULL) AS d
-), fresh AS (
-    SELECT t, database_name, prev_t FROM caps WHERE t > $2 AND prev_t IS NOT NULL
+          WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3 AND database_name IS NOT NULL AND plan_id IS NULL) AS m
+    CROSS JOIN LATERAL (SELECT max(q.collection_time) AS prev_t
+                        FROM collect.query_store_forced_plans AS q
+                        WHERE q.server_id = $1 AND q.database_name = m.database_name AND q.plan_id IS NULL
+                          AND q.collection_time < m.t AND q.collection_time >= m.t - interval '1 day') AS p
+    WHERE p.prev_t IS NOT NULL AND m.t - p.prev_t <= interval '30 minutes'
 )
 SELECT 'forced' AS change_kind, n.t, n.database_name, f.query_id, f.plan_id
 FROM fresh AS n
 JOIN collect.query_store_forced_plans AS f
   ON f.server_id = $1 AND f.collection_time = n.t AND f.database_name = n.database_name AND f.plan_id IS NOT NULL AND f.query_id IS NOT NULL
-WHERE NOT EXISTS (SELECT 1 FROM collect.query_store_forced_plans AS p
-                  WHERE p.server_id = $1 AND p.collection_time = n.prev_t AND p.database_name = n.database_name
-                    AND p.query_id = f.query_id AND p.plan_id = f.plan_id)
+LEFT JOIN LATERAL (SELECT 1 AS hit FROM collect.query_store_forced_plans AS p
+                   WHERE p.server_id = $1 AND p.collection_time = n.prev_t AND p.database_name = n.database_name
+                     AND p.query_id = f.query_id AND p.plan_id = f.plan_id LIMIT 1) AS before ON true
+WHERE before.hit IS NULL
   AND NOT EXISTS (SELECT 1 FROM collect.plan_force_actions AS a
                   WHERE a.server_id = $1 AND a.database_name = f.database_name AND a.query_id = f.query_id AND a.plan_id = f.plan_id
-                    AND a.outcome = 'succeeded' AND a.action_time >= n.t - interval '30 minutes' AND a.action_time <= n.t)
+                    AND a.outcome = 'succeeded' AND a.action_time > n.prev_t AND a.action_time <= n.t)
 UNION ALL
 SELECT 'unforced', n.t, n.database_name, p.query_id, p.plan_id
 FROM fresh AS n
 JOIN collect.query_store_forced_plans AS p
   ON p.server_id = $1 AND p.collection_time = n.prev_t AND p.database_name = n.database_name AND p.plan_id IS NOT NULL AND p.query_id IS NOT NULL
-WHERE NOT EXISTS (SELECT 1 FROM collect.query_store_forced_plans AS f
-                  WHERE f.server_id = $1 AND f.collection_time = n.t AND f.database_name = n.database_name
-                    AND f.query_id = p.query_id AND f.plan_id = p.plan_id)
+LEFT JOIN LATERAL (SELECT 1 AS hit FROM collect.query_store_forced_plans AS f
+                   WHERE f.server_id = $1 AND f.collection_time = n.t AND f.database_name = n.database_name
+                     AND f.query_id = p.query_id AND f.plan_id = p.plan_id LIMIT 1) AS after ON true
+WHERE after.hit IS NULL
   AND NOT EXISTS (SELECT 1 FROM collect.plan_force_actions AS a
                   WHERE a.server_id = $1 AND a.database_name = p.database_name AND a.query_id = p.query_id AND a.plan_id = p.plan_id
-                    AND a.outcome = 'succeeded' AND a.action_time >= n.t - interval '30 minutes' AND a.action_time <= n.t)";
+                    AND a.outcome = 'succeeded' AND a.action_time > n.prev_t AND a.action_time <= n.t)";
 
     private readonly NpgsqlDataSource _readSource;
     private readonly ChangeWatchStore _store;
@@ -284,7 +296,7 @@ WHERE NOT EXISTS (SELECT 1 FROM collect.query_store_forced_plans AS f
             {
                 var database = reader.GetString(2);
                 changes.Add(new ChangeWatchChange($"plan_force:action:{reader.GetInt64(0)}", "plan_force", Utc(reader.GetDateTime(1)),
-                    $"plan {reader.GetInt64(4)} of query {reader.GetInt64(3)} in {database}: {reader.GetString(5)} by the plan-force ledger", database, reader.GetInt64(3)));
+                    $"plan {reader.GetInt64(4)} of query {reader.GetInt64(3)} in {database}: {reader.GetString(5)} by the plan-force ledger", database, reader.GetInt64(3), reader.GetInt64(4)));
             }
         }
 
@@ -301,7 +313,7 @@ WHERE NOT EXISTS (SELECT 1 FROM collect.query_store_forced_plans AS f
                 changes.Add(new ChangeWatchChange(
                     $"plan_force:{(forced ? "snapshot" : "unforced")}:{database}:{queryId}:{planId}:{Stamp(time)}", "plan_force", Utc(time),
                     $"plan {planId} of query {queryId} in {database}: {(forced ? "forced" : "unforced (in the database's previous forced-plan capture, not in this one)")}",
-                    database, queryId));
+                    database, queryId, planId));
             }
         }
 
@@ -328,8 +340,15 @@ WHERE NOT EXISTS (SELECT 1 FROM collect.query_store_forced_plans AS f
         {
             try
             {
-                if (!await _store.ClaimAsync(watch.WatchId, cancellationToken))
+                if (await _store.ClaimAsync(watch.WatchId, cancellationToken) is not { } attempt)
                 {
+                    continue;
+                }
+
+                if (attempt > ChangeWatchStore.MaxAttempts)
+                {
+                    /* #6239 round 3, M2: claimed over and over without one ending in a failure being recorded (the claimer kept dying): stop. */
+                    await _store.FailAttemptAsync(watch.WatchId, $"the watch was claimed {attempt} times without finishing", cancellationToken);
                     continue;
                 }
 
@@ -379,6 +398,7 @@ WHERE NOT EXISTS (SELECT 1 FROM collect.query_store_forced_plans AS f
                     /* #6239 round 3, L6: a failed open is not "no route". The watch stays claimed; the request key makes the retry safe. */
                     _logger.LogWarning("Change watch {WatchId} on {Server}: the request could not be opened; it is tried again: {Message}",
                         watch.WatchId, watch.ServerName, failure.Message);
+                    await RecordFailureAsync(watch, failure.Message, cancellationToken);
                     continue;
                 }
 
@@ -394,7 +414,29 @@ WHERE NOT EXISTS (SELECT 1 FROM collect.query_store_forced_plans AS f
             {
                 _logger.LogWarning("Change watch {WatchId} on {Server} could not be evaluated; it is tried again when its claim goes stale: {Message}",
                     watch.WatchId, watch.ServerName, ex.Message);
+                await RecordFailureAsync(watch, ex.Message, cancellationToken);
             }
+        }
+    }
+
+    /// <summary>#6239 round 3, M2: counts a failed attempt against the watch; at <see cref="ChangeWatchStore.MaxAttempts"/> it closes as <c>failed</c> with the error.</summary>
+    private async Task RecordFailureAsync(ChangeWatchRow watch, string message, CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (await _store.FailAttemptAsync(watch.WatchId, message, cancellationToken))
+            {
+                _logger.LogWarning("Change watch {WatchId} on {Server} failed {Attempts} times and is closed as failed: {Message}",
+                    watch.WatchId, watch.ServerName, ChangeWatchStore.MaxAttempts, message);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("Change watch {WatchId} on {Server}: the failure could not be recorded: {Message}", watch.WatchId, watch.ServerName, ex.Message);
         }
     }
 }

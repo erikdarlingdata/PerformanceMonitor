@@ -224,11 +224,11 @@ public sealed class ChangeWatchLifecycleLiveTests
             var forced = h.Now.AddMinutes(-150);
             await ExecAsync(h.Connection, @"
 INSERT INTO config.investigation_journal (event_time, request_id, route_id, server_id, event, actor, reason, detail)
-SELECT $1, request_id, route_id, server_id, 'action_called', 'agent:tester', 'force the plan', '{""kind"":""plan_force""}'::jsonb
+SELECT $1, request_id, route_id, server_id, 'action_called', 'agent:tester', 'force the plan', '{""kind"":""plan_force"",""target"":{""id"":""10"",""database"":""Sales""}}'::jsonb
 FROM config.investigation_requests", ct, forced.AddMinutes(-3));
             await SeedWaitsAsync(h.Connection, forced.AddMinutes(-60), 200, ct);
             await SeedWaitsAsync(h.Connection, forced, 2000, ct);
-            var agentChange = new ChangeWatchChange("plan_force:snapshot:Sales:1:10:x", "plan_force", forced, "plan 10 of query 1 in Sales: forced", "Sales", 1);
+            var agentChange = new ChangeWatchChange("plan_force:snapshot:Sales:1:10:x", "plan_force", forced, "plan 10 of query 1 in Sales: forced", "Sales", 1, 10);
             await h.Store.RecordChangesAsync(ServerId, ServerName, new[] { agentChange }, ct);
 
             await h.NewPass().EvaluateDueAsync(ct);
@@ -245,7 +245,7 @@ FROM config.investigation_requests", ct, forced.AddMinutes(-3));
             await SeedWaitsAsync(h.Connection, person, 8000, ct);
             await h.Store.RecordChangesAsync(ServerId, ServerName, new[]
             {
-                new ChangeWatchChange("plan_force:snapshot:Sales:2:20:x", "plan_force", person, "plan 20 of query 2 in Sales: forced", "Sales", 2),
+                new ChangeWatchChange("plan_force:snapshot:Sales:2:20:x", "plan_force", person, "plan 20 of query 2 in Sales: forced", "Sales", 2, 20),
             }, ct);
             await h.NewPass().EvaluateDueAsync(ct);
 
@@ -353,5 +353,208 @@ FROM config.investigation_requests", ct, forced.AddMinutes(-3));
 
             Assert.Contains(logger.Messages, m => m.StartsWith("Warning: ", StringComparison.Ordinal) && m.Contains("no pass from", StringComparison.Ordinal));
         });
+    }
+
+    /* A first watch whose request an agent works: its journal row says it forced Sales plan 10 at <agentForcedAt>. The request is then moved three hours back, because
+       the route's hourly limit counts the requests of the last hour and the watches under test come later in the story. */
+    private static async Task OpenARequestAndJournalAnAgentForceAsync(Harness h, DateTime agentForcedAt, CancellationToken ct)
+    {
+        var first = h.Now.AddMinutes(-300);
+        await SeedWaitsAsync(h.Connection, first.AddMinutes(-60), 100, ct);
+        await SeedWaitsAsync(h.Connection, first, 1000, ct);
+        await h.Store.RecordChangesAsync(ServerId, ServerName, await OneChange(first, "max degree of parallelism"), ct);
+        await h.NewPass().EvaluateDueAsync(ct);
+        Assert.Equal(1, await CountAsync(h.Connection, "SELECT count(*) FROM config.investigation_requests WHERE trigger_kind = 'change_watch'", ct));
+        await ExecAsync(h.Connection, @"
+INSERT INTO config.investigation_journal (event_time, request_id, route_id, server_id, event, actor, reason, detail)
+SELECT $1, request_id, route_id, server_id, 'action_called', 'agent:tester', 'force the plan', '{""kind"":""plan_force"",""target"":{""id"":""10"",""database"":""Sales""}}'::jsonb
+FROM config.investigation_requests", ct, agentForcedAt);
+        await ExecAsync(h.Connection, "UPDATE config.investigation_requests SET opened_at = opened_at - interval '3 hours'", ct);
+    }
+
+    [Fact]
+    public async Task APersonsPlanForce_WithinThirtyMinutesOfAnAgentsUnrelatedForce_StillOpensARequest()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            var person = h.Now.AddMinutes(-70);
+            /* The agent forced Sales plan 10 ten minutes before a person forced Orders plan 20: different database, different plan. */
+            await OpenARequestAndJournalAnAgentForceAsync(h, person.AddMinutes(-10), ct);
+            await SeedWaitsAsync(h.Connection, person.AddMinutes(-60), 300, ct);
+            await SeedWaitsAsync(h.Connection, person, 8000, ct);
+            await h.Store.RecordChangesAsync(ServerId, ServerName, new[]
+            {
+                new ChangeWatchChange("plan_force:snapshot:Orders:2:20:x", "plan_force", person, "plan 20 of query 2 in Orders: forced", "Orders", 2, 20),
+            }, ct);
+
+            await h.NewPass().EvaluateDueAsync(ct);
+
+            Assert.Equal(2, await CountAsync(h.Connection, "SELECT count(*) FROM config.investigation_requests WHERE trigger_kind = 'change_watch'", ct));
+            Assert.Equal(1, await CountAsync(h.Connection, "SELECT count(*) FROM config.change_watches WHERE result = 'request_opened' AND first_change_at > now() - interval '3 hours'", ct));
+        });
+    }
+
+    [Fact]
+    public async Task AWatchHoldingBothAnAgentsForceAndAPersonsForce_OpensARequest()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            var at = h.Now.AddMinutes(-70);
+            await OpenARequestAndJournalAnAgentForceAsync(h, at.AddMinutes(-3), ct);
+            await SeedWaitsAsync(h.Connection, at.AddMinutes(-60), 300, ct);
+            await SeedWaitsAsync(h.Connection, at, 8000, ct);
+            await h.Store.RecordChangesAsync(ServerId, ServerName, new[]
+            {
+                new ChangeWatchChange("plan_force:snapshot:Sales:1:10:x", "plan_force", at, "plan 10 of query 1 in Sales: forced", "Sales", 1, 10),
+                new ChangeWatchChange("plan_force:snapshot:Orders:2:20:x", "plan_force", at, "plan 20 of query 2 in Orders: forced", "Orders", 2, 20),
+            }, ct);
+
+            await h.NewPass().EvaluateDueAsync(ct);
+
+            Assert.Equal(2, await CountAsync(h.Connection, "SELECT count(*) FROM config.investigation_requests WHERE trigger_kind = 'change_watch'", ct));
+        });
+    }
+
+    [Fact]
+    public async Task AnEvaluationThatAlwaysThrows_EndsFailedAfterFiveAttempts_AndIsPrunedLikeAClosedWatch()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            var change = h.Now.AddMinutes(-90);
+            await h.Store.RecordChangesAsync(ServerId, ServerName, await OneChange(change, "max degree of parallelism"), ct);
+            /* Every evaluation read fails, for good: the view it reads is gone. */
+            await ExecAsync(h.Connection, "DROP VIEW v_wait_stats", ct);
+
+            var clock = h.Now;
+            var store = new ChangeWatchStore(h.Source, 30, () => clock);
+            var dispatcher = new InvestigationDispatcher(new InvestigationRequestStore(h.Source, 30, () => clock), AgentRoute(), NullLogger.Instance);
+            ChangeWatchPass Pass() => new(h.Source, store, dispatcher.Core, NullLogger.Instance, 30, () => clock);
+
+            for (var attempt = 1; attempt <= 4; attempt++)
+            {
+                /* Each pass is past the stale claim of the one before. */
+                clock = h.Now.AddMinutes(11 * attempt);
+                await Pass().EvaluateDueAsync(ct);
+                Assert.Equal("evaluating", await TextAsync(h.Connection, "SELECT state FROM config.change_watches", ct));
+                Assert.Equal(attempt, await CountAsync(h.Connection, "SELECT attempts FROM config.change_watches", ct));
+            }
+
+            clock = h.Now.AddMinutes(55);
+            await Pass().EvaluateDueAsync(ct);
+
+            Assert.Equal("failed", await TextAsync(h.Connection, "SELECT state FROM config.change_watches", ct));
+            Assert.Equal("failed", await TextAsync(h.Connection, "SELECT result FROM config.change_watches", ct));
+            Assert.Equal(5, await CountAsync(h.Connection, "SELECT attempts FROM config.change_watches", ct));
+            Assert.Contains("v_wait_stats", await TextAsync(h.Connection, "SELECT result_json FROM config.change_watches", ct), StringComparison.Ordinal);
+
+            /* It is not tried again. */
+            clock = h.Now.AddMinutes(70);
+            await Pass().EvaluateDueAsync(ct);
+            Assert.Equal(5, await CountAsync(h.Connection, "SELECT attempts FROM config.change_watches", ct));
+
+            /* A failed watch is kept for the closed retention and then pruned with its changes, by the same prune a close runs. */
+            await ExecAsync(h.Connection, "UPDATE config.change_watches SET closed_at = $1", ct, h.Now.AddDays(-100));
+            await store.CloseAsync(Guid.NewGuid(), ChangeWatchStore.ResultFlat, null, "{}", ct);
+            Assert.Equal(0, await CountAsync(h.Connection, "SELECT count(*) FROM config.change_watches", ct));
+            Assert.Equal(0, await CountAsync(h.Connection, "SELECT count(*) FROM config.change_watch_changes", ct));
+        });
+    }
+
+    [Fact]
+    public async Task APlanForcedByTheLedgerBeforeTheDatabasesPreviousCapture_IsNotExplainedByThatLedgerAction_ButOneInTheGapIs()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            var t1 = h.Now.AddMinutes(-60);
+            var t2 = h.Now.AddMinutes(-35);
+            /* Plans 10 and 11 are in the capture at t2 and not in the one at t1. The ledger forced 11 inside the gap (after t1, up to t2). It forced 10 at
+               t2 - 28 minutes, which is BEFORE t1: that action belongs to the interval before the previous capture, not to this one. */
+            await ForcedPlanCaptureAsync(h.Connection, t1, "Sales", ct);
+            await ForcedPlanCaptureAsync(h.Connection, t2, "Sales", ct, (1, 10), (2, 11));
+            await LedgerAsync(h.Connection, t2.AddMinutes(-28), "Sales", 1, 10, "force", ct);
+            await LedgerAsync(h.Connection, t1.AddMinutes(5), "Sales", 2, 11, "force", ct);
+
+            var found = await h.NewPass().ReadChangesAsync(ServerId, t1.AddMinutes(-1), h.Now, ct);
+
+            var snapshot = Assert.Single(found, c => c.Key.StartsWith("plan_force:snapshot:", StringComparison.Ordinal));
+            Assert.Equal(10, snapshot.PlanId);
+        });
+    }
+
+    [Fact]
+    public async Task ADatabaseCapturedAgainAfterALongGap_HasThatCaptureAsANewBaseline_AndTheNextCaptureIsDiffedAgainstIt()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            var before = h.Now.AddMinutes(-150);
+            var back = h.Now.AddMinutes(-40);
+            var next = h.Now.AddMinutes(-35);
+            /* Sales was not captured for nearly two hours (a failback, Query Store read-only). Plan 20 was forced somewhere in that gap: it cannot be dated, so it is
+               no change at the capture that finds it. Plan 30 is forced between the return capture and the next. */
+            await ForcedPlanCaptureAsync(h.Connection, before, "Sales", ct, (1, 10));
+            await ForcedPlanCaptureAsync(h.Connection, back, "Sales", ct, (1, 10), (2, 20));
+            await ForcedPlanCaptureAsync(h.Connection, next, "Sales", ct, (1, 10), (2, 20), (3, 30));
+
+            var found = await h.NewPass().ReadChangesAsync(ServerId, before.AddMinutes(-1), h.Now, ct);
+
+            var change = Assert.Single(found, c => c.Kind == "plan_force");
+            Assert.Equal("plan_force:snapshot:Sales:3:30:" + Stamp(next), change.Key);
+            Assert.Equal(30, change.PlanId);
+        });
+    }
+
+    [Fact]
+    public async Task PlanDetection_ReadsTheCapturesAfterTheMark_NotADayOfForcedPlanRowsPerPass()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            /* Four Query Store databases, a capture every five minutes for a day, 20 forced plans each: the marker row and the plans of every capture. */
+            await ExecAsync(h.Connection, @"
+INSERT INTO collect.query_store_forced_plans (collection_id, collection_time, server_id, server_name, database_name, plan_id, query_id)
+SELECT row_number() OVER (), c.t, $1, 'x', d.name, p.n, p.n * 10
+FROM generate_series($2::timestamp - interval '24 hours', $2::timestamp, interval '5 minutes') AS c(t)
+CROSS JOIN (VALUES ('db1'), ('db2'), ('db3'), ('db4')) AS d(name)
+CROSS JOIN LATERAL (SELECT NULL::bigint AS n UNION ALL SELECT generate_series(1, 20)) AS p(n)", ct, ServerId, Naive(h.Now));
+            /* One plan is forced in db1 at the newest capture. */
+            await ForcedPlanAsync(h.Connection, h.Now, "db1", 999, 21, ct);
+            await ExecAsync(h.Connection, "ANALYZE collect.query_store_forced_plans", ct);
+            var total = await CountAsync(h.Connection, "SELECT count(*) FROM collect.query_store_forced_plans", ct);
+            var mark = h.Now.AddMinutes(-30);
+
+            var found = await h.NewPass().ReadChangesAsync(ServerId, mark, h.Now, ct);
+            var change = Assert.Single(found, c => c.Kind == "plan_force");
+            Assert.Equal(21, change.PlanId);
+            Assert.Equal("db1", change.DatabaseName);
+
+            /* Rows the statement takes out of the table (the rows its scans emit, over every loop), against the day the old read sorted. */
+            await using var explain = new NpgsqlCommand("EXPLAIN (ANALYZE, FORMAT JSON) " + ChangeWatchPass.PlanSnapshotChangesSql, h.Connection);
+            explain.Parameters.Add(new NpgsqlParameter { Value = ServerId });
+            explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = Naive(mark) });
+            explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = Naive(h.Now) });
+            var json = (string)(await explain.ExecuteScalarAsync(ct))!;
+            using var document = System.Text.Json.JsonDocument.Parse(json);
+            var emitted = RowsEmittedFromTable(document.RootElement[0].GetProperty("Plan"), "query_store_forced_plans");
+
+            Assert.True(emitted < total / 4, $"the statement took {emitted} rows out of {total} forced-plan rows (a day); it must read the captures after the mark only: {json}");
+        });
+    }
+
+    private static double RowsEmittedFromTable(System.Text.Json.JsonElement node, string table)
+    {
+        var rows = 0d;
+        if (node.TryGetProperty("Relation Name", out var relation) && relation.GetString() == table)
+        {
+            rows += node.GetProperty("Actual Rows").GetDouble() * node.GetProperty("Actual Loops").GetDouble();
+        }
+
+        if (node.TryGetProperty("Plans", out var children))
+        {
+            foreach (var child in children.EnumerateArray())
+            {
+                rows += RowsEmittedFromTable(child, table);
+            }
+        }
+
+        return rows;
     }
 }

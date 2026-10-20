@@ -406,13 +406,14 @@ BEGIN
 END $$;"),
 
         // /// V207 (#6234): the change watch tables and the request trigger column. The tables are the probe's newest sentinel. The rewind
-        // drops the three watch tables and the trigger column on the investigation requests, so a re-run of V207 builds them all again.
-        // Safe on a store that never had them.
+        // drops the three watch tables (their attempts and plan_id columns go with them), the marker index on the forced-plan table and the
+        // trigger column on the investigation requests, so a re-run of V207 builds them all again. Safe on a store that never had them.
         new(207, "hasChangeWatches",
             @"
 DROP TABLE IF EXISTS config.change_watch_changes;
 DROP TABLE IF EXISTS config.change_watch_marks;
 DROP TABLE IF EXISTS config.change_watches;
+DROP INDEX IF EXISTS collect.idx_query_store_forced_plans_markers;
 ALTER TABLE IF EXISTS config.investigation_requests
     DROP COLUMN IF EXISTS trigger_kind;"),
     ];
