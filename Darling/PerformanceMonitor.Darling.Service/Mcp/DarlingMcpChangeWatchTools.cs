@@ -26,8 +26,8 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <summary>
 /// #6234: <c>get_change_watches</c>, the read of the change watch windows a recorded change opens. It lists a server's watches, open and
 /// closed, newest first, over <see cref="ChangeWatchStore.ListAsync"/>: the changes each watch names, the measures its evaluation read
-/// (the three windows' numbers and whether each moved), and its result (<c>flat</c>, <c>request_opened</c>, <c>moved_no_request</c> or
-/// <c>no_data</c>, with the request id when one opened). A read of the monitoring store only; the investigation agent may call it.
+/// (the three windows' numbers and whether each moved), and its result (<c>flat</c>, <c>request_opened</c>, <c>moved_no_request</c>,
+/// <c>moved_agent_change</c> or <c>no_data</c>, with the request id when one opened; a watch that failed repeatedly has state and result <c>failed</c>). A read of the monitoring store only; the investigation agent may call it.
 /// </summary>
 [McpServerToolType]
 public sealed class DarlingMcpChangeWatchTools

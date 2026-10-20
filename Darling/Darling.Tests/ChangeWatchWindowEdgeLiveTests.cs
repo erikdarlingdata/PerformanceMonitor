@@ -246,8 +246,18 @@ public sealed class ChangeWatchWindowEdgeLiveTests
             Assert.Equal(["closed/moved_agent_change"], await ListedAsync(h.Source, ChangeWatchStore.ResultAgentChange, ct));
             Assert.Equal(5, (await ListedAsync(h.Source, null, ct)).Length);
 
-            /* failed is a state the tool accepts; this store holds none yet. */
-            Assert.Empty(await ListedAsync(h.Source, "failed", ct));
+            /* A watch that failed the way the worker fails one: claimed and failed MaxAttempts times, then closed by FailAttemptAsync (state and result both 'failed'). */
+            await InsertWatchAsync(h.Connection, t.AddHours(6), "evaluating", null, ct);
+            var failing = Guid.Parse((await TextAsync(h.Connection, "SELECT watch_id::text FROM config.change_watches ORDER BY first_change_at DESC LIMIT 1", ct))!);
+            await ExecAsync(h.Connection, "UPDATE config.change_watches SET attempts = $2 WHERE watch_id = $1", ct, failing, (short)ChangeWatchStore.MaxAttempts);
+            Assert.True(await h.Store.FailAttemptAsync(failing, "the read timed out", ct));
+
+            Assert.Equal(["failed/failed"], await ListedAsync(h.Source, "failed", ct));
+            Assert.Equal(["evaluating/"], await ListedAsync(h.Source, "evaluating", ct));
+            Assert.Equal(["closed/flat", "closed/moved_agent_change", "closed/request_opened"], await ListedAsync(h.Source, "closed", ct));
+            Assert.Equal(6, (await ListedAsync(h.Source, null, ct)).Length);
+            Assert.Contains("the read timed out",
+                await DarlingMcpChangeWatchTools.GetChangeWatches(h.Source, PgServerName, ChangeWatchStore.StateFailed, 50, ct), StringComparison.Ordinal);
             Assert.Contains("Invalid state", await DarlingMcpChangeWatchTools.GetChangeWatches(h.Source, PgServerName, "stuck", 50, ct), StringComparison.Ordinal);
         });
 

@@ -70,8 +70,10 @@ WHERE server_id = $1 AND outcome = 'succeeded' AND action_time > $2 AND action_t
        capture in a run (failover, Query Store off, the collector failed for it) has nothing to compare, so it is never read as an unforce.
        #6239 round 3, L5: the read covers only the captures after the mark ($2) up to $3. Each one's previous capture is the newest marker row (plan_id IS NULL) of
        the same database in the day before it, found by a LATERAL seek on idx_query_store_forced_plans_markers (V207), so a pass no longer sorts a day of forced-plan
-       rows per server. #6239 round 3, L4: a database whose previous capture is more than 30 minutes before this one (it came back after a failback, a
-       Query Store that was read-only, a collector that failed for hours) has this capture treated as a NEW BASELINE: what was forced or unforced during the gap
+       rows per server. #6239 round 3, L4: a database whose previous capture is more than $4 minutes before this one (it came back after a failback, a
+       Query Store that was read-only, a collector that failed for hours) has this capture treated as a NEW BASELINE. #6234: $4 is CaptureGapLimit of the
+       forced-plans collector's frequency on this server (twice the frequency plus 5 minutes), not a fixed 30 minutes: at a 60-minute frequency every capture is
+       more than 30 minutes after the last and no plan change would ever be read. A skipped gap is one of more than a missed capture or two: what was forced or unforced during the gap
        cannot be dated, and reporting it at the return capture would open a watch bracketing the failback and not the change. #6239 round 3, L3: a change the
        plan-force ledger explains (a succeeded action on the plan AFTER the previous capture and up to this one) is skipped; a fixed 30 minutes missed an action
        early in a longer gap. The other capture's plans are probed with a LATERAL LIMIT 1 per plan row (an index probe on the capture's time), because as an
@@ -86,7 +88,7 @@ WITH fresh AS (
                         FROM collect.query_store_forced_plans AS q
                         WHERE q.server_id = $1 AND q.database_name = m.database_name AND q.plan_id IS NULL
                           AND q.collection_time < m.t AND q.collection_time >= m.t - interval '1 day') AS p
-    WHERE p.prev_t IS NOT NULL AND m.t - p.prev_t <= interval '30 minutes'
+    WHERE p.prev_t IS NOT NULL AND m.t - p.prev_t <= $4 * interval '1 minute'
 )
 SELECT 'forced' AS change_kind, n.t, n.database_name, f.query_id, f.plan_id
 FROM fresh AS n
@@ -134,6 +136,26 @@ WHERE after.hit IS NULL
         _commandTimeoutSeconds = commandTimeoutSeconds;
         _utcNow = utcNow ?? (() => DateTime.UtcNow);
         _evaluator = new ChangeWatchEvaluator(readSource, commandTimeoutSeconds);
+    }
+
+    /// <summary>The forced-plans collector, whose captures the plan-change diff reads (the frequency it runs at on a server is settable).</summary>
+    internal const string ForcedPlansCollector = "query_store_forced_plans";
+
+    /// <summary>
+    /// #6234: how far apart two captures of one database may be and still be diffed: twice the collector's frequency, so one missed capture
+    /// still bridges, plus <see cref="MarkSlack"/> for the capture's own run time. A longer gap is a return from an outage, whose change cannot be dated.
+    /// </summary>
+    public static TimeSpan CaptureGapLimit(int frequencyMinutes) => TimeSpan.FromMinutes((2L * Math.Max(1, CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(frequencyMinutes))) + MarkSlack.TotalMinutes);
+
+    /// <summary>
+    /// #6234: the frequency, in minutes, the forced-plans collector runs at on one server, resolved the way the worker resolves it: the server's own
+    /// override row, else the fleet-wide row, else the shipped default (<see cref="CollectorScheduleDefaults.ResolveEffectiveIntervalMinutes"/>).
+    /// </summary>
+    internal async Task<int> ForcedPlansFrequencyMinutesAsync(int serverId, CancellationToken cancellationToken)
+    {
+        var overrides = await DarlingDataReader.ReadScheduleOverridesAsync(_readSource, serverId, cancellationToken);
+        return CollectorScheduleDefaults.ResolveEffectiveIntervalMinutes(ForcedPlansCollector, serverId, overrides)
+               ?? CollectorScheduleDefaults.All[ForcedPlansCollector].FrequencyMinutes;
     }
 
     private static DateTime Naive(DateTime utc) => DateTime.SpecifyKind(utc, DateTimeKind.Unspecified);
@@ -300,7 +322,8 @@ WHERE after.hit IS NULL
             }
         }
 
-        await using (var command = Bind(_readSource.CreateCommand(PlanSnapshotChangesSql), serverId, Mark("plan_snapshots"), naiveEnd))
+        var gapLimit = CaptureGapLimit(await ForcedPlansFrequencyMinutesAsync(serverId, cancellationToken));
+        await using (var command = WithGapLimit(Bind(_readSource.CreateCommand(PlanSnapshotChangesSql), serverId, Mark("plan_snapshots"), naiveEnd), gapLimit))
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
             while (await reader.ReadAsync(cancellationToken))
@@ -318,6 +341,13 @@ WHERE after.hit IS NULL
         }
 
         return changes;
+    }
+
+    /// <summary>Adds PlanSnapshotChangesSql's fourth parameter: the longest gap, in whole minutes, between two captures of a database that is still diffed.</summary>
+    internal static NpgsqlCommand WithGapLimit(NpgsqlCommand command, TimeSpan gapLimit)
+    {
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = (int)gapLimit.TotalMinutes });
+        return command;
     }
 
     private NpgsqlCommand Bind(NpgsqlCommand command, int serverId, DateTime start, DateTime end)
@@ -375,7 +405,7 @@ WHERE after.hit IS NULL
                     continue;
                 }
 
-                if (await _store.IsAgentOnlyAsync(watch.WatchId, cancellationToken))
+                if (await _store.IsAgentOnlyAsync(watch.WatchId, CaptureGapLimit(await ForcedPlansFrequencyMinutesAsync(watch.ServerId, cancellationToken)), cancellationToken))
                 {
                     /* #6239 round 3, L9: an agent's own plan change under a change-watch request is recorded and measured, and opens no further request. */
                     await _store.CloseAsync(watch.WatchId, ChangeWatchStore.ResultAgentChange, null, evaluation.ResultJson, cancellationToken);

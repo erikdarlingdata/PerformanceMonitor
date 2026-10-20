@@ -395,6 +395,30 @@ FROM config.investigation_requests", ct, agentForcedAt);
     }
 
     [Fact]
+    public async Task AtASixtyMinuteFrequency_AnAgentsForceFiftyMinutesBeforeTheCaptureThatSawIt_IsTheAgentsChange()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            await AddServerAsync(h.Connection, ct);
+            await SetForcedPlansFrequencyAsync(h, 60, ct);
+            var at = h.Now.AddMinutes(-70);
+            /* The forced-plans collector runs hourly, so the capture that sees the agent's force is up to an hour after it: the journal row reaches back that far. */
+            await OpenARequestAndJournalAnAgentForceAsync(h, at.AddMinutes(-50), ct);
+            await SeedWaitsAsync(h.Connection, at.AddMinutes(-60), 300, ct);
+            await SeedWaitsAsync(h.Connection, at, 8000, ct);
+            await h.Store.RecordChangesAsync(ServerId, ServerName, new[]
+            {
+                new ChangeWatchChange("plan_force:snapshot:Sales:1:10:x", "plan_force", at, "plan 10 of query 1 in Sales: forced", "Sales", 1, 10),
+            }, ct);
+
+            await h.NewPass().EvaluateDueAsync(ct);
+
+            Assert.Equal(1, await CountAsync(h.Connection, "SELECT count(*) FROM config.investigation_requests WHERE trigger_kind = 'change_watch'", ct));
+            Assert.Equal(1, await CountAsync(h.Connection, "SELECT count(*) FROM config.change_watches WHERE result = 'moved_agent_change'", ct));
+        });
+    }
+
+    [Fact]
     public async Task AWatchHoldingBothAnAgentsForceAndAPersonsForce_OpensARequest()
     {
         await RunAsync(true, async (h, ct) =>
@@ -466,7 +490,7 @@ FROM config.investigation_requests", ct, agentForcedAt);
         await RunAsync(true, async (h, ct) =>
         {
             var t1 = h.Now.AddMinutes(-60);
-            var t2 = h.Now.AddMinutes(-35);
+            var t2 = h.Now.AddMinutes(-50);
             /* Plans 10 and 11 are in the capture at t2 and not in the one at t1. The ledger forced 11 inside the gap (after t1, up to t2). It forced 10 at
                t2 - 28 minutes, which is BEFORE t1: that action belongs to the interval before the previous capture, not to this one. */
             await ForcedPlanCaptureAsync(h.Connection, t1, "Sales", ct);
@@ -478,6 +502,50 @@ FROM config.investigation_requests", ct, agentForcedAt);
 
             var snapshot = Assert.Single(found, c => c.Key.StartsWith("plan_force:snapshot:", StringComparison.Ordinal));
             Assert.Equal(10, snapshot.PlanId);
+        });
+    }
+
+    /* #6234: the forced-plans collector's frequency is per server and settable, so the longest gap between two captures that is still diffed follows it
+       (twice the frequency plus 5 minutes), not a fixed 30 minutes. */
+    private static Task SetForcedPlansFrequencyAsync(Harness h, int minutes, CancellationToken ct) =>
+        ExecAsync(h.Connection, "INSERT INTO config.config_collector_schedules (server_id, collector_name, frequency_minutes) VALUES ($1, 'query_store_forced_plans', $2)", ct, ServerId, minutes);
+
+    [Fact]
+    public async Task AtASixtyMinuteFrequency_APlanForcedBetweenTwoCapturesAnHourApart_IsDetected()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            await AddServerAsync(h.Connection, ct);
+            await SetForcedPlansFrequencyAsync(h, 60, ct);
+            var first = h.Now.AddMinutes(-130);
+            var second = h.Now.AddMinutes(-70);
+            await ForcedPlanCaptureAsync(h.Connection, first, "Sales", ct, (1, 10));
+            await ForcedPlanCaptureAsync(h.Connection, second, "Sales", ct, (1, 10), (2, 20));
+
+            Assert.Equal(60, await h.NewPass().ForcedPlansFrequencyMinutesAsync(ServerId, ct));
+            var found = await h.NewPass().ReadChangesAsync(ServerId, first.AddMinutes(-1), h.Now, ct);
+
+            var change = Assert.Single(found, c => c.Kind == "plan_force");
+            Assert.Equal(20, change.PlanId);
+            Assert.Equal("plan_force:snapshot:Sales:2:20:" + Stamp(second), change.Key);
+        });
+    }
+
+    [Fact]
+    public async Task AtAFifteenMinuteFrequency_ACaptureThreeHoursAfterThePreviousOne_IsStillANewBaseline()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            await AddServerAsync(h.Connection, ct);
+            await SetForcedPlansFrequencyAsync(h, 15, ct);
+            var first = h.Now.AddMinutes(-230);
+            var second = h.Now.AddMinutes(-50);
+            await ForcedPlanCaptureAsync(h.Connection, first, "Sales", ct, (1, 10));
+            await ForcedPlanCaptureAsync(h.Connection, second, "Sales", ct, (1, 10), (2, 20));
+
+            var found = await h.NewPass().ReadChangesAsync(ServerId, first.AddMinutes(-1), h.Now, ct);
+
+            Assert.DoesNotContain(found, c => c.Kind == "plan_force");
         });
     }
 
@@ -531,6 +599,7 @@ CROSS JOIN LATERAL (SELECT NULL::bigint AS n UNION ALL SELECT generate_series(1,
             explain.Parameters.Add(new NpgsqlParameter { Value = ServerId });
             explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = Naive(mark) });
             explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = Naive(h.Now) });
+            ChangeWatchPass.WithGapLimit(explain, ChangeWatchPass.CaptureGapLimit(5));
             var json = (string)(await explain.ExecuteScalarAsync(ct))!;
             using var document = System.Text.Json.JsonDocument.Parse(json);
             var emitted = RowsEmittedFromTable(document.RootElement[0].GetProperty("Plan"), "query_store_forced_plans");

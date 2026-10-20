@@ -393,10 +393,12 @@ WHERE watch_id = $1 AND state = 'evaluating' AND attempts >= $4",
     /// True when the watch has changes and every one is an agent's plan force or unforce made while it handled a change-watch request: an
     /// <c>action_called</c> journal row of a <c>plan_force</c> or <c>plan_unforce</c> kind, by an agent, on a change-watch request of the change's server, whose
     /// target is the change's database and plan (#6239 round 3, M1: matched by plan, not by time alone, so a person's change near an agent's unrelated one still
-    /// opens a request), up to 30 minutes before the capture that saw the change. Such a watch is recorded and measured but opens no request, so an agent's fix
+    /// opens a request), up to <paramref name="reach"/> before the capture that saw the change (#6234: the forced-plans collector's capture gap limit on that
+    /// server, <c>twice its frequency plus 5 minutes</c>, not a fixed 30 minutes: at a 60-minute frequency the capture that sees an agent's force comes up to an hour
+    /// after it, and a person's change is told apart from the agent's only if the window reaches the action). Such a watch is recorded and measured but opens no request, so an agent's fix
     /// cannot start the next.
     /// </summary>
-    public async Task<bool> IsAgentOnlyAsync(Guid watchId, CancellationToken cancellationToken = default)
+    public async Task<bool> IsAgentOnlyAsync(Guid watchId, TimeSpan reach, CancellationToken cancellationToken = default)
     {
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var command = Command(connection, null, @"
@@ -412,7 +414,7 @@ SELECT EXISTS (SELECT 1 FROM config.change_watch_changes WHERE watch_id = $1)
                       AND j.detail->>'kind' IN ('plan_force', 'plan_unforce')
                       AND r.trigger_kind = 'change_watch' AND r.server_id = c.server_id
                       AND j.detail->'target'->>'database' = c.database_name AND j.detail->'target'->>'id' = c.plan_id::text
-                      AND j.event_time >= c.change_time - interval '30 minutes' AND j.event_time <= c.change_time + interval '5 minutes')))", watchId);
+                      AND j.event_time >= c.change_time - $2 * interval '1 minute' AND j.event_time <= c.change_time + interval '5 minutes')))", watchId, (int)Math.Ceiling(reach.TotalMinutes));
         return await command.ExecuteScalarAsync(cancellationToken) is true;
     }
 
