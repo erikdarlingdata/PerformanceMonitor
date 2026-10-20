@@ -114,10 +114,7 @@ public sealed partial class DarlingMcpAlertTools
         var previousRecipients = "";
         if (columns.Contains("smtp_recipients"))
         {
-            await using var read = new NpgsqlCommand("SELECT smtp_recipients FROM config.config_notification_routes WHERE route_id = $1", connection, transaction);
-            read.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-            read.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });
-            previousRecipients = (await read.ExecuteScalarAsync(cancellationToken)) as string ?? "";
+            previousRecipients = await ReadRecipientsAsync(connection, transaction, routeId, cancellationToken);
         }
 
         var previousSaved = await NotificationRouteWriter.SetRouteDestinationsAsync(

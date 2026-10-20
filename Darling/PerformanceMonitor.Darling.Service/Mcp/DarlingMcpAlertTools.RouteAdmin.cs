@@ -353,6 +353,16 @@ public sealed partial class DarlingMcpAlertTools
         }
     }
 
+    /// <summary>The route's recipient list as stored now, read on the write's own transaction (the <c>mcp</c> login may read that column).</summary>
+    private static async Task<string> ReadRecipientsAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, int routeId, CancellationToken cancellationToken)
+    {
+        const string readSql = "SELECT smtp_recipients FROM config.config_notification_routes WHERE route_id = $1";
+        await using var command = new NpgsqlCommand(readSql, connection) { Transaction = transaction };
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });
+        return await command.ExecuteScalarAsync(cancellationToken) as string ?? "";
+    }
+
     /// <summary>The refusal a route function raised (its own DL400, DL403 or DL404 sentence), or null for any other error.</summary>
     private static string? RouteFunctionOutcome(PostgresException ex) => ex.SqlState switch
     {
