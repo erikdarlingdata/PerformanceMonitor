@@ -53,20 +53,25 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     private static readonly string[] AlertToolSurface =
     {
         "create_mute_rule",
+        /* #6231: the route author and editor (sealed through the shared writer) and the dismiss pair. */
+        "create_notification_route",
         "delete_mute_rule",
         /* #3598 (V131): the notification-routes trio — the read publishes the family taxonomy and the routes
            (destinations withheld, presence reported); the two writes are the ones that move no destination,
            the set_mute_rule_enabled / delete_mute_rule shape. */
         "delete_notification_route",
+        "dismiss_alert_history",
         "get_alert_history",
         "get_alert_settings",
         "get_mute_rules",
         "get_notification_routes",
+        "restore_alert_history",
         "set_mute_rule_enabled",
         "set_notification_route_enabled",
         "set_notification_route_fallback",
         "update_alert_settings",
         "update_mute_rule",
+        "update_notification_route",
     };
 
     private static MethodInfo[] ToolMethods() => typeof(DarlingMcpAlertTools)

@@ -152,6 +152,10 @@ public static class DarlingWebEndpoints
         "get_compiles_after_evict",
         "set_notification_route_enabled",
         "set_notification_route_fallback",
+        "create_notification_route",
+        "update_notification_route",
+        "dismiss_alert_history",
+        "restore_alert_history",
         /* #5632 Phase A: claim and submit write investigation state for an agent over MCP; the web serves the two
            investigation reads only (/api/read). */
         "claim_investigation_request",

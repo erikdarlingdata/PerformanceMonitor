@@ -58,9 +58,7 @@ public static class ViewerWebhookSigningKeys
         "The generic webhook URL or proxy changed while the key was made. Close this window, open it again and retry.";
 
     /// <summary>What a save says when it would change the URL or proxy a key is tied to.</summary>
-    public const string RemoveKeyFirstText =
-        "A signing key is saved for this destination, and it is tied to the generic webhook URL and proxy. Remove the key first, "
-        + "save the change, then generate a new key.";
+    public const string RemoveKeyFirstText = NotificationRouteWriter.RemoveKeyFirstText;
 
     /// <summary>What a Settings save says when the generic proxy changes while a route holds a key.</summary>
     public const string RouteKeysTieToProxyText =

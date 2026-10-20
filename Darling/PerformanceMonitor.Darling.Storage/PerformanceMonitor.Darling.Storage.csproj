@@ -23,6 +23,8 @@
     <!-- ServerClock: the job-history read converts each server-local run time with its server's clock. -->
     <ProjectReference Include="..\..\PerformanceMonitor.Analysis\PerformanceMonitor.Analysis.csproj" />
     <ProjectReference Include="..\..\PerformanceMonitor.Collectors\PerformanceMonitor.Collectors.csproj" />
+    <!-- #6231: the notification route write (validation, sealing, SQL) lives here for the Viewer and the MCP tools; its bounds are NotificationRoute's. -->
+    <ProjectReference Include="..\..\PerformanceMonitor.Notifications\PerformanceMonitor.Notifications.csproj" />
     <!-- #3797: the Query Store clutter composition that moved here beside its reader speaks the band canon
          (HealthSeverity) and the readonly_reason decode (QueryStoreReadonlyReason), both of which are
          Common's single copies. Referencing Common is cheaper than restating either one here. -->

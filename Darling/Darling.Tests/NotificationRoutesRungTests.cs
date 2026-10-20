@@ -391,7 +391,7 @@ public sealed class NotificationRoutesRungTests
         Assert.Contains("are NOT reported", readDescription, StringComparison.Ordinal);
 
         Assert.Contains("re-point a route: destinations are bearer secrets", source[enabled..delete], StringComparison.Ordinal);
-        Assert.Contains("only the Viewer's Settings window can author", source[delete..], StringComparison.Ordinal);
+        Assert.Contains("secrets that cannot be read back", source[delete..], StringComparison.Ordinal);
 
         foreach (var family in AlertFamily.All)
         {

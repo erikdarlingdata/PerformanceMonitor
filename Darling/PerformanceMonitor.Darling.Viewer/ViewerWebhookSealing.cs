@@ -26,7 +26,7 @@ public static class ViewerWebhookSealing
     public const string KeepHint = "Saved. Leave blank to keep it. Type - to remove it.";
 
     /// <summary>A box holding only this text removes the saved value.</summary>
-    public const string ClearMarker = "-";
+    public const string ClearMarker = NotificationRouteWriter.ClearMarker;
 
     /// <summary>The text a box shows for a stored value: nothing for a sealed one, which cannot be shown.</summary>
     public static string ShownText(string? stored) => PasswordSeal.IsSealed(stored) ? "" : stored ?? "";
@@ -145,12 +145,35 @@ public static class ViewerWebhookSealing
     {
         ArgumentNullException.ThrowIfNull(row);
         ArgumentNullException.ThrowIfNull(parent);
-        var where = PasswordBinding.WebhookRouteRow(routeId);
+        /* #6231: the resolution is NotificationRouteWriter.ResolveRoute, the one copy the MCP route tools share. */
+        var draft = row.ToDraft();
+        Func<string, PasswordBinding, string>? seal = sealer is null ? null : (text, binding) =>
+        {
+            try
+            {
+                return sealer.SealWebhook(text, binding);
+            }
+            catch (ViewerPasswordRefusedException ex)
+            {
+                throw new NotificationRouteRefusedException(ex.Message, NotificationRouteRefusalKind.Value);
+            }
+        };
 
-        row.TeamsUrl = ResolveValue(row.TeamsUrl, stored?.TeamsUrl, "teams", where, parent.TeamsProxy, parent.TeamsProxy, null, null, "Teams webhook URL", sealer, refusal);
-        row.SlackUrl = ResolveValue(row.SlackUrl, stored?.SlackUrl, "slack", where, parent.SlackProxy, parent.SlackProxy, null, null, "Slack webhook URL", sealer, refusal);
-        row.GenericUrl = ResolveValue(row.GenericUrl, stored?.GenericUrl, "generic", where, parent.GenericProxy, parent.GenericProxy, null, null, "generic webhook URL", sealer, refusal);
-        row.PagerDutyRoutingKey = ResolveValue(row.PagerDutyRoutingKey, stored?.PagerDutyRoutingKey, "pagerduty", where, parent.PagerDutyProxy, parent.PagerDutyProxy, null, null, "PagerDuty routing key", sealer, refusal);
+        try
+        {
+            NotificationRouteWriter.ResolveRoute(
+                draft, stored?.ToDraft(), new WebhookProxies(parent.TeamsProxy, parent.SlackProxy, parent.GenericProxy, parent.PagerDutyProxy),
+                routeId, seal, refusal ?? ViewerPasswordKey.NoKeyText);
+        }
+        catch (NotificationRouteRefusedException ex)
+        {
+            throw new ViewerPasswordRefusedException(ex.Message);
+        }
+
+        row.TeamsUrl = draft.TeamsUrl;
+        row.SlackUrl = draft.SlackUrl;
+        row.GenericUrl = draft.GenericUrl;
+        row.PagerDutyRoutingKey = draft.PagerDutyRoutingKey;
     }
 
     private static string ResolveValue(
