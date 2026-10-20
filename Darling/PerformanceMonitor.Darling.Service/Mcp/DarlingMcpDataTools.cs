@@ -1380,6 +1380,30 @@ public sealed class DarlingMcpDataTools
     /// </summary>
     private const int QueryTextPreviewLength = 400;
 
+    /// <summary>
+    /// #6181: the <c>unavailable</c> answer for a Query Store top read that found nothing when no Query Store sample has ever
+    /// been stored, Query Store is on in the latest health snapshot and the collector's last run succeeded; null otherwise
+    /// (a sampled server, or an unknown or off state), so the caller keeps its own text.
+    /// </summary>
+    private static async Task<string?> FirstIntervalStatusAsync(
+        NpgsqlDataSource postgres, int serverId, string serverName, DatabaseFilter databases, CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (await DarlingTrendReader.HasAnyQueryStoreStatAsync(postgres, serverId, cancellationToken))
+            {
+                return null;
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+
+        var message = await DarlingRuntimePrecondition.QueryStoreFirstIntervalMessageAsync(postgres, serverId, serverName, databases, cancellationToken);
+        return message is null ? null : McpHelpers.Status("unavailable", message);
+    }
+
     [McpServerTool(Name = "get_query_store_top"), Description("Cost-ranked top Query Store queries (heaviest first), not time-ordered. Requires Query Store enabled on target databases. window_truncated marks a window floor, not a page cut — no limit changes it — because stored history can be shorter than asked; effective_start / effective_hours_back give the reach actually served. <<GUIDE>> effective_start is where complete history begins. Long windows may read whole days from a daily summary; approximate: true says so. approximation_note says what the summary can miss; summary_days names the days it covered. Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database and module filtering. Reads the raw tier, and the per-interval table for the older part of a long window (the corrected rollups carry no query_id or plan_id); history_source says which served. Rows are per Query Store execution outcome (execution_type: Regular, Aborted, Exception): a plan with aborted executions returns one row per outcome, each with its own counts and averages. The execution_type filter keeps one outcome, and module_name keeps one module: the exact, case-sensitive schema-qualified name the collector records (get_top_procedures_by_cpu's full_name; Adhoc for ad-hoc statements, Unknown for an object it could not resolve), applied after interval deduplication and before ranking. When a filter matches nothing but the same read without the filters has rows, the answer is empty (a measured zero), not a Query Store precondition; a module_name miss also carries the window read (effective_start, effective_hours_back, window_truncated) as hints. query_text is a 400-character preview by default (query_text_truncated marks a cut row); full_text=true returns each row's whole statement." + McpHelpers.WindowTruncatedDescription)]
     public static Task<string> GetQueryStoreTop(
         NpgsqlDataSource postgres,
@@ -1546,6 +1570,10 @@ public sealed class DarlingMcpDataTools
                     /* And the collector's own last run, for the case Query Store is on and the collector is
                        the thing that cannot read it. */
                     ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_store", cancellationToken)
+                    /* #6181: a server just added stores no Query Store row until its first interval closes. When none was
+                       ever stored but Query Store is READ_WRITE and the collector's last run succeeded, say that instead of
+                       "may not be enabled". */
+                    ?? await FirstIntervalStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, databases, cancellationToken)
                     ?? McpHelpers.Status(
                         "unavailable",
                         $"No Query Store rows for this server in the {hours_back}-hour window searched. Query Store " +

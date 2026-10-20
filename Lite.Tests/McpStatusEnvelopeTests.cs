@@ -340,6 +340,51 @@ public class McpStatusEnvelopeTests : IClassFixture<SharedDuckDbFixture>, IDispo
         Assert.Equal("unavailable", root.GetProperty("status").GetString());
     }
 
+    /// <summary>
+    /// #6181: a newly added server stores no Query Store row until its first interval closes. With Query Store READ_WRITE in the
+    /// health snapshot and a successful query_store run, the three reads say Query Store is on and when its data arrives,
+    /// not "may be OFF" or "may not be enabled".
+    /// </summary>
+    [Fact]
+    public async Task QueryStoreReads_BeforeTheFirstIntervalCloses_SayQueryStoreIsOn()
+    {
+        await SeedQueryStoreHealthAsync("OnDb", "READ_WRITE");
+        await SeedCollectionLogAsync("query_store", "SUCCESS", null);
+
+        var top = Parse(await McpQueryTools.GetQueryStoreTop(_dataService, _serverManager));
+        var trend = Parse(await McpQueryTools.GetQueryStoreDurationTrend(_dataService, _serverManager));
+        var regressions = Parse(await McpQueryTools.GetQueryStoreRegressions(_dataService, _serverManager));
+
+        foreach (var root in new[] { top, trend, regressions })
+        {
+            Assert.Equal("unavailable", root.GetProperty("status").GetString());
+            var message = root.GetProperty("message").GetString()!;
+            Assert.Contains("Query Store is on", message, StringComparison.Ordinal);
+            Assert.Contains("interval closes", message, StringComparison.Ordinal);
+            Assert.Contains("60 minutes", message, StringComparison.Ordinal);
+            Assert.DoesNotContain("may be OFF", message, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("may not be enabled", message, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    /// <summary>
+    /// #6181: the "may be OFF" text stays wherever the evidence does not say Query Store is on and the collector healthy: no
+    /// health snapshot, or a failed collector run.
+    /// </summary>
+    [Fact]
+    public async Task QueryStoreReads_WithoutHealthyEvidence_KeepTheMayBeOffText()
+    {
+        /* State unknown: no snapshot, no collector run. */
+        var unknown = Parse(await McpQueryTools.GetQueryStoreDurationTrend(_dataService, _serverManager));
+        Assert.Contains("Query Store may be OFF", unknown.GetProperty("message").GetString()!, StringComparison.Ordinal);
+
+        /* Query Store on, but the collector's latest run failed. */
+        await SeedQueryStoreHealthAsync("OnDb", "READ_WRITE");
+        await SeedCollectionLogAsync("query_store", "ERROR", "login failed");
+        var failed = Parse(await McpQueryTools.GetQueryStoreDurationTrend(_dataService, _serverManager));
+        Assert.Contains("Query Store may be OFF", failed.GetProperty("message").GetString()!, StringComparison.Ordinal);
+    }
+
     private Task SeedCollectionLogAsync(string collectorName, string status, string? errorMessage) =>
         SeedCollectionLogAtAsync(collectorName, status, errorMessage, DateTime.UtcNow.AddMinutes(-1));
 

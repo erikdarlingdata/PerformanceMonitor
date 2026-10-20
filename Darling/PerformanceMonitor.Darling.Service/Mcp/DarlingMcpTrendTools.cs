@@ -765,6 +765,16 @@ public sealed class DarlingMcpTrendTools
                 var everSampled = await DarlingTrendReader.HasAnyQueryStoreStatAsync(postgres, resolved.ServerId, cancellationToken);
                 if (!everSampled)
                 {
+                    /* #6181: a server just added stores nothing until its first Query Store interval closes. When the
+                       product's own latest evidence says Query Store is on and the collector's last run succeeded, say
+                       that rather than "may be OFF". Unknown or off state keeps the text below. */
+                    var firstInterval = await DarlingRuntimePrecondition.QueryStoreFirstIntervalMessageAsync(
+                        postgres, resolved.ServerId, resolved.ServerName, databases, cancellationToken);
+                    if (firstInterval != null)
+                    {
+                        return EmptyStatus("unavailable", firstInterval, disclosure, databases);
+                    }
+
                     return EmptyStatus(
                         "unavailable",
                         NeverSampledMessage(resolved.DisplayName, "Query Store",
