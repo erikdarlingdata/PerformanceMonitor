@@ -1275,7 +1275,7 @@ SELECT
     EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('collect.query_store_forced_plans') AND attname = 'plan_guide_scope' AND NOT attisdropped),
     /* V202 (#6159) adds the primary replica's name to the AG replica states. Found by catalog so the answer does not depend on the
        connecting role's privileges. Named only in this probe line, never in prose, per the V71 finding. */
-    EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('collect.ag_replica_states') AND attname = 'primary_replica' AND NOT attisdropped)),
+    EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('collect.ag_replica_states') AND attname = 'primary_replica' AND NOT attisdropped),
     /* V203 (#6170) adds the hypothetical-index login pair to the server registry. Found by catalog so the answer does not depend on the
        connecting role's privileges. Named only in this probe line, never in prose, per the V71 finding. */
     EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.config_monitored_servers') AND attname = 'hypothetical_index_encrypted_password' AND NOT attisdropped)";
