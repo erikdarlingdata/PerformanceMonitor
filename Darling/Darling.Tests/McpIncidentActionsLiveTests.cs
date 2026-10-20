@@ -235,8 +235,8 @@ public sealed class McpIncidentActionsLiveTests
     }
 
     [Theory]
-    [InlineData("pause", null, null)]
-    [InlineData("resume", null, null)]
+    [InlineData("pause", ServerId, null)]
+    [InlineData("resume", null, 30)]
     [InlineData("disable_server", ServerId, null)]
     [InlineData("snapshot_now", ServerId, null)]
     [InlineData("undo_plan_change", null, null)]
@@ -247,7 +247,8 @@ public sealed class McpIncidentActionsLiveTests
     [InlineData("purge_now", null, 0)]
     [InlineData("purge_now", null, 3651)]
     [InlineData("reload", ServerId, null)]
-    public async Task TheFunction_RefusesACommandTypeOutsideItsFourOrABadArgument_AndQueuesNothing(string type, int? serverId, int? retentionDays)
+    [InlineData("reload", null, null)]
+    public async Task TheFunction_RefusesACommandTypeOutsideItsFiveOrABadArgument_AndQueuesNothing(string type, int? serverId, int? retentionDays)
     {
         await WithRoleAsync("mcp", grantFunction: true, async (owner, asRole, ct) =>
         {
@@ -266,18 +267,129 @@ public sealed class McpIncidentActionsLiveTests
         });
     }
 
-    [Fact]
-    public async Task Reload_IsQueuedThroughTheFunction_WithNoServerAndNoArguments()
+    [Theory]
+    [InlineData("pause")]
+    [InlineData("resume")]
+    public async Task PauseAndResume_AreQueuedThroughTheFunction_WithNoServer_StampedMcpWhateverTheCallerSends(string type)
     {
         await WithRoleAsync("mcp", grantFunction: true, async (owner, asRole, ct) =>
         {
-            await using var call = asRole.CreateCommand("SELECT config.request_mcp_command('reload', NULL, NULL, NULL)");
+            await using var call = asRole.CreateCommand("SELECT config.request_mcp_command($1, NULL, NULL, 'someone (viewer)')");
+            call.Parameters.AddWithValue(type);
             var id = Convert.ToInt64(await call.ExecuteScalarAsync(ct));
             await using var read = owner.CreateCommand(
-                "SELECT command_type || '/' || COALESCE(args_json::text, 'null') || '/' || requested_by FROM config.config_command WHERE command_id = $1");
+                "SELECT command_type || '/' || COALESCE(args_json::text, 'null') || '/' || requested_by || '/' || status FROM config.config_command WHERE command_id = $1");
             read.Parameters.AddWithValue(id);
-            Assert.Equal("reload/null/mcp", (string)(await read.ExecuteScalarAsync(ct))!);
-            Assert.Equal(CommandKind.StoreWrite, DarlingCommandExecutor.ResolvePlan(new ClaimedCommand(id, "reload", null, null, "mcp")).Kind);
+            Assert.Equal(type + "/null/mcp/pending", (string)(await read.ExecuteScalarAsync(ct))!);
+            Assert.Equal(CommandKind.StoreWrite, DarlingCommandExecutor.ResolvePlan(new ClaimedCommand(id, type, null, null, "mcp")).Kind);
+        });
+    }
+
+    [Fact]
+    public async Task PauseCollection_QueuesThePauseCommand_AndTheMcpRoleCanNoLongerWriteThePausedFlag()
+    {
+        await WithRoleAsync("mcp", grantFunction: true, async (owner, asRole, ct) =>
+        {
+            await ExecAsync(owner, "INSERT INTO config.config_service (id) VALUES (1) ON CONFLICT DO NOTHING", ct);
+            var queued = Parse(await DarlingMcpCollectionStateTools.PauseCollection(asRole, cancellationToken: ct));
+            Assert.Equal("queued", (string?)queued["status"]);
+            var id = (long)queued["command_id"]!;
+            Assert.Equal(id, (long)queued["check_with"]!["command_id"]!);
+            Assert.Equal("resume_collection", (string?)queued["undo"]!["tool"]);
+            await using (var read = owner.CreateCommand("SELECT command_type || '/' || requested_by FROM config.config_command WHERE command_id = $1"))
+            {
+                read.Parameters.AddWithValue(id);
+                Assert.Equal("pause/mcp", (string)(await read.ExecuteScalarAsync(ct))!);
+            }
+
+            /* Nothing wrote the flag: only the service does, when it runs the command. */
+            await using (var flag = owner.CreateCommand("SELECT paused FROM config.config_service WHERE id = 1"))
+            {
+                Assert.False((bool)(await flag.ExecuteScalarAsync(ct))!);
+            }
+
+            var again = Parse(await DarlingMcpCollectionStateTools.PauseCollection(asRole, cancellationToken: ct));
+            Assert.Equal("refused", (string?)again["status"]);
+            Assert.Equal("already_queued", (string?)again["reason"]);
+
+            var denied = await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(asRole, "UPDATE config.config_service SET paused = TRUE WHERE id = 1", ct));
+            Assert.Equal("42501", denied.SqlState);
+        });
+    }
+
+    [Fact]
+    public async Task TestConnect_IsRefusedForADisabledServer_AndQueuedOnceItIsEnabled()
+    {
+        await WithRoleAsync("mcp", grantFunction: true, async (owner, asRole, ct) =>
+        {
+            await ExecAsync(owner, $"UPDATE config.config_monitored_servers SET is_enabled = FALSE WHERE server_id = {ServerId}", ct);
+            var refused = await Assert.ThrowsAsync<PostgresException>(async () =>
+            {
+                await using var call = asRole.CreateCommand($"SELECT config.request_mcp_command('test_connect', {ServerId}, NULL, 'mcp')");
+                await call.ExecuteScalarAsync(ct);
+            });
+            Assert.Equal("DL400", refused.SqlState);
+            await using (var count = owner.CreateCommand("SELECT count(*) FROM config.config_command"))
+            {
+                Assert.Equal(0L, Convert.ToInt64(await count.ExecuteScalarAsync(ct)));
+            }
+
+            await ExecAsync(owner, $"UPDATE config.config_monitored_servers SET is_enabled = TRUE WHERE server_id = {ServerId}", ct);
+            await using var ok = asRole.CreateCommand($"SELECT config.request_mcp_command('test_connect', {ServerId}, NULL, 'mcp')");
+            Assert.True(Convert.ToInt64(await ok.ExecuteScalarAsync(ct)) > 0);
+        });
+    }
+
+    [Fact]
+    public async Task TheFunction_RefusesARepeatableReadTransaction_AndQueuesNothing()
+    {
+        await WithRoleAsync("mcp", grantFunction: true, async (owner, asRole, ct) =>
+        {
+            await using var connection = await asRole.OpenConnectionAsync(ct);
+            await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, ct);
+            var refused = await Assert.ThrowsAsync<PostgresException>(async () =>
+            {
+                await using var call = new NpgsqlCommand("SELECT config.request_mcp_command('pause', NULL, NULL, 'mcp')", connection, transaction);
+                await call.ExecuteScalarAsync(ct);
+            });
+            Assert.Equal("DL400", refused.SqlState);
+            Assert.Contains("READ COMMITTED", refused.MessageText, StringComparison.Ordinal);
+            await transaction.RollbackAsync(ct);
+
+            await using var count = owner.CreateCommand("SELECT count(*) FROM config.config_command");
+            Assert.Equal(0L, Convert.ToInt64(await count.ExecuteScalarAsync(ct)));
+        });
+    }
+
+    [Fact]
+    public async Task TheFunction_AnswersBusyAtOnce_WhenAnotherSessionHoldsItsLock_AndNeverBlocks()
+    {
+        await WithRoleAsync("mcp", grantFunction: true, async (owner, asRole, ct) =>
+        {
+            await using var holder = await owner.OpenConnectionAsync(ct);
+            await using (var hold = new NpgsqlCommand("SELECT pg_advisory_lock(6230, hashtext('pause:'))", holder))
+            {
+                await hold.ExecuteNonQueryAsync(ct);
+            }
+
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            var busy = await Assert.ThrowsAsync<PostgresException>(async () =>
+            {
+                await using var call = asRole.CreateCommand("SELECT config.request_mcp_command('pause', NULL, NULL, 'mcp')");
+                call.CommandTimeout = 20;
+                await call.ExecuteScalarAsync(ct);
+            });
+            Assert.Equal("DL409", busy.SqlState);
+            Assert.Contains("busy", busy.MessageText, StringComparison.Ordinal);
+            Assert.True(clock.Elapsed < TimeSpan.FromSeconds(10), "the request waited on the lock: " + clock.Elapsed);
+
+            await using (var release = new NpgsqlCommand("SELECT pg_advisory_unlock(6230, hashtext('pause:'))", holder))
+            {
+                await release.ExecuteNonQueryAsync(ct);
+            }
+
+            await using var after = asRole.CreateCommand("SELECT config.request_mcp_command('pause', NULL, NULL, 'mcp')");
+            Assert.True(Convert.ToInt64(await after.ExecuteScalarAsync(ct)) > 0);
         });
     }
 

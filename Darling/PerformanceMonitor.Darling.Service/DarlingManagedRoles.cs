@@ -1497,9 +1497,9 @@ GRANT INSERT, UPDATE, DELETE ON {config}.database_state_expected TO {viewer};
 GRANT INSERT, UPDATE, DELETE ON {config}.config_mute_rules TO {mcp};
 GRANT UPDATE ON {config}.config_alert_settings TO {mcp};
 GRANT UPDATE (config_version, updated_at) ON {config}.config_service TO {mcp};
--- #6230: pause_collection / resume_collection run the command plane's own pause and resume write as mcp, so mcp may also set the
---     one paused column. No other service flag (capture_plans, mcp_enabled, mcp_port, ...) is writable by mcp.
-GRANT UPDATE (paused) ON {config}.config_service TO {mcp};
+-- #6230: pause_collection / resume_collection queue a pause or resume command through {config}.request_mcp_command, so mcp holds no
+--     write on the paused column. An earlier build granted it; this revoke takes it back from an upgraded store.
+REVOKE UPDATE (paused) ON {config}.config_service FROM {mcp};
 -- #5085: the fleet server-tag write tools (create/update/delete/assign/unassign_server_tag) run as mcp. The admin
 --    gate is these two single-table grants and nothing else: a role without them gets 42501 on a tag write.
 --    Both tables are non-secret and server_tags.id is GENERATED ALWAYS AS IDENTITY (so no sequence grant). V181 (#5750)
@@ -1698,11 +1698,12 @@ GRANT EXECUTE ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerLeg
 --     NOT a versioned migration, for the same reason as the edit function above.
 {BuildRequestSnapshotNowFunctionSql(config)}
 GRANT EXECUTE ON FUNCTION {config}.request_snapshot_now(integer, text, text) TO {viewer}, {mcp};
--- #6230: the MCP incident tools (analyze now, purge now, test a connection, reload) queue their command through
---     {config}.request_mcp_command, the only way the mcp role writes a command row. It names four command types and refuses any
+-- #6230: the MCP incident tools (analyze now, purge now, test a connection, pause, resume) queue their command through
+--     {config}.request_mcp_command, the only way the mcp role writes a command row. It names five command types and refuses any
 --     other, builds a connection test from the stored server row (no credential or connection string is an argument), and
 --     is granted to mcp only. Owned by the store owner, pinned search_path, no dynamic SQL. NOT a versioned migration.
 {BuildRequestMcpCommandFunctionSql(config)}
+REVOKE ALL ON FUNCTION {config}.request_mcp_command(text, integer, integer, text) FROM {mcp};
 GRANT EXECUTE ON FUNCTION {config}.request_mcp_command(text, integer, integer, text) TO {mcp};
 -- The store's own password rules for every role but the owner (see BuildServerPasswordRulesSql): a trigger on
 --     config_monitored_servers that refuses a password reference (env: or file:) and a move that keeps the stored
@@ -2419,8 +2420,9 @@ REVOKE ALL ON FUNCTION {config}.request_snapshot_now(integer, text, text) FROM P
 
     /// <summary>
     /// The SECURITY DEFINER function (#6230) the MCP incident tools queue a command through: <c>analyze_now</c>, <c>purge_now</c>
-    /// (with an optional retention), <c>test_connect</c> (built from the stored server row, so no credential or connection string
-    /// is ever an argument) and <c>reload</c>. Any other command type is refused in the body. Granted to the <c>mcp</c> role only.
+    /// (with an optional retention), <c>test_connect</c> (built from the stored server row of an enabled server, so no credential or connection string
+    /// is ever an argument), <c>pause</c> and <c>resume</c> (the two the Viewer queues). Any other command type is refused in the body. The row is always
+    /// stamped <c>mcp</c>, a transaction above READ COMMITTED is refused, and the lock is a try-lock that answers busy. Granted to the <c>mcp</c> role only.
     /// </summary>
     internal static string BuildRequestMcpCommandFunctionSql(string config) => $@"
 CREATE OR REPLACE FUNCTION {config}.request_mcp_command(
@@ -2440,20 +2442,30 @@ DECLARE
    v_last_status text;
    v_last_at timestamp;
 BEGIN
-   -- The only command types the mcp role may queue (#6230). Everything else the command plane runs (pause, resume, disable_server, the
-   -- plan and execute commands) stays out of this function on purpose: it is the one way mcp writes a command row.
-   IF v_type NOT IN ('analyze_now', 'purge_now', 'test_connect', 'reload') THEN
+   -- The only command types the mcp role may queue (#6230): the two the Viewer's pause and resume buttons queue, plus analyze_now,
+   -- purge_now and test_connect. Everything else the command plane runs (disable_server, reload, the plan and execute commands) stays
+   -- out of this function on purpose: it is the one way mcp writes a command row.
+   IF v_type NOT IN ('pause', 'resume', 'analyze_now', 'purge_now', 'test_connect') THEN
       RAISE EXCEPTION 'That command type cannot be queued through this function.' USING ERRCODE = 'DL400';
+   END IF;
+   -- The one-request-at-a-time rule below reads the newest row of its kind with a fresh snapshot per statement. A transaction that
+   -- keeps one snapshot (REPEATABLE READ and up) could miss a row another session just queued, so it is refused.
+   IF current_setting('transaction_isolation') <> 'read committed' THEN
+      RAISE EXCEPTION 'This request must run at the READ COMMITTED isolation level.' USING ERRCODE = 'DL400';
    END IF;
    IF p_retention_days IS NOT NULL AND (v_type <> 'purge_now' OR p_retention_days < 1 OR p_retention_days > 3650) THEN
       RAISE EXCEPTION 'retention_days is only for purge_now and must be 1 to 3650.' USING ERRCODE = 'DL400';
    END IF;
-   IF v_type IN ('purge_now', 'reload') THEN
+   IF v_type IN ('purge_now', 'pause', 'resume') THEN
       IF p_server_id IS NOT NULL THEN
          RAISE EXCEPTION 'This command takes no server.' USING ERRCODE = 'DL400';
       END IF;
    ELSIF p_server_id IS NULL OR NOT EXISTS (SELECT 1 FROM {config}.config_monitored_servers WHERE server_id = p_server_id) THEN
       RAISE EXCEPTION 'No monitored server with that id.' USING ERRCODE = 'DL404';
+   END IF;
+   -- A connection test dials the server with its stored credentials, so it runs only against a server the service is monitoring.
+   IF v_type = 'test_connect' AND NOT EXISTS (SELECT 1 FROM {config}.config_monitored_servers WHERE server_id = p_server_id AND is_enabled) THEN
+      RAISE EXCEPTION 'A connection test runs only against an enabled server.' USING ERRCODE = 'DL400';
    END IF;
    IF v_type = 'purge_now' AND p_retention_days IS NOT NULL THEN
       v_args := jsonb_build_object('retention_days', p_retention_days);
@@ -2472,9 +2484,9 @@ BEGIN
       WHERE s.server_id = p_server_id;
    END IF;
    -- One request of a kind (per server where it has one) at a time, and not within 15 seconds of the last, so a holder of the
-   -- mcp login cannot fill the queue. The lock never blocks (provisioning rule): a request holding it is a concurrent one.
+   -- mcp login cannot fill the queue. The lock is a try-lock: a request that cannot take it at once answers busy and never waits.
    IF NOT pg_try_advisory_xact_lock(6230, hashtext(v_type || ':' || COALESCE(p_server_id::text, ''))) THEN
-      RAISE EXCEPTION 'The same request is already queued or running.' USING ERRCODE = 'DL409';
+      RAISE EXCEPTION 'Another request of this kind is being queued right now (busy); try again shortly.' USING ERRCODE = 'DL409';
    END IF;
    SELECT c.status, c.created_at INTO v_last_status, v_last_at
    FROM {config}.config_command AS c
@@ -2487,8 +2499,10 @@ BEGIN
    IF v_last_at IS NOT NULL AND v_last_at > (now() AT TIME ZONE 'UTC') - interval '15 seconds' THEN
       RAISE EXCEPTION 'The same request was made less than 15 seconds ago.' USING ERRCODE = 'DL429';
    END IF;
+   -- The caller's p_requested_by is ignored (the parameter stays so an older caller still binds): every row this function queues is
+   -- stamped 'mcp', so a row cannot carry another actor's name.
    INSERT INTO {config}.config_command (requested_by, command_type, target_server_id, args_json, status, created_at)
-   VALUES (left(COALESCE(p_requested_by, 'mcp'), 200), v_type, p_server_id, v_args, 'pending', (now() AT TIME ZONE 'UTC'))
+   VALUES ('mcp', v_type, p_server_id, v_args, 'pending', (now() AT TIME ZONE 'UTC'))
    RETURNING command_id INTO v_id;
    RETURN v_id;
 END

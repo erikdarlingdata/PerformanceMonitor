@@ -14,6 +14,7 @@ using System.Linq;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -29,11 +30,14 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// databases) and <c>reload_config</c>, with <c>get_collection_state</c> to read the state before and after. The writes are served
 /// under <c>mcp.allowWrites</c> and are never offered to an investigation agent (<see cref="DarlingMcpWritePolicy.NeverAgentTools"/>).
 ///
-/// <para><b>One write path.</b> Pause, resume, enable, disable and reload build the <see cref="ClaimedCommand"/> a queued command
+/// <para><b>One write path.</b> Pause and resume queue the same command the Viewer queues, through <c>config.request_mcp_command</c>
+/// (<see cref="DarlingMcpCommandQueue"/>): the service runs it, the row is stamped <c>mcp</c>, and the <c>mcp</c> login holds no write on the paused flag.
+/// Enable, disable and reload build the <see cref="ClaimedCommand"/> a queued command
 /// row would carry and run the plan <see cref="DarlingCommandExecutor.ResolvePlan"/> returns through
 /// <see cref="DarlingCommandExecutor.ExecuteStoreWriteAsync(NpgsqlDataSource, CommandPlan, CancellationToken)"/>: the same SQL the
 /// command plane runs. The excluded-databases write is <see cref="MonitoredServerExclusions"/>, shared with the Viewer. This class owns no
-/// write SQL and no bounds of its own.</para>
+/// write SQL and no bounds of its own. A server is found the way <c>edit_server</c> and <c>remove_server</c> find one; a name that matches
+/// several servers is answered with the candidates, never picked from. Each server write logs at Warning with the tool, the server and the caller.</para>
 ///
 /// <para><b>Every answer says what changed, what it was, and the call that puts it back.</b> The service re-reads these on its next
 /// config poll (the reload beacon the writes bump), so there is no restart.</para>
@@ -43,33 +47,35 @@ public sealed class DarlingMcpCollectionStateTools
 {
     private const string TakesEffect = "The running service re-reads this on its next config poll; no restart is needed.";
 
-    private sealed record ServerRow(int ServerId, string Name, string Host, string? Database, string Engine, bool Enabled, IReadOnlyList<string> Excluded);
+    private sealed record ServerRow(int ServerId, string Name, string StorageName, string Engine, bool Enabled, IReadOnlyList<string> Excluded);
 
     [McpServerTool(Name = "pause_collection"), Description(
-        "Pauses ALL collection, alerting, analysis and purge in the service: sets the service's paused flag. Data already collected stays, and nothing is deleted. A pass already running finishes; no new pass starts until resume_collection. Served only with mcp.allowWrites. The answer gives the previous state and the exact call that undoes it; get_collection_state shows the flag.")]
-    public static Task<string> PauseCollection(NpgsqlDataSource postgres, CancellationToken cancellationToken = default) =>
-        ApplyPauseAsync(postgres, "pause_collection", pause: true, cancellationToken);
+        "Pauses ALL collection, alerting, analysis and purge in the service: queues the same pause command the Viewer's Pause button queues, which the service runs and which sets its paused flag. Data already collected stays, and nothing is deleted. A pass already running finishes; no new pass starts until resume_collection. Served only with mcp.allowWrites. The answer gives the command id, the previous state, the exact call that undoes it and the read that shows the result (get_command_result, then get_collection_state).")]
+    public static Task<string> PauseCollection(NpgsqlDataSource postgres, ILogger? logger = null, CancellationToken cancellationToken = default) =>
+        ApplyPauseAsync(postgres, "pause_collection", pause: true, logger, cancellationToken);
 
     [McpServerTool(Name = "resume_collection"), Description(
-        "Resumes collection after pause_collection: clears the service's paused flag, so the next pass runs. Served only with mcp.allowWrites. The answer gives the previous state and the exact call that undoes it; get_collection_state shows the flag.")]
-    public static Task<string> ResumeCollection(NpgsqlDataSource postgres, CancellationToken cancellationToken = default) =>
-        ApplyPauseAsync(postgres, "resume_collection", pause: false, cancellationToken);
+        "Resumes collection after pause_collection: queues the same resume command the Viewer's Resume button queues, which the service runs and which clears its paused flag, so the next pass runs. Served only with mcp.allowWrites. The answer gives the command id, the previous state, the exact call that undoes it and the read that shows the result (get_command_result, then get_collection_state).")]
+    public static Task<string> ResumeCollection(NpgsqlDataSource postgres, ILogger? logger = null, CancellationToken cancellationToken = default) =>
+        ApplyPauseAsync(postgres, "resume_collection", pause: false, logger, cancellationToken);
 
     [McpServerTool(Name = "disable_server"), Description(
         "Takes ONE monitored server out of collection: sets its enabled flag to false. Its definition, tags and collected history stay; the service skips it from its next config poll. Reversed by enable_server. Served only with mcp.allowWrites. The answer gives the previous state and the exact call that undoes it; get_collection_state lists each server's enabled flag.")]
     public static Task<string> DisableServer(
         NpgsqlDataSource postgres,
         [Description("Server name (the name list_servers shows), or a unique part of it.")] string server_name,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
-        ApplyEnabledAsync(postgres, "disable_server", server_name, enable: false, cancellationToken);
+        ApplyEnabledAsync(postgres, "disable_server", server_name, enable: false, logger, cancellationToken);
 
     [McpServerTool(Name = "enable_server"), Description(
         "Brings a disabled monitored server back into collection: sets its enabled flag to true; the service picks it up on its next config poll. Reverses disable_server. Served only with mcp.allowWrites. The answer gives the previous state and the exact call that undoes it; get_collection_state lists each server's enabled flag.")]
     public static Task<string> EnableServer(
         NpgsqlDataSource postgres,
         [Description("Server name (the name list_servers shows), or a unique part of it.")] string server_name,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
-        ApplyEnabledAsync(postgres, "enable_server", server_name, enable: true, cancellationToken);
+        ApplyEnabledAsync(postgres, "enable_server", server_name, enable: true, logger, cancellationToken);
 
     [McpServerTool(Name = "set_server_excluded_databases"), Description(
         "Replaces ONE server's excluded-databases list: the databases the collectors skip on that server. The list you send is the whole new list; an empty list clears it. At most 256 names of at most 128 characters each, no control characters; repeats (any casing) are kept once. Data already collected stays. The service applies it on its next config poll. Served only with mcp.allowWrites. The answer gives the previous list and the exact call that restores it; get_collection_state lists each server's excluded databases.")]
@@ -77,6 +83,7 @@ public sealed class DarlingMcpCollectionStateTools
         NpgsqlDataSource postgres,
         [Description("Server name (the name list_servers shows), or a unique part of it.")] string server_name,
         [Description("The complete new list of database names to exclude. Empty clears the list.")] string[] databases,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         const string tool = "set_server_excluded_databases";
@@ -105,18 +112,20 @@ public sealed class DarlingMcpCollectionStateTools
             }
 
             var after = await MonitoredServerExclusions.ReadAsync(postgres, server.ServerId, cancellationToken) ?? wanted;
+            LogWrite(logger, tool, server);
             var changed = !server.Excluded.SequenceEqual(after, StringComparer.Ordinal);
             return new JsonObject
             {
                 ["status"] = changed ? "changed" : "unchanged",
                 ["tool"] = tool,
                 ["server"] = server.Name,
+                ["storage_name"] = server.StorageName,
                 ["what_changed"] = after.Count == 0
                     ? $"{server.Name} has no excluded databases now; every database is collected."
                     : $"{server.Name} now excludes {after.Count} database(s): {string.Join(", ", after)}.",
                 ["previous"] = new JsonObject { ["excluded_databases"] = Strings(server.Excluded) },
                 ["current"] = new JsonObject { ["excluded_databases"] = Strings(after) },
-                ["undo"] = Undo(tool, new JsonObject { ["server_name"] = server.Name, ["databases"] = Strings(server.Excluded) }),
+                ["undo"] = Undo(tool, new JsonObject { ["server_name"] = server.StorageName, ["databases"] = Strings(server.Excluded) }),
                 ["check"] = "get_collection_state",
                 ["takes_effect"] = TakesEffect,
             }.ToJsonString();
@@ -185,6 +194,7 @@ public sealed class DarlingMcpCollectionStateTools
     {
         ["server_id"] = s.ServerId,
         ["server"] = s.Name,
+        ["storage_name"] = s.StorageName,
         ["engine"] = s.Engine,
         ["enabled"] = s.Enabled,
         ["excluded_databases"] = Strings(s.Excluded),
@@ -205,34 +215,46 @@ public sealed class DarlingMcpCollectionStateTools
             ["changed"] = false,
         }.ToJsonString();
 
-    private static async Task<string> ApplyPauseAsync(NpgsqlDataSource postgres, string tool, bool pause, CancellationToken cancellationToken)
+    /// <summary>Pause and resume go through the command queue, the same <c>pause</c> / <c>resume</c> command the Viewer queues: the
+    /// service runs it and the row shows who asked and what came of it. The answer gives the command id and the read that shows the result.</summary>
+    private static async Task<string> ApplyPauseAsync(NpgsqlDataSource postgres, string tool, bool pause, ILogger? logger, CancellationToken cancellationToken)
     {
         try
         {
             var before = await ReadServiceAsync(postgres, cancellationToken);
-            var plan = DarlingCommandExecutor.ResolvePlan(new ClaimedCommand(0, pause ? "pause" : "resume", null, null, "mcp"));
-            if (plan.Kind != CommandKind.StoreWrite)
+            if (before.Paused == pause)
             {
-                return Refuse(tool, "invalid", (plan.FailReason ?? "The request was refused.") + " Nothing was changed.");
+                return new JsonObject
+                {
+                    ["status"] = "unchanged",
+                    ["tool"] = tool,
+                    ["what_changed"] = pause ? "Collection was already paused. Nothing was queued." : "Collection was not paused. Nothing was queued.",
+                    ["current"] = new JsonObject { ["paused"] = before.Paused },
+                    ["check"] = "get_collection_state",
+                }.ToJsonString();
             }
 
-            await DarlingCommandExecutor.ExecuteStoreWriteAsync(postgres, plan, cancellationToken);
-            var after = await ReadServiceAsync(postgres, cancellationToken);
-            var changed = before.Paused != after.Paused;
+            var commandType = pause ? "pause" : "resume";
+            var queued = await DarlingMcpCommandQueue.QueueAsync(postgres, commandType, null, null, cancellationToken);
+            if (queued.Reason is not null)
+            {
+                return Refuse(tool, queued.Reason, queued.Message ?? "The request was refused. Nothing was queued.");
+            }
+
+            logger?.LogWarning("MCP {Tool} queued command {CommandId} ({CommandType}) for the whole service, caller {Caller}",
+                tool, queued.CommandId, commandType, ReadCaller.AmbientMcpCaller ?? ReadCaller.Unknown);
             return new JsonObject
             {
-                ["status"] = changed ? "changed" : "unchanged",
+                ["status"] = "queued",
                 ["tool"] = tool,
+                ["command_id"] = queued.CommandId,
                 ["what_changed"] = pause
-                    ? (changed ? "Collection is now paused: no new pass starts until resume_collection. A pass already running finishes."
-                               : "Collection was already paused. Nothing changed.")
-                    : (changed ? "Collection is resumed: the next pass runs."
-                               : "Collection was not paused. Nothing changed."),
+                    ? "A pause was queued, the same command the Viewer's Pause button queues. When the service runs it, no new pass starts until resume_collection; a pass already running finishes."
+                    : "A resume was queued, the same command the Viewer's Resume button queues. When the service runs it, the next pass runs.",
                 ["previous"] = new JsonObject { ["paused"] = before.Paused },
-                ["current"] = new JsonObject { ["paused"] = after.Paused },
-                ["undo"] = Undo(before.Paused ? "pause_collection" : "resume_collection", new JsonObject()),
-                ["check"] = "get_collection_state",
-                ["takes_effect"] = TakesEffect,
+                ["undo"] = Undo(pause ? "resume_collection" : "pause_collection", new JsonObject()),
+                ["check_with"] = new JsonObject { ["tool"] = "get_command_result", ["command_id"] = queued.CommandId },
+                ["check"] = "get_collection_state shows the paused flag once the command has run.",
             }.ToJsonString();
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -241,8 +263,12 @@ public sealed class DarlingMcpCollectionStateTools
         }
     }
 
+    private static void LogWrite(ILogger? logger, string tool, ServerRow server) =>
+        logger?.LogWarning("MCP {Tool} changed server id {ServerId} ({Server}), caller {Caller}",
+            tool, server.ServerId, server.StorageName, ReadCaller.AmbientMcpCaller ?? ReadCaller.Unknown);
+
     private static async Task<string> ApplyEnabledAsync(
-        NpgsqlDataSource postgres, string tool, string? serverName, bool enable, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, string tool, string? serverName, bool enable, ILogger? logger, CancellationToken cancellationToken)
     {
         try
         {
@@ -262,6 +288,7 @@ public sealed class DarlingMcpCollectionStateTools
             if (changed)
             {
                 await DarlingCommandExecutor.ExecuteStoreWriteAsync(postgres, plan, cancellationToken);
+                LogWrite(logger, tool, server);
             }
 
             var after = (await ReadServersAsync(postgres, cancellationToken)).FirstOrDefault(s => s.ServerId == server.ServerId);
@@ -270,12 +297,13 @@ public sealed class DarlingMcpCollectionStateTools
                 ["status"] = changed ? "changed" : "unchanged",
                 ["tool"] = tool,
                 ["server"] = server.Name,
+                ["storage_name"] = server.StorageName,
                 ["what_changed"] = changed
                     ? $"{server.Name} is now {(enable ? "enabled: collection includes it again" : "disabled: collection skips it")}."
                     : $"{server.Name} was already {(enable ? "enabled" : "disabled")}. Nothing changed.",
                 ["previous"] = new JsonObject { ["enabled"] = server.Enabled },
                 ["current"] = new JsonObject { ["enabled"] = after?.Enabled },
-                ["undo"] = Undo(server.Enabled ? "enable_server" : "disable_server", new JsonObject { ["server_name"] = server.Name }),
+                ["undo"] = Undo(server.Enabled ? "enable_server" : "disable_server", new JsonObject { ["server_name"] = server.StorageName }),
                 ["check"] = "get_collection_state",
                 ["takes_effect"] = TakesEffect,
             }.ToJsonString();
@@ -286,8 +314,9 @@ public sealed class DarlingMcpCollectionStateTools
         }
     }
 
-    /// <summary>Finds one server among ALL definitions (a disabled server must be found to be enabled): the name exactly, else the host
-    /// exactly, else a part of the name that matches one server. A name that matches several is refused with the candidates.</summary>
+    /// <summary>Finds one server among ALL definitions (a disabled server must be found to be enabled), with the matching rule
+    /// <c>edit_server</c> and <c>remove_server</c> use: the storage name <c>list_servers</c> shows, else the name, else a part of either that
+    /// matches ONE server. A name that matches several is never picked from: the answer lists the candidates by storage name.</summary>
     private static async Task<(ServerRow? Server, string? Error)> ResolveAsync(
         NpgsqlDataSource postgres, string tool, string? serverName, CancellationToken cancellationToken)
     {
@@ -298,41 +327,41 @@ public sealed class DarlingMcpCollectionStateTools
 
         var servers = await ReadServersAsync(postgres, cancellationToken);
         var typed = serverName.Trim();
-        var hits = servers.Where(s => string.Equals(s.Name, typed, StringComparison.OrdinalIgnoreCase)).ToList();
-        if (hits.Count == 0)
+        var target = DarlingMcpServerAdminTools.ResolveForRemoval(
+            servers.Select(s => new DarlingServerResolver.RegisteredServer(s.ServerId, s.StorageName, s.Name)).ToList(), typed);
+        if (target.Candidates.Count == 1)
         {
-            hits = servers.Where(s => string.Equals(s.Host, typed, StringComparison.OrdinalIgnoreCase)).ToList();
+            return (servers.First(s => s.ServerId == target.Candidates[0].ServerId), null);
         }
 
-        if (hits.Count == 0)
+        if (target.Candidates.Count == 0)
         {
-            hits = servers.Where(s => s.Name.Contains(typed, StringComparison.OrdinalIgnoreCase)).ToList();
+            return (null, Refuse(tool, "not_found",
+                $"No monitored server is named '{typed}'. Known servers (storage names): " + string.Join(", ", servers.Select(s => s.StorageName)) + ". Nothing was changed."));
         }
 
-        if (hits.Count == 1)
-        {
-            return (hits[0], null);
-        }
-
-        var names = string.Join(", ", (hits.Count == 0 ? servers : hits).Select(s => s.Name));
-        return (null, Refuse(tool, hits.Count == 0 ? "not_found" : "ambiguous",
-            (hits.Count == 0 ? $"No monitored server is named '{typed}'. Known servers: " : $"'{typed}' matches more than one server: ") + names + ". Nothing was changed."));
+        return (null, Refuse(tool, "ambiguous",
+            $"'{typed}' matches more than one server: " + string.Join(", ", target.Candidates.Select(c => c.ServerName))
+            + ". Send one storage name from this list as server_name. Nothing was changed."));
     }
 
     private static async Task<List<ServerRow>> ReadServersAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
     {
         var rows = new List<ServerRow>();
         await using var command = postgres.CreateCommand(
-            "SELECT server_id, name, host, database, COALESCE(engine, 'sqlserver'), is_enabled, excluded_databases "
+            "SELECT server_id, name, host, database, COALESCE(read_only_intent, false), engine, port, is_enabled, excluded_databases "
             + "FROM config.config_monitored_servers ORDER BY name, server_id");
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            var engine = reader.IsDBNull(5) ? null : reader.GetString(5);
             rows.Add(new ServerRow(
-                reader.GetInt32(0), reader.GetString(1), reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetString(3),
-                reader.GetString(4), reader.GetBoolean(5),
-                reader.IsDBNull(6) ? Array.Empty<string>() : reader.GetFieldValue<string[]>(6)));
+                reader.GetInt32(0), reader.GetString(1),
+                ServerIdHelper.BuildStorageName(
+                    reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetString(3), reader.GetBoolean(4), engine, reader.IsDBNull(6) ? 0 : reader.GetInt32(6)),
+                engine ?? "sqlserver", reader.GetBoolean(7),
+                reader.IsDBNull(8) ? Array.Empty<string>() : reader.GetFieldValue<string[]>(8)));
         }
 
         return rows;

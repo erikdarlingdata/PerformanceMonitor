@@ -103,6 +103,9 @@ public sealed class CollectionStateToolsLiveTests
             await ExecAsync(owner, statement, ct);
         }
 
+        /* The queue function pause and resume go through, as the product builds it (the scratch store holds the migrations only), with the EXECUTE the batch grants mcp. */
+        await ExecAsync(owner, DarlingManagedRoles.BuildRequestMcpCommandFunctionSql("config"), ct);
+        await ExecAsync(owner, $"GRANT EXECUTE ON FUNCTION config.request_mcp_command(text, integer, integer, text) TO {role}", ct);
         await ExecAsync(owner, "INSERT INTO config_service (id) VALUES (1) ON CONFLICT DO NOTHING", ct);
         var mcp = NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(ownerString) { Username = role, Password = RolePassword }.ConnectionString);
         return new Rig(scratch, owner, mcp, role);
@@ -149,30 +152,38 @@ public sealed class CollectionStateToolsLiveTests
         try
         {
             Assert.True(DarlingWorker.ShouldRunCollection((await ServiceViewAsync(rig, ct)).Paused));
-            var versionBefore = await ScalarAsync<long>(rig.Owner, "SELECT config_version FROM config_service", ct);
 
-            var paused = Parse(await Tools.PauseCollection(rig.Mcp, ct));
-            Assert.Equal("changed", Status(paused));
+            var paused = Parse(await Tools.PauseCollection(rig.Mcp, cancellationToken: ct));
+            Assert.Equal("queued", Status(paused));
             Assert.False(paused["previous"]!["paused"]!.GetValue<bool>());
-            Assert.True(paused["current"]!["paused"]!.GetValue<bool>());
             Assert.Equal("resume_collection", paused["undo"]!["tool"]!.GetValue<string>());
-            Assert.True(await ScalarAsync<long>(rig.Owner, "SELECT config_version FROM config_service", ct) > versionBefore);
+            var pauseId = paused["command_id"]!.GetValue<long>();
+            Assert.Equal("pause/mcp/pending", await ScalarAsync<string>(rig.Owner,
+                $"SELECT command_type || '/' || requested_by || '/' || status FROM config_command WHERE command_id = {pauseId}", ct));
+            Assert.False((await ServiceViewAsync(rig, ct)).Paused);
 
+            /* The service runs the queued command with the plan the command plane resolves for it. */
+            await DarlingCommandExecutor.ExecuteStoreWriteAsync(
+                rig.Owner, DarlingCommandExecutor.ResolvePlan(new ClaimedCommand(pauseId, "pause", null, null, "mcp")), ct);
             var view = await ServiceViewAsync(rig, ct);
             Assert.True(view.Paused);
             Assert.False(DarlingWorker.ShouldRunCollection(view.Paused));
             Assert.True(Parse(await Tools.GetCollectionState(rig.Mcp, ct))["paused"]!.GetValue<bool>());
 
-            /* A second pause says so and changes nothing. */
-            Assert.Equal("unchanged", Status(Parse(await Tools.PauseCollection(rig.Mcp, ct))));
+            /* A second pause says so and queues nothing. */
+            Assert.Equal("unchanged", Status(Parse(await Tools.PauseCollection(rig.Mcp, cancellationToken: ct))));
+            Assert.Equal(1L, await ScalarAsync<long>(rig.Owner, "SELECT count(*) FROM config_command", ct));
 
             /* The undo the answer named: resume. */
-            var resumed = Parse(await Tools.ResumeCollection(rig.Mcp, ct));
-            Assert.Equal("changed", Status(resumed));
+            var resumed = Parse(await Tools.ResumeCollection(rig.Mcp, cancellationToken: ct));
+            Assert.Equal("queued", Status(resumed));
             Assert.Equal("pause_collection", resumed["undo"]!["tool"]!.GetValue<string>());
+            var resumeId = resumed["command_id"]!.GetValue<long>();
+            await DarlingCommandExecutor.ExecuteStoreWriteAsync(
+                rig.Owner, DarlingCommandExecutor.ResolvePlan(new ClaimedCommand(resumeId, "resume", null, null, "mcp")), ct);
             Assert.True(DarlingWorker.ShouldRunCollection((await ServiceViewAsync(rig, ct)).Paused));
             Assert.False(Parse(await Tools.GetCollectionState(rig.Mcp, ct))["paused"]!.GetValue<bool>());
-            Assert.Equal("unchanged", Status(Parse(await Tools.ResumeCollection(rig.Mcp, ct))));
+            Assert.Equal("unchanged", Status(Parse(await Tools.ResumeCollection(rig.Mcp, cancellationToken: ct))));
             ok = true;
         }
         finally
@@ -182,7 +193,7 @@ public sealed class CollectionStateToolsLiveTests
     }
 
     [Fact]
-    public async Task McpRole_CanSetPausedAndNoOtherServiceFlag()
+    public async Task McpRole_CanSetNoServiceFlag_ThePausedFlagIncluded()
     {
         var ct = TestContext.Current.CancellationToken;
         await using var rig = await OpenAsync(ct);
@@ -192,6 +203,9 @@ public sealed class CollectionStateToolsLiveTests
             var denied = await Assert.ThrowsAsync<PostgresException>(() =>
                 ExecAsync(rig.Mcp, "UPDATE config.config_service SET capture_plans = NOT capture_plans WHERE id = 1", ct));
             Assert.Equal("42501", denied.SqlState);
+            var pausedDenied = await Assert.ThrowsAsync<PostgresException>(() =>
+                ExecAsync(rig.Mcp, "UPDATE config.config_service SET paused = TRUE WHERE id = 1", ct));
+            Assert.Equal("42501", pausedDenied.SqlState);
             ok = true;
         }
         finally
@@ -212,12 +226,13 @@ public sealed class CollectionStateToolsLiveTests
             await SeedServerAsync(rig.Owner, 6202, "billing-primary", "ARRAY[]::text[]", ct);
             Assert.Equal(new[] { "billing-primary", "orders-primary" }, EnabledNames(await ServiceViewAsync(rig, ct)));
 
-            var disabled = Parse(await Tools.DisableServer(rig.Mcp, "orders-primary", ct));
+            var disabled = Parse(await Tools.DisableServer(rig.Mcp, "orders-primary", cancellationToken: ct));
             Assert.Equal("changed", Status(disabled));
             Assert.True(disabled["previous"]!["enabled"]!.GetValue<bool>());
             Assert.False(disabled["current"]!["enabled"]!.GetValue<bool>());
             Assert.Equal("enable_server", disabled["undo"]!["tool"]!.GetValue<string>());
-            Assert.Equal("orders-primary", disabled["undo"]!["arguments"]!["server_name"]!.GetValue<string>());
+            Assert.Equal("orders-primary.example.test", disabled["undo"]!["arguments"]!["server_name"]!.GetValue<string>());
+            Assert.Equal("orders-primary.example.test", disabled["storage_name"]!.GetValue<string>());
             Assert.Equal(new[] { "billing-primary" }, EnabledNames(await ServiceViewAsync(rig, ct)));
 
             var state = Parse(await Tools.GetCollectionState(rig.Mcp, ct));
@@ -225,24 +240,70 @@ public sealed class CollectionStateToolsLiveTests
             Assert.False(row["enabled"]!.GetValue<bool>());
 
             /* A disabled server is still found, by a part of its name, so it can be enabled again. Disabling twice changes nothing. */
-            Assert.Equal("unchanged", Status(Parse(await Tools.DisableServer(rig.Mcp, "orders", ct))));
-            var enabled = Parse(await Tools.EnableServer(rig.Mcp, "orders", ct));
+            Assert.Equal("unchanged", Status(Parse(await Tools.DisableServer(rig.Mcp, "orders", cancellationToken: ct))));
+            var enabled = Parse(await Tools.EnableServer(rig.Mcp, "orders", cancellationToken: ct));
             Assert.Equal("changed", Status(enabled));
             Assert.Equal("disable_server", enabled["undo"]!["tool"]!.GetValue<string>());
             Assert.Equal(new[] { "billing-primary", "orders-primary" }, EnabledNames(await ServiceViewAsync(rig, ct)));
-            Assert.Equal("unchanged", Status(Parse(await Tools.EnableServer(rig.Mcp, "orders-primary", ct))));
+            Assert.Equal("unchanged", Status(Parse(await Tools.EnableServer(rig.Mcp, "orders-primary", cancellationToken: ct))));
 
             /* Words for a bad argument, and nothing written. */
             var versionBefore = await ScalarAsync<long>(rig.Owner, "SELECT config_version FROM config_service", ct);
-            var missing = Parse(await Tools.DisableServer(rig.Mcp, "no-such-server", ct));
+            var missing = Parse(await Tools.DisableServer(rig.Mcp, "no-such-server", cancellationToken: ct));
             Assert.Equal("refused", Status(missing));
             Assert.Equal("not_found", missing["reason"]!.GetValue<string>());
             Assert.Contains("orders-primary", missing["message"]!.GetValue<string>(), StringComparison.Ordinal);
-            var ambiguous = Parse(await Tools.DisableServer(rig.Mcp, "primary", ct));
+            var ambiguous = Parse(await Tools.DisableServer(rig.Mcp, "primary", cancellationToken: ct));
             Assert.Equal("ambiguous", ambiguous["reason"]!.GetValue<string>());
-            Assert.Equal("refused", Status(Parse(await Tools.DisableServer(rig.Mcp, "  ", ct))));
+            Assert.Equal("refused", Status(Parse(await Tools.DisableServer(rig.Mcp, "  ", cancellationToken: ct))));
             Assert.Equal(versionBefore, await ScalarAsync<long>(rig.Owner, "SELECT config_version FROM config_service", ct));
             Assert.Equal(2, (await ServiceViewAsync(rig, ct)).EnabledServers.Count);
+            ok = true;
+        }
+        finally
+        {
+            await DropRoleAsync(rig, ok);
+        }
+    }
+
+    [Fact]
+    public async Task ServerNames_ResolveLikeTheServerAdminTools_AndAnUndoHintNamesExactlyOneServer()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        var ok = false;
+        try
+        {
+            /* Server 6231's NAME is the same text as server 6232's HOST; two more share one name. */
+            await ExecAsync(rig.Owner, @"INSERT INTO config_monitored_servers (server_id, name, host, auth, is_enabled) VALUES
+                (6231, 'web01', 'edge-a.example.test', 'integrated', TRUE),
+                (6232, 'web02', 'web01', 'integrated', TRUE),
+                (6233, 'twin', 'twin-a.example.test', 'integrated', TRUE),
+                (6234, 'twin', 'twin-b.example.test', 'integrated', TRUE)", ct);
+
+            /* A storage name from list_servers resolves, and the answer's undo hint resolves back to the same one server. */
+            var byStorage = Parse(await Tools.DisableServer(rig.Mcp, "edge-a.example.test", cancellationToken: ct));
+            Assert.Equal("changed", Status(byStorage));
+            Assert.Equal("web01", byStorage["server"]!.GetValue<string>());
+            var hint = byStorage["undo"]!["arguments"]!["server_name"]!.GetValue<string>();
+            Assert.Equal("changed", Status(Parse(await Tools.EnableServer(rig.Mcp, hint, cancellationToken: ct))));
+
+            /* A name that is one server's host and another's name is not guessed: the storage name wins, as it does for remove_server. */
+            var typed = Parse(await Tools.DisableServer(rig.Mcp, "web01", cancellationToken: ct));
+            Assert.Equal("web02", typed["server"]!.GetValue<string>());
+            Assert.Equal("web01", typed["storage_name"]!.GetValue<string>());
+            Assert.Equal("changed", Status(Parse(await Tools.EnableServer(rig.Mcp, typed["undo"]!["arguments"]!["server_name"]!.GetValue<string>(), cancellationToken: ct))));
+
+            /* Two servers with one name: nothing is picked, both are listed by storage name, and each storage name resolves alone. */
+            var ambiguous = Parse(await Tools.DisableServer(rig.Mcp, "twin", cancellationToken: ct));
+            Assert.Equal("refused", Status(ambiguous));
+            Assert.Equal("ambiguous", ambiguous["reason"]!.GetValue<string>());
+            var message = ambiguous["message"]!.GetValue<string>();
+            Assert.Contains("twin-a.example.test", message, StringComparison.Ordinal);
+            Assert.Contains("twin-b.example.test", message, StringComparison.Ordinal);
+            Assert.Equal(4L, await ScalarAsync<long>(rig.Owner, "SELECT count(*) FROM config_monitored_servers WHERE is_enabled", ct));
+            Assert.Equal("changed", Status(Parse(await Tools.DisableServer(rig.Mcp, "twin-b.example.test", cancellationToken: ct))));
+            Assert.Equal(1L, await ScalarAsync<long>(rig.Owner, "SELECT count(*) FROM config_monitored_servers WHERE NOT is_enabled AND server_id = 6234", ct));
             ok = true;
         }
         finally
@@ -262,7 +323,7 @@ public sealed class CollectionStateToolsLiveTests
             await SeedServerAsync(rig.Owner, 6211, "reports-01", "ARRAY['tempdb','model']", ct);
             var modifiedBefore = await ScalarAsync<string>(rig.Owner, "SELECT modified_at::text FROM config_monitored_servers WHERE server_id = 6211", ct);
 
-            var set = Parse(await Tools.SetServerExcludedDatabases(rig.Mcp, "reports-01", ["Staging", "Archive", "staging", " "], ct));
+            var set = Parse(await Tools.SetServerExcludedDatabases(rig.Mcp, "reports-01", ["Staging", "Archive", "staging", " "], cancellationToken: ct));
             Assert.Equal("changed", Status(set));
             Assert.Equal(new[] { "tempdb", "model" }, Strings(set["previous"]!["excluded_databases"]));
             Assert.Equal(new[] { "Staging", "Archive" }, Strings(set["current"]!["excluded_databases"]));
@@ -276,24 +337,24 @@ public sealed class CollectionStateToolsLiveTests
             var undo = set["undo"]!;
             Assert.Equal("set_server_excluded_databases", undo["tool"]!.GetValue<string>());
             var back = Parse(await Tools.SetServerExcludedDatabases(
-                rig.Mcp, undo["arguments"]!["server_name"]!.GetValue<string>(), Strings(undo["arguments"]!["databases"]), ct));
+                rig.Mcp, undo["arguments"]!["server_name"]!.GetValue<string>(), Strings(undo["arguments"]!["databases"]), cancellationToken: ct));
             Assert.Equal("changed", Status(back));
             Assert.Equal(new[] { "tempdb", "model" }, (await ServiceViewAsync(rig, ct)).EnabledServers.Single().ExcludedDatabases.ToArray());
 
             /* An empty list clears; the same list again changes nothing. */
-            Assert.Equal("changed", Status(Parse(await Tools.SetServerExcludedDatabases(rig.Mcp, "reports-01", [], ct))));
+            Assert.Equal("changed", Status(Parse(await Tools.SetServerExcludedDatabases(rig.Mcp, "reports-01", [], cancellationToken: ct))));
             Assert.Empty((await ServiceViewAsync(rig, ct)).EnabledServers.Single().ExcludedDatabases);
-            Assert.Equal("unchanged", Status(Parse(await Tools.SetServerExcludedDatabases(rig.Mcp, "reports-01", [], ct))));
+            Assert.Equal("unchanged", Status(Parse(await Tools.SetServerExcludedDatabases(rig.Mcp, "reports-01", [], cancellationToken: ct))));
 
             /* Bad arguments are refused in words and write nothing. */
             await ExecAsync(rig.Owner, "UPDATE config_monitored_servers SET excluded_databases = ARRAY['keep'] WHERE server_id = 6211", ct);
-            var tooMany = Parse(await Tools.SetServerExcludedDatabases(rig.Mcp, "reports-01", Enumerable.Range(0, 300).Select(i => "db" + i).ToArray(), ct));
+            var tooMany = Parse(await Tools.SetServerExcludedDatabases(rig.Mcp, "reports-01", Enumerable.Range(0, 300).Select(i => "db" + i).ToArray(), cancellationToken: ct));
             Assert.Equal("refused", Status(tooMany));
             Assert.Contains("more than 256", tooMany["message"]!.GetValue<string>(), StringComparison.Ordinal);
-            Assert.Equal("refused", Status(Parse(await Tools.SetServerExcludedDatabases(rig.Mcp, "reports-01", ["bad\u0001name"], ct))));
-            Assert.Equal("refused", Status(Parse(await Tools.SetServerExcludedDatabases(rig.Mcp, "reports-01", [new string('x', 129)], ct))));
-            Assert.Equal("refused", Status(Parse(await Tools.SetServerExcludedDatabases(rig.Mcp, "reports-01", null!, ct))));
-            Assert.Equal("not_found", Parse(await Tools.SetServerExcludedDatabases(rig.Mcp, "nope", ["a"], ct))["reason"]!.GetValue<string>());
+            Assert.Equal("refused", Status(Parse(await Tools.SetServerExcludedDatabases(rig.Mcp, "reports-01", ["bad\u0001name"], cancellationToken: ct))));
+            Assert.Equal("refused", Status(Parse(await Tools.SetServerExcludedDatabases(rig.Mcp, "reports-01", [new string('x', 129)], cancellationToken: ct))));
+            Assert.Equal("refused", Status(Parse(await Tools.SetServerExcludedDatabases(rig.Mcp, "reports-01", null!, cancellationToken: ct))));
+            Assert.Equal("not_found", Parse(await Tools.SetServerExcludedDatabases(rig.Mcp, "nope", ["a"], cancellationToken: ct))["reason"]!.GetValue<string>());
             Assert.Equal("keep", await ScalarAsync<string>(rig.Owner, "SELECT array_to_string(excluded_databases, ',') FROM config_monitored_servers WHERE server_id = 6211", ct));
             ok = true;
         }
