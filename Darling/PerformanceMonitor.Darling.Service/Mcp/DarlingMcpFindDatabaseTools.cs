@@ -61,7 +61,51 @@ CROSS JOIN LATERAL (SELECT MAX(collection_time) AS t
 WHERE n.t IS NOT NULL
 ORDER BY s.server_name";
 
-    [McpServerTool(Name = "find_database"), Description("Finds which monitored server holds a database, by exact name (case-insensitive), from each server's newest database list. Tickets and traces name the tenant database, not the server. One row per matching server: registry name, display name, is_monitored (false = disabled), newest_snapshot_at (when the store last saw that list) and snapshot_current (false = older than 6 hours, so the match may be stale). empty = no newest list names it; a dropped, renamed or not-yet-collected database looks the same. Servers with no list in 7 days are not searched.")]
+    /// <summary>The registered servers: the fleet a search with no database list at all would have covered.</summary>
+    public const string RegisteredServersSql = @"
+SELECT server_id, server_name
+FROM servers
+ORDER BY server_name";
+
+    /// <summary>
+    /// #6178: the <c>not_collected</c> envelope when the <c>database_states</c> collector cannot run on ANY registered server's
+    /// engine (Azure SQL Database), else <c>null</c>. One server that could have had the list returns <c>null</c>, so the caller
+    /// keeps its <c>empty</c> answer. The engine decision and the words come from the shared engine-gate helper.
+    /// </summary>
+    private static async Task<string?> NotCollectedForWholeFleetAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    {
+        var servers = new List<(int ServerId, string ServerName)>();
+        try
+        {
+            await using var command = postgres.CreateCommand(RegisteredServersSql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                servers.Add((reader.GetInt32(0), reader.GetString(1)));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+
+        string? first = null;
+        foreach (var (serverId, serverName) in servers)
+        {
+            var envelope = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, serverId, serverName, "database_states", cancellationToken);
+            if (envelope is null)
+            {
+                return null;
+            }
+
+            first ??= envelope;
+        }
+
+        return first;
+    }
+
+    [McpServerTool(Name = "find_database"), Description("Finds which monitored server holds a database, by exact name (case-insensitive), from each server's newest database list. Tickets and traces name the tenant database, not the server. One row per matching server: registry name, display name, is_monitored (false = disabled), newest_snapshot_at (when the store last saw that list) and snapshot_current (false = older than 6 hours, so the match may be stale). empty = no newest list names it; a dropped, renamed or not-yet-collected database looks the same. Servers with no list in 7 days are not searched. not_collected = every server is an Azure SQL Database, which writes no list.")]
     public static async Task<string> FindDatabase(
         NpgsqlDataSource postgres,
         [Description("Database name to find. Exact match, case-insensitive.")] string database_name,
@@ -93,7 +137,10 @@ ORDER BY s.server_name";
             var matches = rows.Where(r => r.Matched is not null).ToList();
             if (matches.Count == 0)
             {
-                return McpHelpers.Status(
+                /* #6178: no server has a list. When every registered server runs an engine that never writes one (Azure SQL
+                   Database), that is not_collected, not a true negative. One server that could have had the list keeps the empty answer. */
+                var fleetNotCollected = rows.Count == 0 ? await NotCollectedForWholeFleetAsync(postgres, cancellationToken) : null;
+                return fleetNotCollected ?? McpHelpers.Status(
                     "empty",
                     rows.Count == 0
                         ? $"No server has a database list in the last {(int)LookBack.TotalDays} days, so nothing was searched for '{requested}'. The database_states collector writes the list every 30 minutes on a SQL Server target (not on Azure SQL Database)."

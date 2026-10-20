@@ -189,4 +189,25 @@ VALUES ($1, $2, $3, 'SibSrv', $4, $5, $6, 'ROWS', $7, $8, $9, $10)";
         Assert.Equal(JsonValueKind.Null, oldDb.GetProperty("files")[0].GetProperty("used_size_mb").ValueKind);
         Assert.False(Database(doc, "oddb").TryGetProperty(AzureSiblingDatabaseSize.RowNoteKey, out _));
     }
+
+    /// <summary>#6178: on Hyperscale the data file's max size is a per-file cap. Its row says so under the same note key the log
+    /// and sibling rows use; a data file of any other database, and the log row, carry no such note.</summary>
+    [Fact]
+    public void AHyperscaleDataFile_SaysItsMaxSizeIsAPerFileCap_AndNoOtherFileDoes()
+    {
+        var hsData = Row("hsdb", 1, "hsdb_data", "ROWS", 10_240, 315);
+        hsData.MaxSizeMb = 131_072;
+        var hsLog = Row("hsdb", 2, "hsdb_log", "LOG", null, 40);
+        hsLog.MaxSizeMb = 2_097_152;
+        var appData = Row("appdb", 1, "appdb_data", "ROWS", 100, 10);
+        appData.MaxSizeMb = 131_072;
+
+        using var doc = JsonDocument.Parse(McpServerInfoTools.DatabaseSizesPayload("srv", new[] { hsData, hsLog, appData }));
+
+        var hsFiles = Database(doc, "hsdb").GetProperty("files").EnumerateArray().ToList();
+        Assert.Equal(HyperscaleLogSize.DataFileMaxSizeNote, hsFiles[0].GetProperty(AzureSiblingDatabaseSize.RowNoteKey).GetString());
+        Assert.False(hsFiles[1].TryGetProperty(AzureSiblingDatabaseSize.RowNoteKey, out _));
+        Assert.All(Database(doc, "appdb").GetProperty("files").EnumerateArray(), f => Assert.False(f.TryGetProperty(AzureSiblingDatabaseSize.RowNoteKey, out _)));
+        Assert.Contains("one file", doc.RootElement.GetProperty("note").GetString(), StringComparison.Ordinal);
+    }
 }

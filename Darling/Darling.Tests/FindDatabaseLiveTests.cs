@@ -86,4 +86,37 @@ public sealed class FindDatabaseLiveTests
         var blank = JsonDocument.Parse(await DarlingMcpFindDatabaseTools.FindDatabase(dataSource, "  ", ct)).RootElement;
         Assert.Equal("invalid", blank.GetProperty("status").GetString());
     }
+
+    /// <summary>
+    /// #6178: with no database list anywhere, the answer is not_collected when every registered server is an Azure SQL Database
+    /// (that engine never writes the list), and stays empty when at least one server could have had it.
+    /// </summary>
+    [Fact]
+    public async Task FindDatabase_WithNoList_AnswersNotCollectedOnlyWhenEveryServerIsAzureSqlDb()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), BaseSkip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var (azure, box) = (ServerIdHelper.GetDeterministicHashCode("fd-azure"), ServerIdHelper.GetDeterministicHashCode("fd-box"));
+        await DarlingMcpTestData.RegisterServerAsync(connection, azure, "fd-azure", ct);
+        await DarlingMcpTestData.RegisterServerAsync(connection, box, "fd-box", ct);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET sql_engine_edition = 5 WHERE server_id = $1", azure);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET sql_engine_edition = 3 WHERE server_id = $1", box);
+
+        var mixed = JsonDocument.Parse(await DarlingMcpFindDatabaseTools.FindDatabase(dataSource, "Tenant1", ct)).RootElement;
+        Assert.Equal("empty", mixed.GetProperty("status").GetString());
+
+        await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM servers WHERE server_id = $1", box);
+        var azureOnly = JsonDocument.Parse(await DarlingMcpFindDatabaseTools.FindDatabase(dataSource, "Tenant1", ct)).RootElement;
+        Assert.Equal("not_collected", azureOnly.GetProperty("status").GetString());
+        var message = azureOnly.GetProperty("message").GetString();
+        Assert.Contains("Azure SQL Database", message, StringComparison.Ordinal);
+        Assert.Contains("database_states", message, StringComparison.Ordinal);
+    }
 }

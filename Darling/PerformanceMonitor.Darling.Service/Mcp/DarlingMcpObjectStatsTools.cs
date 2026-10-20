@@ -666,7 +666,9 @@ public sealed class DarlingMcpObjectStatsTools
                 };
                 if (g.Any(r => r.IsAzureSiblingRow))
                     database[AzureSiblingDatabaseSize.RowNoteKey] = AzureSiblingDatabaseSize.LogNote;
-                database["files"] = g.Select(FilePayload).ToList();
+                /* #6178: on Hyperscale (a log file with no size in this database) a data file's max size is a per-file cap. */
+                var hyperscale = g.Any(r => r.TotalSizeMb is null);
+                database["files"] = g.Select(r => FilePayload(r, hyperscale)).ToList();
                 return database;
             })
             .ToList();
@@ -707,7 +709,7 @@ public sealed class DarlingMcpObjectStatsTools
 
     /// <summary>One file of a database in the payload. The note key is added to the one row another database on an
     /// Azure SQL Database server gets, and to no other.</summary>
-    private static Dictionary<string, object?> FilePayload(DarlingObjectStatsReader.DatabaseSizeRow r)
+    private static Dictionary<string, object?> FilePayload(DarlingObjectStatsReader.DatabaseSizeRow r, bool hyperscaleDatabase)
     {
         var file = new Dictionary<string, object?>
         {
@@ -718,6 +720,8 @@ public sealed class DarlingMcpObjectStatsTools
         };
         if (r.IsAzureSiblingRow)
             file[AzureSiblingDatabaseSize.RowNoteKey] = AzureSiblingDatabaseSize.LogNote;
+        else if (HyperscaleLogSize.IsDataFileWithFileCap(r.FileTypeDesc, hyperscaleDatabase, r.MaxSizeMb is > 0))
+            file[AzureSiblingDatabaseSize.RowNoteKey] = HyperscaleLogSize.DataFileMaxSizeNote;
         file["auto_growth_mb"] = r.AutoGrowthMb;
         /* #5633 item 6: a file that grows by a percentage has no fixed MB step; is_percent_growth says which, growth_pct is the step. */
         file["is_percent_growth"] = r.IsPercentGrowth;

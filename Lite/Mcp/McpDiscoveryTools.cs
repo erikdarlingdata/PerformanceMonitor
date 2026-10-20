@@ -9,7 +9,7 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpDiscoveryTools
 {
-    [McpServerTool(Name = "find_database"), Description("Finds which monitored server holds a database, by exact name (case-insensitive), from each server's newest database list. Tickets and traces name the tenant database, not the server. One row per matching server: registry name, display name, is_monitored (false = disabled), newest_snapshot_at (when the store last saw that list) and snapshot_current (false = older than 6 hours, so the match may be stale). empty = no newest list names it; a dropped, renamed or not-yet-collected database looks the same. Servers with no list in 7 days are not searched.")]
+    [McpServerTool(Name = "find_database"), Description("Finds which monitored server holds a database, by exact name (case-insensitive), from each server's newest database list. Tickets and traces name the tenant database, not the server. One row per matching server: registry name, display name, is_monitored (false = disabled), newest_snapshot_at (when the store last saw that list) and snapshot_current (false = older than 6 hours, so the match may be stale). empty = no newest list names it; a dropped, renamed or not-yet-collected database looks the same. Servers with no list in 7 days are not searched. not_collected = every server is an Azure SQL Database, which writes no list.")]
     public static async Task<string> FindDatabase(
         ServerManager serverManager,
         LocalDataService dataService,
@@ -33,7 +33,12 @@ public sealed class McpDiscoveryTools
             var days = (int)LocalDataService.FindDatabaseLookBack.TotalDays;
             if (matches.Count == 0)
             {
-                return McpHelpers.Status(
+                /* #6178: no server has a list. When every server runs an engine that never writes one (Azure SQL Database), that is
+                   not_collected, not a true negative. One server that could have had the list keeps the empty answer. */
+                var fleetNotCollected = searched.Count == 0
+                    ? await NotCollectedForWholeFleetAsync(dataService, servers.Select(s => (s.Id, s.Server.ServerName)).ToList())
+                    : null;
+                return fleetNotCollected ?? McpHelpers.Status(
                     "empty",
                     searched.Count == 0
                         ? $"No server has a database list in the last {days} days, so nothing was searched for '{requested}'. The database_states collector writes the list every 30 minutes on a SQL Server target (not on Azure SQL Database), and only while Lite is open."
@@ -64,6 +69,25 @@ public sealed class McpDiscoveryTools
         {
             return McpHelpers.FormatError("find_database", ex);
         }
+    }
+
+    /// <summary>#6178: the <c>not_collected</c> envelope when the <c>database_states</c> collector cannot run on ANY server's engine
+    /// (Azure SQL Database), else <c>null</c>: one server that could have had the list leaves the caller's <c>empty</c> answer.</summary>
+    private static async Task<string?> NotCollectedForWholeFleetAsync(LocalDataService dataService, IReadOnlyList<(int Id, string ServerName)> servers)
+    {
+        string? first = null;
+        foreach (var (id, serverName) in servers)
+        {
+            var envelope = await McpEngineCapability.NotCollectedStatusAsync(dataService, id, serverName, "database_states");
+            if (envelope is null)
+            {
+                return null;
+            }
+
+            first ??= envelope;
+        }
+
+        return first;
     }
 
     [McpServerTool(Name = "list_servers"), Description("Lists monitored servers with collection freshness status and last collection time. Darling has no live connection to monitored servers: status is derived from how recently each was collected (Online = fresh, Warning = stale, Offline = no recent collection). Lite's status IS a live connection check, independent of whether anything is being collected. <<GUIDE>> Use this first to see available servers before calling other tools. Lists all monitored SQL Server instances with their current status and last collection time.")]

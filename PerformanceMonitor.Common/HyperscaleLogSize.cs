@@ -36,5 +36,22 @@ public static class HyperscaleLogSize
     /// its rows. Plain words, with no field names, because people read it on the web page.</summary>
     public const string Note =
         "On Azure SQL Database Hyperscale, the transaction log lives in the log service, not in storage the "
-        + "database holds. The log file's size is " + Display + ", and the totals leave it out.";
+        + "database holds. The log file's size is " + Display + ", and the totals leave it out. "
+        + DataFileCapNote;
+
+    /// <summary>#6178: what a Hyperscale data file's maximum size is. <c>sys.database_files</c> reports 131072 MB (128 GB)
+    /// for the data file, which is the cap for that one file. The database itself grows to 128 TB. Plain words, because
+    /// people read it on the web page.</summary>
+    public const string DataFileCapNote =
+        "The data file's maximum size is a limit for that one file, not for the database, which can grow to 128 TB.";
+
+    /// <summary>#6178: the note on the row of a Hyperscale database's data file, under the same <c>size_note</c> key the log
+    /// row and the sibling row use. It sits beside the maximum size it explains.</summary>
+    public const string DataFileMaxSizeNote = "Max size: a limit for this one file. A Hyperscale database can grow to 128 TB.";
+
+    /// <summary>#6178: true for a data file whose maximum size is a per-file cap on Hyperscale: a data file (type ROWS) with a
+    /// maximum size, in a database whose log file has no size (the log service). That log row is how a Hyperscale database is
+    /// told apart, so no other database gets the note.</summary>
+    public static bool IsDataFileWithFileCap(string? fileType, bool databaseHasLogServiceFile, bool hasMaxSize) =>
+        databaseHasLogServiceFile && hasMaxSize && string.Equals(fileType, "ROWS", System.StringComparison.OrdinalIgnoreCase);
 }

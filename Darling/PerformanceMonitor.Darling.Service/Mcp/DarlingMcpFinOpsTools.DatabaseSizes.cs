@@ -70,6 +70,8 @@ public sealed partial class DarlingMcpFinOpsTools
         var note = AzureSiblingDatabaseSize.DatabaseSizesNote(
             hasLogServiceFile: files.Any(f => f.TotalSizeMb is null),
             hasSiblingRow: files.Any(f => AzureSiblingDatabaseSize.IsSiblingRow(f.FileId, f.FileName)));
+        /* #6178: a database whose log file has no size is on Hyperscale; its data files' max size is a per-file cap. */
+        var hyperscaleDatabases = files.Where(f => f.TotalSizeMb is null).Select(f => f.DatabaseName).ToHashSet();
         return JsonSerializer.Serialize(new
         {
             server = serverName,
@@ -80,12 +82,12 @@ public sealed partial class DarlingMcpFinOpsTools
             file_count = files.Count,
             truncated = files.Count > rowCap,
             note,
-            rows = files.Take(rowCap).Select(f => DatabaseSizesRow(f, totalMb, monthly)).ToList(),
+            rows = files.Take(rowCap).Select(f => DatabaseSizesRow(f, totalMb, monthly, hyperscaleDatabases.Contains(f.DatabaseName))).ToList(),
         }, McpHelpers.JsonOptions);
     }
 
     /// <summary>One database-sizes row in the wire shape: snake_case keys.</summary>
-    internal static Dictionary<string, object?> DatabaseSizesRow(DatabaseSizeFileDto f, decimal totalMb, decimal monthly)
+    internal static Dictionary<string, object?> DatabaseSizesRow(DatabaseSizeFileDto f, decimal totalMb, decimal monthly, bool hyperscaleDatabase = false)
     {
         var isLog = string.Equals(f.FileTypeDesc, "LOG", StringComparison.OrdinalIgnoreCase);
         var row = new Dictionary<string, object?>
@@ -110,6 +112,8 @@ public sealed partial class DarlingMcpFinOpsTools
         };
         if (AzureSiblingDatabaseSize.IsSiblingRow(f.FileId, f.FileName))
             row[AzureSiblingDatabaseSize.RowNoteKey] = AzureSiblingDatabaseSize.LogNote;
+        else if (HyperscaleLogSize.IsDataFileWithFileCap(f.FileTypeDesc, hyperscaleDatabase, f.MaxSizeMb is > 0))
+            row[AzureSiblingDatabaseSize.RowNoteKey] = HyperscaleLogSize.DataFileMaxSizeNote;
         return row;
     }
 }
