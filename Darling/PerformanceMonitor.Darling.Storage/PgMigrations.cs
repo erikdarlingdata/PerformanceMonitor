@@ -1924,10 +1924,86 @@ ALTER TABLE config.config_monitored_servers ADD COLUMN IF NOT EXISTS hypothetica
     /// stays (a row inserted without the column is explicit, as every row was), and existing rows keep their values. The service
     /// and the viewer read NULL as "inherit" (<c>ScheduleOverride.Enabled</c> was already nullable and layers with <c>??</c>). An older
     /// build reads the column as a plain boolean and fails on a NULL, so before rolling back past this rung set every NULL to the value
-    /// it inherits, or delete those rows. Idempotent.
+    /// it inherits, or delete those rows (the rollback list in the README has the statement).
+    ///
+    /// <para><b>The table takes only what the schedule tools write.</b> The tools store a collector name in the catalog's own spelling
+    /// (lower-case letters, digits and underscores) and values inside <c>CollectorScheduleDefaults.MaxFrequencyMinutes</c> and
+    /// <c>MaxRetentionDays</c>; the unique indexes compare the name exactly, so a differently-cased name was a second row that the
+    /// readers resolved in no fixed order. First the rung tidies what is already stored: where one scope holds the same name in more than
+    /// one case, the lower-case row stays (else the first by name) and the others go; a remaining mixed-case name becomes lower-case; a
+    /// name that is still not a lower-case identifier of at most 64 characters names no collector and goes; a value over the cap is
+    /// set to the cap (a retention is already read as the cap; a frequency over a year was a collector that effectively never runs). Then three CHECK constraints, added <c>NOT VALID</c> so they bind every
+    /// later INSERT and UPDATE whatever the role, and the rung holds no row they would refuse. The viewer's save deletes a scope's rows
+    /// and inserts them again, so a stored row the checks refuse would fail that save: that is why the tidy comes first.</para>
+    ///
+    /// <para><b>No foreign key to the registry.</b> The viewer lists servers from the observed <c>servers</c> table, which keeps a server
+    /// after its definition in <c>config_monitored_servers</c> is removed and is the only list on a store that was never seeded, and the
+    /// schedule tools resolve against the same table, so a schedule row for an id with no definition is a normal write and a foreign key
+    /// would refuse it. Instead a row-level BEFORE INSERT trigger on <c>config_monitored_servers</c> clears the schedule rows held under
+    /// a server id before the first definition for it is stored, so a row written ahead of the server being registered never decides how
+    /// that server is collected. It does nothing when the id already has a definition (a re-add, an upsert, the seed). The trigger
+    /// function is <c>SECURITY DEFINER</c> with a pinned search_path, because the roles that register a server cannot delete schedule
+    /// rows; it deletes by the new row's server id and nothing else.</para>
+    ///
+    /// <para>Idempotent: every step is guarded or is a no-op the second time.</para>
     /// </summary>
     private const string V206Sql = @"
-ALTER TABLE config.config_collector_schedules ALTER COLUMN enabled DROP NOT NULL;";
+ALTER TABLE config.config_collector_schedules ALTER COLUMN enabled DROP NOT NULL;
+
+DELETE FROM config.config_collector_schedules
+WHERE ctid IN
+(
+    SELECT d.row_id
+    FROM
+    (
+        SELECT
+            s.ctid AS row_id,
+            row_number() OVER (
+                PARTITION BY s.server_id, lower(s.collector_name)
+                ORDER BY (s.collector_name = lower(s.collector_name)) DESC, s.collector_name) AS keep_rank
+        FROM config.config_collector_schedules AS s
+    ) AS d
+    WHERE d.keep_rank > 1
+);
+UPDATE config.config_collector_schedules SET collector_name = lower(collector_name) WHERE collector_name <> lower(collector_name);
+DELETE FROM config.config_collector_schedules WHERE collector_name !~ '^[a-z0-9_]{1,64}$';
+UPDATE config.config_collector_schedules SET frequency_minutes = 525600 WHERE frequency_minutes > 525600;
+UPDATE config.config_collector_schedules SET retention_days = 3650 WHERE retention_days > 3650;
+
+DO $limits$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'config.config_collector_schedules'::regclass AND conname = 'ck_config_collector_schedules_name') THEN
+        ALTER TABLE config.config_collector_schedules
+            ADD CONSTRAINT ck_config_collector_schedules_name CHECK (collector_name ~ '^[a-z0-9_]{1,64}$') NOT VALID;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'config.config_collector_schedules'::regclass AND conname = 'ck_config_collector_schedules_frequency_cap') THEN
+        ALTER TABLE config.config_collector_schedules
+            ADD CONSTRAINT ck_config_collector_schedules_frequency_cap CHECK (frequency_minutes <= 525600) NOT VALID;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'config.config_collector_schedules'::regclass AND conname = 'ck_config_collector_schedules_retention_cap') THEN
+        ALTER TABLE config.config_collector_schedules
+            ADD CONSTRAINT ck_config_collector_schedules_retention_cap CHECK (retention_days <= 3650) NOT VALID;
+    END IF;
+END
+$limits$;
+
+CREATE OR REPLACE FUNCTION config.config_clear_unregistered_schedules() RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $clear$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM config.config_monitored_servers AS m WHERE m.server_id = NEW.server_id) THEN
+        DELETE FROM config.config_collector_schedules WHERE server_id = NEW.server_id;
+    END IF;
+    RETURN NEW;
+END;
+$clear$;
+REVOKE ALL ON FUNCTION config.config_clear_unregistered_schedules() FROM PUBLIC;
+DROP TRIGGER IF EXISTS trg_clear_unregistered_schedules ON config.config_monitored_servers;
+CREATE TRIGGER trg_clear_unregistered_schedules
+    BEFORE INSERT ON config.config_monitored_servers
+    FOR EACH ROW EXECUTE FUNCTION config.config_clear_unregistered_schedules();";
 
     /// <summary>
     /// V204 (#6214): shared folders, personal views and an owner on the saved custom views and notebooks (both are

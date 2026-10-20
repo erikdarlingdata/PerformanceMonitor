@@ -312,6 +312,14 @@ public sealed class MigrationDataMovingRungCensusPins
             + "on a busy store, hundreds at the very most, so each build and each validation is milliseconds and spends none of the "
             + "budget. The rung's DO block also drops V31's UNIQUE (name) under the name it carries, found by its column; a DROP "
             + "CONSTRAINT is catalog-only"),
+        new(
+            206,
+            SetsTheFloor: false,
+            "a DELETE, three UPDATEs and three ADD CONSTRAINT ... NOT VALID on config.config_collector_schedules (created V17), which tidy "
+            + "the stored rows before the new name and value limits bind (#6227). The table is sparse: a row exists only where somebody "
+            + "overrode one collector for one server or the fleet, so a store holds dozens of rows and a very large one a few thousand. Each "
+            + "statement reads the table once, and NOT VALID adds a constraint without scanning it. The rung's trigger function on "
+            + "config.config_monitored_servers only runs for later INSERTs. It does not move the lock-wait floor."),
     ];
 
     /// <summary>
