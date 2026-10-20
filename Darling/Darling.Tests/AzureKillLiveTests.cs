@@ -74,8 +74,8 @@ public sealed class AzureKillLiveTests
         ApplicationName = program,
     };
 
-    private static SqlServerRemediationExecutor Executor(string user = Fix) =>
-        new(1, new RemediationServer(Host!, EncryptMode: "Mandatory"), user, "env:" + SecretEnv);
+    private static SqlServerRemediationExecutor Executor(string user = Fix, string? monitoringUser = null) =>
+        new(1, new RemediationServer(Host!, EncryptMode: "Mandatory"), user, "env:" + SecretEnv, monitoringUserName: monitoringUser);
 
     private static ServerActionPermit Permit(int sessionId, string? database) =>
         new(ServerActionNames.KillSession, 1, "azure-test", sessionId.ToString(CultureInfo.InvariantCulture), database, Guid.NewGuid(), "person:test");
@@ -216,17 +216,42 @@ public sealed class AzureKillLiveTests
         Assert.True(await AliveAsync(names[0], victim));
     }
 
-    /// <summary>#5632: a session of Darling's own program (the monitoring and the remediation connections) is never killed, whoever signed in.</summary>
+    /// <summary>
+    /// #5632: a session is Darling's own when its program name starts with PerformanceMonitorDarling AND it signed in as the monitoring login
+    /// (in either sign-in form), and it is never killed; its facts are not returned.
+    /// </summary>
     [Theory]
     [MemberData(nameof(Databases))]
-    public async Task ASessionOfADarlingProgram_IsNeverKilled_AndItsFactsAreNotReturned(string database)
+    public async Task ASessionOfADarlingProgram_SignedInAsTheMonitoringLogin_IsNeverKilled_AndItsFactsAreNotReturned(string database)
+    {
+        SkipUnlessSet(database);
+        foreach (var user in new[] { Monitor, Monitor + "@" + Host!.Split('.')[0] })
+        {
+            await using var victim = await OpenVictimAsync(database, user, holdLock: false, program: "PerformanceMonitorDarling-Collector");
+            foreach (var dry in new[] { true, false })
+            {
+                var result = await Executor(monitoringUser: Monitor).KillAzureSessionAsync(Permit(victim.SessionId, database), victim.SessionId, victim.LoginTime,
+                    dry, TestContext.Current.CancellationToken);
+                Assert.Equal(RemediationResult.Reasons.ToolLoginSession, result.Reason);
+                Assert.Null(result.Session);
+                Assert.True(await AliveAsync(database, victim));
+            }
+        }
+    }
+
+    /// <summary>#5632: any client can name its own program, so an ordinary login with Darling's program name is not Darling's own and is killable.</summary>
+    [Theory]
+    [MemberData(nameof(Databases))]
+    public async Task AnOrdinaryLoginWithADarlingProgramName_IsNotRefusedAsDarlings(string database)
     {
         SkipUnlessSet(database);
         await using var victim = await OpenVictimAsync(database, App, holdLock: false, program: "PerformanceMonitorDarling-Collector");
-        var result = await Executor().KillAzureSessionAsync(Permit(victim.SessionId, database), victim.SessionId, victim.LoginTime,
-            dryRun: false, TestContext.Current.CancellationToken);
-        Assert.Equal(RemediationResult.Reasons.ToolLoginSession, result.Reason);
-        Assert.Null(result.Session);
+        var result = await Executor(monitoringUser: Monitor).KillAzureSessionAsync(Permit(victim.SessionId, database), victim.SessionId, victim.LoginTime,
+            dryRun: true, TestContext.Current.CancellationToken);
+        Assert.Equal(RemediationOutcome.Done, result.Outcome);
+        Assert.NotEqual(RemediationResult.Reasons.ToolLoginSession, result.Reason);
+        Assert.False(result.Wrote);
+        Assert.NotNull(result.Session);
         Assert.True(await AliveAsync(database, victim));
     }
 
@@ -247,8 +272,8 @@ public sealed class AzureKillLiveTests
     }
 
     /// <summary>
-    /// #5632: the monitoring login's name is not a reason to refuse. A server monitored as its admin login would otherwise have a real blocker
-    /// nobody could end; Darling's own sessions are told apart by their program name.
+    /// #5632: the monitoring login's name alone is not a reason to refuse. A server monitored as its admin login would otherwise have a real blocker
+    /// nobody could end; Darling's own sessions are told apart by their program name together with the login.
     /// </summary>
     [Theory]
     [MemberData(nameof(Databases))]
@@ -256,7 +281,7 @@ public sealed class AzureKillLiveTests
     {
         SkipUnlessSet(database);
         await using var victim = await OpenVictimAsync(database, Monitor, holdLock: false);
-        var result = await Executor().KillAzureSessionAsync(Permit(victim.SessionId, database), victim.SessionId, victim.LoginTime,
+        var result = await Executor(monitoringUser: Monitor).KillAzureSessionAsync(Permit(victim.SessionId, database), victim.SessionId, victim.LoginTime,
             dryRun: true, TestContext.Current.CancellationToken);
         Assert.Equal(RemediationOutcome.Done, result.Outcome);
         Assert.False(result.Wrote);
@@ -274,6 +299,8 @@ public sealed class AzureKillLiveTests
         await using var victim = await OpenVictimAsync(names[0]);
         var result = await Executor().KillAzureSessionAsync(Permit(victim.SessionId, names[1]), victim.SessionId, victim.LoginTime,
             dryRun: false, TestContext.Current.CancellationToken);
+        Assert.Equal(RemediationOutcome.Refused, result.Outcome);
+        Assert.Contains(result.Reason, new[] { RemediationResult.Reasons.SessionGone, RemediationResult.Reasons.SessionReused, RemediationResult.Reasons.SessionInOtherDatabase });
         Assert.Null(result.Session);
         Assert.True(await AliveAsync(names[0], victim));
     }
@@ -337,6 +364,7 @@ public sealed class AzureKillLiveTests
         command.Parameters.Add(new SqlParameter("@login_time", SqlDbType.DateTime) { Value = victim.LoginTime });
         command.Parameters.Add(new SqlParameter("@dry", SqlDbType.Bit) { Value = false });
         command.Parameters.Add(new SqlParameter("@database", SqlDbType.NVarChar, 128) { Value = database });
+        command.Parameters.Add(new SqlParameter("@monitoring_login", SqlDbType.NVarChar, 128) { Value = DBNull.Value });
         Assert.Equal("not_primary", (string?)await command.ExecuteScalarAsync(ct));
         Assert.True(await AliveAsync(database, victim));
     }

@@ -483,7 +483,7 @@ public sealed class DarlingMcpPlanForceTools
             var row = await ReadServerRowAsync(owner, resolved.ServerId, ct);
             if (row is null)
                 return Answer("failed", "server_row_missing", $"{resolved.ServerName} has no row in the monitored-server settings.");
-            var executor = new SqlServerRemediationExecutor(resolved.ServerId, row.Server, row.UserName, row.SecretSlot, logger);
+            var executor = new SqlServerRemediationExecutor(resolved.ServerId, row.Server, row.UserName, row.SecretSlot, logger, row.MonitoringUserName);
 
             /* 4b: Azure SQL Database. The database is never free-form: it is checked against the registry entry and the collected data. */
             if (azure)
@@ -628,7 +628,7 @@ public sealed class DarlingMcpPlanForceTools
         var row = await ReadServerRowAsync(owner, resolved.ServerId, ct);
         if (row is null)
             return Answer("failed", "server_row_missing", $"{resolved.ServerName} has no row in the monitored-server settings.");
-        var executor = new PostgresRemediationExecutor(resolved.ServerId, row.Server, row.UserName, row.SecretSlot, logger);
+        var executor = new PostgresRemediationExecutor(resolved.ServerId, row.Server, row.UserName, row.SecretSlot, logger, row.MonitoringUserName);
 
         /* 3: the read decides, for a dry run and before a write: gone, own session, start time, reused, client session, and what the login may do. */
         var dry = await executor.KillBackendAsync(permit, pid, startEpoch, dryRun: true, ct);

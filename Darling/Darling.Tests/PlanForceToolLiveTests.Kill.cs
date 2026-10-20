@@ -114,9 +114,10 @@ public sealed partial class PlanForceToolLiveTests
     }
 
     /// <summary>
-    /// #5632: a session of Darling itself is never killed, dry run or real: one whose program name starts with PerformanceMonitorDarling (the
-    /// monitoring and remediation connections), and another session of the remediation login. The refusal returns no facts about the session, and
-    /// journals nothing. The monitoring login's name is not a reason to refuse, so an ordinary session of the same login stays killable.
+    /// #5632: a session of Darling itself is never killed, dry run or real: one whose program name starts with PerformanceMonitorDarling AND whose
+    /// login is the monitoring login, and another session of the remediation login with any program name. The refusal returns no facts about the
+    /// session, and journals nothing. The monitoring login's name alone is not a reason to refuse, so an ordinary session of the same login stays
+    /// killable; and an ordinary login with Darling's program name is not Darling's either.
     /// </summary>
     [Fact]
     public async Task ASessionOfDarlingsProgram_OrOfTheRemediationLogin_IsRefused_WithNoFacts_AndNothingIsKilled()
@@ -124,6 +125,10 @@ public sealed partial class PlanForceToolLiveTests
         await RunAsync(Without.Nothing, async c =>
         {
             var offset = await SeedClockAsync(c);
+            var adminLogin = Environment.GetEnvironmentVariable("DARLING_TEST_SQL_USER")!;
+
+            /* The server entry's monitoring login is the test server's admin login, the one the victims sign in as. */
+            await PgExecAsync(c.Connection, $"UPDATE config.config_monitored_servers SET username = '{adminLogin.Replace("'", "''", StringComparison.Ordinal)}' WHERE server_id = 7", c.Ct);
             foreach (var (program, remediation) in new[] { ("PerformanceMonitorDarling-Collector", false), (VictimProgram, true) })
             {
                 var victim = await OpenVictimAsync(c, program, remediation);
@@ -137,6 +142,15 @@ public sealed partial class PlanForceToolLiveTests
                     Assert.True(await SessionAliveAsync(c, victim));
                 }
             }
+
+            /* The same program name from a login that is not the monitoring login is an ordinary session: the dry run reaches the end. */
+            await PgExecAsync(c.Connection, "UPDATE config.config_monitored_servers SET username = 'pm5632_someone_else' WHERE server_id = 7", c.Ct);
+            var ordinary = await OpenVictimAsync(c, "PerformanceMonitorDarling-Collector");
+            using var _ordinary = ordinary.Connection;
+            var ordinaryJson = Parse(await KillAsync(c, ordinary.SessionId, UtcText(ordinary, offset), dryRun: true));
+            Assert.Equal("dry_run", (string?)ordinaryJson["status"]);
+            Assert.NotNull(ordinaryJson["session"]);
+            Assert.True(await SessionAliveAsync(c, ordinary));
 
             Assert.Equal(0, await JournalActionRowsAsync(c));
         });

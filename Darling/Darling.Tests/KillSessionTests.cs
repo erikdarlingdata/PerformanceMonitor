@@ -204,7 +204,7 @@ public sealed class KillSessionTests
     [InlineData(40501, "The service is currently busy. Retry the request after 10 seconds. Incident ID: A1B2C3D4-0000-1111-2222-333344445555. Code: 40501. server 'contoso-sql'")]
     public void AnAzureServiceError_IsReportedByNumber_NotByTheServicesText(int number, string message)
     {
-        var text = SqlServerRemediationExecutor.AzureErrorText([number], message, "s3cret");
+        var text = SqlServerRemediationExecutor.ErrorText([number], message, "s3cret");
         Assert.Contains(number.ToString(System.Globalization.CultureInfo.InvariantCulture), text, StringComparison.Ordinal);
         Assert.DoesNotContain("contoso", text, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("A1B2C3D4", text, StringComparison.OrdinalIgnoreCase);
@@ -214,12 +214,53 @@ public sealed class KillSessionTests
     [Fact]
     public void AnyOtherAzureErrorText_LosesTheSecretTheServerNameAndTheId()
     {
-        var text = SqlServerRemediationExecutor.AzureErrorText([4060],
+        var text = SqlServerRemediationExecutor.ErrorText([4060],
             "Cannot open database \"Sales\" requested by the login on server 'contoso-sql' with s3cret. Activity ID {A1B2C3D4-0000-1111-2222-333344445555}.", "s3cret");
         Assert.DoesNotContain("contoso", text, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("s3cret", text, StringComparison.Ordinal);
         Assert.DoesNotContain("A1B2C3D4", text, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("Sales", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #5632: the number of a firewall or server-name error is reported with fixed wording, and any other error text loses an IPv4 or IPv6 address
+    /// (the client's, or the server's) whichever way the text names it, while a clock time or a version number is left alone.
+    /// </summary>
+    [Theory]
+    [InlineData(40615, "Cannot open server 'contoso-sql' requested by the login. Client with IP address '203.0.113.7' is not allowed to access the server.", "203.0.113.7")]
+    [InlineData(40532, "Cannot open server \"contoso-sql\" requested by the login. The login failed.", "contoso")]
+    public void AFirewallOrServerNameError_IsReportedByNumber_WithNoAddressAndNoName(int number, string message, string leaked)
+    {
+        var text = SqlServerRemediationExecutor.ErrorText([number], message, "s3cret");
+        Assert.Contains("SQL error " + number.ToString(System.Globalization.CultureInfo.InvariantCulture), text, StringComparison.Ordinal);
+        Assert.DoesNotContain(leaked, text, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("A network error occurred connecting to 203.0.113.7:1433.", "203.0.113.7")]
+    [InlineData("Failed to connect to 10.20.30.40.", "10.20.30.40")]
+    [InlineData("no pg_hba.conf entry for host \"2001:db8:85a3::8a2e:370:7334\", user", "2001:db8")]
+    [InlineData("could not connect to [fe80::1%12]:5432", "fe80")]
+    [InlineData("could not connect to ::1.", "::1")]
+    [InlineData("mapped ::ffff:192.0.2.128 refused", "192.0.2.128")]
+    public void AnErrorTextWithAnAddress_ComesBackWithoutIt(string message, string address)
+    {
+        var text = SqlServerRemediationExecutor.ErrorText([], message, "s3cret");
+        Assert.DoesNotContain(address, text, StringComparison.Ordinal);
+        Assert.Contains("<address>", text, StringComparison.Ordinal);
+
+        /* The exception overload (the text RunAsync and the outcome-unknown path answer) does the same, and also removes the secret. */
+        var login = new RemediationLogin("svc", "s3cret");
+        var fromException = SqlServerRemediationExecutor.ErrorText(new InvalidOperationException(message + " s3cret"), login);
+        Assert.DoesNotContain(address, fromException, StringComparison.Ordinal);
+        Assert.DoesNotContain("s3cret", fromException, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AClockTimeAndAVersionNumber_AreNotTakenForAnAddress()
+    {
+        const string message = "Timeout at 12:30:45 on build 16.0.4125 for Class::Method.";
+        Assert.Equal(message, SqlServerRemediationExecutor.ErrorText([], message, ""));
     }
 
     /// <summary>

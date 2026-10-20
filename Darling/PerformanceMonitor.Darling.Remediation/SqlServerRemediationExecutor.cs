@@ -41,20 +41,28 @@ public sealed partial class SqlServerRemediationExecutor
     private readonly RemediationServer _server;
     private readonly string? _userName;
     private readonly string? _secretSlot;
+    private readonly string? _monitoringUserName;
     private readonly ILogger _logger;
 
     /// <param name="serverId">The monitored server's id; a permit issued for another server is refused.</param>
     /// <param name="server">How to reach it (host, TLS and certificate settings).</param>
     /// <param name="remediationUserName">The server's remediation login name.</param>
     /// <param name="remediationSecretSlot">The server's secret slot: an <c>env:</c> or <c>file:</c> reference. A stored password is refused.</param>
+    /// <param name="monitoringUserName">
+    /// The server's monitoring login name (the <c>username</c> of its entry). A kill counts a session as Darling's own only when its program name
+    /// starts with <c>PerformanceMonitorDarling</c> AND its login is this one or the remediation login (any client can set its own program name).
+    /// <b>When this is null (a Windows-authenticated entry has no SQL login name) the program name alone decides.</b> The fallback is in
+    /// <see cref="KillSql"/> and <see cref="AzureKillSql"/>, where an unset <c>@monitoring_login</c> counts every Darling-named session as Darling's.
+    /// </param>
     public SqlServerRemediationExecutor(int serverId, RemediationServer server, string? remediationUserName, string? remediationSecretSlot,
-        ILogger? logger = null)
+        ILogger? logger = null, string? monitoringUserName = null)
     {
         ArgumentNullException.ThrowIfNull(server);
         _serverId = serverId;
         _server = server;
         _userName = remediationUserName;
         _secretSlot = remediationSecretSlot;
+        _monitoringUserName = string.IsNullOrWhiteSpace(monitoringUserName) ? null : monitoringUserName.Trim();
         _logger = logger ?? NullLogger.Instance;
     }
 
@@ -91,8 +99,8 @@ SELECT edition = @edition, granted = @granted, cached = @cached;";
     /// The one kill batch (#5632, step 12), for a dry run and a write alike (<c>@dry</c>). It reads the session's facts, then decides in this order
     /// and stops at the first that applies: the engine is an Azure SQL Database (<c>azure_sql_database</c>: its kill is <see cref="AzureKillSql"/>, in the session's own database), the session is this connection's
     /// own (<c>own_session</c>), no such session (<c>session_gone</c>), a different <c>login_time</c> (<c>session_reused</c>: the id was reused),
-    /// not a user session (<c>not_user_session</c>), a session of Darling itself (a program name that starts with <c>PerformanceMonitorDarling</c>, or the
-    /// remediation login: <c>tool_login_session</c>), the login lacks <c>ALTER ANY CONNECTION</c> (<c>kill_permission_denied</c>). Then it runs the
+    /// not a user session (<c>not_user_session</c>), a session of Darling itself (a program name that starts with <c>PerformanceMonitorDarling</c> AND the monitoring
+    /// or the remediation login, or the remediation login with any program name: <c>tool_login_session</c>; with no monitoring login known, the program name alone), the login lacks <c>ALTER ANY CONNECTION</c> (<c>kill_permission_denied</c>). Then it runs the
     /// <c>KILL</c> unless <c>@dry</c>, and answers <c>dry_ok</c> or <c>killed</c>. The check and the <c>KILL</c> are one batch but not one atomic step:
     /// a session can end and its id be reused between them. The <c>KILL</c> text is built from the int parameter's decimal form only. After a real
     /// <c>KILL</c> it reads the session's request once (<c>command</c>, <c>percent_complete</c>), so a rollback shows. That read sits in TRY/CATCH, so
@@ -149,8 +157,12 @@ BEGIN
         SET @outcome = 'session_reused';
     ELSE IF @is_user = 0
         SET @outcome = 'not_user_session';
-    ELSE IF @program_name COLLATE Latin1_General_100_CI_AS LIKE N'PerformanceMonitorDarling%'
-         OR UPPER(@login_name) = UPPER(SUSER_SNAME())
+    ELSE IF UPPER(@login_name) = UPPER(SUSER_SNAME())
+         OR
+         (
+             @program_name COLLATE Latin1_General_100_CI_AS LIKE N'PerformanceMonitorDarling%'
+             AND (@monitoring_login IS NULL OR UPPER(@login_name) = UPPER(@monitoring_login))
+         )
         SET @outcome = 'tool_login_session';
     ELSE IF ISNULL(HAS_PERMS_BY_NAME(NULL, NULL, 'ALTER ANY CONNECTION'), 0) <> 1
         SET @outcome = 'kill_permission_denied';
@@ -385,6 +397,7 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
             command.Parameters.Add(new SqlParameter("@session_id", SqlDbType.Int) { Value = sessionId });
             command.Parameters.Add(new SqlParameter("@login_time", SqlDbType.DateTime) { Value = DateTime.SpecifyKind(loginTime, DateTimeKind.Unspecified) });
             command.Parameters.Add(new SqlParameter("@dry", SqlDbType.Bit) { Value = dryRun });
+            command.Parameters.Add(new SqlParameter("@monitoring_login", SqlDbType.NVarChar, 128) { Value = (object?)_monitoringUserName ?? DBNull.Value });
             try
             {
                 return await ReadKillAnswerAsync(command, name, dryRun, sessionId, ct);
@@ -392,9 +405,9 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
             catch (Exception ex) when (!dryRun && IsOutcomeUnknown(ex, connection.State == ConnectionState.Open, ct.IsCancellationRequested))
             {
                 /* The batch was sent and its reply was lost: the server may have run the KILL. Never reported as failed (#5632). */
-                var detail = secret.Length == 0 ? ex.Message : ex.Message.Replace(secret, "***", StringComparison.Ordinal);
+                var detail = ErrorText(ex, secret);
                 return RemediationResult.Unknown(name,
-                    $"The kill batch for session {sessionId} was sent, but its reply was lost ({ex.GetType().Name}: {detail}). Session {sessionId} may have been killed. Read get_blocking to see whether it is still there before you try again.");
+                    $"The kill batch for session {sessionId} was sent, but its reply was lost ({detail}). Session {sessionId} may have been killed. Read get_blocking to see whether it is still there before you try again.");
             }
         }, ct);
     }
@@ -473,7 +486,7 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
             KillOutcomes.SessionInOtherDatabase => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.SessionInOtherDatabase,
                 $"Session {sessionId} is connected to another database, not {database}. Nothing was run."),
             KillOutcomes.ToolLoginSession => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.ToolLoginSession,
-                $"Session {sessionId} belongs to Darling itself (its program name starts with PerformanceMonitorDarling, it has no login name, or it is the remediation login's), which this tool never kills. Nothing was run."),
+                $"Session {sessionId} belongs to Darling itself (its program name and its login say it is Darling's, it has no login name, or it is the remediation login's), which this tool never kills. Nothing was run."),
             KillOutcomes.SessionGone when azure => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.SessionGone,
                 $"Session {sessionId} was not found on the primary of database {database}. It is gone, or it is on a named replica or a read-only secondary, which this tool does not reach. Nothing was run."),
             KillOutcomes.PermissionDenied when azure => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.KillPermissionDenied,
@@ -550,11 +563,11 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
         {
             /* 18456 is a failed sign-in; 4060 is a database the login cannot open. */
             var reason = ex.Number is 18456 or 4060 ? RemediationResult.Reasons.SignInFailed : null;
-            return Log(RemediationResult.Failed(name, dryRun, Scrub(ex.Message, login), reason));
+            return Log(RemediationResult.Failed(name, dryRun, ErrorText(ex, login), reason));
         }
         catch (Exception ex)
         {
-            return Log(RemediationResult.Failed(name, dryRun, Scrub(ex.GetType().Name + ": " + ex.Message, login)));
+            return Log(RemediationResult.Failed(name, dryRun, ErrorText(ex, login)));
         }
     }
 
