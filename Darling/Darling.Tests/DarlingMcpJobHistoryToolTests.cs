@@ -317,6 +317,8 @@ public sealed class DarlingMcpJobHistoryToolLiveTests
             }
 
             var expected = storage.Select((dto, i) => ViewerJobHistoryRow.From(dto, viewerRows[i].Clock)).ToList();
+            /* #6137: the viewer also marks every row of a list that holds several servers, so each reads on one clock. */
+            ViewerDataService.StampMixedServers(expected);
             Assert.Equal(6 + 0, viewerRows.Count(r => r.ServerId == ServerA || r.ServerId == ServerB));
             Assert.Equal(JsonSerializer.Serialize(expected), JsonSerializer.Serialize(viewerRows));
             /* Alpha's local 08:00 is 13:00 UTC: the conversion survived the move. */

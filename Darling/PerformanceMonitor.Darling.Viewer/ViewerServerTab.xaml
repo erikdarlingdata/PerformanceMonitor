@@ -2712,6 +2712,18 @@
                                     <DataGridTextColumn Binding="{Binding BlockingClientApp}" Width="140">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BlockingClientApp" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Blocking App" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding BlockingLoginTimeLocal}" Width="130" SortMemberPath="BlockingLoginTime">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal" ToolTip="These describe the head blocker's session at capture: when it signed in, when its last request ended, how many transactions it has open and how much transaction log they have used. Empty when the row was captured before these were collected."><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BlockingLoginTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Head login time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding BlockingLastRequestEndTimeLocal}" Width="130" SortMemberPath="BlockingLastRequestEndTime">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal" ToolTip="These describe the head blocker's session at capture: when it signed in, when its last request ended, how many transactions it has open and how much transaction log they have used. Empty when the row was captured before these were collected."><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BlockingLastRequestEndTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Head last request ended" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding BlockingOpenTransactionCountText}" ElementStyle="{StaticResource NumericCell}" Width="70" SortMemberPath="BlockingOpenTransactionCount">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal" ToolTip="These describe the head blocker's session at capture: when it signed in, when its last request ended, how many transactions it has open and how much transaction log they have used. Empty when the row was captured before these were collected."><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BlockingOpenTransactionCountText" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Head open transactions" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding BlockingTranLogBytesUsedText}" ElementStyle="{StaticResource NumericCell}" Width="80" SortMemberPath="BlockingTranLogBytesUsed">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal" ToolTip="These describe the head blocker's session at capture: when it signed in, when its last request ended, how many transactions it has open and how much transaction log they have used. Empty when the row was captured before these were collected."><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BlockingTranLogBytesUsedText" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Head log used" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
                         </Grid>
@@ -4933,7 +4945,13 @@
                         <DataGridTextColumn Header="Group" Binding="{Binding Group}" Width="130"/>
                         <DataGridTextColumn Header="Metric" Binding="{Binding Metric}" Width="230"/>
                         <DataGridTextColumn Header="Change Over Window" Binding="{Binding Value}" SortMemberPath="ValueSort" ElementStyle="{StaticResource NumericCell}" Width="180"/>
-                        <DataGridTextColumn Header="What It Means" Binding="{Binding Note}" Width="*"/>
+                        <DataGridTemplateColumn Header="What It Means" SortMemberPath="Note" Width="*">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding Note}" TextTrimming="CharacterEllipsis" ToolTip="{Binding Note}"/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
                     </DataGrid.Columns>
                 </DataGrid>
 
@@ -5106,7 +5124,13 @@
                         <DataGridTextColumn Header="TOAST" Binding="{Binding ToastSize}" SortMemberPath="ToastSizeSort" Width="100"/>
                         <DataGridTextColumn Header="Indexes" Binding="{Binding IndexSize}" SortMemberPath="IndexSizeSort" Width="100"/>
                         <DataGridTextColumn Header="Heap Growth" Binding="{Binding HeapGrowth}" SortMemberPath="HeapGrowthSort" Width="120"/>
-                        <DataGridTextColumn Header="Confidence" Binding="{Binding Confidence}" Width="*"/>
+                        <DataGridTemplateColumn Header="Confidence" SortMemberPath="Confidence" Width="*">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding Confidence}" TextTrimming="CharacterEllipsis" ToolTip="{Binding Confidence}"/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
                     </DataGrid.Columns>
                 </DataGrid>
                 <StackPanel Grid.Row="3">
@@ -5146,7 +5170,13 @@
                         <DataGridTextColumn Header="Last Scan" Binding="{Binding LastScan}" Width="140" SortMemberPath="LastScanUtc"/>
                         <DataGridTextColumn Header="Blocks" Binding="{Binding BlockAccesses}" SortMemberPath="BlockAccessesSort" ElementStyle="{StaticResource NumericCell}" Width="110"/>
                         <DataGridTextColumn Header="Samples" Binding="{Binding SampleCount}" ElementStyle="{StaticResource NumericCell}" Width="90"/>
-                        <DataGridTextColumn Header="Can It Go?" Binding="{Binding Droppability}" Width="220"/>
+                        <DataGridTemplateColumn Header="Can It Go?" SortMemberPath="Droppability" Width="220">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding Droppability}" TextTrimming="CharacterEllipsis" ToolTip="{Binding Droppability}"/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
                         <DataGridTextColumn Header="Definition" Binding="{Binding IndexDefinition}" Width="*"/>
                     </DataGrid.Columns>
                 </DataGrid>

@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -16,6 +17,7 @@ using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -99,8 +101,14 @@ public sealed class ViewerAlertRow
     /// Lite's alert row and <see cref="ViewerTimeHelper.FormatForDisplay(DateTime, string)"/> do for the other
     /// grids (#4766).</summary>
     public string TimeLocal => ViewerTimeHelper.FormatForDisplay(
-        AlertTime, ViewerTimeHelper.DisplayZoneFor(ViewerTimeHelper.CurrentDisplayMode, Clock ?? ViewerTimeHelper.ActiveServerClock),
+        AlertTime, ViewerTimeHelper.DisplayZoneFor(
+            MultiServerTime.EffectiveMode(ViewerTimeHelper.CurrentDisplayMode, MixedServers), Clock ?? ViewerTimeHelper.ActiveServerClock),
         "yyyy-MM-dd HH:mm:ss");
+
+    /// <summary>True when the list this row sits in holds rows of several servers (#6137), set by
+    /// <see cref="ViewerDataService.GetAlertHistoryWindowAsync"/>. Server time cannot apply across servers, so the row then
+    /// reads in the viewer's local time like every other row of the list (<see cref="MultiServerTime"/>).</summary>
+    public bool MixedServers { get; set; }
 
     public string CurrentValueDisplay => AlertMetricClassifier.FormatHistoryValue(MetricName, CurrentValue);
 
@@ -316,7 +324,18 @@ AND    dismissed = FALSE";
             });
         }
 
+        StampMixedServers(rows);
         return rows;
+    }
+
+    /// <summary>Marks every row of a list that holds several servers (#6137), so each reads on the one clock the header names.</summary>
+    internal static void StampMixedServers(List<ViewerAlertRow> rows)
+    {
+        var mixed = MultiServerTime.IsMixed(rows.Select(r => r.ServerId));
+        foreach (var row in rows)
+        {
+            row.MixedServers = mixed;
+        }
     }
 
     /* ── Dismiss write path (W2a) ──────────────────────────────────────────────────────────────────

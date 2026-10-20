@@ -201,7 +201,7 @@ The service is cross-platform .NET; only the **bundled zero-admin store** and DP
 Each shape needs a different file from the [release page](https://github.com/erikdarlingdata/PerformanceMonitor/releases). `SHA256SUMS-linux.txt` on the same page lists the checksums.
 
 - **Docker Compose:** download `PerformanceMonitorDarling-compose-<version>.tar.gz`. Extract it, then `cd` into the folder it makes.
-- **Docker Compose, release 3.10.0 or earlier:** these releases have no compose file of their own. Download the release's "Source code" archive instead. It extracts to a `PerformanceMonitor-<version>` folder, and the same files are in its `Darling/compose/` folder.
+- **Docker Compose, release 3.10.0 or earlier:** these releases have no compose file of their own. Download the release's "Source code" archive instead. It extracts to a `PerformanceMonitor-<version>` folder, and the same files are in its `Darling/compose/` folder. Those releases have no `setup.sh`, so make the secret files by hand from the list in [`compose/secrets/README.md`](compose/secrets/README.md).
 - **systemd:** download `PerformanceMonitorDarling-linux-x64-<version>.tar.gz`.
 
 **Compose (the whole stack as one deployment).** The files are in the compose archive, or in [`Darling/compose/`](compose/) of a source checkout:
@@ -209,10 +209,16 @@ Each shape needs a different file from the [release page](https://github.com/eri
 ```bash
 tar -xzf PerformanceMonitorDarling-compose-<version>.tar.gz
 cd PerformanceMonitorDarling-compose-<version>   # from a source checkout or a "Source code" archive: cd Darling/compose
-cp darling.sample.json darling.json        # edit: servers, alerting, tokens
-#   one secret per file — see secrets/README.md for the exact list
+./setup.sh                                 # makes secrets/ and darling.json
+#   edit darling.json: servers, alerting
 docker compose up -d
 ```
+
+`setup.sh` makes the secret files that a default install needs, and it never changes a file that exists. It writes a random store password and the matching store connection string, the web token, and the MCP token. It copies `darling.sample.json` to `darling.json`. It asks for the monitoring login's SQL password with hidden input. To skip the question, set `DARLING_SQL_PASSWORD` and add `--no-prompt`. With `--no-prompt` and no variable, it tells you to make `secrets/sql_password.txt` yourself. It never prints a secret.
+
+The script ends with the dashboard address. To read the web token, run `cat secrets/web_token.txt`. If the script does not start, because the archive lost its execute bit, run `sh setup.sh`.
+
+MCP is off in the sample, so compose does not mount `mcp_token`. To turn MCP on, uncomment `mcp_token` in the two places in `docker-compose.yml`, and set `mcp.enabled` to `true` in `darling.json`. To make the secret files by hand instead of with `setup.sh`, follow the list in [`compose/secrets/README.md`](compose/secrets/README.md).
 
 The compose file in the compose archive names the image tag of its own release, for example `performancemonitor-darling:<version>`. It pulls the release it came from. The copy in the source tree names `:latest`, which is the newest release. To pin a release in that copy, change the `darling` service's `image:` line to that version's tag, for example `performancemonitor-darling:3.10.0`. The `:nightly` tag is the newest dev build. Use it only to test unreleased changes.
 
@@ -583,7 +589,49 @@ Two mutually exclusive modes — setting `managed: true` together with `connecti
 
 **Least privilege for the remediation credential.** Grant `ALTER` on each database you intend to force a plan in — that is what `sp_query_store_force_plan` / `sp_query_store_unforce_plan` need. `ALTER SERVER STATE` is needed *only* to evict a plan (`evict_cached_plan`, #5632), because that is what a targeted `DBCC FREEPROCCACHE(plan_handle)` requires, and it is the expensive grant. It is genuinely optional: without it an eviction is refused as `evict_permission_denied`, a named reason and never silent, and nothing is run. The service does not guess per platform: before it evicts (and on a dry run) it asks the server with a read-only `HAS_PERMS_BY_NAME` check, which answers for the credential's effective permissions however the grant arrived. Azure SQL Database has no plan handle eviction at all, which no grant changes, and that is refused as its own reason, `evict_unsupported_on_platform`, rather than as a permission problem. An eviction has no undo, and it also needs that server's `evict_plan` switch; no server has it on after an upgrade.
 
-**`ALTER ANY CONNECTION` is a strong grant, and it is needed only to kill (`kill_session`, #5632).** It lets the remediation login kill ANY session on that server, not only the one an agent names, so grant it only on a server where you want an agent to be able to kill. Darling checks that the session id and its sign-in time still match what the agent read from `get_blocking` before it runs `KILL`, and refuses with `kill_permission_denied` (a named reason, nothing run) when the login lacks the grant. A kill also needs that server's `kill_session` switch, which is off after an upgrade. A person turns it on the way they turn on `evict_plan`: set `enabled` to true for that server and the action `kill_session` in `config.config_server_actions`. There is no switch screen for it. **PostgreSQL kill is NOT built:** a PostgreSQL target is refused with `postgres_target` and nothing is run. Azure SQL Database is not built either (`kill_not_built_on_platform`).
+**`ALTER ANY CONNECTION` is a strong grant, and it is needed only to kill (`kill_session`, #5632).** It lets the remediation login kill ANY session on that server, not only the one an agent names, so grant it only on a server where you want an agent to be able to kill. Darling checks that the session id and its sign-in time still match what the agent read from `get_blocking` before it runs `KILL`, and refuses with `kill_permission_denied` (a named reason, nothing run) when the login lacks the grant. A kill also needs that server's `kill_session` switch, which is off after an upgrade. A person turns it on the way they turn on `evict_plan`: set `enabled` to true for that server and the action `kill_session` in `config.config_server_actions`. There is no switch screen for it. Azure SQL Database kill is not built: it is refused as `kill_not_built_on_platform` and nothing is run.
+
+### Ending a PostgreSQL session
+
+On a PostgreSQL server the remediation login ends one session with `pg_terminate_backend` (`kill_session`, #5632). The agent names the session by its `backend_id` and its pid. `get_pg_blocking` returns them as `root_backend_id` and `root_pid`, and `get_pg_session_states` as `backend_id` and `pid`. The `backend_id` holds the session's start time in whole seconds, then its pid in seven digits. The two must agree, or Darling refuses.
+
+Darling checks the pid and the start second in the same statement that ends the session. A pid given to a session that started in another second is never ended. This is not a full guarantee. On Linux a pid comes back only after many others have been handed out. On Windows a pid can come back within about a second, so a new session there can have the same pid and the same start second.
+
+If the monitoring login lacks `pg_read_all_stats`, the collector cannot read another role's start time, and it stores the server's start time in `backend_id` instead. Such an id names no session, so Darling refuses it as `backend_id_has_no_session_start`. Grant `pg_read_all_stats` (or `pg_monitor`) to the monitoring login; the ids collected after that work.
+
+The login needs two grants: `pg_signal_backend`, and `pg_read_all_stats` (or `pg_monitor`, which includes it). Without `pg_read_all_stats` the server hides another role's start time. Darling then cannot check the session and refuses. Darling reads what the login can do before it tries. It refuses with `not_permitted` and a message that names the missing grant, and it does not try the kill anyway.
+
+Darling also refuses a session that belongs to a superuser. PostgreSQL lets only a superuser end one, and `pg_signal_backend` does not change that.
+
+Darling ends client sessions only. A background process or a replication sender is refused as `not_user_session`, and Darling's own connection is refused as `own_session`. Ending a session rolls back its open transaction. A session that is waiting for a synchronous standby has already committed on the server, so its commit stays. There is no undo.
+
+`pg_terminate_backend` only sends the signal. After a kill Darling reads the session once more and says in `still_there` whether it was still there. When that read fails, or the caller cancels during it, `still_there` is null and the kill still counts as done. On SQL Server the same holds for `rollback`. If the reply to the kill is lost, for example because the connection drops or the server ends the kill's own connection, the answer is `outcome_unknown`: the session may have ended. The agent changes list then shows the kill as "result unknown", not failed. The SQL Server kill answers the same way. A kill also needs that server's `kill_session` switch, which is off after an upgrade.
+
+#### How the remediation login signs in to PostgreSQL
+
+The remediation connection always opens the `postgres` database. It does not use the database that the server entry names. `pg_stat_activity` and `pg_terminate_backend` cover the whole cluster, so that database is enough. If the login cannot connect to `postgres`, Darling refuses with `sign_in_failed` and names that database. A person can run `GRANT CONNECT ON DATABASE postgres TO <remediation login>`.
+
+The connection sets `search_path` to `pg_catalog, pg_temp` when it signs in. A setting made with `ALTER DATABASE` or `ALTER ROLE` does not change it. Each statement that Darling runs also names its views, functions and operators with the `pg_catalog` schema. Darling never uses a function or an operator of the same name in another schema.
+
+The remediation login signs in with SCRAM-SHA-256 only. If the server asks for a password in clear text or as MD5, or asks for no password, Darling refuses with `sign_in_not_strong_enough`. It does not send the password. If the server entry does not verify the server's certificate in full, the sign-in also needs SCRAM channel binding. Channel binding ties the sign-in to the TLS session. The sign-in then fails when that TLS session does not end at the server that holds the login. The monitoring connection does not change.
+
+Before a kill or a dry run can sign in, do these steps:
+
+1. Set `password_encryption = 'scram-sha-256'` on the server. It is the default from PostgreSQL 14.
+2. Set the password of the remediation login again, so that the server stores it as SCRAM.
+3. Give the remediation login a `scram-sha-256` line in `pg_hba.conf`.
+4. Turn TLS on at the server (`ssl = on`). Channel binding needs TLS, and a verified certificate needs TLS too.
+5. If you do not want channel binding, verify the certificate. In the server entry, set an encryption mode other than Optional and turn off Trust server certificate.
+
+### Managed PostgreSQL
+
+None of the three providers' pages says whether its admin role holds `pg_signal_backend`. Check your own login: a dry run asks the server and ends nothing. These are the facts each page states.
+
+- Amazon RDS and Aurora: `rds_superuser` can stop connections with `pg_terminate_backend`. The internal `rdsadmin` role does the work of a superuser ([AWS](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Appendix.PostgreSQL.CommonDBATasks.Roles.rds_superuser.html)).
+- Azure Database for PostgreSQL flexible server: the server admin belongs to `azure_pg_admin`, a pseudo-superuser role. It does not belong to `azuresu`, the role with superuser privileges ([Microsoft](https://learn.microsoft.com/en-us/azure/postgresql/security/security-access-control)).
+- Google Cloud SQL: `cloudsqlsuperuser` holds limited superuser privileges. `cloudsqladmin` is a system user with superuser privileges ([Google](https://docs.cloud.google.com/sql/docs/postgres/users)).
+
+On any of them, a login that is not a superuser cannot end a superuser's session. Darling refuses it as `not_permitted`.
 
 > Phase 1 ships **no consumer of this credential**. It is accepted, stored and resolvable so the arming model can be reviewed and provisioned ahead of the write path; the service logs at connect that an armed server is inert in this build. Nothing in this release can write to a monitored server.
 

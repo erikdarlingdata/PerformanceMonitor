@@ -19,6 +19,8 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.SqlClient" />
+    <!-- #5632: the PostgreSQL kill (pg_terminate_backend) signs in to a monitored PostgreSQL server with the remediation login. -->
+    <PackageReference Include="Npgsql" />
     <!-- #5802: lifts the transitive System.Security.Cryptography.Pkcs off SqlClient's vulnerable 9.0.18; see Directory.Packages.props. -->
     <PackageReference Include="System.Security.Cryptography.Pkcs" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />

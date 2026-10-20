@@ -133,7 +133,7 @@ public static class ServerTimeHelper
     /// <summary>
     /// A short label for the zone <paramref name="mode"/> shows the instant <paramref name="naiveUtc"/> in (#4766):
     /// "UTC", this machine's zone name at that instant (its daylight name in summer and its standard name in
-    /// winter), or the server's UTC offset at that instant (for example "UTC-4:00" in July and "UTC-5:00" in
+    /// winter), or the server's UTC offset at that instant (for example "UTC-04:00" in July and "UTC-05:00" in
     /// December for a US Eastern clock). It takes the instant that was converted, because the server's offset and
     /// the machine's zone name both change across a daylight-saving change: a label built from the offset in force
     /// now, or from a zone's standard name, would name a different zone than the one the text beside it was
@@ -155,11 +155,9 @@ public static class ServerTimeHelper
             : zone.StandardName;
     }
 
-    private static string OffsetLabel(int utcOffsetMinutes)
-    {
-        var magnitude = Math.Abs(utcOffsetMinutes);
-        return $"UTC{(utcOffsetMinutes < 0 ? "-" : "+")}{magnitude / 60}:{magnitude % 60:D2}";
-    }
+    /// <summary>The offset as one label, "UTC-04:00" (#6137): the spelling the time range picker and the Settings list use,
+    /// so no label reads "UTC-04:00" beside them.</summary>
+    private static string OffsetLabel(int utcOffsetMinutes) => PerformanceMonitor.Ui.MultiServerTime.OffsetLabel(utcOffsetMinutes);
 
     /// <summary>
     /// Formats a NAIVE-UTC timestamp for display (#4766): the instant, in the zone of the selected display mode on

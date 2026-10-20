@@ -1634,6 +1634,13 @@ public class BlockedProcessReportRow : BlockedProcessAlertRow
     public int? BlockingOpenTransactionCount { get; set; }
     public long? BlockingTranLogBytesUsed { get; set; }
 
+    /* #5632 part 4: the grid's text for the four. The two stamps are the monitored server's own clock, so they take the server-clock
+       renderer (not the UTC one EventTime uses); a NULL is an empty cell, and the columns sort on the numbers above, not on this text. */
+    public string BlockingLoginTimeLocal => ServerTimeHelper.FormatServerClock(BlockingLoginTime);
+    public string BlockingLastRequestEndTimeLocal => ServerTimeHelper.FormatServerClock(BlockingLastRequestEndTime);
+    public string BlockingOpenTransactionCountText => BlockingHeadEvidenceText.FormatCount(BlockingOpenTransactionCount);
+    public string BlockingTranLogBytesUsedText => BlockingHeadEvidenceText.FormatLogBytes(BlockingTranLogBytesUsed);
+
     public string EventTimeLocal => ServerTimeHelper.FormatServerTime(EventTime);
     public string WaitTimeFormatted => WaitTimeMs < 1000 ? $"{WaitTimeMs} ms" : $"{WaitTimeMs / 1000.0:F1} sec";
     public bool IsLongBlock => WaitTimeMs > 30000;

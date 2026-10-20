@@ -71,6 +71,10 @@ public sealed class QueryTagUsageBehaviourTests
         // The sections stay apart, and the deadlock section says how it counts.
         Assert.Contains("once for each tag among its processes", run.GetProperty("deadlockText").GetString());
         Assert.Equal("a", run.GetProperty("serverRead").GetProperty("server").GetString());
+        // #6156: an empty section says "None in the last 24 hours." in plain words, with no status word in front of it.
+        var deadlockText = run.GetProperty("deadlockText").GetString()!;
+        Assert.Contains("None in the last 24 hours.", deadlockText);
+        Assert.DoesNotContain("empty:", deadlockText);
     }
 
     [Fact]

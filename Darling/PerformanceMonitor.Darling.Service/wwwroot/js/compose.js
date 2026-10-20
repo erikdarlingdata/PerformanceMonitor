@@ -20,7 +20,7 @@
  * inert. The chart SVG lives entirely in charts.js (one SVG_NS occurrence, the air-gap allowlist); this file has no SVG.
  */
 
-import { el, mount, loadingStrip, errorStrip, emptyStrip, disclosure, fmtInt, fmtNum, apiSendRead, noticeStrip, parseUtc, windowNoteText } from "./util.js";
+import { el, mount, loadingStrip, errorStrip, emptyStrip, disclosure, fmtInt, fmtNum, fmtSize, tickDecimals, apiSendRead, noticeStrip, parseUtc, windowNoteText } from "./util.js";
 import { renderLineChart, zoomChip, getChartHidden, setChartHidden, nextHiddenKeys, chartZoomScope, renderBarChart, renderPieChart, renderScatterChart, CATEGORICAL_COLORS } from "./charts.js";
 import { navigateServer, gridTable } from "./panels.js";
 import { getCatalog } from "./views-api.js";
@@ -380,7 +380,7 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
   }
 
   const unit = panelSpec.unit || "";
-  const fmt = (v) => formatComposedValue(v, unit);
+  const fmt = (v, o) => formatComposedValue(v, unit, o);
   const groupDims = Array.isArray(panelSpec.groupBy) ? panelSpec.groupBy : [];
   /* Render-only reference lines (design D3), in the panel's unit — the chart draws each in-domain value. */
   const thresholds = Array.isArray(panelSpec.thresholds) ? panelSpec.thresholds : null;
@@ -405,7 +405,7 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
           key: "value2",
           label: humanize(panelSpec.overlay.measure || "overlay"),
           color: OVERLAY_COLOR,
-          formatValue: (v) => formatComposedValue(v, panelSpec.overlay.unit || ""),
+          formatValue: (v, o) => formatComposedValue(v, panelSpec.overlay.unit || "", o),
           unit: axisUnit(panelSpec.overlay.unit || ""),
           integerTicks: panelSpec.overlay.unit === "count",
         }
@@ -494,7 +494,7 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
         renderScatterChart({
           items: scatterItems(rows, groupDims),
           formatX: fmt,
-          formatY: (v) => formatComposedValue(v, overlayUnit),
+          formatY: (v, o) => formatComposedValue(v, overlayUnit, o),
           unitX: axisUnit(unit),
           unitY: axisUnit(overlayUnit),
           onSelect,
@@ -713,21 +713,30 @@ function localBucket(s) {
  * percent -> "n.n%", count -> integer, ratio -> a 0..1 fraction, bytes/pages -> integer + unit, any other unit
  * (ms/s/min/kb/mb/gb/…) -> "n.n unit", and a bare number when there is no unit.
  */
-export function formatComposedValue(v, unit) {
+export function formatComposedValue(v, unit, o) {
   if (v == null || isNaN(v)) return "—";
   const n = Number(v);
-  if (unit === "percent") return fmtNum(n, 1) + "%";
-  if (unit === "count") return fmtInt(n);
-  if (unit === "ratio") return fmtNum(n, 3);
-  if (unit === "bytes" || unit === "pages") return fmtInt(n) + " " + unit;
-  if (unit) return fmtNum(n, 1) + " " + unit;
-  return fmtNum(n, 1);
+  /* The second argument is the axis tick step the chart passes (#6158): enough decimals that no two ticks read alike. */
+  if (unit === "percent") return fmtNum(n, tickPlaces(o, 1)) + "%";
+  if (unit === "count") return fmtInt(n, o);
+  if (unit === "ratio") return fmtNum(n, tickPlaces(o, 3));
+  if (unit === "bytes" || unit === "pages") return fmtInt(n, o) + " " + unit;
+  /* kb / mb / gb / tb read "MB" and step up to "GB" past 1,024, as the rest of the web writes sizes (fmtMb). */
+  const sized = fmtSize(n, unit, o);
+  if (sized != null) return sized;
+  if (unit) return fmtNum(n, tickPlaces(o, 1)) + " " + unit;
+  return fmtNum(n, tickPlaces(o, 1));
+}
+
+function tickPlaces(o, min) {
+  return o && typeof o === "object" && o.step > 0 ? Math.max(min, tickDecimals(o.step)) : min;
 }
 
 /** The short y-axis unit caption: "%" for percent, the bare unit for a real unit, null for count/ratio (unitless-ish). */
 function axisUnit(unit) {
   if (unit === "percent") return "%";
-  if (!unit || unit === "count" || unit === "ratio") return null;
+  /* A size's tick labels carry their own unit ("512 MB", "78.1 GB"), and one caption cannot name both. */
+  if (!unit || unit === "count" || unit === "ratio" || fmtSize(0, unit) != null) return null;
   return unit;
 }
 
