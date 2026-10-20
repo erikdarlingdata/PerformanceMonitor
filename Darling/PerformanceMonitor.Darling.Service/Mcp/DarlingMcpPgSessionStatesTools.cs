@@ -401,7 +401,7 @@ public sealed class DarlingMcpPgSessionStatesTools
         DateTime start, DateTime end, ILogger? logger, CancellationToken cancellationToken = default)
     {
         var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
-            postgres, serverId, serverName, "pg_session_states", cancellationToken);
+            postgres, serverId, displayName, "pg_session_states", cancellationToken);
         if (gated != null)
         {
             return gated;

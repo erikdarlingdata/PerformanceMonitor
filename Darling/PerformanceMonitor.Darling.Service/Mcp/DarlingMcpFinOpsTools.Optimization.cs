@@ -143,7 +143,7 @@ public sealed partial class DarlingMcpFinOpsTools
     }
 
     private static async Task<string> ReadOptimizationAsync(
-        NpgsqlDataSource postgres, (int ServerId, string ServerName) resolved, int hoursBack, int limit, CancellationToken ct)
+        NpgsqlDataSource postgres, (int ServerId, string ServerName, string DisplayName) resolved, int hoursBack, int limit, CancellationToken ct)
     {
         var now = DateTime.UtcNow;
         var (textStart, _) = RetentionTierRouter.ClampToTextHorizon(now, now.AddHours(-hoursBack));
@@ -159,11 +159,11 @@ public sealed partial class DarlingMcpFinOpsTools
         var grants = await DarlingFinOpsUtilizationReader.GetMemoryGrantEfficiencyAsync(postgres, resolved.ServerId, MemoryGrantWindowHours, timeout, ct);
 
         /* A gated section is asked only when it came back empty, as every capability check is. */
-        var idleGate = idle.Count == 0 ? await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "database_size_stats", ct) : null;
-        var tempdbGate = tempdb.Count == 0 ? await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "tempdb_stats", ct) : null;
-        var waitGate = waits.Count == 0 ? await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "wait_stats", ct) : null;
-        var queryGate = queries.Count == 0 ? await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_stats", ct) : null;
-        var grantGate = grants.Count == 0 ? await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "memory_grant_stats", ct) : null;
+        var idleGate = idle.Count == 0 ? await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "database_size_stats", ct) : null;
+        var tempdbGate = tempdb.Count == 0 ? await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "tempdb_stats", ct) : null;
+        var waitGate = waits.Count == 0 ? await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "wait_stats", ct) : null;
+        var queryGate = queries.Count == 0 ? await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_stats", ct) : null;
+        var grantGate = grants.Count == 0 ? await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "memory_grant_stats", ct) : null;
 
         var gates = new[] { idleGate, tempdbGate, waitGate, queryGate, grantGate };
         if (gates.All(g => g != null))
@@ -179,7 +179,7 @@ public sealed partial class DarlingMcpFinOpsTools
         var idleOrdered = OrderIdleDatabases(idle);
         return JsonSerializer.Serialize(new
         {
-            server = resolved.ServerName,
+            server = resolved.DisplayName,
             view = OptimizationView,
             hours_back = hoursBack,
             monthly_cost_usd = hasCost ? monthly : (decimal?)null,

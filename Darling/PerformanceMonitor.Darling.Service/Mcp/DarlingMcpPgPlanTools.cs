@@ -104,7 +104,7 @@ public sealed class DarlingMcpPgPlanTools
             if (rows.Count == 0)
             {
                 return await NoPlansStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, wantedQueryId, hours_back, start, now, logger, cancellationToken);
+                    postgres, resolved.ServerId, resolved.ServerName, resolved.DisplayName, wantedQueryId, hours_back, start, now, logger, cancellationToken);
             }
 
             var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
@@ -283,18 +283,18 @@ public sealed class DarlingMcpPgPlanTools
     /// the threshold" become a true statement rather than a guess.</para>
     /// </summary>
     private static async Task<string> NoPlansStatusAsync(
-        NpgsqlDataSource postgres, int serverId, string serverName, long? wantedQueryId, int hoursBack,
+        NpgsqlDataSource postgres, int serverId, string serverName, string displayName, long? wantedQueryId, int hoursBack,
         DateTime start, DateTime end, ILogger? logger, CancellationToken cancellationToken = default)
     {
         var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
-            postgres, serverId, serverName, "pg_plan_capture", cancellationToken);
+            postgres, serverId, displayName, "pg_plan_capture", cancellationToken);
         if (gated != null)
         {
             return gated;
         }
 
         var precondition = await DarlingRuntimePrecondition.StatusAsync(
-            postgres, serverId, serverName, "pg_plan_capture", cancellationToken);
+            postgres, serverId, displayName, "pg_plan_capture", cancellationToken);
         if (precondition != null)
         {
             return precondition;

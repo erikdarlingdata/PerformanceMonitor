@@ -79,7 +79,7 @@ public sealed class McpQueryTools
             {
                 if (tagScope.Active)
                 {
-                    return McpHelpers.Status("empty", $"No query-stats group on {resolved.ServerName} in the last {hours_back} hour(s) carries query tag '{tagScope.Requested}'. The tag filter was applied in SQL before the top-{top} ranking.");
+                    return McpHelpers.Status("empty", $"No query-stats group on {resolved.DisplayName} in the last {hours_back} hour(s) carries query tag '{tagScope.Requested}'. The tag filter was applied in SQL before the top-{top} ranking.");
                 }
 
                 /* A filtered miss is not a collection miss — same words as Darling's twin. */
@@ -87,7 +87,7 @@ public sealed class McpQueryTools
                 {
                     return McpHelpers.Status(
                         "empty",
-                        $"No query-stats group on {resolved.ServerName} in the last {hours_back} hour(s) has a cached plan with lifetime max_dop >= {minMaxDop}. The filter was applied in SQL over the whole window, so this is the window's answer rather than a page artefact — drop parallel_only / min_dop to see the unfiltered ranking, or confirm current parallelism with analyze_query_plan.",
+                        $"No query-stats group on {resolved.DisplayName} in the last {hours_back} hour(s) has a cached plan with lifetime max_dop >= {minMaxDop}. The filter was applied in SQL over the whole window, so this is the window's answer rather than a page artefact — drop parallel_only / min_dop to see the unfiltered ranking, or confirm current parallelism with analyze_query_plan.",
                         new { filter_applied = filterApplied });
                 }
 
@@ -98,7 +98,7 @@ public sealed class McpQueryTools
                 {
                     return McpHelpers.Status(
                         "empty",
-                        McpHelpers.SnapshotsWithoutDeltaMessage(resolved.ServerName, hours_back, snapshots, newestMeasured, windowEnd),
+                        McpHelpers.SnapshotsWithoutDeltaMessage(resolved.DisplayName, hours_back, snapshots, newestMeasured, windowEnd),
                         new
                         {
                             snapshots_in_window = snapshots,
@@ -108,7 +108,7 @@ public sealed class McpQueryTools
                         });
                 }
 
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_stats")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_stats")
                     ?? McpHelpers.Status("unavailable", "No query stats available for the specified time range.");
             }
 
@@ -183,7 +183,7 @@ public sealed class McpQueryTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 /* #4231: what was served, beside what was asked for — query_stats is raw-only (no rollup
                    fallback), so a lowered retention_days or a young install can serve less than hours_back
@@ -269,13 +269,13 @@ public sealed class McpQueryTools
             var leftOut = DatabasesLeftOut.Distinct(droppedDatabases);
             if (rows.Count == 0 && tagScope.Active)
             {
-                return McpHelpers.WithDatabasesLeftOut(McpHelpers.Status("empty", $"No procedure on {resolved.ServerName} in the last {hours_back} hour(s) carries query tag '{tagScope.Requested}'. The tag filter was applied in SQL before the top-{top} ranking."), leftOut)!;
+                return McpHelpers.WithDatabasesLeftOut(McpHelpers.Status("empty", $"No procedure on {resolved.DisplayName} in the last {hours_back} hour(s) carries query tag '{tagScope.Requested}'. The tag filter was applied in SQL before the top-{top} ranking."), leftOut)!;
             }
 
             if (rows.Count == 0)
             {
                 return McpHelpers.WithDatabasesLeftOut(
-                    await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "procedure_stats")
+                    await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "procedure_stats")
                     ?? EmptyProcedureStatsStatus(
                         await dataService.GetCollectorRunFactsAsync(resolved.ServerId, "procedure_stats", hours_back, asOfUtc: windowEnd),
                         hours_back, leftOut?.Count ?? 0), leftOut)!;
@@ -332,7 +332,7 @@ public sealed class McpQueryTools
 
             return WithTagFilter(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 /* #4231: what was served, beside what was asked for — procedure_stats is raw-only (no rollup
                    fallback), so a lowered retention_days or a young install can serve less than hours_back
@@ -451,7 +451,7 @@ public sealed class McpQueryTools
             {
                 if (tagScope.Active)
                 {
-                    return McpHelpers.Status("empty", $"No Query Store query on {resolved.ServerName} in the last {hours_back} hour(s) carries query tag '{tagScope.Requested}'. The tag filter was applied in SQL before the top-{top} ranking.");
+                    return McpHelpers.Status("empty", $"No Query Store query on {resolved.DisplayName} in the last {hours_back} hour(s) carries query tag '{tagScope.Requested}'. The tag filter was applied in SQL before the top-{top} ranking.");
                 }
 
                 /* A filter that matched nothing is an answer, not a missing collection. Most queries never abort,
@@ -473,16 +473,16 @@ public sealed class McpQueryTools
                             window_truncated = truncated
                         });
 
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_store")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_store")
                     /* #2546: the sentence below GUESSES ("may not be enabled"), and it had to, because the
                        read had no way to find out. The store has known all along — query_store_health
                        records actual_state per database every hour for exactly this purpose. Asking it turns
                        a hedge into a fact plus the ALTER DATABASE that fixes it, and it answers for the
                        database this read was scoped to rather than for the server's most flattering one. */
-                    ?? await McpRuntimePrecondition.QueryStoreStatusAsync(dataService, resolved.ServerId, resolved.ServerName, database_name)
+                    ?? await McpRuntimePrecondition.QueryStoreStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, database_name)
                     /* And the collector's own last run, for the case Query Store is on and the collector is
                        the thing that cannot read it. */
-                    ?? await McpRuntimePrecondition.StatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_store")
+                    ?? await McpRuntimePrecondition.StatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_store")
                     ?? McpHelpers.Status("unavailable", "No Query Store data available. Query Store may not be enabled on target databases.");
             }
 
@@ -514,7 +514,7 @@ public sealed class McpQueryTools
 
             return WithTagFilter(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 /* #4231: what was served, beside what was asked for — hours_back alone is a request echoed
                    back as though it described the data. Same keys, same meaning as Darling's get_query_store_top. */
@@ -588,13 +588,13 @@ public sealed class McpQueryTools
                 emptyAnswer: rows.Count == 0);
 
             if (rows.Count == 0)
-                return await EmptyRegressionsAsync(dataService, resolved.ServerId, resolved.ServerName, hours_back, windowEnd, notice, databases);
+                return await EmptyRegressionsAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, notice, databases);
 
             var truncated = rows.Count > limit;
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 /* The window floor, always present (false and null when the store covered the baseline). No
                    effective_hours_back: this payload carries a page `truncated`, and the census holds that key apart
@@ -835,7 +835,7 @@ public sealed class McpQueryTools
                 requestedStart, windowEnd, "query_stats", emptyAnswer: rows.Count == 0);
 
             if (rows.Count == 0)
-                return await EmptyHeatmapAsync(dataService, resolved.ServerId, resolved.ServerName, hours_back, windowEnd, notice, filtered: databases is not null);
+                return await EmptyHeatmapAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, notice, filtered: databases is not null);
 
             var truncated = rows.Count > limit;
             var cells = rows.Take(limit).ToList();
@@ -868,7 +868,7 @@ public sealed class McpQueryTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 /* The window floor, always present (false and null when the store covered the window). No
                    effective_hours_back: this payload carries a page `truncated`, and the census holds that key apart
@@ -1022,7 +1022,7 @@ public sealed class McpQueryTools
                 /* Same two states again, same words as Darling's twin. The probe reads v_query_stats
                    because THIS trend does; Darling's probes the base table because ITS trend does. Each
                    probe follows its own read — what the caller sees is one sentence, not two. */
-                var gated = McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_stats"), database);
+                var gated = McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_stats"), database);
                 if (gated != null)
                 {
                     return gated;
@@ -1031,17 +1031,17 @@ public sealed class McpQueryTools
                 return await dataService.HasAnyQueryStatAsync(resolved.ServerId)
                     ? EmptyStatus(
                         "empty",
-                        $"No query samples recorded for {ScopedServer(resolved.ServerName, database)} in the last {hours_back} hour(s). This server HAS collected query stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.",
+                        $"No query samples recorded for {ScopedServer(resolved.DisplayName, database)} in the last {hours_back} hour(s). This server HAS collected query stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.",
                         startUtc, windowEnd, grain, database)
                     : EmptyStatus(
                         "unavailable",
-                        $"No query stats have EVER been recorded for {resolved.ServerName}. This is not an empty window — the query_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_top_queries_by_cpu will be equally empty until it does.",
+                        $"No query stats have EVER been recorded for {resolved.DisplayName}. This is not an empty window — the query_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_top_queries_by_cpu will be equally empty until it does.",
                         startUtc, windowEnd, grain, database);
             }
 
             /* The two siblings below serialize through the SAME helper, so the three Performance-Trends
                reads cannot advertise three different field sets for one shape. */
-            return SerializeTrend(resolved.ServerName, hours_back, startUtc, windowEnd, points, grain,
+            return SerializeTrend(resolved.DisplayName, hours_back, startUtc, windowEnd, points, grain,
                 await dataService.GetBaselineDiscontinuitiesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd), database);
         }
         catch (Exception ex)
@@ -1080,20 +1080,20 @@ public sealed class McpQueryTools
                 resolved.ServerId, hours_back, asOfUtc: windowEnd, bucketMinutes, database == null ? null : new[] { database });
             if (points.Count == 0)
             {
-                var gated = McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "procedure_stats"), database);
+                var gated = McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "procedure_stats"), database);
                 if (gated != null)
                 {
                     return gated;
                 }
 
                 return await EmptyTrendAsync(
-                    dataService.HasAnyProcedureStatAsync(resolved.ServerId), resolved.ServerName, database, hours_back,
+                    dataService.HasAnyProcedureStatAsync(resolved.ServerId), resolved.DisplayName, database, hours_back,
                     startUtc, windowEnd, grain,
                     "stored-procedure",
                     "Check that collection is running and that the server is enabled. A server that genuinely runs no stored procedures also lands here, and that is a real answer rather than a fault.");
             }
 
-            return SerializeTrend(resolved.ServerName, hours_back, startUtc, windowEnd, points, grain,
+            return SerializeTrend(resolved.DisplayName, hours_back, startUtc, windowEnd, points, grain,
                 await dataService.GetBaselineDiscontinuitiesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd), database);
         }
         catch (Exception ex)
@@ -1132,20 +1132,20 @@ public sealed class McpQueryTools
                     every database on the instance. A server with no Query Store data is not a server with
                     no slow queries, so the message names that cause first.
                 */
-                var gated = McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_store"), database);
+                var gated = McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_store"), database);
                 if (gated != null)
                 {
                     return gated;
                 }
 
                 return await EmptyTrendAsync(
-                    dataService.HasAnyQueryStoreStatAsync(resolved.ServerId), resolved.ServerName, database, hours_back,
+                    dataService.HasAnyQueryStoreStatAsync(resolved.ServerId), resolved.DisplayName, database, hours_back,
                     startUtc, windowEnd, PerInterval,
                     "Query Store",
                     "Query Store may be OFF on this server's databases — that, not an absence of slow queries, is the usual cause. Check QUERY_STORE = ON per database, then that collection is running for this server.");
             }
 
-            return SerializeTrend(resolved.ServerName, hours_back, startUtc, windowEnd, points, PerInterval,
+            return SerializeTrend(resolved.DisplayName, hours_back, startUtc, windowEnd, points, PerInterval,
                 await dataService.GetBaselineDiscontinuitiesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd), database);
         }
         catch (Exception ex)
@@ -1485,7 +1485,7 @@ public sealed class McpQueryTools
             var rows = await dataService.GetQueryStatsHistoryAsync(resolved.ServerId, database_name, query_hash, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_stats")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_stats")
                     ?? McpHelpers.Status("empty", $"No history found for query_hash '{query_hash}' in database '{database_name}' within the last {hours_back} hours.");
             }
 
@@ -1513,7 +1513,7 @@ public sealed class McpQueryTools
                the SKUs' envelopes disagreed until a review of the trio's change pointed at it. */
             var envelope = new Dictionary<string, object?>
             {
-                ["server"] = resolved.ServerName,
+                ["server"] = resolved.DisplayName,
                 ["database_name"] = database_name,
                 ["query_hash"] = query_hash,
                 ["hours_back"] = hours_back,

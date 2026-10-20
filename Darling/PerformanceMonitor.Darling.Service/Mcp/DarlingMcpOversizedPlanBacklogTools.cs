@@ -76,7 +76,7 @@ public sealed class DarlingMcpOversizedPlanBacklogTools
             }
 
             serverId = resolved.ServerId;
-            scope = resolved.ServerName;
+            scope = resolved.DisplayName;
         }
 
         /* REFUSED rather than silently widened to the fleet, following McpHelpers.ValidateTop: a caller who

@@ -286,7 +286,7 @@ public sealed partial class DarlingMcpFinOpsTools
         ReadScope.NoteWindow(nowUtc.AddDays(-(databaseName == null ? StorageGrowthWindowDays : windowDays)), nowUtc);
 
     internal static async Task<string> ReadStorageGrowthAsync(
-        NpgsqlDataSource postgres, (int ServerId, string ServerName) resolved, int hoursBack, int limit,
+        NpgsqlDataSource postgres, (int ServerId, string ServerName, string DisplayName) resolved, int hoursBack, int limit,
         string? databaseName, string? objectName, CancellationToken ct)
     {
         if (StorageGrowthWindowDaysFor(hoursBack) is not int windowDays)
@@ -305,14 +305,14 @@ public sealed partial class DarlingMcpFinOpsTools
         NoteStorageGrowthWindow(databaseName, windowDays, now);
         var timeout = McpCommandDeadlines.ReadSeconds;
         var databases = await DarlingFinOpsStorageGrowthReader.GetStorageGrowthAsync(postgres, resolved.ServerId, now, timeout, ct);
-        var dbGate = databases.Count == 0 ? await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "database_size_stats", ct) : null;
+        var dbGate = databases.Count == 0 ? await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "database_size_stats", ct) : null;
 
         if (databaseName == null)
         {
             if (dbGate != null) return dbGate;
             if (IsBareEmpty([databases.Count], [dbGate]))
                 return McpHelpers.Status("empty", "No database size snapshot was found for this server, so there is no storage growth to show.");
-            return BuildStorageGrowthDatabasesPayload(resolved.ServerName, hoursBack, databases, StorageGrowthDatabaseCap(limit));
+            return BuildStorageGrowthDatabasesPayload(resolved.DisplayName, hoursBack, databases, StorageGrowthDatabaseCap(limit));
         }
 
         var windowStart = DateTime.SpecifyKind(now.AddDays(-windowDays), DateTimeKind.Unspecified);
@@ -323,7 +323,7 @@ public sealed partial class DarlingMcpFinOpsTools
         var topN = MaxStorageGrowthObjects;
         var (objects, samples) = await DarlingFinOpsStorageGrowthReader.GetObjectGrowthHeatmapDataAsync(
             postgres, resolved.ServerId, databaseName, windowStart, windowDays, topN, timeout, ct);
-        var objectGate = objects.Count == 0 ? await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "index_object_stats", ct) : null;
+        var objectGate = objects.Count == 0 ? await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "index_object_stats", ct) : null;
 
         if (dbGate != null && objectGate != null) return dbGate;
         if (IsBareEmpty([databases.Count, objects.Count], [dbGate, objectGate]))
@@ -336,7 +336,7 @@ public sealed partial class DarlingMcpFinOpsTools
 
         if (objectsLevel)
         {
-            return BuildStorageGrowthObjectsPayload(resolved.ServerName, hoursBack, database, ranked.Take(Math.Min(limit, StorageGrowthObjectCap(windowDays))).ToList(), ranked.Count, samples, objectGate, windowDays);
+            return BuildStorageGrowthObjectsPayload(resolved.DisplayName, hoursBack, database, ranked.Take(Math.Min(limit, StorageGrowthObjectCap(windowDays))).ToList(), ranked.Count, samples, objectGate, windowDays);
         }
 
         var match = ranked.FirstOrDefault(o => string.Equals(StorageGrowthObjectKey(o), objectName, StringComparison.Ordinal));
@@ -346,7 +346,7 @@ public sealed partial class DarlingMcpFinOpsTools
 
         var indexes = await DarlingFinOpsStorageGrowthReader.GetObjectIndexDetailAsync(
             postgres, resolved.ServerId, databaseName, match.SchemaName, match.TableName, timeout, ct);
-        var indexGate = indexes.Count == 0 ? await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "index_object_stats", ct) : null;
-        return BuildStorageGrowthIndexesPayload(resolved.ServerName, hoursBack, database, indexes, indexGate);
+        var indexGate = indexes.Count == 0 ? await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "index_object_stats", ct) : null;
+        return BuildStorageGrowthIndexesPayload(resolved.DisplayName, hoursBack, database, indexes, indexGate);
     }
 }

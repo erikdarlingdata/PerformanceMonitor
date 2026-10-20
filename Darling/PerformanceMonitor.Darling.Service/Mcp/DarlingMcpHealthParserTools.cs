@@ -96,7 +96,7 @@ public sealed class DarlingMcpHealthParserTools
 
             return Finish(notice, JsonSerializer.Serialize(new
             {
-                server = c.ServerName,
+                server = c.DisplayName,
                 hours_back,
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
@@ -161,7 +161,7 @@ public sealed class DarlingMcpHealthParserTools
 
             return Finish(notice, JsonSerializer.Serialize(new
             {
-                server = c.ServerName,
+                server = c.DisplayName,
                 hours_back,
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
@@ -276,17 +276,17 @@ public sealed class DarlingMcpHealthParserTools
             var shown = rows.Take(limit).ToList();
             if (rows.Count == 0)
                 return McpHelpers.WithDatabase(await EmptyAsync(
-                    postgres, new Collected<SevereErrorRecord>(null, resolved.ServerId, resolved.ServerName, rows, xmls.Count, lastCapturedAt, now),
+                    postgres, new Collected<SevereErrorRecord>(null, resolved.ServerId, resolved.ServerName, resolved.DisplayName, rows, xmls.Count, lastCapturedAt, now),
                     hours_back, SystemHealthParser.ErrorReportedEvent,
                     $"none was a significant severe error (severity {SystemHealthSignificance.SevereErrorMinSeverity}+ and off the benign connection-reset list)"
                         + DarlingMcpBlockingTools.ForChosenDatabases(databases), logger, cancellationToken), databases.Describe())!;
 
-            var collected = new Collected<SevereErrorRecord>(null, resolved.ServerId, resolved.ServerName, rows, xmls.Count, lastCapturedAt, now);
+            var collected = new Collected<SevereErrorRecord>(null, resolved.ServerId, resolved.ServerName, resolved.DisplayName, rows, xmls.Count, lastCapturedAt, now);
             var notice = await NoticeAsync(postgres, collected, hours_back, EarliestOf(rows.Select(r => r.EventTime)), emptyAnswer: false, logger, cancellationToken);
 
             return Finish(notice, JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
@@ -337,7 +337,7 @@ public sealed class DarlingMcpHealthParserTools
 
             return Finish(notice, JsonSerializer.Serialize(new
             {
-                server = c.ServerName,
+                server = c.DisplayName,
                 hours_back,
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
@@ -386,7 +386,7 @@ public sealed class DarlingMcpHealthParserTools
 
             return Finish(notice, JsonSerializer.Serialize(new
             {
-                server = c.ServerName,
+                server = c.DisplayName,
                 hours_back,
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
@@ -435,7 +435,7 @@ public sealed class DarlingMcpHealthParserTools
 
             return Finish(notice, JsonSerializer.Serialize(new
             {
-                server = c.ServerName,
+                server = c.DisplayName,
                 hours_back,
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
@@ -509,7 +509,7 @@ public sealed class DarlingMcpHealthParserTools
 
             return Finish(notice, JsonSerializer.Serialize(new
             {
-                server = c.ServerName,
+                server = c.DisplayName,
                 hours_back,
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
@@ -562,7 +562,7 @@ public sealed class DarlingMcpHealthParserTools
 
             return Finish(notice, JsonSerializer.Serialize(new
             {
-                server = c.ServerName,
+                server = c.DisplayName,
                 hours_back,
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
@@ -619,7 +619,7 @@ public sealed class DarlingMcpHealthParserTools
 
             return Finish(notice, JsonSerializer.Serialize(new
             {
-                server = c.ServerName,
+                server = c.DisplayName,
                 hours_back,
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
@@ -711,17 +711,17 @@ public sealed class DarlingMcpHealthParserTools
                     description (the four conditions) is this tool's to word.
                 */
                 return await EmptyAsync(
-                    postgres, new Collected<SignificantWaitRecord>(null, resolved.ServerId, resolved.ServerName, rows, xmls.Count, lastCapturedAt, now),
+                    postgres, new Collected<SignificantWaitRecord>(null, resolved.ServerId, resolved.ServerName, resolved.DisplayName, rows, xmls.Count, lastCapturedAt, now),
                     hours_back, SystemHealthParser.WaitInfoEvent,
                     $"none was significant (needs a real session, a non-BACKUP statement, at least {SystemHealthSignificance.SignificantWaitMinDurationMs} ms, and a wait type off the idle list)", logger, cancellationToken);
             }
 
-            var collected = new Collected<SignificantWaitRecord>(null, resolved.ServerId, resolved.ServerName, rows, xmls.Count, lastCapturedAt, now);
+            var collected = new Collected<SignificantWaitRecord>(null, resolved.ServerId, resolved.ServerName, resolved.DisplayName, rows, xmls.Count, lastCapturedAt, now);
             var notice = await NoticeAsync(postgres, collected, hours_back, EarliestOf(rows.Select(r => r.EventTime)), emptyAnswer: false, logger, cancellationToken);
 
             return Finish(notice, JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
@@ -755,7 +755,7 @@ public sealed class DarlingMcpHealthParserTools
     /// <see cref="Rows"/>. The id rides along for the #2511 engine-capability probe on the zero-row path —
     /// re-resolving the name there would be a second registry read, which could answer for a different server.</summary>
     private readonly record struct Collected<T>(
-        string? EarlyReturn, int ServerId, string ServerName, List<T> Rows, int RawEventCount, DateTime? LastCapturedAt, DateTime WindowEnd);
+        string? EarlyReturn, int ServerId, string ServerName, string DisplayName, List<T> Rows, int RawEventCount, DateTime? LastCapturedAt, DateTime WindowEnd);
 
     /// <summary>
     /// Resolves the server, validates hours_back + as_of + limit, reads the raw event_xml for
@@ -775,10 +775,10 @@ public sealed class DarlingMcpHealthParserTools
         Func<string, IEnumerable<T>> shred, Func<T, bool> significant, CancellationToken cancellationToken = default) where T : class
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, serverName, cancellationToken);
-        if (error != null) return new Collected<T>(error, 0, "", new List<T>(), 0, null, default);
+        if (error != null) return new Collected<T>(error, 0, "", "", new List<T>(), 0, null, default);
 
         var validation = DarlingReadWindow.Validate(hoursBack, asOf, out var windowEnd) ?? McpHelpers.ValidateTop(limit);
-        if (validation != null) return new Collected<T>(validation, 0, "", new List<T>(), 0, null, default);
+        if (validation != null) return new Collected<T>(validation, 0, "", "", new List<T>(), 0, null, default);
 
         var now = windowEnd;
         var xmls = await DarlingSystemHealthReader.ReadEventXmlAsync(
@@ -795,7 +795,7 @@ public sealed class DarlingMcpHealthParserTools
             }
         }
 
-        return new Collected<T>(null, resolved.ServerId, resolved.ServerName, rows, xmls.Count, lastCapturedAt, now);
+        return new Collected<T>(null, resolved.ServerId, resolved.ServerName, resolved.DisplayName, rows, xmls.Count, lastCapturedAt, now);
     }
 
     /* ─────────────────────────── the four nothings (#3541 A12) ─────────────────────────── */
@@ -841,7 +841,7 @@ public sealed class DarlingMcpHealthParserTools
                 "empty",
                 McpHelpers.QuietUnlessCut(
                     notice.WindowTruncated, notice.EffectiveStart,
-                    factual: $"{c.RawEventCount} {eventType} event(s) were captured for {c.ServerName} in the last {hoursBack} hour(s) and {noneQualifiedBecause}",
+                    factual: $"{c.RawEventCount} {eventType} event(s) were captured for {c.DisplayName} in the last {hoursBack} hour(s) and {noneQualifiedBecause}",
                     coveredClaim: ". Events ARE being captured, so this is the healthy answer for this read rather than missing data."),
                 sourceObserved: true, c.LastCapturedAt, lastCapturedOfTypeAt: lastOfType, eventsInWindow: c.RawEventCount, hints: notice.AsHints());
         }
@@ -853,7 +853,7 @@ public sealed class DarlingMcpHealthParserTools
                 "empty",
                 McpHelpers.QuietUnlessCut(
                     notice.WindowTruncated, notice.EffectiveStart,
-                    factual: $"No {eventType} events were captured for {c.ServerName} in the last {hoursBack} hour(s). This server HAS captured them before (the newest was stored at {Stamp(seen)})",
+                    factual: $"No {eventType} events were captured for {c.DisplayName} in the last {hoursBack} hour(s). This server HAS captured them before (the newest was stored at {Stamp(seen)})",
                     coveredClaim: ", so the window is genuinely quiet rather than blind — widen hours_back to reach the most recent events."),
                 sourceObserved: true, c.LastCapturedAt, lastCapturedOfTypeAt: seen, eventsInWindow: 0,
                 hints: notice.AsHints());
@@ -863,15 +863,15 @@ public sealed class DarlingMcpHealthParserTools
         {
             return WitnessStatus(
                 "empty",
-                $"No {eventType} events have been captured for {c.ServerName} at any time, but its system_health session IS being read — the collector last stored an event of another type at {Stamp(alive)} — so for this category the absence is a measurement: the engine has not recorded one. Not a blind spot, and a wider window would not change it.",
+                $"No {eventType} events have been captured for {c.DisplayName} at any time, but its system_health session IS being read — the collector last stored an event of another type at {Stamp(alive)} — so for this category the absence is a measurement: the engine has not recorded one. Not a blind spot, and a wider window would not change it.",
                 sourceObserved: true, alive, lastCapturedOfTypeAt: null, eventsInWindow: 0,
                 hints: (await NoticeAsync(postgres, c, hoursBack, null, emptyAnswer: true, logger, cancellationToken)).AsHints());
         }
 
-        return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, c.ServerId, c.ServerName, SystemHealthCollectorName, cancellationToken)
+        return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, c.ServerId, c.DisplayName, SystemHealthCollectorName, cancellationToken)
             ?? WitnessStatus(
                 "unavailable",
-                $"No system_health events of ANY type have EVER been captured for {c.ServerName}, so this is NOT an all-clear — there is nothing here to be clear about. This read is served from the collected system_health ring buffer: check that collection is running for this server and that its system_health session is started before concluding nothing happened.",
+                $"No system_health events of ANY type have EVER been captured for {c.DisplayName}, so this is NOT an all-clear — there is nothing here to be clear about. This read is served from the collected system_health ring buffer: check that collection is running for this server and that its system_health session is started before concluding nothing happened.",
                 sourceObserved: false, lastCapturedAt: null, lastCapturedOfTypeAt: null, eventsInWindow: 0);
     }
 

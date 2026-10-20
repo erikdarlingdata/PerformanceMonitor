@@ -48,13 +48,13 @@ public sealed class DarlingMcpJobTools
             var read = await DarlingJobReader.ReadRunningJobsAsync(postgres, resolved.ServerId, cancellationToken);
             var rows = read.Jobs;
             if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "running_jobs", cancellationToken)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "running_jobs", cancellationToken)
                     /* #2546: the msdb case. "No running SQL Agent jobs found" is an affirmative claim about
                        the server's Agent, and it is the wrong one when the monitoring login was refused the
                        job tables — the collector runs, is denied, and records that denial with the GRANT to
                        issue. Reporting it here is the difference between "nothing is running" and "we cannot
                        see what is running". */
-                    ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, "running_jobs", cancellationToken)
+                    ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "running_jobs", cancellationToken)
                     /* #2559: the case the line above cannot see. StatusAsync reports what the collector's last
                        run RECORDED, and a collector whose AppliesTo gate is off never runs — the runner returns
                        before writing any collection_log row, deliberately, because a per-cycle fake row was
@@ -68,7 +68,7 @@ public sealed class DarlingMcpJobTools
                        The message still names it as a possible cause: a run that is merely late looks the same
                        from here. The text is shared with Lite, so the two tools cannot drift. */
                     ?? await DarlingRuntimePrecondition.GatedOffStatusAsync(
-                        postgres, resolved.ServerId, resolved.ServerName, "running_jobs",
+                        postgres, resolved.ServerId, resolved.DisplayName, "running_jobs",
                         CollectorRuntimePrecondition.RunningJobsPossibleCauses,
                         cancellationToken)
                     /* The freshness bound (#1812): the last good collection is older than three missed cycles, so "none found" would be
@@ -98,7 +98,7 @@ public sealed class DarlingMcpJobTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 /* #3653: captured_at, the #3637 census's one spelling for a latest read's stamp - see
                    DarlingMcpDataTools.GetServerProperties for why it is a cut-over and not an alias. */
                 captured_at = rows[0].CollectionTime.ToString("o"),

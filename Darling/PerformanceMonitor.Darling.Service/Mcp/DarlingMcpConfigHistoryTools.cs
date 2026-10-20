@@ -70,14 +70,14 @@ public sealed class DarlingMcpConfigHistoryTools
             if (changes.Count == 0)
             {
                 /* Decide not_collected first: it carries no notice, so probing before it would throw the probe away. */
-                var notCollected = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "server_config", cancellationToken);
+                var notCollected = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "server_config", cancellationToken);
                 if (notCollected is not null)
                 {
                     return notCollected;
                 }
 
                 var emptyNotice = await ReadNoticeAsync(postgres, "server_config", resolved.ServerName, windowStart, windowEndNaive, emptyAnswer: true, logger, cancellationToken);
-                return NoChanges(resolved.ServerName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)), emptyNotice);
+                return NoChanges(resolved.DisplayName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)), emptyNotice);
             }
 
             var notice = await ReadNoticeAsync(postgres, "server_config", resolved.ServerName, windowStart, windowEndNaive, emptyAnswer: false, logger, cancellationToken);
@@ -95,7 +95,7 @@ public sealed class DarlingMcpConfigHistoryTools
 
             var json = JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 /* #4966: the window floor, always present on a data answer. */
                 effective_start = notice.EffectiveStart,
@@ -157,7 +157,7 @@ public sealed class DarlingMcpConfigHistoryTools
             {
                 /* Decide not_collected first: it carries no notice, so probing before it would throw the probe away. */
                 var notCollected = McpHelpers.WithDatabase(
-                    await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "database_config", cancellationToken),
+                    await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "database_config", cancellationToken),
                     databases.Describe());
                 if (notCollected is not null)
                 {
@@ -166,7 +166,7 @@ public sealed class DarlingMcpConfigHistoryTools
 
                 var emptyNotice = await ReadNoticeAsync(postgres, "database_config", resolved.ServerName, windowStart, windowEndNaive, emptyAnswer: true, logger, cancellationToken);
                 return McpHelpers.WithDatabase(
-                    NoChanges(resolved.ServerName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)), emptyNotice, DatabaseScopeText(databases)),
+                    NoChanges(resolved.DisplayName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)), emptyNotice, DatabaseScopeText(databases)),
                     databases.Describe())!;
             }
 
@@ -182,7 +182,7 @@ public sealed class DarlingMcpConfigHistoryTools
 
             var json = JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 /* #4966: the window floor, always present on a data answer. */
                 effective_start = notice.EffectiveStart,
@@ -228,7 +228,7 @@ public sealed class DarlingMcpConfigHistoryTools
             if (changes.Count == 0)
             {
                 /* Decide not_collected first: it carries no notice, so probing before it would throw the probe away. */
-                var notCollected = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "trace_flags", cancellationToken);
+                var notCollected = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "trace_flags", cancellationToken);
                 if (notCollected is not null)
                 {
                     return notCollected;
@@ -238,7 +238,7 @@ public sealed class DarlingMcpConfigHistoryTools
                 /* #5633 item 19: a successful run that stored zero rows IS the collector saying no flag is on; only a collector that has not
                    run (or stored rows) really has "fewer than two snapshots". */
                 var runFacts = await DarlingCollectorRunFactsReader.ReadAsync(postgres, resolved.ServerId, "trace_flags", null, windowEndNaive, cancellationToken);
-                return NoTraceFlagChanges(resolved.ServerName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)), emptyNotice, runFacts);
+                return NoTraceFlagChanges(resolved.DisplayName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)), emptyNotice, runFacts);
             }
 
             var notice = await ReadNoticeAsync(postgres, "trace_flags", resolved.ServerName, windowStart, windowEndNaive, emptyAnswer: false, logger, cancellationToken);
@@ -256,7 +256,7 @@ public sealed class DarlingMcpConfigHistoryTools
 
             var json = JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 /* #4966: the window floor, always present on a data answer. */
                 effective_start = notice.EffectiveStart,
@@ -304,7 +304,7 @@ public sealed class DarlingMcpConfigHistoryTools
         {
             var snapshot = await DarlingConfigHistoryReader.GetLatestDatabaseScopedConfigAsync(postgres, resolved.ServerId, cancellationToken);
             if (snapshot.IsEmpty)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "database_scoped_config", cancellationToken)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "database_scoped_config", cancellationToken)
                     ?? McpHelpers.Status(
                         "unavailable",
                         "No database-scoped configuration data available. The config collector may not have run yet.");
@@ -327,7 +327,7 @@ public sealed class DarlingMcpConfigHistoryTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 /* #3541 A10: the connect-time capture these settings are as of. */
                 captured_at = snapshot.CapturedAt!.Value.ToString("o"),
                 database_count = grouped.Count,
@@ -369,7 +369,7 @@ public sealed class DarlingMcpConfigHistoryTools
         {
             var snapshot = await DarlingConfigHistoryReader.GetLatestQueryStoreHealthAsync(postgres, resolved.ServerId, cancellationToken);
             if (snapshot.IsEmpty)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store_health", cancellationToken)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_store_health", cancellationToken)
                     ?? McpHelpers.Status(
                         "unavailable",
                         "No Query Store health data available. The query_store_health collector runs hourly (SQL Server 2016+); a server with no rows either predates Query Store or has not completed a cycle yet.");
@@ -404,7 +404,7 @@ public sealed class DarlingMcpConfigHistoryTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 captured_at = snapshot.CapturedAt!.Value.ToString("o"),
                 database_count = result.Count,
                 databases = result

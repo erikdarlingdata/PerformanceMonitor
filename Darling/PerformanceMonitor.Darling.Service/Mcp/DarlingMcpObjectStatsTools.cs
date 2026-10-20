@@ -98,7 +98,7 @@ public sealed class DarlingMcpObjectStatsTools
                     {
                         return McpHelpers.StatusForDatabase(
                             "empty",
-                            $"No table size rows for {DescribeScope(databases)} on {resolved.ServerName} at the latest snapshot, "
+                            $"No table size rows for {DescribeScope(databases)} on {resolved.DisplayName} at the latest snapshot, "
                             + $"though the server has {anyOnServer:N0} index rows across its other databases. Check the database "
                             + $"{(databases.Names.Count == 1 ? "name" : "names")} against get_database_sizes: the filter matches exactly, "
                             + "and an excluded or renamed database looks identical to one with no tables.",
@@ -107,7 +107,7 @@ public sealed class DarlingMcpObjectStatsTools
                 }
 
                 return McpHelpers.WithDatabase(
-                           await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "index_object_stats", cancellationToken),
+                           await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "index_object_stats", cancellationToken),
                            databases.Describe())
                     ?? McpHelpers.StatusForDatabase("unavailable", "No object size data available. Index/object stats are collected daily.", databases.Describe());
             }
@@ -146,7 +146,7 @@ public sealed class DarlingMcpObjectStatsTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 database_name = databases.Describe(),
                 history = new
                 {
@@ -251,7 +251,7 @@ public sealed class DarlingMcpObjectStatsTools
                     {
                         return McpHelpers.Status(
                             "empty",
-                            $"No index usage rows for {scope} on {resolved.ServerName} at the "
+                            $"No index usage rows for {scope} on {resolved.DisplayName} at the "
                             + $"latest snapshot, though the server has {anyOnServer:N0} across its other "
                             + $"databases. Check the database {(databases.Names.Count == 1 ? "name" : "names")} against get_database_sizes — the filter "
                             + "matches exactly, and an excluded or renamed database looks identical to one "
@@ -259,7 +259,7 @@ public sealed class DarlingMcpObjectStatsTools
                     }
                 }
 
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "index_object_stats", cancellationToken)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "index_object_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No index usage data available. Index/object stats are collected daily.");
             }
 
@@ -288,7 +288,7 @@ public sealed class DarlingMcpObjectStatsTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 database_name = databases.Describe(),
                 returned_index_count = rows.Count,
                 matching_index_count = matching,
@@ -440,7 +440,7 @@ public sealed class DarlingMcpObjectStatsTools
                     && (await DarlingObjectStatsReader.GetIndexLockingAsync(postgres, resolved.ServerId, 1, cancellationToken)).Count > 0)
                 {
                     return McpHelpers.Status("empty",
-                        $"No lock/latch contention{inScope} on {resolved.ServerName} at the latest snapshot, though other databases on "
+                        $"No lock/latch contention{inScope} on {resolved.DisplayName} at the latest snapshot, though other databases on "
                         + $"the server have some. Check the database {(databases.Names.Count == 1 ? "name" : "names")} against get_database_sizes "
                         + "— the filter matches exactly, and an excluded or renamed database looks identical to one with no contention."
                         + (optimizedLockingNote is null ? "" : " " + optimizedLockingNote),
@@ -449,7 +449,7 @@ public sealed class DarlingMcpObjectStatsTools
                             : new { optimized_locking_note = optimizedLockingNote, separately_monitored_note = separatelyMonitoredNote });
                 }
 
-                var notCollected = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "index_object_stats", cancellationToken);
+                var notCollected = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "index_object_stats", cancellationToken);
                 if (notCollected is not null) return notCollected;
 
                 /* #5372 (r2 Low): a latest snapshot that holds index rows, none of them contended, is a TRUE negative: the
@@ -460,7 +460,7 @@ public sealed class DarlingMcpObjectStatsTools
                 {
                     return McpHelpers.Status("empty",
                         "No lock/latch contention" + (scope is null ? "" : $"{inScope} or in any other database")
-                        + $" on {resolved.ServerName} at the latest snapshot."
+                        + $" on {resolved.DisplayName} at the latest snapshot."
                         + (optimizedLockingNote is null ? "" : " " + optimizedLockingNote),
                         optimizedLockingNote is null && separatelyMonitoredNote is null
                             ? null
@@ -499,7 +499,7 @@ public sealed class DarlingMcpObjectStatsTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 /* #3880 (Erik's ruling on the judgment call #3878/#3879 recorded): captured_at, the #3637
                    census's one spelling for a latest read's stamp - see GetDatabaseSizes below, and
                    DarlingMcpDataTools.GetServerProperties for why it is a cut-over and not an alias. Every
@@ -554,13 +554,13 @@ public sealed class DarlingMcpObjectStatsTools
             if (row is null)
             {
                 return McpHelpers.Status("empty",
-                    $"No such index in the latest snapshot of {resolved.ServerName}: the page's database, schema, table and index "
+                    $"No such index in the latest snapshot of {resolved.DisplayName}: the page's database, schema, table and index "
                     + "names must match exactly, and an index dropped or renamed since the list was read is no longer there.");
             }
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 captured_at = row.CollectionTime.ToString("o"),
                 detail = new
                 {
@@ -617,7 +617,7 @@ public sealed class DarlingMcpObjectStatsTools
                 {
                     return McpHelpers.StatusForDatabase(
                         "empty",
-                        $"No database size rows for {DescribeScope(databases)} on {resolved.ServerName} in the snapshot captured at "
+                        $"No database size rows for {DescribeScope(databases)} on {resolved.DisplayName} in the snapshot captured at "
                         + $"{snapshot:o}. Check the database {(databases.Names.Count == 1 ? "name" : "names")} against the server's "
                         + "unfiltered get_database_sizes: the filter matches exactly, and an excluded or renamed database looks identical "
                         + "to one with no files.",
@@ -625,12 +625,12 @@ public sealed class DarlingMcpObjectStatsTools
                 }
 
                 return McpHelpers.WithDatabase(
-                           await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "database_size_stats", cancellationToken),
+                           await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "database_size_stats", cancellationToken),
                            databases.Describe())
                     ?? McpHelpers.StatusForDatabase("unavailable", "No database size data available. The size collector may not have run yet.", databases.Describe());
             }
 
-            return DatabaseSizesPayload(resolved.ServerName, rows, databases.Describe());
+            return DatabaseSizesPayload(resolved.DisplayName, rows, databases.Describe());
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

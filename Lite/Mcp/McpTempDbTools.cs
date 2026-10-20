@@ -34,11 +34,11 @@ public sealed class McpTempDbTools
             var points = await dataService.GetTempDbBucketsAsync(resolved.ServerId, hours_back, windowEnd, bucketMinutes);
             if (points.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "tempdb_stats")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "tempdb_stats")
                     ?? McpHelpers.Status("unavailable", "No TempDB data available.");
             }
 
-            return TrendPayloads.TempDbTrend(resolved.ServerName, hours_back, points, bucketMinutes, bucket_minutes is not null, budget.AutoPoints);
+            return TrendPayloads.TempDbTrend(resolved.DisplayName, hours_back, points, bucketMinutes, bucket_minutes is not null, budget.AutoPoints);
         }
         catch (Exception ex)
         {

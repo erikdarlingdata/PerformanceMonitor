@@ -63,7 +63,7 @@ public sealed class McpPvsTools
                 if (names != null && await dataService.GetPvsStatsLatestAsync(resolved.ServerId) is { Count: > 0 } serverRows)
                 {
                     return McpHelpers.StatusForDatabase("empty",
-                        $"No PVS rows for {McpDatabaseSelection.Scope(names)} on {resolved.ServerName} in the snapshot taken at "
+                        $"No PVS rows for {McpDatabaseSelection.Scope(names)} on {resolved.DisplayName} in the snapshot taken at "
                         + $"{serverRows[0].CollectionTime:o}, though it holds {serverRows.Count:N0} other database(s). Check the database "
                         + "name: the filter matches exactly, and a database with no row at that snapshot looks identical to one that does not exist.",
                         McpDatabaseSelection.Describe(names));
@@ -71,7 +71,7 @@ public sealed class McpPvsTools
 
                 /* #5244: every answer shape says which database it was limited to (null for every database). */
                 return McpHelpers.WithDatabase(
-                           await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "pvs_stats"),
+                           await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "pvs_stats"),
                            McpDatabaseSelection.Describe(names))
                     ?? McpHelpers.StatusForDatabase("empty",
                         "No PVS data collected for this server. The collector reads sys.dm_tran_persistent_version_store_stats " +
@@ -134,7 +134,7 @@ public sealed class McpPvsTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 database_name = McpDatabaseSelection.Describe(names),
                 as_of = rows[0].CollectionTime.ToString("o"),
                 databases,

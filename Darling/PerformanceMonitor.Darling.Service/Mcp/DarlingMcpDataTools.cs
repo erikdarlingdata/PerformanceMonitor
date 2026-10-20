@@ -95,13 +95,13 @@ public sealed class DarlingMcpDataTools
         {
             var points = await DarlingDataReader.GetCpuBucketsAsync(postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, bucketMinutes, cancellationToken);
             if (points.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "cpu_utilization", cancellationToken)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "cpu_utilization", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No CPU utilization data available.");
 
             /* #3653 A15/A16: the source-cadence sentence both SKUs publish is TrendPayloads.CpuCadenceNote, the one
                place it is spelled (the ring buffer writes one record a minute on-prem, MI and RDS; Azure SQL DB's
                sys.dm_db_resource_stats one every 15 seconds; samples_in_bucket is the measured count). */
-            return TrendPayloads.CpuUtilization(resolved.ServerName, hours_back, points, bucketMinutes, bucket_minutes is not null, budget.AutoPoints);
+            return TrendPayloads.CpuUtilization(resolved.DisplayName, hours_back, points, bucketMinutes, bucket_minutes is not null, budget.AutoPoints);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -134,7 +134,7 @@ public sealed class DarlingMcpDataTools
                signal. The reader's LIMIT 50 sat under a limit the tool accepts up to 1,000. */
             var rows = await DarlingDataReader.GetWaitStatsAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, cancellationToken);
             if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "wait_stats", cancellationToken)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "wait_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No wait stats data available for the specified time range.");
 
             var truncated = rows.Count > limit;
@@ -166,7 +166,7 @@ public sealed class DarlingMcpDataTools
 
             var json = JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
@@ -214,7 +214,7 @@ public sealed class DarlingMcpDataTools
                     wants somebody to look at collection, and widening will never fill it. Probed only here,
                     against the SAME source the read walks.
                 */
-                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "wait_stats", cancellationToken);
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "wait_stats", cancellationToken);
                 if (gated != null)
                 {
                     return gated;
@@ -223,15 +223,15 @@ public sealed class DarlingMcpDataTools
                 return await DarlingDataReader.HasAnyWaitStatAsync(postgres, resolved.ServerId, cancellationToken)
                     ? McpHelpers.Status(
                         "empty",
-                        $"No wait types recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected wait stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.")
+                        $"No wait types recorded for {resolved.DisplayName} in the last {hours_back} hour(s). This server HAS collected wait stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.")
                     : McpHelpers.Status(
                         "unavailable",
-                        $"No wait stats have EVER been recorded for {resolved.ServerName}. This is not an empty window — nothing has been stored for this server at all. Delta wait stats need a SECOND collection cycle before the first row exists, so on a newly added server this clears itself; otherwise check that collection is running and that the server is enabled.");
+                        $"No wait stats have EVER been recorded for {resolved.DisplayName}. This is not an empty window — nothing has been stored for this server at all. Delta wait stats need a SECOND collection cycle before the first row exists, so on a newly added server this clears itself; otherwise check that collection is running and that the server is enabled.");
             }
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 wait_types = types
             }, McpHelpers.JsonOptions);
@@ -280,7 +280,7 @@ public sealed class DarlingMcpDataTools
                    the miss path, so either order keeps the property that matters — but a permanently gated
                    engine takes this branch on every call, forever, and the probe below could never tell it
                    anything. Asking first makes that case one query instead of two. */
-                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "wait_stats", cancellationToken);
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "wait_stats", cancellationToken);
                 if (gated != null)
                 {
                     return gated;
@@ -308,7 +308,7 @@ public sealed class DarlingMcpDataTools
             var discontinuities = await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, start, now, cancellationToken);
 
             return TrendPayloads.WaitTrend(
-                resolved.ServerName, wait_type, hours_back, points, bucketMinutes, bucket_minutes is not null,
+                resolved.DisplayName, wait_type, hours_back, points, bucketMinutes, bucket_minutes is not null,
                 budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -331,7 +331,7 @@ public sealed class DarlingMcpDataTools
         {
             var stats = await DarlingDataReader.GetLatestMemoryStatsAsync(postgres, resolved.ServerId, cancellationToken);
             if (stats == null)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "memory_stats", cancellationToken)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "memory_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No memory stats available.");
 
             /* ONE edition for the whole answer: the REGISTRY's (servers.sql_engine_edition), read once through the reader every
@@ -340,7 +340,7 @@ public sealed class DarlingMcpDataTools
                with its own not_collected answers. The memory read carries no edition of its own. */
             var engineEdition = await DarlingEngineCapability.EngineEditionAsync(postgres, resolved.ServerId, cancellationToken);
 
-            return MemoryStatsPayload(resolved.ServerName, stats, engineEdition);
+            return MemoryStatsPayload(resolved.DisplayName, stats, engineEdition);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -424,10 +424,10 @@ public sealed class DarlingMcpDataTools
                     the caller does need is to be told that an empty clerk list is NEVER a quiet period,
                     because on a live SQL Server it cannot be: the DMV always has clerks.
                 */
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "memory_clerks", cancellationToken)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "memory_clerks", cancellationToken)
                     ?? McpHelpers.Status(
                         "unavailable",
-                        $"No memory-clerk snapshot is available for {resolved.ServerName}. This read returns the LATEST snapshot rather than a window, so an empty result is never a quiet period — a live SQL Server always has memory clerks. It means nothing the memory_clerks collector stored is still retained, either because it has not run for this server or because its rows have aged out. Check get_collection_health and get_collection_log for the memory_clerks collector.");
+                        $"No memory-clerk snapshot is available for {resolved.DisplayName}. This read returns the LATEST snapshot rather than a window, so an empty result is never a quiet period — a live SQL Server always has memory clerks. It means nothing the memory_clerks collector stored is still retained, either because it has not run for this server or because its rows have aged out. Check get_collection_health and get_collection_log for the memory_clerks collector.");
 
             var result = snapshot.Rows.Select(r => new
             {
@@ -437,7 +437,7 @@ public sealed class DarlingMcpDataTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 captured_at = snapshot.CapturedAt!.Value.ToString("o"),
                 clerks = result
             }, McpHelpers.JsonOptions);
@@ -483,7 +483,7 @@ public sealed class DarlingMcpDataTools
                     {
                         return McpHelpers.StatusForDatabase(
                             "empty",
-                            $"The newest file I/O snapshot for {resolved.ServerName} (captured_at {capturedAt.Value.ToString("o")}) holds no files{DarlingMcpBlockingTools.ForChosenDatabases(databases)}. "
+                            $"The newest file I/O snapshot for {resolved.DisplayName} (captured_at {capturedAt.Value.ToString("o")}) holds no files{DarlingMcpBlockingTools.ForChosenDatabases(databases)}. "
                             + $"The {(databases.Names.Count == 1 ? "name" : "names")}"
                             + " must match a collected database exactly; omit database_name for every database.",
                             databases.Describe());
@@ -491,7 +491,7 @@ public sealed class DarlingMcpDataTools
                 }
 
                 return McpHelpers.WithDatabase(
-                           await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "file_io_stats", cancellationToken),
+                           await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "file_io_stats", cancellationToken),
                            databases.Describe())
                     ?? McpHelpers.StatusForDatabase("unavailable", "No file I/O stats available.", databases.Describe());
             }
@@ -500,7 +500,7 @@ public sealed class DarlingMcpDataTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 database_name = databases.Describe(),
                 captured_at = snapshot.CapturedAt!.Value.ToString("o"),
                 files = result
@@ -571,10 +571,10 @@ public sealed class DarlingMcpDataTools
         {
             var points = await DarlingDataReader.GetTempDbBucketsAsync(postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, bucketMinutes, cancellationToken);
             if (points.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "tempdb_stats", cancellationToken)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "tempdb_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No TempDB data available.");
 
-            return TrendPayloads.TempDbTrend(resolved.ServerName, hours_back, points, bucketMinutes, bucket_minutes is not null, budget.AutoPoints);
+            return TrendPayloads.TempDbTrend(resolved.DisplayName, hours_back, points, bucketMinutes, bucket_minutes is not null, budget.AutoPoints);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -598,7 +598,7 @@ public sealed class DarlingMcpDataTools
         {
             var snapshot = await DarlingDataReader.GetLatestPerfmonStatsAsync(postgres, resolved.ServerId, cancellationToken);
             if (snapshot.IsEmpty)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "perfmon_stats", cancellationToken)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "perfmon_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No perfmon stats available.");
 
             IEnumerable<DarlingDataReader.PerfmonRow> filtered = snapshot.Rows;
@@ -615,7 +615,7 @@ public sealed class DarlingMcpDataTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 captured_at = snapshot.CapturedAt!.Value.ToString("o"),
                 counters = result
             }, McpHelpers.JsonOptions);
@@ -839,7 +839,7 @@ public sealed class DarlingMcpDataTools
                 {
                     return McpHelpers.Status(
                         "empty",
-                        $"No query-stats group on {resolved.ServerName} in the last {hours_back} hour(s) carries query tag '{tagFilter.Requested}'. The tag filter was applied in SQL before the top-{top} ranking.");
+                        $"No query-stats group on {resolved.DisplayName} in the last {hours_back} hour(s) carries query tag '{tagFilter.Requested}'. The tag filter was applied in SQL before the top-{top} ranking.");
                 }
 
                 /* A filtered miss is not a collection miss: with the floor in the query, an empty page under
@@ -850,8 +850,8 @@ public sealed class DarlingMcpDataTools
                     return McpHelpers.Status(
                         "empty",
                         windowTruncated
-                            ? $"No query-stats group on {resolved.ServerName} in the last {hours_back} hour(s) has a cached plan with lifetime max_dop >= {minMaxDop}. The filter was applied in SQL over the part of the window raw query_stats still holds (from {McpHelpers.FormatEffectiveStart(effectiveStart)}; the older part was not read), so this is that part's answer rather than a page artefact — drop parallel_only / min_dop to see the unfiltered ranking, or confirm current parallelism with analyze_query_plan."
-                            : $"No query-stats group on {resolved.ServerName} in the last {hours_back} hour(s) has a cached plan with lifetime max_dop >= {minMaxDop}. The filter was applied in SQL over the whole window, so this is the window's answer rather than a page artefact — drop parallel_only / min_dop to see the unfiltered ranking, or confirm current parallelism with analyze_query_plan.",
+                            ? $"No query-stats group on {resolved.DisplayName} in the last {hours_back} hour(s) has a cached plan with lifetime max_dop >= {minMaxDop}. The filter was applied in SQL over the part of the window raw query_stats still holds (from {McpHelpers.FormatEffectiveStart(effectiveStart)}; the older part was not read), so this is that part's answer rather than a page artefact — drop parallel_only / min_dop to see the unfiltered ranking, or confirm current parallelism with analyze_query_plan."
+                            : $"No query-stats group on {resolved.DisplayName} in the last {hours_back} hour(s) has a cached plan with lifetime max_dop >= {minMaxDop}. The filter was applied in SQL over the whole window, so this is the window's answer rather than a page artefact — drop parallel_only / min_dop to see the unfiltered ranking, or confirm current parallelism with analyze_query_plan.",
                         new
                         {
                             filter_applied = filterApplied,
@@ -873,7 +873,7 @@ public sealed class DarlingMcpDataTools
                     {
                         return McpHelpers.Status(
                             "empty",
-                            McpHelpers.SnapshotsWithoutDeltaMessage(resolved.ServerName, hours_back, probe.SnapshotsInWindow, probe.NewestMeasuredDeltaAt, now),
+                            McpHelpers.SnapshotsWithoutDeltaMessage(resolved.DisplayName, hours_back, probe.SnapshotsInWindow, probe.NewestMeasuredDeltaAt, now),
                             new
                             {
                                 snapshots_in_window = probe.SnapshotsInWindow,
@@ -884,7 +884,7 @@ public sealed class DarlingMcpDataTools
                     }
                 }
 
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_stats", cancellationToken)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No query stats available for the specified time range.");
             }
 
@@ -962,7 +962,7 @@ public sealed class DarlingMcpDataTools
 
             var queriesPayload = JsonSerializer.SerializeToNode(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 /* #4231: what was served, beside what was asked for — the same disclosure get_query_store_top
                    makes (#2364), over query_stats instead of query_store_stats. */
@@ -1190,10 +1190,10 @@ public sealed class DarlingMcpDataTools
             if (rows.Count == 0 && tagFilter.Active)
                 return McpHelpers.WithDatabasesLeftOut(McpHelpers.Status(
                     "empty",
-                    $"No procedure on {resolved.ServerName} in the last {hours_back} hour(s) carries query tag '{tagFilter.Requested}'. The tag filter was applied in SQL before the top-{top} ranking."), leftOut)!;
+                    $"No procedure on {resolved.DisplayName} in the last {hours_back} hour(s) carries query tag '{tagFilter.Requested}'. The tag filter was applied in SQL before the top-{top} ranking."), leftOut)!;
 
             if (rows.Count == 0)
-                return McpHelpers.WithDatabasesLeftOut(await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "procedure_stats", cancellationToken)
+                return McpHelpers.WithDatabasesLeftOut(await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "procedure_stats", cancellationToken)
                     ?? (routed.RawForced
                         /* #5226: a reads ranking that read raw (the io rollup, procedure_stats_io_hourly, did not reach back further
                            than raw), so an empty page here means raw holds nothing in the window while the stitched hourly rollups
@@ -1292,7 +1292,7 @@ public sealed class DarlingMcpDataTools
 
             var proceduresPayload = JsonSerializer.SerializeToNode(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 /* #4231: what was served, beside what was asked for. */
                 effective_start = McpHelpers.FormatEffectiveStart(effectiveStart),
@@ -1498,7 +1498,7 @@ public sealed class DarlingMcpDataTools
                 {
                     return McpHelpers.Status(
                         "empty",
-                        $"No Query Store query on {resolved.ServerName} in the last {hours_back} hour(s) carries query tag '{tagFilter.Requested}'. The tag filter was applied in SQL before the top-{top} ranking.");
+                        $"No Query Store query on {resolved.DisplayName} in the last {hours_back} hour(s) carries query tag '{tagFilter.Requested}'. The tag filter was applied in SQL before the top-{top} ranking.");
                 }
 
                 /* A filter that matched nothing is an answer, not a missing collection. Most queries never abort,
@@ -1536,16 +1536,16 @@ public sealed class DarlingMcpDataTools
                                 window_truncated = truncated
                             }, scopeText);
 
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store", cancellationToken)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_store", cancellationToken)
                     /* #2546: the sentence below GUESSES ("may not be enabled"), and it has to, because the
                        read had no way to find out. The store has known all along -- query_store_health
                        records actual_state per database every hour for exactly this purpose. Asking it turns
                        a hedge into a fact plus the ALTER DATABASE that fixes it, and it answers for the
                        database this read was scoped to rather than for the server's most flattering one. */
-                    ?? await DarlingRuntimePrecondition.QueryStoreStatusAsync(postgres, resolved.ServerId, resolved.ServerName, databases, cancellationToken)
+                    ?? await DarlingRuntimePrecondition.QueryStoreStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, databases, cancellationToken)
                     /* And the collector's own last run, for the case Query Store is on and the collector is
                        the thing that cannot read it. */
-                    ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store", cancellationToken)
+                    ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_store", cancellationToken)
                     ?? McpHelpers.Status(
                         "unavailable",
                         $"No Query Store rows for this server in the {hours_back}-hour window searched. Query Store " +
@@ -1587,7 +1587,7 @@ public sealed class DarlingMcpDataTools
 
             var storePayload = JsonSerializer.SerializeToNode(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 /* #2364: what was served, beside what was asked for. hours_back alone was a request echoed
                    back as though it described the data. */
@@ -1933,7 +1933,7 @@ ORDER BY server_name";
                         ? (object)CompactCollectionHealthRow(r, runTime)
                         : (object)PartialCollectionHealthRow(r, runTime, uncutText ? int.MaxValue : ErrorMessagePreviewLength, uncutText ? int.MaxValue : OutputFindingPreviewLength);
             });
-            result = result.Concat(await DarlingGatedCollectorRows.AppendAsync(postgres, resolved.ServerId, resolved.ServerName, rows, cancellationToken));
+            result = result.Concat(await DarlingGatedCollectorRows.AppendAsync(postgres, resolved.ServerId, resolved.DisplayName, rows, cancellationToken));
             if (alwaysOnOff)
                 result = result.Concat(DarlingGatedCollectorRows.AlwaysOnOffRows(rows));
 
@@ -2204,7 +2204,7 @@ ORDER BY server_name";
             var collectionCaveats = await DarlingCollectionCaveatReader.ReadAsync(postgres, resolved.ServerId, logger, cancellationToken);
             var healthJson = JsonSerializer.Serialize(CollectionCaveatLedger.Shared.Attach(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 /* #3453: the build-attribution read. Nothing else on the MCP surface says WHAT build is
                    answering: counting_since moving proves a RESTART (a crash-restart reads identically to
                    an install), and a capability fingerprint identifies a build only when the change in
@@ -2630,10 +2630,10 @@ ORDER BY server_name";
         {
             var row = await DarlingDataReader.GetLatestServerPropertiesAsync(postgres, resolved.ServerId, cancellationToken);
             if (row == null)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "server_properties", cancellationToken)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "server_properties", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No server properties available. The properties collector may not have run yet.");
 
-            return ServerPropertiesPayload(resolved.ServerName, row);
+            return ServerPropertiesPayload(resolved.DisplayName, row);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -2974,7 +2974,7 @@ ORDER BY server_name";
                 {
                     return McpHelpers.Status(
                         "unavailable",
-                        $"No collector runs have EVER been recorded for {resolved.ServerName}. This is not an empty window — collection has not run at all for this server. Check that the service is running and that the server is enabled for collection; get_collection_health will be equally empty until it does.");
+                        $"No collector runs have EVER been recorded for {resolved.DisplayName}. This is not an empty window — collection has not run at all for this server. Check that the service is running and that the server is enabled for collection; get_collection_health will be equally empty until it does.");
                 }
 
                 var emptyNotice = await ReadNoticeAsync();
@@ -2983,14 +2983,14 @@ ORDER BY server_name";
                 {
                     return McpHelpers.Status(
                         "empty",
-                        $"No collector runs on {resolved.ServerName} in the last {hours_back} hour(s) matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms, status)}. This says nothing about the window as a whole — the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds, and check collector_name against the names get_collection_health lists, since it is matched exactly.", emptyNotice.AsHints());
+                        $"No collector runs on {resolved.DisplayName} in the last {hours_back} hour(s) matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms, status)}. This says nothing about the window as a whole — the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds, and check collector_name against the names get_collection_health lists, since it is matched exactly.", emptyNotice.AsHints());
                 }
 
                 return McpHelpers.Status(
                     "empty",
                     McpHelpers.QuietUnlessCut(
                         emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
-                        factual: $"No collector runs recorded for {resolved.ServerName} in the last {hours_back} hour(s)",
+                        factual: $"No collector runs recorded for {resolved.DisplayName} in the last {hours_back} hour(s)",
                         coveredClaim: ". This server HAS collected before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent runs."),
                     emptyNotice.AsHints());
             }
@@ -3120,7 +3120,7 @@ ORDER BY server_name";
             var notice = await ReadNoticeAsync();
             var payload = new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 /* The span REQUESTED. Kept under its shipped name, and no longer the only span reported --
                    see the two timestamps below. */
                 hours_back = hours_back,
@@ -3407,7 +3407,7 @@ ORDER BY server_name";
                     "nothing was waiting" reads as an all-clear, while the truth may be that the
                     waiting_tasks collector never ran. A caller told all-clear stops looking.
                 */
-                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "waiting_tasks", cancellationToken);
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "waiting_tasks", cancellationToken);
                 if (gated != null)
                 {
                     return gated;
@@ -3417,15 +3417,15 @@ ORDER BY server_name";
                 return everCollected
                     ? McpHelpers.Status(
                         "empty",
-                        $"Nothing was waiting on {resolved.ServerName} in the last {hours_back} hour(s). The collector has sampled this server, so this is a genuine all-clear for the window rather than missing data.")
+                        $"Nothing was waiting on {resolved.DisplayName} in the last {hours_back} hour(s). The collector has sampled this server, so this is a genuine all-clear for the window rather than missing data.")
                     : McpHelpers.Status(
                         "unavailable",
-                        $"No waiting-task samples have EVER been recorded for {resolved.ServerName}, so this is NOT an all-clear — there is nothing to read. Check that collection is running for this server before concluding it was quiet.");
+                        $"No waiting-task samples have EVER been recorded for {resolved.DisplayName}, so this is NOT an all-clear — there is nothing to read. Check that collection is running for this server before concluding it was quiet.");
             }
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back = hours_back,
                 /* #5244: the name for one database, "the chosen databases" for two or more, null for all. */
                 database_name = databases.Describe(),
@@ -3515,7 +3515,7 @@ ORDER BY server_name";
                     checked because either can be off alone, and the deadlock collector is separate from
                     both -- the verdict covers its series too.
                 */
-                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "blocked_process_report", cancellationToken);
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "blocked_process_report", cancellationToken);
                 if (gated != null)
                 {
                     return gated;
@@ -3535,14 +3535,14 @@ ORDER BY server_name";
                             /* #5244: with a database filter only the blocking half was limited to it (deadlocks are not
                                split by database here), so the sentence says exactly that instead of "no blocking". */
                             factual: databases.IsAll
-                                ? $"No blocking or deadlocks recorded for {resolved.ServerName} in the last {hours_back} hour(s)"
+                                ? $"No blocking or deadlocks recorded for {resolved.DisplayName} in the last {hours_back} hour(s)"
                                 : $"No blocking{DarlingMcpBlockingTools.ForChosenDatabases(databases)} "
-                                  + $"(and no deadlocks, which are not limited by database) recorded for {resolved.ServerName} in the last {hours_back} hour(s)",
+                                  + $"(and no deadlocks, which are not limited by database) recorded for {resolved.DisplayName} in the last {hours_back} hour(s)",
                             coveredClaim: ". The blocking collectors HAVE run successfully for this server, so the window is genuinely clear rather than blind."),
                         emptyNotice.AsHints())
                     : McpHelpers.Status(
                         "unavailable",
-                        $"The blocking collectors have NEVER run successfully for {resolved.ServerName}, so this is NOT a clean bill of health — nothing looked. Blocked-process reports need the XE session running, or the DMV blocking snapshot collector enabled; check those before concluding this server does not block.");
+                        $"The blocking collectors have NEVER run successfully for {resolved.DisplayName}, so this is NOT a clean bill of health — nothing looked. Blocked-process reports need the XE session running, or the DMV blocking snapshot collector enabled; check those before concluding this server does not block.");
             }
 
             /* #4966: one notice for two separate series; see BlockingStatsNoticeAsync. */
@@ -3553,7 +3553,7 @@ ORDER BY server_name";
 
             var json = JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back = hours_back,
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,

@@ -285,13 +285,13 @@ public sealed class DarlingMcpPlanForcePrecheckTools
             }
 
             if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store", cancellationToken)
-                    ?? PlanNotFound(resolved.ServerName, database_name, query_id, plan_id, compare_plan_id, hours_back, windowEnd, effectiveStart, new List<PlanFold>());
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_store", cancellationToken)
+                    ?? PlanNotFound(resolved.DisplayName, database_name, query_id, plan_id, compare_plan_id, hours_back, windowEnd, effectiveStart, new List<PlanFold>());
 
             var plans = Fold(rows);
             var candidate = plans.FirstOrDefault(p => p.PlanId == plan_id);
             if (candidate is null)
-                return PlanNotFound(resolved.ServerName, database_name, query_id, plan_id, compare_plan_id, hours_back, windowEnd, effectiveStart, plans);
+                return PlanNotFound(resolved.DisplayName, database_name, query_id, plan_id, compare_plan_id, hours_back, windowEnd, effectiveStart, plans);
 
             PlanFold? compare;
             if (compare_plan_id is long wanted)
@@ -403,7 +403,7 @@ public sealed class DarlingMcpPlanForcePrecheckTools
             /* A dictionary, not an anonymous object: "shown" is this read's own section, not a page cut (the cut-key census reads a `shown =` member as one). */
             return JsonSerializer.Serialize(new Dictionary<string, object?>
             {
-                ["server"] = resolved.ServerName,
+                ["server"] = resolved.DisplayName,
                 ["database_name"] = database_name,
                 ["query_id"] = query_id,
                 ["plan_id"] = plan_id,

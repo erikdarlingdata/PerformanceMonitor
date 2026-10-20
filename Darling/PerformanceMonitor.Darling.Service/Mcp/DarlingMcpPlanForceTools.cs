@@ -195,7 +195,7 @@ public sealed class DarlingMcpPlanForceTools
                 }
 
                 var refusal = new AgentActionRefusal(PostgresTarget,
-                    $"{resolved.ServerName} is a PostgreSQL target. Forcing a plan is SQL Server only; there is no PostgreSQL force.");
+                    $"{resolved.DisplayName} is a PostgreSQL target. Forcing a plan is SQL Server only; there is no PostgreSQL force.");
                 await store.RecordAgentActionRefusalAsync(parsed!.RequestId, parsed.AgentId, tool, refusal.Reason, ct);
                 return DarlingAgentActionGate.RefusalAnswer(refusal);
             }
@@ -216,7 +216,7 @@ public sealed class DarlingMcpPlanForceTools
             /* 3: the server row through the owner data source, and the executor built from it. */
             var row = await ReadServerRowAsync(owner, resolved.ServerId, ct);
             if (row is null)
-                return Answer("failed", "server_row_missing", $"{resolved.ServerName} has no row in the monitored-server settings.");
+                return Answer("failed", "server_row_missing", $"{resolved.DisplayName} has no row in the monitored-server settings.");
             var executor = new SqlServerRemediationExecutor(resolved.ServerId, row.Server, row.UserName, row.SecretSlot, logger);
 
             /* 4: the before state, read on the server. */
@@ -325,7 +325,7 @@ public sealed class DarlingMcpPlanForceTools
             if (engineKind is not null && engineKind.Contains("postgres", StringComparison.OrdinalIgnoreCase))
             {
                 return await RefuseBeforeGateAsync(store, agent_action, tool, PostgresTarget,
-                    $"{resolved.ServerName} is a PostgreSQL target. Evicting a plan is SQL Server only; there is no PostgreSQL eviction.", ct);
+                    $"{resolved.DisplayName} is a PostgreSQL target. Evicting a plan is SQL Server only; there is no PostgreSQL eviction.", ct);
             }
 
             if (owner is null)
@@ -344,7 +344,7 @@ public sealed class DarlingMcpPlanForceTools
 
             var row = await ReadServerRowAsync(owner, resolved.ServerId, ct);
             if (row is null)
-                return Answer("failed", "server_row_missing", $"{resolved.ServerName} has no row in the monitored-server settings.");
+                return Answer("failed", "server_row_missing", $"{resolved.DisplayName} has no row in the monitored-server settings.");
             var executor = new SqlServerRemediationExecutor(resolved.ServerId, row.Server, row.UserName, row.SecretSlot, logger);
 
             /* 4: the before image comes from the store, not the server: what Darling collected for this handle in the last 24 hours. */
@@ -458,14 +458,14 @@ public sealed class DarlingMcpPlanForceTools
             {
                 await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, ServerClockUnknown, ct);
                 return Answer("refused", ServerClockUnknown,
-                    $"Darling has not collected {resolved.ServerName}'s clock yet, so it cannot turn login_time into that server's own time. Nothing was run.");
+                    $"Darling has not collected {resolved.DisplayName}'s clock yet, so it cannot turn login_time into that server's own time. Nothing was run.");
             }
 
             var loginLocal = clock.ToServerLocal(loginUtc);
 
             var row = await ReadServerRowAsync(owner, resolved.ServerId, ct);
             if (row is null)
-                return Answer("failed", "server_row_missing", $"{resolved.ServerName} has no row in the monitored-server settings.");
+                return Answer("failed", "server_row_missing", $"{resolved.DisplayName} has no row in the monitored-server settings.");
             var executor = new SqlServerRemediationExecutor(resolved.ServerId, row.Server, row.UserName, row.SecretSlot, logger);
 
             /* 5: one batch decides, for a dry run and before a write: the engine, own session, gone, reused, not a user session, the grant. */
@@ -560,7 +560,7 @@ public sealed class DarlingMcpPlanForceTools
     /// <c>not_permitted</c> before any kill is tried.
     /// </summary>
     private static async Task<string> RunKillPostgresAsync(NpgsqlDataSource? owner, ILogger logger, InvestigationRequestStore store,
-        (int ServerId, string ServerName) resolved, int? session_id, string? backend_id, string? agent_action, bool dry_run, CancellationToken ct)
+        (int ServerId, string ServerName, string DisplayName) resolved, int? session_id, string? backend_id, string? agent_action, bool dry_run, CancellationToken ct)
     {
         const string tool = KillToolName;
 
@@ -594,7 +594,7 @@ public sealed class DarlingMcpPlanForceTools
 
         var row = await ReadServerRowAsync(owner, resolved.ServerId, ct);
         if (row is null)
-            return Answer("failed", "server_row_missing", $"{resolved.ServerName} has no row in the monitored-server settings.");
+            return Answer("failed", "server_row_missing", $"{resolved.DisplayName} has no row in the monitored-server settings.");
         var executor = new PostgresRemediationExecutor(resolved.ServerId, row.Server, row.UserName, row.SecretSlot, logger);
 
         /* 3: the read decides, for a dry run and before a write: gone, own session, start time, reused, client session, and what the login may do. */

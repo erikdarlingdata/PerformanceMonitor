@@ -41,7 +41,7 @@ public sealed class McpCpuTools
             var points = await dataService.GetCpuBucketsAsync(resolved.ServerId, hours_back, windowEnd, serverClock, bucketMinutes);
             if (points.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "cpu_utilization")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "cpu_utilization")
                     ?? McpHelpers.Status("unavailable", "No CPU utilization data available.");
             }
 
@@ -49,7 +49,7 @@ public sealed class McpCpuTools
                spell it — the ring buffer (RING_BUFFER_SCHEDULER_MONITOR, on-prem / Managed Instance / RDS) writes
                ONE record per minute, the 15-second cadence belongs to Azure SQL DB's sys.dm_db_resource_stats, and
                samples_in_bucket on every bucket is the measured count. */
-            return TrendPayloads.CpuUtilization(resolved.ServerName, hours_back, points, bucketMinutes, bucket_minutes is not null, budget.AutoPoints);
+            return TrendPayloads.CpuUtilization(resolved.DisplayName, hours_back, points, bucketMinutes, bucket_minutes is not null, budget.AutoPoints);
         }
         catch (Exception ex)
         {

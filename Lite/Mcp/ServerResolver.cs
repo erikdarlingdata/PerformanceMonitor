@@ -18,7 +18,7 @@ internal static class ServerResolver
     /// one host name and differ only in database, so the host name alone cannot say which one the caller meant.
     /// A candidate's own <c>server</c> value (its storage name) selects exactly that registration.
     /// </summary>
-    internal static ((int ServerId, string ServerName) resolved, string? error) ResolveIn(
+    internal static ((int ServerId, string ServerName, string DisplayName) resolved, string? error) ResolveIn(
         IReadOnlyList<ServerConnection> servers,
         string? serverName)
     {
@@ -29,7 +29,7 @@ internal static class ServerResolver
             {
                 var s = servers[0];
                 var storageName = RemoteCollectorService.GetServerNameForStorage(s);
-                return ((RemoteCollectorService.GetDeterministicHashCode(storageName), storageName), null);
+                return ((RemoteCollectorService.GetDeterministicHashCode(storageName), storageName, AnswerNameOf(servers, s, storageName)), null);
             }
 
             return (default, Miss(servers));
@@ -40,7 +40,7 @@ internal static class ServerResolver
         if (match.Candidates.Count == 1)
         {
             var only = match.Candidates[0];
-            return ((only.ServerId, only.ServerName), null);
+            return ((only.ServerId, only.ServerName, AnswerNameOf(servers, servers.FirstOrDefault(x => RemoteCollectorService.GetServerNameForStorage(x) == only.ServerName), only.ServerName)), null);
         }
 
         if (match.Candidates.Count == 0)
@@ -53,6 +53,25 @@ internal static class ServerResolver
             $"'{serverName.Trim()}' matches {match.Candidates.Count} monitored servers" +
             (match.MatchedBy == "exact" ? " (several registrations share that name)" : " (as part of their names)") +
             ". Pass one server's full name from this list:\n" + ListCandidates(match.Candidates)));
+    }
+
+    /// <summary>
+    /// The name an answer shows for a server (#6179): its display name when exactly one enabled server carries it,
+    /// otherwise its storage name (<c>host:database</c> for an Azure SQL Database entry). Two registrations can share
+    /// a display name (the host, when no name is set), and the storage name is the one value that selects exactly
+    /// one of them when a caller passes the answer's <c>server</c> back as <c>server_name</c>. Mirrors Darling's
+    /// <c>DarlingServerResolver.AnswerNameOf</c>.
+    /// </summary>
+    internal static string AnswerNameOf(IReadOnlyList<ServerConnection> servers, ServerConnection? server, string storageName)
+    {
+        var display = server?.DisplayName;
+        if (string.IsNullOrWhiteSpace(display))
+        {
+            return storageName;
+        }
+
+        var holders = servers.Count(x => string.Equals(x.DisplayName?.Trim(), display.Trim(), StringComparison.OrdinalIgnoreCase));
+        return holders == 1 ? display : storageName;
     }
 
     private static string Miss(IReadOnlyList<ServerConnection> servers) =>
@@ -77,7 +96,7 @@ internal static class ServerResolver
     /// that keys on <c>status</c> (which the instructions teach it to) sees a refusal rather than prose. The
     /// sentence inside is byte-for-byte what it was; read it back through <see cref="McpHelpers.ErrorMessageOf"/>.</para>
     /// </summary>
-    public static ((int ServerId, string ServerName) resolved, string? error) ResolveOrError(
+    public static ((int ServerId, string ServerName, string DisplayName) resolved, string? error) ResolveOrError(
         ServerManager serverManager,
         string? serverName)
     {

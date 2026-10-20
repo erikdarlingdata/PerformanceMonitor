@@ -49,17 +49,17 @@ public sealed partial class DarlingMcpFinOpsTools
     }
 
     private static async Task<string> ReadDatabaseSizesAsync(
-        NpgsqlDataSource postgres, (int ServerId, string ServerName) resolved, int limit, CancellationToken ct)
+        NpgsqlDataSource postgres, (int ServerId, string ServerName, string DisplayName) resolved, int limit, CancellationToken ct)
     {
         var files = await DarlingFinOpsDatabaseSizesReader.GetLatestAsync(postgres, resolved.ServerId, McpCommandDeadlines.ReadSeconds, ct);
         if (files.Count == 0)
         {
-            return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "database_size_stats", ct)
+            return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "database_size_stats", ct)
                 ?? McpHelpers.Status("unavailable", "No database size data available. The size collector may not have run yet.");
         }
 
         var monthly = await FinOpsUtilizationFigures.GetMonthlyCostUsdAsync(postgres, resolved.ServerId, McpCommandDeadlines.ReadSeconds, ct);
-        return DatabaseSizesPayload(resolved.ServerName, files, monthly, DatabaseSizeRowCap(limit));
+        return DatabaseSizesPayload(resolved.DisplayName, files, monthly, DatabaseSizeRowCap(limit));
     }
 
     /// <summary>The database_sizes payload, shaped apart from the read so it can be pinned without a store.</summary>

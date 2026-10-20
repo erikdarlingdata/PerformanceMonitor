@@ -366,7 +366,7 @@ public sealed class DarlingMcpQueryStoreHistoryTools
             var forced = await TryReadForcedPlansAsync(postgres, resolved.ServerId, database_name, query_id, start, windowEnd, cancellationToken);
 
             if (rows.Count == 0 && forced.Facts.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store", cancellationToken)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_store", cancellationToken)
                     ?? McpHelpers.Status("empty",
                         $"No Query Store history for query_id {query_id} in database '{database_name}' in the {hours_back}-hour window searched.",
                         emptyHints);

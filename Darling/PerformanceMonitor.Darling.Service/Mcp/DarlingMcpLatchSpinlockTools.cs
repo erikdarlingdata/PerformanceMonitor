@@ -79,7 +79,7 @@ public sealed class DarlingMcpLatchSpinlockTools
             var rows = await DarlingLatchSpinlockReader.GetLatchStatsTopNAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now, top, cancellationToken);
             if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "latch_stats", cancellationToken)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "latch_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No latch statistics available in the requested time range.");
 
             var latches = rows.Select(r => new
@@ -132,7 +132,7 @@ public sealed class DarlingMcpLatchSpinlockTools
 
             var json = JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
@@ -172,7 +172,7 @@ public sealed class DarlingMcpLatchSpinlockTools
             var rows = await DarlingLatchSpinlockReader.GetSpinlockStatsTopNAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now, top, cancellationToken);
             if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "spinlock_stats", cancellationToken)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "spinlock_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No spinlock statistics available in the requested time range.");
 
             var spinlocks = rows.Select(r => new
@@ -206,7 +206,7 @@ public sealed class DarlingMcpLatchSpinlockTools
 
             var json = JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,

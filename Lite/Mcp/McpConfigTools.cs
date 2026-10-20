@@ -23,14 +23,14 @@ public sealed class McpConfigTools
         {
             var rows = await dataService.GetLatestServerConfigAsync(resolved.ServerId);
             if (rows.Count == 0)
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "server_config")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "server_config")
                     ?? McpHelpers.Status(
                         "unavailable",
                         "No server configuration data available. The config collector may not have run yet.");
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 /* #3541 A10: the connect-time capture this "current" configuration is as of. */
                 captured_at = rows[0].CaptureTime.ToString("o"),
                 setting_count = rows.Count,
@@ -66,7 +66,7 @@ public sealed class McpConfigTools
         {
             var rows = await dataService.GetLatestDatabaseConfigAsync(resolved.ServerId);
             if (rows.Count == 0)
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "database_config")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "database_config")
                     ?? McpHelpers.Status(
                         "unavailable",
                         "No database configuration data available. The config collector may not have run yet.");
@@ -104,7 +104,7 @@ public sealed class McpConfigTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 captured_at = capturedAt.ToString("o"),
                 database_count = result.Count,
                 databases = result
@@ -131,7 +131,7 @@ public sealed class McpConfigTools
         {
             var rows = await dataService.GetLatestDatabaseScopedConfigAsync(resolved.ServerId);
             if (rows.Count == 0)
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "database_scoped_config")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "database_scoped_config")
                     ?? McpHelpers.Status(
                         "unavailable",
                         "No database-scoped configuration data available. The config collector may not have run yet.");
@@ -157,7 +157,7 @@ public sealed class McpConfigTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 captured_at = capturedAt.ToString("o"),
                 database_count = grouped.Count,
                 databases = grouped
@@ -184,7 +184,7 @@ public sealed class McpConfigTools
         {
             var rows = await dataService.GetLatestQueryStoreHealthAsync(resolved.ServerId);
             if (rows.Count == 0)
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_store_health")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_store_health")
                     ?? McpHelpers.Status(
                         "unavailable",
                         "No Query Store health data available. The query_store_health collector runs hourly (SQL Server 2016+); a server with no rows either predates Query Store or has not completed a cycle yet.");
@@ -222,7 +222,7 @@ public sealed class McpConfigTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 captured_at = capturedAt.ToString("o"),
                 database_count = result.Count,
                 databases = result
@@ -256,12 +256,12 @@ public sealed class McpConfigTools
         {
             var rows = await dataService.GetLatestTraceFlagsAsync(resolved.ServerId);
             if (rows.Count == 0)
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "trace_flags")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "trace_flags")
                     ?? EmptyTraceFlagsStatus(await dataService.GetCollectorRunFactsAsync(resolved.ServerId, "trace_flags"));
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 captured_at = rows[0].CaptureTime.ToString("o"),
                 trace_flag_count = rows.Count,
                 trace_flags = rows.Select(r => new

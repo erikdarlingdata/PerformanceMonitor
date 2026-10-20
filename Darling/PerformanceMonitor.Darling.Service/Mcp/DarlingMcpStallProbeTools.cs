@@ -80,7 +80,7 @@ public sealed class DarlingMcpStallProbeTools
             }
 
             serverId = resolved.ServerId;
-            scope = resolved.ServerName;
+            scope = resolved.DisplayName;
         }
 
         try
