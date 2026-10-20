@@ -25,6 +25,8 @@ namespace Darling.Tests;
 /// (D7), the Overview search narrowing the roll-up above the cards (D9) and a stale Availability Group badge (D10).
 /// Every check is a view-model or pure helper call; none needs a window.
 /// </summary>
+/* Sets the viewer's process-wide display mode and server clock, so it runs in the collection that runs alone (#6199). */
+[Collection("viewer-time-statics")]
 public sealed class ViewerFleetScreenWalkFixesTests : IDisposable
 {
     private readonly TimeDisplayMode _savedMode = ViewerTimeHelper.CurrentDisplayMode;
