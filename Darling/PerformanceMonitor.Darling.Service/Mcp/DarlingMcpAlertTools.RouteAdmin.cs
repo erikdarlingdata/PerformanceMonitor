@@ -38,7 +38,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// </summary>
 public sealed partial class DarlingMcpAlertTools
 {
-    private const string MatchHelp = "a family (performance, self-monitor, reports, agent-jobs, external), an analysis category ('Analysis: <category>'), an exact metric name, or * (every metric, scoped routes only)";
+    private const string MatchHelp = "a family (performance, self-monitor, reports, agent-jobs, external), 'Analysis: <category>', an exact metric name, or * (scoped routes only)";
 
     /// <summary>The sentence both route tools carry: MCP never sets or changes where a route sends (#6231).</summary>
     private const string DestinationsInViewer = "Neither route tool takes or changes a destination (a webhook URL, a routing key or email recipients): those are set in the Viewer's Settings window (Notifications, routes).";
@@ -63,8 +63,6 @@ public sealed partial class DarlingMcpAlertTools
         [Description("Scope the route to this server tag id and every tag under it. Omit for fleet-wide. Not with scope_server_id.")] int? scope_tag_id = null,
         [Description("inherit (default: each channel's own setting), always (send the clear message to the channels this route resolves to) or never.")] string? send_resolutions = null,
         [Description("The route_id of an existing route an expired investigation request goes to first. Omit for none.")] int? fallback_route_id = null,
-        ModelContextProtocol.Server.McpServer? server = null,
-        Microsoft.AspNetCore.Http.IHttpContextAccessor? accessor = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
@@ -96,7 +94,7 @@ public sealed partial class DarlingMcpAlertTools
                 return refusal;
             }
 
-            LogRouteWrite(logger, "create_notification_route", CallerOf(server, accessor), routeId, "metric_match, enabled, scope, send_resolutions, fallback_route_id");
+            LogRouteWrite(logger, "create_notification_route", CallerOf(), routeId, "metric_match, enabled, scope, send_resolutions, fallback_route_id");
             var stored = (await new PgNotificationRouteStore(postgres).LoadSummariesAsync(cancellationToken)).FirstOrDefault(r => r.RouteId == routeId);
             return JsonSerializer.Serialize(new
             {
@@ -136,8 +134,6 @@ public sealed partial class DarlingMcpAlertTools
         [Description("inherit, always or never. Omit to keep.")] string? send_resolutions = null,
         [Description("The route_id of an existing route an expired investigation request goes to first. Omit to keep.")] int? fallback_route_id = null,
         [Description("true removes the fallback route.")] bool? clear_fallback = null,
-        ModelContextProtocol.Server.McpServer? server = null,
-        Microsoft.AspNetCore.Http.IHttpContextAccessor? accessor = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
@@ -255,7 +251,7 @@ public sealed partial class DarlingMcpAlertTools
                 return refusal;
             }
 
-            LogRouteWrite(logger, "update_notification_route", CallerOf(server, accessor), route_id, string.Join(", ", columns));
+            LogRouteWrite(logger, "update_notification_route", CallerOf(), route_id, string.Join(", ", columns));
             var stored = (await store.LoadSummariesAsync(cancellationToken)).FirstOrDefault(r => r.RouteId == route_id);
             return JsonSerializer.Serialize(new
             {
@@ -280,25 +276,9 @@ public sealed partial class DarlingMcpAlertTools
         _ => null,
     };
 
-    /// <summary>The caller of a route write: the MCP client's own name and version, else the request's User-Agent token, else unknown.</summary>
-    private static string CallerOf(ModelContextProtocol.Server.McpServer? server, Microsoft.AspNetCore.Http.IHttpContextAccessor? accessor)
-    {
-        try
-        {
-            var clientInfo = server?.ClientInfo;
-            string? userAgent = null;
-            if (string.IsNullOrWhiteSpace(clientInfo?.Name))
-            {
-                userAgent = accessor?.HttpContext?.Request.Headers.UserAgent.ToString();
-            }
-
-            return ReadCaller.OfMcpClient(clientInfo?.Name, clientInfo?.Version, userAgent);
-        }
-        catch (Exception)
-        {
-            return ReadCaller.Unknown;
-        }
-    }
+    /// <summary>The caller of a route write: the MCP client's own name and version, else the request's User-Agent token, else unknown.
+    /// The tool-call filter names it once per call (<see cref="ReadCaller.AmbientMcpCaller"/>).</summary>
+    private static string CallerOf() => ReadCaller.AmbientMcpCaller ?? ReadCaller.Unknown;
 
     /// <summary>One line per route write (#6231): the tool, the caller, the route and the names of the fields changed. Never a value.</summary>
     internal static void LogRouteWrite(ILogger? logger, string tool, string caller, int routeId, string fields) =>
