@@ -145,6 +145,7 @@ namespace PerformanceMonitor.Common
                     IsolationLevel = proc.Attribute("isolationlevel")?.Value ?? string.Empty,
                     ProcName = ExtractProcName(proc),
                     StackFrames = ExtractStackFrames(proc),
+                    ProcessHandle = ExtractProcessHandle(proc),
                     Status = proc.Attribute("status")?.Value ?? string.Empty
                 });
             }
@@ -284,10 +285,35 @@ namespace PerformanceMonitor.Common
             return frames;
         }
 
-        /// <summary>True for <c>0x</c> followed only by zeros (any length): the "no persistent handle" sentinel.</summary>
-        private static bool IsZeroSqlHandle(string handle)
+        /// <summary>
+        /// The <c>sqlhandle</c> a deadlock graph can put on the <c>&lt;process&gt;</c> element itself (#6205), with that
+        /// element's <c>stmtstart</c>/<c>stmtend</c> (a missing start reads as 0 and a missing end as -1), the same read
+        /// the plan lookups make. <c>null</c> when there is none, when it is all zeros, or when an execution-stack frame
+        /// already lists the same handle with the same offsets (it would be a repeat line).
+        /// </summary>
+        internal static DeadlockProcessHandle? ExtractProcessHandle(XElement proc)
         {
-            var digits = handle.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? handle.AsSpan(2) : handle.AsSpan();
+            var handle = proc.Attribute("sqlhandle")?.Value?.Trim();
+            if (string.IsNullOrEmpty(handle) || IsZeroSqlHandle(handle))
+                return null;
+
+            var start = int.TryParse(proc.Attribute("stmtstart")?.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var s) ? s : 0;
+            var end = int.TryParse(proc.Attribute("stmtend")?.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var e) ? e : -1;
+            foreach (var frame in ExtractStackFrames(proc))
+            {
+                if (string.Equals(frame.SqlHandle, handle, StringComparison.OrdinalIgnoreCase) &&
+                    frame.StmtStart == start && frame.StmtEnd == end)
+                    return null;
+            }
+            return new DeadlockProcessHandle(handle, start, end);
+        }
+
+        /// <summary>True for <c>0x</c> followed only by zeros (any length): the "no persistent handle" sentinel. The one
+        /// zero test the deadlock pane and every plan lookup share, so a short or a long all-zero handle is skipped alike.</summary>
+        public static bool IsZeroSqlHandle(string handle)
+        {
+            var trimmed = handle.AsSpan().Trim();
+            var digits = trimmed.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? trimmed.Slice(2) : trimmed;
             foreach (var c in digits)
                 if (c != '0') return false;
             return true;

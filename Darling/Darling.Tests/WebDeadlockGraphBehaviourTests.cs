@@ -117,6 +117,21 @@ public sealed class WebDeadlockGraphBehaviourTests
     }
 
     [Fact]
+    public void ClickingACard_ShowsTheProcessLevelHandleAsItsOwnLine_BeforeAnyFrames()
+    {
+        var r = Run("sqlProcessHandle");
+        /* #6205: the handle the graph put on the process element is labelled as the process's own, not numbered. A
+           lone one reads "SQL handle"; with frames the block is "stack order" and the own handle leads. */
+        var alone = r.GetProperty("alone");
+        Assert.Equal("process (own handle)  0x0300CC  stmtstart 4, stmtend 88", alone.GetProperty("pres")[0].GetString());
+        Assert.Equal(new[] { "SQL handle:" }, alone.GetProperty("labels").EnumerateArray().Select(t => t.GetString()).ToArray());
+        var withFrames = r.GetProperty("withFrames");
+        Assert.Equal("process (own handle)  0x0300DD  stmtstart 0, stmtend -1\n1 (running)  0x0300AA  stmtstart 20, stmtend 140",
+            withFrames.GetProperty("pres")[0].GetString());
+        Assert.Equal(new[] { "SQL handles (stack order):" }, withFrames.GetProperty("labels").EnumerateArray().Select(t => t.GetString()).ToArray());
+    }
+
+    [Fact]
     public void HostileStatementText_IsShownAsText_AndCreatesNoElement()
     {
         var r = Run("hostile");

@@ -135,6 +135,14 @@ namespace PerformanceMonitor.Common
         /// </summary>
         public IReadOnlyList<DeadlockStackFrame> StackFrames { get; init; } = Array.Empty<DeadlockStackFrame>();
 
+        /// <summary>
+        /// The <c>sqlhandle</c> (with <c>stmtstart</c>/<c>stmtend</c>) a deadlock graph can put on the
+        /// <c>&lt;process&gt;</c> element itself (#6205), which the plan lookups read besides the stack. <c>null</c> when
+        /// there is none, when it is all zeros, or when a frame in <see cref="StackFrames"/> already lists the same
+        /// handle with the same offsets.
+        /// </summary>
+        public DeadlockProcessHandle? ProcessHandle { get; init; }
+
         /// <summary>Layout position (ring placement), assigned by <see cref="DeadlockGraphLayout"/>.</summary>
         public double X { get; set; }
         public double Y { get; set; }
@@ -165,6 +173,17 @@ namespace PerformanceMonitor.Common
             if (Line != null) text += " line " + Line;
             return text;
         }
+    }
+
+    /// <summary>
+    /// The sql_handle a deadlock graph puts on the <c>&lt;process&gt;</c> element itself (#6205), with that element's
+    /// statement range (a missing start reads as 0 and a missing end as -1). It is the process's own handle, not a
+    /// numbered execution-stack frame.
+    /// </summary>
+    public sealed record DeadlockProcessHandle(string SqlHandle, int StmtStart, int StmtEnd)
+    {
+        /// <summary>The one-line text the Properties panel shows and copies for this handle.</summary>
+        public string Describe() => $"process (own handle)  {SqlHandle}  stmtstart {StmtStart}, stmtend {StmtEnd}";
     }
 
     public sealed class DeadlockWaitEdge

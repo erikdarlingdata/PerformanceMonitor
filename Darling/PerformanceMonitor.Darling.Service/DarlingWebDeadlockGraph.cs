@@ -94,6 +94,17 @@ public static class DarlingWebDeadlockGraph
                     return frame;
                 }).ToList();
             }
+            /* #6205: the sql_handle the graph put on the <process> element itself (the plan lookups read it too), with
+               its statement range; absent when there is none, it is all zeros, or a frame above already lists it. */
+            if (p.ProcessHandle != null)
+            {
+                node["sql_process_handle"] = new Dictionary<string, object?>
+                {
+                    ["sql_handle"] = p.ProcessHandle.SqlHandle,
+                    ["stmt_start"] = p.ProcessHandle.StmtStart,
+                    ["stmt_end"] = p.ProcessHandle.StmtEnd,
+                };
+            }
             /* #4348: judged WHOLE, before the cut. The web sweep after this sees only the first SqlTextCap
                characters, and a statement named by what follows them would pass as an innocent prefix. */
             var sqlText = SensitiveStatements.Text(p.SqlText) ?? "";

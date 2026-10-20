@@ -615,10 +615,9 @@ public partial class ServerTab : UserControl
 
     // ── Blocked Process Report plan lookup ──
 
-    /* SQL Server writes this 42-byte all-zero handle into executionStack frames
-       for dynamic SQL / system contexts where no persistent sql_handle exists.
-       Filter matches sp_HumanEventsBlockViewer's XPath exclusion. */
-    private static readonly string ZeroSqlHandle = "0x" + new string('0', 84);
+    /* SQL Server writes an all-zero handle into executionStack frames for dynamic SQL / system
+       contexts where no persistent sql_handle exists; DeadlockGraphParser.IsZeroSqlHandle skips
+       it whatever its length (the same test the deadlock pane uses). */
 
     private async void ViewBlockedSidePlan_Click(object sender, RoutedEventArgs e)
         => await ShowBlockedProcessPlanAsync(sender, blockingSide: false);
@@ -675,7 +674,7 @@ public partial class ServerTab : UserControl
         }
     }
 
-    private static IReadOnlyList<(string SqlHandle, int StmtStart, int StmtEnd)> ExtractBlockedProcessFrames(
+    internal static IReadOnlyList<(string SqlHandle, int StmtStart, int StmtEnd)> ExtractBlockedProcessFrames(
         string bprXml, bool blockingSide)
     {
         var empty = Array.Empty<(string, int, int)>();
@@ -697,7 +696,7 @@ public partial class ServerTab : UserControl
             {
                 var handle = frame.Attribute("sqlhandle")?.Value;
                 if (string.IsNullOrWhiteSpace(handle)) continue;
-                if (string.Equals(handle, ZeroSqlHandle, StringComparison.OrdinalIgnoreCase)) continue;
+                if (PerformanceMonitor.Common.DeadlockGraphParser.IsZeroSqlHandle(handle)) continue;
 
                 int stmtStart = 0;
                 int stmtEnd = -1;
@@ -776,7 +775,7 @@ public partial class ServerTab : UserControl
         }
     }
 
-    private static IReadOnlyList<(string SqlHandle, int StmtStart, int StmtEnd)> ExtractDeadlockProcessFrames(
+    internal static IReadOnlyList<(string SqlHandle, int StmtStart, int StmtEnd)> ExtractDeadlockProcessFrames(
         string graphXml, string processId)
     {
         var empty = Array.Empty<(string, int, int)>();
@@ -793,7 +792,7 @@ public partial class ServerTab : UserControl
             /* Try process-level sqlhandle first — deadlock graphs frequently put it on <process>. */
             var procHandle = process.Attribute("sqlhandle")?.Value;
             if (!string.IsNullOrWhiteSpace(procHandle) &&
-                !string.Equals(procHandle, ZeroSqlHandle, StringComparison.OrdinalIgnoreCase))
+                !PerformanceMonitor.Common.DeadlockGraphParser.IsZeroSqlHandle(procHandle))
             {
                 int ps = 0, pe = -1;
                 int.TryParse(process.Attribute("stmtstart")?.Value, out ps);
@@ -809,7 +808,7 @@ public partial class ServerTab : UserControl
                 {
                     var handle = frame.Attribute("sqlhandle")?.Value;
                     if (string.IsNullOrWhiteSpace(handle)) continue;
-                    if (string.Equals(handle, ZeroSqlHandle, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (PerformanceMonitor.Common.DeadlockGraphParser.IsZeroSqlHandle(handle)) continue;
 
                     int fs = 0, fe = -1;
                     int.TryParse(frame.Attribute("stmtstart")?.Value, out fs);

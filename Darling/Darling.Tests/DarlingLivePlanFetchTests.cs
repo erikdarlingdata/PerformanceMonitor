@@ -315,4 +315,45 @@ public sealed class PlanFrameExtractorTests
             "<blocked-process-report><blocked-process><process><executionStack/></process></blocked-process></blocked-process-report>",
             blockingSide: false));
     }
+
+    /* The plan-lookup extractors skip an all-zero handle whatever its length: a short or a long zero handle is
+       the "no persistent handle" sentinel just like the 42-byte one. */
+    public static TheoryData<string> ZeroHandles => new()
+    {
+        "0x00",
+        "0x0000000000000000",
+        "0X0000",
+        PlanFrameExtractor.ZeroSqlHandle,
+        "0x" + new string('0', 120),
+    };
+
+    [Theory]
+    [MemberData(nameof(ZeroHandles))]
+    public void DeadlockFrames_SkipAZeroHandle_OfAnyLength_OnTheProcessAndOnAFrame(string zero)
+    {
+        var graph = $@"<deadlock><process-list>
+    <process id='p1' sqlhandle='{zero}' stmtstart='5' stmtend='9'>
+      <executionStack><frame sqlhandle='{zero}'/><frame sqlhandle='0x0200EEEE' stmtstart='3' stmtend='8'/></executionStack>
+    </process>
+    <process id='p2' sqlhandle='{zero}'><executionStack><frame sqlhandle='{zero}'/></executionStack></process>
+  </process-list></deadlock>";
+
+        var kept = Assert.Single(PlanFrameExtractor.ExtractDeadlockProcessFrames(graph, "p1"));
+        Assert.Equal(("0x0200EEEE", 3, 8), kept);
+        Assert.Empty(PlanFrameExtractor.ExtractDeadlockProcessFrames(graph, "p2"));
+    }
+
+    [Theory]
+    [MemberData(nameof(ZeroHandles))]
+    public void BlockedProcessFrames_SkipAZeroHandle_OfAnyLength_OnBothSides(string zero)
+    {
+        var report = $@"<blocked-process-report>
+  <blocked-process><process id='a'><executionStack><frame sqlhandle='{zero}'/><frame sqlhandle='0x0200CCCC' stmtstart='1' stmtend='2'/></executionStack></process></blocked-process>
+  <blocking-process><process id='b'><executionStack><frame sqlhandle='{zero}'/></executionStack></process></blocking-process>
+</blocked-process-report>";
+
+        var kept = Assert.Single(PlanFrameExtractor.ExtractBlockedProcessFrames(report, blockingSide: false));
+        Assert.Equal(("0x0200CCCC", 1, 2), kept);
+        Assert.Empty(PlanFrameExtractor.ExtractBlockedProcessFrames(report, blockingSide: true));
+    }
 }

@@ -28,11 +28,11 @@ public sealed class DeadlockSqlHandleTests
     private const string H3 = "0x03000500BBBBBBBBBBBBBBBBBBBBBB0001000000000000000000000000000000000000000000000000000000";
     private static readonly string Zero = "0x" + new string('0', 84);
 
-    private static string Graph(string stack1, string stack2 = "") => $"""
+    private static string Graph(string stack1, string stack2 = "", string process1Extra = "") => $"""
         <deadlock>
           <victim-list><victimProcess id="process1" /></victim-list>
           <process-list>
-            <process id="process1" taskpriority="0" logused="0" waitresource="KEY: 5:1" waittime="10" status="suspended" spid="51" ecid="0" priority="0" currentdbname="AppDb" lockMode="X">
+            <process id="process1" taskpriority="0" logused="0" waitresource="KEY: 5:1" waittime="10" status="suspended" spid="51" ecid="0" priority="0" currentdbname="AppDb" lockMode="X" {process1Extra}>
               <executionStack>{stack1}</executionStack>
               <inputbuf>UPDATE dbo.t SET a = 1</inputbuf>
             </process>
@@ -184,5 +184,124 @@ public sealed class DeadlockSqlHandleTests
         Assert.False(frames[1].TryGetProperty("proc_name", out _));
         Assert.False(frames[1].TryGetProperty("line", out _));
         Assert.False(processes["process2"].TryGetProperty("sql_frames", out _));
+    }
+
+    private static string Off(int start, int end) => $"stmtstart=\"{start}\" stmtend=\"{end}\"";
+
+    private static string OnProcess(string handle, string offsets = "") => $"sqlhandle=\"{handle}\" {offsets}";
+
+    [Fact]
+    public void AProcessLevelHandleAlone_IsKept_WithItsOffsets_AndIsNotANumberedFrame()
+    {
+        var m = DeadlockGraphParser.Parse(Graph("", "", OnProcess(H1, Off(4, 88))));
+
+        var node = Node(m, "process1");
+        Assert.Empty(node.StackFrames);
+        Assert.Equal(new DeadlockProcessHandle(H1, 4, 88), node.ProcessHandle);
+        Assert.Equal($"process (own handle)  {H1}  stmtstart 4, stmtend 88", DeadlockGraphControl.SqlHandlesToCopy(node));
+        Assert.Null(Node(m, "process2").ProcessHandle);
+    }
+
+    [Fact]
+    public void AProcessLevelHandleWithNoOffsets_ReadsAsStartZeroAndEndMinusOne()
+    {
+        var m = DeadlockGraphParser.Parse(Graph("", "", OnProcess(H2)));
+
+        Assert.Equal(new DeadlockProcessHandle(H2, 0, -1), Node(m, "process1").ProcessHandle);
+    }
+
+    [Fact]
+    public void AProcessLevelHandleEqualToAFrame_IsNotListedTwice()
+    {
+        // Same handle, same offsets as frame 1 (the handle differs only in letter case): one line, the frame's.
+        var m = DeadlockGraphParser.Parse(Graph(
+            $"""<frame procname="dbo.P" line="2" stmtstart="20" stmtend="140" sqlhandle="{H1}">a</frame><frame sqlhandle="{H2}">b</frame>""",
+            "", OnProcess(H1.ToLowerInvariant(), Off(20, 140))));
+
+        var node = Node(m, "process1");
+        Assert.Null(node.ProcessHandle);
+        Assert.Equal(2, node.StackFrames.Count);
+        Assert.StartsWith("1 (running)  " + H1, DeadlockGraphControl.SqlHandlesToCopy(node), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AProcessLevelHandleEqualToALaterFrame_IsNotListedTwiceEither()
+    {
+        var m = DeadlockGraphParser.Parse(Graph(
+            $"""<frame sqlhandle="{H1}">a</frame><frame sqlhandle="{H2}" stmtstart="7" stmtend="9">b</frame>""",
+            "", OnProcess(H2, Off(7, 9))));
+
+        Assert.Null(Node(m, "process1").ProcessHandle);
+    }
+
+    [Fact]
+    public void AProcessLevelHandleOfAFrameButWithOtherOffsets_IsKept()
+    {
+        var m = DeadlockGraphParser.Parse(Graph(
+            $"""<frame sqlhandle="{H1}" stmtstart="20" stmtend="140">a</frame>""", "", OnProcess(H1, Off(21, 140))));
+
+        Assert.Equal(new DeadlockProcessHandle(H1, 21, 140), Node(m, "process1").ProcessHandle);
+    }
+
+    [Fact]
+    public void AProcessLevelHandleThatDiffersFromEveryFrame_IsKept_AndLeadsThePanelText()
+    {
+        var m = DeadlockGraphParser.Parse(Graph(
+            $"""<frame stmtstart="2" stmtend="9" sqlhandle="{H1}">a</frame><frame sqlhandle="{H2}">b</frame>""", "", OnProcess(H3, Off(50, 90))));
+
+        var node = Node(m, "process1");
+        Assert.Equal(new DeadlockProcessHandle(H3, 50, 90), node.ProcessHandle);
+        Assert.Equal(2, node.StackFrames.Count);
+        var expected = $"process (own handle)  {H3}  stmtstart 50, stmtend 90"
+            + Environment.NewLine + $"1 (running)  {H1}  stmtstart 2, stmtend 9"
+            + Environment.NewLine + $"2 (caller)  {H2}  stmtstart 0, stmtend -1";
+        Assert.Equal(expected, DeadlockGraphControl.SqlHandlesToCopy(node));
+    }
+
+    [Theory]
+    [InlineData("0x00")]
+    [InlineData("0x0000000000000000")]
+    [InlineData("0X0000")]
+    [InlineData("0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000")]
+    public void AZeroProcessLevelHandle_IsSkipped_WhateverItsLength(string zero)
+    {
+        var m = DeadlockGraphParser.Parse(Graph("", "", OnProcess(zero, Off(4, 88))));
+
+        Assert.Null(Node(m, "process1").ProcessHandle);
+        Assert.Null(DeadlockGraphControl.SqlHandlesToCopy(Node(m, "process1")));
+    }
+
+    [Fact]
+    public void TheWebPayload_CarriesTheProcessLevelHandleApart_FromTheFrames()
+    {
+        var graph = DarlingWebDeadlockGraph.BuildGraph(Graph(
+            $"""<frame sqlhandle="{H1}" stmtstart="2" stmtend="9">a</frame>""", "", OnProcess(H3, Off(50, 90))));
+        Assert.NotNull(graph);
+
+        using var doc = JsonDocument.Parse(JsonSerializer.Serialize(graph));
+        var processes = doc.RootElement.GetProperty("processes").EnumerateArray().ToDictionary(p => p.GetProperty("id").GetString()!);
+
+        var own = processes["process1"].GetProperty("sql_process_handle");
+        Assert.Equal(H3, own.GetProperty("sql_handle").GetString());
+        Assert.Equal(50, own.GetProperty("stmt_start").GetInt32());
+        Assert.Equal(90, own.GetProperty("stmt_end").GetInt32());
+        Assert.Equal(new[] { H1 }, processes["process1"].GetProperty("sql_frames").EnumerateArray().Select(f => f.GetProperty("sql_handle").GetString()).ToArray());
+        Assert.False(processes["process2"].TryGetProperty("sql_process_handle", out _));
+    }
+
+    [Fact]
+    public void TheWebPayload_OmitsAProcessLevelHandle_ThatIsZeroOrRepeatsAFrame()
+    {
+        var zero = DarlingWebDeadlockGraph.BuildGraph(Graph("", "", OnProcess(Zero)));
+        var repeat = DarlingWebDeadlockGraph.BuildGraph(Graph($"""<frame sqlhandle="{H1}" stmtstart="1" stmtend="2">a</frame>""", "", OnProcess(H1, Off(1, 2))));
+        Assert.NotNull(zero);
+        Assert.NotNull(repeat);
+
+        foreach (var g in new[] { zero, repeat })
+        {
+            using var doc = JsonDocument.Parse(JsonSerializer.Serialize(g));
+            var first = doc.RootElement.GetProperty("processes").EnumerateArray().First(p => p.GetProperty("id").GetString() == "process1");
+            Assert.False(first.TryGetProperty("sql_process_handle", out _));
+        }
     }
 }

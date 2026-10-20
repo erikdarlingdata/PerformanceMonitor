@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Xml.Linq;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -24,7 +25,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// </summary>
 public static class PlanFrameExtractor
 {
-    /// <summary>SQL Server's 42-byte all-zero sql_handle sentinel for dynamic SQL / system contexts (no plan).</summary>
+    /// <summary>SQL Server's 42-byte all-zero sql_handle sentinel for dynamic SQL / system contexts (no plan). Sample data
+    /// only: the extractors below skip a zero handle of any length through <see cref="DeadlockGraphParser.IsZeroSqlHandle"/>.</summary>
     public static readonly string ZeroSqlHandle = "0x" + new string('0', 84);
 
     /// <summary>
@@ -49,7 +51,7 @@ public static class PlanFrameExtractor
 
             var procHandle = process.Attribute("sqlhandle")?.Value;
             if (!string.IsNullOrWhiteSpace(procHandle) &&
-                !string.Equals(procHandle, ZeroSqlHandle, StringComparison.OrdinalIgnoreCase))
+                !DeadlockGraphParser.IsZeroSqlHandle(procHandle))
             {
                 int ps = 0, pe = -1;
                 int.TryParse(process.Attribute("stmtstart")?.Value, out ps);
@@ -64,7 +66,7 @@ public static class PlanFrameExtractor
                 {
                     var handle = frame.Attribute("sqlhandle")?.Value;
                     if (string.IsNullOrWhiteSpace(handle)) continue;
-                    if (string.Equals(handle, ZeroSqlHandle, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (DeadlockGraphParser.IsZeroSqlHandle(handle)) continue;
 
                     int fs = 0, fe = -1;
                     int.TryParse(frame.Attribute("stmtstart")?.Value, out fs);
@@ -106,7 +108,7 @@ public static class PlanFrameExtractor
             {
                 var handle = frame.Attribute("sqlhandle")?.Value;
                 if (string.IsNullOrWhiteSpace(handle)) continue;
-                if (string.Equals(handle, ZeroSqlHandle, StringComparison.OrdinalIgnoreCase)) continue;
+                if (DeadlockGraphParser.IsZeroSqlHandle(handle)) continue;
 
                 int stmtStart = 0;
                 int stmtEnd = -1;

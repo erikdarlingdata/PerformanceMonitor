@@ -668,8 +668,12 @@ public partial class DeadlockGraphControl : UserControl, IGraphViewer
     /// </summary>
     internal static string? SqlHandlesToCopy(DeadlockProcessNode? node)
     {
-        if (node == null || node.StackFrames.Count == 0) return null;
-        return string.Join(Environment.NewLine, node.StackFrames.Select(f => f.Describe()));
+        if (node == null) return null;
+        // The process's own handle (when the graph put one on <process> that no frame repeats) leads, as it does in the plan lookups.
+        var lines = node.StackFrames.Select(f => f.Describe());
+        if (node.ProcessHandle != null) lines = lines.Prepend(node.ProcessHandle.Describe());
+        var text = string.Join(Environment.NewLine, lines);
+        return text.Length == 0 ? null : text;
     }
 
     /// <summary>
@@ -746,7 +750,7 @@ public partial class DeadlockGraphControl : UserControl, IGraphViewer
 
             handleHeading.Children.Add(new TextBlock
             {
-                Text = node.StackFrames.Count == 1 ? "SQL Handle" : "SQL Handles (stack order)",
+                Text = node.StackFrames.Count + (node.ProcessHandle != null ? 1 : 0) == 1 ? "SQL Handle" : "SQL Handles (stack order)",
                 ToolTip = HandleHint,
                 FontWeight = FontWeights.SemiBold,
                 Foreground = MutedBrush,
