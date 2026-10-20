@@ -220,7 +220,7 @@ function withoutToolNames(text) {
   t = t.replace(/(?<![\w.])get_[a-z0-9]+(?:_[a-z0-9]+)*(?![\w])/g, (m) => PAGE_FOR_TOOL.get(m) ?? m);
 
   /* Two reads on one tab, named one after the other, are that tab once: "try the Queries tab or the Queries tab". */
-  t = t.replace(/\b(the (?:[A-Z][\w/]*\s)+tab)(?:, | or | and )\1/g, "$1");
+  t = t.replace(/\b(the (?:[A-Z][\w/]*\s)+\btab)(?:, | or | and )\1/g, "$1");
 
   if (firstToolAt(t) < 0) return t;
 
