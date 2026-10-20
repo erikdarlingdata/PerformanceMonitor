@@ -119,6 +119,30 @@ public sealed class TopReadsCollectorRanEmptyLiveTests
         });
     }
 
+    [Fact]
+    public async Task QueryStoreTop_RanSuccessfullyAndStoredNothing_IsEmpty_AndOnlyInsideTheRawTier()
+    {
+        await RunAsync(async (connection, postgres, now, ct) =>
+        {
+            /* A run before the window does not count. */
+            await PlantRunAsync(connection, ct, "query_store", now.AddHours(-5), "SUCCESS", rows: 0);
+            var none = JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName, 1, as_of: now.ToString("o"))).RootElement;
+            Assert.Equal("unavailable", none.GetProperty("status").GetString());
+
+            await PlantRunAsync(connection, ct, "query_store", now.AddMinutes(-30), "SUCCESS", rows: 0);
+            await PlantRunAsync(connection, ct, "query_store", now.AddMinutes(-15), "SUCCESS", rows: 0);
+            var ran = JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName, 1, as_of: now.ToString("o"))).RootElement;
+            Assert.Equal("empty", ran.GetProperty("status").GetString());
+            Assert.StartsWith("query_store ran 2 time(s) in the last 1 hour(s) and found no Query Store intervals to store.", ran.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.Equal(2, ran.GetProperty("hints").GetProperty("successful_runs_in_window").GetInt64());
+
+            /* Past the raw tier's retention the collection log outlives the rows, so its runs prove nothing about the window. */
+            var longWindow = (int)TimescaleSupport.RawRetentionSpan.TotalHours + 24;
+            var beyond = JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName, longWindow, as_of: now.ToString("o"))).RootElement;
+            Assert.Equal("unavailable", beyond.GetProperty("status").GetString());
+        });
+    }
+
     private static async Task RunAsync(Func<NpgsqlConnection, NpgsqlDataSource, DateTime, CancellationToken, Task> body)
     {
         var cs = ConnectionString;
