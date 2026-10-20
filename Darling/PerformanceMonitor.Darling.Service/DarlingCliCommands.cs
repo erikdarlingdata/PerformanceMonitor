@@ -525,10 +525,26 @@ public static class DarlingCliCommands
         output.WriteLine($"Validating connectivity to {targets.Count} server(s)...");
 
         var allReachable = true;
+        var nativeLoadFailureSaid = false;
         foreach (var server in targets)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var probe = await DarlingServerConnector.ProbeAsync(server, null, cancellationToken);
+            if (probe.SqlClientNativeLoadFailed)
+            {
+                /* #6183: SqlClient's native library did not load, so no SQL Server connection can work from this
+                   install. It is one cause for every SQL Server target, so say it once, plainly, and not once per
+                   server. A PostgreSQL target does not use that library and is still probed. */
+                if (!nativeLoadFailureSaid)
+                {
+                    nativeLoadFailureSaid = true;
+                    output.WriteLine("  [FAIL] " + probe.Error);
+                }
+
+                allReachable = false;
+                continue;
+            }
+
             output.WriteLine(FormatProbeLine(server.DisplayName, probe));
             if (!probe.Success)
             {

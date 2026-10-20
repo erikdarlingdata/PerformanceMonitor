@@ -242,6 +242,52 @@ public sealed class TopQueriesDatabaseFilterLiveTests
             Assert.Contains("matched module_name 'dbo.usp_Missing' in database '" + B + "' in the 3-hour window", moduleOne.GetProperty("message").GetString(), StringComparison.Ordinal);
         }, Cleanup);
 
+    /// <summary>
+    /// #6181: a server just added, with Query Store READ_WRITE in the newest health row and a successful query_store run,
+    /// has stored no Query Store sample until its first interval closes. The three reads say Query Store is on and that
+    /// its data arrives when the interval closes, using the stored interval length; with the collector's run failed, or
+    /// with no health row, they keep the "may be OFF" text.
+    /// </summary>
+    [Fact]
+    public Task QueryStoreReads_BeforeTheFirstIntervalCloses_SayQueryStoreIsOn() =>
+        WithSharedStoreAsync("qs-first-interval", async (connection, postgres, serverId, serverName, now, ct) =>
+        {
+            async Task<string[]> MessagesAsync() => new[]
+            {
+                JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(postgres, serverName, 3, 10, DatabaseFilter.All, null, null, null, false, 400, ct)).RootElement.GetProperty("message").GetString()!,
+                JsonDocument.Parse(await DarlingMcpTrendTools.GetQueryStoreDurationTrend(postgres, serverName, 24, null, null, ct)).RootElement.GetProperty("message").GetString()!,
+                JsonDocument.Parse(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, serverName, cancellationToken: ct)).RootElement.GetProperty("message").GetString()!,
+            };
+
+            /* No health row: the state is unknown, so the trend and regressions keep the old text. */
+            var unknown = await MessagesAsync();
+            Assert.Contains("Query Store may be OFF", unknown[1], StringComparison.Ordinal);
+            Assert.Contains("Query Store may be OFF", unknown[2], StringComparison.Ordinal);
+
+            await PlantHealthAsync(connection, ct, serverId, serverName, now.AddMinutes(-10), A, "READ_WRITE");
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status) VALUES ($1, $2, $3, 'query_store', $4, 'ERROR')",
+                CollectionIdGenerator.Next(), serverId, serverName, now.AddMinutes(-3));
+
+            /* Query Store on, but the collector's newest run failed: still the old text. */
+            var failed = await MessagesAsync();
+            Assert.Contains("Query Store may be OFF", failed[1], StringComparison.Ordinal);
+            Assert.Contains("Query Store may be OFF", failed[2], StringComparison.Ordinal);
+
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status) VALUES ($1, $2, $3, 'query_store', $4, 'SUCCESS')",
+                CollectionIdGenerator.Next(), serverId, serverName, now.AddMinutes(-1));
+
+            foreach (var message in await MessagesAsync())
+            {
+                Assert.Contains("Query Store is on", message, StringComparison.Ordinal);
+                Assert.Contains("interval closes", message, StringComparison.Ordinal);
+                Assert.Contains("60 minutes", message, StringComparison.Ordinal);
+                Assert.DoesNotContain("may be OFF", message, StringComparison.OrdinalIgnoreCase);
+                Assert.DoesNotContain("may not be enabled", message, StringComparison.OrdinalIgnoreCase);
+            }
+        }, Cleanup + "; DELETE FROM collection_log WHERE server_id = {0}");
+
     /// <summary>The statement text pins: every pass of every tier carries the list predicate, and none keeps the one-name shape.</summary>
     [Theory]
     [InlineData(nameof(DarlingDataReader.TopQueriesSql), 2)]

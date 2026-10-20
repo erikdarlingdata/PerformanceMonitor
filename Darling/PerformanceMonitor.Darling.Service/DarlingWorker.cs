@@ -14248,8 +14248,21 @@ AND   j.hypertable_name = '{relation}'", connection))
             /* #2255: full text on a NEW cause, one line while it persists. A credential that cannot be
                decrypted on this host is not a transient connect failure, so its explanation is worth Error
                once and worth almost nothing on the 1,440th repeat. */
-            var failure = ex.Message;
-            if (!string.Equals(server.LastConnectFailureLogged, failure, StringComparison.Ordinal))
+            /* #6183: SqlClient's native network library not loading breaks every SQL Server connection from this
+               install, and "The type initializer for 'TdsParser' threw an exception" does not say why. The shared
+               explanation replaces the raw text, and it is logged once for the whole process (it is the same cause
+               for every server), not once per server with a retry line. The retry loop itself is unchanged. */
+            var nativeLoadFailure = SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory);
+            var failure = nativeLoadFailure ?? ex.Message;
+            if (nativeLoadFailure is not null)
+            {
+                server.LastConnectFailureLogged = failure;
+                if (Interlocked.Exchange(ref _nativeLoadFailureLogged, 1) == 0)
+                {
+                    _logger.LogError("Connect failed and will keep failing until fixed: {Message}", failure);
+                }
+            }
+            else if (!string.Equals(server.LastConnectFailureLogged, failure, StringComparison.Ordinal))
             {
                 server.LastConnectFailureLogged = failure;
                 if (ex is InvalidOperationException && failure.Contains("DPAPI-decrypt", StringComparison.Ordinal))
@@ -14278,9 +14291,12 @@ AND   j.hypertable_name = '{relation}'", connection))
                history does. */
             await _selfAlerts!.ApplyConnectionOutcomeAsync(
                 server.Config.ServerId,
-                server.Config.DisplayName, online: false, error: ex.Message, cancellationToken);
+                server.Config.DisplayName, online: false, error: failure, cancellationToken);
         }
     }
+
+    /// <summary>1 once the native-library load failure (#6183) has been logged. It is one cause for every server.</summary>
+    private int _nativeLoadFailureLogged;
 
     /// <summary>
     /// #4999: the at-connect run of ONE on-load collector (effective frequency 0), inline in
