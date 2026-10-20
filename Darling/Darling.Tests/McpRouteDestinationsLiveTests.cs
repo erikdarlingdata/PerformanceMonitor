@@ -26,8 +26,7 @@ namespace Darling.Tests;
 /// <summary>
 /// The route tools' own destinations (#6231) as the provisioned, NOSUPERUSER <c>mcp</c> role: the grants are the shipped
 /// <c>DarlingManagedRoles.BuildProvisioningSql</c> batch run whole. A route made over MCP with a webhook opens only as its own route,
-/// the Viewer reads and edits what MCP set, a value that cannot be sent to is refused at save, an answer holds no full URL or
-/// address, and the role cannot touch a sealed column except through the store's function.
+/// the Viewer reads and edits what MCP set, a value that cannot be sent to is refused at save, an answer holds no URL or key, and the role cannot touch a sealed column except through the store's function.
 /// </summary>
 [Collection("pg-cluster-roles")]
 public sealed class McpRouteDestinationsLiveTests
@@ -101,7 +100,7 @@ public sealed class McpRouteDestinationsLiveTests
                 new DarlingMcpAlertTools.RouteDestinationRequest(TeamsUrl, SlackUrl, null, null, "ops@example.com, dba@example.org"),
                 ring, null, ct);
             Assert.Equal("created", Status(created));
-            foreach (var secret in new[] { "slack-secret-token", "teams-secret-token", SlackUrl, "ops@example.com", "dba@example.org", "sealed:" })
+            foreach (var secret in new[] { "slack-secret-token", "teams-secret-token", SlackUrl, "sealed:" })
             {
                 Assert.DoesNotContain(secret, created, StringComparison.Ordinal);
             }
@@ -111,7 +110,7 @@ public sealed class McpRouteDestinationsLiveTests
             var now = doc.GetProperty("destinations").GetProperty("now");
             Assert.Equal("slack webhook at hooks.example.test", now.GetProperty("slack").GetString());
             Assert.Equal("teams webhook at teams.example.test", now.GetProperty("teams").GetString());
-            Assert.Equal("2 recipients at example.com, example.org", now.GetProperty("email").GetString());
+            Assert.Equal("ops@example.com, dba@example.org", now.GetProperty("email").GetString());
 
             /* The stored value is sealed for this route's own row: it opens there and nowhere else. */
             var sealedSlack = await TextAsync(owned, $"SELECT slack_url FROM config_notification_routes WHERE route_id = {routeId}", ct);
@@ -147,7 +146,7 @@ public sealed class McpRouteDestinationsLiveTests
             Assert.Equal(SlackUrl, ring.Open(afterViewer, PasswordBinding.ForWebhook("slack", PasswordBinding.WebhookRouteRow(routeId), "", null)));
             Assert.Equal("ops@example.com", await TextAsync(owned, $"SELECT smtp_recipients FROM config_notification_routes WHERE route_id = {routeId}", ct));
 
-            /* An edit over MCP changes the generic URL and removes Slack: the answer names the host before and after, never a value, and the undo says to pass the earlier value again. */
+            /* An edit over MCP changes the generic URL and removes Slack: the answer says saved or none (no host for the generic URL), never a value, and the undo says to pass the earlier value again. */
             var edited = await DarlingMcpAlertTools.UpdateNotificationRouteAsync(
                 mcp, routeId, null, null, null, null, null, null, null, null,
                 new DarlingMcpAlertTools.RouteDestinationRequest(null, "-", "https://generic.example.test/in/generic-secret-token", null, null), ring, null, ct);
@@ -160,8 +159,8 @@ public sealed class McpRouteDestinationsLiveTests
             var editDoc = Parse(edited);
             var destinations = editDoc.GetProperty("destinations");
             Assert.Equal("none", destinations.GetProperty("now").GetProperty("slack").GetString());
-            Assert.Equal("slack webhook at hooks.example.test", destinations.GetProperty("previous").GetProperty("slack").GetString());
-            Assert.Equal("generic webhook at generic.example.test", destinations.GetProperty("now").GetProperty("generic").GetString());
+            Assert.Equal("slack webhook saved", destinations.GetProperty("previous").GetProperty("slack").GetString());
+            Assert.Equal("generic webhook saved", destinations.GetProperty("now").GetProperty("generic").GetString());
             Assert.Contains("pass its earlier value again", editDoc.GetProperty("undo").GetProperty("destinations").GetString(), StringComparison.Ordinal);
             Assert.Equal("", await TextAsync(owned, $"SELECT slack_url FROM config_notification_routes WHERE route_id = {routeId}", ct));
 

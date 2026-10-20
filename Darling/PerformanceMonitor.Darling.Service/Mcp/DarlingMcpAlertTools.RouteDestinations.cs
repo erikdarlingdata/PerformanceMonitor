@@ -23,15 +23,16 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// recipients of a route's own row. The shape rule, the seal bound to the route's own row and the recipient rule are the ones the
 /// Viewer's route window uses (<see cref="NotificationRouteWriter"/>); the <c>mcp</c> login writes the row only through
 /// <c>config.set_notification_route_destinations</c>, which stores a sealed value or an empty one, so the service seals here.
-/// An answer never carries a URL, a key or an address: it names the channel and the host, or the recipient count and domains.
+/// An answer never carries a URL or a key: it says whether each webhook or key is saved (with the host for Teams and Slack, whose
+/// hosts are fixed), and shows the recipient list in full, because the caller may change it and needs it to undo an overwrite.
 /// </summary>
 public sealed partial class DarlingMcpAlertTools
 {
     /// <summary>The sentence both route tools carry about their destination fields.</summary>
     private const string DestinationsHelp =
         "A route's own destinations: teams_webhook_url, slack_webhook_url, generic_webhook_url (each an absolute http or https URL; a link-local or cloud instance address is refused), " +
-        "pagerduty_routing_key and email_recipients (comma separated addresses). Each is sealed by the service for this route and cannot be read back: an answer names the channel and " +
-        "the host (the recipient count and domains for email), never the value. Omit a field to leave it as it is; pass - to remove it.";
+        "pagerduty_routing_key and email_recipients (comma separated plain addresses, at most 50). A webhook URL or key is sealed by the service for this route and cannot be read back: " +
+        "an answer says whether each one is saved (with the host for Teams and Slack) and never shows the value; the recipient list is shown in full. Omit a field to leave it as it is; pass - to remove it.";
 
     /// <summary>The destination values a call carries: null (or blank) leaves a field alone, <c>-</c> clears it.</summary>
     internal sealed record RouteDestinationRequest(string? Teams, string? Slack, string? Generic, string? PagerDuty, string? Recipients)
@@ -41,8 +42,13 @@ public sealed partial class DarlingMcpAlertTools
             || !string.IsNullOrWhiteSpace(PagerDuty) || !string.IsNullOrWhiteSpace(Recipients);
     }
 
-    /// <summary>What a destination write changed, as the answer shows it: the field names, and each changed channel's new and previous value described without the value.</summary>
-    internal sealed record RouteDestinationChange(IReadOnlyList<string> Fields, IReadOnlyDictionary<string, string> Now, IReadOnlyDictionary<string, string> Previous);
+    /// <summary>
+    /// What a destination write changed, as the answer shows it: the field names, and each changed channel's new and previous state
+    /// (the host for Teams and Slack, saved or none for the other webhooks, the recipient list for email).
+    /// <paramref name="PreviousRecipients"/> is the list before the write when the call changed it, else null.
+    /// </summary>
+    internal sealed record RouteDestinationChange(
+        IReadOnlyList<string> Fields, IReadOnlyDictionary<string, string> Now, IReadOnlyDictionary<string, string> Previous, string? PreviousRecipients = null);
 
     /// <summary>
     /// Seals and stores the destinations in <paramref name="request"/> on route <paramref name="routeId"/>, on the caller's open
@@ -60,7 +66,10 @@ public sealed partial class DarlingMcpAlertTools
         ArgumentNullException.ThrowIfNull(proxies);
         ArgumentNullException.ThrowIfNull(ring);
 
-        Func<string, PasswordBinding, string>? seal = ring.Status.CanSeal ? (text, binding) => ring.Seal(text, binding) : null;
+        /* The Viewer's sealer: a value that cannot be stored (too long, a lone surrogate) is refused with its words, as invalid. */
+        Func<string, PasswordBinding, string>? seal = ring.Status.CanSeal
+            ? (text, binding) => NotificationRouteWriter.SealValue(text, binding, (plain, bound) => ring.Seal(plain, bound))
+            : null;
         var refusal = ring.Status.CanSeal ? null : ring.Status.Reason ?? NotificationRouteWriter.NoKeyText;
         var columns = new List<string>();
         var values = new string[5];
@@ -100,7 +109,18 @@ public sealed partial class DarlingMcpAlertTools
             return new RouteDestinationChange(Array.Empty<string>(), new Dictionary<string, string>(), new Dictionary<string, string>());
         }
 
-        var previousStored = await NotificationRouteWriter.SetRouteDestinationsAsync(
+        /* The recipient list is not a secret and the mcp login may read its column, so the list before the write is read here, in the
+           same transaction, for the answer and its undo. The function itself returns only whether each webhook value was saved. */
+        var previousRecipients = "";
+        if (columns.Contains("smtp_recipients"))
+        {
+            await using var read = new NpgsqlCommand("SELECT smtp_recipients FROM config.config_notification_routes WHERE route_id = $1", connection, transaction);
+            read.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            read.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });
+            previousRecipients = (await read.ExecuteScalarAsync(cancellationToken)) as string ?? "";
+        }
+
+        var previousSaved = await NotificationRouteWriter.SetRouteDestinationsAsync(
             connection, transaction, routeId, columns, values.Select(v => v ?? "").ToArray(), McpCommandDeadlines.ReadSeconds, cancellationToken);
 
         var now = new Dictionary<string, string>();
@@ -116,16 +136,19 @@ public sealed partial class DarlingMcpAlertTools
             }
 
             now[channels[i]] = DescribeDestination(channels[i], values[i] ?? "", routeId, proxyOf[i], ring);
-            previous[channels[i]] = DescribeDestination(channels[i], previousStored[i] ?? "", routeId, proxyOf[i], ring);
+            previous[channels[i]] = i == 4
+                ? DescribeDestination("email", previousRecipients, routeId, null, ring)
+                : DescribeSaved(channels[i], previousSaved[i] == true);
         }
 
-        return new RouteDestinationChange(columns, now, previous);
+        return new RouteDestinationChange(columns, now, previous, columns.Contains("smtp_recipients") ? previousRecipients : null);
     }
 
     /// <summary>
-    /// Says what a destination value is without showing it: the channel and the host of a webhook URL, the channel for a routing
-    /// key, the recipient count and domains for email, or "none". A sealed value is opened for its own row to read the host; one
-    /// that cannot be opened (the key changed, or its proxy did) is only "saved". A value saved before sealing existed is read as text.
+    /// Says what a destination value is without showing a URL or a key: "none", the recipient list for email, "routing key saved"
+    /// for PagerDuty, "generic webhook saved" for the generic webhook (its host can itself be the credential), and for Teams and Slack
+    /// (fixed, non-secret hosts) the host. A sealed value is opened for its own row to read the host; one that cannot be opened
+    /// (the key changed, or its proxy did) is only "saved". A value saved before sealing existed is read as text.
     /// </summary>
     internal static string DescribeDestination(string channel, string stored, int routeId, string? proxy, IPasswordKeyRing ring)
     {
@@ -136,14 +159,12 @@ public sealed partial class DarlingMcpAlertTools
 
         if (channel == "email")
         {
-            var (count, domains) = NotificationRouteWriter.DescribeRecipients(stored);
-            return string.Create(System.Globalization.CultureInfo.InvariantCulture,
-                $"{count} recipient{(count == 1 ? "" : "s")}{(domains.Length > 0 ? " at " + string.Join(", ", domains) : "")}");
+            return stored.Trim();
         }
 
-        if (channel == "pagerduty")
+        if (channel is not ("teams" or "slack"))
         {
-            return "routing key saved";
+            return DescribeSaved(channel, true);
         }
 
         var text = stored;
@@ -164,18 +185,16 @@ public sealed partial class DarlingMcpAlertTools
             : $"{channel} webhook saved";
     }
 
-    /// <summary>A route as a route write answers it: the route read's projection, with the address list shown as a count and domains.</summary>
-    internal static System.Text.Json.Nodes.JsonNode? RouteWritePayload(PgNotificationRouteStore.RouteSummary? route)
-    {
-        if (route is null)
-        {
-            return null;
-        }
+    /// <summary>The state of a webhook or key that was saved or not, with no host: the form a previous value takes, since the function returns no value.</summary>
+    internal static string DescribeSaved(string channel, bool saved) =>
+        !saved ? "none" : channel == "pagerduty" ? "routing key saved" : $"{channel} webhook saved";
 
-        var node = JsonSerializer.SerializeToNode(RoutePayload(route), McpHelpers.JsonOptions)!.AsObject();
-        node["smtp_recipients"] = DescribeDestination("email", route.EmailRecipients ?? "", route.RouteId, null, DarlingPasswordKey.Current);
-        return node;
-    }
+    /// <summary>
+    /// A route as a route write answers it (#6231): the route read's projection, the recipient list in full. The caller of a write can
+    /// change the list, so it sees the list; a read served with writes off is a different projection and is unchanged.
+    /// </summary>
+    internal static System.Text.Json.Nodes.JsonNode? RouteWritePayload(PgNotificationRouteStore.RouteSummary? route) =>
+        route is null ? null : JsonSerializer.SerializeToNode(RoutePayload(route), McpHelpers.JsonOptions);
 
     /// <summary>The names of the destination fields a request carries, for the write log.</summary>
     internal static string DestinationFieldNames(RouteDestinationChange change) => string.Join(", ", change.Fields);
@@ -188,6 +207,6 @@ public sealed partial class DarlingMcpAlertTools
             changed = change.Fields,
             now = change.Now,
             previous = change.Previous,
-            note = "Values are sealed for this route and never shown: only the channel and host (or recipient count and domains) are.",
+            note = "A webhook URL or key is sealed for this route and never shown: the answer says saved or none (with the host for Teams and Slack). The recipient list is shown in full.",
         };
 }

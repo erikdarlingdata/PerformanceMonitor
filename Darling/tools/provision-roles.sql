@@ -1168,6 +1168,7 @@ GRANT EXECUTE ON FUNCTION config.request_snapshot_now(integer, text, text) TO vi
 --     webhook value for the route's own row first and passes it in, and the function stores only an empty value or a sealed one
 --     (the address list is plain text). All three re-read the row FOR UPDATE and refuse an agent route inside the transaction.
 --     Granted to mcp only.
+BEGIN;
 CREATE OR REPLACE FUNCTION config.create_notification_route(
    p_metric_match text,
    p_enabled boolean,
@@ -1305,6 +1306,8 @@ BEGIN
 END
 $fn$;
 REVOKE ALL ON FUNCTION config.update_notification_route(integer, text[], text, boolean, integer, integer, boolean, integer) FROM PUBLIC;
+-- The return type changed (a previous value is now only a flag for whether one was saved), which CREATE OR REPLACE cannot do on its own.
+DROP FUNCTION IF EXISTS config.set_notification_route_destinations(integer, text[], text, text, text, text, text);
 CREATE OR REPLACE FUNCTION config.set_notification_route_destinations(
    p_route_id integer,
    p_columns text[],
@@ -1313,7 +1316,7 @@ CREATE OR REPLACE FUNCTION config.set_notification_route_destinations(
    p_generic_url text,
    p_pagerduty_routing_key text,
    p_smtp_recipients text)
-RETURNS TABLE (prev_teams_url text, prev_slack_url text, prev_generic_url text, prev_pagerduty_routing_key text, prev_smtp_recipients text)
+RETURNS TABLE (prev_teams_url_set boolean, prev_slack_url_set boolean, prev_generic_url_set boolean, prev_pagerduty_routing_key_set boolean, prev_smtp_recipients_set boolean)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
@@ -1346,15 +1349,27 @@ BEGIN
    v_key := CASE WHEN 'pagerduty_routing_key' = ANY (p_columns) THEN COALESCE(p_pagerduty_routing_key, '') ELSE v_row.pagerduty_routing_key END;
    v_recipients := CASE WHEN 'smtp_recipients' = ANY (p_columns) THEN btrim(COALESCE(p_smtp_recipients, '')) ELSE v_row.smtp_recipients END;
    -- A webhook value is sealed by the Darling service before it gets here, for this route's own row. This function stores
-   -- only an empty value or a sealed one, so no caller of it can store a destination as text.
-   IF (v_teams <> v_row.teams_url AND v_teams <> '' AND left(v_teams, 7) <> 'sealed:')
-      OR (v_slack <> v_row.slack_url AND v_slack <> '' AND left(v_slack, 7) <> 'sealed:')
-      OR (v_generic <> v_row.generic_url AND v_generic <> '' AND left(v_generic, 7) <> 'sealed:')
-      OR (v_key <> v_row.pagerduty_routing_key AND v_key <> '' AND left(v_key, 7) <> 'sealed:') THEN
+   -- only an empty value or a sealed one, so no caller of it can store a destination as text. A changed value must be exactly
+   -- the sealed shape (sealed:v1:, the 16 character key id, base64) and no longer than 16384 characters: a half-formed value
+   -- turns the channel off for the route, and an oversized one is loaded on every configuration reload.
+   IF EXISTS (SELECT 1
+                FROM (VALUES (v_teams, v_row.teams_url), (v_slack, v_row.slack_url), (v_generic, v_row.generic_url), (v_key, v_row.pagerduty_routing_key))
+                     AS w(new_value, old_value)
+               WHERE w.new_value <> w.old_value AND w.new_value <> ''
+                 AND (length(w.new_value) > 16384
+                      OR w.new_value !~ '^sealed:v1:[0-9a-f]+:[A-Za-z0-9+/]+=?=?$'
+                      OR length(split_part(w.new_value, ':', 3)) <> 16)) THEN
       RAISE EXCEPTION 'A webhook value is stored sealed by the Darling service, never as text.' USING ERRCODE = 'DL400';
    END IF;
    IF length(v_recipients) > 4000 THEN
       RAISE EXCEPTION 'The email recipients are longer than can be stored.' USING ERRCODE = 'DL400';
+   END IF;
+   -- A changed recipient list is a comma separated list of at most 50 plain addresses: no control character, angle bracket or
+   -- double quote (so no display name or group), the rule the Viewer and the MCP tools apply before they get here.
+   IF v_recipients <> v_row.smtp_recipients
+      AND (v_recipients ~ '[[:cntrl:]<>]' OR position(chr(34) IN v_recipients) > 0
+           OR (SELECT count(*) FROM unnest(string_to_array(v_recipients, ',')) AS e(item) WHERE btrim(e.item) <> '') > 50) THEN
+      RAISE EXCEPTION 'The email recipients are a comma separated list of at most 50 plain addresses such as name@example.com.' USING ERRCODE = 'DL400';
    END IF;
    -- A signing key is sealed for the route's stored generic URL text (#5998): a change to that text needs the key removed first.
    IF v_row.signing_key <> '' AND v_generic IS DISTINCT FROM v_row.generic_url THEN
@@ -1368,15 +1383,21 @@ BEGIN
           smtp_recipients = v_recipients,
           modified_at = (now() AT TIME ZONE 'UTC')
     WHERE route_id = p_route_id;
-   -- What was stored before comes back as stored (sealed text for a webhook value) so the caller can say what changed
-   -- without a URL: only the service can open it.
-   RETURN QUERY SELECT v_row.teams_url, v_row.slack_url, v_row.generic_url, v_row.pagerduty_routing_key, v_row.smtp_recipients;
+   -- What was stored before comes back only as a flag for whether one was saved, and only for the columns this call names: the function runs
+   -- with the owner's rights, so it never hands a stored value (sealed text, or a value saved before sealing) to its caller.
+   RETURN QUERY SELECT
+      CASE WHEN 'teams_url' = ANY (p_columns) THEN v_row.teams_url <> '' END,
+      CASE WHEN 'slack_url' = ANY (p_columns) THEN v_row.slack_url <> '' END,
+      CASE WHEN 'generic_url' = ANY (p_columns) THEN v_row.generic_url <> '' END,
+      CASE WHEN 'pagerduty_routing_key' = ANY (p_columns) THEN v_row.pagerduty_routing_key <> '' END,
+      CASE WHEN 'smtp_recipients' = ANY (p_columns) THEN v_row.smtp_recipients <> '' END;
 END
 $fn$;
 REVOKE ALL ON FUNCTION config.set_notification_route_destinations(integer, text[], text, text, text, text, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION config.create_notification_route(text, boolean, integer, integer, boolean, integer) TO mcp;
 GRANT EXECUTE ON FUNCTION config.update_notification_route(integer, text[], text, boolean, integer, integer, boolean, integer) TO mcp;
 GRANT EXECUTE ON FUNCTION config.set_notification_route_destinations(integer, text[], text, text, text, text, text) TO mcp;
+COMMIT;
 
 -- The store's own password rules for every role but the owner: a BEFORE INSERT OR UPDATE trigger on
 --     config_monitored_servers. A new or changed password that starts with env: or file: (a reference) is refused:

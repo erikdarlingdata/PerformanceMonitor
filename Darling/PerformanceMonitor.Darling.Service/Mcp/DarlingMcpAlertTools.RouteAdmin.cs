@@ -43,7 +43,7 @@ public sealed partial class DarlingMcpAlertTools
     private const string MatchHelp = "a family (performance, self-monitor, reports, agent-jobs, external), 'Analysis: <category>', an exact metric name, or * (scoped routes only)";
 
     [McpServerTool(Name = "create_notification_route"), Description(
-        "Creates a notification route, optionally with its own destinations (Slack, Teams, generic webhook, PagerDuty, email). With none, each channel goes where it went before (the next matching route, else Settings). Changes shared alert configuration; the service delivers on it at its next sweep. Returns created (the route, and the channel and host of each destination set, never the value) with the undo call, or invalid. It cannot set the agent channel." +
+        "Creates a notification route, optionally with its own destinations (Slack, Teams, generic webhook, PagerDuty, email). With none, each channel goes where it went before (the next matching route, else Settings). Changes shared alert configuration; the service delivers on it at its next sweep. Returns created (the route with its recipient list in full, and for each destination set whether it is saved: the host for Teams and Slack, never a URL or key) with the undo call, or invalid. It cannot set the agent channel." +
         "<<GUIDE>>" +
         "Creates a route that decides WHICH alerts it covers and, when you pass them, where they go. " + DestinationsHelp + " " +
         "With no destination field the route is stored with every destination empty, so it has none of its own and each channel goes where it went before: to the next less specific matching route that sets that channel, else to the Settings > Notifications channels. " +
@@ -148,7 +148,7 @@ public sealed partial class DarlingMcpAlertTools
     }
 
     [McpServerTool(Name = "update_notification_route"), Description(
-        "Edits a notification route by route_id: only the fields you pass change: its match and scope, enabled flag, resolution override, fallback and own destinations (Slack, Teams, generic webhook, PagerDuty, email). Changes shared alert configuration the service delivers on. Returns updated (the route, and each destination changed as channel and host, never the value), previous and the undo call, or unchanged, invalid, not_found or refused (an agent route, or a match or scope change on a route with an agent setting)." +
+        "Edits a notification route by route_id: only the fields you pass change: its match and scope, enabled flag, resolution override, fallback and own destinations (Slack, Teams, generic webhook, PagerDuty, email). Changes shared alert configuration the service delivers on. Returns updated (the route with its recipient list in full, and each destination changed as saved or none, with the host for Teams and Slack and never a URL or key), previous and the undo call, or unchanged, invalid, not_found or refused (an agent route, or a match or scope change on a route with an agent setting)." +
         "<<GUIDE>>" +
         "Edits what a route matches and applies to, and where it sends. " + DestinationsHelp + " " +
         "A route that is an agent route keeps everything in the Viewer, and a route with an agent setting (Off included) keeps its match and scope there: changing metric_match, scope_server_id, scope_tag_id or fleet_wide on it answers refused. " +
@@ -161,7 +161,7 @@ public sealed partial class DarlingMcpAlertTools
         "which re-read the row under its lock and refuse an agent route inside it. " +
         "Use set_notification_route_enabled to turn a route off and on without the rest. " +
         "The answer's previous is the route before the change and undo is the update_notification_route call that puts the match, scope, enabled flag, resolution override and fallback back. " +
-        "A destination value is never shown, so to put a destination back pass its earlier value again in the destination field; the answer's destinations.previous says which channel and host it was. " +
+        "A webhook URL or key is never shown, so to put one back pass its earlier value again in its field; destinations.previous says whether one was saved (the host for Teams and Slack). The earlier recipient list is shown, and undo.arguments carries it as email_recipients. " +
         "Returns {status:\"updated\", route, previous, destinations:{changed, now, previous}, undo}, or {status:\"unchanged\"} when nothing differs.")]
     public static Task<string> UpdateNotificationRoute(
         NpgsqlDataSource postgres,
@@ -340,9 +340,9 @@ public sealed partial class DarlingMcpAlertTools
                 undo = new
                 {
                     tool = "update_notification_route",
-                    arguments = UndoArguments(existing),
+                    arguments = UndoArguments(existing, change),
                     destinations = change is { Fields.Count: > 0 }
-                        ? "A destination value is never shown. To put a destination back, pass its earlier value again in the same field (destinations.previous says which channel and host it was)."
+                        ? "A webhook URL or key is never shown. To put one back, pass its earlier value again in the same field (destinations.previous says whether one was saved). The earlier recipient list is in the arguments as email_recipients."
                         : null,
                 },
             }, McpHelpers.JsonOptions);
@@ -369,8 +369,8 @@ public sealed partial class DarlingMcpAlertTools
     internal static void LogRouteWrite(ILogger? logger, string tool, string caller, int routeId, string fields) =>
         logger?.LogInformation("MCP route write {Tool} by {Identity}: route {RouteId}, fields changed: {Fields}", tool, caller, routeId, fields);
 
-    /// <summary>The update call that puts a route's fields back to <paramref name="existing"/>'s values.</summary>
-    private static Dictionary<string, object?> UndoArguments(PgNotificationRouteStore.RouteSummary existing)
+    /// <summary>The update call that puts a route's fields back to <paramref name="existing"/>'s values, and the recipient list back when the call changed it (<c>-</c> removes a list that was empty).</summary>
+    private static Dictionary<string, object?> UndoArguments(PgNotificationRouteStore.RouteSummary existing, RouteDestinationChange? change)
     {
         var args = new Dictionary<string, object?>
         {
@@ -399,6 +399,11 @@ public sealed partial class DarlingMcpAlertTools
         else
         {
             args["clear_fallback"] = true;
+        }
+
+        if (change?.PreviousRecipients is { } previousRecipients)
+        {
+            args["email_recipients"] = previousRecipients.Trim().Length == 0 ? NotificationRouteWriter.ClearMarker : previousRecipients;
         }
 
         return args;
