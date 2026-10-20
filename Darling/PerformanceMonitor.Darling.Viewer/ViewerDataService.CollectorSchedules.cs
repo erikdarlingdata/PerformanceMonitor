@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -64,26 +65,12 @@ public sealed partial class ViewerDataService
     /// <c>ux_config_collector_schedules_fleet</c>. $1 collector_name, $2 frequency (nullable), $3 retention
     /// (nullable), $4 enabled, $5 databases (nullable — the V125 scope; NULL and empty are distinct,
     /// see <see cref="CollectorScheduleRow.Databases"/>).</summary>
-    public const string CollectorScheduleFleetUpsertSql = @"
-INSERT INTO config_collector_schedules (server_id, collector_name, frequency_minutes, retention_days, enabled, databases)
-VALUES (NULL, $1, $2, $3, $4, $5)
-ON CONFLICT (collector_name) WHERE server_id IS NULL DO UPDATE SET
-    frequency_minutes = EXCLUDED.frequency_minutes,
-    retention_days = EXCLUDED.retention_days,
-    enabled = EXCLUDED.enabled,
-    databases = EXCLUDED.databases";
+    public const string CollectorScheduleFleetUpsertSql = CollectorScheduleSql.FleetRowUpsert;
 
     /// <summary>Upserts one PER-SERVER override row. Arbiter matches V17's
     /// <c>ux_config_collector_schedules_server</c>. $1 server_id, $2 collector_name, $3 frequency (nullable),
     /// $4 retention (nullable), $5 enabled, $6 databases (nullable — the V125 scope).</summary>
-    public const string CollectorScheduleServerUpsertSql = @"
-INSERT INTO config_collector_schedules (server_id, collector_name, frequency_minutes, retention_days, enabled, databases)
-VALUES ($1, $2, $3, $4, $5, $6)
-ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SET
-    frequency_minutes = EXCLUDED.frequency_minutes,
-    retention_days = EXCLUDED.retention_days,
-    enabled = EXCLUDED.enabled,
-    databases = EXCLUDED.databases";
+    public const string CollectorScheduleServerUpsertSql = CollectorScheduleSql.ServerRowUpsert;
 
     /// <summary>Deletes every fleet-wide override row (revert the fleet scope to code defaults).</summary>
     public const string CollectorScheduleDeleteFleetScopeSql =

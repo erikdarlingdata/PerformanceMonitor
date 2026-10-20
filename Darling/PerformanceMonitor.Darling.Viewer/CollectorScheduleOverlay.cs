@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -196,21 +197,17 @@ public static class CollectorScheduleOverlay
 
         foreach (var item in edited)
         {
-            if (item.FrequencyMinutes < 0)
-            {
-                error = $"'{item.Name}': frequency (minutes) can't be negative. Use 0 to collect once on server load.";
-                return false;
-            }
-
-            if (CollectorDeltaCalculator.DeltaFrequencyError(item.Name, item.FrequencyMinutes) is string frequencyError)
+            /* #6227: the bounds are CollectorScheduleBounds', the ones the service's collector-schedule commands (and so the MCP tools)
+               refuse by, so a value this window accepts is a value they accept and the reverse. */
+            if (CollectorScheduleBounds.FrequencyError(item.Name, item.FrequencyMinutes) is string frequencyError)
             {
                 error = frequencyError;
                 return false;
             }
 
-            if (item.RetentionDays < 1)
+            if (CollectorScheduleBounds.RetentionError(item.Name, item.RetentionDays) is string retentionError)
             {
-                error = $"'{item.Name}': retention (days) must be at least 1.";
+                error = retentionError;
                 return false;
             }
 

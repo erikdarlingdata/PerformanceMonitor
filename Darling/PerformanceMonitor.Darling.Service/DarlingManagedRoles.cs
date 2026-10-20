@@ -1517,6 +1517,15 @@ GRANT INSERT, UPDATE, DELETE ON {config}.query_tags TO {mcp};
 GRANT INSERT, UPDATE, DELETE ON {config}.query_tag_assignments TO {mcp};
 GRANT INSERT, UPDATE, DELETE ON {config}.query_tag_rules TO {mcp};
 GRANT DELETE ON {config}.query_tag_map TO {mcp};
+-- #6227: the collector schedule tools (disable_collector, enable_collector, set_collector_frequency, set_collector_run_at,
+--    set_collector_retention) run as mcp. They write the two non-secret schedule tables the Viewer and the --enable-collector /
+--    --set-collector-run-at verbs write: the sparse override rows (enabled, frequency, retention, databases) and the run times (V160).
+--    Both carry a statement-level reload-beacon trigger (INVOKER) that UPDATEs config_service.config_version as the writer, which the
+--    two-column config_service grant above covers; the tables are SELECT-able by mcp already. The tools are served only with
+--    mcp.allowWrites and a token, and are never offered to an investigation agent. Provisioning re-runs every start, so no migration
+--    rung carries this.
+GRANT INSERT, UPDATE, DELETE ON {config}.config_collector_schedules TO {mcp};
+GRANT INSERT, UPDATE, DELETE ON {config}.config_collector_run_times TO {mcp};
 -- #3450: the web dashboard's dedicated mute-rule endpoints (POST/PATCH/PUT/DELETE under /api/mute-rules) run
 --    as the least-privilege viewer role -- the web host's ONLY store identity -- so viewer gets the SAME
 --    single-table config_mute_rules write mcp holds above, the shape of the custom_views/custom_alert_rules

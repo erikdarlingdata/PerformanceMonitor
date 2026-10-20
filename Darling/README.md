@@ -1152,6 +1152,24 @@ After the write the verb reads the collector's rows back from the store and prin
 
 The write needs the run-time table, which the service adds when it starts. If the service has not migrated the store yet, the verb says so. It tells you to start the service once to migrate the store, then run the command again. It exits `1` and changes nothing. `--enable-collector` and `--disable-collector` read back without the `run_at=` part instead of failing.
 
+### Stop, start or reschedule a collector from MCP (#6227)
+
+With `mcp.allowWrites` on (and a token), five MCP tools change one collector's schedule, and one read shows the result. Each write takes a `collector_name` and an optional `server_name`. Without a server it changes the fleet-wide row, which every server inherits unless it has a row of its own.
+
+| Tool | What it does |
+|---|---|
+| `disable_collector` / `enable_collector` | Sets the collector's enabled flag. Data already collected stays. |
+| `set_collector_frequency` | Sets `frequency_minutes` (0 = once when the server loads), or `clear: true` to remove the override. |
+| `set_collector_run_at` | Sets the time of day a once-a-day collector starts (`HH:MM`, `none` or `default`), as `--set-collector-run-at` does. |
+| `set_collector_retention` | Sets `retention_days`, or `clear: true` to remove the override. |
+| `get_collector_schedules` | Lists the stored overrides (enabled, frequency, retention, run time, database scope), for one collector or all, fleet-wide and per server. A read: served without `mcp.allowWrites`. |
+
+The writes run the same plans as `--enable-collector`, `--disable-collector` and `--set-collector-run-at`, and refuse the same things: an unknown collector name, a frequency that is negative or past the cap for a collector that stores deltas, a retention under 1 day, a run time on a collector that runs more often than daily. A refusal changes nothing and says why. A write changes only its own column: the other columns on the row are kept, and a row the tool creates never switches a collector on or off. Each answer gives what changed, the previous value and the exact call that undoes it (`undo`). The service picks the change up on its next config poll; there is no restart.
+
+These tools are never offered to an agent that Darling sends to investigate an alert: it may read with `get_collector_schedules` and may not stop, start or reschedule collection. Lite's MCP server has no write tools, so none of this applies to Lite.
+
+The `mcp` database role gets `INSERT, UPDATE, DELETE` on `config.config_collector_schedules` and `config.config_collector_run_times` when the service provisions roles (every start). It gets no other new privilege. A bring-your-own store needs `tools/provision-roles.sql` run again to add the same two grants.
+
 ### Drop the Extended Events sessions a removed server left behind (`--drop-xe-sessions`)
 
 Removing a server (`remove_server`, the Viewer's Manage Servers dialog) stops collection and drops this install's own Extended Events sessions on the server. The service makes one attempt within 15 seconds. It leaves a session that another registration of this install keeps. A drop that fails or times out never stops the removal. Each install has an id, and the sessions it creates carry that id: `PerformanceMonitor_Darling_<id>_LongQueryCompletions` and, on Azure SQL Database, its own `_Deadlock`, `_BlockedProcess` and `_Attention` sessions. The service never drops the shared sessions: `PerformanceMonitor_Deadlock`, `PerformanceMonitor_BlockedProcess`, `PerformanceMonitor_Attention` and the old shared `PerformanceMonitor_LongQueryCompletions`. Lite, the deprecated Full Dashboard installer and any other Darling service that monitors the same server use those names too. Each session has a 4 MB ring buffer. The long query completions session also tests every completed statement and batch against its duration filter, which is why that collector is opt-in. This verb drops the shared sessions. It also drops this install's own sessions on a server that is still monitored. For a session a removal failed to drop, because the server was unreachable or the attempt timed out, use `--print-sql`. When nothing else monitors the server, run the named form **just before you remove the server**:

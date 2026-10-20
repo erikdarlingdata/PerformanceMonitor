@@ -413,6 +413,12 @@ WHERE status = 'in_progress'
             case "set_collector_run_at":
                 return ResolveCollectorRunAt(command);
 
+            case "set_collector_frequency":
+                return ResolveCollectorColumn(command, CollectorScheduleColumn.FrequencyMinutes);
+
+            case "set_collector_retention":
+                return ResolveCollectorColumn(command, CollectorScheduleColumn.RetentionDays);
+
             case "test_connect":
                 return string.IsNullOrWhiteSpace(command.ArgsJson)
                     ? Fail("test_connect requires args_json with the server definition")
@@ -647,6 +653,76 @@ WHERE status = 'in_progress'
             "INSERT INTO config.config_collector_run_times (server_id, collector_name, run_at_minute) VALUES (NULL, $1, $2) " +
             "ON CONFLICT (collector_name) WHERE server_id IS NULL DO UPDATE SET run_at_minute = EXCLUDED.run_at_minute",
             new object?[] { collectorName, stored }, "collector run time set (fleet-wide)");
+    }
+
+    /// <summary>
+    /// set_collector_frequency / set_collector_retention (#6227) -> set or clear ONE column of the collector's
+    /// <c>config_collector_schedules</c> row, scoped the way <see cref="ResolveCollectorToggle"/> scopes it: <c>target_server_id</c>,
+    /// else args_json.server_id, else the fleet-wide row. args_json carries <c>collector_name</c> and the value: a whole number
+    /// (<c>frequency_minutes</c> or <c>retention_days</c>) or the word <c>default</c> (also <c>none</c>) to clear it, so the
+    /// collector falls back to the next level (the fleet row for a server, else the code default).
+    ///
+    /// <para>The name goes through the catalog like the other collector commands, and the value through
+    /// <see cref="CollectorScheduleBounds"/>, the bounds the Viewer's schedule editor enforces: nothing about either is
+    /// re-decided here. The statements are <see cref="CollectorScheduleSql"/>'s, and write ONE column: the enabled flag, the other
+    /// column and the database scope on an existing row are kept. A row this creates carries the enabled state the scope already
+    /// resolves to, so setting a frequency never switches a collector on or off. Clearing a column on a row that is not there
+    /// writes nothing.</para>
+    /// </summary>
+    private static CommandPlan ResolveCollectorColumn(ClaimedCommand command, CollectorScheduleColumn column)
+    {
+        var frequency = column == CollectorScheduleColumn.FrequencyMinutes;
+        var verb = frequency ? "set_collector_frequency" : "set_collector_retention";
+        var valueName = frequency ? "frequency_minutes" : "retention_days";
+
+        var collectorName = TryReadString(command.ArgsJson, "collector_name", "collectorName");
+        if (string.IsNullOrWhiteSpace(collectorName))
+        {
+            return Fail($"{verb} requires args_json.collector_name");
+        }
+
+        if (DarlingCliCommands.CanonicalCollectorName(collectorName) is not string canonical)
+        {
+            return Fail($"{verb}: unknown collector '{collectorName}'");
+        }
+
+        collectorName = canonical;
+
+        var raw = TryReadProperty(command.ArgsJson, new[] { valueName });
+        var clear = raw is { ValueKind: JsonValueKind.String } word
+            && (string.Equals(word.GetString()?.Trim(), "default", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(word.GetString()?.Trim(), "none", StringComparison.OrdinalIgnoreCase));
+        var value = 0;
+        if (!clear)
+        {
+            if (raw is not { ValueKind: JsonValueKind.Number } number || !number.TryGetInt32(out value))
+            {
+                return Fail($"{verb} requires args_json.{valueName} as a whole number, or \"default\" to clear it");
+            }
+
+            var error = frequency
+                ? CollectorScheduleBounds.FrequencyError(collectorName, value)
+                : CollectorScheduleBounds.RetentionError(collectorName, value);
+            if (error is not null)
+            {
+                return Fail(error);
+            }
+        }
+
+        var serverId = command.TargetServerId ?? TryReadInt(command.ArgsJson, "server_id", "serverId");
+        var shipsOn = CollectorScheduleDefaults.All[collectorName].DefaultEnabled;
+        var what = frequency ? "collector frequency" : "collector retention";
+
+        if (clear)
+        {
+            return serverId is int clearedId
+                ? StoreWrite(CollectorScheduleSql.ClearServerColumn(column), new object?[] { clearedId, collectorName }, what + " cleared")
+                : StoreWrite(CollectorScheduleSql.ClearFleetColumn(column), new object?[] { collectorName }, what + " cleared (fleet-wide)");
+        }
+
+        return serverId is int scopedId
+            ? StoreWrite(CollectorScheduleSql.SetServerColumn(column), new object?[] { scopedId, collectorName, value, shipsOn }, what + " set")
+            : StoreWrite(CollectorScheduleSql.SetFleetColumn(column), new object?[] { collectorName, value, shipsOn }, what + " set (fleet-wide)");
     }
 
     /// <summary>test_connect result mapping (pure): success carries the probe facts, failure the error.</summary>

@@ -7110,7 +7110,7 @@ SELECT cs.server_id, cs.collector_name, cs.frequency_minutes, cs.retention_days,
        COALESCE(s.display_name, s.server_name) AS server_label
 FROM config.config_collector_schedules cs
 LEFT JOIN collect.servers s ON s.server_id = cs.server_id
-WHERE lower(cs.collector_name) = lower($1)
+WHERE ($1::text IS NULL OR lower(cs.collector_name) = lower($1))
 ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
 
     /// <summary>One <c>config_collector_schedules</c> row as the verb reads it back: the service's
@@ -7120,7 +7120,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         IReadOnlyList<string>? Databases, string? ServerLabel);
 
     internal static async Task<List<CollectorScheduleReadbackRow>> ReadCollectorScheduleRowsAsync(
-        NpgsqlDataSource postgres, string collectorName, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, string? collectorName, CancellationToken cancellationToken)
     {
         var rows = new List<CollectorScheduleReadbackRow>();
         /* The deadline is written ON the construction, as every CLI store command in this file writes it: the
@@ -7128,7 +7128,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
            so a deadline assigned a statement later would be a site it cannot certify. */
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
         await using var command = new NpgsqlCommand(CollectorScheduleReadbackSql, connection) { CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds };
-        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = collectorName });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = (object?)collectorName ?? DBNull.Value });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -7158,7 +7158,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
 SELECT rt.server_id, rt.collector_name, rt.run_at_minute, COALESCE(s.display_name, s.server_name) AS server_label
 FROM config.config_collector_run_times rt
 LEFT JOIN collect.servers s ON s.server_id = rt.server_id
-WHERE lower(rt.collector_name) = lower($1)
+WHERE ($1::text IS NULL OR lower(rt.collector_name) = lower($1))
 ORDER BY rt.server_id NULLS FIRST, server_label, rt.server_id";
 
     /// <summary>One <c>config_collector_run_times</c> row as the verb reads it back, with the registry label the operator knows
@@ -7173,14 +7173,14 @@ ORDER BY rt.server_id NULLS FIRST, server_label, rt.server_id";
     /// is what is matched: lc_messages is not always English. Any other failure propagates.
     /// </summary>
     internal static async Task<List<CollectorRunTimeReadbackRow>> ReadCollectorRunTimeRowsAsync(
-        NpgsqlDataSource postgres, string collectorName, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, string? collectorName, CancellationToken cancellationToken)
     {
         var rows = new List<CollectorRunTimeReadbackRow>();
         try
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
             await using var command = new NpgsqlCommand(CollectorRunTimeReadbackSql, connection) { CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds };
-            command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = collectorName });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = (object?)collectorName ?? DBNull.Value });
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
@@ -7486,7 +7486,7 @@ ORDER BY rt.server_id NULLS FIRST, server_label, rt.server_id";
     }
 
     /// <summary>What <see cref="ResolveCollectorScopeAsync"/> decided: the schedule row a verb writes, or the exit code it stops with.</summary>
-    private readonly record struct CollectorScope(int? ServerId, string Label, int? FailureExitCode)
+    internal readonly record struct CollectorScope(int? ServerId, string Label, int? FailureExitCode)
     {
         /// <summary>No <c>--server</c>: the fleet-wide row (<c>server_id</c> NULL).</summary>
         public static CollectorScope Fleet { get; } = new(null, "fleet-wide", null);
@@ -7502,7 +7502,7 @@ ORDER BY rt.server_id NULLS FIRST, server_label, rt.server_id";
     /// with the candidates named and "Nothing was changed." The one place either verb resolves a server, so the two cannot learn
     /// different rules.
     /// </summary>
-    private static async Task<CollectorScope> ResolveCollectorScopeAsync(NpgsqlDataSource dataSource, string? serverName, TextWriter error)
+    internal static async Task<CollectorScope> ResolveCollectorScopeAsync(NpgsqlDataSource dataSource, string? serverName, TextWriter error)
     {
         if (serverName is null)
         {
@@ -7736,6 +7736,17 @@ ORDER BY rt.server_id NULLS FIRST, server_label, rt.server_id";
     }
 
     /// <summary>
+    /// The refusal for a time of day on a collector whose interval, for the row being written, is not a whole number of days
+    /// (<see cref="CollectorRunTime.AllowsRunAt"/> over <see cref="ResolveRunAtInterval"/>), or null when the time is fine. One rule for
+    /// <c>--set-collector-run-at</c> and the MCP <c>set_collector_run_at</c> tool (#6227). Pure over the rows already read.
+    /// </summary>
+    internal static string? RunAtIntervalRefusal(string collectorName, int? serverId, IReadOnlyList<CollectorScheduleReadbackRow> rows)
+    {
+        var interval = ResolveRunAtInterval(collectorName, serverId, rows);
+        return CollectorRunTime.AllowsRunAt(interval) ? null : CollectorRunTime.IntervalRefusalMessage(collectorName, interval);
+    }
+
+    /// <summary>
     /// <c>--set-collector-run-at</c> (#4938): sets, stops or clears the time of day a once-a-day collector runs, in
     /// <c>config.config_collector_run_times</c>, fleet-wide or for one server with <c>--server</c>, and prints the rows
     /// read back from the store.
@@ -7818,10 +7829,9 @@ ORDER BY rt.server_id NULLS FIRST, server_label, rt.server_id";
                 return CollectorToggleExitCode.StoreUnavailable;
             }
 
-            var interval = ResolveRunAtInterval(collectorName, scope.ServerId, existing);
-            if (!CollectorRunTime.AllowsRunAt(interval))
+            if (RunAtIntervalRefusal(collectorName, scope.ServerId, existing) is string intervalRefusal)
             {
-                error.WriteLine(CollectorRunTime.IntervalRefusalMessage(collectorName, interval));
+                error.WriteLine(intervalRefusal);
                 error.WriteLine("Nothing was changed.");
                 return CollectorToggleExitCode.UsageOrConfig;
             }
