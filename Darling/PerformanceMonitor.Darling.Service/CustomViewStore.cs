@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -46,33 +47,37 @@ public sealed class CustomViewStore
     /// <summary>The bare-array list read: the (potentially large) <c>definition</c> BODY is never selected — only
     /// the view <c>kind</c> is extracted as a scalar (<c>definition-&gt;&gt;'kind'</c>) so the list can badge/route
     /// a notebook vs a dashboard without fetching each definition. $1 = include EVERY person's personal views (true for MCP, which has
-    /// no person), $2 = the caller's identity (the personal views it owns are listed; null lists none), $3 = a folder filter
-    /// (null = no filter, '' = the top level, else that exact folder).</summary>
+    /// no person), $2 = the caller's owner key (the personal views it owns are listed; null lists none), $3 = a folder filter
+    /// (null = no filter, '' = the top level, else that exact folder). <c>mine</c> is true when the row's owner key is the caller's; the owner
+    /// key itself is never selected (#6214).</summary>
     public const string ListSql = @"
-SELECT id, name, description, version, updated_at, updated_by, (definition->>'kind') AS kind, folder, personal, created_by
+SELECT id, name, description, version, updated_at, updated_by, (definition->>'kind') AS kind, folder, personal, created_by,
+       COALESCE(owner_key = $2::text, false) AS mine
 FROM custom_views
-WHERE (NOT personal OR $1::boolean OR created_by = $2::text)
+WHERE (NOT personal OR $1::boolean OR owner_key = $2::text)
   AND ($3::text IS NULL OR COALESCE(folder, '') = $3::text)
 ORDER BY name, folder NULLS FIRST, personal, id";
 
-    /// <summary>The full single-view read (includes <c>definition</c>). $1 id.</summary>
+    /// <summary>The full single-view read (includes <c>definition</c>). $1 id, $2 the caller's owner key (null for none; only sets <c>mine</c>).</summary>
     public const string GetSql = @"
-SELECT id, name, definition, description, version, created_at, updated_at, updated_by, folder, personal, created_by
+SELECT id, name, definition, description, version, created_at, updated_at, updated_by, folder, personal, created_by,
+       COALESCE(owner_key = $2::text, false) AS mine
 FROM custom_views
 WHERE id = $1";
 
-    /// <summary>Inserts a new view at version 1. $1 name, $2 definition (jsonb), $3 description, $4 updated_by (also the creator),
-    /// $5 folder, $6 personal.</summary>
+    /// <summary>Inserts a new view at version 1. $1 name, $2 definition (jsonb), $3 description, $4 updated_by (also created_by, the display name),
+    /// $5 folder, $6 personal, $7 owner_key (the creator's stable key; null when the session has none, as for the shared token and MCP).</summary>
     public const string InsertSql = @"
-INSERT INTO custom_views (name, definition, description, version, created_at, updated_at, updated_by, created_by, folder, personal)
-VALUES ($1, $2, $3, 1, (now() AT TIME ZONE 'UTC'), (now() AT TIME ZONE 'UTC'), $4, $4, $5, $6)
-RETURNING id, name, definition, description, version, created_at, updated_at, updated_by, folder, personal, created_by";
+INSERT INTO custom_views (name, definition, description, version, created_at, updated_at, updated_by, created_by, folder, personal, owner_key)
+VALUES ($1, $2, $3, 1, (now() AT TIME ZONE 'UTC'), (now() AT TIME ZONE 'UTC'), $4, $4, $5, $6, $7)
+RETURNING id, name, definition, description, version, created_at, updated_at, updated_by, folder, personal, created_by, (owner_key IS NOT NULL) AS mine";
 
     /// <summary>Optimistic-concurrency update. $1 id, $2 name, $3 definition (jsonb), $4 description,
-    /// $5 updated_by, $6 expected_version, $7 folder, $8 personal (the new value), $9 actor (the signed-in identity; null when there is none).
+    /// $5 updated_by, $6 expected_version, $7 folder, $8 personal (the new value), $9 the actor's owner key (null when the session has none).
     /// Returns the row only when the expected version matched AND the actor may change this view: anyone may change a shared view and keep
-    /// it shared; a personal view only its owner may change; a shared view becomes personal only when the actor created it (a view with no
-    /// recorded creator can never be made personal, so nobody can take a team's legacy view out of everyone else's list).</summary>
+    /// it shared; a personal view only its owner may change; a shared view becomes personal only when its owner key is the actor's (a view
+    /// with no owner key, such as one the shared token or MCP made or one from before V204, can never be made personal, so nobody can take
+    /// a team's view out of everyone else's list). Ownership is the owner key, never the display name in created_by.</summary>
     public const string UpdateSql = @"
 UPDATE custom_views
 SET name = $2,
@@ -85,17 +90,18 @@ SET name = $2,
     personal = $8
 WHERE id = $1 AND version = $6
   AND ((NOT personal AND NOT $8::boolean)
-       OR (NOT personal AND $8::boolean AND created_by = $9::text)
-       OR (personal AND created_by = $9::text))
-RETURNING id, name, definition, description, version, created_at, updated_at, updated_by, folder, personal, created_by";
+       OR (NOT personal AND $8::boolean AND owner_key IS NOT NULL AND owner_key = $9::text)
+       OR (personal AND owner_key IS NOT NULL AND owner_key = $9::text))
+RETURNING id, name, definition, description, version, created_at, updated_at, updated_by, folder, personal, created_by,
+          COALESCE(owner_key = $9::text, false) AS mine";
 
-    /// <summary>Disambiguates a 0-rowcount update or delete: the current version, whether the view is personal and who created it, or no
+    /// <summary>Disambiguates a 0-rowcount update or delete: the current version, whether the view is personal and its owner key, or no
     /// row when the id is gone. $1 id.</summary>
-    public const string VersionProbeSql = "SELECT version, personal, created_by FROM custom_views WHERE id = $1";
+    public const string VersionProbeSql = "SELECT version, personal, owner_key FROM custom_views WHERE id = $1";
 
-    /// <summary>Deletes a view by id. $1 id, $2 actor (the signed-in identity; null when there is none). A personal view is deleted only by
-    /// its owner.</summary>
-    public const string DeleteSql = "DELETE FROM custom_views WHERE id = $1 AND (NOT personal OR created_by = $2::text)";
+    /// <summary>Deletes a view by id. $1 id, $2 the actor's owner key (null when the session has none), $3 true to delete any person's personal view
+    /// (MCP only: the operator's cleanup for a person who has left). A personal view is otherwise deleted only by its owner.</summary>
+    public const string DeleteSql = "DELETE FROM custom_views WHERE id = $1 AND (NOT personal OR $3::boolean OR owner_key = $2::text)";
 
     /// <summary>Postgres <c>unique_violation</c> — a duplicate <c>name</c> insert/rename.</summary>
     private const string UniqueViolation = "23505";
@@ -118,9 +124,16 @@ RETURNING id, name, definition, description, version, created_at, updated_at, up
     /// <summary>The plain sentence for a personal view with nobody to own it.</summary>
     public const string NoIdentityMessage = "A personal view needs a signed-in identity; this session has none.";
 
+    /// <summary>The plain sentence for a session that signed in before owner keys existed (#6214): it names a person but cannot own a view.</summary>
+    public const string SignInAgainMessage = "Sign out and sign in again to save personal views.";
+
+    /// <summary>The name the sidebar gives the caller's own personal views, so no shared folder may take it.</summary>
+    public const string ReservedFolderName = "My views";
+
     /// <summary>
     /// Normalizes a folder name the way every writer stores it: trimmed, and an empty or blank name becomes null (the top level).
-    /// Sets <paramref name="error"/> instead when the name is longer than <see cref="MaxFolderLength"/> or holds a control character.
+    /// Sets <paramref name="error"/> instead when the name is longer than <see cref="MaxFolderLength"/>, holds a control character or an invisible
+    /// formatting character (such as U+202E or U+200B, which make two different names look alike), or is "My views" in any letter case.
     /// </summary>
     public static string? NormalizeFolder(string? folder, out string? error)
     {
@@ -137,13 +150,19 @@ RETURNING id, name, definition, description, version, created_at, updated_at, up
             return null;
         }
 
-        foreach (var c in trimmed)
+        foreach (var rune in trimmed.EnumerateRunes())
         {
-            if (char.IsControl(c))
+            if (Rune.IsControl(rune) || Rune.GetUnicodeCategory(rune) == UnicodeCategory.Format)
             {
-                error = "'folder' must not contain control characters.";
+                error = "'folder' must not contain control or invisible formatting characters.";
                 return null;
             }
+        }
+
+        if (string.Equals(trimmed, ReservedFolderName, StringComparison.OrdinalIgnoreCase))
+        {
+            error = $"'{ReservedFolderName}' is reserved for each person's own personal views. Pick another folder name.";
+            return null;
         }
 
         return trimmed;
@@ -159,18 +178,18 @@ RETURNING id, name, definition, description, version, created_at, updated_at, up
 
     /// <summary>
     /// Lists saved views as lightweight summaries (no <c>definition</c>), ordered by name. Every shared view is listed. A personal view is
-    /// listed only for its owner (<paramref name="callerIdentity"/>), or for everybody when <paramref name="allPersonal"/> is true (MCP,
+    /// listed only for its owner (<paramref name="callerOwnerKey"/>), or for everybody when <paramref name="allPersonal"/> is true (MCP,
     /// which has no person). <paramref name="folder"/> narrows to one folder ('' is the top level); null lists every folder. "Personal" is a
     /// list filter, not access control: <see cref="GetAsync"/> still returns any view.
     /// </summary>
     public async Task<IReadOnlyList<CustomViewSummary>> ListAsync(
-        string? callerIdentity = null, bool allPersonal = false, string? folder = null, CancellationToken cancellationToken = default)
+        string? callerOwnerKey = null, bool allPersonal = false, string? folder = null, CancellationToken cancellationToken = default)
     {
         var results = new List<CustomViewSummary>();
         await using var command = _dataSource.CreateCommand(ListSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = allPersonal });                              // $1
-        AddNullableText(command, callerIdentity);                                                                     // $2
+        AddNullableText(command, callerOwnerKey);                                                                   // $2
         AddNullableText(command, folder);                                                                             // $3
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -185,18 +204,21 @@ RETURNING id, name, definition, description, version, created_at, updated_at, up
                 reader.IsDBNull(6) ? null : reader.GetString(6),
                 reader.IsDBNull(7) ? null : reader.GetString(7),
                 reader.GetBoolean(8),
-                reader.IsDBNull(9) ? null : reader.GetString(9)));
+                reader.IsDBNull(9) ? null : reader.GetString(9),
+                reader.GetBoolean(10)));
         }
 
         return results;
     }
 
-    /// <summary>Reads one view in full (with <c>definition</c>), or <see cref="CustomViewResult.NotFound"/>.</summary>
-    public async Task<CustomViewResult> GetAsync(long id, CancellationToken cancellationToken = default)
+    /// <summary>Reads one view in full (with <c>definition</c>), or <see cref="CustomViewResult.NotFound"/>. <paramref name="callerOwnerKey"/>
+    /// only sets <see cref="CustomView.Mine"/>.</summary>
+    public async Task<CustomViewResult> GetAsync(long id, string? callerOwnerKey = null, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(GetSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = id });
+        AddNullableText(command, callerOwnerKey);                                                                   // $2
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
         {
@@ -214,7 +236,7 @@ RETURNING id, name, definition, description, version, created_at, updated_at, up
     /// </summary>
     public async Task<CustomViewResult> CreateAsync(
         string name, string? description, string definitionJson, string? updatedBy, string? folder = null, bool personal = false,
-        CancellationToken cancellationToken = default)
+        string? ownerKey = null, CancellationToken cancellationToken = default)
     {
         var invalid = ValidateArgs(name, definitionJson);
         if (invalid is not null)
@@ -228,7 +250,7 @@ RETURNING id, name, definition, description, version, created_at, updated_at, up
             return new CustomViewResult.Invalid(folderError);
         }
 
-        if (personal && string.IsNullOrWhiteSpace(updatedBy))
+        if (personal && (string.IsNullOrWhiteSpace(updatedBy) || string.IsNullOrEmpty(ownerKey)))
         {
             return new CustomViewResult.Invalid(NoIdentityMessage);
         }
@@ -241,6 +263,7 @@ RETURNING id, name, definition, description, version, created_at, updated_at, up
         AddNullableText(command, updatedBy);                                                                        // $4 (also created_by)
         AddNullableText(command, folder);                                                                           // $5
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = personal });                               // $6
+        AddNullableText(command, ownerKey);                                                                         // $7
 
         try
         {
@@ -262,7 +285,7 @@ RETURNING id, name, definition, description, version, created_at, updated_at, up
     /// </summary>
     public async Task<CustomViewResult> UpdateAsync(
         long id, string name, string? description, string definitionJson, int expectedVersion, string? updatedBy,
-        string? folder, bool personal, string? actor, CancellationToken cancellationToken = default)
+        string? folder, bool personal, string? actorKey, CancellationToken cancellationToken = default)
     {
         var invalid = ValidateArgs(name, definitionJson);
         if (invalid is not null)
@@ -276,7 +299,7 @@ RETURNING id, name, definition, description, version, created_at, updated_at, up
             return new CustomViewResult.Invalid(folderError);
         }
 
-        if (personal && string.IsNullOrWhiteSpace(actor))
+        if (personal && string.IsNullOrEmpty(actorKey))
         {
             return new CustomViewResult.Invalid(NoIdentityMessage);
         }
@@ -291,7 +314,7 @@ RETURNING id, name, definition, description, version, created_at, updated_at, up
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = expectedVersion });                         // $6
         AddNullableText(command, folder);                                                                           // $7
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = personal });                               // $8
-        AddNullableText(command, actor);                                                                            // $9
+        AddNullableText(command, actorKey);                                                                         // $9
 
         try
         {
@@ -309,18 +332,19 @@ RETURNING id, name, definition, description, version, created_at, updated_at, up
         }
 
         /* 0 rows updated: the id is gone (NotFound), the actor may not change it (Forbidden) or the version moved under us (stale Conflict). */
-        return await ClassifyMissedUpdateAsync(id, actor, personal, cancellationToken);
+        return await ClassifyMissedUpdateAsync(id, actorKey, personal, cancellationToken);
     }
 
     /// <summary>Deletes a view. Returns <see cref="CustomViewResult.Ok"/> (no body) when a row was deleted,
-    /// <see cref="CustomViewResult.Forbidden"/> for a personal view <paramref name="actor"/> does not own (a null actor owns none),
-    /// else <see cref="CustomViewResult.NotFound"/>.</summary>
-    public async Task<CustomViewResult> DeleteAsync(long id, string? actor, CancellationToken cancellationToken = default)
+    /// <see cref="CustomViewResult.Forbidden"/> for a personal view <paramref name="actor"/> does not own (a null actor key owns none),
+    /// else <see cref="CustomViewResult.NotFound"/>. <paramref name="anyPersonal"/> (MCP) deletes a personal view whoever owns it.</summary>
+    public async Task<CustomViewResult> DeleteAsync(long id, string? actorKey, bool anyPersonal = false, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(DeleteSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = id });                                     // $1
-        AddNullableText(command, actor);                                                                            // $2
+        AddNullableText(command, actorKey);                                                                         // $2
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = anyPersonal });                            // $3
         var affected = await command.ExecuteNonQueryAsync(cancellationToken);
         if (affected > 0)
         {
@@ -328,12 +352,12 @@ RETURNING id, name, definition, description, version, created_at, updated_at, up
         }
 
         /* Nothing deleted: the id is gone, or it is somebody else's personal view. */
-        var missed = await ClassifyMissedUpdateAsync(id, actor, wantPersonal: false, cancellationToken);
+        var missed = await ClassifyMissedUpdateAsync(id, actorKey, wantPersonal: false, cancellationToken);
         return missed is CustomViewResult.Forbidden ? missed : new CustomViewResult.NotFound();
     }
 
     private async Task<CustomViewResult> ClassifyMissedUpdateAsync(
-        long id, string? actor, bool wantPersonal, CancellationToken cancellationToken)
+        long id, string? actorKey, bool wantPersonal, CancellationToken cancellationToken)
     {
         await using var command = _dataSource.CreateCommand(VersionProbeSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
@@ -346,15 +370,15 @@ RETURNING id, name, definition, description, version, created_at, updated_at, up
 
         var currentVersion = reader.GetInt32(0);
         var isPersonal = reader.GetBoolean(1);
-        var createdBy = reader.IsDBNull(2) ? null : reader.GetString(2);
-        if (isPersonal && (actor is null || createdBy != actor))
+        var ownerKey = reader.IsDBNull(2) ? null : reader.GetString(2);
+        if (isPersonal && (actorKey is null || ownerKey != actorKey))
         {
             return new CustomViewResult.Forbidden(NotOwnerMessage);
         }
 
-        if (!isPersonal && wantPersonal && createdBy != actor)
+        if (!isPersonal && wantPersonal && (ownerKey is null || ownerKey != actorKey))
         {
-            return new CustomViewResult.Forbidden(createdBy is null ? NoCreatorMessage : NotCreatorMessage);
+            return new CustomViewResult.Forbidden(ownerKey is null ? NoCreatorMessage : NotCreatorMessage);
         }
 
         return new CustomViewResult.Conflict(
@@ -387,7 +411,7 @@ RETURNING id, name, definition, description, version, created_at, updated_at, up
     }
 
     /// <summary>Reads a full-view row (column order: id, name, definition, description, version, created_at,
-    /// updated_at, updated_by, folder, personal, created_by — shared by <see cref="GetSql"/>/<see cref="InsertSql"/>/<see cref="UpdateSql"/>'s
+    /// updated_at, updated_by, folder, personal, created_by, mine — shared by <see cref="GetSql"/>/<see cref="InsertSql"/>/<see cref="UpdateSql"/>'s
     /// RETURNING). <c>definition</c> is jsonb, read as its text representation.</summary>
     private static CustomView ReadFullView(NpgsqlDataReader reader) => new(
         reader.GetInt64(0),
@@ -400,7 +424,8 @@ RETURNING id, name, definition, description, version, created_at, updated_at, up
         reader.IsDBNull(7) ? null : reader.GetString(7),
         reader.IsDBNull(8) ? null : reader.GetString(8),
         reader.GetBoolean(9),
-        reader.IsDBNull(10) ? null : reader.GetString(10));
+        reader.IsDBNull(10) ? null : reader.GetString(10),
+        reader.GetBoolean(11));
 
     private static void AddNullableText(NpgsqlCommand command, string? value) =>
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)value ?? DBNull.Value });
@@ -418,7 +443,8 @@ public sealed record CustomView(
     string? UpdatedBy,
     string? Folder,
     bool Personal,
-    string? CreatedBy);
+    string? CreatedBy,
+    bool Mine);
 
 /// <summary>The lightweight list projection — every field except the <c>definition</c> body, plus the view
 /// <c>Kind</c> extracted as a scalar (<c>null</c> when the stored definition declares none — the wire layer
@@ -433,7 +459,8 @@ public sealed record CustomViewSummary(
     string? Kind,
     string? Folder,
     bool Personal,
-    string? CreatedBy);
+    string? CreatedBy,
+    bool Mine);
 
 /// <summary>
 /// The discriminated outcome of a store operation. Closed (the private base constructor blocks external

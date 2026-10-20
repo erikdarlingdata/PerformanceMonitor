@@ -79,6 +79,9 @@ public sealed class CustomViewFoldersWebTests
         /* The shared-token session has no identity, so no My views group, and never shows a personal view it was handed. */
         Assert.Equal(folderAndTopLevel, Strings(r.GetProperty("noIdentity")));
 
+        /* The page never compares names: a personal view that carries my display name but is not `mine` is not in My views. */
+        Assert.Empty(Strings(r.GetProperty("sameNameNotMine")));
+
         /* A collapsed group keeps its header (with its count) and hides its views. */
         Assert.Contains("G:Ops(2,c)", Strings(r.GetProperty("aliceOpsCollapsed")));
         Assert.DoesNotContain("V:CPU@1", Strings(r.GetProperty("aliceOpsCollapsed")));
@@ -155,13 +158,14 @@ public sealed class CustomViewFoldersWebTests
         /* No identity: the box is disabled and the page says why. */
         var noIdentity = r.GetProperty("newNoIdentity");
         Assert.True(noIdentity.GetProperty("personalDisabled").GetBoolean());
-        Assert.Contains("Personal views need a signed-in identity, and this session has none.", noIdentity.GetProperty("text").GetString());
+        Assert.Contains("Personal views need a sign-in that can own them", noIdentity.GetProperty("text").GetString());
+        Assert.Contains("sign out and sign in again", noIdentity.GetProperty("text").GetString());
 
         /* A shared view: only its creator can make it personal; one with no recorded creator can be made personal by nobody. */
         Assert.False(r.GetProperty("ownShared").GetProperty("personalDisabled").GetBoolean());
         Assert.Contains("Created by alice · changed by alice", r.GetProperty("ownShared").GetProperty("text").GetString());
         Assert.True(r.GetProperty("otherShared").GetProperty("personalDisabled").GetBoolean());
-        Assert.Contains("Only the person who created this view can make it personal.", r.GetProperty("otherShared").GetProperty("text").GetString());
+        Assert.Contains("Only the person who created this view can make it personal", r.GetProperty("otherShared").GetProperty("text").GetString());
         var legacy = r.GetProperty("legacyShared");
         Assert.True(legacy.GetProperty("personalDisabled").GetBoolean());
         Assert.Contains("has no recorded creator", legacy.GetProperty("text").GetString());
@@ -193,6 +197,61 @@ public sealed class CustomViewFoldersWebTests
         Assert.Equal(2, ticked.GetProperty("changed").GetInt32());
         Assert.False(r.GetProperty("afterUnticking").GetProperty("meta").GetProperty("personal").GetBoolean());
         Assert.False(r.GetProperty("afterUnticking").GetProperty("folderDisabled").GetBoolean());
+    }
+
+    [Fact]
+    public void TheFolderBox_RefusesInvisibleCharactersAndTheReservedName_LikeTheStore_AndBlocksSave()
+    {
+        if (!TryRun("fields", out var r)) return;
+
+        var block = r.GetProperty("folderBlock");
+        foreach (var name in new[] { "hidden", "zeroWidth", "reserved", "tooLong" })
+        {
+            Assert.True(block.GetProperty(name).GetBoolean(), name);
+        }
+
+        Assert.False(block.GetProperty("fine").GetBoolean());
+        Assert.Contains("reserved", block.GetProperty("note").GetString());
+        Assert.False(block.GetProperty("personalIgnoresFolder").GetBoolean());
+
+        /* blank, blank, Ops, then the five refusals, then a 100-character name that is fine */
+        Assert.Equal(new[] { false, false, false, true, true, true, true, true, true, true, false },
+            r.GetProperty("folderProblems").EnumerateArray().Select(e => e.GetBoolean()).ToArray());
+    }
+
+    [Fact]
+    public void SigningOut_ClearsTheCollapsedFolders_FromThisBrowser()
+    {
+        if (!TryRun("signout", out var r)) return;
+
+        Assert.True(r.GetProperty("before").GetBoolean());
+        Assert.False(r.GetProperty("after").GetBoolean());
+        Assert.True(r.GetProperty("keyGone").GetBoolean());
+        Assert.False(r.GetProperty("afterReload").GetBoolean());
+    }
+
+    [Fact]
+    public void ASignedOutPage_NeverRepaintsTheOldSessionsLists_AndDropsTheCachedViewList()
+    {
+        if (!TryRun("expired", out var r)) return;
+
+        /* Before the session ends the list (with the personal views) and the fleet sidebar paint. */
+        var before = r.GetProperty("beforeExpiry");
+        Assert.Equal(new[] { 2 }, before.GetProperty("views").EnumerateArray().Select(e => e.GetInt32()).ToArray());
+        Assert.Equal(1, before.GetProperty("servers").GetInt32());
+        Assert.True(before.GetProperty("cached").GetBoolean());
+
+        /* After: the takeover drops the cache and the folder state, and a later repaint (a poll, a collapse) paints nothing. */
+        var after = r.GetProperty("afterExpiry");
+        Assert.Equal(1, after.GetProperty("views").GetArrayLength());
+        Assert.Equal(1, after.GetProperty("servers").GetInt32());
+        Assert.False(after.GetProperty("cached").GetBoolean());
+        Assert.Equal(1, after.GetProperty("cleared").GetInt32());
+
+        /* A list read that was already in flight and lands after the sign-out keeps nothing. */
+        var late = r.GetProperty("lateRead");
+        Assert.Equal(1, late.GetProperty("views").GetArrayLength());
+        Assert.False(late.GetProperty("cached").GetBoolean());
     }
 
     [Fact]

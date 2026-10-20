@@ -61,7 +61,10 @@ const all = (node, pred, out = []) => {
 };
 const fire = (node, type, e = {}) => { for (const fn of node.handlers[type] || []) fn(e); };
 
-const v = (id, name, o = {}) => ({ id, name, kind: "dashboard", version: 1, folder: null, personal: false, created_by: "alice", updated_by: "alice", ...o });
+const v = (id, name, o = {}) => ({ id, name, kind: "dashboard", version: 1, folder: null, personal: false, created_by: "alice", updated_by: "alice", mine: false, ...o });
+/* The server marks `mine` (the owner key matches); the harness uses the created_by name as the stand-in for that key. */
+const as = (list, user) => list.map((x) => ({ ...x, mine: user !== null && x.created_by === user }));
+const asOne = (view, user) => (view ? as([view], user)[0] : view);
 const views = [
   v(1, "Zeta top level"),
   v(2, "Alpha top level"),
@@ -89,14 +92,16 @@ try {
   const none = () => false;
 
   if (scenario === "order") {
-    out.alice = shape(rules.sidebarViewRows(views, "alice", none));
-    out.bob = shape(rules.sidebarViewRows(views, "bob", none));
-    out.noIdentity = shape(rules.sidebarViewRows(views, null, none));
-    out.aliceOpsCollapsed = shape(rules.sidebarViewRows(views, "alice", (id) => id === "folder:Ops"));
-    out.aliceMyCollapsed = shape(rules.sidebarViewRows(views, "alice", (id) => id === "my"));
-    out.onlyTopLevel = shape(rules.sidebarViewRows([views[0], views[1]], "alice", none));
-    out.empty = shape(rules.sidebarViewRows([], "alice", none));
+    out.alice = shape(rules.sidebarViewRows(as(views, "alice"), none));
+    out.bob = shape(rules.sidebarViewRows(as(views, "bob"), none));
+    out.noIdentity = shape(rules.sidebarViewRows(as(views, null), none));
+    out.aliceOpsCollapsed = shape(rules.sidebarViewRows(as(views, "alice"), (id) => id === "folder:Ops"));
+    out.aliceMyCollapsed = shape(rules.sidebarViewRows(as(views, "alice"), (id) => id === "my"));
+    out.onlyTopLevel = shape(rules.sidebarViewRows([views[0], views[1]], none));
+    out.empty = shape(rules.sidebarViewRows([], none));
     out.folders = rules.folderNames(views);
+    // the page never compares names: a personal view that carries my display name but is not `mine` is not in My views
+    out.sameNameNotMine = shape(rules.sidebarViewRows([v(40, "Impostor", { personal: true, created_by: "alice", mine: false })], none));
   } else if (scenario === "collapse") {
     local.setStorage(globalThis.localStorage);
     local.toggleViewGroup("folder:Ops");
@@ -124,7 +129,7 @@ try {
   } else if (scenario === "paint") {
     const list = new FakeNode("div");
     local.setStorage(globalThis.localStorage);
-    const repaint = () => side.paintViewList(list, views, { can_edit: true, subject: "alice" }, 4);
+    const repaint = () => side.paintViewList(list, as(views, "alice"), { can_edit: true, can_own: true }, 4);
     local.onChange(repaint);
     repaint();
     const lines = () => list.children.map((n) => (n.dataset.viewGroup !== undefined ? "G:" + n.children[1].textContent + n.children[2].textContent + n.attrs["aria-expanded"] : "V:" + n.textContent + (n.className.includes("active") ? "*" : "") + (n.attrs.href || "")));
@@ -135,25 +140,25 @@ try {
     out.stored = JSON.parse(data["darling.local.viewGroups.v1"]);
     out.headerCount = all(list, (n) => n.dataset.viewGroup !== undefined).length;
     // the shared-token session: no My views, and no New links when it cannot edit
-    side.paintViewList(list, [views[0], views[6]], { can_edit: false, subject: null }, null);
+    side.paintViewList(list, as([views[0], views[6]], null), { can_edit: false, can_own: false }, null);
     out.tokenReadOnly = lines();
     const empty = new FakeNode("div");
-    side.paintViewList(empty, [], { can_edit: false, subject: null }, null);
+    side.paintViewList(empty, [], { can_edit: false, can_own: false }, null);
     out.emptyText = empty.textContent;
     // a name that looks like markup stays text
     const hostile = new FakeNode("div");
     side.paintViewList(hostile, [v(20, "<img src=x onerror=alert(1)>", { folder: "<b>f</b>" })], { can_edit: false }, null);
     out.hostile = hostile.children.map((n) => n.textContent);
   } else if (scenario === "fields") {
-    const session = (subject) => ({ can_edit: true, subject });
-    const build = (view, subject, meta) => fields.buildViewMetaFields({ meta: meta || { folder: view ? view.folder || "" : "", personal: view ? view.personal === true : false }, view, session: session(subject), views, onChange: () => { out.changed = (out.changed || 0) + 1; } });
+    const session = (user) => ({ can_edit: true, can_own: user !== null });
+    const build = (view, subject, meta) => fields.buildViewMetaFields({ meta: meta || { folder: view ? view.folder || "" : "", personal: view ? view.personal === true : false }, view: asOne(view, subject), session: session(subject), views, onChange: () => { out.changed = (out.changed || 0) + 1; } });
     const inspect = (b) => {
       const inputs = all(b.node, (n) => n.tag === "input");
       const folder = inputs.find((n) => n.attrs.type === "text");
       const box = inputs.find((n) => n.attrs.type === "checkbox");
       return {
         folderValue: folder.value, folderDisabled: folder.disabled, personalChecked: box.checked, personalDisabled: box.disabled,
-        readOnly: b.readOnly, text: b.node.textContent,
+        readOnly: b.readOnly, blocked: b.blocked, text: b.node.textContent,
         options: all(b.node, (n) => n.tag === "option").map((n) => n.attrs.value),
         listLinked: folder.attrs.list === all(b.node, (n) => n.tag === "datalist")[0].attrs.id,
         maxlength: folder.attrs.maxlength,
@@ -189,18 +194,88 @@ try {
       blank: rules.metaForSave({ folder: "   ", personal: false }, null, session("alice")),
       personal: rules.metaForSave({ folder: "Ops", personal: true }, null, session("alice")),
       personalNoIdentity: rules.metaForSave({ folder: "", personal: true }, null, session(null)),
-      personalLegacy: rules.metaForSave({ folder: "", personal: true }, views[5], session("alice")),
-      personalOthers: rules.metaForSave({ folder: "", personal: true }, views[2], session("bob")),
-      ownPersonalStays: rules.metaForSave({ folder: "", personal: true }, views[6], session("alice")),
+      personalLegacy: rules.metaForSave({ folder: "", personal: true }, asOne(views[5], "alice"), session("alice")),
+      personalOthers: rules.metaForSave({ folder: "", personal: true }, asOne(views[2], "bob"), session("bob")),
+      ownPersonalStays: rules.metaForSave({ folder: "", personal: true }, asOne(views[6], "alice"), session("alice")),
     };
+    // a folder name the store would refuse: the editor says so and blocks Save; a personal view has no folder to refuse
+    const badMeta = { folder: "Dev\u202Es", personal: false };
+    const bad = build(null, "alice", badMeta);
+    const badBox = all(bad.node, (n) => n.tag === "input").find((n) => n.attrs.type === "checkbox");
+    const badFolder = all(bad.node, (n) => n.tag === "input").find((n) => n.attrs.type === "text");
+    const blockedFor = (text) => { badFolder.value = text; fire(badFolder, "input"); return bad.blocked; };
+    out.folderBlock = {
+      hidden: blockedFor("Dev\u202Es"), zeroWidth: blockedFor("Dev\u200Bs"), reserved: blockedFor("my VIEWS"), tooLong: blockedFor("x".repeat(101)),
+      fine: blockedFor("Devs"), note: (() => { blockedFor("My views"); return bad.node.textContent; })(),
+      personalIgnoresFolder: (() => { badBox.checked = true; fire(badBox, "change"); return bad.blocked; })(),
+    };
+    out.folderProblems = ["", "  ", "Ops", "My views", "MY VIEWS", " my views ", "a\u202Eb", "a\u200Bb", "a\tb", "x".repeat(101), "x".repeat(100)].map((n) => rules.folderProblem(n) !== null);
     out.owner = [rules.ownerLine(views[2]), rules.ownerLine(views[5]), rules.ownerLine({ id: 1, created_by: "a", updated_by: "b" }), rules.ownerLine(null)];
   } else if (scenario === "access") {
-    const note = (view, subject) => rules.viewAccess(view, { subject });
+    const note = (view, user) => rules.viewAccess(asOne(view, user), { can_edit: true, can_own: user !== null });
     out.shared = note(views[0], "alice");
     out.own = note(views[6], "alice");
     out.others = note(views[8], "alice");
     out.noIdentity = note(views[8], null);
     out.legacyPersonal = note(v(30, "x", { personal: true, created_by: null }), "alice");
+  } else if (scenario === "signout") {
+    local.setStorage(globalThis.localStorage);
+    local.toggleViewGroup("folder:Secret plans");
+    out.before = local.isViewGroupCollapsed("folder:Secret plans");
+    local.clearViewGroups();
+    out.after = local.isViewGroupCollapsed("folder:Secret plans");
+    out.keyGone = data["darling.local.viewGroups.v1"] === undefined;
+    local.reload();
+    out.afterReload = local.isViewGroupCollapsed("folder:Secret plans");
+  } else if (scenario === "expired") {
+    // The shipped app.js pieces (the view list, the fleet sidebar and the signed-out takeover), run against stand-ins: once the
+    // session is expired, nothing repaints the old session's lists, and the cached list is dropped.
+    const vm = await import("node:vm");
+    const full = fs.readFileSync(path.join(jsDir, "app.js"), "utf8").replace(/\r\n/g, "\n");
+    const slice = (from, to) => {
+      const a = full.indexOf(from);
+      const b = full.indexOf(to, a);
+      if (a < 0 || b < a) throw new Error("app.js layout changed: " + from);
+      return full.slice(a, b);
+    };
+    const source = [
+      slice("/* The last good fleet read, kept at module scope", "/* ─────────────────────────── availability-groups nav gate"),
+      slice("async function refreshViewList()", "/* ─────────────────────────── status bar"),
+      slice("function showSignedOutState(", "/* ─────────────────────────── auto-refresh play/pause"),
+    ].join("\n");
+    const calls = { paintViewList: [], paintServerList: 0, mounts: 0, cleared: 0 };
+    let expired = false;
+    let release = null;
+    const ctx = vm.createContext({
+      console, Promise, Array, location: { pathname: "/", search: "", hash: "" },
+      viewList: {}, serverList: {}, statusbar: {}, main: {},
+      el: () => ({}), mount: () => { calls.mounts++; },
+      isSessionExpired: () => expired,
+      getSession: async () => ({ can_edit: true, can_own: true }),
+      listViews: () => (release ? new Promise((r) => { release = () => r({ kind: "data", data: as(views, "alice") }); }) : Promise.resolve({ kind: "data", data: as(views, "alice") })),
+      currentRoute: () => ({ name: "home", id: null, param: null }),
+      isViewItemRoute: () => false,
+      paintViewList: (_c, list) => { calls.paintViewList.push(list.filter((x) => x.personal && x.mine).length); },
+      paintServerList: () => { calls.paintServerList++; },
+      updateStatusBar: () => {},
+      clearViewGroups: () => { calls.cleared++; },
+    });
+    vm.runInContext(source + "\nthis.api = { refreshViewList, paintViewListNow, paintSidebar, showSignedOutState, setFleet: (x) => { lastSidebarFleet = x; }, last: () => lastViewList };", ctx);
+    await ctx.api.refreshViewList();
+    ctx.api.setFleet({ data: {} });
+    ctx.api.paintSidebar();
+    out.beforeExpiry = { views: [...calls.paintViewList], servers: calls.paintServerList, cached: ctx.api.last() !== null };
+    expired = true;
+    ctx.api.showSignedOutState("Your session is no longer valid.");
+    ctx.api.paintViewListNow();
+    ctx.api.paintSidebar();
+    out.afterExpiry = { views: [...calls.paintViewList], servers: calls.paintServerList, cached: ctx.api.last() !== null, cleared: calls.cleared };
+    // a list read that lands after the session ended keeps nothing and paints nothing
+    release = () => {};
+    const inFlight = ctx.api.refreshViewList();
+    release();
+    await inFlight;
+    out.lateRead = { views: [...calls.paintViewList], cached: ctx.api.last() !== null };
   } else {
     throw new Error("unknown scenario " + scenario);
   }

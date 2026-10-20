@@ -14,7 +14,7 @@
  */
 
 import { el } from "./util.js";
-import { folderNames, MAX_FOLDER_LENGTH, ownerLine, personalChoice, viewAccess } from "./view-folders.js";
+import { folderNames, folderProblem, MAX_FOLDER_LENGTH, ownerLine, personalChoice, viewAccess } from "./view-folders.js";
 
 let listCounter = 0;
 
@@ -22,8 +22,9 @@ let listCounter = 0;
  * Builds the fields. `meta` is the editor model ({ folder, personal }) and is updated as the user types. `view` is the stored
  * view being edited, or null for a new one. `session` is /api/session's answer. `views` is the list the sidebar read (for the
  * folder suggestions). `onChange` runs after any change so the editor can recompute its Save button.
- * Returns { node, readOnly, note }: `readOnly` is true for another person's personal view, which the store would refuse to
- * change, so the editor keeps Save disabled; `note` is the sentence saying why.
+ * Returns { node, readOnly, blocked, note }: `readOnly` is true for another person's personal view, which the store would refuse to
+ * change; `blocked` is `readOnly` or a folder name the store would refuse (the editor keeps Save disabled while it is true);
+ * `note` is the sentence saying why a view is read-only.
  */
 export function buildViewMetaFields({ meta, view, session, views, onChange }) {
   const access = viewAccess(view, session);
@@ -47,15 +48,20 @@ export function buildViewMetaFields({ meta, view, session, views, onChange }) {
   personalBox.disabled = choice.disabled || access.readOnly;
 
   const folderNote = el("div", { class: "muted view-meta-note" });
+  /* The folder name the store would refuse, or null. A personal view has no folder, so its folder text is not sent or checked. */
+  const folderIssue = () => (personalBox.checked ? null : folderProblem(meta.folder));
   function syncFolder() {
     const personal = personalBox.checked;
     folderInput.disabled = access.readOnly || personal;
-    folderNote.textContent = personal && !access.readOnly ? "A personal view is listed under My views, not in a folder." : "";
+    const problem = folderIssue();
+    folderNote.className = problem ? "strip error view-meta-note" : "muted view-meta-note";
+    folderNote.textContent = problem || (personal && !access.readOnly ? "A personal view is listed under My views, not in a folder." : "");
   }
   syncFolder();
 
   folderInput.addEventListener("input", () => {
     meta.folder = folderInput.value;
+    syncFolder();
     if (onChange) onChange();
   });
   personalBox.addEventListener("change", () => {
@@ -70,6 +76,7 @@ export function buildViewMetaFields({ meta, view, session, views, onChange }) {
       el("label", { class: "editor-field" }, [el("span", { class: "field-label", text: "Folder" }), folderInput, datalist]),
       el("div", { class: "editor-field field-enabled" }, [
         el("label", { class: "editor-check-row" }, [personalBox, el("span", { text: " Personal (listed only for you)" })]),
+        el("div", { class: "muted view-meta-note", text: "Other people can still open it if they have the link, and it still shows up over MCP." }),
         choice.disabled && !access.readOnly ? el("div", { class: "muted view-meta-note", text: choice.reason }) : null,
       ]),
     ]),
@@ -77,5 +84,12 @@ export function buildViewMetaFields({ meta, view, session, views, onChange }) {
     owner ? el("div", { class: "muted view-owner-line", text: owner }) : null,
     access.readOnly ? el("div", { class: "strip empty view-readonly-note", text: access.note + ". It is read-only for you." }) : null,
   ];
-  return { node: el("div", { class: "view-meta-fields" }, nodes), readOnly: access.readOnly, note: access.note };
+  return {
+    node: el("div", { class: "view-meta-fields" }, nodes),
+    readOnly: access.readOnly,
+    get blocked() {
+      return access.readOnly || folderIssue() !== null;
+    },
+    note: access.note,
+  };
 }

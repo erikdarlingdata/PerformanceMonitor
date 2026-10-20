@@ -62,7 +62,7 @@ import { renderManageTags } from "./pages/manage-tags.js";
 import { renderManageQueryTags } from "./pages/manage-query-tags.js";
 import { renderQueryTagUsage } from "./pages/query-tag-usage.js";
 import { renderJobHistory } from "./pages/job-history.js";
-import { refreshAttention, onChange as onLocalChange } from "./viewer-local.js";
+import { refreshAttention, clearViewGroups, onChange as onLocalChange } from "./viewer-local.js";
 import { initSidebarCollapse, initSeverityColorSettings } from "./viewer-local-ui.js";
 import { initSidebarSearch, paintServerList } from "./sidebar.js";
 
@@ -272,6 +272,8 @@ async function refreshSidebar() {
 let lastSidebarFleet = null;
 
 function paintSidebar() {
+  /* #6214: a signed-out page paints nothing: a late poll or a local change must not bring the old session's lists back. */
+  if (isSessionExpired()) return;
   const res = lastSidebarFleet;
   if (!res) return;
   const r = currentRoute();
@@ -310,6 +312,7 @@ async function refreshAgNav() {
 async function refreshViewList() {
   if (!viewList) return;
   const [session, res] = await Promise.all([getSession(), listViews()]);
+  if (isSessionExpired()) return; // the session ended while the list was in flight: keep nothing of it
   lastViewList = { session, views: res.kind === "data" && Array.isArray(res.data) ? res.data : [] };
   paintViewListNow();
 }
@@ -319,7 +322,7 @@ async function refreshViewList() {
 let lastViewList = null;
 
 function paintViewListNow() {
-  if (!viewList || !lastViewList) return;
+  if (isSessionExpired() || !viewList || !lastViewList) return;
   const r = currentRoute();
   paintViewList(viewList, lastViewList.views, lastViewList.session, isViewItemRoute(r.name) ? r.id : null);
 }
@@ -663,6 +666,10 @@ function updateRefreshHint() {
    alert link's #/triage route survives a stale-session sign-in the same way the login page's own return
    value does: the hash never left the address bar, so there is nothing to lose. */
 function showSignedOutState(message, _login) {
+  /* #6214: drop the cached lists too, so nothing later repaints the old session's personal views. */
+  lastViewList = null;
+  lastSidebarFleet = null;
+  clearViewGroups();
   mount(serverList, []);
   mount(viewList, []);
   mount(statusbar, el("span", { class: "sb-item muted", text: "Signed out" }));

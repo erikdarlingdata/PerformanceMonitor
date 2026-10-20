@@ -53,7 +53,7 @@ public sealed class DarlingMcpCustomViewTools
         "created_by (null = unknown), version, and who/when it was last updated (updated_by). No definition body. " +
         "Lists ALL views, other people's personal views included and marked personal:true. Pass 'folder' to list one " +
         "folder (an empty string lists the top level). Use the id with get_custom_view to fetch a view's full spec, or " +
-        "with update_custom_view / delete_custom_view (which refuse a personal view: only its owner can change it, in the web dashboard).")]
+        "with update_custom_view (which refuses a personal view: only its owner can change it, in the web dashboard) or delete_custom_view.")]
     public static async Task<string> ListCustomViews(
         NpgsqlDataSource postgres,
         [Description("Optional folder filter: a folder name lists only that folder; an empty string \"\" lists the views at the top level (no folder). Omit to list every folder.")] string? folder = null)
@@ -223,7 +223,7 @@ public sealed class DarlingMcpCustomViewTools
             var result = await store.UpdateAsync(
                 view_id, name, DarlingMcpCustomAlertTools.ResolveOptionalText(description, currentOk.View.Description),
                 definition, version, updatedBy: DarlingWebEndpoints.McpEditorPrincipal,
-                folder: DarlingMcpCustomAlertTools.ResolveOptionalText(folder, currentOk.View.Folder), personal: false, actor: null);
+                folder: DarlingMcpCustomAlertTools.ResolveOptionalText(folder, currentOk.View.Folder), personal: false, actorKey: null);
             return result switch
             {
                 CustomViewResult.Ok ok => DarlingWebEndpoints.BuildFullViewNode(ok.View!).ToJsonString(McpHelpers.JsonOptions),
@@ -242,9 +242,9 @@ public sealed class DarlingMcpCustomViewTools
 
     [McpServerTool(Name = "delete_custom_view"), Description(
         "Deletes a saved custom view by id. Returns {status:\"deleted\", view_id:N} on success, or " +
-        "{status:\"not_found\", ...} when no view has that id. A PERSONAL view cannot be deleted over MCP (MCP has no " +
-        "person identity; only the owner can delete it in the web dashboard): it returns {status:\"refused\", ...}. " +
-        "This is permanent.")]
+        "{status:\"not_found\", ...} when no view has that id. Unlike update_custom_view, this DOES delete a PERSONAL view, " +
+        "whoever owns it: it is the operator's only way to clean up after a person who has left. Check personal and " +
+        "created_by from list_custom_views first. This is permanent.")]
     public static async Task<string> DeleteCustomView(
         NpgsqlDataSource postgres,
         [Description("The id of the view to delete (from list_custom_views).")] long view_id)
@@ -252,11 +252,10 @@ public sealed class DarlingMcpCustomViewTools
         try
         {
             var store = new CustomViewStore(postgres);
-            var result = await store.DeleteAsync(view_id, actor: null);
+            var result = await store.DeleteAsync(view_id, actorKey: null, anyPersonal: true);
             return result switch
             {
                 CustomViewResult.Ok => JsonSerializer.Serialize(new { status = "deleted", view_id }, McpHelpers.JsonOptions),
-                CustomViewResult.Forbidden => Outcome("refused", PersonalViewRefusal),
                 _ => Outcome("not_found", $"No custom view with id {view_id}."),
             };
         }
@@ -406,14 +405,15 @@ public sealed class DarlingMcpCustomViewTools
         }
     }
 
+    /// <summary>The refusal for updating a personal view over MCP (#6214): MCP authenticates a client, not a person, so it can neither own
+    /// a personal view nor act as its owner. Delete is the one exception (see <c>delete_custom_view</c>).</summary>
+    internal const string PersonalViewRefusal =
+        "This is a personal view. Over MCP it can be listed, read and deleted but not updated, because MCP has no person identity; " +
+        "only its owner can change it, in the web dashboard.";
+
     /// <summary>A small <c>{status, message}</c> envelope for a non-data write outcome (conflict / invalid /
     /// not_found / error) — the same shape mute_analysis_finding uses for its status, so an MCP client can branch
     /// on the outcome kind. A successful create/update/get returns the view object itself, not this.</summary>
-    /// <summary>The refusal for a personal view over MCP (#6214): MCP authenticates a client, not a person, so it can neither own
-    /// a personal view nor act as its owner.</summary>
-    internal const string PersonalViewRefusal =
-        "This is a personal view. Over MCP it can be listed and read but not updated or deleted, because MCP has no person identity; " +
-        "only its owner can change or delete it, in the web dashboard.";
 
     private static string Outcome(string status, string message) =>
         JsonSerializer.Serialize(new { status, message }, McpHelpers.JsonOptions);

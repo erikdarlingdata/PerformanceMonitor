@@ -33,8 +33,9 @@ namespace Darling.Tests;
 /// <summary>
 /// #6214, V204: shared folders, personal views and an owner on the custom views. Behaviour against a real store: the migration
 /// (fresh, as an upgrade over V203 rows, run again), each uniqueness scope, the web routes' identity rules (a personal view
-/// needs a signed-in identity, only its owner changes or deletes it, the list hides other people's personal views while GET by id
-/// does not, a personal view moves to a shared folder), and the MCP tools' fields and refusals.
+/// needs a session with an owner key, only the owner changes or deletes it, the list hides other people's personal views while GET
+/// by id does not, a personal view moves to a shared folder), ownership by owner key and never by display name, the folder-name
+/// refusals, and the MCP tools' fields and refusals (MCP may delete a personal view and may not update one).
 /// </summary>
 public sealed class DarlingCustomViewFoldersLiveTests
 {
@@ -151,6 +152,7 @@ public sealed class DarlingCustomViewFoldersLiveTests
                 "INSERT INTO config.custom_views (name, definition, folder) VALUES ('a', '{}', repeat('x', 101))",
                 "INSERT INTO config.custom_views (name, definition, folder) VALUES ('a', '{}', E'tab\\there')",
                 "INSERT INTO config.custom_views (name, definition, personal) VALUES ('a', '{}', true)",
+                "INSERT INTO config.custom_views (name, definition, personal, created_by) VALUES ('a', '{}', true, 'named-but-keyless')",
             })
             {
                 var ex = await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(connection, bad, ct));
@@ -198,26 +200,36 @@ public sealed class DarlingCustomViewFoldersLiveTests
             Assert.IsType<CustomViewResult.Conflict>(await store.CreateAsync("Waits", null, Dashboard, "web", folder: "   ", cancellationToken: ct));
 
             /* Personal: unique per owner; two people may each have the same name, and a personal view may share a shared view's name. */
-            var alices = Made(await store.CreateAsync("Waits", null, Dashboard, "alice", personal: true, cancellationToken: ct));
-            Made(await store.CreateAsync("Waits", null, Dashboard, "bob", personal: true, cancellationToken: ct));
+            var alices = Made(await store.CreateAsync("Waits", null, Dashboard, "alice", personal: true, ownerKey: "key-alice", cancellationToken: ct));
+            Made(await store.CreateAsync("Waits", null, Dashboard, "bob", personal: true, ownerKey: "key-bob", cancellationToken: ct));
             var personalDup = Assert.IsType<CustomViewResult.Conflict>(
-                await store.CreateAsync("Waits", null, Dashboard, "alice", personal: true, cancellationToken: ct));
+                await store.CreateAsync("Waits", null, Dashboard, "alice", personal: true, ownerKey: "key-alice", cancellationToken: ct));
             Assert.Equal("You already have a personal view named 'Waits'.", personalDup.Message);
             Assert.True(alices.Personal);
             Assert.Equal("alice", alices.CreatedBy);
 
             /* A rename onto a taken name in the same scope conflicts with that scope's sentence too. */
-            var other = Made(await store.CreateAsync("Other", null, Dashboard, "alice", personal: true, cancellationToken: ct));
+            var other = Made(await store.CreateAsync("Other", null, Dashboard, "alice", personal: true, ownerKey: "key-alice", cancellationToken: ct));
             var renameDup = Assert.IsType<CustomViewResult.Conflict>(
-                await store.UpdateAsync(other.Id, "Waits", null, Dashboard, 1, "alice", null, true, "alice", ct));
+                await store.UpdateAsync(other.Id, "Waits", null, Dashboard, 1, "alice", null, true, "key-alice", ct));
             Assert.Equal("You already have a personal view named 'Waits'.", renameDup.Message);
 
-            /* A personal view with no owner cannot be made. */
+            /* A personal view with no owner key cannot be made, whatever name the session gives. */
             Assert.IsType<CustomViewResult.Invalid>(await store.CreateAsync("Nobody", null, Dashboard, null, personal: true, cancellationToken: ct));
+            Assert.IsType<CustomViewResult.Invalid>(await store.CreateAsync("Keyless", null, Dashboard, "alice", personal: true, cancellationToken: ct));
 
             /* The folder rules the store holds for every writer. */
             Assert.IsType<CustomViewResult.Invalid>(await store.CreateAsync("Long", null, Dashboard, "web", folder: new string('x', 101), cancellationToken: ct));
             Assert.IsType<CustomViewResult.Invalid>(await store.CreateAsync("Ctl", null, Dashboard, "web", folder: "a\tb", cancellationToken: ct));
+
+            /* Invisible formatting characters (a right-to-left override, a zero-width space, a tag character beyond the first plane)
+               and the reserved name "My views" in any case are refused; a name that merely contains it is fine. */
+            foreach (var bad in new[] { "a\u202Eb", "dev\u200Bs", "x\U000E0041y", "My views", "my VIEWS", "  MY views  " })
+            {
+                Assert.IsType<CustomViewResult.Invalid>(await store.CreateAsync("Bad", null, Dashboard, "web", folder: bad, cancellationToken: ct));
+            }
+
+            Assert.Equal("My views 2", Made(await store.CreateAsync("Fine", null, Dashboard, "web", folder: "My views 2", cancellationToken: ct)).Folder);
             Assert.Equal(new string('x', 100), Made(await store.CreateAsync("Max", null, Dashboard, "web", folder: new string('x', 100), cancellationToken: ct)).Folder);
 
             bodySucceeded = true;
@@ -242,7 +254,8 @@ public sealed class DarlingCustomViewFoldersLiveTests
         }
 
         /// <summary>Builds the real custom-view routes behind a stand-in for the auth middleware: the request's seat comes from the
-        /// <c>X-Test-Subject</c> header (none = the shared-token seat) and <c>X-Test-Viewer</c> marks a read-only seat.</summary>
+        /// <c>X-Test-Subject</c> header (none = the shared-token seat) and the owner key from <c>X-Test-Key</c> (none = a seat with a
+        /// name and no key, like a cookie from before owner keys existed).</summary>
         public static async Task<WebFixture> StartAsync(NpgsqlDataSource dataSource, CancellationToken ct)
         {
             var builder = WebApplication.CreateBuilder();
@@ -253,7 +266,8 @@ public sealed class DarlingCustomViewFoldersLiveTests
             {
                 if (context.Request.Headers.TryGetValue("X-Test-Subject", out var subject) && subject.Count > 0)
                 {
-                    context.Items[DarlingWebSeat.HttpContextItemKey] = new DarlingWebSeat(subject[0], CanEdit: true);
+                    var key = context.Request.Headers.TryGetValue("X-Test-Key", out var k) && k.Count > 0 ? k[0] : null;
+                    context.Items[DarlingWebSeat.HttpContextItemKey] = new DarlingWebSeat(subject[0], CanEdit: true, key);
                 }
 
                 await next();
@@ -264,12 +278,19 @@ public sealed class DarlingCustomViewFoldersLiveTests
             return new WebFixture(app, app.GetTestClient());
         }
 
-        public async Task<(HttpStatusCode Status, JsonElement Body)> SendAsync(HttpMethod method, string path, string? subject, object? body, CancellationToken ct)
+        /// <summary>Sends as <paramref name="subject"/> (null = the shared token). A named seat gets the owner key
+        /// <c>key-{subject}</c> unless <paramref name="key"/> names another or <paramref name="noKey"/> is set.</summary>
+        public async Task<(HttpStatusCode Status, JsonElement Body)> SendAsync(
+            HttpMethod method, string path, string? subject, object? body, CancellationToken ct, string? key = null, bool noKey = false)
         {
             using var request = new HttpRequestMessage(method, path);
             if (subject is not null)
             {
                 request.Headers.Add("X-Test-Subject", subject);
+                if (!noKey)
+                {
+                    request.Headers.Add("X-Test-Key", key ?? "key-" + subject);
+                }
             }
 
             if (body is not null)
@@ -341,6 +362,8 @@ public sealed class DarlingCustomViewFoldersLiveTests
             Assert.Equal(HttpStatusCode.Created, created);
             Assert.True(mine.GetProperty("personal").GetBoolean());
             Assert.Equal("alice", mine.GetProperty("created_by").GetString());
+            Assert.True(mine.GetProperty("mine").GetBoolean());
+            Assert.False(mine.TryGetProperty("owner_key", out _));
             Assert.Equal("alice", mine.GetProperty("updated_by").GetString());
             Assert.Equal(JsonValueKind.Null, mine.GetProperty("folder").ValueKind);
             var mineId = mine.GetProperty("id").GetInt64();
@@ -359,13 +382,20 @@ public sealed class DarlingCustomViewFoldersLiveTests
             Assert.Equal("Devs", teamRow.GetProperty("folder").GetString());
             Assert.False(teamRow.GetProperty("personal").GetBoolean());
             Assert.Equal("alice", teamRow.GetProperty("created_by").GetString());
+            Assert.False(teamRow.GetProperty("mine").GetBoolean());
+            Assert.False(teamRow.TryGetProperty("owner_key", out _));
+            var aliceRows = (await web.SendAsync(HttpMethod.Get, "/api/views", "alice", null, ct)).Body.EnumerateArray().ToDictionary(v => v.GetProperty("name").GetString()!);
+            Assert.True(aliceRows["Mine"].GetProperty("mine").GetBoolean());
+            Assert.True(aliceRows["Team"].GetProperty("mine").GetBoolean());
 
-            /* The page decides "My views", read-only and the personal checkbox from the session's identity: a person's own subject,
-               and null for the shared-token session. */
+            /* The page decides "My views", read-only and the personal checkbox from each view's `mine` and the session's `can_own`,
+               never by comparing names. The session returns neither the subject nor the key. */
             var (_, aliceSession) = await web.SendAsync(HttpMethod.Get, "/api/session", "alice", null, ct);
-            Assert.Equal("alice", aliceSession.GetProperty("subject").GetString());
+            Assert.True(aliceSession.GetProperty("can_own").GetBoolean());
+            Assert.False(aliceSession.TryGetProperty("subject", out _));
+            Assert.False(aliceSession.TryGetProperty("owner_key", out _));
             var (_, tokenSession) = await web.SendAsync(HttpMethod.Get, "/api/session", null, null, ct);
-            Assert.Equal(JsonValueKind.Null, tokenSession.GetProperty("subject").ValueKind);
+            Assert.False(tokenSession.GetProperty("can_own").GetBoolean());
             Assert.True(tokenSession.GetProperty("can_edit").GetBoolean());
 
             /* GET by id still returns another person's personal view, so a link keeps working. */
@@ -373,6 +403,8 @@ public sealed class DarlingCustomViewFoldersLiveTests
             Assert.Equal(HttpStatusCode.OK, getStatus);
             Assert.True(got.GetProperty("personal").GetBoolean());
             Assert.Equal("alice", got.GetProperty("created_by").GetString());
+            Assert.False(got.GetProperty("mine").GetBoolean());
+            Assert.False(got.TryGetProperty("owner_key", out _));
 
             /* Another person, and the shared-token session, can neither update nor delete it. */
             foreach (var intruder in new string?[] { "bob", null })
@@ -485,7 +517,151 @@ public sealed class DarlingCustomViewFoldersLiveTests
             var (copyStatus, copy) = await web.SendAsync(HttpMethod.Post, "/api/views", "carol", ViewBody("legacy", personal: true), ct);
             Assert.Equal(HttpStatusCode.Created, copyStatus);
             Assert.Equal("carol", copy.GetProperty("created_by").GetString());
+            Assert.True(copy.GetProperty("mine").GetBoolean());
             Assert.Equal(HttpStatusCode.Forbidden, (await web.SendAsync(HttpMethod.Delete, $"/api/views/{copy.GetProperty("id").GetInt64()}", "bob", null, ct)).Status);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    [Fact]
+    public async Task Web_TwoSessionsWithTheSameDisplayName_ButDifferentOwnerKeys_NeverSeeOrChangeEachOthersPersonalViews()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the V204 owner-key facts (each mints its own scratch database).");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await MigratedScratchAsync(ct);
+        await using var dataSource = DataSourceFor(scratch.ConnectionString);
+        await using var web = await WebFixture.StartAsync(dataSource, ct);
+        var bodySucceeded = false;
+        try
+        {
+            /* Same display subject, two people (an identity provider reissued the name): each owns only what their own key made. */
+            var (_, first) = await web.SendAsync(HttpMethod.Post, "/api/views", "sam@example.invalid", ViewBody("Private", personal: true), ct, key: "key-first");
+            var firstId = first.GetProperty("id").GetInt64();
+            var (_, firstShared) = await web.SendAsync(HttpMethod.Post, "/api/views", "sam@example.invalid", ViewBody("Team"), ct, key: "key-first");
+            var firstSharedId = firstShared.GetProperty("id").GetInt64();
+
+            /* The second session does not see the first one's personal view under `mine`, or at all in its list. */
+            var (_, secondList) = await web.SendAsync(HttpMethod.Get, "/api/views", "sam@example.invalid", null, ct, key: "key-second");
+            Assert.Equal(new[] { "Team" }, secondList.EnumerateArray().Select(v => v.GetProperty("name").GetString()!).ToArray());
+            Assert.False(secondList.EnumerateArray().Single().GetProperty("mine").GetBoolean());
+            var (_, firstList) = await web.SendAsync(HttpMethod.Get, "/api/views", "sam@example.invalid", null, ct, key: "key-first");
+            Assert.All(firstList.EnumerateArray(), v => Assert.True(v.GetProperty("mine").GetBoolean()));
+            Assert.Equal(2, firstList.GetArrayLength());
+            Assert.False((await web.SendAsync(HttpMethod.Get, $"/api/views/{firstId}", "sam@example.invalid", null, ct, key: "key-second")).Body.GetProperty("mine").GetBoolean());
+
+            /* The second session can neither change nor delete it, though the display names are identical. */
+            Assert.Equal(HttpStatusCode.Forbidden, (await web.SendAsync(
+                HttpMethod.Put, $"/api/views/{firstId}", "sam@example.invalid", ViewBody("Taken", version: 1), ct, key: "key-second")).Status);
+            Assert.Equal(HttpStatusCode.Forbidden, (await web.SendAsync(
+                HttpMethod.Delete, $"/api/views/{firstId}", "sam@example.invalid", null, ct, key: "key-second")).Status);
+
+            /* Nor can it make the first one's shared view personal, which would take it out of the first person's list. */
+            var (stolen, stolenBody) = await web.SendAsync(
+                HttpMethod.Put, $"/api/views/{firstSharedId}", "sam@example.invalid", ViewBody("Team", personal: true, version: 1), ct, key: "key-second");
+            Assert.Equal(HttpStatusCode.Forbidden, stolen);
+            Assert.Equal("Only the person who created a view can make it personal.", stolenBody.GetProperty("error").GetString());
+
+            /* Personal names are unique per owner key: the second person may use the same name. */
+            Assert.Equal(HttpStatusCode.Created, (await web.SendAsync(
+                HttpMethod.Post, "/api/views", "sam@example.invalid", ViewBody("Private", personal: true), ct, key: "key-second")).Status);
+
+            /* The first person's own key still works after a rename of their display name. */
+            Assert.Equal(HttpStatusCode.OK, (await web.SendAsync(
+                HttpMethod.Put, $"/api/views/{firstId}", "sam.renamed@example.invalid", ViewBody("Private v2", version: 1), ct, key: "key-first")).Status);
+            Assert.Equal(HttpStatusCode.OK, (await web.SendAsync(
+                HttpMethod.Put, $"/api/views/{firstSharedId}", "sam.renamed@example.invalid", ViewBody("Team", personal: true, version: 1), ct, key: "key-first")).Status);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    [Fact]
+    public async Task Web_ASessionNamedWebOrMcp_CannotMakeAViewTheTokenOrMcpMadePersonal_AndASessionWithNoOwnerKeyIsToldToSignInAgain()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the V204 sentinel facts (each mints its own scratch database).");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await MigratedScratchAsync(ct);
+        await using var dataSource = DataSourceFor(scratch.ConnectionString);
+        await using var web = await WebFixture.StartAsync(dataSource, ct);
+        var bodySucceeded = false;
+        try
+        {
+            /* One view from the shared token (created_by "web") and one from MCP (created_by "mcp"): neither carries an owner key. */
+            var (_, tokenMade) = await web.SendAsync(HttpMethod.Post, "/api/views", null, ViewBody("Token made"), ct);
+            Assert.Equal("web", tokenMade.GetProperty("created_by").GetString());
+            var mcpMade = JsonDocument.Parse(await DarlingMcpCustomViewTools.CreateCustomView(dataSource, "Mcp made", Dashboard)).RootElement;
+            Assert.Equal("mcp", mcpMade.GetProperty("created_by").GetString());
+
+            /* A person whose display name is the same word still does not own them. */
+            foreach (var (name, id, expected) in new[] { ("web", tokenMade.GetProperty("id").GetInt64(), "Token made"), ("mcp", mcpMade.GetProperty("id").GetInt64(), "Mcp made") })
+            {
+                var (status, body) = await web.SendAsync(HttpMethod.Put, $"/api/views/{id}", name, ViewBody(expected, personal: true, version: 1), ct, key: "key-" + name);
+                Assert.Equal(HttpStatusCode.Forbidden, status);
+                Assert.Equal("This shared view has no recorded creator, so it can't be made personal. Save a copy as a personal view instead.", body.GetProperty("error").GetString());
+                var row = (await web.SendAsync(HttpMethod.Get, "/api/views", name, null, ct, key: "key-" + name)).Body.EnumerateArray().Single(v => v.GetProperty("name").GetString() == expected);
+                Assert.False(row.GetProperty("mine").GetBoolean());
+                Assert.False(row.GetProperty("personal").GetBoolean());
+            }
+
+            /* A session that names a person but has no key (a cookie from before owner keys existed) is told to sign in again,
+               on create and on turning a view personal; saving a shared view still works. A session with no person says so. */
+            var (oldCreate, oldCreateBody) = await web.SendAsync(HttpMethod.Post, "/api/views", "olga", ViewBody("Olga's", personal: true), ct, noKey: true);
+            Assert.Equal(HttpStatusCode.BadRequest, oldCreate);
+            Assert.Equal("Sign out and sign in again to save personal views.", oldCreateBody.GetProperty("error").GetString());
+            var (oldShared, oldSharedBody) = await web.SendAsync(HttpMethod.Post, "/api/views", "olga", ViewBody("Olga's team"), ct, noKey: true);
+            Assert.Equal(HttpStatusCode.Created, oldShared);
+            Assert.False(oldSharedBody.GetProperty("mine").GetBoolean());
+            var oldSharedId = oldSharedBody.GetProperty("id").GetInt64();
+            var (oldPersonalize, oldPersonalizeBody) = await web.SendAsync(
+                HttpMethod.Put, $"/api/views/{oldSharedId}", "olga", ViewBody("Olga's team", personal: true, version: 1), ct, noKey: true);
+            Assert.Equal(HttpStatusCode.BadRequest, oldPersonalize);
+            Assert.Equal("Sign out and sign in again to save personal views.", oldPersonalizeBody.GetProperty("error").GetString());
+            Assert.False((await web.SendAsync(HttpMethod.Get, "/api/session", "olga", null, ct, noKey: true)).Body.GetProperty("can_own").GetBoolean());
+            var (tokenStatus, tokenBody) = await web.SendAsync(HttpMethod.Post, "/api/views", null, ViewBody("Nobody's", personal: true), ct);
+            Assert.Equal(HttpStatusCode.BadRequest, tokenStatus);
+            Assert.Equal("A personal view needs a signed-in identity; this session has none.", tokenBody.GetProperty("error").GetString());
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    [Fact]
+    public async Task Web_AFolderNameWithInvisibleOrControlCharacters_OrTheReservedMyViews_IsARefused400_OnCreateAndOnUpdate()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the V204 folder-name facts (each mints its own scratch database).");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await MigratedScratchAsync(ct);
+        await using var dataSource = DataSourceFor(scratch.ConnectionString);
+        await using var web = await WebFixture.StartAsync(dataSource, ct);
+        var bodySucceeded = false;
+        try
+        {
+            foreach (var bad in new[] { "Dev\u202Es", "Dev\u200Bs", "Dev\u0007s", "My views", "MY VIEWS", " my views " })
+            {
+                var (status, body) = await web.SendAsync(HttpMethod.Post, "/api/views", "alice", ViewBody("Folder test", folder: bad), ct);
+                Assert.Equal(HttpStatusCode.BadRequest, status);
+                Assert.False(string.IsNullOrWhiteSpace(body.GetProperty("error").GetString()));
+            }
+
+            var (_, ok) = await web.SendAsync(HttpMethod.Post, "/api/views", "alice", ViewBody("Folder test", folder: "Devs"), ct);
+            var id = ok.GetProperty("id").GetInt64();
+            foreach (var bad in new[] { "Dev\u202Es", "my Views" })
+            {
+                Assert.Equal(HttpStatusCode.BadRequest, (await web.SendAsync(
+                    HttpMethod.Put, $"/api/views/{id}", "alice", ViewBody("Folder test", folder: bad, version: 1), ct)).Status);
+            }
+
+            Assert.Equal("Devs", (await web.SendAsync(HttpMethod.Get, $"/api/views/{id}", "alice", null, ct)).Body.GetProperty("folder").GetString());
             bodySucceeded = true;
         }
         finally
@@ -508,7 +684,7 @@ public sealed class DarlingCustomViewFoldersLiveTests
         try
         {
             var personal = Assert.IsType<CustomViewResult.Ok>(
-                await store.CreateAsync("Alice scratch", null, Dashboard, "alice", personal: true, cancellationToken: ct)).View!;
+                await store.CreateAsync("Alice scratch", null, Dashboard, "alice", personal: true, ownerKey: "key-alice", cancellationToken: ct)).View!;
 
             /* create_custom_view takes a folder and stamps MCP as creator; the view is shared. */
             var created = JsonDocument.Parse(await DarlingMcpCustomViewTools.CreateCustomView(dataSource, "Fleet", Dashboard, "d", "Monitoring")).RootElement;
@@ -531,6 +707,8 @@ public sealed class DarlingCustomViewFoldersLiveTests
             Assert.Equal("alice", alices.GetProperty("created_by").GetString());
             Assert.Equal("alice", alices.GetProperty("updated_by").GetString());
             Assert.Equal(JsonValueKind.Null, alices.GetProperty("folder").ValueKind);
+            Assert.False(alices.TryGetProperty("owner_key", out _));
+            Assert.False(JsonDocument.Parse(await DarlingMcpCustomViewTools.GetCustomView(dataSource, personal.Id)).RootElement.TryGetProperty("owner_key", out _));
 
             /* The folder filter: a folder, and "" for the top level. */
             var inFolder = JsonDocument.Parse(await DarlingMcpCustomViewTools.ListCustomViews(dataSource, "Monitoring")).RootElement;
@@ -548,16 +726,23 @@ public sealed class DarlingCustomViewFoldersLiveTests
             Assert.Equal("Ops", moved.GetProperty("folder").GetString());
             Assert.False(moved.GetProperty("personal").GetBoolean());
 
-            /* A personal view cannot be updated or deleted over MCP, and the refusal says why; nothing changed. */
+            /* A personal view cannot be updated over MCP, and the refusal says why; nothing changed. */
             var refusedUpdate = JsonDocument.Parse(await DarlingMcpCustomViewTools.UpdateCustomView(dataSource, personal.Id, "Taken", Dashboard, 1)).RootElement;
             Assert.Equal("refused", refusedUpdate.GetProperty("status").GetString());
             Assert.Contains("personal view", refusedUpdate.GetProperty("message").GetString(), StringComparison.Ordinal);
             Assert.Contains("MCP has no person identity", refusedUpdate.GetProperty("message").GetString(), StringComparison.Ordinal);
-            var refusedDelete = JsonDocument.Parse(await DarlingMcpCustomViewTools.DeleteCustomView(dataSource, personal.Id)).RootElement;
-            Assert.Equal("refused", refusedDelete.GetProperty("status").GetString());
-            var still = Assert.IsType<CustomViewResult.Ok>(await store.GetAsync(personal.Id, ct)).View!;
+            var still = Assert.IsType<CustomViewResult.Ok>(await store.GetAsync(personal.Id, cancellationToken: ct)).View!;
             Assert.Equal("Alice scratch", still.Name);
             Assert.Equal(1, still.Version);
+
+            /* Delete is the operator's cleanup for a person who has left: MCP deletes a personal view whoever owns it. */
+            var deletedPersonal = JsonDocument.Parse(await DarlingMcpCustomViewTools.DeleteCustomView(dataSource, personal.Id)).RootElement;
+            Assert.Equal("deleted", deletedPersonal.GetProperty("status").GetString());
+            Assert.IsType<CustomViewResult.NotFound>(await store.GetAsync(personal.Id, cancellationToken: ct));
+
+            /* A folder MCP may not name is an invalid, not a save. */
+            var badFolder = JsonDocument.Parse(await DarlingMcpCustomViewTools.CreateCustomView(dataSource, "Sneaky", Dashboard, folder: "my Views")).RootElement;
+            Assert.Equal("invalid", badFolder.GetProperty("status").GetString());
 
             /* A shared view still deletes. */
             Assert.Equal("deleted", JsonDocument.Parse(await DarlingMcpCustomViewTools.DeleteCustomView(dataSource, id)).RootElement.GetProperty("status").GetString());

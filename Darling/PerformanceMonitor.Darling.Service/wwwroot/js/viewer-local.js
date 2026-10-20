@@ -439,4 +439,18 @@ export function toggleViewGroup(id) {
   changed();
 }
 
+/**
+ * Forgets which Custom Views folders were collapsed (#6214). A folder's name is the key, and a name can be one person's private
+ * wording, so a sign-out clears it from this browser instead of leaving it for whoever signs in next. Quiet: no repaint (the
+ * page is showing its signed-out state).
+ */
+export function clearViewGroups() {
+  viewGroups = new Set();
+  try {
+    if (storage) storage.removeItem(KEY_VIEW_GROUPS);
+  } catch {
+    /* private mode: nothing was stored */
+  }
+}
+
 reload();

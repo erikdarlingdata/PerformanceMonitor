@@ -482,7 +482,7 @@ function buildEditor(main, ctx) {
 
   function refreshSaveState() {
     const problem = saveBlocker(model, ctx.catalog);
-    saveBtn.disabled = problem != null || metaFields.readOnly;
+    saveBtn.disabled = problem != null || metaFields.blocked;
     mount(saveStatus, problem ? el("span", { class: "muted", text: problem }) : null);
   }
 

@@ -14,7 +14,7 @@
  */
 
 import { el, mount } from "./util.js";
-import { sidebarViewRows, sessionSubject } from "./view-folders.js";
+import { sidebarViewRows } from "./view-folders.js";
 import { isViewGroupCollapsed, toggleViewGroup } from "./viewer-local.js";
 
 const INDENT_REM = 0.75;
@@ -57,7 +57,7 @@ function groupHeader(g) {
  * views, for a session that can edit.
  */
 export function paintViewList(container, views, session, activeId) {
-  const rows = sidebarViewRows(views, sessionSubject(session), isViewGroupCollapsed);
+  const rows = sidebarViewRows(views, isViewGroupCollapsed);
   const items = rows.map((r) => (r.kind === "group" ? groupHeader(r) : viewLink(r.view, r.depth, activeId)));
 
   if (session && session.can_edit) {

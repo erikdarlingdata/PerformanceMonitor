@@ -283,7 +283,7 @@ function buildNotebookEditor(main, ctx) {
 
   function refreshSaveState() {
     const problem = notebookSaveBlocker(model, ctx.catalog);
-    saveBtn.disabled = problem != null || metaFields.readOnly;
+    saveBtn.disabled = problem != null || metaFields.blocked;
     const atCap = model.cells.length >= MAX_NOTEBOOK_CELLS;
     addMdBtn.disabled = atCap;
     addPanelBtn.disabled = atCap;

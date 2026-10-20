@@ -2047,7 +2047,9 @@ public sealed class DarlingWebHostService : BackgroundService
             return;
         }
 
-        AppendSessionCookie(context, signingKey, DarlingWebSeat.EncodeCookieSubject(subject, role));
+        /* #6214: the owner key (issuer + sub, hashed) rides in the signed cookie, so a personal view follows the person's provider
+           identity and not the display name, which can change and can be reissued. */
+        AppendSessionCookie(context, signingKey, DarlingWebSeat.EncodeCookieSubject(subject, role, DarlingWebOidc.ResolveOwnerKey(payload!)));
 
         /* Per-user identity in the service log — the #2550 counterpart of the updated_by stamp. */
         _logger.LogInformation(

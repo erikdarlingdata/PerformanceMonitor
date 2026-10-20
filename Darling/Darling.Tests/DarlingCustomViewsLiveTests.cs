@@ -115,7 +115,7 @@ public sealed class DarlingCustomViewsLiveTests
             Assert.Contains("panels", view.DefinitionJson, StringComparison.Ordinal);
 
             /* get -> Ok, matches. */
-            var fetched = Assert.IsType<CustomViewResult.Ok>(await store.GetAsync(view.Id, ct));
+            var fetched = Assert.IsType<CustomViewResult.Ok>(await store.GetAsync(view.Id, cancellationToken: ct));
             Assert.Equal(view.Id, fetched.View!.Id);
             Assert.Equal(name1, fetched.View.Name);
 
@@ -153,9 +153,9 @@ public sealed class DarlingCustomViewsLiveTests
                 await store.UpdateAsync(-999999, name1, null, SampleDefinition, 1, CreatePrincipal, null, false, null, ct));
 
             /* delete -> Ok; then get + delete-again -> NotFound. */
-            Assert.IsType<CustomViewResult.Ok>(await store.DeleteAsync(view.Id, null, ct));
-            Assert.IsType<CustomViewResult.NotFound>(await store.GetAsync(view.Id, ct));
-            Assert.IsType<CustomViewResult.NotFound>(await store.DeleteAsync(view.Id, null, ct));
+            Assert.IsType<CustomViewResult.Ok>(await store.DeleteAsync(view.Id, null, cancellationToken: ct));
+            Assert.IsType<CustomViewResult.NotFound>(await store.GetAsync(view.Id, cancellationToken: ct));
+            Assert.IsType<CustomViewResult.NotFound>(await store.DeleteAsync(view.Id, null, cancellationToken: ct));
 
             bodySucceeded = true;
         }
@@ -215,7 +215,7 @@ public sealed class DarlingCustomViewsLiveTests
                 await store.CreateAsync(name, "notebook with a read cell", SampleNotebookWithReadCell, CreatePrincipal, cancellationToken: ct));
             viewId = created.View!.Id;
 
-            var fetched = Assert.IsType<CustomViewResult.Ok>(await store.GetAsync(viewId, ct));
+            var fetched = Assert.IsType<CustomViewResult.Ok>(await store.GetAsync(viewId, cancellationToken: ct));
 
             var expected = JsonNode.Parse(SampleNotebookWithReadCell);
             var actual = JsonNode.Parse(fetched.View!.DefinitionJson);
