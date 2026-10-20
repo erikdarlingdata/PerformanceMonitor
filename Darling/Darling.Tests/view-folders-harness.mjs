@@ -54,6 +54,14 @@ globalThis.localStorage = {
   removeItem: (k) => { delete data[k]; },
 };
 
+// the folder-collapse set is kept in sessionStorage (#6214), so a stand-in of its own: localStorage must never hold it
+const sdata = {};
+globalThis.sessionStorage = {
+  getItem: (k) => (Object.prototype.hasOwnProperty.call(sdata, k) ? sdata[k] : null),
+  setItem: (k, v) => { sdata[k] = String(v); },
+  removeItem: (k) => { delete sdata[k]; },
+};
+
 const all = (node, pred, out = []) => {
   if (pred(node)) out.push(node);
   for (const c of node.children) all(c, pred, out);
@@ -104,9 +112,10 @@ try {
     out.sameNameNotMine = shape(rules.sidebarViewRows([v(40, "Impostor", { personal: true, created_by: "alice", mine: false })], none));
   } else if (scenario === "collapse") {
     local.setStorage(globalThis.localStorage);
+    local.setSessionStorage(globalThis.sessionStorage);
     local.toggleViewGroup("folder:Ops");
     local.toggleViewGroup("my");
-    out.storedAfterTwo = JSON.parse(data["darling.local.viewGroups.v1"]);
+    out.storedAfterTwo = JSON.parse(sdata["darling.local.viewGroups.v1"]);
     out.opsCollapsed = local.isViewGroupCollapsed("folder:Ops");
     out.devCollapsed = local.isViewGroupCollapsed("folder:Dev");
     // a rebuilt page reads the same state back
@@ -120,15 +129,17 @@ try {
     local.toggleViewGroup(7);
     local.toggleViewGroup("folder:" + "x".repeat(101));
     local.toggleViewGroup("folder:bad\u0007name");
-    out.storedAfterJunk = JSON.parse(data["darling.local.viewGroups.v1"]);
+    out.storedAfterJunk = JSON.parse(sdata["darling.local.viewGroups.v1"]);
     // a hand-edited value is cleaned on load, and the server-tag groups' own key is untouched
-    data["darling.local.viewGroups.v1"] = JSON.stringify({ v: 1, collapsed: ["my", "folder:Ok", 5, "nope", "folder:" + "y".repeat(200)] });
+    sdata["darling.local.viewGroups.v1"] = JSON.stringify({ v: 1, collapsed: ["my", "folder:Ok", 5, "nope", "folder:" + "y".repeat(200)] });
     local.reload();
     out.cleaned = ["my", "folder:Ok", "nope"].map((id) => local.isViewGroupCollapsed(id));
     out.serverGroupsKey = data["darling.local.sidebar.v1"] === undefined;
+    out.localStorageKeys = Object.keys(data);
   } else if (scenario === "paint") {
     const list = new FakeNode("div");
     local.setStorage(globalThis.localStorage);
+    local.setSessionStorage(globalThis.sessionStorage);
     const repaint = () => side.paintViewList(list, as(views, "alice"), { can_edit: true, can_own: true }, 4);
     local.onChange(repaint);
     repaint();
@@ -137,7 +148,7 @@ try {
     const ops = all(list, (n) => n.dataset.viewGroup === "folder:Ops")[0];
     fire(ops, "click");
     out.afterCollapse = lines();
-    out.stored = JSON.parse(data["darling.local.viewGroups.v1"]);
+    out.stored = JSON.parse(sdata["darling.local.viewGroups.v1"]);
     out.headerCount = all(list, (n) => n.dataset.viewGroup !== undefined).length;
     // the shared-token session: no My views, and no New links when it cannot edit
     side.paintViewList(list, as([views[0], views[6]], null), { can_edit: false, can_own: false }, null);
@@ -209,7 +220,9 @@ try {
       fine: blockedFor("Devs"), note: (() => { blockedFor("My views"); return bad.node.textContent; })(),
       personalIgnoresFolder: (() => { badBox.checked = true; fire(badBox, "change"); return bad.blocked; })(),
     };
-    out.folderProblems = ["", "  ", "Ops", "My views", "MY VIEWS", " my views ", "a\u202Eb", "a\u200Bb", "a\tb", "x".repeat(101), "x".repeat(100)].map((n) => rules.folderProblem(n) !== null);
+    out.folderProblems = ["", "  ", "Ops", "My views", "MY VIEWS", " my views ", "a\u202Eb", "a\u200Bb", "a\u0007b", "x".repeat(101), "x".repeat(100), "My\u00A0views", "My\u2003 VIEWS", "My\uFE0Fviews", "a\u3164b", "a\u034Fb", "a\u{E0100}b", "a\tb", "Ops\u00A0\u00A0 Team"].map((n) => rules.folderProblem(n) !== null);
+    out.normalized = ["  Ops \u00A0\t  Team\u3000 ", "\u00A0", "x", null].map((n) => rules.normalizeFolder(n));
+    out.saved = rules.metaForSave({ folder: "My\u00A0\u00A0Ops  Team ", personal: false }, null, { can_own: true });
     out.owner = [rules.ownerLine(views[2]), rules.ownerLine(views[5]), rules.ownerLine({ id: 1, created_by: "a", updated_by: "b" }), rules.ownerLine(null)];
   } else if (scenario === "access") {
     const note = (view, user) => rules.viewAccess(asOne(view, user), { can_edit: true, can_own: user !== null });
@@ -220,11 +233,12 @@ try {
     out.legacyPersonal = note(v(30, "x", { personal: true, created_by: null }), "alice");
   } else if (scenario === "signout") {
     local.setStorage(globalThis.localStorage);
+    local.setSessionStorage(globalThis.sessionStorage);
     local.toggleViewGroup("folder:Secret plans");
     out.before = local.isViewGroupCollapsed("folder:Secret plans");
     local.clearViewGroups();
     out.after = local.isViewGroupCollapsed("folder:Secret plans");
-    out.keyGone = data["darling.local.viewGroups.v1"] === undefined;
+    out.keyGone = sdata["darling.local.viewGroups.v1"] === undefined;
     local.reload();
     out.afterReload = local.isViewGroupCollapsed("folder:Secret plans");
   } else if (scenario === "expired") {

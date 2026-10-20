@@ -220,17 +220,24 @@ public sealed class DarlingCustomViewFoldersLiveTests
 
             /* The folder rules the store holds for every writer. */
             Assert.IsType<CustomViewResult.Invalid>(await store.CreateAsync("Long", null, Dashboard, "web", folder: new string('x', 101), cancellationToken: ct));
-            Assert.IsType<CustomViewResult.Invalid>(await store.CreateAsync("Ctl", null, Dashboard, "web", folder: "a\tb", cancellationToken: ct));
+            Assert.IsType<CustomViewResult.Invalid>(await store.CreateAsync("Ctl", null, Dashboard, "web", folder: "a\u0007b", cancellationToken: ct));
 
             /* Invisible formatting characters (a right-to-left override, a zero-width space, a tag character beyond the first plane)
                and the reserved name "My views" in any case are refused; a name that merely contains it is fine. */
-            foreach (var bad in new[] { "a\u202Eb", "dev\u200Bs", "x\U000E0041y", "My views", "my VIEWS", "  MY views  " })
+            foreach (var bad in new[] { "a\u202Eb", "dev\u200Bs", "x\U000E0041y", "My views", "my VIEWS", "  MY views  ",
+                /* the same name with a no-break space, an ideographic space, a variation selector or a hangul filler: it would
+                   render as "My views" (or a lookalike of any folder), so it is refused too */
+                "My\u00A0views", "my\u3000 VIEWS", "My\uFE0Fviews", "Dev\u3164s", "Dev\u034Fs" })
             {
                 Assert.IsType<CustomViewResult.Invalid>(await store.CreateAsync("Bad", null, Dashboard, "web", folder: bad, cancellationToken: ct));
             }
 
             Assert.Equal("My views 2", Made(await store.CreateAsync("Fine", null, Dashboard, "web", folder: "My views 2", cancellationToken: ct)).Folder);
             Assert.Equal(new string('x', 100), Made(await store.CreateAsync("Max", null, Dashboard, "web", folder: new string('x', 100), cancellationToken: ct)).Folder);
+
+            /* Whitespace of every kind is stored as plain single spaces with the ends trimmed, so two spellings of one name are one folder. */
+            Assert.Equal("Ops Team", Made(await store.CreateAsync("Spaced", null, Dashboard, "web", folder: "  Ops \u00A0\t  Team\u3000 ", cancellationToken: ct)).Folder);
+            Assert.Equal("My views 2", Made(await store.CreateAsync("Nbsp", null, Dashboard, "web", folder: "My\u00A0views\u00A0\u00A02", cancellationToken: ct)).Folder);
 
             bodySucceeded = true;
         }
@@ -614,7 +621,7 @@ public sealed class DarlingCustomViewFoldersLiveTests
                on create and on turning a view personal; saving a shared view still works. A session with no person says so. */
             var (oldCreate, oldCreateBody) = await web.SendAsync(HttpMethod.Post, "/api/views", "olga", ViewBody("Olga's", personal: true), ct, noKey: true);
             Assert.Equal(HttpStatusCode.BadRequest, oldCreate);
-            Assert.Equal("Sign out and sign in again to save personal views.", oldCreateBody.GetProperty("error").GetString());
+            Assert.Equal("Your sign-in is from an older version. Open /auth/logout, then sign in again, to save personal views.", oldCreateBody.GetProperty("error").GetString());
             var (oldShared, oldSharedBody) = await web.SendAsync(HttpMethod.Post, "/api/views", "olga", ViewBody("Olga's team"), ct, noKey: true);
             Assert.Equal(HttpStatusCode.Created, oldShared);
             Assert.False(oldSharedBody.GetProperty("mine").GetBoolean());
@@ -622,7 +629,7 @@ public sealed class DarlingCustomViewFoldersLiveTests
             var (oldPersonalize, oldPersonalizeBody) = await web.SendAsync(
                 HttpMethod.Put, $"/api/views/{oldSharedId}", "olga", ViewBody("Olga's team", personal: true, version: 1), ct, noKey: true);
             Assert.Equal(HttpStatusCode.BadRequest, oldPersonalize);
-            Assert.Equal("Sign out and sign in again to save personal views.", oldPersonalizeBody.GetProperty("error").GetString());
+            Assert.Equal("Your sign-in is from an older version. Open /auth/logout, then sign in again, to save personal views.", oldPersonalizeBody.GetProperty("error").GetString());
             Assert.False((await web.SendAsync(HttpMethod.Get, "/api/session", "olga", null, ct, noKey: true)).Body.GetProperty("can_own").GetBoolean());
             var (tokenStatus, tokenBody) = await web.SendAsync(HttpMethod.Post, "/api/views", null, ViewBody("Nobody's", personal: true), ct);
             Assert.Equal(HttpStatusCode.BadRequest, tokenStatus);
@@ -662,6 +669,11 @@ public sealed class DarlingCustomViewFoldersLiveTests
             }
 
             Assert.Equal("Devs", (await web.SendAsync(HttpMethod.Get, $"/api/views/{id}", "alice", null, ct)).Body.GetProperty("folder").GetString());
+
+            /* A name with odd spaces and runs of spaces is stored as plain single spaces. */
+            var (spacedStatus, spaced) = await web.SendAsync(HttpMethod.Post, "/api/views", "alice", ViewBody("Spaced folder", folder: "Dev\u00A0\u00A0 Ops\t"), ct);
+            Assert.Equal(HttpStatusCode.Created, spacedStatus);
+            Assert.Equal("Dev Ops", spaced.GetProperty("folder").GetString());
             bodySucceeded = true;
         }
         finally

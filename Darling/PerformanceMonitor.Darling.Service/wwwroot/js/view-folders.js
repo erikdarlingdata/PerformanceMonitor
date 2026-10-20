@@ -42,17 +42,32 @@ export function canOwn(session) {
   return !!session && typeof session === "object" && session.can_own === true;
 }
 
+/** Unicode White_Space, spelled out to match the store: the Z categories, U+0009-U+000D and U+0085. */
+const WHITESPACE_RUN = /[\p{Z}\t-\r\u0085]+/gu;
+
+/** Control and format characters, plus the Unicode Default_Ignorable_Code_Point set as explicit ranges (the store's list). An
+ *  ignorable code point draws nothing, so two names that differ only by one look the same. */
+const INVISIBLE = /[\p{Cc}\p{Cf}­͏؜ᅟᅠ឴឵᠋-᠏​-‏‪-‮⁠-⁯ㅤ︀-️﻿ﾠ￰-￸\u{1BCA0}-\u{1BCA3}\u{1D173}-\u{1D17A}\u{E0000}-\u{E0FFF}]/u;
+
 /**
- * Why a folder name would be refused, or null when it is fine (the typed text is trimmed first; blank is the top level). Mirrors
- * the store: at most MAX_FOLDER_LENGTH characters, no control character and no invisible formatting character (such as U+202E or
- * U+200B, which make two different names look alike), and "My views" in any letter case is reserved. The store decides; this
- * only saves the round trip.
+ * The folder name as the store keeps it: every whitespace character (a no-break space, a tab) becomes a plain space, runs collapse
+ * to one, and the ends are trimmed. Anything that is not text gives "". Mirrors CustomViewStore.NormalizeFolder.
+ */
+export function normalizeFolder(name) {
+  return typeof name === "string" ? name.replace(WHITESPACE_RUN, " ").trim() : "";
+}
+
+/**
+ * Why a folder name would be refused, or null when it is fine (the typed text is normalized first, see normalizeFolder; blank is
+ * the top level). Mirrors the store: at most MAX_FOLDER_LENGTH characters, no control, invisible formatting or default-ignorable
+ * character (such as U+202E, U+200B or U+FE0F, which make two different names look alike), and "My views" in any letter case,
+ * whatever kind of space sits between the words, is reserved. The store decides; this only saves the round trip.
  */
 export function folderProblem(name) {
-  const typed = typeof name === "string" ? name.trim() : "";
+  const typed = normalizeFolder(name);
   if (typed === "") return null;
   if (typed.length > MAX_FOLDER_LENGTH) return "A folder name can be at most " + MAX_FOLDER_LENGTH + " characters.";
-  if (/[\p{Cc}\p{Cf}]/u.test(typed)) return "A folder name can't contain control or invisible formatting characters.";
+  if (INVISIBLE.test(typed)) return "A folder name can't contain control or invisible formatting characters.";
   if (typed.toLowerCase() === MY_VIEWS_NAME.toLowerCase()) return "\"" + MY_VIEWS_NAME + "\" is reserved for your own personal views. Pick another folder name.";
   return null;
 }
@@ -143,7 +158,7 @@ export function ownerLine(view) {
  */
 export function personalChoice(view, session) {
   if (!canOwn(session)) {
-    return { disabled: true, reason: "Personal views need a sign-in that can own them, and this session has none. If you are signed in, sign out and sign in again." };
+    return { disabled: true, reason: "Personal views need a sign-in that can own them, and this session has none. If you are signed in, open /auth/logout, then sign in again." };
   }
   if (view && view.personal !== true && view.id != null && view.mine !== true) {
     return {
@@ -161,7 +176,7 @@ export function personalChoice(view, session) {
  * `personal` is true only when the box is ticked AND the choice is open to this session, so a disabled box never sends true.
  */
 export function metaForSave(meta, view, session) {
-  const typed = typeof meta.folder === "string" ? meta.folder.trim() : "";
+  const typed = normalizeFolder(meta.folder);
   return {
     folder: typed === "" ? null : typed,
     personal: meta.personal === true && !personalChoice(view, session).disabled,

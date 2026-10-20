@@ -114,6 +114,9 @@ public sealed class CustomViewFoldersWebTests
         /* A hand-edited value is cleaned when read, and the server-tag groups' own key is not touched. */
         Assert.Equal(new[] { true, true, false }, r.GetProperty("cleaned").EnumerateArray().Select(e => e.GetBoolean()).ToArray());
         Assert.True(r.GetProperty("serverGroupsKey").GetBoolean());
+
+        /* The collapse set sits in sessionStorage (it goes with the tab): localStorage never holds it. */
+        Assert.Empty(r.GetProperty("localStorageKeys").EnumerateArray());
     }
 
     [Fact]
@@ -159,7 +162,7 @@ public sealed class CustomViewFoldersWebTests
         var noIdentity = r.GetProperty("newNoIdentity");
         Assert.True(noIdentity.GetProperty("personalDisabled").GetBoolean());
         Assert.Contains("Personal views need a sign-in that can own them", noIdentity.GetProperty("text").GetString());
-        Assert.Contains("sign out and sign in again", noIdentity.GetProperty("text").GetString());
+        Assert.Contains("open /auth/logout, then sign in again", noIdentity.GetProperty("text").GetString());
 
         /* A shared view: only its creator can make it personal; one with no recorded creator can be made personal by nobody. */
         Assert.False(r.GetProperty("ownShared").GetProperty("personalDisabled").GetBoolean());
@@ -214,9 +217,16 @@ public sealed class CustomViewFoldersWebTests
         Assert.Contains("reserved", block.GetProperty("note").GetString());
         Assert.False(block.GetProperty("personalIgnoresFolder").GetBoolean());
 
-        /* blank, blank, Ops, then the five refusals, then a 100-character name that is fine */
-        Assert.Equal(new[] { false, false, false, true, true, true, true, true, true, true, false },
+        /* blank, blank, Ops, then the refusals (the control character is the last of them before the 101-character name), then a
+           100-character name that is fine, then the lookalikes (no-break space, em space, variation selector, hangul filler,
+           combining grapheme joiner, a tag variation selector), which are refused, then a tab and runs of spaces, which are only
+           normalized */
+        Assert.Equal(new[] { false, false, false, true, true, true, true, true, true, true, false, true, true, true, true, true, true, false, false },
             r.GetProperty("folderProblems").EnumerateArray().Select(e => e.GetBoolean()).ToArray());
+
+        /* The page sends the name the store keeps: every kind of space becomes one plain space, the ends are trimmed. */
+        Assert.Equal(new[] { "Ops Team", "", "x", "" }, r.GetProperty("normalized").EnumerateArray().Select(e => e.GetString()).ToArray());
+        Assert.Equal("My Ops Team", r.GetProperty("saved").GetProperty("folder").GetString());
     }
 
     [Fact]

@@ -125,48 +125,107 @@ RETURNING id, name, definition, description, version, created_at, updated_at, up
     public const string NoIdentityMessage = "A personal view needs a signed-in identity; this session has none.";
 
     /// <summary>The plain sentence for a session that signed in before owner keys existed (#6214): it names a person but cannot own a view.</summary>
-    public const string SignInAgainMessage = "Sign out and sign in again to save personal views.";
+    public const string SignInAgainMessage = "Your sign-in is from an older version. Open /auth/logout, then sign in again, to save personal views.";
 
     /// <summary>The name the sidebar gives the caller's own personal views, so no shared folder may take it.</summary>
     public const string ReservedFolderName = "My views";
 
     /// <summary>
-    /// Normalizes a folder name the way every writer stores it: trimmed, and an empty or blank name becomes null (the top level).
-    /// Sets <paramref name="error"/> instead when the name is longer than <see cref="MaxFolderLength"/>, holds a control character or an invisible
-    /// formatting character (such as U+202E or U+200B, which make two different names look alike), or is "My views" in any letter case.
+    /// Normalizes a folder name the way every writer stores it: every Unicode whitespace character (a no-break space, a tab, an
+    /// ideographic space) becomes a plain space, runs of spaces collapse to one, and the ends are trimmed; an empty or blank name
+    /// becomes null (the top level). Sets <paramref name="error"/> instead when the normalized name is longer than
+    /// <see cref="MaxFolderLength"/>, holds a control character, a format character or a default-ignorable code point (such as
+    /// U+202E, U+200B, U+FE0F or U+3164, which make two different names look alike), or is "My views" in any letter case. The check
+    /// for the reserved name runs on the normalized text, so "My&#160;views" cannot slip past it.
     /// </summary>
     public static string? NormalizeFolder(string? folder, out string? error)
     {
         error = null;
-        var trimmed = folder?.Trim();
-        if (string.IsNullOrEmpty(trimmed))
+        if (folder is null)
         {
             return null;
         }
 
-        if (trimmed.Length > MaxFolderLength)
+        var sb = new StringBuilder(folder.Length);
+        var lastWasSpace = false;
+        foreach (var rune in folder.EnumerateRunes())
+        {
+            if (IsFolderWhitespace(rune))
+            {
+                if (!lastWasSpace)
+                {
+                    sb.Append(' ');
+                }
+
+                lastWasSpace = true;
+                continue;
+            }
+
+            if (Rune.IsControl(rune)
+                || Rune.GetUnicodeCategory(rune) == UnicodeCategory.Format
+                || IsDefaultIgnorable(rune.Value))
+            {
+                error = "'folder' must not contain control or invisible formatting characters.";
+                return null;
+            }
+
+            lastWasSpace = false;
+            sb.Append(rune.ToString());
+        }
+
+        var normalized = sb.ToString().Trim(' ');
+        if (normalized.Length == 0)
+        {
+            return null;
+        }
+
+        if (normalized.Length > MaxFolderLength)
         {
             error = $"'folder' exceeds the maximum length of {MaxFolderLength} characters.";
             return null;
         }
 
-        foreach (var rune in trimmed.EnumerateRunes())
-        {
-            if (Rune.IsControl(rune) || Rune.GetUnicodeCategory(rune) == UnicodeCategory.Format)
-            {
-                error = "'folder' must not contain control or invisible formatting characters.";
-                return null;
-            }
-        }
-
-        if (string.Equals(trimmed, ReservedFolderName, StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(normalized, ReservedFolderName, StringComparison.OrdinalIgnoreCase))
         {
             error = $"'{ReservedFolderName}' is reserved for each person's own personal views. Pick another folder name.";
             return null;
         }
 
-        return trimmed;
+        return normalized;
     }
+
+    /// <summary>Unicode White_Space, spelled out so view-folders.js can mirror it exactly: the Z categories, U+0009-U+000D and U+0085.</summary>
+    private static bool IsFolderWhitespace(Rune rune)
+    {
+        if (rune.Value is >= 0x09 and <= 0x0D or 0x85)
+        {
+            return true;
+        }
+
+        var category = Rune.GetUnicodeCategory(rune);
+        return category is UnicodeCategory.SpaceSeparator or UnicodeCategory.LineSeparator or UnicodeCategory.ParagraphSeparator;
+    }
+
+    /// <summary>
+    /// The Unicode Default_Ignorable_Code_Point property as explicit ranges (an ignorable code point draws nothing, so two folder
+    /// names that differ only by one look the same). Category Cf is refused separately. Mirrored in view-folders.js.
+    /// </summary>
+    private static bool IsDefaultIgnorable(int cp) =>
+        cp is 0x00AD or 0x034F or 0x061C
+            or (>= 0x115F and <= 0x1160)
+            or (>= 0x17B4 and <= 0x17B5)
+            or (>= 0x180B and <= 0x180F)
+            or (>= 0x200B and <= 0x200F)
+            or (>= 0x202A and <= 0x202E)
+            or (>= 0x2060 and <= 0x206F)
+            or 0x3164
+            or (>= 0xFE00 and <= 0xFE0F)
+            or 0xFEFF
+            or 0xFFA0
+            or (>= 0xFFF0 and <= 0xFFF8)
+            or (>= 0x1BCA0 and <= 0x1BCA3)
+            or (>= 0x1D173 and <= 0x1D17A)
+            or (>= 0xE0000 and <= 0xE0FFF);
 
     /// <summary>The 409 sentence for a duplicate name, naming the scope the name collided in.</summary>
     internal static string DuplicateMessage(string name, string? folder, bool personal) =>

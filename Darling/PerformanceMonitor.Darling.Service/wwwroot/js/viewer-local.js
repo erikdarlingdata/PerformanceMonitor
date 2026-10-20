@@ -17,7 +17,7 @@
  * change without misreading an old value. A stored value that is absent, corrupt, from another version or hand-edited
  * reads as the default and never throws; the page still works. Only server ids, instants, booleans and #rrggbb
  * literals are stored - never a name, a connection string or a token. The exceptions are the database filter and the Custom Views
- * sidebar's collapsed folders (#6214: a folder has no id, only its name). The database filter IS a
+ * sidebar's collapsed folders (#6214: a folder has no id, only its name; that set is kept in sessionStorage, not localStorage). The database filter IS a
  * set of database names per server (the reads filter by name, and the store has no stable database id). They are names the
  * page already shows, and they leave the browser only as the reads' own `database_name` parameter.
  *
@@ -55,6 +55,16 @@ try {
   storage = null;
 }
 
+/** The Custom Views folder-collapse set lives in sessionStorage, not localStorage (#6214): a folder's name can be one person's
+ *  private wording, the web UI has no sign-out control, and the sign-in page does not load this module, so a localStorage copy
+ *  would stay in the browser after the session ends. sessionStorage goes with the tab. */
+let sessionStore = null;
+try {
+  sessionStore = typeof sessionStorage === "undefined" ? null : sessionStorage;
+} catch {
+  sessionStore = null;
+}
+
 let favorites = new Set();
 let acks = new Map(); // server_id -> epoch ms of the acknowledgement
 let colors = {}; // severity -> "#rrggbb" (only valid choices)
@@ -66,9 +76,9 @@ let sidebarGroups = new Set(); // collapsed sidebar groups: tag ids, plus the fi
 let attention = new Map(); // server_id -> { count, critical, latestMs } from the last alert read
 const listeners = new Set();
 
-function readJson(key) {
+function readJson(key, store = storage) {
   try {
-    const raw = storage && storage.getItem(key);
+    const raw = store && store.getItem(key);
     if (typeof raw !== "string") return null;
     const v = JSON.parse(raw);
     return v && typeof v === "object" && !Array.isArray(v) && v.v === VERSION ? v : null;
@@ -77,9 +87,9 @@ function readJson(key) {
   }
 }
 
-function writeJson(key, value) {
+function writeJson(key, value, store = storage) {
   try {
-    if (storage) storage.setItem(key, JSON.stringify({ v: VERSION, ...value }));
+    if (store) store.setItem(key, JSON.stringify({ v: VERSION, ...value }));
   } catch {
     /* private mode or a full quota: the choice holds for this page load only */
   }
@@ -145,8 +155,14 @@ export function reload() {
   sidebarGrouped = !!(s && s.grouped === true);
   sidebarGroups = new Set(s && Array.isArray(s.collapsedGroups) ? s.collapsedGroups.filter(isGroupId).slice(0, MAX_IDS) : []);
 
-  const g = readJson(KEY_VIEW_GROUPS);
+  const g = readJson(KEY_VIEW_GROUPS, sessionStore);
   viewGroups = new Set(g && Array.isArray(g.collapsed) ? g.collapsed.filter(isViewGroupId).slice(0, MAX_VIEW_GROUPS) : []);
+}
+
+/** Test seam: replaces the session Storage (the view-group collapse set) and re-reads. */
+export function setSessionStorage(s) {
+  sessionStore = s;
+  reload();
 }
 
 /** Test seam: replaces the Storage and re-reads. */
@@ -435,19 +451,19 @@ export function toggleViewGroup(id) {
   if (!isViewGroupId(id)) return;
   if (viewGroups.has(id)) viewGroups.delete(id);
   else if (viewGroups.size < MAX_VIEW_GROUPS) viewGroups.add(id);
-  writeJson(KEY_VIEW_GROUPS, { collapsed: [...viewGroups] });
+  writeJson(KEY_VIEW_GROUPS, { collapsed: [...viewGroups] }, sessionStore);
   changed();
 }
 
 /**
  * Forgets which Custom Views folders were collapsed (#6214). A folder's name is the key, and a name can be one person's private
- * wording, so a sign-out clears it from this browser instead of leaving it for whoever signs in next. Quiet: no repaint (the
+ * wording, so it is kept in sessionStorage only and an expired session clears it too. Quiet: no repaint (the
  * page is showing its signed-out state).
  */
 export function clearViewGroups() {
   viewGroups = new Set();
   try {
-    if (storage) storage.removeItem(KEY_VIEW_GROUPS);
+    if (sessionStore) sessionStore.removeItem(KEY_VIEW_GROUPS);
   } catch {
     /* private mode: nothing was stored */
   }
