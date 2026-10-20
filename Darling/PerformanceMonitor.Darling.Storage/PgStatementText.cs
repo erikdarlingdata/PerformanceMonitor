@@ -152,7 +152,7 @@ FROM
         s.queryid AS queryid,
         s.query AS query_text,
         s.total_exec_time AS total_exec_time
-    FROM aurora_stat_statements(true) AS s
+    FROM {AURORA_SCHEMA}.aurora_stat_statements(true) AS s
     WHERE s.queryid IS NOT NULL
     AND   s.query IS NOT NULL
     AND   s.toplevel
@@ -193,7 +193,7 @@ FROM
         s.queryid AS queryid,
         s.query AS query_text,
         s.total_exec_time AS total_exec_time
-    FROM public.pg_stat_statements AS s
+    FROM {STATEMENTS_SCHEMA}.pg_stat_statements AS s
     WHERE s.queryid IS NOT NULL
     AND   s.query IS NOT NULL
     AND   {TOPLEVEL}
@@ -209,14 +209,25 @@ LIMIT $1";
     /// tracking did not exist, so every row IS top level and <c>true</c> is the correct predicate rather
     /// than a fallback — the same guard <c>PgStatementStatsCollector</c> already applies, and without it
     /// the query fails on a 13 target instead of degrading.</para>
+    /// <para>#6143: the view and the Aurora function are named by the schema <paramref name="schemas"/> read on the
+    /// connection that runs the fetch (<see cref="CollectorContext.PgExtensionSchema"/> and
+    /// <see cref="CollectorContext.PgFunctionSchema"/>), never by <c>public</c> or by search_path: a role with CREATE
+    /// on <c>public</c> could put a same-named view or function there, and the fetch runs under the monitoring login.
+    /// A schema the host did not find is <c>pg_catalog</c>, where the read fails as a missing extension.</para>
     /// </summary>
-    public static string FetchSqlFor(bool isAurora, int postgresMajorVersion)
-        => isAurora
-            ? AuroraFetchSql
-            : VanillaFetchSql.Replace(
-                "{TOPLEVEL}",
-                postgresMajorVersion >= 14 ? "s.toplevel" : "true",
-                System.StringComparison.Ordinal);
+    public static string FetchSqlFor(bool isAurora, int postgresMajorVersion, CollectorContext schemas)
+    {
+        System.ArgumentNullException.ThrowIfNull(schemas);
+        return isAurora
+            ? AuroraFetchSql.Replace(
+                "{AURORA_SCHEMA}", schemas.PgFunctionSchema("aurora_stat_statements"), System.StringComparison.Ordinal)
+            : VanillaFetchSql
+                .Replace("{STATEMENTS_SCHEMA}", schemas.PgExtensionSchema("pg_stat_statements"), System.StringComparison.Ordinal)
+                .Replace(
+                    "{TOPLEVEL}",
+                    postgresMajorVersion >= 14 ? "s.toplevel" : "true",
+                    System.StringComparison.Ordinal);
+    }
 
     /// <summary>
     /// Whether this server is due a text fetch — asked of the STORE rather than remembered in the service, so a

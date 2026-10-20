@@ -48,7 +48,7 @@ public sealed class PgStatementTextFailureRecordingTests
         var start = source.IndexOf(signature, StringComparison.Ordinal);
         Assert.True(start > 0, "#5320: TryRefreshPgStatementTextAsync is no longer in DarlingWorker.cs");
 
-        var end = source.IndexOf("private static async Task<(List<long> QueryIds", start, StringComparison.Ordinal);
+        var end = source.IndexOf("internal static async Task<(List<long> QueryIds", start, StringComparison.Ordinal);
         Assert.True(end > start, "#5320: ReadPgStatementTextAsync no longer follows TryRefreshPgStatementTextAsync");
         var refresh = source[start..end];
 

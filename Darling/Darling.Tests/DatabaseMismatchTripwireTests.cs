@@ -120,7 +120,7 @@ public sealed class DatabaseMismatchTripwireTests
             SelectListAliases(DarlingServerConnector.DetectionQueryText).IndexOf("connected_database"));
 
         Assert.Equal(
-            ConnectedDatabaseOrdinalIn(connector, "private static async Task<ServerRuntime> ConnectPostgresAsync("),
+            ConnectedDatabaseOrdinalIn(connector, "internal static async Task<ServerRuntime> ConnectPostgresAsync("),
             SelectListAliases(DarlingServerConnector.PostgresDetectionQueryText).IndexOf("connected_database"));
 
         /* No DMV: the SQL Server probe deliberately avoids sys.dm_os_sys_info because an Azure SQL DB

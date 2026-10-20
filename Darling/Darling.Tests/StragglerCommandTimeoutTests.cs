@@ -74,7 +74,7 @@ public sealed class StragglerCommandTimeoutTests
     /// </summary>
     private static readonly (string File, Hop Hop, int Sites, string Constant, Regex Assignment)[] s_regimes =
     {
-        ("Targets/HypotheticalIndexExperiment.cs", Hop.Target, 6,
+        ("Targets/HypotheticalIndexExperiment.cs", Hop.Target, 7,   /* 7 since #6143: the hypopg schema read */
             "HypotheticalIndexExperiment.{Forward,Reset}CommandTimeoutSeconds",
             Assigns(@"(?:Forward|Reset)CommandTimeoutSeconds")),
         ("PgPlanForceActionStore.cs", Hop.Store, 4,
