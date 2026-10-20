@@ -143,6 +143,45 @@ public sealed class CollectionStateToolsLiveTests
 
     private static string[] EnabledNames(StoreConfigView view) => view.EnabledServers.Select(s => s.Name).OrderBy(n => n, StringComparer.Ordinal).ToArray();
 
+    /// <summary>An undo of a pause that has not run yet is a real undo: the flag still reads "running", but the pause is queued, so the
+    /// resume is queued behind it and the service (which runs them in command_id order) ends up running.</summary>
+    [Fact]
+    public async Task ResumeCollection_WhileThePauseIsStillQueued_QueuesTheResume_AndTheServerEndsUpRunning()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        var ok = false;
+        try
+        {
+            var paused = Parse(await Tools.PauseCollection(rig.Mcp, cancellationToken: ct));
+            var pauseId = paused["command_id"]!.GetValue<long>();
+            Assert.False((await ServiceViewAsync(rig, ct)).Paused);
+
+            var resumed = Parse(await Tools.ResumeCollection(rig.Mcp, cancellationToken: ct));
+            Assert.Equal("queued", Status(resumed));
+            var resumeId = resumed["command_id"]!.GetValue<long>();
+            Assert.True(resumeId > pauseId);
+            Assert.Equal(pauseId, resumed["runs_after"]!["command_id"]!.GetValue<long>());
+            Assert.Contains(pauseId.ToString(System.Globalization.CultureInfo.InvariantCulture), resumed["check"]!.GetValue<string>(), StringComparison.Ordinal);
+
+            /* A resume now would change nothing more; a pause is again the one that changes the end state. */
+            Assert.Equal("unchanged", Status(Parse(await Tools.ResumeCollection(rig.Mcp, cancellationToken: ct))));
+
+            foreach (var (id, type) in new[] { (pauseId, "pause"), (resumeId, "resume") })
+            {
+                await DarlingCommandExecutor.ExecuteStoreWriteAsync(
+                    rig.Owner, DarlingCommandExecutor.ResolvePlan(new ClaimedCommand(id, type, null, null, "mcp")), ct);
+            }
+
+            Assert.True(DarlingWorker.ShouldRunCollection((await ServiceViewAsync(rig, ct)).Paused));
+            ok = true;
+        }
+        finally
+        {
+            await DropRoleAsync(rig, ok);
+        }
+    }
+
     [Fact]
     public async Task PauseCollection_StopsTheNextPass_AndItsOwnUndoStartsItAgain()
     {

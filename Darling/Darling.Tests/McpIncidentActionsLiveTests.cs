@@ -9,6 +9,7 @@
 using System;
 using System.Linq;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
@@ -174,6 +175,38 @@ public sealed class McpIncidentActionsLiveTests
         });
     }
 
+    /// <summary>The confirm value comes from the first call only: one worked out from the plan alone is refused, a real one is spent by
+    /// the purge it queues, and one older than 5 minutes is refused (the clock is injected, nothing sleeps).</summary>
+    [Fact]
+    public async Task PurgeNow_RefusesAComputedValue_ASpentValue_AndAnExpiredValue()
+    {
+        await WithRoleAsync("mcp", grantFunction: true, async (owner, asRole, ct) =>
+        {
+            var clock = new ManualTimeProvider();
+            var tokens = new McpConfirmTokens(clock);
+
+            var plan = (await DarlingMcpIncidentActionTools.PreviewPurgeAsync(asRole, 7, ct)).Plan;
+            var computed = "purge-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(plan)), 0, 6).ToLowerInvariant();
+            var refused = Parse(await DarlingMcpIncidentActionTools.PurgeNowAsync(asRole, computed, 7, tokens, ct));
+            Assert.Equal("confirm_mismatch", (string?)refused["reason"]);
+
+            var first = Parse(await DarlingMcpIncidentActionTools.PurgeNowAsync(asRole, null, 7, tokens, ct));
+            var expired = (string)first["confirm_value"]!;
+            Assert.Equal(5, (int)first["confirm_valid_minutes"]!);
+            clock.Advance(TimeSpan.FromMinutes(5));
+            Assert.Equal("confirm_mismatch", (string?)Parse(await DarlingMcpIncidentActionTools.PurgeNowAsync(asRole, expired, 7, tokens, ct))["reason"]);
+            Assert.Equal(0L, await CommandCountAsync(owner, ct));
+
+            var good = (string)Parse(await DarlingMcpIncidentActionTools.PurgeNowAsync(asRole, null, 7, tokens, ct))["confirm_value"]!;
+            Assert.Equal("queued", (string?)Parse(await DarlingMcpIncidentActionTools.PurgeNowAsync(asRole, good, 7, tokens, ct))["status"]);
+            Assert.Equal(1L, await CommandCountAsync(owner, ct));
+
+            /* Spent: the same value answers confirm_mismatch (not the queue's own already-queued refusal), and nothing more is queued. */
+            Assert.Equal("confirm_mismatch", (string?)Parse(await DarlingMcpIncidentActionTools.PurgeNowAsync(asRole, good, 7, tokens, ct))["reason"]);
+            Assert.Equal(1L, await CommandCountAsync(owner, ct));
+        });
+    }
+
     [Fact]
     public async Task PurgeNow_WithABadRetention_IsRefused_AndQueuesNothing()
     {
@@ -308,9 +341,11 @@ public sealed class McpIncidentActionsLiveTests
                 Assert.False((bool)(await flag.ExecuteScalarAsync(ct))!);
             }
 
+            /* A second pause sees the one still queued: collection is already on its way to paused, so nothing more is queued. */
             var again = Parse(await DarlingMcpCollectionStateTools.PauseCollection(asRole, cancellationToken: ct));
-            Assert.Equal("refused", (string?)again["status"]);
-            Assert.Equal("already_queued", (string?)again["reason"]);
+            Assert.Equal("unchanged", (string?)again["status"]);
+            Assert.Equal(id, (long)again["check_with"]!["command_id"]!);
+            Assert.Equal(1L, await CommandCountAsync(owner, ct));
 
             var denied = await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(asRole, "UPDATE config.config_service SET paused = TRUE WHERE id = 1", ct));
             Assert.Equal("42501", denied.SqlState);
@@ -378,8 +413,13 @@ public sealed class McpIncidentActionsLiveTests
                 call.CommandTimeout = 20; /* a request that waited on the lock would end in 57014 (query canceled), not DL409 */
                 await call.ExecuteScalarAsync(ct);
             });
-            Assert.Equal("DL409", busy.SqlState);
+            Assert.Equal("DL423", busy.SqlState);
             Assert.Contains("busy", busy.MessageText, StringComparison.Ordinal);
+
+            /* The tool answers it with its own reason, not the duplicate request's. */
+            var answered = Parse(await DarlingMcpCollectionStateTools.PauseCollection(asRole, cancellationToken: ct));
+            Assert.Equal("refused", (string?)answered["status"]);
+            Assert.Equal("busy", (string?)answered["reason"]);
 
             await using (var release = new NpgsqlCommand("SELECT pg_advisory_unlock(6230, hashtext('pause:'))", holder))
             {

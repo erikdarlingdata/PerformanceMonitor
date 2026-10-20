@@ -191,7 +191,7 @@ internal static class DarlingMcpInstructions
 
         ## What this server can and cannot do
 
-        This server reads previously collected performance data. It cannot run SQL on a monitored server, kill sessions, change a monitored server's settings, or run ad-hoc diagnostics. With writes on, purge_now deletes collected history older than the retention given.
+        This server reads previously collected performance data. It cannot run SQL on a monitored server or run ad-hoc diagnostics; only the plan force, plan evict and session kill tools act on one. With writes on, purge_now deletes history older than the retention given.
 
         """ + DarlingMcpWritePolicy.InstructionsLine;
 

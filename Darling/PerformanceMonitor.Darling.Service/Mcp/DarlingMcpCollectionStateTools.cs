@@ -222,16 +222,32 @@ public sealed class DarlingMcpCollectionStateTools
         try
         {
             var before = await ReadServiceAsync(postgres, cancellationToken);
-            if (before.Paused == pause)
+
+            /* Decide from the state the queue is heading for, not the flag alone: a pause or resume that is still queued has not
+               moved the flag yet, and the service runs them in command_id order, so the last one decides where the flag ends up.
+               An undo of a pause that is still pending therefore queues the resume (it runs after the pause). */
+            var pending = await ReadPendingPauseCommandsAsync(postgres, cancellationToken);
+            var effective = pending.Count == 0 ? before.Paused : pending[^1].CommandType == "pause";
+            if (effective == pause)
             {
-                return new JsonObject
+                var queuedAlready = pending.Count == 0 ? null : pending[^1];
+                var unchanged = new JsonObject
                 {
                     ["status"] = "unchanged",
                     ["tool"] = tool,
-                    ["what_changed"] = pause ? "Collection was already paused. Nothing was queued." : "Collection was not paused. Nothing was queued.",
+                    ["what_changed"] = queuedAlready is null
+                        ? (pause ? "Collection was already paused. Nothing was queued." : "Collection was not paused. Nothing was queued.")
+                        : $"A {queuedAlready.CommandType} (command {queuedAlready.CommandId.ToString(CultureInfo.InvariantCulture)}) is already queued and will leave collection "
+                            + (pause ? "paused" : "running") + ". Nothing was queued.",
                     ["current"] = new JsonObject { ["paused"] = before.Paused },
                     ["check"] = "get_collection_state",
-                }.ToJsonString();
+                };
+                if (queuedAlready is not null)
+                {
+                    unchanged["check_with"] = new JsonObject { ["tool"] = "get_command_result", ["command_id"] = queuedAlready.CommandId };
+                }
+
+                return unchanged.ToJsonString();
             }
 
             var commandType = pause ? "pause" : "resume";
@@ -243,24 +259,48 @@ public sealed class DarlingMcpCollectionStateTools
 
             logger?.LogWarning("MCP {Tool} queued command {CommandId} ({CommandType}) for the whole service, caller {Caller}",
                 tool, queued.CommandId, commandType, ReadCaller.AmbientMcpCaller ?? ReadCaller.Unknown);
+            var runsAfter = pending.Count == 0 ? null : pending[^1];
             return new JsonObject
             {
                 ["status"] = "queued",
                 ["tool"] = tool,
                 ["command_id"] = queued.CommandId,
+                ["runs_after"] = runsAfter is null ? null : new JsonObject { ["command_id"] = runsAfter.CommandId, ["command_type"] = runsAfter.CommandType },
                 ["what_changed"] = pause
                     ? "A pause was queued, the same command the Viewer's Pause button queues. When the service runs it, no new pass starts until resume_collection; a pass already running finishes."
                     : "A resume was queued, the same command the Viewer's Resume button queues. When the service runs it, the next pass runs.",
                 ["previous"] = new JsonObject { ["paused"] = before.Paused },
                 ["undo"] = Undo(pause ? "resume_collection" : "pause_collection", new JsonObject()),
                 ["check_with"] = new JsonObject { ["tool"] = "get_command_result", ["command_id"] = queued.CommandId },
-                ["check"] = "get_collection_state shows the paused flag once the command has run.",
+                ["check"] = runsAfter is null
+                    ? "get_collection_state shows the paused flag once the command has run."
+                    : $"The {runsAfter.CommandType} (command {runsAfter.CommandId.ToString(CultureInfo.InvariantCulture)}) was still queued, so this {commandType} (command {queued.CommandId.ToString(CultureInfo.InvariantCulture)}) runs after it. "
+                        + "get_collection_state shows the paused flag once both have run.",
             }.ToJsonString();
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError(tool, ex);
         }
+    }
+
+    private sealed record PendingPauseCommand(long CommandId, string CommandType);
+
+    /// <summary>The pause and resume commands still queued or running, oldest first: the order the service claims them in.</summary>
+    private static async Task<List<PendingPauseCommand>> ReadPendingPauseCommandsAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    {
+        await using var command = postgres.CreateCommand(
+            "SELECT command_id, command_type FROM config.config_command " +
+            "WHERE command_type IN ('pause', 'resume') AND status IN ('pending', 'in_progress') ORDER BY command_id");
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        var rows = new List<PendingPauseCommand>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new PendingPauseCommand(reader.GetInt64(0), reader.GetString(1)));
+        }
+
+        return rows;
     }
 
     private static void LogWrite(ILogger? logger, string tool, ServerRow server) =>

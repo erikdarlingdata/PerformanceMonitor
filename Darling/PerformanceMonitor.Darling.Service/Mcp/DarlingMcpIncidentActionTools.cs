@@ -70,12 +70,20 @@ public sealed class DarlingMcpIncidentActionTools
             "An analysis pass is queued. The service runs it on its next command poll.", cancellationToken);
 
     [McpServerTool(Name = "purge_now"), Description(
-        "Starts the retention purge across the WHOLE store now, for example when the store disk fills. With no retention_days it purges to each collector's configured retention; with retention_days it purges every collector to that many days. PURGED DATA CANNOT COME BACK: there is no undo, and a short retention_days deletes every row older than it. Two steps: the first call queues nothing and answers what would be deleted (each collector's retention and the oldest time kept) with a confirm value; only a second call that passes that confirm value back queues the purge. Fleet-wide, not per server. It is queued as a command and the service starts it on its next command poll; the answer gives the command_id, and get_command_result shows that it started or that an earlier purge still holds the slot. Needs mcp.allowWrites; never offered to an investigation agent.")]
-    public static async Task<string> PurgeNow(
+        "Starts the retention purge across the WHOLE store now, for example when the store disk fills. With no retention_days it purges to each collector's configured retention; with retention_days it purges every collector to that many days. PURGED DATA CANNOT COME BACK: there is no undo, and a short retention_days deletes every row older than it. Two steps: the first call queues nothing and answers what would be deleted (each collector's retention and the oldest time kept) with a confirm value that works once and expires after 5 minutes; only a second call that passes it back queues the purge. Fleet-wide, not per server. It is queued as a command and the service starts it on its next command poll; the answer gives the command_id, and get_command_result shows that it started or that an earlier purge still holds the slot. Needs mcp.allowWrites; never offered to an investigation agent.")]
+    public static Task<string> PurgeNow(
         NpgsqlDataSource postgres,
-        [Description("Leave empty on the first call: it shows what the purge would delete and answers a confirm value. To queue the purge, call again with the same retention_days and that confirm value.")] string? confirm = null,
+        [Description("Leave empty on the first call: it shows what the purge would delete and answers a confirm value. To queue the purge, call again with the same retention_days and that confirm value; it works once and expires after 5 minutes.")] string? confirm = null,
         [Description("Optional. Purge every collector to this many days (1 to 3650). Omit to use each collector's configured retention.")] int? retention_days = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        PurgeNowAsync(postgres, confirm, retention_days, McpConfirmTokens.Shared, cancellationToken);
+
+    /// <summary>The scope a purge's confirm value is issued for: the purge is store-wide, so one scope.</summary>
+    private const string PurgeScope = "store";
+
+    /// <summary><see cref="PurgeNow"/> with the confirm values it issues and redeems passed in, so a test can hold the clock.</summary>
+    internal static async Task<string> PurgeNowAsync(
+        NpgsqlDataSource postgres, string? confirm, int? retention_days, McpConfirmTokens tokens, CancellationToken cancellationToken)
     {
         try
         {
@@ -86,11 +94,13 @@ public sealed class DarlingMcpIncidentActionTools
             }
 
             /* Show, then confirm (the shape undo_plan_change uses): the first call writes nothing and answers what the purge would
-               delete; only a call that echoes the confirm value that answer carried queues it. The value is derived from the
-               retention in force, so a retention that changed between the two calls is shown again instead of purged. */
+               delete, with a confirm value this process issues for that plan; only a call that echoes it queues the purge. The value
+               is good for 5 minutes and once, and for the plan it was issued for, so a retention that changed between the two calls
+               is shown again instead of purged. */
             var preview = await PreviewPurgeAsync(postgres, retention_days, cancellationToken);
             if (string.IsNullOrWhiteSpace(confirm))
             {
+                var issued = tokens.Issue("purge", PurgeScope, preview.Plan);
                 return new JsonObject
                 {
                     ["status"] = "confirm_required",
@@ -99,18 +109,21 @@ public sealed class DarlingMcpIncidentActionTools
                         + "and the deleted rows cannot be brought back. It also trims the store's own logs past their fixed horizons.",
                     ["retention_days"] = retention_days,
                     ["would_delete"] = preview.Groups,
-                    ["confirm_value"] = preview.ConfirmValue,
-                    ["next"] = "To queue it, call purge_now again with "
+                    ["confirm_value"] = issued,
+                    ["confirm_valid_minutes"] = (int)McpConfirmTokens.Lifetime.TotalMinutes,
+                    ["next"] = "To queue it, call purge_now again within "
+                        + ((int)McpConfirmTokens.Lifetime.TotalMinutes).ToString(CultureInfo.InvariantCulture) + " minutes with "
                         + (retention_days is int shown ? $"retention_days={shown.ToString(CultureInfo.InvariantCulture)} and " : string.Empty)
-                        + $"confirm=\"{preview.ConfirmValue}\".",
+                        + $"confirm=\"{issued}\". The value works once.",
                 }.ToJsonString();
             }
 
-            if (!string.Equals(confirm.Trim(), preview.ConfirmValue, StringComparison.Ordinal))
+            if (!tokens.TryRedeem(confirm.Trim(), PurgeScope, preview.Plan))
             {
                 return Refuse("purge_now", "confirm_mismatch",
-                    "That confirm value does not match what a purge with these settings would delete now. Nothing was queued. "
-                    + "Call purge_now without confirm to see the current answer and its confirm value.");
+                    "That confirm value was not issued by a purge_now call for what these settings would delete now, or it was already used, or it is older than "
+                    + ((int)McpConfirmTokens.Lifetime.TotalMinutes).ToString(CultureInfo.InvariantCulture) + " minutes. Nothing was queued. "
+                    + "Call purge_now without confirm to see the current answer and a new confirm value.");
             }
 
             var args = retention_days is int d ? $"{{\"retention_days\":{d.ToString(CultureInfo.InvariantCulture)}}}" : null;
@@ -146,7 +159,7 @@ public sealed class DarlingMcpIncidentActionTools
         }
     }
 
-    /// <summary>What a purge to <paramref name="retentionDays"/> (or to each collector's configured retention) would delete: collectors grouped by the retention the purge applies to them, with the oldest time each group keeps, and the confirm value that names that plan.</summary>
+    /// <summary>What a purge to <paramref name="retentionDays"/> (or to each collector's configured retention) would delete: collectors grouped by the retention the purge applies to them, with the oldest time each group keeps, and the plan as text.</summary>
     internal static async Task<PurgePreview> PreviewPurgeAsync(NpgsqlDataSource postgres, int? retentionDays, CancellationToken cancellationToken)
     {
         var overrides = retentionDays is null
@@ -187,14 +200,14 @@ public sealed class DarlingMcpIncidentActionTools
             plan.Append(group.Key.ToString(CultureInfo.InvariantCulture)).Append('=').AppendJoin(',', names).Append(';');
         }
 
-        var hash = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(plan.ToString()));
-        return new PurgePreview(groups, "purge-" + Convert.ToHexString(hash, 0, 6).ToLowerInvariant());
+        return new PurgePreview(groups, plan.ToString());
     }
 
-    internal sealed record PurgePreview(JsonArray Groups, string ConfirmValue);
+    /// <summary>The groups shown to the caller, and the plan as text, which a confirm value is issued and redeemed against.</summary>
+    internal sealed record PurgePreview(JsonArray Groups, string Plan);
 
     [McpServerTool(Name = "get_command_result"), Description(
-        "Reads one queued command's state and result: status (pending, in_progress, succeeded or failed), result_status and the result the service wrote. Use it after test_connection, analyze_now or purge_now with the command_id they answered, and after run_collectors_now answers running. Command rows older than the store's retention are gone and answer not_found. Read only; the command's arguments are never returned.")]
+        "Reads one queued command's state and result: status (pending, in_progress, succeeded or failed), result_status and the result the service wrote. Use it after test_connection, analyze_now, purge_now, pause_collection or resume_collection with the command_id they answered. Command rows older than the store's retention are gone and answer not_found. Read only; the command's arguments are never returned.")]
     public static async Task<string> GetCommandResult(
         NpgsqlDataSource postgres,
         [Description("The command_id a write tool answered.")] long command_id,

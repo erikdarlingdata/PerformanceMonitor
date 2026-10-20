@@ -42,12 +42,13 @@ internal static class DarlingMcpCommandQueue
             var id = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
             return new Queued(id, null, null);
         }
-        catch (PostgresException ex) when (ex.SqlState is "DL400" or "DL404" or "DL409" or "DL429")
+        catch (PostgresException ex) when (ex.SqlState is "DL400" or "DL404" or "DL409" or "DL423" or "DL429")
         {
             var reason = ex.SqlState switch
             {
                 "DL404" => "unknown_server",
                 "DL409" => "already_queued",
+                "DL423" => "busy",
                 "DL429" => "too_soon",
                 _ => "invalid",
             };

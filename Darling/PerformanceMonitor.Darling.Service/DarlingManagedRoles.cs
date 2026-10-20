@@ -2486,7 +2486,7 @@ BEGIN
    -- One request of a kind (per server where it has one) at a time, and not within 15 seconds of the last, so a holder of the
    -- mcp login cannot fill the queue. The lock is a try-lock: a request that cannot take it at once answers busy and never waits.
    IF NOT pg_try_advisory_xact_lock(6230, hashtext(v_type || ':' || COALESCE(p_server_id::text, ''))) THEN
-      RAISE EXCEPTION 'Another request of this kind is being queued right now (busy); try again shortly.' USING ERRCODE = 'DL409';
+      RAISE EXCEPTION 'Another request of this kind is being queued right now (busy); try again shortly.' USING ERRCODE = 'DL423';
    END IF;
    SELECT c.status, c.created_at INTO v_last_status, v_last_at
    FROM {config}.config_command AS c
