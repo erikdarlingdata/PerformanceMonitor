@@ -95,6 +95,7 @@ public sealed class McpResponseBudgetPerfmonAndBlockedXmlToolTests : IClassFixtu
         var service = new LocalDataService(_duckDb);
         var bigXml = BuildReportXml(18_000);
         var newest = DateTime.UtcNow.AddMinutes(-5);
+        newest = new DateTime(newest.Ticks - (newest.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Utc);
         for (var i = 0; i < 5; i++)
         {
             await SeedBlockedReportAsync(newest.AddMinutes(-i * 10), 100 + i, bigXml);
@@ -119,10 +120,10 @@ public sealed class McpResponseBudgetPerfmonAndBlockedXmlToolTests : IClassFixtu
         var oldestServed = root.GetProperty("reports")[returned - 1].GetProperty("event_time").GetString();
         Assert.Equal(System.DateTime.Parse(oldestServed!, null, System.Globalization.DateTimeStyles.RoundtripKind),
             System.DateTime.Parse(root.GetProperty("oldest_returned_event_time").GetString()!, null, System.Globalization.DateTimeStyles.RoundtripKind));
-        /* Lite's coverage probe reads the event time itself, so it names the store's oldest report in the window, left out or not:
-           the notice's start is never later than the oldest report served. */
-        Assert.True(System.DateTime.Parse(root.GetProperty("effective_start").GetString()!, null, System.Globalization.DateTimeStyles.RoundtripKind)
-            <= System.DateTime.Parse(root.GetProperty("oldest_returned_event_time").GetString()!, null, System.Globalization.DateTimeStyles.RoundtripKind));
+        /* Lite's coverage probe reads the stored event time itself, so the notice names the store's oldest report in the window,
+           left out or not (a start that is true of the store, and never later than the oldest report served). It is the shared
+           notice's value, written through the shared formatter: the seeded oldest report, to the instant. */
+        Assert.Equal(McpHelpers.FormatEffectiveStart(newest.AddMinutes(-4 * 10)), root.GetProperty("effective_start").GetString());
 
         /* Every report returned is a whole, well-formed document: never cut mid-way. */
         foreach (var report in root.GetProperty("reports").EnumerateArray())

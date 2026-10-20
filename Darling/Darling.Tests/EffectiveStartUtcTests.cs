@@ -126,8 +126,9 @@ public sealed class EffectiveStartUtcTests
 
         Assert.Equal(expectedTools, writes.Count);
         Assert.All(writes, line => Assert.Equal("effective_start = notice.EffectiveStart,", line));
-        /* Two calls per tool: the data answer's, and the empty answer's. */
-        Assert.Equal(expectedTools * 2, Regex.Matches(source, @"EventWindowNoticeAsync\(\s*\(\) => dataService\.GetQueryWindowFloorAsync").Count);
+        /* The notice calls themselves are not counted: a tool may build its notice once or once per page length (#6180). Behaviour
+           pins the rest: McpWindowNoticeEventToolTests (Lite.Tests) calls each tool and compares effective_start with the shared
+           formatter's value, with rows and over an empty window. */
         /* The empty answer carries the notice under hints in one of two shapes: inline (`...emptyAnswer: true)).AsHints()`), or, where the
            answer first reads the notice to decide its own wording (#5244 L3: get_long_query_completions points at the opt-in switch only
            when the floor probe is null), built into `emptyNotice` and handed to the status as `emptyNotice.AsHints()`. The second shape
