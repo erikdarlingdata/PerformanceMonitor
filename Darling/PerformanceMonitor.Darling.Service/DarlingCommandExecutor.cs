@@ -44,6 +44,17 @@ public sealed class DarlingCommandExecutor
     /// concurrent service instances never claim the same row. Public const so a test can pin the shape.
     /// </summary>
     public const string ClaimCommandSql = @"
+WITH expired AS (
+    UPDATE config.config_command
+    SET status = 'failed',
+        completed_at = now() AT TIME ZONE 'UTC',
+        result_status = $3::text,
+        result_json = jsonb_build_object('success', false, 'error', $3::text),
+        args_json = NULL
+    WHERE status = 'pending'
+      AND created_at < (now() AT TIME ZONE 'UTC') - $2
+    RETURNING command_id
+)
 UPDATE config.config_command
 SET status = 'in_progress',
     claimed_at = now() AT TIME ZONE 'UTC',
@@ -52,11 +63,32 @@ WHERE command_id = (
     SELECT command_id
     FROM config.config_command
     WHERE status = 'pending'
+      AND created_at >= (now() AT TIME ZONE 'UTC') - $2
     ORDER BY command_id
     LIMIT 1
     FOR UPDATE SKIP LOCKED
 )
 RETURNING command_id, command_type, target_server_id, args_json, requested_by";
+
+    /// <summary>
+    /// How long a <c>pending</c> command stays runnable (#6247). A command nobody claimed within this many
+    /// minutes of its <c>created_at</c> is failed, never run: the service may have been stopped when it was
+    /// queued, and a pause, purge or undo that fires days later acts on a request the person gave up on. Age
+    /// is measured on the STORE's clock (<c>now() AT TIME ZONE 'UTC'</c> against <c>created_at</c>, which the
+    /// store also stamped), never the service host's clock. Applies to every <c>config_command</c> row, so a
+    /// command queued by the Viewer, the web or MCP gets the same lifetime. A hardcoded default, not a setting.
+    /// </summary>
+    public const int CommandLifetimeMinutes = 15;
+
+    /// <summary>The same lifetime as the interval the claim statement binds as <c>$2</c>.</summary>
+    public static readonly TimeSpan CommandLifetime = TimeSpan.FromMinutes(CommandLifetimeMinutes);
+
+    /// <summary>
+    /// The error text an expired command is failed with (bound as <c>$3</c> of <see cref="ClaimCommandSql"/>), shown
+    /// as-is wherever the command's result is read.
+    /// </summary>
+    public static readonly string ExpiredErrorText =
+        FormattableString.Invariant($"expired: the service did not pick this up within {CommandLifetimeMinutes} minutes of the request");
 
     /// <summary>
     /// Writes the terminal outcome back on the claimed row (succeeded/failed + result_status/json). Internal
@@ -198,13 +230,19 @@ WHERE status = 'in_progress'
         }
     }
 
-    /// <summary>Atomically claims the oldest pending command (or null when the queue is empty).</summary>
+    /// <summary>
+    /// Atomically claims the oldest pending command that is still inside its <see cref="CommandLifetime"/> (or null
+    /// when the queue is empty). The same statement fails every older pending row (#6247), so an expired command
+    /// is never claimed and the next fresh one is.
+    /// </summary>
     public async Task<ClaimedCommand?> ClaimNextAsync(CancellationToken cancellationToken)
     {
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
         using var command = new NpgsqlCommand(ClaimCommandSql, connection);
         command.CommandTimeout = ServiceCommandDeadlines.CommandPlaneSeconds;
-        command.Parameters.AddWithValue(_serviceInstance);
+        command.Parameters.AddWithValue(_serviceInstance);                                                          // $1
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Interval, Value = CommandLifetime }); // $2
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = ExpiredErrorText });                       // $3
 
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
