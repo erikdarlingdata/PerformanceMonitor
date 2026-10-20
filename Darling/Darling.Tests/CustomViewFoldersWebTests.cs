@@ -298,4 +298,38 @@ public sealed class CustomViewFoldersWebTests
         Assert.True(r.GetProperty("noIdentity").GetProperty("readOnly").GetBoolean());
         Assert.Equal("Personal view of unknown", r.GetProperty("legacyPersonal").GetProperty("note").GetString());
     }
+
+    [Fact]
+    public void ACreate_AnEdit_AndADelete_EachRefreshTheSidebarList_AndARefusedWriteDoesNot()
+    {
+        if (!TryRun("write-refresh", out var r)) return;
+
+        Assert.Equal(new[] { "First" }, Strings(r.GetProperty("start")));
+        Assert.Equal(new[] { "Brand new", "First" }, Strings(r.GetProperty("afterCreate")));
+        Assert.Equal("data", r.GetProperty("createdKind").GetString());
+        Assert.Equal("Moved", r.GetProperty("afterEdit").GetProperty("folder").GetString());
+        Assert.Equal(new[] { "Brand new" }, Strings(r.GetProperty("afterDelete")));
+
+        /* One refresh for each accepted write, none for the one the service refused. */
+        Assert.Equal("error", r.GetProperty("refusedKind").GetString());
+        Assert.Equal(3, r.GetProperty("refreshesFromWrites").GetInt32());
+    }
+
+    [Fact]
+    public void TheViewList_DrawsOnceTheSessionAndListAnswer_WithoutWaitingForTheFleetRead()
+    {
+        if (!TryRun("direct-load", out var r)) return;
+
+        var pending = r.GetProperty("whileFleetPending");
+        Assert.False(pending.GetProperty("loading").GetBoolean());
+        Assert.True(pending.GetProperty("hasViews").GetBoolean());
+        Assert.False(r.GetProperty("pickerBefore").GetBoolean());
+
+        /* The server picker for the dashboard templates arrives when the fleet answers, and the list stays. */
+        Assert.True(r.GetProperty("afterFleet").GetProperty("hasViews").GetBoolean());
+        Assert.True(r.GetProperty("afterFleet").GetProperty("picker").GetBoolean());
+
+        /* A fleet answer that lands after the user went to another page draws nothing over it. */
+        Assert.Equal("another page", r.GetProperty("leftPage").GetString());
+    }
 }
