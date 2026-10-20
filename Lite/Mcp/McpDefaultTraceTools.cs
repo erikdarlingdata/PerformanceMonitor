@@ -65,7 +65,7 @@ public sealed class McpDefaultTraceTools
             var rows = await dataService.GetDefaultTraceEventsAsync(
                 resolved.ServerId, hours_back, databaseNames: database is null ? null : new[] { database }, asOfUtc: windowEnd, serverClock: serverClock);
             if (rows.Count == 0)
-                return McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "default_trace_events"), database)
+                return McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "default_trace_events"), database)
                     ?? McpHelpers.StatusForDatabase("empty",
                         $"No significant default trace events found in the requested time range{McpDatabaseSelection.ForChosen(database is null ? null : new[] { database })}.",
                         database,
@@ -75,7 +75,7 @@ public sealed class McpDefaultTraceTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 /* #4966: where this server's default trace data starts for the window, always present (false and null
                    when the store covered it). No effective_hours_back: the payload's total_events/shown cap is a page. */

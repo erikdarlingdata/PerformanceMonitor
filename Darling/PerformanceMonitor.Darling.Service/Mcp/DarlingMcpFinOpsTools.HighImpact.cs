@@ -27,20 +27,20 @@ public sealed partial class DarlingMcpFinOpsTools
         "high_impact reads the query-stats window for the server, keeps the top limit query hashes on each of the six measures (CPU, duration, reads, writes, memory and executions), and ranks the union by impact_score 0-100 (the mean percent-rank across the six measures). impact_band is high at 80 and above, medium at 60 and above, else low. The *_share_pct fields are each row's share of the kept set's total, rounded to 0.1. sample_query_text is the first 200 characters of the hash's busiest statement; the full text and the plan are not returned, has_plan only says whether a plan was captured. No cost fields.";
 
     private static async Task<string> ReadHighImpactAsync(
-        NpgsqlDataSource postgres, (int ServerId, string ServerName) resolved, int hoursBack, int limit, CancellationToken ct)
+        NpgsqlDataSource postgres, (int ServerId, string ServerName, string DisplayName) resolved, int hoursBack, int limit, CancellationToken ct)
     {
         var rows = await DarlingFinOpsHighImpactReader.ReadAsync(
             postgres, resolved.ServerId, hoursBack, McpCommandDeadlines.ReadSeconds, ct, limit);
         if (rows.Count == 0)
         {
-            return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_stats", ct)
+            return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_stats", ct)
                 ?? McpHelpers.Status("empty",
                     $"No query statistics were collected for this server in the last {hoursBack} hours, so there is nothing to rank.");
         }
 
         return JsonSerializer.Serialize(new
         {
-            server = resolved.ServerName,
+            server = resolved.DisplayName,
             view = HighImpactView,
             hours_back = hoursBack,
             rows = rows.Select(HighImpactRow).ToList(),

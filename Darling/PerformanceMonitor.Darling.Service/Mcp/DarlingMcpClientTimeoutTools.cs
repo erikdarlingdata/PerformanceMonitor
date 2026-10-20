@@ -54,7 +54,7 @@ public sealed class DarlingMcpClientTimeoutTools
 
         try
         {
-            var unmet = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, Collector, cancellationToken);
+            var unmet = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, Collector, cancellationToken);
             if (unmet != null)
             {
                 return unmet;
@@ -68,18 +68,18 @@ public sealed class DarlingMcpClientTimeoutTools
             {
                 /* A collector that recorded a denial or a missing session on its latest run has a specific sentence, which is better
                    evidence than the generic one. */
-                return await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, Collector, cancellationToken)
-                    ?? McpHelpers.Status("unavailable", ClientTimeoutsRead.UnavailableMessage(resolved.ServerName, window, windowEnd, hours_back));
+                return await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.DisplayName, Collector, cancellationToken)
+                    ?? McpHelpers.Status("unavailable", ClientTimeoutsRead.UnavailableMessage(resolved.DisplayName, window, windowEnd, hours_back));
             }
 
             if (kind == ClientTimeoutsKind.Quiet)
             {
-                return McpHelpers.Status("empty", ClientTimeoutsRead.EmptyMessage(resolved.ServerName, reading!, hours_back));
+                return McpHelpers.Status("empty", ClientTimeoutsRead.EmptyMessage(resolved.DisplayName, reading!, hours_back));
             }
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 client_timeouts = ClientTimeoutsRead.Payload(reading!, window, samples, limit, 2000),
             }, McpHelpers.JsonOptions);

@@ -71,7 +71,7 @@ public sealed class DarlingMcpPlanCacheSchedulerTools
             var rows = await DarlingPlanCacheSchedulerReader.GetPlanCacheBloatAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now, cancellationToken);
             if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "plan_cache_stats", cancellationToken)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "plan_cache_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No plan cache statistics available in the requested time range.");
 
             var totalPlans = rows.Sum(r => (long)r.TotalPlans);
@@ -82,7 +82,7 @@ public sealed class DarlingMcpPlanCacheSchedulerTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 captured_at = rows[0].CollectionTime.ToString("o"),
                 age_seconds = LatestSnapshotStamp.AgeSeconds(rows[0].CollectionTime, now),
                 summary = new
@@ -137,7 +137,7 @@ public sealed class DarlingMcpPlanCacheSchedulerTools
             var item = await DarlingPlanCacheSchedulerReader.GetCpuSchedulerPressureAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now, cancellationToken);
             if (item == null)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "cpu_scheduler_stats", cancellationToken)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "cpu_scheduler_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No CPU scheduler snapshot in the requested time range. The scheduler collector may not have run yet, or its newest snapshot is older than hours_back.");
 
             var workerUtilizationPercent = item.MaxWorkersCount > 0
@@ -150,7 +150,7 @@ public sealed class DarlingMcpPlanCacheSchedulerTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 captured_at = item.CollectionTime.ToString("o"),
                 age_seconds = LatestSnapshotStamp.AgeSeconds(item.CollectionTime, now),
                 schedulers = item.SchedulerCount,

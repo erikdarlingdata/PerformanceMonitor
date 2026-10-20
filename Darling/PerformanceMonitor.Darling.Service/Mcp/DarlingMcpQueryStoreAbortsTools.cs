@@ -114,7 +114,7 @@ public sealed class DarlingMcpQueryStoreAbortsTools
                 {
                     return McpHelpers.StatusForDatabase(
                         "empty",
-                        $"No Query Store query on {resolved.ServerName} had an aborted or exception run in the last {hours_back} hour(s)"
+                        $"No Query Store query on {resolved.DisplayName} had an aborted or exception run in the last {hours_back} hour(s)"
                         + (scopeName is null ? "" : $" for {(databases.Names.Count > 1 ? DatabaseFilter.ManyDatabasesDescription : "database '" + scopeName + "'")}")
                         + ". Other runs were recorded in the window, so this is a measured zero"
                         + (truncated ? ", over the part of the window the store holds (see effective_start)." : "."),
@@ -122,13 +122,13 @@ public sealed class DarlingMcpQueryStoreAbortsTools
                 }
 
                 return McpHelpers.WithDatabase(
-                           await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store", cancellationToken)
-                           ?? await DarlingRuntimePrecondition.QueryStoreStatusAsync(postgres, resolved.ServerId, resolved.ServerName, databases, cancellationToken)
-                           ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store", cancellationToken),
+                           await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_store", cancellationToken)
+                           ?? await DarlingRuntimePrecondition.QueryStoreStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, databases, cancellationToken)
+                           ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_store", cancellationToken),
                            scopeName)
                        ?? McpHelpers.StatusForDatabase(
                            "empty",
-                           $"No Query Store rows for {resolved.ServerName} in the {hours_back}-hour window searched"
+                           $"No Query Store rows for {resolved.DisplayName} in the {hours_back}-hour window searched"
                            + (truncated ? ", and the store does not hold the whole window (see effective_start)." : ". Query Store may be off for the target databases, or nothing ran."),
                            scopeName, hints);
             }
@@ -157,7 +157,7 @@ public sealed class DarlingMcpQueryStoreAbortsTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 database_name = scopeName,
                 effective_start = McpHelpers.FormatEffectiveStart(effectiveStart),

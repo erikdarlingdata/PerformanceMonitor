@@ -37,7 +37,7 @@ public sealed partial class DarlingMcpFinOpsTools
     /// its slow-read row (#5814), after its checks and before its first store read.
     /// </summary>
     internal static async Task<string> ReadUtilizationAsync(
-        NpgsqlDataSource postgres, (int ServerId, string ServerName) resolved, int hoursBack, int limit, CancellationToken ct)
+        NpgsqlDataSource postgres, (int ServerId, string ServerName, string DisplayName) resolved, int hoursBack, int limit, CancellationToken ct)
     {
         if (hoursBack != 24)
             return McpHelpers.Refusal("hours_back",
@@ -53,7 +53,7 @@ public sealed partial class DarlingMcpFinOpsTools
             postgres, resolved.ServerId, McpCommandDeadlines.ReadSeconds, ct);
         if (dto == null)
         {
-            return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "memory_stats", ct)
+            return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "memory_stats", ct)
                 ?? McpHelpers.Status("empty",
                     "No memory statistics were collected for this server in the last 24 hours, so there is no utilization summary.");
         }
@@ -74,7 +74,7 @@ public sealed partial class DarlingMcpFinOpsTools
 
         return JsonSerializer.Serialize(new
         {
-            server = resolved.ServerName,
+            server = resolved.DisplayName,
             view = UtilizationView,
             window_hours = 24,
             trend_days = UtilizationTrendDays,

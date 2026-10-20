@@ -84,7 +84,7 @@ public sealed class DarlingMcpSignatureMergeTools
                     return Refused(problem.Code, problem.Message);
                 var id = await DeadlockSignatureStore.InsertMergeAsync(connection, transaction, resolved.ServerId, signature, merged_into, reason!.Trim(), "mcp", ct);
                 await transaction.CommitAsync(ct);
-                return Answer(resolved.ServerName, resolved.ServerId, signature, merged_into, id);
+                return Answer(resolved.DisplayName, resolved.ServerId, signature, merged_into, id);
             }
 
             _ = InvestigationToolCore.ParseAgentAction(agent_action, out var action);
@@ -112,7 +112,7 @@ public sealed class DarlingMcpSignatureMergeTools
                     }, ct);
                 if (outcome.Refusal is { } refusal)
                     return DarlingAgentActionGate.RefusalAnswer(refusal);
-                return Answer(resolved.ServerName, resolved.ServerId, signature, merged_into, mergeId);
+                return Answer(resolved.DisplayName, resolved.ServerId, signature, merged_into, mergeId);
             }
             catch (AgentToolOutcomeException ex)
             {

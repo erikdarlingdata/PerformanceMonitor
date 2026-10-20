@@ -69,7 +69,7 @@ public sealed class McpPlanCorrectionTools
 
             if (tuning.Count == 0 && rows.Count == 0)
             {
-                return McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "plan_correction"), database)
+                return McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "plan_correction"), database)
                     ?? McpHelpers.StatusForDatabase("empty",
                         /* #5244: a filtered empty is a verdict about the chosen database only, the same words as Darling's twin. */
                         database != null
@@ -130,7 +130,7 @@ public sealed class McpPlanCorrectionTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 /* #4966: always present (false and null when the store covered the window). No effective_hours_back: this payload
                    carries a page `truncated`, and the census holds that key apart for the window floor. */

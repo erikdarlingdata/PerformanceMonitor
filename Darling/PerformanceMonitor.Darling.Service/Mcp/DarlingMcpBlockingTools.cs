@@ -171,7 +171,7 @@ public sealed class DarlingMcpBlockingTools
             var rows = await DarlingBlockingReader.GetRecentBlockedProcessReportsAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now, fetch, databases, cancellationToken);
             if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "blocked_process_report", cancellationToken)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "blocked_process_report", cancellationToken)
                     /* #4966: an empty answer over a window the store may not reach back to is not a true negative, so the window keys
                        ride on it under hints. The page is fed by two collectors, so the probe is both (the earlier of the two). */
                     ?? McpHelpers.Status("empty", $"No blocking events found in the specified time range{ForChosenDatabases(databases)}.",
@@ -290,7 +290,7 @@ public sealed class DarlingMcpBlockingTools
 
             var json = WithoutNullPlanFlags(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 /* The span REQUESTED. Kept under its shipped name, and no longer the only span on the page. */
                 hours_back,
                 /* #4966: where the store's data starts, always present on a data answer (false and null when the store covered the
@@ -419,12 +419,12 @@ public sealed class DarlingMcpBlockingTools
             var rows = await DarlingBlockingReader.GetRecentDeadlocksAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now, fetch, cancellationToken: cancellationToken);
             if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "deadlocks", cancellationToken)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "deadlocks", cancellationToken)
                     /* #2546: capability first (permanent), then the runtime precondition (fixable), then the
                        read's own miss. A deadlock capture whose XE session is gone records SESSION_MISSING
                        and then returns zero rows forever, which is byte-identical to a server that simply
                        did not deadlock — the one answer nobody should be given without being told. */
-                    ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, "deadlocks", cancellationToken)
+                    ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "deadlocks", cancellationToken)
                     /* #4966: the window keys ride on an empty answer under hints; not_collected and the precondition stay bare. */
                     ?? McpHelpers.Status("empty", "No deadlocks found in the specified time range.",
                         (await DarlingMcpWindowNotice.ReadEventAsync(
@@ -486,7 +486,7 @@ public sealed class DarlingMcpBlockingTools
 
             var json = WithoutNullPlanFlags(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 /* #4966: where the store's data starts, always present on a data answer (false and null when the store covered the
                    window). No effective_hours_back: this payload carries a page `truncated`, and the census holds that key apart
@@ -601,7 +601,7 @@ public sealed class DarlingMcpBlockingTools
                consume one of the `limit` slots the caller wanted spent on real graphs. It is now the SQL's
                predicate rather than a Where() here, for the reason above. */
             if (candidates.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "deadlocks", cancellationToken)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "deadlocks", cancellationToken)
                     /* #4966: the window keys ride on an empty answer under hints; not_collected stays bare. */
                     ?? McpHelpers.Status("empty", "No deadlock XML available in the specified time range.",
                         (await DarlingMcpWindowNotice.ReadEventAsync(
@@ -673,7 +673,7 @@ public sealed class DarlingMcpBlockingTools
 
             var json = JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 /* #4966: where the store's data starts, always present on a data answer (false and null when the store covered the
                    window). No effective_hours_back: this payload carries a page `truncated`, and the census holds that key apart
@@ -748,10 +748,10 @@ public sealed class DarlingMcpBlockingTools
             var truncated = candidates.Count > limit;
             var withXml = candidates.Take(limit).ToList();
             if (withXml.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "blocked_process_report", cancellationToken)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "blocked_process_report", cancellationToken)
                     /* #2546: same order and same reason as get_deadlocks — a blocked-process capture whose
                        session is gone is indistinguishable here from a server that never blocked. */
-                    ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, "blocked_process_report", cancellationToken)
+                    ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "blocked_process_report", cancellationToken)
                     /* #4966: the report XML exists only in the XE arm, so the probe is the XE collector's alone: the DMV snapshots are
                        not a source of these rows, and their longer history must not read as coverage of reports they cannot hold. */
                     ?? McpHelpers.Status("empty", $"No blocked process report XML available in the specified time range{ForChosenDatabases(databases)}.",
@@ -793,7 +793,7 @@ public sealed class DarlingMcpBlockingTools
                 var leftOut = allReports.Count - fitCount;
                 return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 /* #4966: where the store's data starts, always present on a data answer (false and null when the store covered the
                    window). No effective_hours_back: this payload carries a page `truncated`, and the census holds that key apart
@@ -877,7 +877,7 @@ public sealed class DarlingMcpBlockingTools
                     from collection_log, which records a SUCCESS with zero rows for a collector that ran
                     and saw nothing. Probed only here, on the path that already found nothing.
                 */
-                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "blocked_process_report", cancellationToken);
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "blocked_process_report", cancellationToken);
                 if (gated != null)
                 {
                     return gated;
@@ -886,14 +886,14 @@ public sealed class DarlingMcpBlockingTools
                 var captures = await DarlingBlockingTrendReader.GetBlockingCaptureCountsAsync(
                     postgres, resolved.ServerId, start, now, cancellationToken);
                 return WithNullSource(await EmptyTrend(
-                    "blocking", resolved.ServerName, hours_back, captures,
+                    "blocking", resolved.DisplayName, hours_back, captures,
                     () => DarlingBlockingTrendReader.HasAnyBlockingCollectorRunAsync(postgres, resolved.ServerId, cancellationToken),
                     databases));
             }
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 /* #5244: which databases the trend is limited to (null for all), and which collector answered: the blocked-process
                    reports, or the DMV snapshot when those have no rows for the chosen databases. One source per answer. */
@@ -933,7 +933,7 @@ public sealed class DarlingMcpBlockingTools
             if (points.Count == 0)
             {
                 /* Same two facts as the blocking trend above, same denominator, same reason. */
-                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "deadlocks", cancellationToken);
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "deadlocks", cancellationToken);
                 if (gated != null)
                 {
                     return gated;
@@ -945,13 +945,13 @@ public sealed class DarlingMcpBlockingTools
                     /* SINGULAR: the subject lands in "No {subject} was recorded", and "no deadlocks
                        was recorded" is not a sentence. It also reads correctly in the other two,
                        where it modifies the collector rather than the event. */
-                    "deadlock", resolved.ServerName, hours_back, captures,
+                    "deadlock", resolved.DisplayName, hours_back, captures,
                     () => DarlingBlockingTrendReader.HasAnyDeadlockCollectorRunAsync(postgres, resolved.ServerId, cancellationToken));
             }
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 trend = points.Select(p => new { time = p.Time.ToString("o"), count = p.Count })
             }, McpHelpers.JsonOptions);
@@ -1014,7 +1014,7 @@ public sealed class DarlingMcpBlockingTools
                     wait stats for months and never taken a lock wait is the all-clear this branch is for,
                     and filtering the probe the same way would call that server uncollected.
                 */
-                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "wait_stats", cancellationToken);
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "wait_stats", cancellationToken);
                 if (gated != null)
                 {
                     return gated;
@@ -1023,10 +1023,10 @@ public sealed class DarlingMcpBlockingTools
                 return await DarlingDataReader.HasAnyWaitStatAsync(postgres, resolved.ServerId, cancellationToken)
                     ? McpHelpers.Status(
                         "empty",
-                        $"No lock waits recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected wait stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.")
+                        $"No lock waits recorded for {resolved.DisplayName} in the last {hours_back} hour(s). This server HAS collected wait stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.")
                     : McpHelpers.Status(
                         "unavailable",
-                        $"No wait stats have EVER been recorded for {resolved.ServerName}, so this is NOT a report of a server without lock contention — nothing has been stored for it at all. Delta wait stats need a SECOND collection cycle before the first row exists, so on a newly added server this clears itself; otherwise check that collection is running and that the server is enabled.");
+                        $"No wait stats have EVER been recorded for {resolved.DisplayName}, so this is NOT a report of a server without lock contention — nothing has been stored for it at all. Delta wait stats need a SECOND collection cycle before the first row exists, so on a newly added server this clears itself; otherwise check that collection is running and that the server is enabled.");
             }
 
             /*
@@ -1040,7 +1040,7 @@ public sealed class DarlingMcpBlockingTools
             var types = await DarlingBlockingTrendReader.GetLockWaitTypesAsync(postgres, resolved.ServerId, start, end, cancellationToken);
 
             return TrendPayloads.LockWaitTrend(
-                resolved.ServerName, hours_back, types, points, bucketMinutes, bucket_minutes is not null, budget.AutoPoints);
+                resolved.DisplayName, hours_back, types, points, bucketMinutes, bucket_minutes is not null, budget.AutoPoints);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

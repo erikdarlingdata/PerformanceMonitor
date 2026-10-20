@@ -42,7 +42,7 @@ public sealed partial class DarlingMcpFinOpsTools
             .ToList();
 
     private static async Task<string> ReadApplicationConnectionsAsync(
-        NpgsqlDataSource postgres, (int ServerId, string ServerName) resolved, int hoursBack, int limit, CancellationToken ct)
+        NpgsqlDataSource postgres, (int ServerId, string ServerName, string DisplayName) resolved, int hoursBack, int limit, CancellationToken ct)
     {
         if (limit != DefaultLimit)
             return McpHelpers.Refusal("limit",
@@ -53,7 +53,7 @@ public sealed partial class DarlingMcpFinOpsTools
             postgres, resolved.ServerId, cutoff, McpCommandDeadlines.ReadSeconds, ct);
         if (rows.Count == 0)
         {
-            return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "session_stats", ct)
+            return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "session_stats", ct)
                 ?? McpHelpers.Status("empty",
                     $"No session statistics were collected for this server in the last {hoursBack} hours, so there is no per-application connection data to show.");
         }
@@ -61,7 +61,7 @@ public sealed partial class DarlingMcpFinOpsTools
         var ordered = OrderApplicationRows(rows);
         return JsonSerializer.Serialize(new
         {
-            server = resolved.ServerName,
+            server = resolved.DisplayName,
             view = ApplicationConnectionsView,
             hours_back = hoursBack,
             application_count = ordered.Count,

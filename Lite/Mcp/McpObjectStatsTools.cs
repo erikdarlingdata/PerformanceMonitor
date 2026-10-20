@@ -54,7 +54,7 @@ public sealed class McpObjectStatsTools
                 if (names != null && (await dataService.GetObjectSizeGrowthAsync(resolved.ServerId, 1)).Count > 0)
                 {
                     return McpHelpers.StatusForDatabase("empty",
-                        $"No table size rows for {McpDatabaseSelection.Scope(names)} on {resolved.ServerName} at the latest snapshot, "
+                        $"No table size rows for {McpDatabaseSelection.Scope(names)} on {resolved.DisplayName} at the latest snapshot, "
                         + "though the server has index rows in its other databases. Check the database name against get_database_sizes: "
                         + "the filter matches exactly, and an excluded or renamed database looks identical to one with no tables.",
                         McpDatabaseSelection.Describe(names));
@@ -62,7 +62,7 @@ public sealed class McpObjectStatsTools
 
                 /* #5244: every answer shape says which database it was limited to (null for every database). */
                 return McpHelpers.WithDatabase(
-                           await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "index_object_stats"),
+                           await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "index_object_stats"),
                            McpDatabaseSelection.Describe(names))
                     ?? McpHelpers.StatusForDatabase("unavailable", "No object size data available. Index/object stats are collected daily.", McpDatabaseSelection.Describe(names));
             }
@@ -101,7 +101,7 @@ public sealed class McpObjectStatsTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 database_name = McpDatabaseSelection.Describe(names),
                 history = new
                 {
@@ -196,7 +196,7 @@ public sealed class McpObjectStatsTools
                     {
                         return McpHelpers.Status(
                             "empty",
-                            $"No index usage rows for database '{database}' on {resolved.ServerName} at the "
+                            $"No index usage rows for database '{database}' on {resolved.DisplayName} at the "
                             + $"latest snapshot, though the server has {anyOnServer:N0} across its other "
                             + "databases. Check the database name against get_database_sizes — the filter "
                             + "matches exactly, and an excluded or renamed database looks identical to one "
@@ -204,7 +204,7 @@ public sealed class McpObjectStatsTools
                     }
                 }
 
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "index_object_stats")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "index_object_stats")
                     ?? McpHelpers.Status("unavailable", "No index usage data available. Index/object stats are collected daily.");
             }
 
@@ -233,7 +233,7 @@ public sealed class McpObjectStatsTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 database_name = database,
                 returned_index_count = rows.Count,
                 matching_index_count = matching,
@@ -296,14 +296,14 @@ public sealed class McpObjectStatsTools
                     && (await dataService.GetIndexLockingAsync(resolved.ServerId, 1)).Count > 0)
                 {
                     return McpHelpers.Status("empty",
-                        $"No lock/latch contention{inScope} on {resolved.ServerName} at the latest snapshot, though other databases on "
+                        $"No lock/latch contention{inScope} on {resolved.DisplayName} at the latest snapshot, though other databases on "
                         + "the server have some. Check the database name against get_database_sizes "
                         + "— the filter matches exactly, and an excluded or renamed database looks identical to one with no contention."
                         + (optimizedLockingNote is null ? "" : " " + optimizedLockingNote),
                         optimizedLockingNote is null ? null : new { optimized_locking_note = optimizedLockingNote });
                 }
 
-                var notCollected = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "index_object_stats");
+                var notCollected = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "index_object_stats");
                 if (notCollected is not null) return notCollected;
 
                 /* #5372 (r2 Low): a latest snapshot that holds index rows, none of them contended, is a TRUE negative:
@@ -315,7 +315,7 @@ public sealed class McpObjectStatsTools
                     return McpHelpers.Status("empty",
                         "No lock/latch contention"
                         + (database is null ? "" : $"{inScope} or in any other database")
-                        + $" on {resolved.ServerName} at the latest snapshot."
+                        + $" on {resolved.DisplayName} at the latest snapshot."
                         + (optimizedLockingNote is null ? "" : " " + optimizedLockingNote),
                         optimizedLockingNote is null ? null : new { optimized_locking_note = optimizedLockingNote });
                 }
@@ -349,7 +349,7 @@ public sealed class McpObjectStatsTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 /* #3880: captured_at, the #3637 census's one spelling for a latest read's stamp - see
                    McpServerInfoTools.GetServerProperties for why it is a cut-over and not an alias. Erik's
                    ruling on the call Darling's twin recorded in #3878/#3879 (stamp it, do not roster it as

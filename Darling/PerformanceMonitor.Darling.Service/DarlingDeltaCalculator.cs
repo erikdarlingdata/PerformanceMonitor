@@ -290,12 +290,15 @@ ORDER BY server_id, queryid, database_id, user_id, toplevel, collection_time DES
         while (await reader.ReadAsync(cancellationToken))
         {
             var serverId = reader.GetInt32(0);
-            var waitType = reader.GetString(1);
+            /* #6212: every cell but the server and the time is nullable in the store, and one NULL used to throw
+               out of the whole family's read, costing every server its continuity. A NULL key part reads as the
+               empty string and a NULL counter as 0, the way every other family below already reads them. */
+            var waitType = reader.IsDBNull(1) ? "" : reader.GetString(1);
             /* Naive-UTC storage by convention across the product — read as-is, never convert. */
             var ts = reader.IsDBNull(5) ? (DateTime?)null : reader.GetDateTime(5);
-            Seed(serverId, "wait_stats_tasks", waitType, reader.GetInt64(2), ts);
-            Seed(serverId, "wait_stats_time", waitType, reader.GetInt64(3), ts);
-            Seed(serverId, "wait_stats_signal", waitType, reader.GetInt64(4), ts);
+            Seed(serverId, "wait_stats_tasks", waitType, reader.IsDBNull(2) ? 0 : reader.GetInt64(2), ts);
+            Seed(serverId, "wait_stats_time", waitType, reader.IsDBNull(3) ? 0 : reader.GetInt64(3), ts);
+            Seed(serverId, "wait_stats_signal", waitType, reader.IsDBNull(4) ? 0 : reader.GetInt64(4), ts);
             passes.Observe(serverId, ts);
             count++;
         }
@@ -346,7 +349,7 @@ ORDER BY server_id, queryid, database_id, user_id, toplevel, collection_time DES
             var counter = reader.IsDBNull(2) ? "" : reader.GetString(2);
             var instance = reader.IsDBNull(3) ? "" : reader.GetString(3);
             var ts = reader.IsDBNull(5) ? (DateTime?)null : reader.GetDateTime(5);
-            Seed(serverId, "perfmon", $"{objectName}|{counter}|{instance}", reader.GetInt64(4), ts);
+            Seed(serverId, "perfmon", $"{objectName}|{counter}|{instance}", reader.IsDBNull(4) ? 0 : reader.GetInt64(4), ts);
             passes.Observe(serverId, ts);
             count++;
         }
@@ -387,7 +390,7 @@ ORDER BY server_id, queryid, database_id, user_id, toplevel, collection_time DES
         while (await reader.ReadAsync(cancellationToken))
         {
             var serverId = reader.GetInt32(0);
-            var latchClass = reader.GetString(1);
+            var latchClass = reader.IsDBNull(1) ? "" : reader.GetString(1);
             var ts = reader.IsDBNull(5) ? (DateTime?)null : reader.GetDateTime(5);
             Seed(serverId, "latch_stats_waiting_requests", latchClass, reader.IsDBNull(2) ? 0 : reader.GetInt64(2), ts);
             Seed(serverId, "latch_stats_wait_time", latchClass, reader.IsDBNull(3) ? 0 : reader.GetInt64(3), ts);
@@ -409,7 +412,7 @@ ORDER BY server_id, queryid, database_id, user_id, toplevel, collection_time DES
         while (await reader.ReadAsync(cancellationToken))
         {
             var serverId = reader.GetInt32(0);
-            var spinlockName = reader.GetString(1);
+            var spinlockName = reader.IsDBNull(1) ? "" : reader.GetString(1);
             var ts = reader.IsDBNull(6) ? (DateTime?)null : reader.GetDateTime(6);
             Seed(serverId, "spinlock_stats_collisions", spinlockName, reader.IsDBNull(2) ? 0 : reader.GetInt64(2), ts);
             Seed(serverId, "spinlock_stats_spins", spinlockName, reader.IsDBNull(3) ? 0 : reader.GetInt64(3), ts);
@@ -506,9 +509,18 @@ ORDER BY server_id, queryid, database_id, user_id, toplevel, collection_time DES
         while (await reader.ReadAsync(cancellationToken))
         {
             var serverId = reader.GetInt32(0);
+            var ts = reader.IsDBNull(4) ? (DateTime?)null : reader.GetDateTime(4);
+
+            /* #6212: a row with no event id cannot reproduce the collector's key, so it seeds nothing (the rule
+               query_stats applies to a row without offsets) but still feeds the pass window. */
+            if (reader.IsDBNull(1))
+            {
+                passes.Observe(serverId, ts);
+                continue;
+            }
+
             /* The key exactly as PgWaitStatsCollector builds it: the event id, invariant-formatted. */
             var key = reader.GetInt64(1).ToString(CultureInfo.InvariantCulture);
-            var ts = reader.IsDBNull(4) ? (DateTime?)null : reader.GetDateTime(4);
             Seed(serverId, "pg_wait_stats_waits", key, reader.IsDBNull(2) ? 0 : reader.GetInt64(2), ts);
             Seed(serverId, "pg_wait_stats_time", key, reader.IsDBNull(3) ? 0 : reader.GetInt64(3), ts);
             passes.Observe(serverId, ts);
@@ -528,10 +540,19 @@ ORDER BY server_id, queryid, database_id, user_id, toplevel, collection_time DES
         while (await reader.ReadAsync(cancellationToken))
         {
             var serverId = reader.GetInt32(0);
+            var ts = reader.IsDBNull(8) ? (DateTime?)null : reader.GetDateTime(8);
+
+            /* #6212: a row missing any of the three ids cannot reproduce the collector's key, so it seeds nothing
+               but still feeds the pass window. One such row used to throw out of the family's read. */
+            if (reader.IsDBNull(1) || reader.IsDBNull(2) || reader.IsDBNull(3))
+            {
+                passes.Observe(serverId, ts);
+                continue;
+            }
+
             /* The key exactly as PgStatementStatsCollector.ReadAsync builds it. */
             var key = string.Create(CultureInfo.InvariantCulture,
                 $"{reader.GetInt64(1)}|{reader.GetInt64(2)}|{reader.GetInt64(3)}|{(!reader.IsDBNull(4) && reader.GetBoolean(4) ? 1 : 0)}");
-            var ts = reader.IsDBNull(8) ? (DateTime?)null : reader.GetDateTime(8);
             Seed(serverId, "pg_statement_stats_calls", key, reader.IsDBNull(5) ? 0 : reader.GetInt64(5), ts);
             /* (long) of the stored double — the collector's own truncation. */
             Seed(serverId, "pg_statement_stats_time", key, reader.IsDBNull(6) ? 0 : (long)reader.GetDouble(6), ts);
