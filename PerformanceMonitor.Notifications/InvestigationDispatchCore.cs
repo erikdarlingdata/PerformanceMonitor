@@ -138,7 +138,7 @@ public sealed class InvestigationDispatchCore
     public async Task<InvestigationOpenResult?> OpenOrJoinAsync(
         string serverId, string serverName, string metricName, bool muted, DateTime alertTimeUtc, AlertContext? context,
         string? storyPathHash, InvestigationAlertFacts? facts, CancellationToken cancellationToken,
-        string triggerKind = InvestigationTriggerKinds.Alert)
+        string triggerKind = InvestigationTriggerKinds.Alert, IReadOnlyList<string>? dedupKeys = null, Action<Exception>? failed = null)
     {
         if (muted)
         {
@@ -176,7 +176,7 @@ public sealed class InvestigationDispatchCore
                 family,
                 metricName,
                 alertTimeUtc,
-                DedupKeys(serverId, serverName, metricName, context, _settings),
+                dedupKeys ?? DedupKeys(serverId, serverName, metricName, context, _settings),
                 storyPathHash,
                 route.AgentMaxPerHour,
                 route.AgentMaxPerDay,
@@ -227,6 +227,7 @@ public sealed class InvestigationDispatchCore
             _logger.LogWarning(
                 "Investigation dispatch failed for {Metric} on {Server}; the alert's delivery and record go on: {Message}",
                 metricName, serverName, ex.Message);
+            failed?.Invoke(ex);
             return null;
         }
     }
@@ -236,11 +237,14 @@ public sealed class InvestigationDispatchCore
     /// trigger: the same agent route (the metric <see cref="InvestigationTriggerKinds.ChangeWatchMetric"/> resolves like any
     /// other, so a route that sends everything, or this metric, to an agent turns it on), the same agent gate, the same store
     /// call and the same wake-up. Null when nothing was opened (no agent route, held by the gate, or a failure).
+    /// <paramref name="requestKey"/> is the request's dedup key, the watch's id: a unique index admits one request per key, so a replay
+    /// cannot open a second. <paramref name="failed"/> is called with the exception when the open threw, which tells a failure from "no route".
     /// </summary>
     public Task<InvestigationOpenResult?> OpenChangeWatchAsync(
-        string serverId, string serverName, DateTime alertTimeUtc, InvestigationAlertFacts facts, CancellationToken cancellationToken) =>
+        string serverId, string serverName, DateTime alertTimeUtc, InvestigationAlertFacts facts, CancellationToken cancellationToken,
+        string? requestKey = null, Action<Exception>? failed = null) =>
         OpenOrJoinAsync(serverId, serverName, InvestigationTriggerKinds.ChangeWatchMetric, false, alertTimeUtc, null, null, facts,
-            cancellationToken, InvestigationTriggerKinds.ChangeWatch);
+            cancellationToken, InvestigationTriggerKinds.ChangeWatch, requestKey is null ? null : new[] { requestKey }, failed);
 
     /// <summary>
     /// #5821, shared by #5820: opens or joins the request for an alert that is about to be sent and recorded, and returns the

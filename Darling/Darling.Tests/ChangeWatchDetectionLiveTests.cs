@@ -28,58 +28,75 @@ namespace Darling.Tests;
 /* #1776 own-store: every fact mints its own scratch database through ChangeWatchLiveTests.RunAsync (ScratchPostgres), so the class is deliberately NOT [Collection("live-postgres")]. */
 public sealed class ChangeWatchDetectionLiveTests
 {
-    private static DateTime Naive(DateTime utc) => DateTime.SpecifyKind(utc, DateTimeKind.Unspecified);
+    internal static DateTime Naive(DateTime utc) => DateTime.SpecifyKind(utc, DateTimeKind.Unspecified);
 
-    private static Task ServerConfigAsync(NpgsqlConnection c, DateTime at, string name, long value, CancellationToken ct) =>
+    internal static Task ServerConfigAsync(NpgsqlConnection c, DateTime at, string name, long value, CancellationToken ct) =>
         SeedAsync(c, "server_config", new Dictionary<string, object>
         {
             ["server_id"] = ServerId, ["server_name"] = ServerName, ["capture_time"] = Naive(at), ["configuration_name"] = name,
             ["value_configured"] = value, ["value_in_use"] = value, ["is_dynamic"] = true, ["is_advanced"] = false,
         }, ct);
 
-    private static Task DatabaseConfigAsync(NpgsqlConnection c, DateTime at, string database, int compatibility, string recovery, CancellationToken ct) =>
+    internal static Task DatabaseConfigAsync(NpgsqlConnection c, DateTime at, string database, int compatibility, string recovery, CancellationToken ct) =>
         SeedAsync(c, "database_config", new Dictionary<string, object>
         {
             ["server_id"] = ServerId, ["server_name"] = ServerName, ["capture_time"] = Naive(at), ["database_name"] = database,
             ["compatibility_level"] = compatibility, ["recovery_model"] = recovery,
         }, ct);
 
-    private static Task ScopedConfigAsync(NpgsqlConnection c, DateTime at, string database, string name, string value, CancellationToken ct) =>
+    internal static Task ScopedConfigAsync(NpgsqlConnection c, DateTime at, string database, string name, string value, CancellationToken ct) =>
         SeedAsync(c, "database_scoped_config", new Dictionary<string, object>
         {
             ["server_id"] = ServerId, ["server_name"] = ServerName, ["capture_time"] = Naive(at), ["database_name"] = database,
             ["configuration_name"] = name, ["value"] = value,
         }, ct);
 
-    private static Task TraceFlagAsync(NpgsqlConnection c, DateTime at, int flag, CancellationToken ct) =>
+    internal static Task TraceFlagAsync(NpgsqlConnection c, DateTime at, int flag, CancellationToken ct) =>
         SeedAsync(c, "trace_flags", new Dictionary<string, object>
         {
             ["server_id"] = ServerId, ["server_name"] = ServerName, ["capture_time"] = Naive(at), ["trace_flag"] = flag,
             ["status"] = true, ["is_global"] = true, ["is_session"] = false,
         }, ct);
 
-    private static Task ForcedPlanAsync(NpgsqlConnection c, DateTime at, string database, long queryId, long planId, CancellationToken ct) =>
+    internal static Task ForcedPlanAsync(NpgsqlConnection c, DateTime at, string database, long queryId, long planId, CancellationToken ct) =>
         SeedAsync(c, "query_store_forced_plans", new Dictionary<string, object>
         {
             ["server_id"] = ServerId, ["server_name"] = ServerName, ["collection_time"] = Naive(at), ["database_name"] = database,
             ["query_id"] = queryId, ["plan_id"] = planId,
         }, ct);
 
-    private static Task LedgerAsync(NpgsqlConnection c, DateTime at, string database, long queryId, long planId, string action, CancellationToken ct) =>
+    /* The collector writes ONE all-NULL marker row per captured database per pass (database_name only), then the forced plans. */
+    internal static Task ForcedPlanMarkerAsync(NpgsqlConnection c, DateTime at, string database, CancellationToken ct) =>
+        SeedAsync(c, "query_store_forced_plans", new Dictionary<string, object>
+        {
+            ["server_id"] = ServerId, ["server_name"] = ServerName, ["collection_time"] = Naive(at), ["database_name"] = database,
+        }, ct);
+
+    /// <summary>One capture of one database exactly as the collector writes it: the marker row, then each forced plan.</summary>
+    internal static async Task ForcedPlanCaptureAsync(NpgsqlConnection c, DateTime at, string database, CancellationToken ct, params (long Query, long Plan)[] plans)
+    {
+        await ForcedPlanMarkerAsync(c, at, database, ct);
+        foreach (var (query, plan) in plans)
+        {
+            await ForcedPlanAsync(c, at, database, query, plan, ct);
+        }
+    }
+
+    internal static Task LedgerAsync(NpgsqlConnection c, DateTime at, string database, long queryId, long planId, string action, CancellationToken ct) =>
         SeedAsync(c, "plan_force_actions", new Dictionary<string, object>
         {
             ["server_id"] = ServerId, ["server_name"] = ServerName, ["action_time"] = Naive(at), ["database_name"] = database,
             ["query_id"] = queryId, ["plan_id"] = planId, ["action"] = action, ["outcome"] = "succeeded",
         }, ct);
 
-    private static Task CollectorRunAsync(NpgsqlConnection c, DateTime at, string collector, string status, long rows, CancellationToken ct) =>
+    internal static Task CollectorRunAsync(NpgsqlConnection c, DateTime at, string collector, string status, long rows, CancellationToken ct) =>
         SeedAsync(c, "collection_log", new Dictionary<string, object>
         {
             ["server_id"] = ServerId, ["server_name"] = ServerName, ["collection_time"] = Naive(at), ["collector_name"] = collector,
             ["status"] = status, ["rows_collected"] = rows,
         }, ct);
 
-    private static async Task AddServerAsync(NpgsqlConnection c, CancellationToken ct)
+    internal static async Task AddServerAsync(NpgsqlConnection c, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(
             "INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date) " +
@@ -89,7 +106,7 @@ public sealed class ChangeWatchDetectionLiveTests
         await command.ExecuteNonQueryAsync(ct);
     }
 
-    private static string[] Keys(IEnumerable<ChangeWatchChange> changes) => changes.Select(c => c.Key).OrderBy(k => k, StringComparer.Ordinal).ToArray();
+    internal static string[] Keys(IEnumerable<ChangeWatchChange> changes) => changes.Select(c => c.Key).OrderBy(k => k, StringComparer.Ordinal).ToArray();
 
     [Fact]
     public async Task ReadChanges_FindsExactlyTheChangesAfterTheMark_ForEverySnapshotSource_AndNothingAtOrBeforeIt()
@@ -139,18 +156,15 @@ public sealed class ChangeWatchDetectionLiveTests
 
             /* Forced plans a person forced: plan 10/100 is the baseline, 11/110 appears before the mark, 12/120 after it. The ledger forced
                plan 13/130 before the mark and 14/140 after it, and a person's snapshot row for 14/140 appears right after (the ledger's own). */
-            await ForcedPlanAsync(h.Connection, t1, "Sales", 10, 100, ct);
+            await ForcedPlanCaptureAsync(h.Connection, t1, "Sales", ct, (10, 100));
             foreach (var at in new[] { t2, t3 })
             {
-                await ForcedPlanAsync(h.Connection, at, "Sales", 10, 100, ct);
-                await ForcedPlanAsync(h.Connection, at, "Sales", 11, 110, ct);
+                await ForcedPlanCaptureAsync(h.Connection, at, "Sales", ct, (10, 100), (11, 110));
             }
 
             foreach (var at in new[] { t4, t5 })
             {
-                await ForcedPlanAsync(h.Connection, at, "Sales", 10, 100, ct);
-                await ForcedPlanAsync(h.Connection, at, "Sales", 11, 110, ct);
-                await ForcedPlanAsync(h.Connection, at, "Sales", 12, 120, ct);
+                await ForcedPlanCaptureAsync(h.Connection, at, "Sales", ct, (10, 100), (11, 110), (12, 120));
             }
 
             await LedgerAsync(h.Connection, t2, "Sales", 13, 130, "force", ct);
@@ -189,40 +203,60 @@ public sealed class ChangeWatchDetectionLiveTests
         });
     }
 
-    private static string Stamp(DateTime time) => time.ToString("yyyyMMddTHHmmssfff", System.Globalization.CultureInfo.InvariantCulture);
+    internal static string Stamp(DateTime time) => time.ToString("yyyyMMddTHHmmssfff", System.Globalization.CultureInfo.InvariantCulture);
 
     [Fact]
-    public async Task TheLastForcedPlanBeingUnforced_IsAChange_OnlyWhenTheCollectorRanAndStoredNothing()
+    public async Task APlanBeingUnforced_IsAChange_PerDatabase_FromTheMarkerRows_AndNeverFromADatabaseThatWasNotCaptured()
     {
         await RunAsync(true, async (h, ct) =>
         {
-            var snapshot = h.Now.AddMinutes(-40);
-            foreach (var (query, plan) in new[] { (1L, 10L), (2L, 20L), (3L, 30L) })
-            {
-                await ForcedPlanAsync(h.Connection, snapshot, "Sales", query, plan, ct);
-            }
+            var first = h.Now.AddMinutes(-50);
+            var second = h.Now.AddMinutes(-40);
+            var third = h.Now.AddMinutes(-30);
 
-            /* The ledger unforced plan 3 itself just before the empty run: it is the ledger's change, not a person's. */
-            await LedgerAsync(h.Connection, snapshot.AddMinutes(9), "Sales", 3, 30, "unforce", ct);
+            /* Sales has three forced plans, then one of them is unforced and the ledger itself unforces another; Orders loses its LAST forced plan (the
+               capture still writes its marker); Billing is captured once and is then not captured at all (Query Store off, a failover). */
+            await ForcedPlanCaptureAsync(h.Connection, first, "Sales", ct, (1, 10), (2, 20), (3, 30));
+            await ForcedPlanCaptureAsync(h.Connection, first, "Orders", ct, (4, 40));
+            await ForcedPlanCaptureAsync(h.Connection, first, "Billing", ct, (5, 50));
+            await LedgerAsync(h.Connection, second.AddMinutes(-3), "Sales", 3, 30, "unforce", ct);
+            await ForcedPlanCaptureAsync(h.Connection, second, "Sales", ct, (2, 20));
+            await ForcedPlanCaptureAsync(h.Connection, second, "Orders", ct);
+            await ForcedPlanCaptureAsync(h.Connection, third, "Sales", ct, (2, 20));
+            await ForcedPlanCaptureAsync(h.Connection, third, "Orders", ct);
 
-            /* A run that failed stored nothing too, and says nothing: only a SUCCESS run that stored zero rows is "the collector looked". */
-            await CollectorRunAsync(h.Connection, snapshot.AddMinutes(5), "query_store_forced_plans", "ERROR", 0, ct);
-            await CollectorRunAsync(h.Connection, snapshot.AddMinutes(10), "query_store_forced_plans", "SUCCESS", 0, ct);
-            /* The next empty run has nothing left to unforce. */
-            await CollectorRunAsync(h.Connection, snapshot.AddMinutes(20), "query_store_forced_plans", "SUCCESS", 0, ct);
-
-            var found = await h.NewPass().ReadChangesAsync(ServerId, snapshot.AddMinutes(-1), h.Now, ct);
-            var unforced = found.Where(c => c.Key.StartsWith("plan_force:unforced:", StringComparison.Ordinal)).ToList();
+            var found = await h.NewPass().ReadChangesAsync(ServerId, first.AddMinutes(-1), h.Now, ct);
+            var plans = found.Where(c => c.Kind == "plan_force" && !c.Key.StartsWith("plan_force:action:", StringComparison.Ordinal)).ToList();
             Assert.Equal(
-                new[] { "plan_force:unforced:Sales:1:10:" + Stamp(snapshot.AddMinutes(10)), "plan_force:unforced:Sales:2:20:" + Stamp(snapshot.AddMinutes(10)) },
-                Keys(unforced));
-            Assert.All(unforced, c => Assert.Equal("plan_force", c.Kind));
-            Assert.Equal(new long?[] { 1, 2 }, unforced.Select(c => c.QueryId).OrderBy(q => q).ToArray());
+                new[] { "plan_force:unforced:Orders:4:40:" + Stamp(second), "plan_force:unforced:Sales:1:10:" + Stamp(second) },
+                Keys(plans));
+            Assert.Equal(new long?[] { 1, 4 }, plans.Select(c => c.QueryId).OrderBy(q => q).ToArray());
 
-            /* Marked at the empty run, it was seen already. */
-            Assert.DoesNotContain(
-                await h.NewPass().ReadChangesAsync(ServerId, snapshot.AddMinutes(10), h.Now, ct),
-                c => c.Key.StartsWith("plan_force:unforced:", StringComparison.Ordinal));
+            /* Marked at the unforcing capture, it was seen already; and nothing reads Billing, which has no capture after its first. */
+            Assert.DoesNotContain(await h.NewPass().ReadChangesAsync(ServerId, second, h.Now, ct), c => c.Kind == "plan_force");
+        });
+    }
+
+    [Fact]
+    public async Task MarkerRows_DoNotFailDetection_AndALaterCapturedDatabaseIsABaseline_NotAForce()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            var mark = h.Now.AddMinutes(-30);
+            /* A server whose only Query Store database has no forced plan: every pass writes a marker row and nothing else. */
+            await ServerConfigAsync(h.Connection, mark.AddMinutes(-10), "max degree of parallelism", 4, ct);
+            await ServerConfigAsync(h.Connection, mark.AddMinutes(10), "max degree of parallelism", 2, ct);
+            await ForcedPlanMarkerAsync(h.Connection, mark.AddMinutes(-10), "Sales", ct);
+            await ForcedPlanMarkerAsync(h.Connection, mark.AddMinutes(5), "Sales", ct);
+            await ForcedPlanMarkerAsync(h.Connection, mark.AddMinutes(10), "Sales", ct);
+            /* A database first captured now has forced plans: its first capture is a baseline, not "forced by a person". */
+            await ForcedPlanCaptureAsync(h.Connection, mark.AddMinutes(10), "Orders", ct, (7, 70));
+
+            var found = await h.NewPass().ReadChangesAsync(ServerId, mark, h.Now, ct);
+
+            /* The server setting change is read in the same pass: a marker row used to throw out of the read and drop it. */
+            var change = Assert.Single(found);
+            Assert.Equal("server_config", change.Kind);
         });
     }
 

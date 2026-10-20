@@ -149,12 +149,6 @@ public sealed class InvestigationDispatcher
         AlertHistoryRecord record, AlertContext? context, string? storyPathHash = null, CancellationToken cancellationToken = default) =>
         _core.DispatchAsync(record, context, storyPathHash, cancellationToken);
 
-    /// <summary>#6234: opens the request of a change watch whose measures moved, through the same route, gate and store call an alert uses
-    /// (<see cref="InvestigationDispatchCore.OpenChangeWatchAsync"/>). Never throws.</summary>
-    public Task<InvestigationOpenResult?> OpenChangeWatchAsync(
-        string serverId, string serverName, DateTime alertTimeUtc, InvestigationAlertFacts facts, CancellationToken cancellationToken = default) =>
-        _core.OpenChangeWatchAsync(serverId, serverName, alertTimeUtc, facts, cancellationToken);
-
     /// <summary>The shared core, for the change watch's pass (#6234).</summary>
     internal InvestigationDispatchCore Core => _core;
 

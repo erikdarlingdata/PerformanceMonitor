@@ -31,6 +31,11 @@ public sealed record ChangeWatchRow(
     Guid WatchId, int ServerId, string ServerName, DateTime FirstChangeUtc, DateTime LastChangeUtc, DateTime WindowEndsUtc,
     string State, string? Result, Guid? RequestId, DateTime? ClosedUtc, string? ResultJson, IReadOnlyList<ChangeWatchChange> Changes);
 
+/// <summary>What <see cref="ChangeWatchStore.RecordAsync"/> did: the watch the changes joined or opened (null when none was recorded), and whether some
+/// change could not be recorded yet (its time is after the open watch's window): the caller keeps its marks, so the change is read again once that
+/// watch has been evaluated.</summary>
+public sealed record ChangeWatchRecordResult(Guid? WatchId, bool Deferred);
+
 /// <summary>
 /// #6234: the watch windows a recorded change opens. Every change opens a watch of <see cref="Window"/> for its server, or extends the
 /// server's open one (one open watch per server, a partial unique index), and the watch is a row, so a restart loses nothing: a watch
@@ -47,6 +52,18 @@ public sealed class ChangeWatchStore
 
     /// <summary>The <c>result</c> of a closed watch: nothing moved, an investigation request was opened, or something moved and no request was opened (investigations off, no agent route, a limit).</summary>
     public const string ResultFlat = "flat", ResultRequestOpened = "request_opened", ResultMovedNoRequest = "moved_no_request", ResultNoData = "no_data";
+
+    /// <summary>The <c>result</c> of a watch that saw something move but whose every change was an agent's own plan change made while it handled a change-watch request: it is recorded and measured, and opens no further request (no loop, #6234).</summary>
+    public const string ResultAgentChange = "moved_agent_change";
+
+    /// <summary>The most a watch may span from its first change (#6234): extension stops there, and a later change starts a new watch once this one has closed.</summary>
+    public static readonly TimeSpan MaxSpan = TimeSpan.FromMinutes(180);
+
+    /// <summary>How long a claim (<c>evaluating</c>) holds before another pass may take the watch over: the instance that claimed it is taken to have died.</summary>
+    public static readonly TimeSpan StaleClaim = TimeSpan.FromMinutes(10);
+
+    /// <summary>The dedup key a watch's request carries (#6234): one request per watch id, enforced by a unique index.</summary>
+    public static string RequestKey(Guid watchId) => "change_watch:" + watchId.ToString("D");
 
     /// <summary>
     /// V207 (#6234): <c>config.change_watches</c>, <c>config.change_watch_changes</c> and <c>config.investigation_requests.trigger_kind</c>
@@ -70,8 +87,19 @@ CREATE TABLE IF NOT EXISTS config.change_watches
     result text,
     request_id uuid,
     result_json text,
-    CONSTRAINT ck_change_watches_state CHECK (state IN ('open', 'closed'))
+    claimed_at timestamptz,
+    CONSTRAINT ck_change_watches_state CHECK (state IN ('open', 'evaluating', 'closed'))
 );
+
+/* A store that took an earlier draft of this rung has the table without the claim column and with the two-state check. */
+ALTER TABLE config.change_watches ADD COLUMN IF NOT EXISTS claimed_at timestamptz;
+ALTER TABLE config.change_watches DROP CONSTRAINT IF EXISTS ck_change_watches_state;
+ALTER TABLE config.change_watches ADD CONSTRAINT ck_change_watches_state CHECK (state IN ('open', 'evaluating', 'closed'));
+
+/* One request per watch: the request's first dedup key is the watch id, so a retry, a crash between the open and the close, or a second
+   instance cannot open a second one (the loser's insert fails and it reads the winner's). */
+CREATE UNIQUE INDEX IF NOT EXISTS uq_investigation_requests_change_watch
+    ON config.investigation_requests (first_dedup_key) WHERE trigger_kind = 'change_watch';
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_change_watches_open ON config.change_watches (server_id) WHERE state = 'open';
 CREATE INDEX IF NOT EXISTS ix_change_watches_server_opened ON config.change_watches (server_id, opened_at);
@@ -138,12 +166,21 @@ CREATE TABLE IF NOT EXISTS config.change_watch_marks
     /// One transaction under a per-server advisory lock.
     /// </summary>
     public async Task<Guid?> RecordChangesAsync(
+        int serverId, string serverName, IReadOnlyList<ChangeWatchChange> changes, CancellationToken cancellationToken = default) =>
+        (await RecordAsync(serverId, serverName, changes, cancellationToken)).WatchId;
+
+    /// <summary>
+    /// <see cref="RecordChangesAsync"/> with the deferral spelled out. A change joins the server's open watch only when its time is at or before that
+    /// watch's window end (a watch whose window has ended is evaluated, never extended), and the window never runs past <see cref="MaxSpan"/> from the
+    /// watch's first change; a change that cannot join is deferred. A watch that is evaluating or closed no longer blocks a new one.
+    /// </summary>
+    public async Task<ChangeWatchRecordResult> RecordAsync(
         int serverId, string serverName, IReadOnlyList<ChangeWatchChange> changes, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(changes);
         if (changes.Count == 0)
         {
-            return null;
+            return new ChangeWatchRecordResult(null, false);
         }
 
         var now = Now();
@@ -171,34 +208,51 @@ CREATE TABLE IF NOT EXISTS config.change_watch_marks
         if (fresh.Count == 0)
         {
             await transaction.CommitAsync(cancellationToken);
-            return null;
+            return new ChangeWatchRecordResult(null, false);
         }
 
-        var first = Utc(fresh.Min(c => c.ChangeTimeUtc));
-        var last = Utc(fresh.Max(c => c.ChangeTimeUtc));
-        Guid watchId;
+        var watchId = Guid.Empty;
+        DateTime windowEnds = default;
         await using (var command = Command(connection, transaction,
-            "SELECT watch_id FROM config.change_watches WHERE server_id = $1 AND state = 'open' FOR UPDATE", serverId))
+            "SELECT watch_id, window_ends_at FROM config.change_watches WHERE server_id = $1 AND state = 'open' FOR UPDATE", serverId))
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
-            watchId = await command.ExecuteScalarAsync(cancellationToken) is Guid existing ? existing : Guid.Empty;
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                watchId = reader.GetGuid(0);
+                windowEnds = Utc(reader.GetDateTime(1));
+            }
         }
 
+        var deferred = false;
         if (watchId == Guid.Empty)
         {
+            var first = Utc(fresh.Min(c => c.ChangeTimeUtc));
+            var last = Utc(fresh.Max(c => c.ChangeTimeUtc));
             watchId = Guid.NewGuid();
             await using var insert = Command(connection, transaction, @"
 INSERT INTO config.change_watches (watch_id, server_id, server_name, opened_at, first_change_at, last_change_at, window_ends_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7)", watchId, serverId, serverName, now, first, last, last + Window);
+VALUES ($1, $2, $3, $4, $5, $6, $7)", watchId, serverId, serverName, now, first, last, new[] { last + Window, first + MaxSpan }.Min());
             await insert.ExecuteNonQueryAsync(cancellationToken);
         }
         else
         {
+            var joining = fresh.Where(c => Utc(c.ChangeTimeUtc) <= windowEnds).ToList();
+            deferred = joining.Count < fresh.Count;
+            fresh = joining;
+            if (fresh.Count == 0)
+            {
+                await transaction.CommitAsync(cancellationToken);
+                return new ChangeWatchRecordResult(null, true);
+            }
+
             await using var update = Command(connection, transaction, @"
 UPDATE config.change_watches
 SET first_change_at = least(first_change_at, $2),
     last_change_at = greatest(last_change_at, $3),
-    window_ends_at = greatest(window_ends_at, $4)
-WHERE watch_id = $1", watchId, first, last, last + Window);
+    window_ends_at = least(greatest(window_ends_at, $4), least(first_change_at, $2) + make_interval(mins => $5))
+WHERE watch_id = $1", watchId, Utc(fresh.Min(c => c.ChangeTimeUtc)), Utc(fresh.Max(c => c.ChangeTimeUtc)),
+                Utc(fresh.Max(c => c.ChangeTimeUtc)) + Window, (int)MaxSpan.TotalMinutes);
             await update.ExecuteNonQueryAsync(cancellationToken);
         }
 
@@ -213,7 +267,7 @@ ON CONFLICT (server_id, change_key) DO NOTHING",
         }
 
         await transaction.CommitAsync(cancellationToken);
-        return watchId;
+        return new ChangeWatchRecordResult(watchId, deferred);
     }
 
     /// <summary>The detection sources a server has a high-water mark for.</summary>
@@ -259,7 +313,57 @@ ON CONFLICT (server_id, source) DO UPDATE SET mark = greatest(config.change_watc
 
     /// <summary>The open watches whose window has ended, oldest first: a watch that ended while the service was down is among them.</summary>
     public Task<IReadOnlyList<ChangeWatchRow>> DueAsync(CancellationToken cancellationToken = default) =>
-        ReadAsync("w.state = 'open' AND w.window_ends_at <= $1", new object?[] { Now() }, 500, cancellationToken);
+        ReadAsync("w.window_ends_at <= $1 AND (w.state = 'open' OR (w.state = 'evaluating' AND w.claimed_at <= $2))",
+            new object?[] { Now(), Now() - StaleClaim }, 500, cancellationToken);
+
+    /// <summary>
+    /// Takes a due watch for evaluation: one UPDATE from <c>open</c> to <c>evaluating</c> (or from an <c>evaluating</c> whose claim has gone stale), guarded
+    /// by the status it reads, with RETURNING. False when another pass or instance holds it, so each watch is evaluated, and its request opened, by one.
+    /// </summary>
+    public async Task<bool> ClaimAsync(Guid watchId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var claim = Command(connection, null, @"
+UPDATE config.change_watches
+SET state = 'evaluating', claimed_at = $2
+WHERE watch_id = $1 AND window_ends_at <= $2
+  AND (state = 'open' OR (state = 'evaluating' AND claimed_at <= $3))
+RETURNING watch_id", watchId, Now(), Now() - StaleClaim);
+        return await claim.ExecuteScalarAsync(cancellationToken) is Guid;
+    }
+
+    /// <summary>The request already opened for this watch (its dedup key is the watch id), or null: a pass that took over a stale claim reads it instead of opening a second.</summary>
+    public async Task<Guid?> FindRequestAsync(Guid watchId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = Command(connection, null,
+            "SELECT request_id FROM config.investigation_requests WHERE trigger_kind = 'change_watch' AND first_dedup_key = $1", RequestKey(watchId));
+        return await command.ExecuteScalarAsync(cancellationToken) is Guid id ? id : null;
+    }
+
+    /// <summary>
+    /// True when the watch has changes and every one is an agent's plan force or unforce made while it handled a change-watch request (an
+    /// <c>action_called</c> journal row of a <c>plan_force</c> or <c>plan_unforce</c> kind, by an agent, on a change-watch request of this server, up to
+    /// 30 minutes before the capture that saw the change). Such a watch is recorded and measured but opens no request, so an agent's fix cannot start the next.
+    /// </summary>
+    public async Task<bool> IsAgentOnlyAsync(Guid watchId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = Command(connection, null, @"
+SELECT EXISTS (SELECT 1 FROM config.change_watch_changes WHERE watch_id = $1)
+   AND NOT EXISTS (
+        SELECT 1 FROM config.change_watch_changes AS c
+        WHERE c.watch_id = $1
+          AND (c.change_kind <> 'plan_force'
+               OR NOT EXISTS (
+                    SELECT 1 FROM config.investigation_journal AS j
+                    JOIN config.investigation_requests AS r ON r.request_id = j.request_id
+                    WHERE j.event = 'action_called' AND j.actor LIKE 'agent:%'
+                      AND j.detail->>'kind' IN ('plan_force', 'plan_unforce')
+                      AND r.trigger_kind = 'change_watch' AND r.server_id = c.server_id
+                      AND j.event_time >= c.change_time - interval '30 minutes' AND j.event_time <= c.change_time + interval '5 minutes')))", watchId);
+        return await command.ExecuteScalarAsync(cancellationToken) is true;
+    }
 
     /// <summary>Watches for <c>get_change_watches</c>: open and closed, newest first, optionally one server and one state.</summary>
     public Task<IReadOnlyList<ChangeWatchRow>> ListAsync(int? serverId, string? state, int limit, CancellationToken cancellationToken = default) =>
@@ -319,7 +423,7 @@ ORDER BY change_time, change_key", rows.Select(r => r.Item1).ToArray());
         await using var close = Command(connection, null, @"
 UPDATE config.change_watches
 SET state = 'closed', closed_at = $2, result = $3, request_id = $4, result_json = $5
-WHERE watch_id = $1 AND state = 'open'", watchId, Now(), result, requestId, resultJson);
+WHERE watch_id = $1 AND state IN ('open', 'evaluating')", watchId, Now(), result, requestId, resultJson);
         var closed = await close.ExecuteNonQueryAsync(cancellationToken) > 0;
         await using var prune = Command(connection, null,
             "DELETE FROM config.change_watches WHERE state = 'closed' AND closed_at < $1", Now() - ClosedRetention);

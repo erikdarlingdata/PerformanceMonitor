@@ -52,7 +52,7 @@ FROM (
     SELECT capture_time, database_name, configuration_name, value, value_for_secondary,
            LAG(value) OVER w AS prev_value, LAG(value_for_secondary) OVER w AS prev_secondary, row_number() OVER w AS rn
     FROM v_database_scoped_config
-    WHERE server_id = $1 AND {PerformanceMonitor.Darling.Service.Mcp.DarlingConfigHistoryReader.BaselineBound("v_database_scoped_config", "$1", "$2")}
+    WHERE server_id = $1 AND {PerformanceMonitor.Darling.Service.Mcp.DarlingConfigHistoryReader.BaselineBound("v_database_scoped_config", "$1", "$2", perColumn: "database_name")}
     WINDOW w AS (PARTITION BY database_name, configuration_name ORDER BY capture_time)
 ) AS x
 WHERE rn > 1 AND capture_time > $2 AND capture_time <= $3
@@ -63,41 +63,42 @@ SELECT action_id, action_time, database_name, query_id, plan_id, action
 FROM collect.plan_force_actions
 WHERE server_id = $1 AND outcome = 'succeeded' AND action_time > $2 AND action_time <= $3";
 
-    /* A person unforced the LAST forced plan: an empty forced-plan snapshot is not stored, so the rows never show it. The collector's own
-       run record does: a SUCCESS run that stored zero rows (CollectorRunFacts.RanFoundNothing's evidence) after a snapshot that held plans
-       means every plan in that snapshot is no longer forced. Only the FIRST empty run after a snapshot counts (a second one has nothing
-       left to unforce), and a plan the ledger unforced in the half hour before is the ledger's change, not a person's. */
-    private const string PlanUnforceAllSql = @"
-SELECT r.collection_time, f.database_name, f.query_id, f.plan_id
-FROM v_collection_log AS r
-CROSS JOIN LATERAL (SELECT max(p.collection_time) AS t FROM collect.query_store_forced_plans AS p
-                    WHERE p.server_id = r.server_id AND p.collection_time < r.collection_time) AS s
-JOIN collect.query_store_forced_plans AS f ON f.server_id = r.server_id AND f.collection_time = s.t
-WHERE r.server_id = $1 AND r.collector_name = 'query_store_forced_plans' AND r.status = 'SUCCESS' AND r.rows_collected = 0
-  AND r.collection_time > $2 AND r.collection_time <= $3
-  AND NOT EXISTS (SELECT 1 FROM v_collection_log AS r2
-                  WHERE r2.server_id = r.server_id AND r2.collector_name = r.collector_name AND r2.status = 'SUCCESS' AND r2.rows_collected = 0
-                    AND r2.collection_time > s.t AND r2.collection_time < r.collection_time)
-  AND NOT EXISTS (SELECT 1 FROM collect.plan_force_actions AS a
-                  WHERE a.server_id = f.server_id AND a.database_name IS NOT DISTINCT FROM f.database_name
-                    AND a.query_id = f.query_id AND a.plan_id = f.plan_id AND a.outcome = 'succeeded'
-                    AND a.action_time >= r.collection_time - interval '30 minutes' AND a.action_time <= r.collection_time)";
-
-    /* A plan that appears in a forced-plan snapshot after earlier snapshots that did not hold it: forced by a person (the ledger's own
-       forcing is read above). The server's first-ever snapshot is the baseline, never a change, and a snapshot a ledger row explains is skipped. */
+    /* #6234, #6239 round 3 (H1, H2, L1): plan changes by a person, read the way DarlingForcedPlanStateReader reads them. The forced-plan collector writes
+       ONE marker row per CAPTURED database per pass (database_name set, plan_id and query_id NULL), so a database's captures are the distinct
+       (collection_time, database_name) pairs. For each capture after the mark ($2) the plans are compared with the SAME database's previous capture: a plan in
+       the newer one and not the older was forced, the reverse was unforced. A database with no previous capture is a baseline, and a database that has no
+       capture in a run (failover, Query Store off, the collector failed for it) has nothing to compare, so it is never read as an unforce. The previous
+       capture is looked for a day back. A change the plan-force ledger explains (a succeeded action on the plan within 30 minutes before the capture) is skipped. */
     private const string PlanSnapshotChangesSql = @"
-SELECT f.collection_time, f.database_name, f.query_id, f.plan_id
-FROM collect.query_store_forced_plans AS f
-WHERE f.server_id = $1 AND f.collection_time > $2 AND f.collection_time <= $3
-  AND f.collection_time > (SELECT min(b.collection_time) FROM collect.query_store_forced_plans AS b WHERE b.server_id = f.server_id)
-  AND NOT EXISTS (SELECT 1 FROM collect.query_store_forced_plans AS p
-                  WHERE p.server_id = f.server_id AND p.database_name IS NOT DISTINCT FROM f.database_name
-                    AND p.query_id = f.query_id AND p.plan_id = f.plan_id
-                    AND p.collection_time < f.collection_time AND p.collection_time >= f.collection_time - interval '1 day')
+WITH caps AS (
+    SELECT t, database_name, LAG(t) OVER (PARTITION BY database_name ORDER BY t) AS prev_t
+    FROM (SELECT DISTINCT collection_time AS t, database_name
+          FROM collect.query_store_forced_plans
+          WHERE server_id = $1 AND collection_time > $2 - interval '1 day' AND collection_time <= $3 AND database_name IS NOT NULL) AS d
+), fresh AS (
+    SELECT t, database_name, prev_t FROM caps WHERE t > $2 AND prev_t IS NOT NULL
+)
+SELECT 'forced' AS change_kind, n.t, n.database_name, f.query_id, f.plan_id
+FROM fresh AS n
+JOIN collect.query_store_forced_plans AS f
+  ON f.server_id = $1 AND f.collection_time = n.t AND f.database_name = n.database_name AND f.plan_id IS NOT NULL AND f.query_id IS NOT NULL
+WHERE NOT EXISTS (SELECT 1 FROM collect.query_store_forced_plans AS p
+                  WHERE p.server_id = $1 AND p.collection_time = n.prev_t AND p.database_name = n.database_name
+                    AND p.query_id = f.query_id AND p.plan_id = f.plan_id)
   AND NOT EXISTS (SELECT 1 FROM collect.plan_force_actions AS a
-                  WHERE a.server_id = f.server_id AND a.database_name IS NOT DISTINCT FROM f.database_name
-                    AND a.query_id = f.query_id AND a.plan_id = f.plan_id AND a.outcome = 'succeeded'
-                    AND a.action_time >= f.collection_time - interval '30 minutes' AND a.action_time <= f.collection_time)";
+                  WHERE a.server_id = $1 AND a.database_name = f.database_name AND a.query_id = f.query_id AND a.plan_id = f.plan_id
+                    AND a.outcome = 'succeeded' AND a.action_time >= n.t - interval '30 minutes' AND a.action_time <= n.t)
+UNION ALL
+SELECT 'unforced', n.t, n.database_name, p.query_id, p.plan_id
+FROM fresh AS n
+JOIN collect.query_store_forced_plans AS p
+  ON p.server_id = $1 AND p.collection_time = n.prev_t AND p.database_name = n.database_name AND p.plan_id IS NOT NULL AND p.query_id IS NOT NULL
+WHERE NOT EXISTS (SELECT 1 FROM collect.query_store_forced_plans AS f
+                  WHERE f.server_id = $1 AND f.collection_time = n.t AND f.database_name = n.database_name
+                    AND f.query_id = p.query_id AND f.plan_id = p.plan_id)
+  AND NOT EXISTS (SELECT 1 FROM collect.plan_force_actions AS a
+                  WHERE a.server_id = $1 AND a.database_name = p.database_name AND a.query_id = p.query_id AND a.plan_id = p.plan_id
+                    AND a.outcome = 'succeeded' AND a.action_time >= n.t - interval '30 minutes' AND a.action_time <= n.t)";
 
     private readonly NpgsqlDataSource _readSource;
     private readonly ChangeWatchStore _store;
@@ -132,8 +133,9 @@ WHERE f.server_id = $1 AND f.collection_time > $2 AND f.collection_time <= $3
     /// <summary>One detect pass and one evaluate pass. A failure on one server is logged and the others go on.</summary>
     public async Task RunOnceAsync(CancellationToken cancellationToken = default)
     {
-        await DetectAsync(cancellationToken);
+        /* #6239 round 3, M4: a due watch is evaluated BEFORE detection, so a change found after its window ended opens a new watch and never stretches the old one. */
         await EvaluateDueAsync(cancellationToken);
+        await DetectAsync(cancellationToken);
     }
 
     /// <summary>Records the last hour's changes of every target (SQL Server and PostgreSQL), opening or extending its watch.</summary>
@@ -170,13 +172,35 @@ WHERE f.server_id = $1 AND f.collection_time > $2 AND f.collection_time <= $3
                 }
 
                 /* A restart after a long stop still looks no further back than the lookback: a watch is an hour, not a catch-up. */
+                var oldest = marks.Where(m => sources.Contains(m.Key)).Select(m => m.Value).DefaultIfEmpty(end).Min();
+                if (oldest < floor)
+                {
+                    /* #6239 round 3, L2: say what the lookback skips. */
+                    _logger.LogWarning(
+                        "Change detection for {Server} had no pass from {From:u} to {To:u}; changes in that span are not read (the lookback is {Minutes} minutes)",
+                        name, oldest, floor, (int)DetectLookback.TotalMinutes);
+                }
+
                 var bounds = marks.ToDictionary(m => m.Key, m => m.Value > floor ? m.Value : floor, StringComparer.Ordinal);
                 var changes = postgres
                     ? await ReadPostgresChangesAsync(id, bounds, end, cancellationToken)
                     : await ReadChangesAsync(id, bounds, end, cancellationToken);
-                if (changes.Count > 0 && await _store.RecordChangesAsync(id, name, changes, cancellationToken) is { } watchId)
+                var deferred = false;
+                if (changes.Count > 0)
                 {
-                    _logger.LogInformation("Change watch {WatchId} on {Server} now names {Count} change(s) seen in the last hour", watchId, name, changes.Count);
+                    var recorded = await _store.RecordAsync(id, name, changes, cancellationToken);
+                    deferred = recorded.Deferred;
+                    if (recorded.WatchId is { } watchId)
+                    {
+                        _logger.LogInformation("Change watch {WatchId} on {Server} now names {Count} change(s) seen in the last hour", watchId, name, changes.Count);
+                    }
+                }
+
+                if (deferred)
+                {
+                    /* A change after the open watch's window waits for that watch to be evaluated: the marks stay, and the next pass reads it again. */
+                    _logger.LogDebug("A change on {Server} is after its open watch's window; it is recorded once that watch has been evaluated", name);
+                    continue;
                 }
 
                 /* Only after the changes are recorded: a failed read or record leaves the marks, and the next pass reads the same rows again. */
@@ -229,10 +253,12 @@ WHERE f.server_id = $1 AND f.collection_time > $2 AND f.collection_time <= $3
 
         /* A trace_flags run that finds no flag stores no rows, so the last flag being turned off is in the run record only. */
         var flagMark = Mark("trace_flags");
-        var emptyFlagRuns = await DarlingCollectorRunFactsReader.ReadEmptyTraceFlagRunsAsync(_readSource, serverId, flagMark, naiveEnd, cancellationToken);
-        foreach (var c in ConfigChangeDiff.DiffTraceFlagChanges(
-                     await DarlingConfigHistoryReader.GetTraceFlagSnapshotsAsync(_readSource, serverId, flagMark, cancellationToken),
-                     emptyFlagRuns, flagMark, naiveEnd).Where(c => c.ChangeTime > flagMark))
+        var flagSnapshots = await DarlingConfigHistoryReader.GetTraceFlagSnapshotsAsync(_readSource, serverId, flagMark, cancellationToken);
+        /* #6239 round 3, M1: the empty runs are read from the instant the snapshot read starts (its baseline capture), not from the mark, so an empty run
+           between the baseline and the mark reaches the diff: a flag turned off and back on is seen, and a flag that was off is not reported off again. */
+        var flagFloor = flagSnapshots.Count > 0 && flagSnapshots.Min(x => x.CaptureTime) < flagMark ? flagSnapshots.Min(x => x.CaptureTime) : flagMark;
+        var emptyFlagRuns = await DarlingCollectorRunFactsReader.ReadEmptyTraceFlagRunsAsync(_readSource, serverId, flagFloor, naiveEnd, cancellationToken);
+        foreach (var c in ConfigChangeDiff.DiffTraceFlagChanges(flagSnapshots, emptyFlagRuns, flagMark, naiveEnd).Where(c => c.ChangeTime > flagMark))
         {
             changes.Add(new ChangeWatchChange($"trace_flag:{c.TraceFlag}:{Stamp(c.ChangeTime)}", "trace_flag", Utc(c.ChangeTime), c.ChangeDescription));
         }
@@ -267,22 +293,15 @@ WHERE f.server_id = $1 AND f.collection_time > $2 AND f.collection_time <= $3
         {
             while (await reader.ReadAsync(cancellationToken))
             {
-                var database = reader.IsDBNull(1) ? "" : reader.GetString(1);
-                var time = reader.GetDateTime(0);
-                changes.Add(new ChangeWatchChange($"plan_force:snapshot:{database}:{reader.GetInt64(2)}:{reader.GetInt64(3)}:{Stamp(time)}", "plan_force", Utc(time),
-                    $"plan {reader.GetInt64(3)} of query {reader.GetInt64(2)} in {database}: forced", database, reader.GetInt64(2)));
-            }
-        }
-
-        await using (var command = Bind(_readSource.CreateCommand(PlanUnforceAllSql), serverId, Mark("plan_snapshots"), naiveEnd))
-        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
-        {
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                var database = reader.IsDBNull(1) ? "" : reader.GetString(1);
-                var time = reader.GetDateTime(0);
-                changes.Add(new ChangeWatchChange($"plan_force:unforced:{database}:{reader.GetInt64(2)}:{reader.GetInt64(3)}:{Stamp(time)}", "plan_force", Utc(time),
-                    $"plan {reader.GetInt64(3)} of query {reader.GetInt64(2)} in {database}: unforced (the forced-plan collector ran and stored no forced plan)", database, reader.GetInt64(2)));
+                var forced = string.Equals(reader.GetString(0), "forced", StringComparison.Ordinal);
+                var database = reader.GetString(2);
+                var time = reader.GetDateTime(1);
+                var queryId = reader.GetInt64(3);
+                var planId = reader.GetInt64(4);
+                changes.Add(new ChangeWatchChange(
+                    $"plan_force:{(forced ? "snapshot" : "unforced")}:{database}:{queryId}:{planId}:{Stamp(time)}", "plan_force", Utc(time),
+                    $"plan {planId} of query {queryId} in {database}: {(forced ? "forced" : "unforced (in the database's previous forced-plan capture, not in this one)")}",
+                    database, queryId));
             }
         }
 
@@ -298,13 +317,29 @@ WHERE f.server_id = $1 AND f.collection_time > $2 AND f.collection_time <= $3
         return command;
     }
 
-    /// <summary>Evaluates every open watch whose window has ended. A watch whose evaluation fails stays open and is tried again next pass.</summary>
+    /// <summary>
+    /// Evaluates every open watch whose window has ended. Each is CLAIMED first (one UPDATE from open to evaluating), so one pass or instance
+    /// evaluates it and opens its one request; a claim that went stale (the claimer died) is taken over, and a request already opened for the watch
+    /// is found by its key and not opened again. A watch whose evaluation, or whose request open, fails stays claimed and is tried again once the claim is stale.
+    /// </summary>
     public async Task EvaluateDueAsync(CancellationToken cancellationToken = default)
     {
         foreach (var watch in await _store.DueAsync(cancellationToken))
         {
             try
             {
+                if (!await _store.ClaimAsync(watch.WatchId, cancellationToken))
+                {
+                    continue;
+                }
+
+                if (await _store.FindRequestAsync(watch.WatchId, cancellationToken) is { } existing)
+                {
+                    /* A claimer opened the request and died before it closed the watch. */
+                    await _store.CloseAsync(watch.WatchId, ChangeWatchStore.ResultRequestOpened, existing, "{}", cancellationToken);
+                    continue;
+                }
+
                 var evaluation = await _evaluator.EvaluateAsync(watch, cancellationToken);
                 if (!evaluation.HadData)
                 {
@@ -319,6 +354,13 @@ WHERE f.server_id = $1 AND f.collection_time > $2 AND f.collection_time <= $3
                     continue;
                 }
 
+                if (await _store.IsAgentOnlyAsync(watch.WatchId, cancellationToken))
+                {
+                    /* #6239 round 3, L9: an agent's own plan change under a change-watch request is recorded and measured, and opens no further request. */
+                    await _store.CloseAsync(watch.WatchId, ChangeWatchStore.ResultAgentChange, null, evaluation.ResultJson, cancellationToken);
+                    continue;
+                }
+
                 var moved = 0;
                 foreach (var m in evaluation.Measures)
                 {
@@ -326,8 +368,18 @@ WHERE f.server_id = $1 AND f.collection_time > $2 AND f.collection_time <= $3
                 }
 
                 var facts = new InvestigationAlertFacts(moved, 1, false, evaluation.DetailText, evaluation.ResultJson);
+                Exception? failure = null;
                 var opened = await _dispatch.OpenChangeWatchAsync(
-                    watch.ServerId.ToString(CultureInfo.InvariantCulture), watch.ServerName, watch.WindowEndsUtc, facts, cancellationToken);
+                    watch.ServerId.ToString(CultureInfo.InvariantCulture), watch.ServerName, watch.WindowEndsUtc, facts, cancellationToken,
+                    ChangeWatchStore.RequestKey(watch.WatchId), ex => failure = ex);
+                if (opened is null && failure is not null)
+                {
+                    /* #6239 round 3, L6: a failed open is not "no route". The watch stays claimed; the request key makes the retry safe. */
+                    _logger.LogWarning("Change watch {WatchId} on {Server}: the request could not be opened; it is tried again: {Message}",
+                        watch.WatchId, watch.ServerName, failure.Message);
+                    continue;
+                }
+
                 var requestId = opened?.RequestId;
                 await _store.CloseAsync(
                     watch.WatchId, requestId is null ? ChangeWatchStore.ResultMovedNoRequest : ChangeWatchStore.ResultRequestOpened, requestId, evaluation.ResultJson, cancellationToken);
@@ -338,7 +390,7 @@ WHERE f.server_id = $1 AND f.collection_time > $2 AND f.collection_time <= $3
             }
             catch (Exception ex)
             {
-                _logger.LogWarning("Change watch {WatchId} on {Server} could not be evaluated; it is tried again next pass: {Message}",
+                _logger.LogWarning("Change watch {WatchId} on {Server} could not be evaluated; it is tried again when its claim goes stale: {Message}",
                     watch.WatchId, watch.ServerName, ex.Message);
             }
         }

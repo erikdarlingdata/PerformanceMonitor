@@ -110,7 +110,7 @@ public sealed class ChangeWatchLiveTests
     }
 
     /// <summary>One wait row a minute over [start, start + 60 minutes], each holding <paramref name="msPerSecond"/> of wait time per second.</summary>
-    private static async Task SeedWaitsAsync(NpgsqlConnection connection, DateTime start, double msPerSecond, CancellationToken ct)
+    internal static async Task SeedWaitsAsync(NpgsqlConnection connection, DateTime start, double msPerSecond, CancellationToken ct)
     {
         for (var minute = 1; minute <= 60; minute++)
         {
@@ -125,7 +125,7 @@ public sealed class ChangeWatchLiveTests
         }
     }
 
-    private static Task<ChangeWatchChange[]> OneChange(DateTime at, string what) =>
+    internal static Task<ChangeWatchChange[]> OneChange(DateTime at, string what) =>
         Task.FromResult(new[] { new ChangeWatchChange($"server_config:{what}:{at:O}", "server_config", at, what) });
 
     internal static async Task<long> CountAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
