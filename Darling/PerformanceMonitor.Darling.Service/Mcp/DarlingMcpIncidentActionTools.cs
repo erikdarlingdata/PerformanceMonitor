@@ -16,7 +16,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
-using NpgsqlTypes;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -43,8 +42,6 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpIncidentActionTools
 {
-    private const string RequestedBy = "mcp";
-
     /// <summary>
     /// The command types the MCP tools queue (the types <c>config.request_mcp_command</c> accepts). <c>get_command_result</c> reads
     /// only these: a command another client queued (the Viewer's plan fetch and live reads, for one) answers as not found.
@@ -117,13 +114,13 @@ public sealed class DarlingMcpIncidentActionTools
             }
 
             var args = retention_days is int d ? $"{{\"retention_days\":{d.ToString(CultureInfo.InvariantCulture)}}}" : null;
-            var plan = DarlingCommandExecutor.ResolvePlan(new ClaimedCommand(0, "purge_now", null, args, RequestedBy));
+            var plan = DarlingCommandExecutor.ResolvePlan(new ClaimedCommand(0, "purge_now", null, args, DarlingMcpCommandQueue.RequestedBy));
             if (plan.Kind == CommandKind.Fail)
             {
                 return Refuse("purge_now", "invalid", (plan.FailReason ?? "The request was refused.") + " Nothing was queued.");
             }
 
-            var queued = await QueueAsync(postgres, "purge_now", null, retention_days, cancellationToken);
+            var queued = await DarlingMcpCommandQueue.QueueAsync(postgres, "purge_now", null, retention_days, cancellationToken);
             if (queued.Reason is not null)
             {
                 return Refuse("purge_now", queued.Reason, queued.Message!);
@@ -332,13 +329,13 @@ public sealed class DarlingMcpIncidentActionTools
 
             /* The executor's own plan first, so a request it would refuse is refused here in its words. test_connect needs an
                args_json to resolve; the real one is built by the store function from the stored row. */
-            var plan = DarlingCommandExecutor.ResolvePlan(new ClaimedCommand(0, commandType, resolved.ServerId, commandType == "test_connect" ? "{}" : null, RequestedBy));
+            var plan = DarlingCommandExecutor.ResolvePlan(new ClaimedCommand(0, commandType, resolved.ServerId, commandType == "test_connect" ? "{}" : null, DarlingMcpCommandQueue.RequestedBy));
             if (plan.Kind == CommandKind.Fail)
             {
                 return Refuse(tool, "invalid", (plan.FailReason ?? "The request was refused.") + " Nothing was queued.");
             }
 
-            var queued = await QueueAsync(postgres, commandType, resolved.ServerId, null, cancellationToken);
+            var queued = await DarlingMcpCommandQueue.QueueAsync(postgres, commandType, resolved.ServerId, null, cancellationToken);
             if (queued.Reason is not null)
             {
                 return Refuse(tool, queued.Reason, queued.Message!);
@@ -359,42 +356,6 @@ public sealed class DarlingMcpIncidentActionTools
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError(tool, ex);
-        }
-    }
-
-    /// <summary>What the store function answered: the new command id, or the refusal in plain words.</summary>
-    private readonly record struct Queued(long CommandId, string? Reason, string? Message);
-
-    /// <summary>Queues one command through <c>config.request_mcp_command</c>. Its codes map to plain refusals.</summary>
-    private static async Task<Queued> QueueAsync(
-        NpgsqlDataSource postgres, string commandType, int? serverId, int? retentionDays, CancellationToken cancellationToken)
-    {
-        try
-        {
-            await using var command = postgres.CreateCommand("SELECT config.request_mcp_command($1, $2, $3, $4)");
-            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = commandType });
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId.HasValue ? serverId.Value : DBNull.Value });
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = retentionDays.HasValue ? retentionDays.Value : DBNull.Value });
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = RequestedBy });
-            var id = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
-            return new Queued(id, null, null);
-        }
-        catch (PostgresException ex) when (ex.SqlState is "DL400" or "DL404" or "DL409" or "DL429")
-        {
-            var reason = ex.SqlState switch
-            {
-                "DL404" => "unknown_server",
-                "DL409" => "already_queued",
-                "DL429" => "too_soon",
-                _ => "invalid",
-            };
-            return new Queued(0, reason, ex.MessageText + " Nothing was queued.");
-        }
-        catch (PostgresException ex) when (ex.SqlState is "42883" or "42501")
-        {
-            return new Queued(0, "store_not_ready",
-                "The store has no queue function for this tool yet, or the mcp login may not call it. Restart the Darling service so it re-provisions the store roles, or re-run tools/provision-roles.sql on a self-managed store. Nothing was queued.");
         }
     }
 }
