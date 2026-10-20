@@ -7121,17 +7121,18 @@ public static class DarlingCliCommands
     /// </summary>
     internal const string CollectorScheduleReadbackSql = @"
 SELECT cs.server_id, cs.collector_name, cs.frequency_minutes, cs.retention_days, cs.enabled, cs.databases,
-       COALESCE(s.display_name, s.server_name) AS server_label
+       COALESCE(s.display_name, s.server_name) AS server_label, s.server_name
 FROM config.config_collector_schedules cs
 LEFT JOIN collect.servers s ON s.server_id = cs.server_id
 WHERE ($1::text IS NULL OR lower(cs.collector_name) = lower($1))
 ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
 
     /// <summary>One <c>config_collector_schedules</c> row as the verb reads it back: the service's
-    /// <see cref="ScheduleOverride"/> columns plus the registry label the operator knows the server by.</summary>
+    /// <see cref="ScheduleOverride"/> columns plus the registry label the operator knows the server by, and the storage name
+    /// (<c>ServerName</c>) the server resolver accepts, which the label ("Display (Storage)") is not.</summary>
     internal sealed record CollectorScheduleReadbackRow(
         int? ServerId, string CollectorName, int? FrequencyMinutes, int? RetentionDays, bool? Enabled,
-        IReadOnlyList<string>? Databases, string? ServerLabel);
+        IReadOnlyList<string>? Databases, string? ServerLabel, string? ServerName = null);
 
     internal static async Task<List<CollectorScheduleReadbackRow>> ReadCollectorScheduleRowsAsync(
         NpgsqlDataSource postgres, string? collectorName, CancellationToken cancellationToken)
@@ -7155,7 +7156,8 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
                 /* V125 (#3477): NULL and an empty array are different readings — keep both, as the service's
                    ReadScheduleOverridesAsync does, so the printout says which one the row carries. */
                 reader.IsDBNull(5) ? null : reader.GetFieldValue<string[]>(5),
-                reader.IsDBNull(6) ? null : reader.GetString(6)));
+                reader.IsDBNull(6) ? null : reader.GetString(6),
+                reader.IsDBNull(7) ? null : reader.GetString(7)));
         }
 
         return rows;

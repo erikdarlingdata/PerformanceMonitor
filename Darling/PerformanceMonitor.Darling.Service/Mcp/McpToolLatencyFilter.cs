@@ -155,7 +155,7 @@ public sealed class McpToolLatencyFilter
 
             if (DarlingMcpWritePolicy.IsWrite(toolName))
             {
-                LogWriteCall(toolName, caller, answer.IsError == true ? "error" : "completed");
+                LogWriteCall(toolName, caller, WriteOutcomeOf(answer));
             }
 
             /* A successful write, or a successful unanchored analyze_server (it stores findings, D5), makes every cached
@@ -173,6 +173,50 @@ public sealed class McpToolLatencyFilter
     /// from inside the tool.</summary>
     private void LogWriteCall(string toolName, string caller, string outcome) =>
         _logger?.LogInformation("MCP write tool {Tool} called by {Caller}: {Outcome}", toolName, caller, outcome);
+
+    /// <summary>The outcome word a write call logs, read from the answer the way <see cref="ClassifyResult"/> reads a read's: a write
+    /// tool answers a refusal and a caught error as text, never as a thrown exception, so the error flag alone would call every one
+    /// of them completed. A <c>refused</c> or <c>invalid</c> status is <c>refused</c> (nothing was changed because the request as
+    /// given cannot be served), the caught-error envelope or an error flag is <c>failed</c>, anything else is <c>completed</c>.
+    /// Internal so a unit test can call it without a running server.</summary>
+    internal static string WriteOutcomeOf(CallToolResult result)
+    {
+        if (result.Content is { Count: 1 } content && content[0] is TextContentBlock block)
+        {
+            var text = EnvelopeText(block.Text);
+            if (McpHelpers.IsErrorEnvelope(text))
+            {
+                return "failed";
+            }
+
+            if (McpHelpers.IsRefusalEnvelope(text) || StatusWordOf(text) == "refused")
+            {
+                return "refused";
+            }
+        }
+
+        return result.IsError == true ? "failed" : "completed";
+    }
+
+    /// <summary>The <c>status</c> word of a JSON object answer, or null when the text is not one.</summary>
+    private static string? StatusWordOf(string text)
+    {
+        if (!text.AsSpan().TrimStart().StartsWith("{".AsSpan(), StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        try
+        {
+            return JsonNode.Parse(text) is JsonObject body && body["status"] is JsonValue status && status.TryGetValue<string>(out var word)
+                ? word
+                : null;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return null;
+        }
+    }
 
     /// <summary>The read itself: admission, then the tool, recording the outcome. A cached read runs it once for every
     /// caller waiting on it, under the flight's token.</summary>

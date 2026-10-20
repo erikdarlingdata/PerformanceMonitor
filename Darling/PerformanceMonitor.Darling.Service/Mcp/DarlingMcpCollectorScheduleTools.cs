@@ -20,6 +20,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -406,6 +407,11 @@ public sealed class DarlingMcpCollectorScheduleTools
             edit.Tool, edit.Inherit ? " (inherit)" : string.Empty, collector, scope.Label, before, after, ReadCaller.AmbientMcpCaller ?? ReadCaller.Unknown);
     }
 
+    /// <summary>A server as a note names it: the storage name the server resolver accepts (the label, "Display (Storage)", is not
+    /// one), else the id for a row whose server is not in the registry.</summary>
+    private static string NoteNameOf(DarlingCliCommands.CollectorScheduleReadbackRow row) =>
+        row.ServerName ?? $"server_id {row.ServerId}";
+
     private static string EnabledText(DarlingCliCommands.CollectorScheduleReadbackRow? row) =>
         row is null ? "no row" : row.Enabled is bool b ? (b ? "enabled" : "disabled") : "inherited";
 
@@ -482,7 +488,7 @@ public sealed class DarlingMcpCollectorScheduleTools
                 if (serverId is null)
                 {
                     var own = rowsAfter.Where(r => r.ServerId is not null && r.Enabled is bool theirs && theirs != wanted)
-                        .Select(r => r.ServerLabel ?? $"server_id {r.ServerId}").ToList();
+                        .Select(NoteNameOf).ToList();
                     if (own.Count > 0)
                     {
                         notes.Add($"These servers have their own enabled value, which wins over the fleet-wide one: {string.Join(", ", own)}. enable_collector / disable_collector with inherit=true and a server_name puts a server back on the fleet-wide value.");
@@ -502,13 +508,19 @@ public sealed class DarlingMcpCollectorScheduleTools
                 previous = freq ? new { frequency_minutes = before } : new { retention_days = before };
                 current = freq ? new { frequency_minutes = after } : new { retention_days = after };
                 tool = freq ? "set_collector_frequency" : "set_collector_retention";
-                if (before is int b)
+                if (before is int b && (freq ? CollectorScheduleBounds.FrequencyError(collector, b) : CollectorScheduleBounds.RetentionError(collector, b)) is null)
                 {
                     undoArgs[name] = b;
                 }
                 else
                 {
                     undoArgs["clear"] = true;
+                    if (before is int tooBig)
+                    {
+                        /* A value stored before today's limits (or written straight into the store) is one this tool now refuses, so the
+                           undo it names must not be that call. */
+                        notes.Add($"The previous {name} ({tooBig}) is above what this tool accepts today, so the old value cannot be put back with it; the undo clears the override, and the {(serverId is null ? "code default" : "fleet-wide value, else the code default")} applies.");
+                    }
                 }
 
                 changed = before != after;
@@ -525,7 +537,7 @@ public sealed class DarlingMcpCollectorScheduleTools
                 if (serverId is null)
                 {
                     var own = rowsAfter.Where(r => r.ServerId is not null && (freq ? r.FrequencyMinutes : r.RetentionDays) is not null)
-                        .Select(r => r.ServerLabel ?? $"server_id {r.ServerId}").ToList();
+                        .Select(NoteNameOf).ToList();
                     if (own.Count > 0)
                     {
                         notes.Add($"These servers have their own {name}, which wins over the fleet-wide one: {string.Join(", ", own)}.");

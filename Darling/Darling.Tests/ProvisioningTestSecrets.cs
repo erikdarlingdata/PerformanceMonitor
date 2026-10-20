@@ -6,33 +6,36 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-using System.Linq;
+using System.Security.Cryptography;
 using PerformanceMonitor.Darling.Service;
 
 namespace Darling.Tests;
 
 /// <summary>
-/// Fixed role secrets for tests that build the provisioning batch (#3910). The batch takes SCRAM-SHA-256
-/// verifiers and refuses a password, so these are verifiers of the three passwords the tests used to pass,
-/// each under its own fixed salt, and so byte-stable across runs.
+/// Role secrets for tests that build the provisioning batch (#3910). The batch takes SCRAM-SHA-256
+/// verifiers and refuses a password, so these are random passwords made once per test process, each with
+/// the verifier computed from it under its own random salt. A live test that creates the admin, viewer and
+/// mcp login roles on a cluster therefore never leaves roles whose password is written in the repository;
+/// a run that is killed before its cleanup leaves logins nobody can guess. Nothing in the tests relies on a
+/// fixed value: they read the password and the verifier from here and never the other way round.
 /// </summary>
 internal static class ProvisioningTestSecrets
 {
-    public const string AdminPassword = "AdminPassword01";
+    public static readonly string AdminPassword = DarlingManagedPostgres.GeneratePassword();
 
-    public const string ViewerPassword = "ViewerPassword02";
+    public static readonly string ViewerPassword = DarlingManagedPostgres.GeneratePassword();
 
-    public const string McpPassword = "McpPassword03";
+    public static readonly string McpPassword = DarlingManagedPostgres.GeneratePassword();
 
-    public static readonly string Admin = Verifier(AdminPassword, seed: 1);
+    public static readonly string Admin = Verifier(AdminPassword);
 
-    public static readonly string Viewer = Verifier(ViewerPassword, seed: 2);
+    public static readonly string Viewer = Verifier(ViewerPassword);
 
-    public static readonly string Mcp = Verifier(McpPassword, seed: 3);
+    public static readonly string Mcp = Verifier(McpPassword);
 
-    private static string Verifier(string password, int seed) =>
+    private static string Verifier(string password) =>
         ScramSha256Verifier.Compute(
             password,
-            Enumerable.Range(0, ScramSha256Verifier.SaltLength).Select(i => (byte)((seed * 31) + i)).ToArray(),
+            RandomNumberGenerator.GetBytes(ScramSha256Verifier.SaltLength),
             ScramSha256Verifier.DefaultIterations);
 }

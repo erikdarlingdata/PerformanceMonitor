@@ -247,6 +247,73 @@ public sealed class DarlingMcpCollectorScheduleToolsLiveTests
     }
 
     [Fact]
+    public async Task TheNotesNameOtherServersByTheStorageNameTheResolverAccepts_NotByTheDisplayLabel()
+    {
+        await WithStoreAsync(async (source, owner, ct) =>
+        {
+            await ExecAsync(owner, $"UPDATE servers SET display_name = 'Alpha Box' WHERE server_id = {ServerA}", ct);
+            await DarlingMcpCollectorScheduleTools.EnableCollector(source, Delta, "sched-alpha", cancellationToken: ct);
+            await DarlingMcpCollectorScheduleTools.SetCollectorRetention(source, Daily, 30, false, "sched-alpha", cancellationToken: ct);
+
+            var enabled = Parse(await DarlingMcpCollectorScheduleTools.DisableCollector(source, Delta, null, cancellationToken: ct));
+            var retention = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorRetention(source, Daily, 90, false, null, cancellationToken: ct));
+            foreach (var answer in new[] { enabled, retention })
+            {
+                var note = Assert.Single(((JsonArray)answer["notes"]!).Select(n => (string?)n), n => n!.StartsWith("These servers have their own", StringComparison.Ordinal));
+                Assert.Contains("sched-alpha", note, StringComparison.Ordinal);
+                Assert.DoesNotContain("Alpha Box", note, StringComparison.Ordinal);
+            }
+
+            /* The name the note gave is one the resolver takes: the follow-up call the note describes lands. */
+            var back = Parse(await DarlingMcpCollectorScheduleTools.DisableCollector(source, Delta, "sched-alpha", inherit: true, cancellationToken: ct));
+            Assert.Equal("changed", (string?)back["status"]);
+        });
+    }
+
+    [Fact]
+    public async Task WhenThePreviousValueIsAboveTodaysCap_TheUndoClearsTheOverride_AndTheNoteSaysTheOldValueCannotBePutBack()
+    {
+        await WithStoreAsync(async (source, owner, ct) =>
+        {
+            /* A row from before the limits, or written straight into the store: the checks are dropped on the scratch store to seed it. */
+            var names = new System.Collections.Generic.List<string>();
+            await using (var list = new NpgsqlCommand(
+                "SELECT conname FROM pg_constraint WHERE conrelid = 'config.config_collector_schedules'::regclass AND contype = 'c'", owner))
+            await using (var reader = await list.ExecuteReaderAsync(ct))
+            {
+                while (await reader.ReadAsync(ct))
+                {
+                    names.Add(reader.GetString(0));
+                }
+            }
+
+            foreach (var name in names)
+            {
+                await ExecAsync(owner, $"ALTER TABLE config.config_collector_schedules DROP CONSTRAINT \"{name}\"", ct);
+            }
+
+            await ExecAsync(owner,
+                $"INSERT INTO config.config_collector_schedules (server_id, collector_name, frequency_minutes, retention_days) VALUES ({ServerA}, '{Daily}', 600000, 5000)", ct);
+
+            var frequency = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorFrequency(source, Daily, 60, false, "sched-alpha", cancellationToken: ct));
+            Assert.Equal("changed", (string?)frequency["status"]);
+            var frequencyUndo = (JsonObject)frequency["undo"]!["arguments"]!;
+            Assert.True((bool?)frequencyUndo["clear"]);
+            Assert.False(frequencyUndo.ContainsKey("frequency_minutes"));
+            Assert.Contains(((JsonArray)frequency["notes"]!).Select(n => (string?)n), n => n!.Contains("600000", StringComparison.Ordinal) && n.Contains("cannot be put back", StringComparison.Ordinal));
+            var undone = Parse(await CallUndoAsync(source, frequency, ct));
+            Assert.Equal("changed", (string?)undone["status"]);
+            Assert.Equal(1, await ScalarAsync(owner, $"SELECT count(*) FROM config.config_collector_schedules WHERE server_id = {ServerA} AND collector_name = '{Daily}' AND frequency_minutes IS NULL", ct));
+
+            var retention = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorRetention(source, Daily, 30, false, "sched-alpha", cancellationToken: ct));
+            var retentionUndo = (JsonObject)retention["undo"]!["arguments"]!;
+            Assert.True((bool?)retentionUndo["clear"]);
+            Assert.False(retentionUndo.ContainsKey("retention_days"));
+            Assert.Contains(((JsonArray)retention["notes"]!).Select(n => (string?)n), n => n!.Contains("5000", StringComparison.Ordinal) && n.Contains("cannot be put back", StringComparison.Ordinal));
+        });
+    }
+
+    [Fact]
     public async Task RunAt_SetNoneAndClear_RoundTrip_AndTheReadShowsIt()
     {
         await WithStoreAsync(async (source, owner, ct) =>

@@ -328,13 +328,30 @@ public sealed class DarlingMcpCollectorScheduleBehaviourLiveTests
             filterLog = new CapturingTestLogger();
             toolLog = new CapturingTestLogger();
             using var second = await BuildWriteServerAsync(source, filterLog, toolLog);
-            await ToolsCallAsync(second, "set_collector_frequency", "{\"collector_name\":\"secret_collector_name\",\"frequency_minutes\":5,\"server_name\":\"beh-beta\"}");
+            var refusedReply = await ToolsCallAsync(second, "set_collector_frequency", "{\"collector_name\":\"secret_collector_name\",\"frequency_minutes\":5,\"server_name\":\"beh-beta\"}");
+            Assert.Contains("refused", refusedReply, StringComparison.Ordinal);
             var refused = Assert.Single(filterLog.Lines, l => l.Contains("MCP write tool", StringComparison.Ordinal));
             Assert.Contains("set_collector_frequency", refused, StringComparison.Ordinal);
+            Assert.EndsWith(": refused", refused, StringComparison.Ordinal);
+            Assert.DoesNotContain("completed", refused, StringComparison.Ordinal);
             Assert.Contains(Caller, refused, StringComparison.Ordinal);
             Assert.DoesNotContain("secret_collector_name", refused, StringComparison.Ordinal);
             Assert.DoesNotContain("beh-beta", refused, StringComparison.Ordinal);
             Assert.Empty(toolLog.Lines);
+
+            /* A call the tool catches an error for (the schedule table is not there) answers an error envelope as text, not an exception:
+               the filter logs it as failed, not completed, and still not the arguments. */
+            await ExecAsync(owner, "ALTER TABLE config.config_collector_schedules RENAME TO config_collector_schedules_gone", ct);
+            filterLog = new CapturingTestLogger();
+            toolLog = new CapturingTestLogger();
+            using var third = await BuildWriteServerAsync(source, filterLog, toolLog);
+            var failedReply = await ToolsCallAsync(third, "disable_collector", "{\"collector_name\":\"wait_stats\",\"server_name\":\"beh-alpha\"}");
+            Assert.Contains("Error during disable_collector", failedReply, StringComparison.Ordinal);
+            var failed = Assert.Single(filterLog.Lines, l => l.Contains("MCP write tool", StringComparison.Ordinal));
+            Assert.Contains("disable_collector", failed, StringComparison.Ordinal);
+            Assert.EndsWith(": failed", failed, StringComparison.Ordinal);
+            Assert.DoesNotContain("completed", failed, StringComparison.Ordinal);
+            Assert.DoesNotContain("wait_stats", failed, StringComparison.Ordinal);
         });
     }
 

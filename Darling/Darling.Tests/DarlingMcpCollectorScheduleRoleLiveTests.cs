@@ -68,10 +68,13 @@ public sealed class DarlingMcpCollectorScheduleRoleLiveTests
         {
             await owner.OpenAsync(ct);
             await PgMigrations.MigrateAsync(owner, ct);
-            /* The managed roles carry fixed names and a role is cluster-wide: never adopt or drop a set that belongs to something else. */
-            Assert.SkipWhen(
-                (bool)(await ScalarAsync(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp'))", ct))!,
-                "A cluster-wide admin/viewer/mcp role already exists on this rig; the managed provisioning batch would adopt it.");
+            /* The managed roles carry fixed names and a role is cluster-wide: never adopt or drop a set that belongs to something else.
+               A leftover set (an earlier run that was killed before its cleanup) fails here and names the roles, so it is seen and removed
+               by hand instead of every later run skipping past it. */
+            var existing = (string)(await ScalarAsync(owner, "SELECT COALESCE(string_agg(rolname, ', ' ORDER BY rolname), '') FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp')", ct))!;
+            Assert.True(
+                existing.Length == 0,
+                $"The cluster already has the login role(s) {existing}. They are cluster-wide and this test creates and drops all three of admin, viewer and mcp, so it will not adopt them: drop them from the rig and run it again.");
         }
 
         var bodySucceeded = false;
