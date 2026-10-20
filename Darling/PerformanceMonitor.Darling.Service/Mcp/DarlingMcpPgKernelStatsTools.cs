@@ -91,12 +91,12 @@ public sealed class DarlingMcpPgKernelStatsTools
                 var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
                     postgres, "get_pg_kernel_stats", resolved.ServerName, emptyStart, windowEnd, emptyAnswer: true, logger, cancellationToken);
 
-                return McpHelpers.Status(
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status(
                         "empty",
                         $"No per-query OS resource usage for {resolved.DisplayName} in the last "
                         + $"{hours_back} hour(s). These are per-interval deltas, so a single collection "
                         + "has nothing to difference against and the window fills on the second one.",
-                        emptyNotice.AsHints());
+                        emptyNotice.AsHints()), cancellationToken);
             }
 
             /* #4966: where the store's coverage of the window starts, probed on the web's own source for this read (WebDataStartNote).

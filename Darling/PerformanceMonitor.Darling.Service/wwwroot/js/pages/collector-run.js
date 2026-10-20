@@ -13,7 +13,7 @@
  * neither button: the server answers 403 to it anyway, so this is the affordance layer, never the enforcement.
  */
 
-import { el, mount, apiGet, apiWrite, readTool } from "../util.js";
+import { el, mount, apiGet, apiGetFleet, apiWrite, readTool } from "../util.js";
 import { getSession, peekSession } from "../views-api.js";
 
 const POLL_MS = 2000;
@@ -28,12 +28,20 @@ const bars = new Map();
 /* What the status line and the results table say for each server. Kept here, not in the elements, because the tab
    is rebuilt while a run goes (auto-refresh) and the run's last words must land on the page that is showing. */
 const shown = new Map();
+/* #6155: servers the fleet card calls Offline. The service has no connection to such a target, so a run it is asked for
+   is skipped ("server not connected"); the buttons say so and stay off instead of queueing a run that cannot happen. */
+const offline = new Set();
+const OFFLINE_TIP = "This server is offline: the service has no connection to it, so a collector run would be skipped. Collection resumes on its own when the server is reachable again.";
+function locked(server) {
+  return !!running.get(server) || offline.has(server);
+}
+
 function notify(server) {
   const set = buttons.get(server);
   if (!set) return;
   for (const button of [...set]) {
     if (!button.isConnected) set.delete(button);
-    else button.disabled = !!running.get(server);
+    else button.disabled = locked(server);
   }
 }
 
@@ -41,7 +49,25 @@ function track(server, button) {
   const set = buttons.get(server) || new Set();
   set.add(button);
   buttons.set(server, set);
-  button.disabled = !!running.get(server);
+  button.disabled = locked(server);
+  if (offline.has(server)) button.title = OFFLINE_TIP;
+}
+
+/* Ask the fleet read whether the server's card says Offline (the read the page header already makes, shared when in
+   flight), and turn the buttons off with the reason when it does. A failed read leaves the buttons as they were. */
+async function markOffline(server, button, note) {
+  const res = await apiGetFleet();
+  if (res.kind !== "data") return;
+  const card = (res.data.cards || []).find((c) => c.server_name === server || c.display_name === server);
+  if (!card || card.band !== "Offline") {
+    offline.delete(server);
+    return;
+  }
+  offline.add(server);
+  button.title = OFFLINE_TIP;
+  note.textContent = " This server is offline, so a collector run would be skipped. Collection resumes on its own when it is reachable again.";
+  notify(server);
+  for (const other of buttons.get(server) || []) other.title = OFFLINE_TIP;
 }
 
 /* Draw what is known for the server into the bar that is on the page now (nothing for a read-only seat's empty bar). */
@@ -185,6 +211,7 @@ export function collectorRunBar(server) {
     ]);
     track(server, button);
     mount(slot, [el("div", {}, [button, note]), status, output]);
+    markOffline(server, button, note);
     slot.dataset.status = "ready";
     slot.__status = status;
     slot.__output = output;

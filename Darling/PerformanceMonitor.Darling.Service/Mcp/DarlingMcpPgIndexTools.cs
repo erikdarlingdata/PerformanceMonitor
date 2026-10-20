@@ -145,12 +145,12 @@ public sealed class DarlingMcpPgIndexTools
                         });
                 }
 
-                return McpHelpers.Status(
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status(
                     "empty",
                     $"No index bloat rows for {resolved.DisplayName} in the last {hours_back} "
                     + "hour(s). This collector runs DAILY, so a window shorter than a day can be empty "
                     + "on a perfectly healthy server — widen it before concluding anything. "
-                    + coverage.Message);
+                    + coverage.Message), cancellationToken);
             }
 
             coverage = await DarlingPgIndexBloatReader.GetCoverageVerdictAsync(
@@ -446,11 +446,11 @@ public sealed class DarlingMcpPgIndexTools
                    privilege filter and select neither, which is prose about the mechanism rather than a
                    diagnosis of it - measured on a 50-target fleet where the answer was the privilege
                    filter on every one of them and no read said so. */
-                return McpHelpers.Status(
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status(
                     "empty",
                     $"No column statistics for {resolved.DisplayName} in the last {hours_back} hour(s). "
                     + "This collector runs DAILY, so a window shorter than a day can be empty on a "
-                    + "perfectly healthy server - widen it before concluding anything. " + coverage.Message);
+                    + "perfectly healthy server - widen it before concluding anything. " + coverage.Message), cancellationToken);
             }
 
             coverage = await DarlingPgColumnStatsReader.GetCoverageVerdictAsync(

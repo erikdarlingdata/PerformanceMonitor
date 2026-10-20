@@ -90,7 +90,7 @@ public sealed class DarlingMcpPgLogEventTools
                    turns "no events" into not-collected WITH THE REASON. Then the honest quiet answer, which
                    names the settings a family depends on, because an all-off target is the likeliest
                    reason a log has nothing for a family and nothing else on this surface says so. */
-                return await DarlingEngineCapability.NotCollectedStatusAsync(
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, await DarlingEngineCapability.NotCollectedStatusAsync(
                     postgres, resolved.ServerId, resolved.DisplayName, "pg_log_events", cancellationToken)
                     ?? await DarlingRuntimePrecondition.StatusAsync(
                         postgres, resolved.ServerId, resolved.DisplayName, "pg_log_events", cancellationToken)
@@ -115,7 +115,7 @@ public sealed class DarlingMcpPgLogEventTools
                         + "is the problem rather than the server.",
                         (await DarlingMcpWindowNotice.ReadEventAsync(
                             () => DarlingMcpWindowNotice.Probe(postgres, "pg_log_events", resolved.ServerName, windowStart, windowEnd, cancellationToken),
-                            null, windowStart, windowEnd, "pg_log_events", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints());
+                            null, windowStart, windowEnd, "pg_log_events", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints()), cancellationToken);
             }
 
             var truncated = page.Rows.Count > limit;

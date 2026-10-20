@@ -94,10 +94,10 @@ public sealed class DarlingMcpPgCpuUtilizationTools
                    probe's own column; the web does not list this read, so the collector table is the source. */
                 var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
                 postgres, "get_pg_cpu_utilization", resolved.ServerName, windowEnd.AddHours(-hours_back), windowEnd, emptyAnswer: true, logger, cancellationToken);
-                return McpHelpers.Status(
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status(
                     "empty",
                     $"No CPU utilization data for {resolved.DisplayName} in the last {hours_back} hour(s).",
-                    emptyNotice.AsHints());
+                    emptyNotice.AsHints()), cancellationToken);
             }
 
             var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
