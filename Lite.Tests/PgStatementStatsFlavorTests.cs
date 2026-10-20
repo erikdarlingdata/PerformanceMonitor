@@ -79,16 +79,16 @@ public class PgStatementStatsFlavorTests
     {
         var sql = Sql(isAurora: true);
 
-        Assert.Contains("FROM aurora_stat_statements(false)", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM pg_catalog.aurora_stat_statements(false)", sql, StringComparison.Ordinal);
         /* The VIEW is what Aurora must not read - its rows come from the extended function. The extension's
            one-row pg_stat_statements_info (#3653 A5, the statements epoch) sits beside the view on Aurora
            too and is read on both flavors; the word boundary is what tells the two apart, since `_` is a
            word character and the info view's name continues past it. Since #3818 the epoch read also names
            the extension itself - as a pg_extension.extname LITERAL, to find the schema it was created in -
            so the pin is on a FROM of the view, which is the read Aurora must not make. */
-        Assert.DoesNotMatch(new Regex(@"FROM\s+(?:public\.)?pg_stat_statements\b"), sql);
+        Assert.DoesNotMatch(new Regex(@"FROM\s+(?:\S+\.)?pg_stat_statements\b"), sql);
         Assert.Contains("pg_stat_statements_info", sql, StringComparison.Ordinal);
-        Assert.Contains("WHERE e.extname = 'pg_stat_statements'", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE e.extname OPERATOR(pg_catalog.=) 'pg_stat_statements'", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -96,7 +96,7 @@ public class PgStatementStatsFlavorTests
     {
         var sql = Sql(isAurora: false);
 
-        Assert.Contains("FROM public.pg_stat_statements", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM pg_catalog.pg_stat_statements", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("aurora_stat_statements", sql, StringComparison.Ordinal);
     }
 
@@ -133,7 +133,8 @@ public class PgStatementStatsFlavorTests
     /// <para>The shape is the measured one (the collector's comment records the measurement): a static
     /// <c>FROM pg_stat_statements_info</c> raises at parse analysis whatever WHERE or CASE surrounds it, so
     /// the relation is named only inside <c>query_to_xml</c>'s SQL text - resolved at EXECUTION - behind a
-    /// <c>to_regclass</c> test on the schema-qualified name, with the schema read from <c>pg_extension</c>
+    /// test that the view of that name in the extension's schema is a member of the extension (<c>pg_depend</c>,
+    /// #6143), with the schema read from <c>pg_extension</c>
     /// rather than assumed <c>public.</c> (the second failure mode) or left to the search_path (which read
     /// NULL on the rig with the extension in a schema off the path).</para>
     /// </summary>
@@ -160,38 +161,6 @@ public class PgStatementStatsFlavorTests
         /* Never a static FROM of the info view - that is the read that raised 42P01 at parse analysis. */
         Assert.DoesNotMatch(new Regex(@"FROM\s+(?:public\.)?pg_stat_statements_info\b"), sql);
         Assert.DoesNotContain("public.pg_stat_statements_info", sql, StringComparison.Ordinal);
-    }
-
-    /// <summary>
-    /// The pieces of the existence gate, each of which the rig measurement depends on: the existence test
-    /// is <c>to_regclass</c> on the name qualified with the extension's OWN schema from <c>pg_extension</c>;
-    /// the read is <c>query_to_xml</c> of SQL text (resolved at execution, so it cannot raise at parse
-    /// analysis) and only in the ELSE arm; both CASE arms are typed <c>timestamp with time zone</c> so the
-    /// column's type is the same on every path and <c>ReadAsync</c>'s <c>GetDateTime(27)</c> is unchanged.
-    /// </summary>
-    [Fact]
-    public void TheExistenceGate_ReadsTheExtensionsOwnSchema_AndResolvesTheRelationAtExecution()
-    {
-        var epoch = PgStatementStatsCollector.StatementsEpochSql;
-
-        Assert.Contains("to_regclass(format('%I.pg_stat_statements_info', n.nspname)) IS NULL THEN NULL::timestamp with time zone", epoch, StringComparison.Ordinal);
-        Assert.Contains("query_to_xml(format('SELECT stats_reset FROM %I.pg_stat_statements_info', n.nspname), true, false, '')", epoch, StringComparison.Ordinal);
-        Assert.Contains("FROM '<stats_reset>([^<]+)</stats_reset>')::timestamp with time zone", epoch, StringComparison.Ordinal);
-        Assert.Contains("FROM pg_catalog.pg_extension AS e", epoch, StringComparison.Ordinal);
-        Assert.Contains("ON n.oid = e.extnamespace", epoch, StringComparison.Ordinal);
-        Assert.Contains("WHERE e.extname = 'pg_stat_statements'", epoch, StringComparison.Ordinal);
-
-        /* The ELSE arm is the only place the relation is read, and it is inside a string literal. */
-        var caseStart = epoch.IndexOf("ELSE", StringComparison.Ordinal);
-        Assert.True(caseStart > 0);
-        Assert.Contains("query_to_xml", epoch[caseStart..], StringComparison.Ordinal);
-        Assert.DoesNotContain("query_to_xml", epoch[..caseStart], StringComparison.Ordinal);
-
-        /* Uncorrelated - a scalar subquery with its own FROM and nothing from the outer row - so the planner
-           makes it an InitPlan evaluated once per statement (measured: `InitPlan 1 (returns $0)`). It opens
-           and closes as one parenthesised SELECT. */
-        Assert.StartsWith("(SELECT CASE", epoch, StringComparison.Ordinal);
-        Assert.EndsWith("WHERE e.extname = 'pg_stat_statements')", epoch, StringComparison.Ordinal);
     }
 
     /// <summary>

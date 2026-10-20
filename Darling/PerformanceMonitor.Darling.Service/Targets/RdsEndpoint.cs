@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Text.RegularExpressions;
 
 namespace PerformanceMonitor.Darling.Service.Targets;
@@ -48,6 +49,21 @@ public static class RdsEndpoint
     private static readonly Regex s_endpoint = new(
         @"^(?<name>[a-z0-9][a-z0-9-]*)\.(?<second>cluster-ro-[a-z0-9]+|cluster-custom-[a-z0-9]+|cluster-[a-z0-9]+|[a-z0-9]+)\.(?<region>[a-z]{2}(?:-[a-z]+)+-\d)\.rds\.",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    /* RDS Proxy:   name.proxy-hash.region.rds.amazonaws.com, and a proxy's own endpoints add a label in front
+       (endpointname.endpoint.proxy-hash.region.rds.amazonaws.com). */
+    private static readonly Regex s_proxy = new(
+        @"(?:^|\.)proxy-[a-z0-9]+\.[a-z]{2}(?:-[a-z]+)+-\d\.rds\.",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// #6143: true when any host in <paramref name="host"/> (a comma-separated list is allowed) is an RDS Proxy
+    /// endpoint. Monitoring connections send a startup parameter RDS Proxy does not accept, so such a target is
+    /// refused with a message instead.
+    /// </summary>
+    public static bool IsProxyHost(string? host) =>
+        !string.IsNullOrWhiteSpace(host)
+        && host.Split(',').Any(h => s_proxy.IsMatch(h.Trim()));
 
     /// <summary>
     /// Null when the host is not an RDS endpoint at all — a self-hosted server, a proxy, or an IP. That is

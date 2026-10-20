@@ -1793,6 +1793,120 @@ public sealed class DarlingCollectorRunner
     }
 
     /// <summary>
+    /// #6143: every extension in the connected database and the schema it was created in, then each Aurora built-in
+    /// function (<see cref="CollectorContext.AuroraFunctionNames"/>) found in pg_catalog. The one function the
+    /// pg_stat_statements extension ships (<see cref="CollectorContext.StatementsExtensionAuroraFunction"/>) is also
+    /// returned from the schema the extension was created in, but only when <c>pg_depend</c> shows it is a member of
+    /// that extension and its argument types are the ones the collector calls it with: anyone with CREATE on that schema
+    /// can make a function of the same name there. No other schema is read, and
+    /// <see cref="CollectorContext.ChoosePgFunctionSchemas"/> checks the same rule again. Run on the monitoring
+    /// connection, whose search_path is pinned to pg_catalog; every relation and operator is named by schema all the same.
+    /// </summary>
+    internal const string PgExtensionSchemasSql = @"SELECT 'extension'::text, e.extname::text, n.nspname::text
+FROM pg_catalog.pg_extension AS e
+JOIN pg_catalog.pg_namespace AS n ON n.oid OPERATOR(pg_catalog.=) e.extnamespace
+UNION ALL
+SELECT 'function'::text, p.proname::text, n.nspname::text
+FROM pg_catalog.pg_proc AS p
+JOIN pg_catalog.pg_namespace AS n ON n.oid OPERATOR(pg_catalog.=) p.pronamespace
+WHERE p.proname::text OPERATOR(pg_catalog.=) ANY (@functions)
+AND n.nspname OPERATOR(pg_catalog.=) 'pg_catalog'
+UNION ALL
+SELECT 'function'::text, p.proname::text, n.nspname::text
+FROM pg_catalog.pg_extension AS x
+JOIN pg_catalog.pg_depend AS d
+  ON d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_extension'::pg_catalog.regclass
+ AND d.refobjid OPERATOR(pg_catalog.=) x.oid
+ AND d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_proc'::pg_catalog.regclass
+ AND d.deptype OPERATOR(pg_catalog.=) 'e'
+JOIN pg_catalog.pg_proc AS p
+  ON p.oid OPERATOR(pg_catalog.=) d.objid
+ AND p.pronamespace OPERATOR(pg_catalog.=) x.extnamespace
+JOIN pg_catalog.pg_namespace AS n ON n.oid OPERATOR(pg_catalog.=) p.pronamespace
+WHERE x.extname OPERATOR(pg_catalog.=) 'pg_stat_statements'
+AND p.proname::text OPERATOR(pg_catalog.=) '" + CollectorContext.StatementsExtensionAuroraFunction + @"'
+AND p.proname::text OPERATOR(pg_catalog.=) ANY (@functions)
+AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + CollectorContext.StatementsExtensionAuroraFunctionArguments + "'";
+
+    /// <summary>#6143: a catalog read of a handful of rows; the other connection-time reads beside it use 5 s too.</summary>
+    internal const int PgExtensionSchemasTimeoutSeconds = 5;
+
+    /// <summary>
+    /// #6143: sets <see cref="CollectorContext.PgExtensionSchemas"/> (and, on Aurora,
+    /// <see cref="CollectorContext.PgFunctionSchemas"/>) from <paramref name="targetConnection"/>, for a PostgreSQL
+    /// collector that declares an extension it reads (<see cref="ICollectorSchemaInfo.RequiredPgExtensions"/>) or calls
+    /// Aurora built-ins (<see cref="ICollectorSchemaInfo.ReadsAuroraFunctions"/>), so its SQL names each object by the
+    /// schema it is in. Clears both first, so a per-database loop never carries one database's answer into the next.
+    /// Returns whether it read the catalog.
+    /// <para>Not best-effort: when the read itself fails or times out, this throws, and the run (on the per-database
+    /// path, that database) fails with a message that says so. Guessing a schema instead could send the collector's SQL
+    /// to a same-named object in the guessed schema.</para>
+    /// </summary>
+    internal static async ValueTask<bool> ResolvePgExtensionSchemasAsync(
+        CollectorContext context,
+        ICollectorSchemaInfo definition,
+        DbConnection targetConnection,
+        ILogger? logger,
+        CancellationToken cancellationToken)
+    {
+        context.PgExtensionSchemas = null;
+        context.PgFunctionSchemas = null;
+        var readsFunctions = definition.ReadsAuroraFunctions && context.Target.IsAurora;
+        if (definition.TargetEngine != CollectorTargetEngine.PostgreSql
+            || (definition.RequiredPgExtensions.Count == 0 && !readsFunctions))
+        {
+            return false;
+        }
+
+        var schemas = new Dictionary<string, string>(StringComparer.Ordinal);
+        var functions = new List<(string Function, string Schema)>();
+        try
+        {
+            using var command = targetConnection.CreateCommand();
+            command.CommandTimeout = PgExtensionSchemasTimeoutSeconds;
+            command.CommandText = PgExtensionSchemasSql;
+            var parameter = command.CreateParameter();
+            parameter.ParameterName = "functions";
+            parameter.Value = readsFunctions ? CollectorContext.AuroraFunctionNames.ToArray() : Array.Empty<string>();
+            command.Parameters.Add(parameter);
+            using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    if (string.Equals(reader.GetString(0), "extension", StringComparison.Ordinal))
+                    {
+                        schemas[reader.GetString(1)] = reader.GetString(2);
+                    }
+                    else
+                    {
+                        functions.Add((reader.GetString(1), reader.GetString(2)));
+                    }
+                }
+            }
+        }
+        catch (DbException ex)
+        {
+            logger?.LogDebug(ex, "Reading extension schemas for {Collector} did not succeed (#6143)", definition.Name);
+            throw new InvalidOperationException(
+                $"{definition.Name} did not run: reading the schema of each extension it uses from pg_catalog.pg_extension "
+                + $"did not succeed, and the collector does not guess a schema. {ex.Message}",
+                ex);
+        }
+
+        context.PgExtensionSchemas = schemas;
+        if (readsFunctions)
+        {
+            var statementsSchema = schemas.TryGetValue("pg_stat_statements", out var found) ? found : null;
+            /* #6143: a function pg_proc did not show is called in pg_catalog. This read is fresh on every run, so the
+               one function the extension ships is used from the extension's schema only while pg_depend shows it is a
+               member there. */
+            context.PgFunctionSchemas = CollectorContext.ChoosePgFunctionSchemas(functions, statementsSchema);
+        }
+
+        return true;
+    }
+
+    /// <summary>
     /// #4251: sets <see cref="CollectorContext.PgFileSettingsReadable"/> for <c>pg_server_config</c> from
     /// <see cref="PgFileSettingsCapability"/> (its own hourly cache), and leaves every other collector
     /// untouched — pg_file_settings only matters to this one read. Its own method, the
@@ -2909,6 +3023,15 @@ public sealed class DarlingCollectorRunner
                        are disposed. Every other collector on this branch simply holds an idle connection for
                        the flush, which is milliseconds. */
                     using var dbConnection = openedConnection;
+
+                    /* #6143: an extension is created per database, in whatever schema that database chose, so a
+                       collector that reads one rebuilds its query here, on this database's own connection, once
+                       that database's extension schemas are known. Every other collector keeps the plan above. */
+                    if (await ResolvePgExtensionSchemasAsync(context, definition, dbConnection, _logger, dbToken))
+                    {
+                        dbPlan = definition.BuildQuery(context);
+                    }
+
                     using (var dbCommand = CreateCollectorCommand(perDbProvider, dbPlan, dbConnection, perDbTimeout))
                     {
                         /* #2855: the open, same contract as the other two paths — ExecuteReaderAsync returns
@@ -3843,6 +3966,8 @@ public sealed class DarlingCollectorRunner
                    to send before BuildQuery runs. */
                 await ResolvePgFileSettingsReadableAsync(
                     context, definition.Name, targetConnection, server, _logger, cancellationToken);
+                /* #6143: same connection, same point: the schema of each extension the collector reads. */
+                await ResolvePgExtensionSchemasAsync(context, definition, targetConnection, _logger, cancellationToken);
 
                 var sqlSlice = Stopwatch.StartNew();
                 var plan = definition.BuildQuery(context);
@@ -5143,13 +5268,15 @@ public sealed class DarlingCollectorRunner
             CollectSchemaChangeEvents = _collectSchemaChanges(),
         };
 
-        var plan = definition.BuildQuery(context);
-
         /* Engine-neutral: a Postgres target gets an NpgsqlConnection here and the definition's
            ReadAsync never knows the difference — it reads a DbDataReader either way. */
         var provider = TargetProviders.For(server.Target);
         using var connection = provider.CreateConnection(server.ConnectionString);
         await connection.OpenAsync(cancellationToken);
+
+        /* #6143: built after the open, so the query names each extension by the schema read on this connection. */
+        await ResolvePgExtensionSchemasAsync(context, definition, connection, _logger, cancellationToken);
+        var plan = definition.BuildQuery(context);
         using var command = CreateCollectorCommand(provider, plan, connection, commandTimeoutSeconds);
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
         return await definition.ReadAsync(reader, context, cancellationToken);

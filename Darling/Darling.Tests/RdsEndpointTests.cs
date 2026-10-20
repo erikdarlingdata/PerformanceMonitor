@@ -69,6 +69,25 @@ public class RdsEndpointTests
     }
 
     /// <summary>
+    /// #6143: an RDS Proxy endpoint (default or one of the proxy's own endpoints, in any partition) is recognised, so
+    /// the connector can ask for the instance or cluster endpoint instead. Instance and cluster endpoints are not.
+    /// </summary>
+    [Theory]
+    [InlineData("the-proxy.proxy-abc123xyz.us-east-1.rds.amazonaws.com", true)]
+    [InlineData("reader-ep.endpoint.proxy-abc123xyz.eu-west-2.rds.amazonaws.com", true)]
+    [InlineData("p.proxy-abc.cn-north-1.rds.amazonaws.com.cn", true)]
+    [InlineData("10.0.0.5, the-proxy.proxy-abc.us-east-1.rds.amazonaws.com", true)]
+    [InlineData("alpha.abc123xyz.us-east-1.rds.amazonaws.com", false)]
+    [InlineData("gamma.cluster-abc123.us-east-2.rds.amazonaws.com", false)]
+    [InlineData("proxy-db.internal.example.com", false)]
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    public void AnRdsProxyEndpointIsRecognised(string? host, bool expected)
+    {
+        Assert.Equal(expected, RdsEndpoint.IsProxyHost(host));
+    }
+
+    /// <summary>
     /// The suffix is matched loosely so China and GovCloud parse. Pinning <c>.rds.amazonaws.com</c> exactly
     /// would silently refuse a valid endpoint in either partition, and refusing to parse looks identical to
     /// "this is not RDS" — so the failure would present as the wrong route being chosen.

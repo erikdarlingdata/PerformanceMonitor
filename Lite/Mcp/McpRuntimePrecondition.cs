@@ -115,6 +115,29 @@ internal static class McpRuntimePrecondition
     }
 
     /// <summary>
+    /// #6181: Lite's twin of Darling's <c>QueryStoreFirstIntervalMessageAsync</c>. The message for a Query Store read that
+    /// found no sample EVER stored, when the latest health snapshot says Query Store is on and the query_store collector's
+    /// latest run succeeded (<see cref="CollectorRuntimePrecondition.QueryStoreFirstIntervalMessage"/>), or null when it
+    /// does not (state unknown, off, read-only, in error, collector run failed or missing) and the caller keeps its
+    /// "may be OFF" text. Null as well when a read fails: this runs on a path that already found nothing.
+    /// </summary>
+    public static async Task<string?> QueryStoreFirstIntervalMessageAsync(
+        LocalDataService dataService, int serverId, string serverName, string? databaseName)
+    {
+        try
+        {
+            var (states, observedUtc) = await dataService.GetQueryStoreStatesAsync(
+                serverId, string.IsNullOrEmpty(databaseName) ? null : new[] { databaseName });
+            var (status, _, _) = await dataService.GetLatestCollectorOutcomeAsync(serverId, "query_store");
+            return CollectorRuntimePrecondition.QueryStoreFirstIntervalMessage(serverName, states, status, observedUtc);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
     /// #6074: the sentence a Query Store read that found nothing appends when a database it covers is not READ_WRITE
     /// (<see cref="CollectorRuntimePrecondition.QueryStoreNotWritingHint"/>), read from the same <c>v_query_store_health</c> row
     /// <c>get_query_store_health</c> answers from. Null when every database in scope is collecting, there is no health row, or

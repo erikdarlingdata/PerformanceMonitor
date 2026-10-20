@@ -304,7 +304,9 @@ public sealed class RdsEndpointVerifier
                 CommandTimeout = LoginProbeSeconds,
             };
 
-            await using var connection = new NpgsqlConnection(builder.ConnectionString);
+            /* #6143: no type loading, so SELECT 1 is the only statement this login runs. */
+            await using var source = DarlingServerConnector.OpenWithoutTypeLoading(builder.ConnectionString);
+            await using var connection = source.CreateConnection();
             await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
             await using var command = new NpgsqlCommand("SELECT 1;", connection) { CommandTimeout = LoginProbeSeconds };
             await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);

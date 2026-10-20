@@ -159,7 +159,12 @@ ORDER BY count(*) DESC";
     /// </summary>
     public override int? CommandTimeoutSecondsOverride => 120;
 
-    public override CollectorQuery BuildQuery(CollectorContext context) => new(QueryText);
+    /* #6143: the view named by the schema pg_buffercache was created in; the monitoring connection's search_path is
+       pg_catalog, and the extension need not be in public. */
+    public override CollectorQuery BuildQuery(CollectorContext context) => new(QueryText.Replace(
+        "FROM public.pg_buffercache AS b",
+        "FROM " + context.PgExtensionSchema("pg_buffercache") + ".pg_buffercache AS b",
+        StringComparison.Ordinal));
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
     {

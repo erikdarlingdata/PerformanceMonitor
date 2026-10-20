@@ -130,7 +130,7 @@ public sealed class HypotheticalIndexRequestTests
         var source = File.ReadAllText(Path.Combine(RepoRoot(),
             "Darling", "PerformanceMonitor.Darling.Service", "Targets", "HypotheticalIndexExperiment.cs"));
 
-        Assert.Contains("SELECT set_config('pm.stmt', $1, true)", source, StringComparison.Ordinal);
+        Assert.Contains("SELECT pg_catalog.set_config('pm.stmt', $1, true)", source, StringComparison.Ordinal);
         Assert.Contains("current_setting('pm.stmt')", source, StringComparison.Ordinal);
 
         /* The shape that fails: EXPLAIN with the statement pasted straight into the command text. */
