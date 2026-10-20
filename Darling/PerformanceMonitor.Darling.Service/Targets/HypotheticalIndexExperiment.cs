@@ -27,7 +27,7 @@ namespace PerformanceMonitor.Darling.Service.Targets;
 /// blast radius is worth stating precisely rather than reassuringly. A hypothetical index costs no disk,
 /// is visible only inside the session that created it, and is never written anywhere.
 /// <c>EXPLAIN</c> without <c>ANALYZE</c> does not run the statement, but it does plan it, and planning can evaluate an
-/// IMMUTABLE function whose arguments are all constants (#6170). So the connection is the hypothetical-index login
+/// IMMUTABLE function whose arguments are all constants, and a STABLE one while it estimates selectivity (#6170). So the connection is the hypothetical-index login
 /// (<see cref="HypotheticalIndexLogin"/>), never the monitoring login, and the experiment takes SELECT statements only. The
 /// whole experiment runs inside a transaction that is ROLLED BACK, so even the session-local catalog entry does not outlive the call.
 /// </para>
@@ -214,6 +214,12 @@ public static class HypotheticalIndexExperiment
 
         try
         {
+            /* #6170: nothing in the experiment writes. A function that planning evaluates (an IMMUTABLE one, and a STABLE one when
+               selectivity is estimated, each with constant arguments) runs under this read-only transaction, so it cannot write.
+               hypopg keeps its indexes in the backend's memory, not in a catalog, and works under it. First in the transaction,
+               before any other statement. */
+            await ExecuteAsync(connection, transaction, "SET TRANSACTION READ ONLY", cancellationToken);
+
             await ExecuteAsync(connection, transaction,
                 $"SET LOCAL statement_timeout = '{StatementTimeoutSeconds}s'", cancellationToken);
 
@@ -729,7 +735,7 @@ public static class HypotheticalIndexExperiment
     /// product's <c>pg_statement_text</c> store by queryid), so anyone who can run queries on a monitored
     /// server can influence it, and this EXPLAIN runs as the hypothetical-index login ON that server. Safety
     /// rests, in order, on: (1) <c>EXPLAIN</c> WITHOUT <c>ANALYZE</c> only PLANS — the statement itself is not
-    /// run, but planning is not free of side effects: the planner can evaluate an IMMUTABLE function with
+    /// run, but planning is not free of side effects: the planner can evaluate an IMMUTABLE function (and a STABLE one, while it estimates selectivity) with
     /// constant arguments while it folds constants, so a function the text names can run during the EXPLAIN, under the
     /// roles of the login that plans. That login is the hypothetical-index login (#6170), which holds CONNECT, USAGE and
     /// SELECT and nothing else, and never the monitoring login; (2) the text is a single NORMALIZED <c>pg_stat_statements</c> entry, not a script;

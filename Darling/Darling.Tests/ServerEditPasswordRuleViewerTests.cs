@@ -345,7 +345,7 @@ public sealed class ServerEditPasswordRuleViewerTests
     /// <summary>The sentence the web and MCP edit give for a row with a remediation login. Held here as text because the
     /// two apps carry it as separate constants.</summary>
     private const string RemediationSentence =
-        "This server has a remediation login stored. Change how it is reached on the service host, in the configuration file or with --add-server.";
+        "This server has a remediation or hypothetical-index login stored. Change how it is reached on the service host, in the configuration file or with --add-server.";
 
     [Fact]
     public void TheViewersRemediationSentence_IsTheSharedSentence()

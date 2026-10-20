@@ -2108,6 +2108,15 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
             {
                 server.RemediationEncryptedPasswordDeclaredByFile = true;
             }
+
+            /* #6170: the same rule for the hypothetical-index login: the row must name the login the file declared the reference for. */
+            if (declared.HypotheticalIndexEncryptedPasswordDeclaredByFile
+                && string.Equals(declared.HypotheticalIndexUsername ?? string.Empty, server.HypotheticalIndexUsername ?? string.Empty, StringComparison.Ordinal)
+                && DarlingSecrets.DeclaresSecretText(server.HypotheticalIndexEncryptedPassword)
+                && string.Equals(declared.HypotheticalIndexEncryptedPassword, server.HypotheticalIndexEncryptedPassword, StringComparison.Ordinal))
+            {
+                server.HypotheticalIndexEncryptedPasswordDeclaredByFile = true;
+            }
         }
     }
 

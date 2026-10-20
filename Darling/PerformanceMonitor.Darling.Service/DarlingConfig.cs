@@ -469,6 +469,7 @@ public sealed class DarlingConfig
 
             server.EncryptedPasswordDeclaredByFile = DarlingSecrets.DeclaresSecretText(server.EncryptedPassword);
             server.RemediationEncryptedPasswordDeclaredByFile = DarlingSecrets.DeclaresSecretText(server.RemediationEncryptedPassword);
+            server.HypotheticalIndexEncryptedPasswordDeclaredByFile = DarlingSecrets.DeclaresSecretText(server.HypotheticalIndexEncryptedPassword);
         }
 
         if (config.Smtp is not null)
@@ -2697,6 +2698,10 @@ public sealed class MonitoredServer
     /// <summary><see cref="EncryptedPasswordDeclaredByFile"/> for <see cref="RemediationEncryptedPassword"/>.</summary>
     [JsonIgnore]
     internal bool RemediationEncryptedPasswordDeclaredByFile { get; set; }
+
+    /// <summary><see cref="EncryptedPasswordDeclaredByFile"/> for <see cref="HypotheticalIndexEncryptedPassword"/> (#6170).</summary>
+    [JsonIgnore]
+    internal bool HypotheticalIndexEncryptedPasswordDeclaredByFile { get; set; }
 
     /// <summary>
     /// The connection as the store row holds it, read once by <see cref="ServerConnectionIdentity.FromStoredColumns"/> from the raw

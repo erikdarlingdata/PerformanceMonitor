@@ -803,7 +803,7 @@ public sealed class ServerEditCoreTests : IDisposable
         var answer = JsonNode.Parse(await Run(store, "{\"monthly_cost_usd\":5}"))!;
 
         Assert.Equal("invalid", answer["status"]!.GetValue<string>());
-        Assert.Equal("This server has a remediation login stored. Change how it is reached on the service host, in the configuration file or with --add-server.", answer["message"]!.GetValue<string>());
+        Assert.Equal("This server has a remediation or hypothetical-index login stored. Change how it is reached on the service host, in the configuration file or with --add-server.", answer["message"]!.GetValue<string>());
         Assert.Equal(Edit.EditRemediationKeptText, answer["message"]!.GetValue<string>());
     }
 }

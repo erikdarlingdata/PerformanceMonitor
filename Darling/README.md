@@ -587,7 +587,7 @@ Two mutually exclusive modes — setting `managed: true` together with `connecti
 | `remediationUsername` | *(none)* | **Optional second credential, for operator-initiated remediation only (#2138).** The credential above stays read-only forever and is never used for a write. Omit both remediation keys — the default — and this server has no remediation surface at all: there is nothing to enable and nothing to disable. Both halves are required; one alone counts as unarmed and the service says so at connect. Always SQL auth when set, so there is no `remediationAuth` key: an integrated remediation identity would be the service account, which is the monitoring identity |
 | `remediationEncryptedPassword` | *(none)* | The remediation credential's secret: same DPAPI blob from `--encrypt-password`, or an `env:NAME` / `file:/path` reference. There is deliberately **no plaintext variant** of this one — a wrong monitoring password fails a read, a wrong remediation password fails a write against a production server |
 | `hypotheticalIndexUsername` | *(none)* | **PostgreSQL targets only. The login that the "Test an index" check runs under (#6170).** The check never runs under the monitoring login. With no login set, the check is refused and the message says what to set up. See [Testing an index on PostgreSQL](#testing-an-index-on-postgresql) |
-| `hypotheticalIndexEncryptedPassword` | *(none)* | The password of that login, as an `env:NAME` or `file:/path` reference. Darling reads it on its own host when the check runs. A stored password is refused |
+| `hypotheticalIndexEncryptedPassword` | *(none)* | The password of that login, as an `env:NAME` or `file:/path` reference. Darling reads it on its own host when the check runs. A stored password is refused, and so is a reference to one of Darling's own configuration files or secrets (unless this same reference is in darling.json for this server). The login needs a SCRAM-SHA-256 password: the check signs in with SCRAM-SHA-256 only, as the remediation login does |
 
 **Least privilege for the remediation credential.** Grant `ALTER` on each database you intend to force a plan in — that is what `sp_query_store_force_plan` / `sp_query_store_unforce_plan` need. `ALTER SERVER STATE` is needed *only* to evict a plan (`evict_cached_plan`, #5632), because that is what a targeted `DBCC FREEPROCCACHE(plan_handle)` requires, and it is the expensive grant. It is genuinely optional: without it an eviction is refused as `evict_permission_denied`, a named reason and never silent, and nothing is run. The service does not guess per platform: before it evicts (and on a dry run) it asks the server with a read-only `HAS_PERMS_BY_NAME` check, which answers for the credential's effective permissions however the grant arrived. Azure SQL Database has no plan handle eviction at all, which no grant changes, and that is refused as its own reason, `evict_unsupported_on_platform`, rather than as a permission problem. An eviction has no undo, and it also needs that server's `evict_plan` switch; no server has it on after an upgrade.
 
@@ -597,7 +597,7 @@ Two mutually exclusive modes — setting `managed: true` together with `connecti
 
 The server tab can test an index on a PostgreSQL server. It plans one stored statement twice, with and without an index that does not exist. The index is a hypothetical one from the `hypopg` extension. Nothing is built.
 
-Planning a statement can run a function. PostgreSQL runs a function while it plans when the function is marked `IMMUTABLE` and its arguments are constants. The function runs under the login that plans. So the check does not use the monitoring login, which usually holds `pg_monitor` or `pg_read_all_stats`. It uses its own login.
+Planning a statement can run a function. PostgreSQL runs a function while it plans when the function is marked `IMMUTABLE` and its arguments are constants, and also when it is marked `STABLE` and its arguments are constants, because the planner calls it to estimate how many rows a condition matches. The function runs under the login that plans. So the check does not use the monitoring login, which usually holds `pg_monitor` or `pg_read_all_stats`. It uses its own login.
 
 Set up the login the way you set up the remediation login:
 
@@ -605,7 +605,22 @@ Set up the login the way you set up the remediation login:
 2. Give it `CONNECT` on the database.
 3. Give it `USAGE` on each schema that holds a table you want to test, and on the schema `hypopg` is installed in.
 4. Give it `SELECT` on each table that the statements read. PostgreSQL checks table privileges when it starts an `EXPLAIN`, so a table the login cannot read stops the check with `permission denied`.
-5. Set `hypotheticalIndexUsername` to the login name and `hypotheticalIndexEncryptedPassword` to an `env:NAME` or `file:/path` reference to its password, in the server entry.
+5. Give it a SCRAM-SHA-256 password (`password_encryption = 'scram-sha-256'` when you set it), and a `scram-sha-256` line in `pg_hba.conf`. The check signs in with SCRAM-SHA-256 only. A server that asks for a password in clear text, MD5, or no password at all is refused before the password is sent. Unless the server entry verifies the server's certificate in full (encryption not `Optional` and `Trust server certificate` off), the check also needs SCRAM channel binding, so TLS must be on at the server (`ssl = on`).
+6. Set `hypotheticalIndexUsername` to the login name and `hypotheticalIndexEncryptedPassword` to an `env:NAME` or `file:/path` reference to its password.
+
+**For a server that is already in the store**, darling.json is read only to add servers the store does not have, so the two keys in the file do not change a server already there. Set them on the store row, as the store's owner role, the same way as the remediation pair (the web dashboard, the MCP `edit_server` tool and the desktop viewer cannot set either pair, by design). For example, in `psql` as the owner:
+
+```sql
+UPDATE config.config_monitored_servers
+SET hypothetical_index_username = 'pm_index_check',
+    hypothetical_index_encrypted_password = 'env:PM_INDEX_CHECK_PASSWORD',
+    modified_at = (now() AT TIME ZONE 'UTC')
+WHERE name = 'my-pg-server';
+```
+
+The service picks the change up when it next reloads its server list. Once either column is set, the web dashboard, the MCP `edit_server` tool and the desktop viewer refuse to change how that server is reached (host, port, database, authentication, username, encryption), as they do for a remediation login: change it on the service host, with the same `UPDATE` as the owner. Removing the two columns (`SET ... = NULL`) lifts that.
+
+**What a role that can create functions can read through this check.** The check runs `EXPLAIN` on a stored statement. If a role can create a function in that database, and a statement that calls it with constant arguments is among the statements the check plans, that function runs while the statement is planned, as this login. So a role that can create functions in that database can read, through the check, whatever this login can `SELECT`. Grant the login `SELECT` only on the tables you want to test, and treat the right to create functions in that database accordingly. The transaction is read-only, so the function cannot write.
 
 The login needs no write grants. The check tests `SELECT` statements and `WITH` statements only. An `INSERT`, `UPDATE` or `DELETE` is refused with a plain message, because planning one needs a write grant on its table.
 

@@ -15013,8 +15013,7 @@ AND   j.hypertable_name = '{relation}'", connection))
            when its arguments are constants, and the monitoring login usually holds pg_monitor or pg_read_all_stats. With no login set up
            the check is refused with what to set up, and nothing is sent to the monitored server. */
         var (hypotheticalIndexConnectionString, loginRefusal) = Targets.HypotheticalIndexLogin.Resolve(
-            displayName, server.Config.HypotheticalIndexUsername, server.Config.HypotheticalIndexEncryptedPassword,
-            runtime.ConnectionString);
+            server.Config, runtime.ConnectionString);
         if (hypotheticalIndexConnectionString is null)
         {
             return new CommandOutcome(false, "hypothetical-index login not set up", JsonError(loginRefusal ?? "no login"));
@@ -15054,20 +15053,33 @@ AND   j.hypertable_name = '{relation}'", connection))
         {
             throw;
         }
+        catch (NpgsqlException ex) when (Targets.HypotheticalIndexLogin.IsSignInRuleRefusal(ex))
+        {
+            /* #6170: the server asked for a sign-in the check does not accept (clear text, MD5, none, or SCRAM without channel binding). Refused
+               before the password was sent, with what to change. */
+            return new CommandOutcome(false, "hypothetical-index sign-in refused",
+                JsonError($"the hypothetical-index connection to '{displayName}' did not sign in: "
+                    + $"{CustomAlertEvaluator.SanitizeDisplayText(ex.Message, HypotheticalIndexErrorMaxLength).TrimEnd('.')}. "
+                    + Targets.HypotheticalIndexLogin.SignInRule));
+        }
         catch (PostgresException ex)
         {
             /* Reported rather than thrown, and the SQLSTATE travels: 42P01 here means the table named in the
                candidate does not exist, which is a caller mistake, and 42501 means the login cannot plan
-               against it — two different conversations that a bare failure would merge. */
+               against it — two different conversations that a bare failure would merge. The server's text goes to the
+               Viewer, so it is cleaned and capped like the pooler text is (#6165). */
             return new CommandOutcome(false, "experiment failed",
-                JsonError($"planning on '{displayName}' failed: {ex.MessageText} (SQLSTATE {ex.SqlState})"));
+                JsonError($"planning on '{displayName}' failed: {CustomAlertEvaluator.SanitizeDisplayText(ex.MessageText, HypotheticalIndexErrorMaxLength)} (SQLSTATE {ex.SqlState})"));
         }
         catch (Exception ex)
         {
             return new CommandOutcome(false, "experiment failed",
-                JsonError($"planning on '{displayName}' failed: {ex.Message}"));
+                JsonError($"planning on '{displayName}' failed: {CustomAlertEvaluator.SanitizeDisplayText(ex.Message, HypotheticalIndexErrorMaxLength)}"));
         }
     }
+
+    /// <summary>The longest server or driver text the hypothetical-index result carries to the Viewer (#6170).</summary>
+    private const int HypotheticalIndexErrorMaxLength = 300;
 
     /// <summary>
     /// The <c>fetch_active_queries</c> command handler (headless-plan live-snapshot wave): reads the LIVE

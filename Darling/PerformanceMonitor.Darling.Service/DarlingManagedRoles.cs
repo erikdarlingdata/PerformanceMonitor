@@ -2493,7 +2493,8 @@ BEGIN
    p_columns := COALESCE(p_columns, ARRAY[]::text[]);
 
    SELECT s.modified_at, s.host, s.port, s.auth, s.database, s.read_only_intent, s.username, s.encrypt_mode,
-          s.trust_server_certificate, s.multi_subnet_failover, COALESCE(s.remediation_encrypted_password, '') <> '',
+          s.trust_server_certificate, s.multi_subnet_failover,
+          (COALESCE(s.remediation_encrypted_password, '') <> '' OR COALESCE(s.hypothetical_index_encrypted_password, '') <> ''),
           s.aws_role_arn, s.aws_external_id
    INTO v_old_modified_at, v_old_host, v_old_port, v_old_auth, v_old_database, v_old_read_only_intent,
         v_old_username, v_old_encrypt_mode, v_old_trust_server_certificate, v_old_multi_subnet_failover,
@@ -2575,8 +2576,9 @@ BEGIN
       OR v_trust_server_certificate IS DISTINCT FROM v_old_trust_server_certificate
       OR v_multi_subnet_failover IS DISTINCT FROM v_old_multi_subnet_failover;
 
-   -- A row that holds a remediation secret is not moved from here, whatever else the call sends: that secret is
-   -- set and changed on the service host, and a new main password does not replace it.
+   -- A row that holds a remediation secret, or a hypothetical-index login secret (#6170), is not moved from here,
+   -- whatever else the call sends: that secret is set and changed on the service host, and a new main password
+   -- does not replace it.
    IF v_connection_changed AND v_remediation_held THEN
       RETURN QUERY SELECT 'remediation_kept'::text, NULL::timestamp;
       RETURN;
@@ -2805,6 +2807,7 @@ AS $rules$
 DECLARE
    v_reference_main boolean;
    v_reference_remediation boolean;
+   v_reference_hypothetical boolean;
    v_held boolean;
    v_moved boolean;
 BEGIN
@@ -2817,12 +2820,14 @@ BEGIN
 
    v_reference_main := COALESCE(left(NEW.encrypted_password, 4) = 'env:' OR left(NEW.encrypted_password, 5) = 'file:', false);
    v_reference_remediation := COALESCE(left(NEW.remediation_encrypted_password, 4) = 'env:' OR left(NEW.remediation_encrypted_password, 5) = 'file:', false);
+   -- #6170: the hypothetical-index login's password column is held to the same rule as the remediation one.
+   v_reference_hypothetical := COALESCE(left(NEW.hypothetical_index_encrypted_password, 4) = 'env:' OR left(NEW.hypothetical_index_encrypted_password, 5) = 'file:', false);
 
    IF TG_OP = 'INSERT' THEN
       -- A new row never holds a reference. The one pass: an upsert's proposed row for a server whose stored value is
       -- already that exact reference (the row is locked, so it cannot go away before the write), which then meets the
       -- UPDATE rules below. A role that cannot read or lock the row (viewer, mcp) gets the refusal.
-      IF v_reference_main OR v_reference_remediation THEN
+      IF v_reference_main OR v_reference_remediation OR v_reference_hypothetical THEN
          v_held := false;
          BEGIN
             PERFORM 1
@@ -2830,6 +2835,7 @@ BEGIN
             WHERE s.server_id = NEW.server_id
               AND (NOT v_reference_main OR s.encrypted_password = NEW.encrypted_password)
               AND (NOT v_reference_remediation OR s.remediation_encrypted_password = NEW.remediation_encrypted_password)
+              AND (NOT v_reference_hypothetical OR s.hypothetical_index_encrypted_password = NEW.hypothetical_index_encrypted_password)
             FOR UPDATE OF s;
             v_held := FOUND;
          EXCEPTION WHEN insufficient_privilege THEN
@@ -2846,7 +2852,8 @@ BEGIN
 
    -- An update never sets a reference.
    IF (v_reference_main AND NEW.encrypted_password IS DISTINCT FROM OLD.encrypted_password)
-      OR (v_reference_remediation AND NEW.remediation_encrypted_password IS DISTINCT FROM OLD.remediation_encrypted_password) THEN
+      OR (v_reference_remediation AND NEW.remediation_encrypted_password IS DISTINCT FROM OLD.remediation_encrypted_password)
+      OR (v_reference_hypothetical AND NEW.hypothetical_index_encrypted_password IS DISTINCT FROM OLD.hypothetical_index_encrypted_password) THEN
       RAISE EXCEPTION '%', 'Enter the password itself. References (env: or file:) can only be set in the configuration file.' USING ERRCODE = 'PW001';
    END IF;
 
@@ -2866,10 +2873,14 @@ BEGIN
 
    -- A remediation secret that is kept goes with the login name it was stored for: that name is as much a part of how
    -- the row is reached as the host is, so it is not changed here either. Not part of v_moved, so it never raises PW002.
-   IF COALESCE(OLD.remediation_encrypted_password, '') <> ''
-      AND NEW.remediation_encrypted_password IS NOT DISTINCT FROM OLD.remediation_encrypted_password
-      AND (v_moved OR NEW.remediation_username IS DISTINCT FROM OLD.remediation_username) THEN
-      RAISE EXCEPTION '%', 'This server has a remediation login stored. Change how it is reached on the service host, in the configuration file or with --add-server.' USING ERRCODE = 'PW003';
+   -- The hypothetical-index login's secret (#6170) goes with its login name in the same way.
+   IF (COALESCE(OLD.remediation_encrypted_password, '') <> ''
+       AND NEW.remediation_encrypted_password IS NOT DISTINCT FROM OLD.remediation_encrypted_password
+       AND (v_moved OR NEW.remediation_username IS DISTINCT FROM OLD.remediation_username))
+      OR (COALESCE(OLD.hypothetical_index_encrypted_password, '') <> ''
+       AND NEW.hypothetical_index_encrypted_password IS NOT DISTINCT FROM OLD.hypothetical_index_encrypted_password
+       AND (v_moved OR NEW.hypothetical_index_username IS DISTINCT FROM OLD.hypothetical_index_username)) THEN
+      RAISE EXCEPTION '%', 'This server has a remediation or hypothetical-index login stored. Change how it is reached on the service host, in the configuration file or with --add-server.' USING ERRCODE = 'PW003';
    END IF;
 
    IF v_moved
