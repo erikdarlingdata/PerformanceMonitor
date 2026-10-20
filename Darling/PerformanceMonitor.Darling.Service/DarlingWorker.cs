@@ -6562,7 +6562,7 @@ LIMIT 1";
     /// forever, and made test_hypothetical_index (#2612) unable to resolve a statement on the one platform
     /// it can be tested against.</para>
     /// </summary>
-    private static async Task<(List<long> QueryIds, List<string> Texts)> ReadPgStatementTextAsync(
+    internal static async Task<(List<long> QueryIds, List<string> Texts)> ReadPgStatementTextAsync(
         ServerRuntime runtime, CancellationToken cancellationToken)
     {
         var queryIds = new List<long>();
@@ -6580,10 +6580,23 @@ LIMIT 1";
            occurrence of a queryid is the row the SQL already chose. */
         var seen = new HashSet<long>();
 
-        await using var connection = new Npgsql.NpgsqlConnection(runtime.ConnectionString);
+        await using var connection = PostgresTargetProvider.CreatePinnedConnection(runtime.ConnectionString);
         await connection.OpenAsync(cancellationToken);
+
+        /* #6143: the view and the Aurora function are named by the schema read on this connection, as the collectors
+           name them, never by public. */
+        var schemas = new CollectorContext
+        {
+            ServerId = runtime.ServerId,
+            ServerName = runtime.Config.DisplayName,
+            CollectionTime = DateTime.UtcNow,
+            Deltas = new CollectorDeltaCalculator(),
+            Target = runtime.Target,
+        };
+        await DarlingCollectorRunner.ResolvePgExtensionSchemasAsync(
+            schemas, PgStatementStatsCollector.Instance, connection, logger: null, cancellationToken);
         await using var command = new Npgsql.NpgsqlCommand(
-            PgStatementText.FetchSqlFor(runtime.Target.IsAurora, runtime.Target.PostgresMajorVersion),
+            PgStatementText.FetchSqlFor(runtime.Target.IsAurora, runtime.Target.PostgresMajorVersion, schemas),
             connection) { CommandTimeout = PgStatementText.FetchCommandTimeoutSeconds };
         command.Parameters.AddWithValue(PgStatementTextRowCap);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -14248,8 +14261,21 @@ AND   j.hypertable_name = '{relation}'", connection))
             /* #2255: full text on a NEW cause, one line while it persists. A credential that cannot be
                decrypted on this host is not a transient connect failure, so its explanation is worth Error
                once and worth almost nothing on the 1,440th repeat. */
-            var failure = ex.Message;
-            if (!string.Equals(server.LastConnectFailureLogged, failure, StringComparison.Ordinal))
+            /* #6183: SqlClient's native network library not loading breaks every SQL Server connection from this
+               install, and "The type initializer for 'TdsParser' threw an exception" does not say why. The shared
+               explanation replaces the raw text, and it is logged once for the whole process (it is the same cause
+               for every server), not once per server with a retry line. The retry loop itself is unchanged. */
+            var nativeLoadFailure = SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory);
+            var failure = nativeLoadFailure ?? ex.Message;
+            if (nativeLoadFailure is not null)
+            {
+                server.LastConnectFailureLogged = failure;
+                if (Interlocked.Exchange(ref _nativeLoadFailureLogged, 1) == 0)
+                {
+                    _logger.LogError("Connect failed and will keep failing until fixed: {Message}", failure);
+                }
+            }
+            else if (!string.Equals(server.LastConnectFailureLogged, failure, StringComparison.Ordinal))
             {
                 server.LastConnectFailureLogged = failure;
                 if (ex is InvalidOperationException && failure.Contains("DPAPI-decrypt", StringComparison.Ordinal))
@@ -14278,9 +14304,12 @@ AND   j.hypertable_name = '{relation}'", connection))
                history does. */
             await _selfAlerts!.ApplyConnectionOutcomeAsync(
                 server.Config.ServerId,
-                server.Config.DisplayName, online: false, error: ex.Message, cancellationToken);
+                server.Config.DisplayName, online: false, error: failure, cancellationToken);
         }
     }
+
+    /// <summary>1 once the native-library load failure (#6183) has been logged. It is one cause for every server.</summary>
+    private int _nativeLoadFailureLogged;
 
     /// <summary>
     /// #4999: the at-connect run of ONE on-load collector (effective frequency 0), inline in
@@ -15025,7 +15054,9 @@ AND   j.hypertable_name = '{relation}'", connection))
 
         try
         {
-            await using var connection = new NpgsqlConnection(runtime.ConnectionString);
+            /* #6143: pinned like every other monitoring connection. The experiment sets the database's own
+               search_path only around the EXPLAIN and the hypothetical index it plans against. */
+            await using var connection = PostgresTargetProvider.CreatePinnedConnection(runtime.ConnectionString);
             await connection.OpenAsync(cancellationToken);
 
             var result = await Targets.HypotheticalIndexExperiment.RunAsync(

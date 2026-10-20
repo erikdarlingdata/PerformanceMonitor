@@ -139,7 +139,12 @@ LIMIT 500";
         new PgExtensionDependency("pg_qualstats", PgExtensionInstallKind.SharedPreloadLibraries),
     };
 
-    public override CollectorQuery BuildQuery(CollectorContext context) => new(QueryText);
+    /* #6143: the function named by the schema pg_qualstats was created in, in this database (the host reads it per
+       database), which need not be public. */
+    public override CollectorQuery BuildQuery(CollectorContext context) => new(QueryText.Replace(
+        "FROM public.pg_qualstats() AS q",
+        "FROM " + context.PgExtensionSchema("pg_qualstats") + ".pg_qualstats() AS q",
+        System.StringComparison.Ordinal));
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
     {

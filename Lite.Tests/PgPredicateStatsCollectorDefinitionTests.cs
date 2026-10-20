@@ -30,6 +30,8 @@ public class PgPredicateStatsCollectorDefinitionTests
             ServerName = "test-server",
             CollectionTime = new DateTime(2026, 8, 25, 12, 0, 0, DateTimeKind.Utc),
             Deltas = s_deltas,
+            /* #6143: the host reads the schema the extension was created in; here it was created in public. */
+            PgExtensionSchemas = new System.Collections.Generic.Dictionary<string, string> { ["pg_qualstats"] = "public" },
             Target = new CollectorTargetInfo
             {
                 Engine = CollectorTargetEngine.PostgreSql,
@@ -105,7 +107,7 @@ public class PgPredicateStatsCollectorDefinitionTests
     [Fact]
     public void TheExtensionFunction_IsQualifiedWhereItActuallyLives()
     {
-        Assert.Contains("public.pg_qualstats()", Sql, StringComparison.Ordinal);
+        Assert.Contains("\"public\".pg_qualstats()", Sql, StringComparison.Ordinal);
         Assert.DoesNotContain("pg_catalog.pg_qualstats", Sql, StringComparison.Ordinal);
     }
 

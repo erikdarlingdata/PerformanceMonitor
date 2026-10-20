@@ -126,7 +126,7 @@ try {
     'import { el } from "./util.js";\nexport const SERIES_COLORS = [];\nexport function normalizeColor(c) { return c; }\nexport function renderLineChart() { return el("div", {}); }\n' +
       'export function zoomableLineChart() { return el("div", {}); }\nexport function chartZoomScope() { return ""; }\n'
   );
-  const { renderJobHistory, JOB_HISTORY_COLUMNS, limitNote } = await import(pathToFileURL(path.join(scratch, "pages", "job-history.js")).href);
+  const { renderJobHistory, JOB_HISTORY_COLUMNS, limitNote, noAgentLine } = await import(pathToFileURL(path.join(scratch, "pages", "job-history.js")).href);
 
   const run = {
     runs: [
@@ -329,6 +329,16 @@ try {
   all(rebuilt2, "button").find((b) => b.textContent === "Close").handlers.click();
   const closed = all(rebuilt2, "div").filter((d) => d.className === "jh-detail").map((d) => d.textContent).join("");
   out.detail = { longMessage, before, opened, preText, reopened, noMessagePre, closed };
+
+  // #6178: the sentence for a not_collected answer that names Azure SQL Database; every other answer keeps its own.
+  const azureMessage = "srv-az runs on Azure SQL Database (EngineEdition 5). The job_history collector does not run there.";
+  out.noAgentLines = {
+    azure: noAgentLine({ kind: "empty", status: "not_collected", message: azureMessage }),
+    otherEngine: noAgentLine({ kind: "empty", status: "not_collected", message: "srv-mi runs on Azure SQL Managed Instance (EngineEdition 8)." }),
+    plainEmpty: noAgentLine({ kind: "empty", status: "empty", message: "No job runs matched in the requested time range." }),
+    azureButEmpty: noAgentLine({ kind: "empty", status: "empty", message: azureMessage }),
+    none: noAgentLine(null),
+  };
 
   out.columns = JOB_HISTORY_COLUMNS.map((c) => c.label);
   console.log(JSON.stringify(out));

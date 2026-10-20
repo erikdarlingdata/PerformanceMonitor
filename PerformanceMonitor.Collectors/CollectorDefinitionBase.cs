@@ -68,6 +68,9 @@ public abstract class CollectorDefinitionBase<TRow> : ICollectorDefinition<TRow>
     /* Declared here as well as on the interface, the StaysPlainTable pair and for the same reason. See ICollectorSchemaInfo.IsDarlingOnly. */
     public virtual bool IsDarlingOnly => false;
 
+    /* Declared here as well as on the interface, the IsDarlingOnly pair and for the same reason. See ICollectorSchemaInfo.ReadsAuroraFunctions. */
+    public virtual bool ReadsAuroraFunctions => false;
+
     public virtual int? PerItemRowCountWarnThreshold => null;
 
     public virtual int? PerItemTextByteBudget => null;

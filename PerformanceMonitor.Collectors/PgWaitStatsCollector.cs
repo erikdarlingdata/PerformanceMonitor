@@ -189,7 +189,14 @@ WHERE w.wait_time > 0";
     /// </summary>
     public override bool AppliesTo(CollectorTargetInfo target) => target.IsAurora;
 
-    public override CollectorQuery BuildQuery(CollectorContext context) => new(QueryText);
+    /// <summary>#6143: the host reads the schema of each Aurora wait function before it builds the query.</summary>
+    public override bool ReadsAuroraFunctions => true;
+
+    /* #6143: each Aurora function named by the schema the host found it in (pg_catalog, or pg_stat_statements' schema). */
+    public override CollectorQuery BuildQuery(CollectorContext context) => new(QueryText
+        .Replace("FROM aurora_stat_system_waits()", "FROM " + context.PgFunctionSchema("aurora_stat_system_waits") + ".aurora_stat_system_waits()", StringComparison.Ordinal)
+        .Replace("JOIN aurora_stat_wait_type()", "JOIN " + context.PgFunctionSchema("aurora_stat_wait_type") + ".aurora_stat_wait_type()", StringComparison.Ordinal)
+        .Replace("JOIN aurora_stat_wait_event()", "JOIN " + context.PgFunctionSchema("aurora_stat_wait_event") + ".aurora_stat_wait_event()", StringComparison.Ordinal));
 
     /// <summary>
     /// The postmaster epoch this collector persists per server (#3653 A5): <c>pg_postmaster_start_time()</c>

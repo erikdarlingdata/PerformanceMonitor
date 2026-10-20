@@ -333,7 +333,11 @@ LIMIT 500";
     /// </summary>
     public override CollectorQuery BuildQuery(CollectorContext context) =>
         context.Target.HasPgWaitSamplingExtension
-            ? new CollectorQuery(QueryText)
+            ? new CollectorQuery(QueryText.Replace(
+                "FROM pg_wait_sampling_profile AS p",
+                /* #6143: named by the extension's own schema; the monitoring connection's search_path is pg_catalog. */
+                "FROM " + context.PgExtensionSchema("pg_wait_sampling") + ".pg_wait_sampling_profile AS p",
+                StringComparison.Ordinal))
             : new CollectorQuery(SamplerBatchSql(HasQueryIdColumn(context.Target)));
 
     /// <summary>

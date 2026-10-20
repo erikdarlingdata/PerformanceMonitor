@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -258,6 +259,8 @@ VALUES ($1, $2, $3, $4, 42, 16384, 10, TRUE, 100, 5000, 91.5, 250, 10, 5, 0, 0, 
                 PostgresMajorVersion = major,
                 PostgresVersionNum = major * 10000,
             },
+            /* #6143: what the host reads from pg_extension; the test creates the extension in public. */
+            PgExtensionSchemas = new Dictionary<string, string>(StringComparer.Ordinal) { ["pg_stat_statements"] = "public" },
         }).Text;
 
     private static async Task<(int Count, long? Dealloc)> ReadOrdinal30Async(NpgsqlConnection connection, string sql, CancellationToken ct)

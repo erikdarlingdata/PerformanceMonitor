@@ -130,6 +130,14 @@ const scenarios = {
     offline: chips(modules.fleet.metricBands(card({ is_online: false }))),
     online: chips(modules.fleet.metricBands(card({ last_collection: iso(1000) }))),
   }),
+  /* #6178: a server with no thread reading. On an Azure SQL Database (engine_edition 5) the Threads chip says why; on a box it stays a bare n/a. */
+  azureThreads: async () => {
+    const noThreads = { available_threads: null, total_threads: null, threads_severity: "Unknown", last_collection: iso(1000) };
+    return {
+      azure: chips(modules.fleet.metricBands(card({ ...noThreads, engine_edition: 5 }))),
+      box: chips(modules.fleet.metricBands(card({ ...noThreads, engine_edition: 3 }))),
+    };
+  },
   agStale: async () => {
     /* The Availability Groups card subtitle of a group the page was told is stale, and of a fresh one. */
     const group = (over) => ({

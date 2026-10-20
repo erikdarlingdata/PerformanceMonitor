@@ -6,6 +6,9 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System.Collections.Generic;
+using System.Linq;
+
 namespace PerformanceMonitor.Common;
 
 /// <summary>
@@ -36,5 +39,52 @@ public static class HyperscaleLogSize
     /// its rows. Plain words, with no field names, because people read it on the web page.</summary>
     public const string Note =
         "On Azure SQL Database Hyperscale, the transaction log lives in the log service, not in storage the "
-        + "database holds. The log file's size is " + Display + ", and the totals leave it out.";
+        + "database holds. The log file's size is " + Display + ", and the totals leave it out. "
+        + DataFileCapNote;
+
+    /// <summary>#6178: what a Hyperscale data file's maximum size is. <c>sys.database_files</c> reports 131072 MB (128 GB)
+    /// for the data file, which is the cap for that one file. The database itself grows to 128 TB. Plain words, because
+    /// people read it on the web page.</summary>
+    public const string DataFileCapNote =
+        "The data file's maximum size is a limit for that one file, not for the database, which can grow to 128 TB.";
+
+    /// <summary>#6178: the note on the row of a Hyperscale database's data file, under the same <c>size_note</c> key the log
+    /// row and the sibling row use. It sits beside the maximum size it explains.</summary>
+    public const string DataFileMaxSizeNote = "Max size: a limit for this one file. A Hyperscale database can grow to 128 TB.";
+
+    /// <summary>#6178: true for a data file whose maximum size is a per-file cap on Hyperscale: a data file (type ROWS) with a
+    /// maximum size, in a database whose log file has no size (the log service). That log row is how a Hyperscale database is
+    /// told apart, so no other database gets the note.</summary>
+    public static bool IsDataFileWithFileCap(string? fileType, bool databaseHasLogServiceFile, bool hasMaxSize) =>
+        databaseHasLogServiceFile && hasMaxSize && string.Equals(fileType, "ROWS", System.StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>#6178: true when the stored server properties say the monitored database is on Hyperscale: the edition the
+    /// collector stores for Azure SQL Database reads "Azure SQL Database (Hyperscale)", and the service objective starts with
+    /// <c>HS_</c> (for example <c>HS_Gen5_4</c>). Either is enough. An empty read (no stored properties) is false.</summary>
+    public static bool IsHyperscaleTier(string? edition, string? serviceObjective) =>
+        (edition ?? string.Empty).Contains("Hyperscale", System.StringComparison.OrdinalIgnoreCase)
+        || (serviceObjective ?? string.Empty).StartsWith("HS_", System.StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>#6178: the databases in a size snapshot that are on Hyperscale. A database whose log file has no size is one (the
+    /// log service). When the stored server properties say Hyperscale (<paramref name="serverIsHyperscale"/>, see
+    /// <see cref="IsHyperscaleTier"/>), so is a database with no sized log file at all, which covers a snapshot whose log row is
+    /// missing. A database with a sized log file is never Hyperscale, because its log would have no size there.</summary>
+    public static HashSet<string> HyperscaleDatabases(
+        IEnumerable<(string Database, string? FileType, bool HasSize)> files, bool serverIsHyperscale)
+    {
+        var all = files.ToList();
+        var result = new HashSet<string>(all.Where(f => !f.HasSize).Select(f => f.Database));
+        if (serverIsHyperscale)
+        {
+            var sizedLog = new HashSet<string>(all
+                .Where(f => f.HasSize && string.Equals(f.FileType, "LOG", System.StringComparison.OrdinalIgnoreCase))
+                .Select(f => f.Database));
+            foreach (var database in all.Select(f => f.Database))
+            {
+                if (!sizedLog.Contains(database)) result.Add(database);
+            }
+        }
+
+        return result;
+    }
 }
