@@ -203,9 +203,6 @@ public sealed class AgentLevel2ToolPolicyTests
     }
 }
 
-/* #1776 own-store: every fact mints its own scratch database through ScratchPostgres, so the class is deliberately NOT
-   [Collection("live-postgres")]. */
-
 public sealed class AgentMuteStartRefusalTests
 {
     private static readonly DarlingAgentActionSeat Seat = new(new DarlingMcpWritePolicy.Effective(false, false, Investigations: true));
@@ -226,6 +223,9 @@ public sealed class AgentMuteStartRefusalTests
         Assert.Contains("starts_at is not available", update, StringComparison.Ordinal);
     }
 }
+
+/* #1776 own-store: every fact mints its own scratch database through ScratchPostgres, so the class is deliberately NOT
+   [Collection("live-postgres")]. */
 
 /// <summary>
 /// #5915: the seven Level 2 tools against a live store, through the real tool methods: every kind rule refuses, a pass is
