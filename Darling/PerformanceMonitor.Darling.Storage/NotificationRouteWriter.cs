@@ -273,6 +273,13 @@ WHERE route_id = $1";
             return text;
         }
 
+        /* #6231: a URL that cannot be sent to is refused at save, with the same words in every writer. A routing key is not a URL. */
+        if (slot is "teams" or "slack" or "generic" && !PasswordSeal.IsSealed(text)
+            && WebhookUrlShape.Refusal(text, label) is { } shapeRefusal)
+        {
+            throw new NotificationRouteRefusedException(shapeRefusal, NotificationRouteRefusalKind.Value);
+        }
+
         if (seal is null)
         {
             throw new NotificationRouteRefusedException(refusal ?? NoKeyText, NotificationRouteRefusalKind.Value);

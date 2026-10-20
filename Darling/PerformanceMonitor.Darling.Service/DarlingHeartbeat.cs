@@ -134,27 +134,14 @@ public sealed class HeartbeatConfig
         return true;
     }
 
-    /// <summary>Parses a literal URL: absolute, http or https, a host, and no user info. Null problem = fine.</summary>
-    private static string? TryParseUrl(string text, out Uri? uri)
+    /// <summary>Parses a literal URL: absolute, http or https, a host, and no user info. Null problem = fine. The rule is
+    /// <see cref="PerformanceMonitor.Darling.Storage.WebhookUrlShape"/>, shared with every webhook URL writer (#6231).</summary>
+    private static string? TryParseUrl(string text, out Uri? uri) => PerformanceMonitor.Darling.Storage.WebhookUrlShape.TryParse(text, out uri) switch
     {
-        uri = null;
-        if (!Uri.TryCreate(text, UriKind.Absolute, out var parsed)
-            || (parsed.Scheme != Uri.UriSchemeHttp && parsed.Scheme != Uri.UriSchemeHttps)
-            || string.IsNullOrEmpty(parsed.Host))
-        {
-            return UrlShapeProblem;
-        }
-
-        /* HttpClient never turns user info into an Authorization header, so a URL with it would just fail as HTTP 401
-           with no hint. Refused up front instead. */
-        if (!string.IsNullOrEmpty(parsed.UserInfo))
-        {
-            return UserInfoProblem;
-        }
-
-        uri = parsed;
-        return null;
-    }
+        PerformanceMonitor.Darling.Storage.WebhookUrlShape.Problem.Shape => UrlShapeProblem,
+        PerformanceMonitor.Darling.Storage.WebhookUrlShape.Problem.UserInfo => UserInfoProblem,
+        _ => null,
+    };
 
     /// <summary>
     /// Resolves <see cref="Url"/> to an absolute http/https <see cref="Uri"/>, for the loop's tick (and the diagnostics

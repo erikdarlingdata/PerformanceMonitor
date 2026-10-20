@@ -202,6 +202,13 @@ public static class ViewerWebhookSealing
             return text;
         }
 
+        /* #6231: a URL that cannot be sent to is refused at save, with the same words in every writer. */
+        if (slot is "teams" or "slack" or "generic" && !PasswordSeal.IsSealed(text)
+            && WebhookUrlShape.Refusal(text, label) is { } shapeRefusal)
+        {
+            throw new ViewerPasswordRefusedException(shapeRefusal);
+        }
+
         if (sealer is null)
         {
             throw new ViewerPasswordRefusedException(refusal ?? ViewerPasswordKey.NoKeyText);
