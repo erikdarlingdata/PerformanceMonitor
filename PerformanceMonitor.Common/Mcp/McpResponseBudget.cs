@@ -6,6 +6,8 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
+
 namespace PerformanceMonitor.Common;
 
 /// <summary>
@@ -55,4 +57,53 @@ public static class McpResponseBudget
     /// numbers this was set from.
     /// </summary>
     public const int CollectionLogPerServerDefaultLimit = 58;
+
+    /// <summary>
+    /// #6180: how many LEADING items of a list a reply can carry and still fit <paramref name="budgetBytes"/>, for the
+    /// reads that answer a caller who asked for more than the budget holds (<c>full_detail</c>, a large <c>limit</c>) or
+    /// whose defaults were over it (<c>get_perfmon_stats</c>' whole counter set). The reply is serialized through
+    /// <paramref name="serializeFirst"/> with the first <c>n</c> items, so the envelope's own digits, flags and notes
+    /// count against the budget, and the largest <c>n</c> that fits wins (binary search: the size only grows with
+    /// <c>n</c>). At least <paramref name="minimum"/> items are always kept, so one item bigger than the budget is still
+    /// answered whole rather than cut mid-way or replaced by nothing. Items are never trimmed, only left off the end.
+    /// </summary>
+    /// <param name="total">How many items there are.</param>
+    /// <param name="serializeFirst">The full reply for the first <c>n</c> items.</param>
+    /// <param name="budgetBytes">The UTF-8 byte target, normally <see cref="DefaultBytes"/>.</param>
+    /// <param name="minimum">The fewest items to keep, even when they are over the budget. Default 1.</param>
+    /// <returns>The count that fits and that count's reply.</returns>
+    public static (int Count, string Json) FitPrefix(int total, Func<int, string> serializeFirst, int budgetBytes = DefaultBytes, int minimum = 1)
+    {
+        ArgumentNullException.ThrowIfNull(serializeFirst);
+        var floor = Math.Clamp(minimum, 0, Math.Max(total, 0));
+
+        var whole = serializeFirst(total);
+        if (total <= floor || System.Text.Encoding.UTF8.GetByteCount(whole) <= budgetBytes)
+        {
+            return (total, whole);
+        }
+
+        /* Largest n in [floor, total) whose reply fits; floor when none does. */
+        var lo = floor;
+        var hi = total - 1;
+        var best = floor;
+        string? bestJson = null;
+        while (lo <= hi)
+        {
+            var mid = lo + ((hi - lo) / 2);
+            var json = serializeFirst(mid);
+            if (mid == floor || System.Text.Encoding.UTF8.GetByteCount(json) <= budgetBytes)
+            {
+                best = mid;
+                bestJson = json;
+                lo = mid + 1;
+            }
+            else
+            {
+                hi = mid - 1;
+            }
+        }
+
+        return (best, bestJson ?? serializeFirst(best));
+    }
 }

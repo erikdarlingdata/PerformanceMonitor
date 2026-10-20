@@ -611,14 +611,10 @@ public sealed class DarlingMcpDataTools
                calls too: counter_kind is the stored type's three-way reading (V132, #3653 A7), delta_value is null
                on a gauge because the collector writes none, and a rate row adds per_second, its delta over the
                stored interval, so the running total in value is never the only number a reader gets. */
-            var result = filtered.Select(PerfmonRowPayload);
+            var result = filtered.Select(PerfmonRowPayload).ToList();
 
-            return JsonSerializer.Serialize(new
-            {
-                server = resolved.ServerName,
-                captured_at = snapshot.CapturedAt!.Value.ToString("o"),
-                counters = result
-            }, McpHelpers.JsonOptions);
+            /* #6180: the page is cut to the shared response target (see TrendPayloads.PerfmonLatestReply). */
+            return TrendPayloads.PerfmonLatestReply(resolved.ServerName, snapshot.CapturedAt!.Value.ToString("o"), result);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -2202,7 +2198,12 @@ ORDER BY server_name";
                the process-wide ledger because the scheduled sweep builds a fresh analysis service per pass.
                A different layer from the collector rows above: 43 healthy collectors above a family the pass timed out reading. */
             var collectionCaveats = await DarlingCollectionCaveatReader.ReadAsync(postgres, resolved.ServerId, logger, cancellationToken);
-            var healthJson = JsonSerializer.Serialize(CollectionCaveatLedger.Shared.Attach(new
+            /* #6180: full_detail serves ~30 fields for every collector (52 KB measured), past the shared response target. The
+               collectors are cut from the end to fit it, whole rows only, and the reply says how many it kept and how to
+               get the compact form that carries them all. The reply is built per count so the caveats attached below count
+               against the budget too. */
+            var collectorRows = result.ToList();
+            Func<int, string> healthReply = collectorCount => DarlingCollectionCaveatReader.AttachToJson(JsonSerializer.Serialize(CollectionCaveatLedger.Shared.Attach(new
             {
                 server = resolved.ServerName,
                 /* #3453: the build-attribution read. Nothing else on the MCP surface says WHAT build is
@@ -2360,7 +2361,14 @@ ORDER BY server_name";
                 collector_detail_note = full_detail
                     ? "full_detail=true: every field is served for every collector below."
                     : $"{compactCount} of {rows.Count} collector(s) below are HEALTHY with nothing to report (no errors, denials, session/extension-missing runs or abandoned cycles this window) and are compacted to collector/status/compact/total_runs/rows_stored/avg_duration_ms/last_success. {partialCount} need a look (failing, stale, stopped, erroring, denied, regressed, or an unexplained zero) and carry a leaner partial_detail shape instead of full detail: in a partial row a missing key means null, false or 0, and only collector, status, partial_detail, total_runs and errors are always present. Pass full_detail=true for every field on every collector.",
-                collectors = result,
+                /* #6180: the response-size cut, observed (see healthReply above). Null note and false flag when every collector fit. */
+                truncated = collectorCount < collectorRows.Count,
+                collectors_returned = collectorCount,
+                collectors_total = collectorRows.Count,
+                size_note = collectorCount < collectorRows.Count
+                    ? $"{collectorRows.Count - collectorCount} of {collectorRows.Count} collector row(s) were left off the end to keep this answer within about 32 KB. Call again without full_detail: healthy collectors are then compacted and every collector fits."
+                    : null,
+                collectors = collectorRows.Take(collectorCount),
                 /* #3856: how old the collector half of this payload is, in whole seconds — the same field, the
                    same name and the same semantics get_fleet_overview has carried since #3735, because it is
                    now the same kind of reading: one 7-day scan per minute per host per server, shared by every
@@ -2373,8 +2381,8 @@ ORDER BY server_name";
                    nothing an existing consumer indexes by position moved — the same placement rule every
                    column of the statement behind it follows. */
                 collection_health_age_seconds = collectionHealthAgeSeconds
-            }, resolved.ServerId, McpHelpers.JsonOptions), McpHelpers.JsonOptions);
-            return DarlingCollectionCaveatReader.AttachToJson(healthJson, collectionCaveats);
+            }, resolved.ServerId, McpHelpers.JsonOptions), McpHelpers.JsonOptions), collectionCaveats);
+            return McpResponseBudget.FitPrefix(collectorRows.Count, healthReply).Json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -3118,6 +3126,14 @@ ORDER BY server_name";
             });
 
             var notice = await ReadNoticeAsync();
+            /* #6180: a large limit (1000 measured at 70-86 KB) passes the shared response target, so the reply is built per page
+               size and the newest-first (or slowest-first) prefix that fits is served: whole runs only, with the page fields
+               (run_count, the returned-time span, truncated) describing the page actually served. */
+            var runRows = result.ToList();
+            string LogReply(int pageCount)
+            {
+            var pageRows = rows.Take(pageCount).ToList();
+            var cut = pageCount < rows.Count;
             var payload = new
             {
                 server = resolved.ServerName,
@@ -3134,10 +3150,10 @@ ORDER BY server_name";
                    which are not runs, so they are counted in skipped_cycle_rows and not here. #5824: nor is the analysis pass's
                    analysis_pass row, which the page shows and neither count holds. The returned-time span fields below
                    describe the PAGE, cycle rows included. */
-                run_count = rows.Count(r => CollectionCycleRow.IsCollectorRun(r.CollectorName)),
-                skipped_cycle_rows = rows.Count(r => r.CollectorName == CollectionCycleRow.CollectorName),
-                /* Observed by the over-fetch above, not inferred from the row count. */
-                truncated,
+                run_count = pageRows.Count(r => CollectionCycleRow.IsCollectorRun(r.CollectorName)),
+                skipped_cycle_rows = pageRows.Count(r => r.CollectorName == CollectionCycleRow.CollectorName),
+                /* Observed by the over-fetch above, not inferred from the row count; also true when the size target cut the page. */
+                truncated = truncated || cut,
                 /*
                     #3287: the span this PAGE covers, beside the span requested.
 
@@ -3169,8 +3185,8 @@ ORDER BY server_name";
                     while the time-ordered test kept passing.
                 */
                 /* #4966: where the page's rows stop describes the window it covers, so it prints like effective_start (UTC, with the Z), and so does the newest bound (#5015); the rows' own times stay as the store holds them. */
-                oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(rows.Min(r => r.CollectionTime)),
-                newest_returned_collection_time = McpHelpers.FormatEffectiveStart(rows.Max(r => r.CollectionTime)),
+                oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(pageRows.Min(r => r.CollectionTime)),
+                newest_returned_collection_time = McpHelpers.FormatEffectiveStart(pageRows.Max(r => r.CollectionTime)),
                 /* Which ordering the page actually came back in. Stated rather than left to be inferred
                    from whether min_duration_ms was sent, because the first sentence of this tool's
                    description is the only other place that coupling is written down. */
@@ -3196,10 +3212,18 @@ ORDER BY server_name";
                     with.
                 */
                 status_filter = string.IsNullOrWhiteSpace(status) ? null : status.Trim().ToUpperInvariant(),
-                runs = result,
+                runs_returned = pageCount,
+                runs_total = rows.Count,
+                size_note = cut
+                    ? $"{rows.Count - pageCount} of the {rows.Count} run(s) this read selected were left off the end to keep this answer within about 32 KB. Ask for fewer rows (limit), a narrower window (hours_back or as_of), or one collector_name / status to read the rest in full."
+                    : null,
+                runs = runRows.Take(pageCount),
             };
             var json = JsonSerializer.Serialize(payload, McpHelpers.JsonOptions);
             return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
+            }
+
+            return McpResponseBudget.FitPrefix(rows.Count, LogReply).Json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -3328,8 +3352,14 @@ ORDER BY server_name";
                     ids_attempted = fr.Entry.TextFetchIdsAttempted,
                     probe_ids = fr.Entry.TextFetchProbeIds,
                 },
-            });
+            }).ToList();
 
+            /* #6180: a large limit passes the shared response target, so the page is cut to the newest (or slowest) whole runs
+               that fit, with the page fields describing what was served. */
+            return McpResponseBudget.FitPrefix(rows.Count, pageCount =>
+            {
+            var pageRows = rows.Take(pageCount).ToList();
+            var cut = pageCount < rows.Count;
             return JsonSerializer.Serialize(new
             {
                 /* No single `server`: `scope` is the fleet-form's own signal, so a client branching on
@@ -3337,20 +3367,26 @@ ORDER BY server_name";
                 scope = "fleet",
                 hours_back,
                 /* #5735: collector runs only; the collection_cycle/SKIPPED rows the page also shows are counted apart. #5824: the analysis_pass rows are in neither count. The returned-time span fields describe the page, cycle rows included. */
-                run_count = rows.Count(r => CollectionCycleRow.IsCollectorRun(r.Entry.CollectorName)),
-                skipped_cycle_rows = rows.Count(r => r.Entry.CollectorName == CollectionCycleRow.CollectorName),
-                truncated,
+                run_count = pageRows.Count(r => CollectionCycleRow.IsCollectorRun(r.Entry.CollectorName)),
+                skipped_cycle_rows = pageRows.Count(r => r.Entry.CollectorName == CollectionCycleRow.CollectorName),
+                truncated = truncated || cut,
                 /* #4966: where the page's rows stop describes the window it covers, so it prints like effective_start (UTC, with the Z), and so does the newest bound (#5015); the rows' own times stay as the store holds them. */
-                oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(rows.Min(r => r.Entry.CollectionTime)),
-                newest_returned_collection_time = McpHelpers.FormatEffectiveStart(rows.Max(r => r.Entry.CollectionTime)),
+                oldest_returned_collection_time = McpHelpers.FormatEffectiveStart(pageRows.Min(r => r.Entry.CollectionTime)),
+                newest_returned_collection_time = McpHelpers.FormatEffectiveStart(pageRows.Max(r => r.Entry.CollectionTime)),
                 order = min_duration_ms is null
                     ? McpHelpers.CollectionLogOrderNewestFirst
                     : McpHelpers.CollectionLogOrderSlowestFirst,
                 collector_name = string.IsNullOrWhiteSpace(collector_name) ? null : collector_name.Trim(),
                 min_duration_ms,
                 status_filter = string.IsNullOrWhiteSpace(status) ? null : status.Trim().ToUpperInvariant(),
-                runs = result,
+                runs_returned = pageCount,
+                runs_total = rows.Count,
+                size_note = cut
+                    ? $"{rows.Count - pageCount} of the {rows.Count} run(s) this read selected were left off the end to keep this answer within about 32 KB. Ask for fewer rows (limit), a narrower window (hours_back or as_of), or one server_name / collector_name / status to read the rest in full."
+                    : null,
+                runs = result.Take(pageCount),
             }, McpHelpers.JsonOptions);
+            }).Json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

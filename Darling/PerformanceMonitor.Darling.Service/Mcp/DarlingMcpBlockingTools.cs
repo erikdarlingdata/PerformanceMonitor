@@ -764,7 +764,7 @@ public sealed class DarlingMcpBlockingTools
                 () => DarlingMcpWindowNotice.Probe(postgres, "blocked_process_reports", resolved.ServerName, windowStart, now, cancellationToken),
                 withXml.Min(r => r.EventTime), windowStart, now, "blocked_process_reports", logger: logger, cancellationToken: cancellationToken);
 
-            var result = withXml.Select(r => new
+            var allReports = withXml.Select(r => new
             {
                 event_time = r.EventTime?.ToString("o"),
                 database_name = r.DatabaseName,
@@ -772,9 +772,16 @@ public sealed class DarlingMcpBlockingTools
                 blocking_spid = r.BlockingSpid,
                 wait_time_ms = r.WaitTimeMs,
                 blocked_process_report_xml = r.BlockedProcessReportXml
-            });
+            }).ToList();
 
-            var json = JsonSerializer.Serialize(new
+            /* #6180: each report is a whole XML document (about 18 KB), so the default limit of 5 passes the shared response
+               target. The page keeps the newest reports that fit WHOLE (always at least one) and lists the ones it left out by
+               their identifying fields, so a report is never cut mid-way and any one of them can be fetched by itself. */
+            var (_, json) =McpResponseBudget.FitPrefix(allReports.Count, fitCount =>
+            {
+                var page = withXml.Take(fitCount).ToList();
+                var leftOut = allReports.Count - fitCount;
+                return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
@@ -788,13 +795,24 @@ public sealed class DarlingMcpBlockingTools
                 database_name = databases.Describe(),
                 /* #3541 A3: the page bounds, on get_blocking's names. truncated means "more reports WITH
                    XML in the window than limit". */
-                reports_returned = withXml.Count,
-                truncated,
-                oldest_returned_event_time = McpHelpers.FormatEffectiveStart(withXml.Min(r => r.EventTime)),
-                newest_returned_event_time = McpHelpers.FormatEffectiveStart(withXml.Max(r => r.EventTime)),
+                reports_returned = fitCount,
+                truncated = truncated || leftOut > 0,
+                oldest_returned_event_time = McpHelpers.FormatEffectiveStart(page.Min(r => r.EventTime)),
+                newest_returned_event_time = McpHelpers.FormatEffectiveStart(page.Max(r => r.EventTime)),
                 order = "event_time_desc",
-                reports = result
+                /* #6180: the reports the size target left off, newest first, by the fields that identify each (a report's
+                   event_time with as_of and limit 1 fetches it alone). Capped so a very large limit cannot grow the list. */
+                left_out_count = leftOut,
+                left_out_reports = allReports.Skip(fitCount).Take(20).Select(r => new
+                {
+                    r.event_time, r.database_name, r.blocked_spid, r.blocking_spid, r.wait_time_ms
+                }).ToList(),
+                size_note = leftOut > 0
+                    ? $"{leftOut} of the {allReports.Count} report(s) this page selected were left out so the answer stays within about 32 KB; a report is never cut mid-way, so each one returned is whole. left_out_reports lists the ones left out (first 20). Fetch one by calling again with as_of set to its event_time (hours_back wide enough to reach it) and limit 1, or narrow with database_name."
+                    : null,
+                reports = allReports.Take(fitCount)
             }, McpHelpers.JsonOptions);
+            });
 
             /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). */
             return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;

@@ -78,6 +78,37 @@ public sealed class CollectionLogPerServerResponseBudgetToolTests : IClassFixtur
             $"Per-server default call was {bytes:N0} bytes, over the {McpResponseBudget.DefaultBytes:N0}-byte budget.");
     }
 
+    /// <summary>#6180: a caller who asks for limit 1000 on a store holding more runs than fit still gets an answer within the
+    /// budget: whole runs, newest first, with the page fields describing what was served and a note saying how to read the rest.</summary>
+    [Fact]
+    public async Task PerServerLargeLimit_AnswersWithinTheBudget_AndSaysItWasCut()
+    {
+        var service = new LocalDataService(_duckDb);
+        for (var i = 0; i < 300; i++)
+        {
+            await SeedLogAsync(_serverId, ServerName, i % 3 == 0 ? "query_store" : "wait_stats", DateTime.UtcNow.AddMinutes(-(i + 1)), 100 + i, null);
+        }
+
+        var json = await McpHealthTools.GetCollectionLog(service, _serverManager, server_name: ServerName, hours_back: 24, limit: 1000);
+        Assert.True(Encoding.UTF8.GetByteCount(json) <= McpResponseBudget.DefaultBytes,
+            $"limit 1000 was {Encoding.UTF8.GetByteCount(json):N0} bytes, over the {McpResponseBudget.DefaultBytes:N0}-byte budget.");
+
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        var root = doc.RootElement;
+        var returned = root.GetProperty("runs").GetArrayLength();
+        Assert.True(root.GetProperty("truncated").GetBoolean());
+        Assert.Equal(300, root.GetProperty("runs_total").GetInt32());
+        Assert.Equal(returned, root.GetProperty("runs_returned").GetInt32());
+        Assert.InRange(returned, 1, 299);
+        Assert.Equal(returned, root.GetProperty("run_count").GetInt32());
+        Assert.Contains("limit", root.GetProperty("size_note").GetString(), StringComparison.Ordinal);
+
+        /* A request that fits is not marked cut. */
+        var small = System.Text.Json.JsonDocument.Parse(await McpHealthTools.GetCollectionLog(service, _serverManager, server_name: ServerName, hours_back: 24, limit: 10));
+        Assert.Equal(10, small.RootElement.GetProperty("runs").GetArrayLength());
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, small.RootElement.GetProperty("size_note").ValueKind);
+    }
+
     private async Task<DuckDBConnection> SeedConnectionAsync()
     {
         if (_seedConn is null)
