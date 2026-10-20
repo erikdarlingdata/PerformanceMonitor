@@ -18,6 +18,7 @@ using Microsoft.Data.SqlClient;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Remediation;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Service.Targets;
 using PerformanceMonitor.Darling.Storage;
@@ -339,6 +340,53 @@ public sealed partial class PlanForceToolLiveTests
             Assert.True(await SessionAliveAsync(c, victim));
             Assert.Equal(0, await JournalActionRowsAsync(c));
             Assert.Equal("1", await PgScalarAsync(c.Connection, "SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND reason = 'bad_backend_id'", c.Ct));
+        });
+    }
+
+    /// <summary>
+    /// #5632: a target the registry records as an Azure SQL Database (engine edition 5) takes the Azure arm. The database is required, never
+    /// master, never one the entry excludes, and must be the entry's database or one Darling collected a blocking row from; each refusal comes
+    /// before any connection, kills nothing and journals no action. A database that passes is opened, and the batch checks the engine again:
+    /// this test server is not an Azure SQL Database, so it answers not_azure_sql_database and kills nothing.
+    /// </summary>
+    [Fact]
+    public async Task AnAzureTarget_NeedsADatabaseItKnows_AndTheBatchChecksTheEngineAgain()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var offset = await SeedClockAsync(c);
+            var victim = await OpenVictimAsync(c);
+            using var _ = victim.Connection;
+            await PgExecAsync(c.Connection, "UPDATE collect.servers SET sql_engine_edition = 5 WHERE server_id = 7", c.Ct);
+            await PgExecAsync(c.Connection, "UPDATE config.config_monitored_servers SET username = 'monitor_login', excluded_databases = ARRAY['Archive'] WHERE server_id = 7", c.Ct);
+
+            async Task<JsonNode> Azure(string? database) =>
+                Parse(await DarlingMcpPlanForceTools.RunKillAsync(c.Source, c.Source, c.Log, "srv-7", victim.SessionId, UtcText(victim, offset), null, c.Arg,
+                    dry_run: false, c.Ct, database));
+
+            Assert.Equal(RemediationResult.Reasons.DatabaseRequired, (string?)(await Azure(null))["reason"]);
+            Assert.Equal(RemediationResult.Reasons.DatabaseRequired, (string?)(await Azure("master"))["reason"]);
+            Assert.Equal(DarlingMcpPlanForceTools.AzureDatabaseExcluded, (string?)(await Azure("archive"))["reason"]);
+            Assert.Equal(DarlingMcpPlanForceTools.AzureDatabaseUnknown, (string?)(await Azure(c.Sql.Database))["reason"]);
+
+            /* A blocking row from the database names it as one the target holds. */
+            await using (var insert = new NpgsqlCommand(
+                "INSERT INTO collect.dmv_blocking_snapshots (collection_id, collection_time, server_id, server_name, event_time, database_name, blocked_spid, blocking_spid, "
+                + "wait_time_ms, lock_mode, blocking_status, blocked_sql_text, blocking_sql_text, contentious_object) "
+                + "VALUES ($1, $2, 7, 'srv-7', $2, $3, 999, $4, 10, '', 'sleeping', '', '', '')", c.Connection) { CommandTimeout = 60 })
+            {
+                insert.Parameters.Add(new NpgsqlParameter<long> { TypedValue = DateTime.UtcNow.Ticks, NpgsqlDbType = NpgsqlDbType.Bigint });
+                insert.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(DateTime.UtcNow.AddMinutes(-1), DateTimeKind.Unspecified), NpgsqlDbType = NpgsqlDbType.Timestamp });
+                insert.Parameters.Add(new NpgsqlParameter<string> { TypedValue = c.Sql.Database, NpgsqlDbType = NpgsqlDbType.Text });
+                insert.Parameters.Add(new NpgsqlParameter<int> { TypedValue = victim.SessionId, NpgsqlDbType = NpgsqlDbType.Integer });
+                await insert.ExecuteNonQueryAsync(c.Ct);
+            }
+
+            var reached = await Azure(c.Sql.Database);
+            Assert.Equal("refused", (string?)reached["status"]);
+            Assert.Equal(RemediationResult.Reasons.NotAzureSqlDatabase, (string?)reached["reason"]);
+            Assert.True(await SessionAliveAsync(c, victim));
+            Assert.Equal(0, await JournalActionRowsAsync(c));
         });
     }
 
