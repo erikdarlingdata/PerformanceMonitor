@@ -1940,8 +1940,10 @@ ALTER TABLE config.config_monitored_servers ADD COLUMN IF NOT EXISTS hypothetica
     /// after its definition in <c>config_monitored_servers</c> is removed and is the only list on a store that was never seeded, and the
     /// schedule tools resolve against the same table, so a schedule row for an id with no definition is a normal write and a foreign key
     /// would refuse it. Instead a row-level BEFORE INSERT trigger on <c>config_monitored_servers</c> clears the schedule rows held under
-    /// a server id before the first definition for it is stored, so a row written ahead of the server being registered never decides how
-    /// that server is collected. It does nothing when the id already has a definition (a re-add, an upsert, the seed). The trigger
+    /// a server id the service has never seen: no definition in <c>config_monitored_servers</c> and no row in the observed
+    /// <c>collect.servers</c>, so a row written ahead of an unknown server being registered never decides how that server is collected.
+    /// It does nothing when the id already has a definition (an upsert, the seed) or an observed row, so a server that was removed and
+    /// is added again keeps the schedule rows the operator set for it (a collector switched off stays off). The trigger
     /// function is <c>SECURITY DEFINER</c> with a pinned search_path, because the roles that register a server cannot delete schedule
     /// rows; it deletes by the new row's server id and nothing else.</para>
     ///
@@ -1993,7 +1995,8 @@ SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $clear$
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM config.config_monitored_servers AS m WHERE m.server_id = NEW.server_id) THEN
+    IF NOT EXISTS (SELECT 1 FROM config.config_monitored_servers AS m WHERE m.server_id = NEW.server_id)
+       AND NOT EXISTS (SELECT 1 FROM collect.servers AS o WHERE o.server_id = NEW.server_id) THEN
         DELETE FROM config.config_collector_schedules WHERE server_id = NEW.server_id;
     END IF;
     RETURN NEW;

@@ -25,8 +25,8 @@ namespace Darling.Tests;
 /// <summary>
 /// #6227, V206: the collector schedule table takes only what the schedule tools write. Behaviour against a real store: the rung over
 /// a store that holds mixed-case, duplicate-case, junk-named and over-cap rows from before it, the raw writes the constraints refuse,
-/// the clearing of schedule rows held for a server id when that server is first registered (as a role that cannot delete schedule
-/// rows), the Viewer's save of a server's schedules over the upgraded rows, and the rollback statement that gives every inherited
+/// the clearing of schedule rows held for a server id the service has never seen when that server is first registered (as a role that
+/// cannot delete schedule rows), a removed server that is added again keeping its rows, the Viewer's save of a server's schedules over the upgraded rows, and the rollback statement that gives every inherited
 /// NULL the value it inherits.
 /// </summary>
 public sealed class CollectorScheduleLimitsRungLiveTests
@@ -34,6 +34,8 @@ public sealed class CollectorScheduleLimitsRungLiveTests
     private const int ServerA = 8101;
     private const int ServerB = 8102;
     private const int NotYetRegistered = 8103;
+    private const int ReAdded = 8104;
+    private const int ObservedOnly = 8105;
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -239,7 +241,7 @@ GRANT SELECT, UPDATE ON config.config_service TO {roleName};", ct);
             Assert.Equal(1L, await CountAsync(connection, $"server_id = {ServerA}", ct));
             Assert.Equal(1L, await CountAsync(connection, "server_id IS NULL", ct));
 
-            /* A server that already has a definition keeps its rows when the same id is written again (a re-add, an upsert, the seed). */
+            /* A server that already has a definition keeps its rows when the same id is written again (an upsert, the seed). */
             await ExecAsync(connection, $"INSERT INTO config.config_monitored_servers (server_id, name, host) VALUES ({ServerA}, 'first-registered', 'first-registered')", ct);
             Assert.Equal(0L, await CountAsync(connection, $"server_id = {ServerA}", ct));
             await ExecAsync(connection, $"INSERT INTO config.config_collector_schedules (server_id, collector_name, enabled) VALUES ({ServerA}, 'wait_stats', FALSE)", ct);
@@ -250,6 +252,41 @@ GRANT SELECT, UPDATE ON config.config_service TO {roleName};", ct);
         async (cleanup, cleanupCt) =>
         {
             await ExecAsync(cleanup, $"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName}", cleanupCt);
+        });
+    }
+
+    [Fact]
+    public async Task AServerTheServiceHasSeen_RemovedFromTheRegistryAndAddedAgain_KeepsItsScheduleRows_AnIdItHasNeverSeenStillHasItsRowsCleared()
+    {
+        await WithStoreAsync(async (connection, ct) =>
+        {
+            /* A server with an observed row (collect.servers keeps it after the definition goes) and a definition, whose operator
+               switched a heavy collector off and set a frequency on another. */
+            await ExecAsync(connection, $"INSERT INTO servers (server_id, server_name) VALUES ({ReAdded}, 'readd-alpha'), ({ObservedOnly}, 'observed-only')", ct);
+            await ExecAsync(connection, $"INSERT INTO config.config_monitored_servers (server_id, name, host) VALUES ({ReAdded}, 'readd-alpha', 'readd-alpha')", ct);
+            await ExecAsync(connection, $@"
+INSERT INTO config.config_collector_schedules (server_id, collector_name, enabled, frequency_minutes) VALUES
+    ({ReAdded}, 'query_store', FALSE, NULL), ({ReAdded}, 'wait_stats', NULL, 30),
+    ({ObservedOnly}, 'query_store', FALSE, NULL),
+    ({NotYetRegistered}, 'query_store', FALSE, NULL), (NULL, 'query_store', TRUE, NULL)", ct);
+
+            /* The operator removes the server and adds it again: its schedule rows are exactly as they were. */
+            await ExecAsync(connection, $"DELETE FROM config.config_monitored_servers WHERE server_id = {ReAdded}", ct);
+            await ExecAsync(connection, $"INSERT INTO config.config_monitored_servers (server_id, name, host) VALUES ({ReAdded}, 'readd-alpha', 'readd-alpha')", ct);
+            Assert.Equal(2L, await CountAsync(connection, $"server_id = {ReAdded}", ct));
+            Assert.False((bool)(await ScalarAsync(connection,
+                $"SELECT enabled FROM config.config_collector_schedules WHERE server_id = {ReAdded} AND collector_name = 'query_store'", ct))!);
+            Assert.Equal(30, Convert.ToInt32(await ScalarAsync(connection,
+                $"SELECT frequency_minutes FROM config.config_collector_schedules WHERE server_id = {ReAdded} AND collector_name = 'wait_stats'", ct), CultureInfo.InvariantCulture));
+
+            /* A server the observed table holds but that was never registered keeps its rows when it is first registered. */
+            await ExecAsync(connection, $"INSERT INTO config.config_monitored_servers (server_id, name, host) VALUES ({ObservedOnly}, 'observed-only', 'observed-only')", ct);
+            Assert.Equal(1L, await CountAsync(connection, $"server_id = {ObservedOnly}", ct));
+
+            /* An id that no observed row and no definition holds has its rows cleared when it is registered; the fleet-wide row stays. */
+            await ExecAsync(connection, $"INSERT INTO config.config_monitored_servers (server_id, name, host) VALUES ({NotYetRegistered}, 'never-seen', 'never-seen')", ct);
+            Assert.Equal(0L, await CountAsync(connection, $"server_id = {NotYetRegistered}", ct));
+            Assert.Equal(1L, await CountAsync(connection, "server_id IS NULL", ct));
         });
     }
 
