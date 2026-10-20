@@ -19,7 +19,7 @@
 import { el, mount, clear, readTool, readToolWithinKeptHistory, keptWindowStrip, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, makeActivatable, fmtInt, fmtNum } from "../util.js";
 import { pageRangePicker, windowOfSpec } from "../page-range.js";
 import { relativeSpec } from "../time-range.js";
-import { orderServers } from "../server-order.js";
+import { orderServers, displayNameFor } from "../server-order.js";
 
 const DEFAULT_HOURS = 24;
 const FLEET = "";
@@ -118,7 +118,7 @@ function statusLine(block) {
 }
 
 /** One section: its heading, then one table (a server) or one table per server with the fleet line (Fleet). */
-export function sectionCard(section, block, onTag) {
+export function sectionCard(section, block, onTag, servers = []) {
   const parts = [el("h3", {}, [section.title, el("span", { class: "panel-sub", text: block && block.source ? " " + block.source : "" })])];
   if (!block) {
     parts.push(emptyStrip("The read sent no " + section.title + " section."));
@@ -129,7 +129,8 @@ export function sectionCard(section, block, onTag) {
   if (note) parts.push(note);
   if (Array.isArray(block.servers)) {
     for (const s of block.servers) {
-      parts.push(el("h4", { text: s.server || "" }));
+      /* #6157: the heading is the display name of the server; the read names it by its connection key. */
+      parts.push(el("h4", { text: displayNameFor(servers, s.server) }));
       const sn = statusLine(s);
       if (sn) parts.push(sn);
       parts.push(sectionTable(s, onTag));
@@ -238,6 +239,8 @@ export function renderQueryTagUsage(main) {
     mount(body, loadingStrip("Loading query tag usage…"));
     const w = currentWindow();
     const res = await readToolWithinKeptHistory("get_resource_use_by_tag", readParams(w), signal);
+    /* The server list the headings are named from may still be on its way: wait for it so the first paint is not the keys. */
+    await serversReady;
     if (ticket !== loadSeq) return;
     if (res.kind === "aborted" || res.kind === "auth") return;
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
@@ -245,7 +248,7 @@ export function renderQueryTagUsage(main) {
     const kept = keptWindowStrip(res);
     const sections = Array.isArray(data.sections) ? data.sections : [];
     if (res.kind === "empty" && sections.length === 0) return mount(body, [kept, emptyStrip(res.message)]);
-    const cards = SECTIONS.map((s) => sectionCard(s, sections.find((b) => b && b.section === s.name) || null, openTag));
+    const cards = SECTIONS.map((s) => sectionCard(s, sections.find((b) => b && b.section === s.name) || null, openTag, knownServers));
     mount(body, [
       kept,
       res.kind === "empty" ? emptyStrip(res.message) : null,
@@ -254,7 +257,7 @@ export function renderQueryTagUsage(main) {
     ]);
   }
 
-  (async () => {
+  const serversReady = (async () => {
     const res = await readTool("list_servers", {}, controller.signal);
     if (mine !== pageSeq || res.kind !== "data") return;
     knownServers = orderServers(serverRows(res.data));

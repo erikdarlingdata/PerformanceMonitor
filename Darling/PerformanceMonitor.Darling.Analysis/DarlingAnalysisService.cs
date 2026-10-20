@@ -543,21 +543,7 @@ public sealed class DarlingAnalysisService
                    read (wait_stats on a SQL Server target, pg_database_stats on a PostgreSQL one, #3665), so
                    "unstamped" is not a third state here — Coverage is null only when collection threw, and
                    that unwinds through the catch below, never through this test. */
-                /* True when the WINDOW went unobserved but point-in-time facts (config, trace flags,
-                   hardware) still read — the case that used to slip past the facts.Count == 0 check. */
-                var hasPointInTimeFactsOnly = facts.Count > 0;
-                WindowEmptyMessage = hasPointInTimeFactsOnly
-                    ? $"The collector observed none of the analysis window " +
-                      $"({context.TimeRangeStart:yyyy-MM-dd HH:mm} to {context.TimeRangeEnd:yyyy-MM-dd HH:mm} UTC): " +
-                      $"no collection interval landed inside it, even though this server has {dataSpanHours:F1} hours " +
-                      $"of total collected history. The {facts.Count} fact(s) that could still be read are point-in-time " +
-                      "configuration and state, not measurements of this window. Collection appears to have stopped or " +
-                      "broken for this window, so nothing was measured — this is NOT an all-clear."
-                    : $"No facts were collected in the analysis window " +
-                      $"({context.TimeRangeStart:yyyy-MM-dd HH:mm} to {context.TimeRangeEnd:yyyy-MM-dd HH:mm} UTC) " +
-                      $"even though this server has {dataSpanHours:F1} hours of total collected history. " +
-                      "Collection appears to have stopped or broken for this window, so nothing was measured " +
-                      "— this is NOT an all-clear.";
+                WindowEmptyMessage = WindowEmptyText.Compose(context, dataSpanHours, facts.Count);
 
                 _logger?.LogWarning(
                     "[DarlingAnalysisService] No observed collection in the analysis window for {Server} ({Start} to {End}) " +

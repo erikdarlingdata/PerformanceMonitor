@@ -76,7 +76,7 @@ public sealed class WebDataStartNoteBlockingDeadlockTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
             () => WebDataStartNote.AddAsync(store, "get_pg_log_events", "sql01", 48, WindowEnd, events, null, Cancelled));
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
-            () => WebDataStartNote.AddAsync(store, "get_pg_deadlocks", "sql01", 48, WindowEnd, "{\"status\":\"no_deadlocks\",\"message\":\"x\"}", null, Cancelled));
+            () => WebDataStartNote.AddAsync(store, "get_pg_deadlocks", "sql01", 48, WindowEnd, "{\"status\":\"empty\",\"message\":\"x\"}", null, Cancelled));
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
             () => WebDataStartNote.AddAsync(store, "get_deadlocks", "sql01", 48, WindowEnd, "{\"status\":\"empty\",\"message\":\"x\"}", null, Cancelled));
         const string notCollected = "{\"status\":\"not_collected\",\"message\":\"x\"}";
@@ -107,7 +107,7 @@ public sealed class WebDataStartNoteBlockingDeadlockTests
     {
         var pgDeadlocks = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpPgDeadlockTools.cs");
         Assert.Contains("status = \"deadlocks\"", pgDeadlocks, StringComparison.Ordinal);
-        Assert.Contains("\"no_deadlocks\"", pgDeadlocks, StringComparison.Ordinal);
+        Assert.Contains("\"empty\"", pgDeadlocks, StringComparison.Ordinal);
         Assert.Contains("occurred_at = r.OccurredAtUtc", pgDeadlocks, StringComparison.Ordinal);
         var pgLog = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpPgLogEventTools.cs");
         Assert.Contains("status = \"events\"", pgLog, StringComparison.Ordinal);

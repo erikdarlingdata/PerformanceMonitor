@@ -73,7 +73,7 @@ public sealed class DarlingMcpPgSlotTools
         _ => 0,
     };
 
-    [McpServerTool(Name = "get_pg_replication_slots"), Description("Replication slot health: whether retained WAL is unbounded and GROWING (fills disk, pins vacuum). Window ends at as_of. not_collected: engine is not PostgreSQL. no_slots: none sampled in hours_back, none exist or none collected; per-instance, a replica's no_slots doesn't clear the writer. slots_present: slots in window; read worst_severity. retained_wal_bytes/_gb, safe_wal_size_bytes, xmin ages: null on the collector's -1 sentinel; no ceiling by default isn't a gap. retained_wal_growth_bytes is 0 when flat (measured), null when unmeasurable. worst_slot ranks by severity, not size.<<GUIDE>>Gets PostgreSQL replication slot health, including whether any slot is retaining WAL without bound. An abandoned slot is one of the few PostgreSQL conditions that can take a server down by itself, and it does so two independent ways: it retains every WAL segment its consumer has not confirmed - unbounded by default, so it will fill the volume and stop the server - and it simultaneously pins the vacuum horizon so nothing gets reclaimed cluster-wide. Reports whether retained WAL is still GROWING across the window, which is the difference between a consumer that is merely behind and a volume filling in front of you. Common orphan sources are a removed CDC task, a finished blue/green deployment, a decommissioned Debezium consumer, or a failed major-version upgrade. Works on any PostgreSQL target.")]
+    [McpServerTool(Name = "get_pg_replication_slots"), Description("Replication slot health: whether retained WAL is unbounded and GROWING (fills disk, pins vacuum). Window ends at as_of. not_collected: engine is not PostgreSQL. empty: none sampled in hours_back, none exist or none collected; per-instance, a replica's empty doesn't clear the writer. slots_present: slots in window; read worst_severity. retained_wal_bytes/_gb, safe_wal_size_bytes, xmin ages: null on the collector's -1 sentinel; no ceiling by default isn't a gap. retained_wal_growth_bytes is 0 when flat (measured), null when unmeasurable. worst_slot ranks by severity, not size.<<GUIDE>>Gets PostgreSQL replication slot health, including whether any slot is retaining WAL without bound. An abandoned slot is one of the few PostgreSQL conditions that can take a server down by itself, and it does so two independent ways: it retains every WAL segment its consumer has not confirmed - unbounded by default, so it will fill the volume and stop the server - and it simultaneously pins the vacuum horizon so nothing gets reclaimed cluster-wide. Reports whether retained WAL is still GROWING across the window, which is the difference between a consumer that is merely behind and a volume filling in front of you. Common orphan sources are a removed CDC task, a finished blue/green deployment, a decommissioned Debezium consumer, or a failed major-version upgrade. Works on any PostgreSQL target.")]
     public static async Task<string> GetPgReplicationSlots(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -81,7 +81,7 @@ public sealed class DarlingMcpPgSlotTools
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
@@ -104,7 +104,7 @@ public sealed class DarlingMcpPgSlotTools
                    real finding on a PostgreSQL target and a false one on a SQL Server target, where the
                    collector has never run and never will. */
                 var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_replication_slots", cancellationToken);
+                    postgres, resolved.ServerId, resolved.DisplayName, "pg_replication_slots", cancellationToken);
                 if (gated != null)
                 {
                     return gated;
@@ -112,9 +112,9 @@ public sealed class DarlingMcpPgSlotTools
 
                 return JsonSerializer.Serialize(new
                 {
-                    server = resolved.ServerName,
+                    server = resolved.DisplayName,
                     hours_back,
-                    status = "no_slots",
+                    status = "empty",
                     finding = "This instance has no replication slots in the window, so it is not itself "
                             + "retaining WAL or pinning vacuum through one.",
                     scope = "Per-instance. Slots live on the writer, so if this target is a replica, check "
@@ -180,7 +180,7 @@ public sealed class DarlingMcpPgSlotTools
 
             return JsonSerializer.Serialize(new
             {
-                server = resolved.ServerName,
+                server = resolved.DisplayName,
                 hours_back,
                 status = "slots_present",
                 slot_count = slots.Count,

@@ -58,6 +58,8 @@ public partial class JobHistoryTab : UserControl
         ColumnFilterScope.SetServer(this, ColumnFilterScope.AllServers);
         _staleDataTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(10) };
         _staleDataTimer.Tick += StaleDataTimer_Tick;
+        /* #6136: each column is at least as wide as its own header, so "Duration" and "Retries" are not cut at the fixed widths. */
+        Loaded += (_, _) => DataGridHeaderFit.Apply(this);
     }
 
     /// <summary>Wires the data service and the column-filter manager, and starts the stale-data ticker.</summary>
@@ -192,6 +194,7 @@ public partial class JobHistoryTab : UserControl
             var displayCount = JobHistoryDataGrid.Items.Count;
             NoJobsMessage.Visibility = displayCount == 0 ? Visibility.Visible : Visibility.Collapsed;
             RunTimeHeaderText.Text = TimeColumnTitle.For("Run Time", ViewerTimeHelper.CurrentDisplayMode, all.Any(r => r.MixedServers)); // D5: the column names its clock
+            DataGridHeaderFit.Apply(JobHistoryDataGrid); // #6136: the longer title ("Run Time (server)") widens its column
 
             /* The cap applies to the read (all.Count), not the display count after the per-column filter popups: a column filter
                narrowing the grid must not make the "newest 2,000" label disappear when the underlying read still hit the cap.

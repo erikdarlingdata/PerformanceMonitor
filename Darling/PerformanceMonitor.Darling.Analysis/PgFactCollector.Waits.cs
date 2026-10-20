@@ -157,6 +157,8 @@ WHERE collection_time >= $2";
             NominalMs = nominalMs,
             ObservedMs = Math.Min(nominalMs, Math.Max(0, observedSeconds * 1000.0)),
             SampleCount = (int)Math.Min(int.MaxValue, sampleCount),
+            FirstSampleTime = firstSample,
+            LastSampleTime = lastSample,
             LargestGapMs = Math.Min(nominalMs, largestGapMs)
         };
     }

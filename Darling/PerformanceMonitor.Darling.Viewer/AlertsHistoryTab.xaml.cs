@@ -69,6 +69,8 @@ public partial class AlertsHistoryTab : UserControl
     public AlertsHistoryTab()
     {
         InitializeComponent();
+        /* #6136: each column is at least as wide as its own header ("Channel" was cut to "Channe"). */
+        Loaded += (_, _) => DataGridHeaderFit.Apply(this);
         /* #5562: the shared picker; the old combo defaulted to the last 24 hours. */
         TimeRangePickerControl.ZoneProvider = ViewerTimeHelper.CurrentDisplayZone;
         TimeRangePickerControl.Value = TimeRangePresets.Find("1d")!;
@@ -130,6 +132,7 @@ public partial class AlertsHistoryTab : UserControl
             var displayCount = AlertsDataGrid.Items.Count;
             NoAlertsMessage.Visibility = displayCount == 0 ? Visibility.Visible : Visibility.Collapsed;
             AlertTimeHeaderText.Text = TimeColumnTitle.For("Time", ViewerTimeHelper.CurrentDisplayMode, alerts.Any(a => a.MixedServers)); // D5: the column names its clock
+            DataGridHeaderFit.Apply(AlertsDataGrid); // #6136: a longer title widens its column
             /* D7: the cap applies to the READ (alerts.Count), not to what a column filter leaves on screen. */
             _lastReadRowCount = alerts.Count;
             AlertCountIndicator.Text = JobHistoryCap.CountText(displayCount, _lastReadRowCount, RowCap, "alert(s)");

@@ -107,7 +107,7 @@ public partial class ViewerServerTab
     /// </summary>
     private void ShowSystemHealthChartsNote()
     {
-        var gap = SystemHealthGapNote(_server.ServerName, _server.EngineEdition, _server.EngineKind);
+        var gap = SystemHealthGapNote(_server.DisplayName, _server.EngineEdition, _server.EngineKind);
         foreach (var (note, charts) in new (System.Windows.Controls.TextBlock, System.Windows.Controls.Grid)[]
                  {
                      (CorruptionEventsNoDataMessage, CorruptionEventsCharts),

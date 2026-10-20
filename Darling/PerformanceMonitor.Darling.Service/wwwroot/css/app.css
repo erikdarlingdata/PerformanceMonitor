@@ -991,6 +991,12 @@ td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
 .disclosure[open] > .disc-summary::before { content: "▾ "; }
 .disclosure > .disc-summary:hover { color: var(--fg); }
 .disc-body { margin-top: 0.4rem; }
+/* #6154: a grid cell that opens its row-specific explanation on a click. The value stays in the normal colour; the text opens
+   under it at a readable width. */
+.disclosure.cell-detail > .disc-summary { color: inherit; }
+.disclosure.cell-detail > .disc-summary:hover { color: var(--fg); text-decoration: underline; }
+.cell-detail .disc-body { white-space: normal; min-width: 16rem; max-width: 34rem; font-weight: normal; text-align: left; }
+.cell-detail-text { margin: 0; color: var(--dim); }
 
 /* #5246: the deadlock graph under Blocking > Deadlock Graphs. */
 .dlg { display: flex; gap: 0.75rem; align-items: flex-start; flex-wrap: wrap; }

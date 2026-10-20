@@ -231,9 +231,7 @@ public class InferenceEngine
     /// measured symptom is emitted on a settings source (verified over every emission site).</para>
     /// </summary>
     private static bool IsConfigAdvisoryFact(Fact fact) =>
-        fact.Source is "config" or "database_config"
-        || fact.Source == PgTargetSources.ConfigSource
-        || fact.Source == PgTargetSources.PostureSource
+        FactKinds.IsSettingsSource(fact.Source)
         || IsConfigAdvisoryRoot(fact.Key);
 
     /// <summary>
