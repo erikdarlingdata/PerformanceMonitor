@@ -379,7 +379,7 @@ END;";
     /// <c>sys.dm_exec_procedure_stats</c>. A small target flushes its plan cache within seconds, and a cycle that starts
     /// without them fails on a count that says nothing about the collector.
     /// <para>The first cycle of a test has no earlier cycle to preserve, so a missing module is run again (the existing
-    /// helper), up to three times within about five seconds, and read again; if that does not bring them all back the test
+    /// helper), up to three times (each run is a few round trips, well under the five seconds all three may take), and read again; if that does not bring them all back the test
     /// fails. Any later cycle follows an earlier one whose plans it needs to see unchanged; running a flushed module again
     /// would give it a new plan that no cycle has seen, so a missing module throws <see cref="PlanCacheLostException"/>
     /// and nothing is run. A test that runs nothing between its cycles is checked the same way.</para>
@@ -390,8 +390,7 @@ END;";
     {
         var cached = await CachedModulesAsync(targetConnectionString, ct);
         var reruns = 0;
-        var clock = System.Diagnostics.Stopwatch.StartNew();
-        while (first && MissingFrom(cached).Length > 0 && reruns < 3 && clock.Elapsed < TimeSpan.FromSeconds(5))
+        while (first && MissingFrom(cached).Length > 0 && reruns < 3)
         {
             reruns++;
             await RunModulesAgainAsync(targetConnectionString, ct);
