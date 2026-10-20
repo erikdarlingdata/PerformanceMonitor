@@ -206,6 +206,27 @@ public sealed class AgentLevel2ToolPolicyTests
 /* #1776 own-store: every fact mints its own scratch database through ScratchPostgres, so the class is deliberately NOT
    [Collection("live-postgres")]. */
 
+public sealed class AgentMuteStartRefusalTests
+{
+    private static readonly DarlingAgentActionSeat Seat = new(new DarlingMcpWritePolicy.Effective(false, false, Investigations: true));
+
+    [Fact]
+    public async Task AnAgentMute_WithAStartsAt_IsRefusedBeforeAnythingIsRead()
+    {
+        /* A data source that was never opened: the refusal comes before any store access, so nothing connects. */
+        await using var unused = NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Database=none;Username=none;Timeout=1");
+
+        var create = await DarlingMcpAgentActions.CreateMuteAsync(Seat, unused, null, null, null, "High CPU", null, null, null, null,
+            "patching", "2026-10-30T00:00:00Z", 7, null, null, "2026-10-29T00:00:00Z", TestContext.Current.CancellationToken);
+        var update = await DarlingMcpAgentActions.UpdateMuteAsync(Seat, unused, null, null, "rule-1",
+            "{\"starts_at_utc\":\"2026-10-29T00:00:00Z\"}", TestContext.Current.CancellationToken);
+
+        Assert.Equal("invalid", System.Text.Json.Nodes.JsonNode.Parse(create)!["status"]!.GetValue<string>());
+        Assert.Contains("starts_at is not available", create, StringComparison.Ordinal);
+        Assert.Contains("starts_at is not available", update, StringComparison.Ordinal);
+    }
+}
+
 /// <summary>
 /// #5915: the seven Level 2 tools against a live store, through the real tool methods: every kind rule refuses, a pass is
 /// attributed and journaled, and the writes arm is unchanged.

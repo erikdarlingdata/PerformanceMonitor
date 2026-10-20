@@ -67,6 +67,8 @@ public sealed class PgClusterObjectCensusTests
             "creates the cluster's own bootstrap role name only when it is missing (CREATE ROLE darling ... IF NOT EXISTS); on a CI cluster it already exists, so the write never happens",
         ["AlertHistoryDismissTests"] =
             "builds the shipped provisioning text and retargets its viewer GRANT at a per-run role; the batch itself is never executed",
+        ["McpAlertAdminLiveTests"] =
+            "lifts the shipped mcp REVOKE and GRANT on the alert history table out of the provisioning text and runs them retargeted at a per-run role; the batch itself is never executed",
         ["ViewerStoreLoginRawReadLiveTests"] =
             "lifts two shipped GRANT statements out of the provisioning text and runs them retargeted at a per-run role",
         ["ServerAddViewerRoleLiveTests"] =

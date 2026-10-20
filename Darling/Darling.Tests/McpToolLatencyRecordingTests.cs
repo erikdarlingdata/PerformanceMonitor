@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Net;
@@ -354,6 +355,41 @@ public sealed class McpToolLatencyRecordingTests
         Assert.DoesNotContain("Hunter2!", record.ArgumentsJson, StringComparison.Ordinal);
         Assert.DoesNotContain("password\":\"", record.ArgumentsJson, StringComparison.Ordinal);
         Assert.Contains(SlowReadLog.OmittedMarker, record.ArgumentsJson, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ASlowOrFailedWriteCall_StoresTheArgumentNamesOnly_NeverTheValues()
+    {
+        var supplied = new Dictionary<string, System.Text.Json.JsonElement>
+        {
+            ["notes"] = System.Text.Json.JsonDocument.Parse("\"call me at the on-call number 555-0100\"").RootElement.Clone(),
+            ["rule_id"] = System.Text.Json.JsonDocument.Parse("42").RootElement.Clone(),
+        };
+        var toolName = DarlingMcpWritePolicy.WriteTools.First();
+
+        var arguments = McpToolLatencyFilter.SlowReadArguments(toolName, supplied);
+        var record = SlowReadLog.Build(ReadScope.Open(null).Scope, ReadSurface.Mcp, toolName, ReadOutcome.Error, 10, arguments, null, DateTime.UtcNow);
+
+        Assert.Contains("\"notes\"", record.ArgumentsJson, StringComparison.Ordinal);
+        Assert.Contains("\"rule_id\"", record.ArgumentsJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("555-0100", record.ArgumentsJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("42", record.ArgumentsJson, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ASlowReadCall_KeepsItsValues_AndRedactsAUrlArgument()
+    {
+        var supplied = new Dictionary<string, System.Text.Json.JsonElement>
+        {
+            ["hours_back"] = System.Text.Json.JsonDocument.Parse("6").RootElement.Clone(),
+            ["target_url"] = System.Text.Json.JsonDocument.Parse("\"https://hooks.example.test/abc123\"").RootElement.Clone(),
+        };
+
+        var arguments = McpToolLatencyFilter.SlowReadArguments("get_wait_stats", supplied);
+        var record = SlowReadLog.Build(ReadScope.Open(null).Scope, ReadSurface.Mcp, "get_wait_stats", ReadOutcome.Error, 10, arguments, null, DateTime.UtcNow);
+
+        Assert.DoesNotContain("abc123", record.ArgumentsJson, StringComparison.Ordinal);
+        Assert.Contains("\"hours_back\":6", record.ArgumentsJson, StringComparison.Ordinal);
     }
 
     [Fact]

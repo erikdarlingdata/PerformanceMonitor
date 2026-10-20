@@ -129,6 +129,43 @@ public sealed class QuietWindowBehaviourTests
     }
 
     [Fact]
+    public async Task ClearQuietWindow_LeavesTheViewersSilenceRuleAlone_ButClearsOneSetWithNoReason()
+    {
+        /* The Viewer's Silence button writes a server-scoped rule with an end; it is not a window this tool set. */
+        var silence = new MuteRule
+        {
+            Id = "silence", ServerId = 11, ServerName = "alpha", ExpiresAtUtc = Now.AddDays(1), Reason = "Silenced from server list",
+        };
+        var store = new FakeMuteRuleStore().Seed(silence);
+        var refused = Parse(await DarlingMcpQuietWindowTools.ClearQuietWindowCore(store, "silence", Now));
+        Assert.Equal("invalid", refused["status"]!.GetValue<string>());
+        Assert.Equal(1, store.Count);
+
+        var set = Parse(await DarlingMcpQuietWindowTools.SetQuietWindowCore(store, Alpha, Iso(Now.AddHours(2)), null, null, Now));
+        var cleared = Parse(await DarlingMcpQuietWindowTools.ClearQuietWindowCore(store, set["rule_id"]!.GetValue<string>(), Now));
+        Assert.Equal("cleared", cleared["status"]!.GetValue<string>());
+        Assert.Equal(1, store.Count);
+    }
+
+    [Fact]
+    public async Task ASetWindowLongerThanSevenDays_IsRefused_AndExactlySevenDaysIsAccepted()
+    {
+        var store = new FakeMuteRuleStore();
+
+        var tooLong = Parse(await DarlingMcpQuietWindowTools.SetQuietWindowCore(store, Alpha, Iso(Now.AddDays(7).AddMinutes(1)), null, null, Now));
+        Assert.Equal("invalid", tooLong["status"]!.GetValue<string>());
+        Assert.Contains("7 days", tooLong["message"]!.GetValue<string>(), StringComparison.Ordinal);
+        Assert.Equal(0, store.Count);
+
+        /* The length is the end minus the start: a window set ahead is judged by its own length, not by how far ahead it begins. */
+        var ahead = Parse(await DarlingMcpQuietWindowTools.SetQuietWindowCore(store, Alpha, Iso(Now.AddDays(11)), Iso(Now.AddDays(5)), null, Now));
+        Assert.Equal("created", ahead["status"]!.GetValue<string>());
+
+        var week = Parse(await DarlingMcpQuietWindowTools.SetQuietWindowCore(store, Alpha, Iso(Now.AddDays(7)), null, null, Now));
+        Assert.Equal("created", week["status"]!.GetValue<string>());
+    }
+
+    [Fact]
     public async Task AnEndBeforeTheStart_IsRefusedAndNothingIsWritten()
     {
         var store = new FakeMuteRuleStore();

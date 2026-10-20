@@ -15,6 +15,7 @@ using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
@@ -51,7 +52,18 @@ public sealed class DarlingMcpQuietWindowTools
         && rule.WaitTypePattern is null
         && rule.JobNamePattern is null
         && rule.ClientAppPattern is null
-        && rule.ExternalSource is null;
+        && rule.ExternalSource is null
+        && IsQuietWindowReason(rule.Reason);
+
+    /// <summary>True when <paramref name="reason"/> is the text <c>set_quiet_window</c> writes: the prefix alone, or the prefix, a colon and a note.
+    /// The Viewer's own Silence rules carry another reason, so they are not cleared here.</summary>
+    internal static bool IsQuietWindowReason(string? reason) =>
+        reason is not null
+        && (string.Equals(reason, ReasonPrefix, StringComparison.Ordinal) || reason.StartsWith(ReasonPrefix + ": ", StringComparison.Ordinal));
+
+    /// <summary>The longest window <c>set_quiet_window</c> sets: 7 days, the longest finite expiry the Viewer's mute dialog offers (1 hour, 24 hours,
+    /// 7 days, or never). A longer mute is made by an operator in the Viewer.</summary>
+    internal static readonly TimeSpan MaxWindow = TimeSpan.FromDays(7);
 
     [McpServerTool(Name = "set_quiet_window"), Description(
         "Sets a QUIET WINDOW: no alert is delivered for one server (server_name) or for the WHOLE FLEET (server_name omitted) from starts_at (optional, default now) until ends_at (required). Alerts are still logged. Changes shared alert configuration the service delivers on. The window ends on its own. Returns the rule id and the clear_quiet_window call that undoes it.<<GUIDE>>" +
@@ -71,6 +83,7 @@ public sealed class DarlingMcpQuietWindowTools
         [Description("The one server to quiet (its display name). Omit to quiet the WHOLE FLEET.")] string? server_name = null,
         [Description("Optional ISO-8601 UTC start. Omit to start now. Before the start the window mutes nothing and shows as upcoming.")] string? starts_at = null,
         [Description("Optional reason, shown in the mute list (for example 'patching window, change 4471').")] string? reason = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         try
@@ -87,7 +100,9 @@ public sealed class DarlingMcpQuietWindowTools
                 target = (resolved.ServerId, resolved.DisplayName);
             }
 
-            return await SetQuietWindowCore(new PgMuteRuleStore(postgres), target, ends_at, starts_at, reason, DateTime.UtcNow);
+            var answer = await SetQuietWindowCore(new PgMuteRuleStore(postgres), target, ends_at, starts_at, reason, DateTime.UtcNow);
+            LogWrite(logger, "set_quiet_window", answer);
+            return answer;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -134,6 +149,12 @@ public sealed class DarlingMcpQuietWindowTools
             return DarlingMcpAlertTools.Outcome("invalid", $"ends_at ({Iso(end)}) is already past, so the window would never apply. Nothing was written.");
         }
 
+        if (end - (start ?? nowUtc) > MaxWindow)
+        {
+            return DarlingMcpAlertTools.Outcome("invalid",
+                $"A quiet window can last at most 7 days, the longest finite choice the Viewer's mute dialog offers (ends_at {Iso(end)} is longer). Set a shorter window and set another when it ends. Nothing was written.");
+        }
+
         var text = string.IsNullOrWhiteSpace(reason) ? ReasonPrefix : $"{ReasonPrefix}: {reason.Trim()}";
         var answer = await DarlingMcpAlertTools.CreateMuteRuleOver(
             store, target?.DisplayName, null, null, null, null, null, text, Iso(end), target?.ServerId,
@@ -176,11 +197,14 @@ public sealed class DarlingMcpQuietWindowTools
     public static async Task<string> ClearQuietWindow(
         NpgsqlDataSource postgres,
         [Description("The id of the quiet window's rule (from set_quiet_window or get_mute_rules).")] string rule_id,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         try
         {
-            return await ClearQuietWindowCore(new PgMuteRuleStore(postgres), rule_id, DateTime.UtcNow);
+            var answer = await ClearQuietWindowCore(new PgMuteRuleStore(postgres), rule_id, DateTime.UtcNow);
+            LogWrite(logger, "clear_quiet_window", answer);
+            return answer;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -205,7 +229,7 @@ public sealed class DarlingMcpQuietWindowTools
         if (!IsQuietWindow(rule))
         {
             return DarlingMcpAlertTools.Outcome("invalid",
-                $"Mute rule '{ruleId}' is not a quiet window (it has no end time, or it is narrowed by a metric, pattern, source or client application), so clear_quiet_window leaves it alone. Use delete_mute_rule or set_mute_rule_enabled for an ordinary mute.");
+                $"Mute rule '{ruleId}' is not a quiet window (it has no end time, it is narrowed by a metric, pattern, source or client application, or it was not set by set_quiet_window), so clear_quiet_window leaves it alone. Use delete_mute_rule or set_mute_rule_enabled for an ordinary mute.");
         }
 
         await store.DeleteAsync(rule.Id);
@@ -244,6 +268,25 @@ public sealed class DarlingMcpQuietWindowTools
             message = "The window is deleted. The service stops applying it on its next collection sweep.",
             undo,
         }, McpHelpers.JsonOptions);
+    }
+
+    /// <summary>One Information line per call that wrote: the tool, who called, the rule id. A refusal wrote nothing and is not logged here.</summary>
+    private static void LogWrite(ILogger? logger, string tool, string answer)
+    {
+        if (logger is null)
+        {
+            return;
+        }
+
+        var node = JsonNode.Parse(answer) as JsonObject;
+        var status = node?["status"]?.GetValue<string>();
+        if (status is not ("created" or "already_exists" or "cleared"))
+        {
+            return;
+        }
+
+        logger.LogInformation("MCP write {Tool} by {Caller}: {Status}, rule {RuleId}",
+            tool, ReadCaller.AmbientMcpCaller ?? ReadCaller.Unknown, status, node?["rule_id"]?.GetValue<string>());
     }
 
     private static bool TryParseUtc(string text, out DateTime utc)

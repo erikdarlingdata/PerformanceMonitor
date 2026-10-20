@@ -1542,8 +1542,14 @@ GRANT UPDATE (config_version, updated_at) ON {config}.config_service TO {viewer}
 --    may call the route (a read-only OIDC seat is refused every unsafe method by the host's write gate). The WPF
 --    read-only probe is unaffected: has_table_privilege(..., 'UPDATE') answers for the TABLE-level privilege only
 --    (the column-level form is has_column_privilege), so it stays false for viewer and the locked-down Viewer's
---    dismiss buttons stay hidden. mcp gets no such grant: no MCP tool dismisses an alert.
+--    dismiss buttons stay hidden. mcp gets the same one-column grant just below (#6231).
 GRANT UPDATE (dismissed) ON {config}.config_alert_log TO {viewer};
+-- #6231: the MCP dismiss_alert_history / restore_alert_history tools run as mcp and set the SAME one column through
+--    AlertDismissStore, so mcp gets the same column-level grant (revoke first, so a table-level UPDATE from an older
+--    provisioning run cannot linger). It names no other column and no INSERT/DELETE: mcp can flip the dismissed
+--    flag and cannot rewrite what an alert said. The store records only that flag, not who set it.
+REVOKE UPDATE ON {config}.config_alert_log FROM {mcp};
+GRANT UPDATE (dismissed) ON {config}.config_alert_log TO {mcp};
 -- #5085: the web dashboard's server-tag endpoints (POST/PATCH/DELETE under /api/server-tags) run as viewer, so it
 --    gets the SAME two single-table writes mcp holds above. The seat model decides who may call them (a read-only
 --    seat is refused every unsafe method); these grants are only the floor beneath that gate. Both tables are

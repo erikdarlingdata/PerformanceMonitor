@@ -14,6 +14,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -376,6 +377,7 @@ public sealed partial class DarlingMcpAlertTools
     public static async Task<string> DismissAlertHistory(
         NpgsqlDataSource postgres,
         [Description("JSON array of {alert_time, server_id, metric_name} copied from get_alert_history rows. At most 1000.")] string alerts_json,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         try
@@ -387,6 +389,7 @@ public sealed partial class DarlingMcpAlertTools
 
             var willChange = await AlertDismissStore.KeysInStateAsync(postgres, keys, dismissed: false, McpCommandDeadlines.ReadSeconds, cancellationToken);
             var outcome = await AlertDismissStore.DismissKeysAsync(postgres, keys, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            LogAlertWrite(logger, "dismiss_alert_history", outcome.Dismissed);
             return JsonSerializer.Serialize(new
             {
                 status = "dismissed",
@@ -412,6 +415,7 @@ public sealed partial class DarlingMcpAlertTools
     public static async Task<string> RestoreAlertHistory(
         NpgsqlDataSource postgres,
         [Description("JSON array of {alert_time, server_id, metric_name}. At most 1000.")] string alerts_json,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         try
@@ -423,6 +427,7 @@ public sealed partial class DarlingMcpAlertTools
 
             var willChange = await AlertDismissStore.KeysInStateAsync(postgres, keys, dismissed: true, McpCommandDeadlines.ReadSeconds, cancellationToken);
             var outcome = await AlertDismissStore.RestoreKeysAsync(postgres, keys, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            LogAlertWrite(logger, "restore_alert_history", outcome.Dismissed);
             return JsonSerializer.Serialize(new
             {
                 status = "restored",
@@ -437,6 +442,11 @@ public sealed partial class DarlingMcpAlertTools
             return McpHelpers.FormatError("restore_alert_history", ex);
         }
     }
+
+    /// <summary>One Information line per dismiss or restore call: the tool, who called, and how many rows changed.</summary>
+    private static void LogAlertWrite(ILogger? logger, string tool, int rows) =>
+        logger?.LogInformation("MCP write {Tool} by {Caller}: {Rows} alert history rows changed",
+            tool, ReadCaller.AmbientMcpCaller ?? ReadCaller.Unknown, rows);
 
     /// <summary>Parses the keys with the web dismiss route's own parser, so the two surfaces refuse a body in the same words.</summary>
     private static string? ParseAlertKeys(string? alertsJson, out List<AlertDismissKey> keys)

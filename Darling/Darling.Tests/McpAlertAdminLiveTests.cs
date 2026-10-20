@@ -200,7 +200,7 @@ VALUES ((now() at time zone 'utc') - interval '1 hour', 7, 's7', 'Blocking', 9, 
                 .Select(r => new { alert_time = r.AlertTime.ToString("o"), server_id = r.ServerId, metric_name = r.MetricName }).ToList();
             var json = JsonSerializer.Serialize(all);
 
-            var answer = await DarlingMcpAlertTools.DismissAlertHistory(source, json, ct);
+            var answer = await DarlingMcpAlertTools.DismissAlertHistory(source, json, cancellationToken: ct);
             var doc = JsonDocument.Parse(answer).RootElement;
             Assert.Equal(1, doc.GetProperty("dismissed").GetInt32());
             Assert.Equal(1, doc.GetProperty("already_dismissed").GetInt32());
@@ -209,16 +209,86 @@ VALUES ((now() at time zone 'utc') - interval '1 hour', 7, 's7', 'Blocking', 9, 
             /* The undo names only the row this call dismissed, so the earlier dismissal stays. */
             var undo = doc.GetProperty("undo").GetProperty("arguments").GetProperty("alerts_json").GetString()!;
             Assert.Single(JsonDocument.Parse(undo).RootElement.EnumerateArray());
-            var restored = await DarlingMcpAlertTools.RestoreAlertHistory(source, undo, ct);
+            var restored = await DarlingMcpAlertTools.RestoreAlertHistory(source, undo, cancellationToken: ct);
             Assert.Equal(1, JsonDocument.Parse(restored).RootElement.GetProperty("restored").GetInt32());
             Assert.Equal(1, await VisibleAsync());
 
-            Assert.Equal("invalid", Status(await DarlingMcpAlertTools.DismissAlertHistory(source, "not json", ct)));
+            Assert.Equal("invalid", Status(await DarlingMcpAlertTools.DismissAlertHistory(source, "not json", cancellationToken: ct)));
             bodySucceeded = true;
         }
         finally
         {
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+            await scratch.DisposeAsync();
+        }
+    }
+
+    /// <summary>The mcp role's alert-log grant, lifted from the managed provisioning SQL (the REVOKE and the column GRANT) and given to a
+    /// stand-in role, so the test runs the shipped statements and not a copy.</summary>
+    private static string McpAlertLogGrantFor(string role)
+    {
+        var managed = DarlingManagedRoles.BuildProvisioningSql(
+            ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp, 15);
+        var statements = System.Text.RegularExpressions.Regex.Matches(managed, @"(?m)^(?:REVOKE|GRANT) [^;]*? ON config\.config_alert_log (?:TO|FROM) mcp;")
+            .Select(m => m.Value.Replace(" mcp;", " " + role + ";", StringComparison.Ordinal)).ToList();
+        Assert.Equal(2, statements.Count);
+        return string.Join("\n", statements);
+    }
+
+    [Fact]
+    public async Task DismissAndRestore_RunAsTheMcpRole_SetOnlyTheDismissedColumn()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the MCP dismiss checks.");
+        var ct = TestContext.Current.CancellationToken;
+        var role = "mcp_dismiss_probe_" + Guid.NewGuid().ToString("N")[..8];
+        var scratch = await MintAsync(ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var owner = NpgsqlDataSource.Create(scratch.ConnectionString);
+            await ExecAsync(owner, $@"CREATE ROLE {role} LOGIN NOSUPERUSER PASSWORD 'probe-6231-pw';
+GRANT USAGE ON SCHEMA config TO {role};
+GRANT SELECT ON config.config_alert_log TO {role};
+INSERT INTO config_alert_log (alert_time, server_id, server_name, metric_name, current_value, threshold_value, dismissed)
+VALUES ('2026-10-04 10:00:00', 7, 's7', 'Blocking', 9, 5, false)", ct);
+
+            var roleString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Username = role, Password = "probe-6231-pw", Pooling = false }.ConnectionString;
+            await using var asMcp = NpgsqlDataSource.Create(roleString);
+            var rows = JsonSerializer.Serialize(new[] { new { alert_time = "2026-10-04T10:00:00Z", server_id = 7, metric_name = "Blocking" } });
+
+            /* Before the shipped grant the role is refused, so the success below belongs to the grant. */
+            Assert.Contains("permission denied", await DarlingMcpAlertTools.DismissAlertHistory(asMcp, rows, cancellationToken: ct), StringComparison.OrdinalIgnoreCase);
+
+            await ExecAsync(owner, McpAlertLogGrantFor(role), ct);
+
+            var dismissed = JsonDocument.Parse(await DarlingMcpAlertTools.DismissAlertHistory(asMcp, rows, cancellationToken: ct)).RootElement;
+            Assert.Equal(1, dismissed.GetProperty("dismissed").GetInt32());
+            var undo = dismissed.GetProperty("undo").GetProperty("arguments").GetProperty("alerts_json").GetString()!;
+            var restored = JsonDocument.Parse(await DarlingMcpAlertTools.RestoreAlertHistory(asMcp, undo, cancellationToken: ct)).RootElement;
+            Assert.Equal(1, restored.GetProperty("restored").GetInt32());
+
+            /* Nothing but the dismissed flag: any other column, INSERT and DELETE are refused. */
+            foreach (var statement in new[]
+            {
+                "UPDATE config_alert_log SET muted = TRUE",
+                "UPDATE config_alert_log SET detail_text = 'x'",
+                "INSERT INTO config_alert_log (alert_time, server_id, server_name, metric_name, current_value, threshold_value) VALUES (now(), -1, 's', 'm', 1, 1)",
+                "DELETE FROM config_alert_log",
+            })
+            {
+                var refused = await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(asMcp, statement, ct));
+                Assert.Equal("42501", refused.SqlState);
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (owner, token) =>
+            {
+                await using var command = new NpgsqlCommand($"DROP OWNED BY {role}; DROP ROLE IF EXISTS {role}", owner);
+                await command.ExecuteNonQueryAsync(token);
+            });
             await scratch.DisposeAsync();
         }
     }

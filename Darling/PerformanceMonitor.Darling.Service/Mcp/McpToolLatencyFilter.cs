@@ -383,6 +383,28 @@ public sealed class McpToolLatencyFilter
         return result.IsError == true ? ReadOutcome.Error : ReadOutcome.Ok;
     }
 
+    /// <summary>The arguments a slow-read record keeps for one MCP call. A write tool's arguments are the new values it
+    /// sets (URLs, rule text, notes), so only their names are kept and every value is the redaction marker; a read keeps
+    /// its values, which the slow-read log then redacts by key and sweeps for statements. Internal so a test can pin it.</summary>
+    internal static JsonObject? SlowReadArguments(string toolName, IDictionary<string, System.Text.Json.JsonElement>? supplied)
+    {
+        if (supplied is null)
+        {
+            return null;
+        }
+
+        var isWrite = DarlingMcpWritePolicy.IsWrite(toolName);
+        var arguments = new JsonObject();
+        foreach (var (key, value) in supplied)
+        {
+            arguments[key] = isWrite
+                ? JsonValue.Create(SecretTextGuard.RedactedMarker)
+                : JsonNode.Parse(value.GetRawText());
+        }
+
+        return arguments;
+    }
+
     /// <summary>Offers a slow or failed call to the slow-read record (#5097). The arguments are built only when the
     /// call qualifies, and nothing here can reach the request.</summary>
     private void OfferSlow(ReadScope scope, string toolName, ReadOutcome outcome, long elapsedMs,
@@ -396,14 +418,7 @@ public sealed class McpToolLatencyFilter
         JsonObject? arguments = null;
         try
         {
-            if (request.Params?.Arguments is { } supplied)
-            {
-                arguments = new JsonObject();
-                foreach (var (key, value) in supplied)
-                {
-                    arguments[key] = JsonNode.Parse(value.GetRawText());
-                }
-            }
+            arguments = SlowReadArguments(toolName, request.Params?.Arguments);
         }
         catch (Exception ex)
         {

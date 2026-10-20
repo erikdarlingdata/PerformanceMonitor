@@ -29,6 +29,8 @@ internal static class SecretTextGuard
         "connectionstring", "connection_string", "auth",
         /* #5452: the external ID of a server's AWS role (aws_external_id, awsExternalId). */
         "external_id", "externalid",
+        /* A URL argument (target_url, webhook_url, ...) can carry a token or a path the caller chose. */
+        "_url",
     };
 
     /* Fragments that mark a VALUE as a secret. Narrower than the key list: a bare "key" or "auth" would drop ordinary text. */

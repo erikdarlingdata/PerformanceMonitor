@@ -834,8 +834,12 @@ GRANT INSERT, UPDATE, DELETE ON config.server_tag_map TO mcp;
 --     writes `UPDATE config_alert_log SET dismissed = TRUE`. Column-level on exactly that one column, so viewer
 --     can flip the dismissed flag and cannot rewrite what an alert said or reach INSERT/DELETE. config_alert_log
 --     carries no trigger. The WPF read-only probe (has_table_privilege ... 'UPDATE') answers for the table-level
---     privilege only, so it stays false for viewer. mcp gets none: no MCP tool dismisses an alert.
+--     privilege only, so it stays false for viewer. mcp gets the same one-column grant just below (#6231).
 GRANT UPDATE (dismissed) ON config.config_alert_log TO viewer;
+-- #6231: the MCP dismiss_alert_history / restore_alert_history tools run as mcp and set the same one column, so mcp
+--     gets the same column-level grant (revoke first, so no table-level UPDATE lingers). No other column, no INSERT/DELETE.
+REVOKE UPDATE ON config.config_alert_log FROM mcp;
+GRANT UPDATE (dismissed) ON config.config_alert_log TO mcp;
 
 -- #5085: the web dashboard's /api/server-tags endpoints run as viewer, so viewer gets the same two single-table
 --     writes (the seat model decides who may call them; these grants are only the floor). The WPF Viewer's read-only
