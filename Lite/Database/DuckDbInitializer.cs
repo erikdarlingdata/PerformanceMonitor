@@ -423,7 +423,7 @@ public partial class DuckDbInitializer : IDisposable
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 76;
+    internal const int CurrentSchemaVersion = 77;
 
     private readonly string _archivePath;
 
@@ -3076,6 +3076,15 @@ public partial class DuckDbInitializer : IDisposable
             _logger?.LogInformation("Running migration to v76: adding the head blocker's evidence columns to dmv_blocking_snapshots");
             await AddMissingColumnsAsync(connection, AddedColumnsForVersion(76));
         }
+
+        if (fromVersion < 77)
+        {
+            /* v77 (#6159, twinning Darling's V202): ag_replica_states.primary_replica, the name of the replica that was the primary when the row was
+               collected (sys.dm_hadr_availability_group_states.primary_replica, which a secondary can read; the shared added-columns list). NULL on a
+               row stored before v77. Fresh installs get it from DuckDbSchemaGenerator (the AG tables are generated from the collector catalog). */
+            _logger?.LogInformation("Running migration to v77: adding ag_replica_states.primary_replica");
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(77));
+        }
     }
 
     /* #5990: set when a migration step failed in a way that must be retried at the next start; the stamp then stops at this
@@ -3152,6 +3161,8 @@ public partial class DuckDbInitializer : IDisposable
         (76, "dmv_blocking_snapshots", "blocking_last_request_end_time", "TIMESTAMP"),
         (76, "dmv_blocking_snapshots", "blocking_open_transaction_count", "INTEGER"),
         (76, "dmv_blocking_snapshots", "blocking_tran_log_bytes_used", "BIGINT"),
+        /* #6159: the primary replica's name (Darling's V202 column). NULL on a row stored before v77, which a reader shows as "primary not known". */
+        (77, "ag_replica_states", "primary_replica", "VARCHAR"),
     };
 
     internal static IEnumerable<(int Version, string Table, string Column, string Type)> AddedColumnsForVersion(int version) =>

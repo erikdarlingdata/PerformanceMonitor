@@ -83,13 +83,13 @@ public sealed class DarlingMcpPgPredicateTools
                 var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
                     postgres, "get_pg_predicate_stats", resolved.ServerName, emptyStart, windowEnd, emptyAnswer: true, logger, cancellationToken);
 
-                return McpHelpers.Status(
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status(
                         "empty",
                         $"No predicate statistics for {resolved.DisplayName} in the last {hours_back} "
                         + "hour(s). pg_qualstats SAMPLES executions — at the default 1% rate a low-traffic "
                         + "database can genuinely record nothing — and it needs shared_preload_libraries "
                         + "plus a restart to be active at all.",
-                        emptyNotice.AsHints());
+                        emptyNotice.AsHints()), cancellationToken);
             }
 
             /* #4966: where the store's coverage of the window starts, probed on the web's own source for this read (WebDataStartNote).

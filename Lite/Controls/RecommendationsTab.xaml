@@ -55,6 +55,7 @@
 
                         <!-- Title -->
                         <TextBlock Text="{Binding Title}" FontWeight="SemiBold" FontSize="13"
+                                   Visibility="{Binding ShowTitle, Converter={StaticResource BoolToVis}}"
                                    TextWrapping="Wrap"
                                    Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
 

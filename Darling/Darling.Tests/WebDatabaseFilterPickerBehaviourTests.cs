@@ -158,6 +158,9 @@ public sealed class WebDatabaseFilterPickerBehaviourTests
         Assert.True(r.GetProperty("fiftyFirstDisabled").GetBoolean());
         Assert.Equal(50, r.GetProperty("checkedAfter").GetInt32());
         Assert.Equal("Limit reached: uncheck a database to pick another.", r.GetProperty("hint").GetString());
+        // #6159: the count says how many are picked and the most that may be; "0 / 50 selected" read as 50 databases listed.
+        Assert.Equal("0 selected (up to 50)", r.GetProperty("countAtOpen").GetString());
+        Assert.Equal("50 selected (up to 50)", r.GetProperty("countAtLimit").GetString());
         Assert.Equal(50, r.GetProperty("storedCount").GetInt32());
     }
 

@@ -1880,6 +1880,21 @@ ALTER TABLE collect.query_store_forced_plans ADD COLUMN IF NOT EXISTS plan_guide
 ALTER TABLE collect.query_store_forced_plans ADD COLUMN IF NOT EXISTS plan_guide_scope text;";
 
     /// <summary>
+    /// V202 (#6159): <c>collect.ag_replica_states.primary_replica</c>, the name of the replica that was the primary when the row was
+    /// collected, read from <c>sys.dm_hadr_availability_group_states.primary_replica</c>. A secondary can read that DMV, so the Availability
+    /// Groups card built from a secondary's own view can say "Primary: NODE1" instead of leaving the reader to guess why the replica
+    /// list it was given has no PRIMARY row.
+    ///
+    /// <para><b>Nullable, no DEFAULT, no backfill</b> (the V151 <c>group_id</c> shape): a row collected before this rung never asked
+    /// the engine, so NULL is the honest value, and a reader treats NULL as "primary not known". <b>Appended LAST</b>, after
+    /// <c>group_id</c>: the writer is a positional binary COPY, so a fresh store (the generated V1 table carries the column from the
+    /// collector's payload, and this ALTER no-ops there) and an upgraded store share one physical column order. The table has no
+    /// passthrough view, so the rung is one ALTER. An older build ignores the column.</para>
+    /// </summary>
+    private const string V202Sql = @"
+ALTER TABLE collect.ag_replica_states ADD COLUMN IF NOT EXISTS primary_replica text;";
+
+    /// <summary>
     /// V203 (#6170): the per-server login the PostgreSQL hypothetical-index check runs under, a pair in the same shape as the
     /// remediation pair V113 added. <c>hypothetical_index_username</c> is a login name. <c>hypothetical_index_encrypted_password</c>
     /// holds an <c>env:</c> or <c>file:</c> reference to its password, never the password. Both are nullable with no default and no
@@ -2266,6 +2281,7 @@ $rung$;";
         new Migration(199, "blocking-head-evidence", V199Sql),
         new Migration(200, "excluded-volumes", V200Sql),
         new Migration(201, "forced-plan-variants-and-guides", V201Sql),
+        new Migration(202, "ag-primary-replica", V202Sql),
         new Migration(203, "hypothetical-index-login", V203Sql),
     };
 

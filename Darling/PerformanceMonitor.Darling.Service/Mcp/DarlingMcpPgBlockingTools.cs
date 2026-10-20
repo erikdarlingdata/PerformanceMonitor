@@ -182,7 +182,7 @@ public sealed class DarlingMcpPgBlockingTools
                 /* #4966: the all-clear (captures, no blocking) is an empty answer that carries the window floor under hints. */
                 var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
                     postgres, "get_pg_blocking", resolved.ServerName, startUtc, now, emptyAnswer: true, logger, cancellationToken);
-                return DarlingMcpWindowNotice.FinishEmpty(JsonSerializer.Serialize(new
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, DarlingMcpWindowNotice.FinishEmpty(JsonSerializer.Serialize(new
                 {
                     server = resolved.DisplayName,
                     hours_back,
@@ -196,7 +196,7 @@ public sealed class DarlingMcpPgBlockingTools
                         + "window. Note the limit of that statement: captures are periodic, so blocking that "
                         + "started and cleared between two of them left no trace. PostgreSQL has no "
                         + "engine-side blocked-process recorder to fall back on.",
-                }, McpHelpers.JsonOptions), emptyNotice);
+                }, McpHelpers.JsonOptions), emptyNotice), cancellationToken);
             }
 
             var chainsNotice = await DarlingMcpWindowNotice.ReadForToolAsync(

@@ -83,6 +83,15 @@ public sealed class WebClickthroughStaleStateTests
         Assert.StartsWith("CollectorsStale", texts[5], StringComparison.Ordinal);
     }
 
+    /// <summary>#6178: the Overview Threads chip of an Azure SQL Database server gives the reason beside its "n/a"; a box with no reading keeps a bare "n/a".</summary>
+    [Fact]
+    public void TheThreadsChip_GivesTheReasonOnAzureSqlDatabase_AndNothingOnABox()
+    {
+        var r = Run("azureThreads");
+        Assert.Equal("Threadsn/aAzure SQL Database has no thread data", Texts(r.GetProperty("azure"))[1]);
+        Assert.Equal("Threadsn/a", Texts(r.GetProperty("box"))[1]);
+    }
+
     [Fact]
     public void AnOnlineServer_KeepsItsLiveValues()
     {

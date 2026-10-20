@@ -104,7 +104,9 @@ public sealed class FinOpsCpuRightSizingWindowLiveTests
         Assert.DoesNotContain(recs, r => r.Finding.StartsWith("CPU over-provisioned", StringComparison.Ordinal));
     }
 
-    /// <summary>A 32-core SQL Server with 64 GB of RAM and a sparse memory series: the CPU rows are the only ones the seed is built to move.</summary>
+    /// <summary>A 32-core SQL Server with 64 GB of RAM and a sparse memory series: the CPU rows are the only ones the seed is built to move.
+    /// The buffer pool (40000 of 50000 MB) leaves 20% stolen, under the 60% that reads as memory pressure (#6139): a buffer pool of
+    /// 9000 would make every server here UNDER_PROVISIONED whatever its CPU.</summary>
     private static async Task SeedServerAsync(NpgsqlConnection c, CancellationToken ct, int serverId, string serverName, DateTime now)
     {
         await DarlingMcpTestData.RegisterServerAsync(c, serverId, serverName, ct);
@@ -112,7 +114,7 @@ public sealed class FinOpsCpuRightSizingWindowLiveTests
             "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, engine_edition, cpu_count, physical_memory_mb, is_hadr_enabled, ag_replica_role) VALUES ($1,$2,$3,$4,'Standard Edition (64-bit)','15.0.4000.1',2,32,65536,FALSE,'Standalone')",
             CollectionIdGenerator.Next(), now.AddHours(-2), serverId, serverName);
         await DarlingMcpTestData.ExecAsync(c, ct,
-            "INSERT INTO memory_stats (collection_id, collection_time, server_id, server_name, total_physical_memory_mb, total_server_memory_mb, target_server_memory_mb, buffer_pool_mb, max_workers_count, current_workers_count) VALUES ($1, $2, $3, $4, 65536, 50000, 60000, 9000, 512, 100)",
+            "INSERT INTO memory_stats (collection_id, collection_time, server_id, server_name, total_physical_memory_mb, total_server_memory_mb, target_server_memory_mb, buffer_pool_mb, max_workers_count, current_workers_count) VALUES ($1, $2, $3, $4, 65536, 50000, 60000, 40000, 512, 100)",
             CollectionIdGenerator.Next(), now.AddHours(-1), serverId, serverName);
     }
 

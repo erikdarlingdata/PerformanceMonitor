@@ -204,6 +204,38 @@ public sealed class EngineCapabilityMissTests : IClassFixture<SharedDuckDbFixtur
     }
 
     /// <summary>
+    /// #6178: find_database with no database list anywhere. When every server is an Azure SQL Database, which never writes
+    /// the list, the answer is not_collected and names the engine and the collector. One server that could have had the
+    /// list (a box) keeps the true-negative empty answer.
+    /// </summary>
+    [Fact]
+    public async Task FindDatabase_WithNoList_AnswersNotCollectedOnlyWhenEveryServerIsAzureSqlDb()
+    {
+        await SeedServerPropertiesAsync(_azureServerId, AzureServerName, CollectorEngineCapability.AzureSqlDatabaseEngineEdition);
+        await SeedServerPropertiesAsync(_boxServerId, BoxServerName, engineEdition: 3);
+        var service = new LocalDataService(_duckDb);
+
+        var mixed = await McpDiscoveryTools.FindDatabase(_serverManager, service, "Tenant1");
+        Assert.Equal("empty", StatusOf(mixed));
+
+        var azureOnlyDir = Path.Combine(Path.GetTempPath(), "pmlite-enginecap-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(azureOnlyDir);
+        try
+        {
+            var azureOnly = new ServerManager(azureOnlyDir);
+            azureOnly.AddServer(new ServerConnection { Id = Guid.NewGuid().ToString(), ServerName = AzureServerName, IsEnabled = true });
+            var answer = await McpDiscoveryTools.FindDatabase(azureOnly, service, "Tenant1");
+            Assert.Equal("not_collected", StatusOf(answer));
+            Assert.Contains("Azure SQL Database", answer, StringComparison.Ordinal);
+            Assert.Contains("database_states", answer, StringComparison.Ordinal);
+        }
+        finally
+        {
+            try { Directory.Delete(azureOnlyDir, recursive: true); } catch (IOException) { /* temp dir */ }
+        }
+    }
+
+    /// <summary>
     /// A server's edition is the NEWEST collected row's, the same row the analysis engine reads its own
     /// edition fact from: an older row at a different edition (a server re-pointed at a different instance)
     /// must not win over the latest one, in either direction.

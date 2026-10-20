@@ -43,6 +43,11 @@ export function favoriteStar(serverId, onToggled) {
   return inertToRow(btn);
 }
 
+/** The badge's screen-reader name: "1 alert", "2 alerts" (#6159). */
+export function alertBadgeLabel(count) {
+  return count + (count === 1 ? " alert" : " alerts") + ", click to acknowledge";
+}
+
 /** The alert-count badge for a server, or null when it has nothing to show or is acknowledged. A click acknowledges. */
 export function alertBadge(serverId) {
   const a = attentionFor(serverId);
@@ -51,7 +56,7 @@ export function alertBadge(serverId) {
     type: "button",
     class: "alert-badge " + (a.critical ? "crit" : "warn"),
     title: "Click to acknowledge: hides this count in this browser until a newer alert arrives",
-    "aria-label": a.count + " alerts, click to acknowledge",
+    "aria-label": alertBadgeLabel(a.count),
     text: a.count > 99 ? "99+" : String(a.count),
     onClick: (e) => {
       e.stopPropagation();

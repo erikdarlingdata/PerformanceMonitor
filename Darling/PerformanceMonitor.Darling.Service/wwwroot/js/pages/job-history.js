@@ -97,6 +97,13 @@ function serverRows(data) {
   return [];
 }
 
+/** #6178: the sentence for a server whose engine is Azure SQL Database, which has no SQL Agent, so no job will ever match. The service
+    says "not_collected" and names the engine for it; any other answer keeps its own sentence. */
+const AZURE_NO_AGENT_LINE = "Azure SQL Database has no SQL Agent, so it has no job history.";
+export function noAgentLine(res) {
+  return res && res.status === "not_collected" && /runs on Azure SQL Database \(EngineEdition 5\)/.test(String(res.message || "")) ? AZURE_NO_AGENT_LINE : null;
+}
+
 /* Agent history exists only on SQL Server targets; a server whose engine is not stamped yet stays on offer. */
 function isSqlServerTarget(r) {
   return !/postgres/i.test(String(r && r.engine_kind ? r.engine_kind : ""));
@@ -344,7 +351,7 @@ export function renderJobHistory(main) {
       const kept = keptWindowStrip(res);
       showAgent(res.kind === "empty" ? res.hints : data);
       if (res.kind === "empty") {
-        return mount(body, [kept, noticeFor(retainedNote(res.hints)), emptyStrip(res.message)]);
+        return mount(body, [kept, noticeFor(retainedNote(res.hints)), emptyStrip(noAgentLine(res) || res.message)]);
       }
       for (const r of data.runs || []) if (r.category) seenCategories.add(r.category);
       fill(category.sel, categoryOptions(), state.category);
