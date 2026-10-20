@@ -140,7 +140,7 @@ SELECT (
         var dbClause = BuildDbInClause(databaseNames, "database_name", 2, out var dbValues);
 
         command.CommandText = @"
-SELECT database_name, actual_state, capture_time
+SELECT database_name, actual_state, capture_time, interval_length_minutes
 FROM v_query_store_health
 WHERE server_id = $1
 AND   capture_time = (SELECT MAX(capture_time) FROM v_query_store_health WHERE server_id = $1)" + dbClause + @"
@@ -158,7 +158,8 @@ ORDER BY database_name";
         {
             states.Add(new CollectorRuntimePrecondition.QueryStoreDatabaseState(
                 reader.IsDBNull(0) ? string.Empty : reader.GetString(0),
-                reader.IsDBNull(1) ? null : reader.GetString(1)));
+                reader.IsDBNull(1) ? null : reader.GetString(1),
+                reader.IsDBNull(3) ? null : Convert.ToInt64(reader.GetValue(3), System.Globalization.CultureInfo.InvariantCulture)));
 
             observedUtc ??= reader.IsDBNull(2)
                 ? null
