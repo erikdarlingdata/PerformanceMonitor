@@ -18,7 +18,6 @@ using Npgsql;
 using PerformanceMonitor.Darling.Service.Targets;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
-using PerformanceMonitor.Darling.Remediation;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -287,8 +286,8 @@ SELECT
     /// </summary>
     internal static void EnsureSearchPathPinned(string? observedSearchPath, string serverName)
     {
-        /* The rule is shared with the kill connection (RemediationConnection.IsPinnedSearchPath). */
-        if (RemediationConnection.IsPinnedSearchPath(observedSearchPath))
+        /* The rule is shared with the kill connection (PostgresSearchPathPin.IsPinned). */
+        if (PostgresSearchPathPin.IsPinned(observedSearchPath))
         {
             return;
         }
@@ -302,7 +301,7 @@ SELECT
     }
 
     /// <summary>#6143: the characters PostgreSQL's identifier-list parser skips (scanner_isspace).</summary>
-    internal static bool IsPgListSpace(char c) => RemediationConnection.IsPgListSpace(c);
+    internal static bool IsPgListSpace(char c) => PostgresSearchPathPin.IsPgListSpace(c);
 
     /// <summary>
     /// #6143: an unpooled data source over <paramref name="connectionString"/> that loads no types, so a session opened

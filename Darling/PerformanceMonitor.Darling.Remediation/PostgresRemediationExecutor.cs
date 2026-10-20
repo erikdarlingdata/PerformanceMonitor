@@ -245,9 +245,9 @@ WHERE a.pid OPERATOR(pg_catalog.=) @pid;";
             /* #6143: type loading is off, so this is the first statement on the connection. The sign-in sends search_path=pg_catalog,pg_temp; a
                connection pooler can drop that option without an error, and then the server's own setting for the role or database applies. The
                statements below rely on the pin, so a connection without it is not used. */
-            await using var searchPath = new NpgsqlCommand(RemediationConnection.PostgresSearchPathSql, connection) { CommandTimeout = 30 };
+            await using var searchPath = new NpgsqlCommand(PostgresSearchPathPin.ReadSql, connection) { CommandTimeout = 30 };
             var observed = await searchPath.ExecuteScalarAsync(ct) as string;
-            if (!RemediationConnection.IsPinnedSearchPath(observed))
+            if (!PostgresSearchPathPin.IsPinned(observed))
             {
                 return RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.SignInNotStrongEnough,
                     $"The remediation connection did not get the search_path this service sends when it signs in ('pg_catalog, pg_temp'): it has '{CleanSearchPath(observed)}'. "

@@ -6,8 +6,6 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-using System;
-using System.Linq;
 using Microsoft.Data.SqlClient;
 using Npgsql;
 
@@ -75,21 +73,6 @@ public static class RemediationConnection
     /// </summary>
     public const string PostgresSearchPathOption = "-c search_path=pg_catalog,pg_temp";
 
-    /// <summary>The statement that reads the search_path a PostgreSQL session actually has (#6143).</summary>
-    public const string PostgresSearchPathSql = "SELECT pg_catalog.current_setting('search_path')";
-
-    /// <summary>
-    /// #6143: the one rule for whether a PostgreSQL session has the search_path this product sends at sign-in
-    /// (<c>pg_catalog, pg_temp</c>). The service's monitoring connections (<c>DarlingServerConnector.EnsureSearchPathPinned</c>) and the kill
-    /// connection both use it. Only the whitespace PostgreSQL itself skips between schema names (<see cref="IsPgListSpace"/>) is ignored;
-    /// anything else must match, so other Unicode spaces, which are part of a schema name to PostgreSQL, are not accepted.
-    /// </summary>
-    public static bool IsPinnedSearchPath(string? observedSearchPath) =>
-        string.Equals(string.Concat((observedSearchPath ?? string.Empty).Where(c => !IsPgListSpace(c))), "pg_catalog,pg_temp", StringComparison.Ordinal);
-
-    /// <summary>The characters PostgreSQL's identifier-list parser skips (scanner_isspace).</summary>
-    public static bool IsPgListSpace(char c) => c is ' ' or '\t' or '\n' or '\r' or '\f';
-
     /// <summary>
     /// The remediation connection to a monitored PostgreSQL server (#5632): the same host and port as the service's PostgreSQL monitoring
     /// connection, and the same TLS mode (an Optional mode prefers TLS, a trusted certificate requires it, anything else verifies the
@@ -101,8 +84,8 @@ public static class RemediationConnection
     /// and the settings of a database somebody else owns never apply to this connection.</item>
     /// <item>It sets <c>search_path</c> to <c>pg_catalog, pg_temp</c> at sign-in (<see cref="PostgresSearchPathOption"/>).</item>
     /// <item>Npgsql's type loading is off (<c>Server Compatibility Mode=NoTypeLoading</c>), so its pg_type read does not run on the first open
-    /// and the first statement on the connection is the caller's own. The caller then reads the search_path (<see cref="PostgresSearchPathSql"/>)
-    /// and refuses to go on unless <see cref="IsPinnedSearchPath"/>. Npgsql then knows only built-in types, so every statement on this
+    /// and the first statement on the connection is the caller's own. The caller then reads the search_path (<see cref="PerformanceMonitor.Common.PostgresSearchPathPin.ReadSql"/>)
+    /// and refuses to go on unless it is the pinned one (<see cref="PerformanceMonitor.Common.PostgresSearchPathPin"/>). Npgsql then knows only built-in types, so every statement on this
     /// connection reads built-in types only (or casts to text).</item>
     /// <item>It accepts SCRAM-SHA-256 sign-in only: a server that asks for a password in clear text or MD5, or asks for none, is refused
     /// before the password is sent.</item>
