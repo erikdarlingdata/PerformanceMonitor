@@ -89,6 +89,20 @@ public sealed class PgCollectorSearchPathLiveTests
         SELECT pg_catalog.count(*) FROM public.pm6143_rows;
         """";
 
+    /// <summary>
+    /// The text the same-named operators raise in the type-loading test. Npgsql's type-loading joins cannot hash or
+    /// merge on these operators, so they run as nested loops and call the operator very many times. Raising on the
+    /// first call ends that query at once on any machine, where a counting copy ran for as long as the machine took.
+    /// </summary>
+    private const string OperatorRanMarker = "pm6143 same-named operator ran";
+
+    private const string RaisingOperatorsSql = $$"""
+        CREATE OR REPLACE FUNCTION lookalike.int4_eq(integer, integer) RETURNS boolean LANGUAGE plpgsql AS $$
+        BEGIN RAISE EXCEPTION '{{OperatorRanMarker}}'; END $$;
+        CREATE OR REPLACE FUNCTION lookalike.oid_eq(oid, oid) RETURNS boolean LANGUAGE plpgsql AS $$
+        BEGIN RAISE EXCEPTION '{{OperatorRanMarker}}'; END $$;
+        """;
+
     [Theory]
     [InlineData("database")]
     [InlineData("role")]
@@ -728,6 +742,7 @@ public sealed class PgCollectorSearchPathLiveTests
             await ExecAsync(admin.ConnectionString, $"CREATE ROLE {Monitor} LOGIN SUPERUSER", ct);
             await ExecAsync(admin.ConnectionString, $"CREATE DATABASE {Database} OWNER {Owner}", ct);
             await ExecAsync(ownedAdmin.ConnectionString, SetupSql, ct);
+            await ExecAsync(ownedAdmin.ConnectionString, RaisingOperatorsSql, ct);
             await ExecAsync(
                 new NpgsqlConnectionStringBuilder(ownedAdmin.ConnectionString) { Username = Owner }.ConnectionString,
                 $"ALTER DATABASE {Database} SET search_path = lookalike, pg_catalog, public", ct);
@@ -739,17 +754,15 @@ public sealed class PgCollectorSearchPathLiveTests
             var runId = Guid.NewGuid().ToString("N");
 
             /* Control: a plain, unpinned connection with Npgsql's type loading on. Its pg_type read runs under the
-               database's search_path and fires the same-named operator, which proves this setup catches type loading. */
+               database's search_path and reaches the same-named operator, which raises at once. The open failing with
+               that text proves this setup catches type loading. */
             var controlString = new NpgsqlConnectionStringBuilder(runtime.ConnectionString) { Options = null, ApplicationName = $"pm6143-control-{runId}" }.ConnectionString;
-            await using (var control = new NpgsqlConnection(controlString))
+            var control = await Assert.ThrowsAnyAsync<NpgsqlException>(async () =>
             {
-                await control.OpenAsync(ct);
-            }
-
-            Assert.True(
-                await ScalarLongAsync(ownedAdmin.ConnectionString, "SELECT pg_catalog.count(*) FROM lookalike.calls", ct) > 0,
-                "the control connection did not run the same-named operator, so this test would not notice type loading");
-            await ExecAsync(ownedAdmin.ConnectionString, "DELETE FROM lookalike.calls", ct);
+                await using var plain = new NpgsqlConnection(controlString);
+                await plain.OpenAsync(ct);
+            });
+            Assert.Contains(OperatorRanMarker, control.Message, StringComparison.Ordinal);
 
             var withoutPin = new NpgsqlConnectionStringBuilder(runtime.ConnectionString) { Options = null, ApplicationName = $"pm6143-first-statement-{runId}" }.ConnectionString;
 
@@ -760,7 +773,6 @@ public sealed class PgCollectorSearchPathLiveTests
                 Assert.Contains("lookalike", (string?)await command.ExecuteScalarAsync(ct), StringComparison.Ordinal);
             }
 
-            Assert.Equal(0L, await ScalarLongAsync(ownedAdmin.ConnectionString, "SELECT pg_catalog.count(*) FROM lookalike.calls", ct));
 
             var pinnedString = new NpgsqlConnectionStringBuilder(runtime.ConnectionString) { ApplicationName = $"pm6143-first-statement-pinned-{runId}" }.ConnectionString;
             await using (var pinned = PostgresTargetProvider.CreatePinnedConnection(pinnedString))
@@ -770,7 +782,6 @@ public sealed class PgCollectorSearchPathLiveTests
                 Assert.Equal("pg_catalog,pg_temp", (string?)await command.ExecuteScalarAsync(ct));
             }
 
-            Assert.Equal(0L, await ScalarLongAsync(ownedAdmin.ConnectionString, "SELECT pg_catalog.count(*) FROM lookalike.calls", ct));
             bodySucceeded = true;
         }
         finally
