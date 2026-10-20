@@ -131,10 +131,6 @@ ON CONFLICT (server_id) DO NOTHING";
     public const string MonitoredServerSetEnabledSql =
         "UPDATE config_monitored_servers SET is_enabled = $2, modified_at = (now() AT TIME ZONE 'UTC') WHERE server_id = $1";
 
-    /// <summary>Rewrites just <c>excluded_databases</c> (the Excluded Databases editor). $1 server_id, $2 text[].</summary>
-    public const string MonitoredServerSetExcludedDatabasesSql =
-        "UPDATE config_monitored_servers SET excluded_databases = $2, modified_at = (now() AT TIME ZONE 'UTC') WHERE server_id = $1";
-
     /// <summary>All configured servers, for the Manage Servers list. Ordered by display name. Deliberately
     /// OMITS <c>encrypted_password</c>: the list is a display / sidebar-reconcile read that never needs the
     /// secret, and #1416 revoked the read-only <c>viewer</c> role's SELECT on that column — selecting it here
@@ -824,13 +820,17 @@ WHERE server_id = $1";
         await ExecuteWriteAsync(command, cancellationToken);
     }
 
-    /// <summary>Rewrites a server's excluded-databases list (the Excluded Databases editor).</summary>
+    /// <summary>Rewrites a server's excluded-databases list (the Excluded Databases editor). The statement and the bounds are
+    /// <see cref="MonitoredServerExclusions"/>, shared with the set_server_excluded_databases MCP tool (#6230).</summary>
     public async Task SetMonitoredServerExcludedDatabasesAsync(int serverId, IEnumerable<string> excludedDatabases, CancellationToken cancellationToken = default)
     {
-        await using var command = _dataSource.CreateCommand(MonitoredServerSetExcludedDatabasesSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        AddTextArray(command, excludedDatabases);
+        var names = MonitoredServerExclusions.Prepare(excludedDatabases);
+        if (MonitoredServerExclusions.Refusal(names) is string refusal)
+        {
+            throw new InvalidOperationException(refusal);
+        }
+
+        await using var command = MonitoredServerExclusions.CreateSetCommand(_dataSource, serverId, names, ViewerCommandDeadlines.CurrentInteractiveReadSeconds);
         await ExecuteWriteAsync(command, cancellationToken);
     }
 

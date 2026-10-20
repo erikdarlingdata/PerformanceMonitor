@@ -200,6 +200,16 @@ public static class DarlingWebEndpoints
         "list_query_tag_rules",
         "test_query_tag_rule",
         "run_collectors_now",
+        /* #6230: the collection-state writes (pause, resume, disable and enable a server, a server's excluded databases, reload) are MCP-only:
+           the Viewer and the command plane already carry them, and the web host's viewer role holds no write on config_service or
+           config_monitored_servers. Their read, get_collection_state, is MCP-only too: the Viewer's Manage Servers and Settings windows show the same state. */
+        "get_collection_state",
+        "pause_collection",
+        "resume_collection",
+        "disable_server",
+        "enable_server",
+        "set_server_excluded_databases",
+        "reload_config",
         "get_tool_guide",
         "wait_for_investigation_requests",
         /* #6033: an agent's read of one claimed request's frozen evidence, served by claim; no page read mirrors it. */
