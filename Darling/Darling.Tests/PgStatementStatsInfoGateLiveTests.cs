@@ -104,6 +104,7 @@ public sealed class PgStatementStatsInfoGateLiveTests
             ServerName = "live-target",
             CollectionTime = DateTime.UtcNow,
             Deltas = new NoOpDeltaCalculator(),
+            PgExtensionSchemas = new System.Collections.Generic.Dictionary<string, string> { ["pg_stat_statements"] = "public" },   /* the schema the extension is created in below; the default is pg_catalog */
             Target = new CollectorTargetInfo
             {
                 Engine = CollectorTargetEngine.PostgreSql,

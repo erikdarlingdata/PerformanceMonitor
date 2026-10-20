@@ -704,6 +704,66 @@ public sealed class PgCollectorSearchPathLiveTests
     }
 
     /// <summary>
+    /// The first statement on a target connection is the caller's own. The database's search_path puts a schema first
+    /// that holds a same-named <c>=</c> for oid and integer, which is what Npgsql's type-loading query would run on the
+    /// first connection of a data source. A string without the pin (so the server's own setting applies) and the
+    /// service's pinned string both open and answer, and none of that schema runs.
+    /// </summary>
+    [Fact]
+    public async Task TargetConnection_FirstStatementIsTheCallers_AndNoSameNamedOperatorRuns()
+    {
+        var adminConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(adminConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the search_path live test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var admin = new NpgsqlConnectionStringBuilder(adminConnectionString) { Pooling = false };
+        var ownedAdmin = new NpgsqlConnectionStringBuilder(admin.ConnectionString) { Database = Database };
+
+        var bodySucceeded = false;
+        try
+        {
+            await ResetAsync(admin.ConnectionString, ct);
+            await ExecAsync(admin.ConnectionString, $"CREATE ROLE {Owner} LOGIN NOSUPERUSER", ct);
+            await ExecAsync(admin.ConnectionString, $"CREATE ROLE {Monitor} LOGIN SUPERUSER", ct);
+            await ExecAsync(admin.ConnectionString, $"CREATE DATABASE {Database} OWNER {Owner}", ct);
+            await ExecAsync(ownedAdmin.ConnectionString, SetupSql, ct);
+            await ExecAsync(
+                new NpgsqlConnectionStringBuilder(ownedAdmin.ConnectionString) { Username = Owner }.ConnectionString,
+                $"ALTER DATABASE {Database} SET search_path = lookalike, pg_catalog, public", ct);
+
+            var runtime = await RuntimeAsync(admin, Database, Monitor, ct);
+            /* A string no other test opens through the provider, so its data source is new and this is its first connection. */
+            var withoutPin = new NpgsqlConnectionStringBuilder(runtime.ConnectionString) { Options = null, ApplicationName = "pm6143-first-statement" }.ConnectionString;
+
+            await using (var unpinned = PostgresTargetProvider.CreatePinnedConnection(withoutPin))
+            {
+                await unpinned.OpenAsync(ct);
+                await using var command = new NpgsqlCommand("SHOW search_path", unpinned);
+                Assert.Contains("lookalike", (string?)await command.ExecuteScalarAsync(ct), StringComparison.Ordinal);
+            }
+
+            Assert.Equal(0L, await ScalarLongAsync(ownedAdmin.ConnectionString, "SELECT pg_catalog.count(*) FROM lookalike.calls", ct));
+
+            var pinnedString = new NpgsqlConnectionStringBuilder(runtime.ConnectionString) { ApplicationName = "pm6143-first-statement-pinned" }.ConnectionString;
+            await using (var pinned = PostgresTargetProvider.CreatePinnedConnection(pinnedString))
+            {
+                await pinned.OpenAsync(ct);
+                await using var command = new NpgsqlCommand("SHOW search_path", pinned);
+                Assert.Equal("pg_catalog,pg_temp", (string?)await command.ExecuteScalarAsync(ct));
+            }
+
+            Assert.Equal(0L, await ScalarLongAsync(ownedAdmin.ConnectionString, "SELECT pg_catalog.count(*) FROM lookalike.calls", ct));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(admin.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DropAsync(admin.ConnectionString, cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
     /// The search_path check ignores only the whitespace PostgreSQL skips between schema names. A no-break space or
     /// another Unicode space is part of a schema name to PostgreSQL, so a search_path holding one is refused. What the
     /// server reported reaches the message without control characters and capped in length.
