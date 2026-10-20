@@ -1525,7 +1525,7 @@
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
-            <TextBlock Grid.Column="0" x:Name="StatusText" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center"/>
+            <TextBlock Grid.Column="0" x:Name="StatusText" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextWrapping="Wrap"/>
             <TextBlock Grid.Column="1" x:Name="SeatText" Text="Seat: --" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="16,0" VerticalAlignment="Center"/>
             <TextBlock Grid.Column="2" x:Name="CollectorHealthText" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="16,0" VerticalAlignment="Center"/>
             <TextBlock Grid.Column="3" x:Name="DatabaseSizeText" Text="Database: --" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="16,0" VerticalAlignment="Center"/>
