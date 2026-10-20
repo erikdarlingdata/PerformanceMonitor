@@ -283,9 +283,35 @@ public static class DarlingManagedRoles
     /// safe — the same reasoning the password-injection guard relies on.
     /// </summary>
     public static string BuildViewerColumnAclSql(string configSchema, string viewerRole) =>
+        BuildColumnAclSql(configSchema, viewerRole, withheld: null);
+
+    /// <summary>
+    /// Columns the <c>mcp</c> role is denied although <c>viewer</c> reads them (#6230): <c>config_command.result_json</c> holds
+    /// what the service wrote back for every command type, including the Viewer-only ones (an actual plan, the live active
+    /// queries), so the <c>mcp</c> login reads a command's result only through
+    /// <c>read_mcp_command_result</c> (<see cref="BuildReadMcpCommandResultFunctionSql"/>), which answers only for the types
+    /// the MCP tools queue. <c>args_json</c> is already a secret column for every read role.
+    /// </summary>
+    public static readonly IReadOnlyDictionary<string, string[]> McpWithheldColumns =
+        new Dictionary<string, string[]>(StringComparer.Ordinal) { ["config_command"] = ["result_json"] };
+
+    /// <summary>
+    /// The same fail-closed column-ACL block as <see cref="BuildViewerColumnAclSql"/> for the <c>mcp</c> role, minus the
+    /// <see cref="McpWithheldColumns"/>. REVOKE comes first, so a store that granted <c>mcp</c> the withheld column before
+    /// loses it on the next run.
+    /// </summary>
+    public static string BuildMcpColumnAclSql(string configSchema, string mcpRole) =>
+        BuildColumnAclSql(configSchema, mcpRole, McpWithheldColumns);
+
+    private static string BuildColumnAclSql(string configSchema, string role, IReadOnlyDictionary<string, string[]>? withheld) =>
         string.Join("\n", ViewerRestrictedConfigTables.Select(acl =>
-            $"REVOKE SELECT ON {configSchema}.{acl.Table} FROM {viewerRole};\n" +
-            $"GRANT SELECT ({string.Join(", ", acl.NonSecretColumns)}) ON {configSchema}.{acl.Table} TO {viewerRole};"));
+        {
+            var columns = withheld is not null && withheld.TryGetValue(acl.Table, out var drop)
+                ? acl.NonSecretColumns.Where(c => !drop.Contains(c, StringComparer.Ordinal)).ToList()
+                : acl.NonSecretColumns.ToList();
+            return $"REVOKE SELECT ON {configSchema}.{acl.Table} FROM {role};\n" +
+                   $"GRANT SELECT ({string.Join(", ", columns)}) ON {configSchema}.{acl.Table} TO {role};";
+        }));
 
     /// <summary>
     /// Ensures the <c>admin</c>/<c>viewer</c>/<c>mcp</c> roles, their DPAPI credentials, and the
@@ -1309,7 +1335,7 @@ ALTER ROLE {mcp}    SET log_parameter_max_length = 0;";
         /* The SAME fail-closed carve for the mcp role — it gets viewer's read surface, so it must be
            denied the identical secret columns. Reusing BuildViewerColumnAclSql(config, mcp) means the
            mcp carve can never drift from viewer's (Round 4 #5 guards this with a live denial test). */
-        var mcpColumnAcl = BuildViewerColumnAclSql(config, mcp);
+        var mcpColumnAcl = BuildMcpColumnAclSql(config, mcp);
 
         return $@"
 /* Least-privilege roles for the Darling security split (#1262). Idempotent + self-healing:
@@ -1705,6 +1731,12 @@ GRANT EXECUTE ON FUNCTION {config}.request_snapshot_now(integer, text, text) TO 
 {BuildRequestMcpCommandFunctionSql(config)}
 REVOKE ALL ON FUNCTION {config}.request_mcp_command(text, integer, integer, text) FROM {mcp};
 GRANT EXECUTE ON FUNCTION {config}.request_mcp_command(text, integer, integer, text) TO {mcp};
+-- #6230: mcp holds no SELECT on config_command.result_json; it reads a command's status and result through
+--     {config}.read_mcp_command_result, which answers only for the command types the MCP tools queue. Owned by the store
+--     owner, pinned search_path, no dynamic SQL, granted to mcp only. NOT a versioned migration.
+{BuildReadMcpCommandResultFunctionSql(config)}
+REVOKE ALL ON FUNCTION {config}.read_mcp_command_result(bigint) FROM {mcp};
+GRANT EXECUTE ON FUNCTION {config}.read_mcp_command_result(bigint) TO {mcp};
 -- The store's own password rules for every role but the owner (see BuildServerPasswordRulesSql): a trigger on
 --     config_monitored_servers that refuses a password reference (env: or file:) and a move that keeps the stored
 --     password. Created here, not in a migration: CREATE OR REPLACE is idempotent and owner-run every start. A
@@ -2417,6 +2449,38 @@ BEGIN
 END
 $fn$;
 REVOKE ALL ON FUNCTION {config}.request_snapshot_now(integer, text, text) FROM PUBLIC;";
+
+    /// <summary>
+    /// The SECURITY DEFINER read function (#6230) behind <c>get_command_result</c> and the collector-run state read: one command's
+    /// status and result, for the command types the MCP tools queue only (<c>analyze_now</c>, <c>purge_now</c>, <c>test_connect</c>,
+    /// <c>pause</c>, <c>resume</c> and <c>snapshot_now</c>). Any other type answers no row. The <c>mcp</c> role holds no column
+    /// SELECT on <c>result_json</c> (<see cref="McpWithheldColumns"/>), so this is its only way to that column. Granted to
+    /// <c>mcp</c> only.
+    /// </summary>
+    internal static string BuildReadMcpCommandResultFunctionSql(string config) => $@"
+CREATE OR REPLACE FUNCTION {config}.read_mcp_command_result(p_command_id bigint)
+RETURNS TABLE (
+   command_type text,
+   target_server_id integer,
+   status text,
+   requested_by text,
+   created_at timestamp,
+   claimed_at timestamp,
+   completed_at timestamp,
+   result_status text,
+   result_json jsonb)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+   SELECT c.command_type, c.target_server_id, c.status, c.requested_by, c.created_at, c.claimed_at, c.completed_at,
+          c.result_status, c.result_json
+   FROM {config}.config_command AS c
+   WHERE c.command_id = p_command_id
+     AND c.command_type IN ('analyze_now', 'purge_now', 'test_connect', 'pause', 'resume', 'snapshot_now');
+$fn$;
+REVOKE ALL ON FUNCTION {config}.read_mcp_command_result(bigint) FROM PUBLIC;";
 
     /// <summary>
     /// The SECURITY DEFINER function (#6230) the MCP incident tools queue a command through: <c>analyze_now</c>, <c>purge_now</c>

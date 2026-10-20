@@ -713,7 +713,10 @@ ORDER BY d.host, d.database";
     /// deliberately narrow, because this rule also chooses what a delete removes: the match is case-SENSITIVE, so the
     /// same name in another case, a display-name match and a partial all keep the old behavior and still answer
     /// ambiguous when they name several registrations. And a tier that finds anything other than exactly one
-    /// registration falls through to the matching above unchanged.</para>
+    /// registration falls through to the matching above unchanged. The one addition: when that single storage-name
+    /// match is also the display name of a different registration that is not of the same host (a colon-suffixed
+    /// sibling, or the same name in another case), the name answers ambiguous with both listed (#6230), so a name never silently picks one of two
+    /// servers it names.</para>
     /// </summary>
     internal static RemovalTarget ResolveForRemoval(
         IReadOnlyList<DarlingServerResolver.RegisteredServer> servers, string serverName, bool storageNameIgnoresCase = false)
@@ -738,6 +741,25 @@ ORDER BY d.host, d.database";
                 .ToList();
             if (byStorageName.Count == 1)
             {
+                /* A name that is this registration's storage name AND a different, unrelated registration's display
+                   name names two servers, so it answers with both and the caller picks one by storage name. A registration
+                   of the same host does not count: its storage name continues with a colon (the read-only and per-database
+                   registrations that share the machine name as their display name, #4734) or differs only in case (its
+                   display name is its own storage name). */
+                var only = byStorageName[0];
+                var sharedDisplayName = servers
+                    .Where(s => !ReferenceEquals(s, only)
+                             && s.ServerId != only.ServerId
+                             && string.Equals(s.DisplayName, name, StringComparison.OrdinalIgnoreCase)
+                             && !string.Equals(s.ServerName, only.ServerName, StringComparison.OrdinalIgnoreCase)
+                             && !s.ServerName.StartsWith(only.ServerName + ":", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                if (sharedDisplayName.Count > 0)
+                {
+                    sharedDisplayName.Insert(0, only);
+                    return new RemovalTarget(sharedDisplayName, "exact");
+                }
+
                 return new RemovalTarget(byStorageName, "exact");
             }
         }

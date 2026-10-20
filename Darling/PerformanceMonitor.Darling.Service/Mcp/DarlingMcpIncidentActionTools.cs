@@ -42,11 +42,9 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpIncidentActionTools
 {
-    /// <summary>
-    /// The command types the MCP tools queue (the types <c>config.request_mcp_command</c> accepts). <c>get_command_result</c> reads
-    /// only these: a command another client queued (the Viewer's plan fetch and live reads, for one) answers as not found.
-    /// </summary>
-    internal static readonly string[] QueuedCommandTypes = { "analyze_now", "purge_now", "test_connect", "pause", "resume" };
+    /* get_command_result reads through config.read_mcp_command_result (#6230): the mcp role holds no SELECT on result_json, and the
+       function answers only for the command types the MCP tools queue, so a command another client queued (the Viewer's plan
+       fetch and live reads, for one) answers as not found. */
 
     /// <summary>The longest retention a purge may be given, in days (the same bound the store function holds).</summary>
     internal const int MaxPurgeRetentionDays = 3650;
@@ -222,10 +220,9 @@ public sealed class DarlingMcpIncidentActionTools
 
             await using var command = postgres.CreateCommand(
                 "SELECT command_type, target_server_id, status, requested_by, created_at, claimed_at, completed_at, result_status, result_json " +
-                "FROM config.config_command WHERE command_id = $1 AND command_type = ANY($2)");
+                "FROM config.read_mcp_command_result($1)");
             command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = command_id });
-            command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = QueuedCommandTypes });
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (!await reader.ReadAsync(cancellationToken))
             {

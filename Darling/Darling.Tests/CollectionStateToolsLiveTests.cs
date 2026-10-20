@@ -327,11 +327,20 @@ public sealed class CollectionStateToolsLiveTests
             var hint = byStorage["undo"]!["arguments"]!["server_name"]!.GetValue<string>();
             Assert.Equal("changed", Status(Parse(await Tools.EnableServer(rig.Mcp, hint, cancellationToken: ct))));
 
-            /* A name that is one server's host and another's name is not guessed: the storage name wins, as it does for remove_server. */
+            /* A name that is one server's storage name and another server's display name picks neither: both are listed,
+               nothing changes, and the exact single match (the other display name) still resolves. */
             var typed = Parse(await Tools.DisableServer(rig.Mcp, "web01", cancellationToken: ct));
-            Assert.Equal("web02", typed["server"]!.GetValue<string>());
-            Assert.Equal("web01", typed["storage_name"]!.GetValue<string>());
-            Assert.Equal("changed", Status(Parse(await Tools.EnableServer(rig.Mcp, typed["undo"]!["arguments"]!["server_name"]!.GetValue<string>(), cancellationToken: ct))));
+            Assert.Equal("refused", Status(typed));
+            Assert.Equal("ambiguous", typed["reason"]!.GetValue<string>());
+            var typedMessage = typed["message"]!.GetValue<string>();
+            Assert.Contains("web01", typedMessage, StringComparison.Ordinal);
+            Assert.Contains("edge-a.example.test", typedMessage, StringComparison.Ordinal);
+            Assert.Equal(4L, await ScalarAsync<long>(rig.Owner, "SELECT count(*) FROM config_monitored_servers WHERE is_enabled", ct));
+            var byDisplay = Parse(await Tools.DisableServer(rig.Mcp, "web02", cancellationToken: ct));
+            Assert.Equal("changed", Status(byDisplay));
+            Assert.Equal("web01", byDisplay["storage_name"]!.GetValue<string>());
+            Assert.Equal("ambiguous", Parse(await Tools.EnableServer(rig.Mcp, byDisplay["undo"]!["arguments"]!["server_name"]!.GetValue<string>(), cancellationToken: ct))["reason"]!.GetValue<string>());
+            Assert.Equal("changed", Status(Parse(await Tools.EnableServer(rig.Mcp, "web02", cancellationToken: ct))));
 
             /* Two servers with one name: nothing is picked, both are listed by storage name, and each storage name resolves alone. */
             var ambiguous = Parse(await Tools.DisableServer(rig.Mcp, "twin", cancellationToken: ct));

@@ -329,8 +329,11 @@ public sealed class DarlingSecuritySplitLiveTests
                silently exposing the credential columns over the network MCP surface (Round 4 #5). */
             foreach (var acl in DarlingManagedRoles.ViewerRestrictedConfigTables)
             {
-                await ExecAsync(mcp, $"SELECT {string.Join(", ", acl.NonSecretColumns)} FROM config.{acl.Table} LIMIT 1", ct);
-                foreach (var secret in acl.SecretColumns)
+                var readable = DarlingManagedRoles.McpWithheldColumns.TryGetValue(acl.Table, out var withheld)
+                    ? acl.NonSecretColumns.Where(c => !withheld.Contains(c, StringComparer.Ordinal))
+                    : acl.NonSecretColumns;
+                await ExecAsync(mcp, $"SELECT {string.Join(", ", readable)} FROM config.{acl.Table} LIMIT 1", ct);
+                foreach (var secret in acl.SecretColumns.Concat(withheld ?? []))
                 {
                     var denied = await Assert.ThrowsAsync<PostgresException>(async () =>
                         await ExecAsync(mcp, $"SELECT {secret} FROM config.{acl.Table} LIMIT 1", ct));
@@ -694,7 +697,7 @@ ALTER DEFAULT PRIVILEGES FOR ROLE {OwnerRoleOf(owner)} IN SCHEMA collect GRANT S
 GRANT USAGE ON SCHEMA collect, config TO {McpRole};
 GRANT SELECT ON ALL TABLES IN SCHEMA collect TO {McpRole};
 GRANT SELECT ON ALL TABLES IN SCHEMA config  TO {McpRole};
-{DarlingManagedRoles.BuildViewerColumnAclSql("config", McpRole)}
+{DarlingManagedRoles.BuildMcpColumnAclSql("config", McpRole)}
 GRANT INSERT ON collect.analysis_findings TO {McpRole};
 GRANT INSERT ON config.analysis_muted TO {McpRole};
 -- The mcp custom_views write (#1599): the MCP custom-view tools CRUD config.custom_views, so mcp gets the SAME

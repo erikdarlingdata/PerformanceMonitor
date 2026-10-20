@@ -248,6 +248,75 @@ public sealed class McpIncidentActionsLiveTests
         });
     }
 
+    /// <summary>#6230: the mcp login holds no SELECT on a command's result (a raw read is refused with the permission error), keeps the
+    /// plain status columns, and reads a result only through the read function, which answers the types the MCP tools queue and nothing else.</summary>
+    [Fact]
+    public async Task TheMcpLogin_CannotReadResultJsonDirectly_AndTheReadFunctionAnswersOnlyTheTypesMcpQueues()
+    {
+        await WithRoleAsync("mcp", grantFunction: true, async (owner, asRole, ct) =>
+        {
+            await ExecAsync(owner,
+                "INSERT INTO config.config_command (command_id, command_type, target_server_id, status, requested_by, result_status, result_json) OVERRIDING SYSTEM VALUE VALUES " +
+                "(9101, 'fetch_active_queries', 41, 'succeeded', 'viewer', 'ok', '{\"rows\":[\"viewer-only\"]}'), " +
+                "(9102, 'analyze_now', 41, 'succeeded', 'mcp', 'ok', '{\"queued\":true}'), " +
+                "(9103, 'snapshot_now', 41, 'succeeded', 'mcp', 'ok', '{\"collectors\":1}')", ct);
+
+            foreach (var column in new[] { "result_json", "args_json" })
+            {
+                var refused = await Assert.ThrowsAsync<PostgresException>(async () =>
+                    await ExecAsync(asRole, $"SELECT {column} FROM config.config_command", ct));
+                Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, refused.SqlState);
+            }
+
+            /* The plain status columns stay readable. */
+            await using (var status = asRole.CreateCommand("SELECT count(*) FROM config.config_command WHERE status = 'succeeded'"))
+            {
+                Assert.Equal(3L, Convert.ToInt64(await status.ExecuteScalarAsync(ct)));
+            }
+
+            /* The function returns a command the MCP tools queue, with its result. */
+            await using (var queued = asRole.CreateCommand("SELECT command_type, result_json::text FROM config.read_mcp_command_result(9102)"))
+            await using (var reader = await queued.ExecuteReaderAsync(ct))
+            {
+                Assert.True(await reader.ReadAsync(ct));
+                Assert.Equal("analyze_now", reader.GetString(0));
+                Assert.Contains("queued", reader.GetString(1), StringComparison.Ordinal);
+            }
+
+            await using (var snapshot = asRole.CreateCommand("SELECT count(*) FROM config.read_mcp_command_result(9103)"))
+            {
+                Assert.Equal(1L, Convert.ToInt64(await snapshot.ExecuteScalarAsync(ct)));
+            }
+
+            /* A command only the Viewer queues answers no row, whatever its result holds. */
+            await using (var viewerOnly = asRole.CreateCommand("SELECT count(*) FROM config.read_mcp_command_result(9101)"))
+            {
+                Assert.Equal(0L, Convert.ToInt64(await viewerOnly.ExecuteScalarAsync(ct)));
+            }
+
+            /* The collector-run state read goes through the same function: the MCP type answers, the Viewer-only one is not found. */
+            var store = new PostgresSnapshotNowStore(asRole, resultThroughMcpFunction: true);
+            var state = await store.ReadStateAsync(9103, ct);
+            Assert.NotNull(state);
+            Assert.Equal("succeeded", state!.Status);
+            Assert.Contains("collectors", state.ResultJson, StringComparison.Ordinal);
+            Assert.Null(await store.ReadStateAsync(9101, ct));
+        });
+    }
+
+    /// <summary>#6230: a login the function was not granted to is refused when it calls it.</summary>
+    [Fact]
+    public async Task TheReadFunction_IsRefusedToALoginThatWasNotGrantedIt()
+    {
+        await WithRoleAsync("mcp", grantFunction: false, async (owner, asRole, ct) =>
+        {
+            var refused = await Assert.ThrowsAsync<PostgresException>(async () =>
+                await ExecAsync(asRole, "SELECT * FROM config.read_mcp_command_result(1)", ct));
+            Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, refused.SqlState);
+            await Task.CompletedTask;
+        });
+    }
+
     [Fact]
     public async Task ASecondRequest_IsRefusedInPlainWords_WhileOneIsPending_AndAnUnknownServerIsRefused()
     {
@@ -545,6 +614,7 @@ public sealed class McpIncidentActionsLiveTests
                 $"INSERT INTO collect.servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date) VALUES ({ServerId}, 'snap-target', 'snap-target', TRUE, 15, now(), now())", ct);
 
             await ExecAsync(owner, DarlingManagedRoles.BuildRequestMcpCommandFunctionSql("config"), ct);
+            await ExecAsync(owner, DarlingManagedRoles.BuildReadMcpCommandResultFunctionSql("config"), ct);
             await ExecAsync(owner, $"CREATE ROLE {roleName} LOGIN NOSUPERUSER PASSWORD '{RolePassword}'", ct);
             foreach (var statement in ViewerGrantReplay.StatementsFor(roleName, scratch.DatabaseName, managedRole))
             {
@@ -559,6 +629,11 @@ public sealed class McpIncidentActionsLiveTests
             if (grantFunction)
             {
                 await ExecAsync(owner, execute[..at] + " TO " + roleName, ct);
+                var read = ViewerGrantReplay.BatchStatements().Single(s =>
+                    s.StartsWith("GRANT EXECUTE ON FUNCTION config.read_mcp_command_result", StringComparison.Ordinal));
+                var readAt = read.LastIndexOf(" TO ", StringComparison.Ordinal);
+                Assert.Equal("mcp", read[(readAt + 4)..].Trim());
+                await ExecAsync(owner, read[..readAt] + " TO " + roleName, ct);
             }
 
             await using var asRole = NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(scratch.ConnectionString)

@@ -661,8 +661,11 @@ GRANT SELECT (server_id, name, host, database, auth, username, encrypt_mode, tru
               aws_role_arn, aws_external_id_set)
     ON config.config_monitored_servers TO mcp;
 REVOKE SELECT ON config.config_command FROM mcp;
+-- (#6230) result_json is withheld from mcp: it holds the result of every command type, including the Viewer-only ones.
+--     mcp reads a command's result through config.read_mcp_command_result (created below), which answers only for the
+--     command types the MCP tools queue. The REVOKE above removes a result_json grant an earlier run made.
 GRANT SELECT (command_id, created_at, requested_by, command_type, target_server_id, status, claimed_at,
-              completed_at, result_status, result_json, service_instance)
+              completed_at, result_status, service_instance)
     ON config.config_command TO mcp;
 REVOKE SELECT ON config.config_notification FROM mcp;
 GRANT SELECT (id, smtp_host, smtp_port, smtp_use_ssl, smtp_from_address, smtp_recipients,
@@ -1247,6 +1250,35 @@ $fn$;
 REVOKE ALL ON FUNCTION config.request_mcp_command(text, integer, integer, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION config.request_mcp_command(text, integer, integer, text) FROM mcp;
 GRANT EXECUTE ON FUNCTION config.request_mcp_command(text, integer, integer, text) TO mcp;
+
+-- #6230: mcp holds no SELECT on config_command.result_json; it reads a command's status and result through
+--     config.read_mcp_command_result, which answers only for the command types the MCP tools queue. Owned by the store
+--     owner, pinned search_path, no dynamic SQL, granted to mcp only. NOT a versioned migration.
+CREATE OR REPLACE FUNCTION config.read_mcp_command_result(p_command_id bigint)
+RETURNS TABLE (
+   command_type text,
+   target_server_id integer,
+   status text,
+   requested_by text,
+   created_at timestamp,
+   claimed_at timestamp,
+   completed_at timestamp,
+   result_status text,
+   result_json jsonb)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+   SELECT c.command_type, c.target_server_id, c.status, c.requested_by, c.created_at, c.claimed_at, c.completed_at,
+          c.result_status, c.result_json
+   FROM config.config_command AS c
+   WHERE c.command_id = p_command_id
+     AND c.command_type IN ('analyze_now', 'purge_now', 'test_connect', 'pause', 'resume', 'snapshot_now');
+$fn$;
+REVOKE ALL ON FUNCTION config.read_mcp_command_result(bigint) FROM PUBLIC;
+REVOKE ALL ON FUNCTION config.read_mcp_command_result(bigint) FROM mcp;
+GRANT EXECUTE ON FUNCTION config.read_mcp_command_result(bigint) TO mcp;
 
 -- The store's own password rules for every role but the owner: a BEFORE INSERT OR UPDATE trigger on
 --     config_monitored_servers. A new or changed password that starts with env: or file: (a reference) is refused:

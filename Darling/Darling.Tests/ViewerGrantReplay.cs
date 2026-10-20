@@ -85,6 +85,7 @@ internal static class ViewerGrantReplay
     internal static bool CannotReplayOnScratchStore(string statement) =>
         statement.Contains("EXECUTE ON FUNCTION", StringComparison.Ordinal)
         || statement.StartsWith($"REVOKE ALL ON FUNCTION {PgSchemaGenerator.ConfigSchema}.request_mcp_command(", StringComparison.Ordinal)
+        || statement.StartsWith($"REVOKE ALL ON FUNCTION {PgSchemaGenerator.ConfigSchema}.read_mcp_command_result(", StringComparison.Ordinal)
         || string.Equals(statement, SubmitFunctionRevoke, StringComparison.Ordinal);
 
     /// <summary>The batch's REVOKE of the submission function from admin, viewer and mcp, as the batch writes it.</summary>

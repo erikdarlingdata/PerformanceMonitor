@@ -653,9 +653,21 @@ public sealed class DarlingManagedRolesTests
         foreach (var acl in DarlingManagedRoles.ViewerRestrictedConfigTables)
         {
             Assert.Contains($"REVOKE SELECT ON config.{acl.Table} FROM mcp;", sql, StringComparison.Ordinal);
-            Assert.Contains($"GRANT SELECT ({string.Join(", ", acl.NonSecretColumns)}) ON config.{acl.Table} TO mcp;",
+            var columns = DarlingManagedRoles.McpWithheldColumns.TryGetValue(acl.Table, out var withheld)
+                ? acl.NonSecretColumns.Where(c => !withheld.Contains(c, StringComparer.Ordinal))
+                : acl.NonSecretColumns;
+            Assert.Contains($"GRANT SELECT ({string.Join(", ", columns)}) ON config.{acl.Table} TO mcp;",
                 sql, StringComparison.Ordinal);
         }
+
+        /* #6230: no mcp column grant names result_json, the table is revoked from mcp before the re-grant, and the read function is
+           granted to mcp alone. */
+        Assert.DoesNotContain(sql.Split('\n').Where(l => l.Contains("TO mcp", StringComparison.Ordinal) && l.Contains("GRANT SELECT (", StringComparison.Ordinal)),
+            l => l.Contains("result_json", StringComparison.Ordinal));
+        Assert.Contains("GRANT EXECUTE ON FUNCTION config.read_mcp_command_result(bigint) TO mcp;", sql, StringComparison.Ordinal);
+        Assert.Contains("REVOKE ALL ON FUNCTION config.read_mcp_command_result(bigint) FROM PUBLIC;", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("read_mcp_command_result(bigint) TO viewer", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("read_mcp_command_result(bigint) TO admin", sql, StringComparison.Ordinal);
 
         /* No secret column name appears in any GRANT SELECT (...) TO mcp line (belt over the per-table check). */
         var mcpGrantLines = sql.Split('\n')

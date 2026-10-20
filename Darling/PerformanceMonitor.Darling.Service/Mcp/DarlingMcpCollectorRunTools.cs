@@ -54,7 +54,7 @@ public sealed class DarlingMcpCollectorRunTools
             }
 
             return await RunCollectorsNowCore(
-                new SnapshotNowRequests(new PostgresSnapshotNowStore(postgres)),
+                new SnapshotNowRequests(new PostgresSnapshotNowStore(postgres, resultThroughMcpFunction: true)),
                 resolved.ServerId, resolved.DisplayName, collectors, "mcp", WaitBudget, PollInterval, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

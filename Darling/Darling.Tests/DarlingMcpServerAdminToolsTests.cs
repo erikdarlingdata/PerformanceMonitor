@@ -575,14 +575,19 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
 
     /// <summary>A display name that happens to spell another registration's storage name does not tie with it.</summary>
     [Fact]
-    public void ResolveForRemoval_ADisplayNameThatIsAnotherRegistrationsStorageName_DoesNotTieWithIt()
+    public void ResolveForRemoval_ADisplayNameThatIsAnotherRegistrationsStorageName_IsAmbiguousWithBothListed()
     {
         var servers = new[] { Row(1, "sql-01", "Payments"), Row(2, "sql-02", "sql-01") };
 
         var target = DarlingMcpServerAdminTools.ResolveForRemoval(servers, "sql-01");
 
         Assert.Equal("exact", target.MatchedBy);
-        Assert.Equal(1, Assert.Single(target.Candidates).ServerId);
+        Assert.Equal(new[] { 1, 2 }, target.Candidates.Select(c => c.ServerId).OrderBy(i => i).ToArray());
+
+        /* A name that is only one registration's still picks it alone, and the read resolver's case-insensitive tier agrees. */
+        Assert.Equal(2, Assert.Single(DarlingMcpServerAdminTools.ResolveForRemoval(servers, "sql-02").Candidates).ServerId);
+        Assert.Equal(1, Assert.Single(DarlingMcpServerAdminTools.ResolveForRemoval(servers, "Payments").Candidates).ServerId);
+        Assert.Equal(2, DarlingMcpServerAdminTools.ResolveForRemoval(servers, "SQL-01", storageNameIgnoresCase: true).Candidates.Count);
     }
 
     [Theory]
