@@ -32,19 +32,23 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpChangeWatchTools
 {
     [McpServerTool(Name = "get_change_watches"), Description(
-        "Lists a server's change watches, open and closed, newest first: a recorded change (server, database or database-scoped " +
-        "configuration, a trace flag, a forced or unforced Query Store plan) opens a 60 minute watch, and at its end Darling compares " +
-        "wait time per second, average CPU and query duration with the hour before and the same hour a week earlier. Each watch carries " +
-        "its changes, its measures and its result (flat, request_opened, moved_no_request, no_data). Stored read. <<GUIDE>> " +
-        "Reads the change watch windows (config.change_watches) for SQL Server targets. Every change Darling records opens a watch of 60 " +
+        "Lists a server's change watches, open and closed, newest first: a recorded change (a configuration, trace flag, plan or " +
+        "extension change) opens a 60 minute watch, and at its end Darling compares wait time per second, average CPU and query " +
+        "duration with the hour before and the same hour a week earlier. Each watch carries its changes, its measures and its result " +
+        "(flat, request_opened, moved_no_request, no_data). Stored read. <<GUIDE>> " +
+        "Reads the change watch windows (config.change_watches) for SQL Server and PostgreSQL targets. A SQL Server change is a server, database or " +
+        "database-scoped setting, a trace flag, or a forced or unforced Query Store plan; a PostgreSQL change is a server setting, a per-database " +
+        "or per-role setting, or an extension install, drop or version change. Every change Darling records opens a watch of 60 " +
         "minutes for its server, or extends the open one; when the window ends, the watch is evaluated and closes. Each watch lists its " +
         "changes (time, kind, database, query id and what changed), and a closed watch lists its measures: total wait time per second, " +
-        "average SQL CPU and each query whose average duration at least doubled with 10 or more executions in both windows, each with the " +
+        "average CPU and each query whose average duration at least doubled with 10 or more executions in both windows, each with the " +
         "hour before, the watch window and the same window a week earlier. result says how it closed: flat (nothing moved), " +
         "request_opened (something moved and ONE investigation request opened, request_id names it), moved_no_request (something moved and " +
         "no investigation could open: investigations are off or no agent route matched), or no_data (the before or after hour had no " +
         "collected rows, so nothing was compared). result_detail.notes says when a plan-change watch could not read the query from Query " +
-        "Store and measured the top 20 queries instead. An open watch has no measures yet: it is still collecting its window. Pass state " +
+        "Store and measured the top 20 queries instead. A PostgreSQL target reads waits from the wait collector, CPU from Performance " +
+        "Insights samples and statements from pg_stat_statements; a measure it has no source for is listed in not_measured with the reason " +
+        "(for example no CPU source), never as flat. An open watch has no measures yet: it is still collecting its window. Pass state " +
         "open or closed to see only those. A read over the monitoring store; no monitored server is touched.")]
     public static async Task<string> GetChangeWatches(
         NpgsqlDataSource postgres,
@@ -104,6 +108,7 @@ public sealed class DarlingMcpChangeWatchTools
                             what = c.Description,
                         }),
                         measures = detail?["measures"],
+                        not_measured = detail?["not_measured"],
                         result_detail = detail,
                     };
                 }),

@@ -220,6 +220,10 @@ ON CONFLICT (server_id, change_key) DO NOTHING",
     public static readonly IReadOnlyList<string> MarkSources =
         ["server_config", "database_config", "database_scoped_config", "trace_flags", "plan_actions", "plan_snapshots"];
 
+    /// <summary>The sources a PostgreSQL target has a mark for (#6234): server-wide settings, per-database and per-role overrides, and
+    /// extension install state (the daily extension snapshot). The marks table keys on (server, source), so no migration is needed.</summary>
+    public static readonly IReadOnlyList<string> PostgresMarkSources = ["pg_server_config", "pg_scoped_config", "pg_extensions"];
+
     /// <summary>The server's high-water marks (UTC), by source. Empty for a server detection has never run for.</summary>
     public async Task<Dictionary<string, DateTime>> GetMarksAsync(int serverId, CancellationToken cancellationToken = default)
     {

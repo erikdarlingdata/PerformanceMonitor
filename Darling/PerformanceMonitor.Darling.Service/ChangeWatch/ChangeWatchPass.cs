@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Notifications;
@@ -32,12 +33,14 @@ namespace PerformanceMonitor.Darling.Service.ChangeWatch;
 /// runs at start) is compared with the hour before and the same hour a week earlier. When a measure moved, ONE request opens through
 /// the dispatcher's own gate and route (<c>change_watch</c> trigger kind); otherwise the watch closes quietly.</para>
 /// </summary>
-public sealed class ChangeWatchPass
+public sealed partial class ChangeWatchPass
 {
     /// <summary>How far back a pass looks for a change. A change is recorded once under its key, so a longer look only costs reads.</summary>
     public static readonly TimeSpan DetectLookback = TimeSpan.FromMinutes(70);
 
-    private const string ServersSql = "SELECT s.server_id, s.server_name FROM servers AS s WHERE s.is_enabled AND " + DarlingFleetReader.SqlServerCollectedTargetSql;
+    /* #6234 PostgreSQL pass: every enabled target, with its engine kind: a PostgreSQL target reads its own change sources
+       (ChangeWatchPass.Postgres.cs) and is evaluated by its own readers. */
+    private const string ServersSql = "SELECT s.server_id, s.server_name, s.engine_kind FROM servers AS s WHERE s.is_enabled";
 
     /// <summary>How far a watch window's own mark may lag the present: the marks move to this far behind the pass, so a row the store makes visible a little late is still read next tick (a change is recorded once under its key).</summary>
     public static readonly TimeSpan MarkSlack = TimeSpan.FromMinutes(5);
@@ -133,28 +136,29 @@ WHERE f.server_id = $1 AND f.collection_time > $2 AND f.collection_time <= $3
         await EvaluateDueAsync(cancellationToken);
     }
 
-    /// <summary>Records the last hour's changes of every SQL Server target, opening or extending its watch.</summary>
+    /// <summary>Records the last hour's changes of every target (SQL Server and PostgreSQL), opening or extending its watch.</summary>
     public async Task DetectAsync(CancellationToken cancellationToken = default)
     {
-        var servers = new List<(int Id, string Name)>();
+        var servers = new List<(int Id, string Name, bool Postgres)>();
         await using (var command = _readSource.CreateCommand(ServersSql))
         {
             command.CommandTimeout = _commandTimeoutSeconds;
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
-                servers.Add((reader.GetInt32(0), reader.GetString(1)));
+                servers.Add((reader.GetInt32(0), reader.GetString(1), MonitoredEngineKind.IsPostgres(reader.IsDBNull(2) ? null : reader.GetString(2))));
             }
         }
 
         var end = DateTime.SpecifyKind(_utcNow(), DateTimeKind.Utc);
         var floor = end - DetectLookback;
-        foreach (var (id, name) in servers)
+        foreach (var (id, name, postgres) in servers)
         {
             try
             {
                 var marks = await _store.GetMarksAsync(id, cancellationToken);
-                var unmarked = ChangeWatchStore.MarkSources.Where(s => !marks.ContainsKey(s)).ToDictionary(s => s, _ => end, StringComparer.Ordinal);
+                var sources = postgres ? ChangeWatchStore.PostgresMarkSources : ChangeWatchStore.MarkSources;
+                var unmarked = sources.Where(s => !marks.ContainsKey(s)).ToDictionary(s => s, _ => end, StringComparer.Ordinal);
                 if (unmarked.Count > 0)
                 {
                     /* The first pass on a store that has history for this server: its marks start at now, and nothing already stored is a change. */
@@ -167,14 +171,16 @@ WHERE f.server_id = $1 AND f.collection_time > $2 AND f.collection_time <= $3
 
                 /* A restart after a long stop still looks no further back than the lookback: a watch is an hour, not a catch-up. */
                 var bounds = marks.ToDictionary(m => m.Key, m => m.Value > floor ? m.Value : floor, StringComparer.Ordinal);
-                var changes = await ReadChangesAsync(id, bounds, end, cancellationToken);
+                var changes = postgres
+                    ? await ReadPostgresChangesAsync(id, bounds, end, cancellationToken)
+                    : await ReadChangesAsync(id, bounds, end, cancellationToken);
                 if (changes.Count > 0 && await _store.RecordChangesAsync(id, name, changes, cancellationToken) is { } watchId)
                 {
                     _logger.LogInformation("Change watch {WatchId} on {Server} now names {Count} change(s) seen in the last hour", watchId, name, changes.Count);
                 }
 
                 /* Only after the changes are recorded: a failed read or record leaves the marks, and the next pass reads the same rows again. */
-                await _store.SetMarksAsync(id, ChangeWatchStore.MarkSources.ToDictionary(s => s, _ => end - MarkSlack, StringComparer.Ordinal), cancellationToken);
+                await _store.SetMarksAsync(id, sources.ToDictionary(s => s, _ => end - MarkSlack, StringComparer.Ordinal), cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {

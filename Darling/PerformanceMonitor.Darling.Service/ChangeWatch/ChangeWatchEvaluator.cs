@@ -23,9 +23,13 @@ namespace PerformanceMonitor.Darling.Service.ChangeWatch;
 /// <summary>One measure's numbers in the three windows, and whether it moved (#6234).</summary>
 public sealed record ChangeWatchMeasure(string Name, string Unit, double? Before, double After, double? WeekEarlier, bool Moved, string? Note = null);
 
+/// <summary>A measure the target has no signal for (a PostgreSQL target with no CPU source, no wait collection, no statement statistics) and why (#6234). Never reported as flat.</summary>
+public sealed record ChangeWatchNotMeasured(string Measure, string Reason);
+
 /// <summary>What a watch window showed: every measure's numbers, which moved, and the text the investigation request carries.</summary>
 public sealed record ChangeWatchEvaluation(
-    bool HadData, IReadOnlyList<ChangeWatchMeasure> Measures, string DetailText, string ResultJson, IReadOnlyList<string>? Notes = null)
+    bool HadData, IReadOnlyList<ChangeWatchMeasure> Measures, string DetailText, string ResultJson, IReadOnlyList<string>? Notes = null,
+    IReadOnlyList<ChangeWatchNotMeasured>? NotMeasured = null)
 {
     public bool Moved => Measures.Any(m => m.Moved);
 }
@@ -36,7 +40,7 @@ public sealed record ChangeWatchEvaluation(
 /// <para>The thresholds are this feature's own: the analysis engine for SQL Server targets keeps no threshold for a rise in total wait
 /// time per second, average CPU or a query's average duration between two windows, so none was reused.</para>
 /// </summary>
-public sealed class ChangeWatchEvaluator
+public sealed partial class ChangeWatchEvaluator
 {
     /// <summary>Total wait time per second must rise by this fraction of the before-window's...</summary>
     public const double WaitRiseFraction = 0.5;
@@ -163,6 +167,11 @@ WHERE rn = 1";
         var weekEnd = afterEnd.AddDays(-7);
         var afterSeconds = Math.Max(1, (afterEnd - afterStart).TotalSeconds);
         var beforeSeconds = Math.Max(1, (afterStart - beforeStart).TotalSeconds);
+
+        if (await IsPostgresTargetAsync(watch.ServerId, cancellationToken))
+        {
+            return await EvaluatePostgresAsync(watch, cancellationToken);
+        }
 
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         var measures = new List<ChangeWatchMeasure>();
@@ -319,11 +328,14 @@ WHERE rn = 1";
         return result.Length <= 990 ? result : result[..987] + "...";
     }
 
-    internal static string ResultJson(ChangeWatchRow watch, IReadOnlyList<ChangeWatchMeasure> measures, bool hadData, IReadOnlyList<string>? notes = null) =>
+    internal static string ResultJson(
+        ChangeWatchRow watch, IReadOnlyList<ChangeWatchMeasure> measures, bool hadData, IReadOnlyList<string>? notes = null,
+        IReadOnlyList<ChangeWatchNotMeasured>? notMeasured = null) =>
         JsonSerializer.Serialize(new
         {
             had_data = hadData,
             notes = notes ?? [],
+            not_measured = (notMeasured ?? []).Select(n => new { measure = n.Measure, reason = n.Reason }),
             window = new { before_start = watch.FirstChangeUtc - ChangeWatchStore.Window, after_start = watch.FirstChangeUtc, after_end = watch.WindowEndsUtc },
             changes = watch.Changes.Select(c => new { time = c.ChangeTimeUtc, kind = c.Kind, what = c.Description }),
             measures = measures.Select(m => new { measure = m.Name, unit = m.Unit, before = m.Before, after = m.After, week_earlier = m.WeekEarlier, moved = m.Moved, note = m.Note }),
