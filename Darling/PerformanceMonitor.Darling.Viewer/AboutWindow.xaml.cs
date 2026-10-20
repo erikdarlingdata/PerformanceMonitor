@@ -38,8 +38,8 @@ public partial class AboutWindow : Window
     {
         InitializeComponent();
 
-        var version = Assembly.GetExecutingAssembly().GetName().Version;
-        VersionText.Text = $"Version {version?.Major}.{version?.Minor}.{version?.Build}";
+        // #6244: the informational version, with the build's commit when it carries one.
+        VersionText.Text = AboutVersionText.ForAssembly(Assembly.GetExecutingAssembly());
     }
 
     private void GitHubLink_Click(object sender, RoutedEventArgs e) => OpenUrl(GitHubUrl);
