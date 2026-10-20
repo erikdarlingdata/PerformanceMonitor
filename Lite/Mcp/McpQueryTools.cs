@@ -384,6 +384,29 @@ public sealed class McpQueryTools
     /// </summary>
     private const int QueryTextPreviewLength = 400;
 
+    /// <summary>
+    /// #6181: Lite's twin of Darling's first-interval answer for a Query Store top read that found nothing; null when a Query Store
+    /// sample was ever stored or the health state is unknown or off, so the caller keeps its own text.
+    /// </summary>
+    private static async Task<string?> FirstIntervalStatusAsync(
+        LocalDataService dataService, int serverId, string serverName, string? databaseName)
+    {
+        try
+        {
+            if (await dataService.HasAnyQueryStoreStatAsync(serverId))
+            {
+                return null;
+            }
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+
+        var message = await McpRuntimePrecondition.QueryStoreFirstIntervalMessageAsync(dataService, serverId, serverName, databaseName);
+        return message is null ? null : McpHelpers.Status("unavailable", message);
+    }
+
     [McpServerTool(Name = "get_query_store_top"), Description("Cost-ranked top Query Store queries (heaviest first), not time-ordered. Requires Query Store enabled on target databases. window_truncated marks a window floor, not a page cut — no limit changes it — because stored history can be shorter than asked; effective_start / effective_hours_back give the reach actually served. <<GUIDE>> Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database and module filtering. Rows are per Query Store execution outcome (execution_type: Regular, Aborted, Exception): a plan with aborted executions returns one row per outcome, each with its own counts and averages. The execution_type filter keeps one outcome, and module_name keeps one module: the exact, case-sensitive schema-qualified name the collector records (get_top_procedures_by_cpu's full_name; Adhoc for ad-hoc statements, Unknown for an object it could not resolve), applied after interval deduplication and before ranking. When a filter matches nothing but the same read without the filters has rows, the answer is empty (a measured zero), not a Query Store precondition; a module_name miss also carries the window read (effective_start, effective_hours_back, window_truncated) as hints. query_text is a 400-character preview by default (query_text_truncated marks a cut row); full_text=true returns each row's whole statement." + McpHelpers.WindowTruncatedDescription)]
     public static async Task<string> GetQueryStoreTop(
         LocalDataService dataService,
@@ -483,6 +506,10 @@ public sealed class McpQueryTools
                     /* And the collector's own last run, for the case Query Store is on and the collector is
                        the thing that cannot read it. */
                     ?? await McpRuntimePrecondition.StatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_store")
+                    /* #6181: a server just added stores no Query Store row until its first interval closes. When none was
+                       ever stored but Query Store is READ_WRITE and the collector's last run succeeded, say that instead of
+                       "may not be enabled". */
+                    ?? await FirstIntervalStatusAsync(dataService, resolved.ServerId, resolved.ServerName, database_name)
                     ?? McpHelpers.Status("unavailable", "No Query Store data available. Query Store may not be enabled on target databases.");
             }
 
@@ -705,7 +732,11 @@ public sealed class McpQueryTools
 
         if (!hasBaseline && !hasRecent)
         {
+            /* #6181: Query Store on, collector healthy, first interval not closed yet: say so instead of "may be OFF". */
             return await McpEngineCapability.NotCollectedStatusAsync(dataService, serverId, serverName, "query_store")
+                ?? (await McpRuntimePrecondition.QueryStoreFirstIntervalMessageAsync(
+                        dataService, serverId, serverName, databases is { Length: 1 } ? databases[0] : null)
+                    is { } firstInterval ? McpHelpers.Status("unavailable", firstInterval + " There is nothing to compare yet, so this is not a report of zero regressions.") : null)
                 ?? McpHelpers.Status(
                     "unavailable",
                     $"No Query Store data has EVER been collected for {serverName}, so this is NOT a report of zero regressions — there is nothing to compare. Query Store may be OFF on this server's databases, which get_query_store_health will say; otherwise check that collection is running for this server.");
@@ -1142,7 +1173,8 @@ public sealed class McpQueryTools
                     dataService.HasAnyQueryStoreStatAsync(resolved.ServerId), resolved.ServerName, database, hours_back,
                     startUtc, windowEnd, PerInterval,
                     "Query Store",
-                    "Query Store may be OFF on this server's databases — that, not an absence of slow queries, is the usual cause. Check QUERY_STORE = ON per database, then that collection is running for this server.");
+                    "Query Store may be OFF on this server's databases — that, not an absence of slow queries, is the usual cause. Check QUERY_STORE = ON per database, then that collection is running for this server.",
+                    () => McpRuntimePrecondition.QueryStoreFirstIntervalMessageAsync(dataService, resolved.ServerId, resolved.ServerName, database));
             }
 
             return SerializeTrend(resolved.ServerName, hours_back, startUtc, windowEnd, points, PerInterval,
@@ -1450,9 +1482,17 @@ public sealed class McpQueryTools
     /// </summary>
     private static async Task<string> EmptyTrendAsync(
         Task<bool> probe, string serverName, string? database, int hours_back, DateTime startUtc, DateTime windowEndUtc, TrendGrain grain,
-        string what, string checkThis)
+        string what, string checkThis, Func<Task<string?>>? neverSampledOverride = null)
     {
         var everSampled = await probe;
+
+        /* #6181: a caller that can tell "no sample yet, but the source is healthy" supplies the whole answer for the
+           never-sampled state; null keeps the standard text. */
+        if (!everSampled && neverSampledOverride != null && await neverSampledOverride() is { } overrideText)
+        {
+            return EmptyStatus("unavailable", overrideText, startUtc, windowEndUtc, grain, database);
+        }
+
         return everSampled
             ? EmptyStatus(
                 "empty",
