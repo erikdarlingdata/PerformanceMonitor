@@ -2248,7 +2248,8 @@ internal sealed class DarlingSelfAlertEvaluator
                floor, which no field list states), and these give every surface that can render a table
                something to render: the Viewer's dialog, the Teams fact sets, Slack's field sections and
                {{context_json}}. Carries no Incidents, so this report stays outside per-event splitting. */
-            context: BuildCollectorCostDigestContext(movers, census));
+            context: BuildCollectorCostDigestContext(movers, census),
+            scheduledReport: true);
 
         await RecordDocumentDeliveredAsync(
             _lastCostDigest, CollectorCostDigestKey, PgSelfAlertDeliveryStampStore.CostDigestStateKey,
@@ -2887,7 +2888,8 @@ internal sealed class DarlingSelfAlertEvaluator
             numericThresholdValue: 0,
             cancellationToken,
             /* #3834: the digest's structured rows, on the same terms — see BuildFleetSweepRollupContext. */
-            context: BuildFleetSweepRollupContext(facts, spanStartUtc, spanEndUtc));
+            context: BuildFleetSweepRollupContext(facts, spanStartUtc, spanEndUtc),
+            scheduledReport: true);
 
         await RecordDocumentDeliveredAsync(
             _lastSweepRollup, FleetSweepRollupKey, PgSelfAlertDeliveryStampStore.FleetSweepRollupStateKey,
@@ -3311,7 +3313,8 @@ internal sealed class DarlingSelfAlertEvaluator
             /* #3834: the digest's structured rows, on the same terms — see
                BuildAnalysisSinglesDigestContext, including why the dedup keys ride as a field rather than
                as Incidents. */
-            context: BuildAnalysisSinglesDigestContext(facts));
+            context: BuildAnalysisSinglesDigestContext(facts),
+            scheduledReport: true);
 
         await RecordDocumentDeliveredAsync(
             _lastSinglesDigest, AnalysisSinglesDigestKey, PgSelfAlertDeliveryStampStore.AnalysisSinglesDigestStateKey,
@@ -3660,6 +3663,85 @@ internal sealed class DarlingSelfAlertEvaluator
             ? CollectorCadence.NextDue(previous, now, interval) - interval
             : now;
 
+    /// <summary>How long a document whose delivery keeps failing the same way goes between Warning lines
+    /// (#6215). The retry itself is every tick and is unchanged; only the log level of the repeats is.</summary>
+    internal static readonly TimeSpan DocumentFailureReminderInterval = TimeSpan.FromDays(1);
+
+    /// <summary>One document's run of failed deliveries: what failed, how often, and when the log last said so
+    /// at Warning.</summary>
+    private sealed class DocumentFailureRun
+    {
+        public string Error = string.Empty;
+        public int Count;
+        public DateTime FirstUtc;
+        public DateTime LastWarnedUtc;
+    }
+
+    private readonly ConcurrentDictionary<string, DocumentFailureRun> _documentFailures = new();
+
+    /// <summary>
+    /// #6215: the log half of a failed document delivery. The document is retried on every tick (no stamp is
+    /// written) and that stays, but the log must not say the same Warning every hour for as long as a channel
+    /// is down: the Windows event log keeps Warning, and a Teams endpoint that never answers wrote four
+    /// events an hour on a healthy install. A dead channel still must not go quiet, so:
+    /// <list type="bullet">
+    /// <item>the FIRST failure, and any failure whose error differs from the last one, is a Warning;</item>
+    /// <item>a repeat of the same error is Information with the running count;</item>
+    /// <item>a repeat is a Warning again once <see cref="DocumentFailureReminderInterval"/> has passed since
+    /// the last Warning, so a channel that stays dead still surfaces once a day.</item>
+    /// </list>
+    /// The channel's own state is separately reported by the "Notification Channel Failing" alert; this is
+    /// only the document's log line. Runs on the evaluator's controllable clock.
+    /// </summary>
+    private void LogDocumentDeliveryFailure(string documentName, string error, DateTime now)
+    {
+        var run = _documentFailures.AddOrUpdate(
+            documentName,
+            _ => new DocumentFailureRun { Error = error, Count = 1, FirstUtc = now, LastWarnedUtc = now },
+            (_, existing) =>
+            {
+                if (!string.Equals(existing.Error, error, StringComparison.Ordinal))
+                {
+                    return new DocumentFailureRun { Error = error, Count = 1, FirstUtc = now, LastWarnedUtc = now };
+                }
+
+                existing.Count++;
+                return existing;
+            });
+
+        if (run.Count == 1)
+        {
+            _logger?.LogWarning(
+                "{Document} delivery failed ({Error}); no delivery stamp written, so the next tick retries it",
+                documentName, error);
+            return;
+        }
+
+        if (now - run.LastWarnedUtc >= DocumentFailureReminderInterval)
+        {
+            run.LastWarnedUtc = now;
+            _logger?.LogWarning(
+                "{Document} delivery is still failing ({Error}): {Count} failed attempts since {SinceUtc:u}; it is retried every tick",
+                documentName, error, run.Count, run.FirstUtc);
+            return;
+        }
+
+        _logger?.LogInformation(
+            "{Document} delivery failed again ({Error}): {Count} failed attempts since {SinceUtc:u}; the next tick retries it",
+            documentName, error, run.Count, run.FirstUtc);
+    }
+
+    /// <summary>The one Information line when a document that was failing is delivered (#6215).</summary>
+    private void LogDocumentDeliveryRecovered(string documentName)
+    {
+        if (_documentFailures.TryRemove(documentName, out var run))
+        {
+            _logger?.LogInformation(
+                "{Document} delivery recovered after {Count} failed attempts since {SinceUtc:u}",
+                documentName, run.Count, run.FirstUtc);
+        }
+    }
+
     /// <summary>
     /// Records that a daily document was DELIVERED, as the SLOT it served (<see cref="ServedSlot"/>) — into process memory and,
     /// when a store is configured, into the delivery stamp — unless the deliverer reported the send
@@ -3692,11 +3774,11 @@ internal sealed class DarlingSelfAlertEvaluator
     {
         if (delivery is { Channel: AlertDelivery.ChannelFailed })
         {
-            _logger?.LogWarning(
-                "{Document} delivery failed ({Error}); no delivery stamp written, so the next tick retries it",
-                documentName, delivery.SendError ?? "no error text");
+            LogDocumentDeliveryFailure(documentName, delivery.SendError ?? "no error text", now);
             return;
         }
+
+        LogDocumentDeliveryRecovered(documentName);
 
 /* #4652: record the SLOT this delivery served, not the send instant, so the next day's slot is one interval
            after this one however late the tick that sent it ran. The gate above has already cached the previous
@@ -8849,7 +8931,7 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
         string serverKey, string serverName, string metricName, string currentValue, string thresholdValue,
         string detail, AlertSeverityLevel? severity, string shortMessage,
         double? numericCurrentValue, double? numericThresholdValue, CancellationToken cancellationToken,
-        AlertContext? context = null, bool? muted = null)
+        AlertContext? context = null, bool? muted = null, bool scheduledReport = false)
     {
         /* Same mute treatment as the engine: a muted self-alert is still recorded (flagged muted) but its
            channels are skipped — the deliverer honors AlertOutcome.Muted. A caller that brought its own
@@ -8870,10 +8952,23 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
            by definition something wrong with the monitor itself, and because it must stand out from the
            Information-level recovery it will eventually pair with. Muted alerts are logged too — muting
            suppresses the notification channels, not the operator's ability to find it in the log afterwards. */
-        _logger?.LogWarning(
-            "{Line}",
-            AlertFiringLog.Fired(
-                serverName, metricName, severity?.ToString() ?? "Warning", shortMessage, isMuted));
+        if (scheduledReport)
+        {
+            /* #6215: a scheduled report (the collector-cost digest, the fleet-sweep rollup, the analysis singles
+               digest) is a measurement of a period, not a condition that went wrong. Logging it as "ALERT
+               TRIGGERED [Warning]" put it in the Windows event log, and a channel that failed it retried it
+               every hourly tick, so a healthy install wrote the same warning every hour. It is logged at
+               Information with its own marker; a real alert a report carries is fired on its own path. */
+            _logger?.LogInformation(
+                "{Line}", AlertFiringLog.Report(serverName, metricName, shortMessage, isMuted));
+        }
+        else
+        {
+            _logger?.LogWarning(
+                "{Line}",
+                AlertFiringLog.Fired(
+                    serverName, metricName, severity?.ToString() ?? "Warning", shortMessage, isMuted));
+        }
 
         return await _deliverer.DeliverAndReportAsync(new AlertOutcome(
             serverKey, serverName, metricName, currentValue, thresholdValue,
