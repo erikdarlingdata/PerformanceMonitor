@@ -618,7 +618,9 @@ SET hypothetical_index_username = 'pm_index_check',
 WHERE name = 'my-pg-server';
 ```
 
-The service picks the change up when it next reloads its server list. Once either column is set, the web dashboard, the MCP `edit_server` tool and the desktop viewer refuse to change how that server is reached (host, port, database, authentication, username, encryption), as they do for a remediation login: change it on the service host, with the same `UPDATE` as the owner. Removing the two columns (`SET ... = NULL`) lifts that.
+The service picks the change up when it next reloads its server list. Once the password column is set, the web dashboard, the MCP `edit_server` tool and the desktop viewer refuse to change how that server is reached (host, port, database, authentication, username, encryption), as they do for a remediation login: change it on the service host, with the same `UPDATE` as the owner. Removing the two columns (`SET ... = NULL`) lifts that.
+
+A bring-your-own store needs one step after the service upgrades the store to V203. Run `tools/provision-roles.sql` again, so `config.edit_monitored_server` and the password-rules trigger know the new password column. The service replaces both on each start when its login owns them, and warns once, naming the script, when it does not. The compose store and managed provisioning do this on their own.
 
 **What a role that can create functions can read through this check.** The check runs `EXPLAIN` on a stored statement. If a role can create a function in that database, and a statement that calls it with constant arguments is among the statements the check plans, that function runs while the statement is planned, as this login. So a role that can create functions in that database can read, through the check, whatever this login can `SELECT`. Grant the login `SELECT` only on the tables you want to test, and treat the right to create functions in that database accordingly. The transaction is read-only, so the function cannot write.
 

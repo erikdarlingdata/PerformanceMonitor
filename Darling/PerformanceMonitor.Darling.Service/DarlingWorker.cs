@@ -14979,15 +14979,19 @@ AND   j.hypertable_name = '{relation}'", connection))
     {
         ServerLoopState? server;
         ServerRuntime? runtime;
+        MonitoredServer? config;
         string displayName;
         lock (_serversLock)
         {
             server = servers.Find(s => s.Config.ServerId == serverId);
             runtime = server?.Runtime;
-            displayName = server?.Config.DisplayName ?? serverId.ToString(CultureInfo.InvariantCulture);
+            /* #6170: the definition is read with the runtime, in one hold of the lock: the login pair below must be the one the
+               address in the runtime was made from, not a later edit's. */
+            config = server?.Config;
+            displayName = config?.DisplayName ?? serverId.ToString(CultureInfo.InvariantCulture);
         }
 
-        if (server is null)
+        if (server is null || config is null)
         {
             return new CommandOutcome(false, "server not monitored", JsonError($"no monitored server with server_id {serverId}"));
         }
@@ -14996,6 +15000,12 @@ AND   j.hypertable_name = '{relation}'", connection))
         {
             return new CommandOutcome(false, "server not connected",
                 JsonError($"server '{displayName}' is not currently connected — a hypothetical index has to be tested against the server's own statistics, so there is nothing to answer from while it is unreachable"));
+        }
+
+        if (!ServerDefinitionEquals(config, runtime.Config))
+        {
+            return new CommandOutcome(false, "server definition changed",
+                JsonError($"server '{displayName}' was edited and is reconnecting; try again once it has reconnected"));
         }
 
         if (runtime.Target.Engine != CollectorTargetEngine.PostgreSql)
@@ -15029,7 +15039,7 @@ AND   j.hypertable_name = '{relation}'", connection))
            when its arguments are constants, and the monitoring login usually holds pg_monitor or pg_read_all_stats. With no login set up
            the check is refused with what to set up, and nothing is sent to the monitored server. */
         var (hypotheticalIndexConnectionString, loginRefusal) = Targets.HypotheticalIndexLogin.Resolve(
-            server.Config, runtime.ConnectionString);
+            config, runtime.ConnectionString);
         if (hypotheticalIndexConnectionString is null)
         {
             return new CommandOutcome(false, "hypothetical-index login not set up", JsonError(loginRefusal ?? "no login"));

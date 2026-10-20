@@ -522,6 +522,43 @@ public sealed class StoreServerPasswordRulesLiveTests
     }
 
     /// <summary>
+    /// A self-managed store whose script was not re-run keeps the edit function from before the hypothetical-index pair existed,
+    /// which looks only at the remediation password: through it, a change of host on a row that holds a pair saves (#6170).
+    /// The service's start replaces both overloads, and the same call is then refused and writes nothing.
+    /// </summary>
+    [Fact]
+    public async Task AStoreHoldingTheOlderEditFunction_GetsItReplacedByTheServicesStart_AndAHostChangeOnAHeldPairIsRefused()
+    {
+        await RunScenarioAsync(selfManagedText: false, async (ownerString, owner, ct) =>
+        {
+            const string pairCheck = " OR COALESCE(s.hypothetical_index_encrypted_password, '') <> ''";
+            var older = DarlingManagedRoles.BuildEditMonitoredServerFunctionSql("config");
+            Assert.Contains(pairCheck, older, StringComparison.Ordinal);
+            await ExecAsync(owner, older.Replace(pairCheck, "", StringComparison.Ordinal), ct);
+
+            await InsertHypotheticalServerAsync(owner, 8301, "held-before", "check_login", "env:PM_INDEX_CHECK_PASSWORD", ct);
+            await InsertHypotheticalServerAsync(owner, 8302, "held-after", "check_login", "env:PM_INDEX_CHECK_PASSWORD", ct);
+            await using var viewer = await ConnectAsync(ownerString, "viewer", ProvisioningTestSecrets.ViewerPassword, ct);
+
+            /* The older function lets the host change through on a held pair: the store really is in the state the start must fix. */
+            Assert.Equal("saved", await EditOutcomeAsync(viewer, 8301, "'host','encrypted_password'", "moved-host", "typed-anything", owner, ct));
+            Assert.Equal("moved-host", await TextAsync(owner, "SELECT host FROM config_monitored_servers WHERE server_id = 8301", ct));
+
+            var log = new CapturingTestLogger();
+            await using (var ownerSource = NpgsqlDataSource.Create(ownerString))
+            {
+                Assert.True(await DarlingManagedRoles.EnsureServerPasswordRulesAsync(ownerSource, log, ct), log.Joined);
+            }
+
+            Assert.Equal(0, log.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
+            Assert.Equal("remediation_kept", await EditOutcomeAsync(viewer, 8302, "'host','encrypted_password'", "moved-host", "typed-anything", owner, ct));
+            Assert.Equal("held-after", await TextAsync(owner, "SELECT host FROM config_monitored_servers WHERE server_id = 8302", ct));
+            Assert.Equal("env:PM_INDEX_CHECK_PASSWORD",
+                await TextAsync(owner, "SELECT hypothetical_index_encrypted_password FROM config_monitored_servers WHERE server_id = 8302", ct));
+        });
+    }
+
+    /// <summary>
     /// A self-managed store's rules are created on the service's start, as the role that owns its tables, when the script was
     /// not re-run after an upgrade; running it again changes nothing, and a login that may not create them gets one warning
     /// that names the script and fails nothing. Rules already in place from another role raise no warning; a function that

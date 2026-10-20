@@ -476,6 +476,9 @@ public sealed class HypotheticalIndexLoginLiveTests : IClassFixture<PostgresKill
     {
         NpgsqlConnection.ClearAllPools();
         PostgresTargetProvider.ClearPools();
+        /* No TimescaleDB job worker is left running in the database when the drop goes ahead (#5480). The helper returns at once
+           when the database carries no TimescaleDB jobs, or is already gone. */
+        await ScratchPostgres.QuiesceTimescaleJobsAsync(admin, Database);
         foreach (var sql in new[]
         {
             $"SELECT pg_catalog.pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity WHERE datname = '{Database}'",

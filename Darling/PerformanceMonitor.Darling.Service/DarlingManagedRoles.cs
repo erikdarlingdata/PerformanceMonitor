@@ -2916,7 +2916,8 @@ CREATE OR REPLACE TRIGGER trg_monitored_server_password_rules
     /// included, which this connection could not replace), nothing is run and nothing is warned, and no lock is taken on
     /// the table. The check and the command run under the provisioning advisory lock (#5560,
     /// <see cref="ProvisioningLockKey"/>), so two services starting against one store do not both replace the function
-    /// at once. Returns whether the rules are in place.
+    /// at once. The two <c>edit_monitored_server</c> overloads are part of the rules (#6170): a store that holds them from an
+    /// older script keeps a version that does not know the hypothetical-index pair, so they are replaced the same way. Returns whether the rules are in place.
     /// </summary>
     public static async Task<bool> EnsureServerPasswordRulesAsync(
         NpgsqlDataSource dataSource, ILogger logger, CancellationToken cancellationToken = default)
@@ -2936,9 +2937,12 @@ CREATE OR REPLACE TRIGGER trg_monitored_server_password_rules
             await ExecuteSerializedAsync(connection, async (transaction, token) =>
             {
                 alreadyInPlace = await ServerPasswordRulesAreInPlaceAsync(connection, transaction, token);
+                /* #6170: the edit function is part of the same rules (it answers the host change before the trigger is reached),
+                   and a store whose script was not re-run keeps the version that knows only the remediation column. */
+                alreadyInPlace &= await EditMonitoredServerFunctionsAreCurrentAsync(connection, transaction, token);
                 return alreadyInPlace
                     ? null
-                    : new NpgsqlCommand(BuildServerPasswordRulesSql("config"), connection, transaction)
+                    : new NpgsqlCommand(BuildServerPasswordRulesSql("config") + BuildEditMonitoredServerFunctionsSql("config"), connection, transaction)
                     {
                         CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds,
                     };
@@ -3009,6 +3013,76 @@ WHERE t.tgrelid = 'config.config_monitored_servers'::regclass
                 NormalizeRulesText(stored),
                 NormalizeRulesText(built.Substring(open + quote.Length, close - open - quote.Length)),
                 StringComparison.Ordinal);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            await RecoverFromReadAsync(transaction);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Both <c>config.edit_monitored_server</c> overloads (#5240, #5452), the 17-argument function first and then the wrapper
+    /// over it: what a self-managed store replaces on every start (<see cref="EnsureServerPasswordRulesAsync"/>), because
+    /// <c>CREATE OR REPLACE</c> keeps the grants the script made. The same text is in <c>tools/provision-roles.sql</c>.
+    /// </summary>
+    internal static string BuildEditMonitoredServerFunctionsSql(string config) =>
+        BuildEditMonitoredServerFunctionSql(config) + BuildEditMonitoredServerLegacyWrapperSql(config);
+
+    /// <summary>
+    /// Whether the <c>config.edit_monitored_server</c> overloads of a store are the ones this build writes (#6170): body text
+    /// (full-line comments and spacing set aside) and the pinned search path, for both. A store that holds neither overload
+    /// has no edit function to replace (the script was never run there) and answers true. A store that holds one, or an
+    /// older body, answers false. A read that fails answers false, so the caller falls back to replacing them.
+    /// </summary>
+    internal static async Task<bool> EditMonitoredServerFunctionsAreCurrentAsync(
+        NpgsqlConnection connection, NpgsqlTransaction? transaction, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await TakeReadSavepointAsync(transaction, cancellationToken);
+            var present = 0;
+            foreach (var (signature, builder) in new (string, Func<string, string>)[]
+            {
+                (EditMonitoredServerSignature, BuildEditMonitoredServerFunctionSql),
+                (EditMonitoredServerLegacySignature, BuildEditMonitoredServerLegacyWrapperSql),
+            })
+            {
+                await using var read = new NpgsqlCommand(
+                    "SELECT p.prosrc, p.proconfig FROM pg_catalog.pg_proc AS p WHERE p.oid = pg_catalog.to_regprocedure(@signature)", connection, transaction)
+                {
+                    CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds,
+                };
+                read.Parameters.AddWithValue("signature", "config.edit_monitored_server(" + signature + ")");
+                await using var reader = await read.ExecuteReaderAsync(cancellationToken);
+                if (!await reader.ReadAsync(cancellationToken))
+                {
+                    continue;
+                }
+
+                present++;
+                var stored = reader.GetString(0);
+                var settings = reader.IsDBNull(1) ? Array.Empty<string>() : reader.GetFieldValue<string[]>(1);
+                if (settings.Length != 1 || !string.Equals(settings[0], "search_path=pg_catalog, pg_temp", StringComparison.Ordinal))
+                {
+                    return false;
+                }
+
+                var built = builder("config");
+                const string quote = "$fn$";
+                var open = built.IndexOf(quote, StringComparison.Ordinal);
+                var close = built.IndexOf(quote, open + quote.Length, StringComparison.Ordinal);
+                if (open < 0 || close < 0
+                    || !string.Equals(
+                        NormalizeRulesText(stored),
+                        NormalizeRulesText(built.Substring(open + quote.Length, close - open - quote.Length)),
+                        StringComparison.Ordinal))
+                {
+                    return false;
+                }
+            }
+
+            return present is 0 or 2;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
