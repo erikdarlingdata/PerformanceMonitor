@@ -9,7 +9,10 @@
 using System;
 using System.Net;
 using System.Net.Http;
+using System.Net.Sockets;
+using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 using Xunit;
@@ -85,5 +88,127 @@ public sealed class WebhookUrlGuardTests
         var row = new NotificationRouteDraft { MetricMatch = "Blocking", PagerDutyRoutingKey = "R0UT1NGK3Y" };
         NotificationRouteWriter.ResolveRoute(row, null, new WebhookProxies("", "", "", ""), 1, (text, _) => "sealed:" + text, null);
         Assert.Equal("sealed:R0UT1NGK3Y", row.PagerDutyRoutingKey);
+    }
+
+    [Theory]
+    [InlineData("fd00:ec2::254", true)]
+    [InlineData("168.63.129.16", true)]
+    [InlineData("100.100.100.200", true)]
+    [InlineData("::ffff:168.63.129.16", true)]
+    [InlineData("::ffff:100.100.100.200", true)]
+    [InlineData("169.254.169.254", true)]
+    [InlineData("fe80::1", true)]
+    [InlineData("fd00:ec2::255", false)]
+    [InlineData("168.63.129.17", false)]
+    [InlineData("100.100.100.201", false)]
+    [InlineData("127.0.0.1", false)]
+    [InlineData("::1", false)]
+    [InlineData("10.1.2.3", false)]
+    [InlineData("172.16.0.9", false)]
+    [InlineData("192.168.1.5", false)]
+    [InlineData("fd12:3456::1", false)]
+    public void CloudInstanceAddressesAreRefused_PrivateAndLoopbackAreNot(string address, bool refused) =>
+        Assert.Equal(refused, WebhookConnectGuard.IsRefused(IPAddress.Parse(address)));
+
+    [Theory]
+    [InlineData("http://168.63.129.16/machine")]
+    [InlineData("http://100.100.100.200/latest/meta-data")]
+    [InlineData("http://[fd00:ec2::254]/latest/meta-data")]
+    [InlineData("http://[::ffff:168.63.129.16]/machine")]
+    public async Task AWebhookPost_ToACloudInstanceAddress_IsRefusedAtConnect(string url)
+    {
+        using var client = new HttpClient(WebhookConnectGuard.NewHandler()) { Timeout = TimeSpan.FromSeconds(10) };
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        cts.CancelAfter(TimeSpan.FromSeconds(10));
+
+        var refused = await Assert.ThrowsAsync<HttpRequestException>(() => client.GetAsync(url, cts.Token));
+        Assert.Contains(WebhookConnectGuard.RefusalText, refused.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TheHeartbeatClient_RefusesALinkLocalTarget_AndStillReachesAPrivateReceiver()
+    {
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        cts.CancelAfter(TimeSpan.FromSeconds(10));
+
+        var refused = await Assert.ThrowsAsync<HttpRequestException>(
+            () => DarlingHeartbeat.SharedClient.GetAsync("http://169.254.169.254/latest/meta-data", cts.Token));
+        Assert.Contains(WebhookConnectGuard.RefusalText, refused.ToString(), StringComparison.Ordinal);
+
+        using var receiver = new CapturingWebhookEndpoint();
+        var (ok, reason) = await DarlingHeartbeat.PingAsync(
+            DarlingHeartbeat.SharedClient, new Uri(receiver.Url), TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        Assert.True(ok, reason);
+    }
+
+    [Fact]
+    public async Task ACancelledConnect_DisposesTheSocketItWasHanded()
+    {
+        using var cts = new CancellationTokenSource();
+        TrackedSocket? made = null;
+        Socket Make(AddressFamily family)
+        {
+            made = new TrackedSocket(family);
+            cts.Cancel(); /* the cancel arrives while the connect is about to start, so it is deterministic */
+            return made;
+        }
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+            await WebhookConnectGuard.ConnectAsync(new DnsEndPoint("127.0.0.1", 9), Make, cts.Token));
+
+        Assert.NotNull(made);
+        Assert.True(made.WasDisposed);
+    }
+
+    [Fact]
+    public async Task AFailedConnect_DisposesTheSocketItWasHanded()
+    {
+        int closedPort;
+        using (var probe = new TcpListener(IPAddress.Loopback, 0))
+        {
+            probe.Start();
+            closedPort = ((IPEndPoint)probe.LocalEndpoint).Port;
+            probe.Stop();
+        }
+
+        TrackedSocket? made = null;
+        Socket Make(AddressFamily family) => made = new TrackedSocket(family);
+
+        await Assert.ThrowsAsync<HttpRequestException>(async () =>
+            await WebhookConnectGuard.ConnectAsync(new DnsEndPoint("127.0.0.1", closedPort), Make, TestContext.Current.CancellationToken));
+
+        Assert.NotNull(made);
+        Assert.True(made.WasDisposed);
+    }
+
+    [Fact]
+    public async Task ASuccessfulConnect_KeepsTheSocketOpenForTheStream()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        TrackedSocket? made = null;
+        Socket Make(AddressFamily family) => made = new TrackedSocket(family);
+
+        await using var stream = await WebhookConnectGuard.ConnectAsync(
+            new DnsEndPoint("127.0.0.1", port), Make, TestContext.Current.CancellationToken);
+
+        Assert.NotNull(made);
+        Assert.False(made.WasDisposed);
+    }
+
+    private sealed class TrackedSocket(AddressFamily family) : Socket(family, SocketType.Stream, ProtocolType.Tcp)
+    {
+        public bool WasDisposed { get; private set; }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                WasDisposed = true;
+            }
+
+            base.Dispose(disposing);
+        }
     }
 }

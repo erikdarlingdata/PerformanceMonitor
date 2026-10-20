@@ -824,6 +824,8 @@ A channel is enabled by a non-empty URL.
 | `slackUrl` | `""` | Slack incoming webhook |
 | `slackProxy` | `""` | Optional proxy address |
 
+Webhook and heartbeat posts do not connect to a link-local address (169.254.0.0/16, fe80::/10) or to the cloud instance addresses `fd00:ec2::254`, `168.63.129.16` and `100.100.100.200`; loopback and private addresses stay allowed. The address check applies to direct connections: when a proxy is in use, the proxy decides what it can reach.
+
 #### Notification routes — sending alert families to different channels
 
 The channels above (and the SMTP, PagerDuty and generic-webhook ones the Viewer's Settings window adds) are the **parent** channel set: one destination per channel type, and by default every alert goes to every configured one. One stream then interleaves four audiences — the monitor's own health, scheduled reports, Agent job failures, and the performance pages the channel exists for — and the reader routes in their head on every post. Since V131 (#3598) a sparse **routes** table layered over the parent row lets the operator make that call once: **Settings → Notifications → Manage Notification Routes…**, or read it back with `get_notification_routes`.

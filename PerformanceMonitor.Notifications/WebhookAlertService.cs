@@ -3471,9 +3471,9 @@ public class WebhookAlertService
        HttpClient/handler per request leaks sockets into TIME_WAIT and can exhaust
        the ephemeral port range when many servers alert. One pooled client covers the
        no-proxy case; proxied clients are cached per proxy address. #6231: the two direct clients connect through
-       WebhookConnectGuard, which refuses link-local addresses (a proxied client connects to its proxy, which resolves the host). */
+       WebhookConnectGuard, which refuses link-local and cloud instance addresses (a proxied client connects to its proxy, which resolves the host). */
     private static readonly HttpClient s_defaultClient =
-        new(new SocketsHttpHandler { PooledConnectionLifetime = TimeSpan.FromMinutes(5), ConnectCallback = WebhookConnectGuard.ConnectAsync })
+        new(WebhookConnectGuard.NewHandler())
         { Timeout = TimeSpan.FromSeconds(30) };
 
     private static readonly ConcurrentDictionary<string, HttpClient> s_proxyClients = new();
@@ -3482,7 +3482,7 @@ public class WebhookAlertService
        were set up for and nowhere else. These two clients serve only those sends; sends without headers keep the
        clients above. */
     private static readonly HttpClient s_defaultNoRedirectClient =
-        new(new SocketsHttpHandler { PooledConnectionLifetime = TimeSpan.FromMinutes(5), AllowAutoRedirect = false, ConnectCallback = WebhookConnectGuard.ConnectAsync })
+        new(WebhookConnectGuard.NewHandler(allowAutoRedirect: false))
         { Timeout = TimeSpan.FromSeconds(30) };
 
     private static readonly ConcurrentDictionary<string, HttpClient> s_proxyNoRedirectClients = new();

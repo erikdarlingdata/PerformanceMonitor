@@ -17,6 +17,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -378,7 +379,7 @@ internal sealed class DarlingHeartbeat
        than a handler per ping, with redirects off so a 3xx is reported as the failure it is and is never followed
        to a host the operator did not configure. */
     private static readonly HttpClient s_client =
-        new(new SocketsHttpHandler { PooledConnectionLifetime = TimeSpan.FromMinutes(5), AllowAutoRedirect = false })
+        new(WebhookConnectGuard.NewHandler(allowAutoRedirect: false))
         { Timeout = TimeSpan.FromSeconds(30) };
 
     /// <summary>The production client, so a test can prove its redirect setting rather than a copy's.</summary>
