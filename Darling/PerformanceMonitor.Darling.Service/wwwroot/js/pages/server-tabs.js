@@ -41,6 +41,7 @@
 
 import { el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, metricNote, getPath, fmtMs, fmtInt, fmtRate, localTime, parseUtc, windowFromHours, daysText, dbScopeChip, dbFilteredEmptyText, sourceStrip, clampText, getActiveDatabaseFilter, queryWaitFilter, setQueryWaitFilter, waitIsLinked } from "../util.js";
 import { renderPanel, emptyHeadline, setPanelSignal, getPanelSignal, VIZ, worstFirst, newestFirst } from "../panels.js";
+import { activeQueriesSnapshotSlot, SNAPSHOT_ROW_CAP } from "./active-snapshots.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../charts.js";
 import { multiPicker, mergeSeriesRows } from "../multi-picker.js";
 import { pgPlanColumn } from "./pg-plan-viewer.js";
@@ -3471,24 +3472,35 @@ function waitLinkCell(server, row, timeKey) {
    grid names the wait as text and clears the filter. The heading stays "Active Queries" (the scroll finder matches it).
    Unfiltered, the read is the 50-row page it always was. */
 function activeQueriesPanel(server, ctx) {
-  return tagFilteredCard("active", (picker) => activeQueriesCard(server, ctx, picker));
+  const wait = queryWaitFilter(server);
+  /* #6302: the snapshot picker (active-snapshots.js) reads the window's snapshot times, under the tag pick and the wait filter the grid
+     uses, and draws the grid for the latest one, or the one picked; "All snapshots in window" draws it as it was. */
+  return tagFilteredCard("active", (tagPicker) =>
+    activeQueriesSnapshotSlot(server, ctx, wait, withTagPick({}, "active"), (snapshotTime, snapPicker) =>
+      activeQueriesGrid(server, ctx, wait, snapshotTime, snapPicker ? el("div", {}, [tagPicker, snapPicker]) : tagPicker)
+    )
+  );
 }
 
-function activeQueriesCard(server, ctx, picker) {
-  const wait = queryWaitFilter(server);
+function activeQueriesGrid(server, ctx, wait, snapshotTime, control) {
+  const base = wait ? { server, hours: ctx.hours, limit: 500, wait_type: wait } : { server, hours: ctx.hours, limit: 50 };
   const panel = table(
     "Active Queries",
     "get_active_queries",
-    withTagPick(wait ? { server, hours: ctx.hours, limit: 500, wait_type: wait } : { server, hours: ctx.hours, limit: 50 }, "active"),
+    snapshotTime
+      ? withTagPick({ ...base, limit: SNAPSHOT_ROW_CAP, collection_time: snapshotTime }, "active")
+      : withTagPick(base, "active"),
     "queries",
     [...ACTIVE_COLUMNS, ...activePlanColumns(server)],
-    wait ? ctx.label + ", waiting on " + wait : ctx.label,
-    wait ? "No active queries waiting on " + wait + " were captured in this window." : "No active-query snapshots in this window.",
+    snapshotTime ? "snapshot at " + localTime(snapshotTime) : wait ? ctx.label + ", waiting on " + wait : ctx.label,
+    snapshotTime
+      ? "No active queries" + (wait ? " waiting on " + wait : "") + " in this snapshot."
+      : wait ? "No active queries waiting on " + wait + " were captured in this window." : "No active-query snapshots in this window.",
     2,
     null,
     null,
     null,
-    picker
+    control
   );
   if (wait) {
     const strip = el("div", { class: "strip notice wait-filter-strip" }, [
