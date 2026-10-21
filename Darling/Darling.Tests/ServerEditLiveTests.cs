@@ -693,10 +693,10 @@ public sealed class ServerEditLiveTests : IDisposable
         }
     }
 
-    /// <summary>#6281: a server no route with an agent setting applies to (a route with no agent setting, or an agent route on another server or
-    /// tag) is still pointed elsewhere over MCP; and a route with no scope at all applies to every server.</summary>
+    /// <summary>#6281: a server no route with an agent setting is scoped to (a route with no agent setting, or an agent route on another server or
+    /// tag) is still pointed elsewhere over MCP; and a route with no scope at all, which applies to every server, does not hold it either.</summary>
     [Fact]
-    public async Task AsTheMcpRole_AnUncoveredServer_StillMoves_AndAFleetWideAgentRouteCoversEveryServer()
+    public async Task AsTheMcpRole_AnUnscopedServer_StillMoves_EvenWithAnAgentRouteThatHasNoScope()
     {
         var ct = TestContext.Current.CancellationToken;
         await using var rig = await OpenAsync(ct);
@@ -717,10 +717,10 @@ public sealed class ServerEditLiveTests : IDisposable
             Assert.Equal("alpha-78.example.test", await ScalarAsync<string>(rig.Owner, "SELECT host FROM config_monitored_servers WHERE server_id = 7211", ct));
 
             await ExecAsync(rig.Owner, "INSERT INTO config.config_notification_routes (metric_match, agent_level) VALUES ('Deadlocks', 0)", ct);
-            var covered = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "alpha-78", "{\"host\":\"alpha-80.example.test\"}", Reachable, TestKeyRings.Healthy, null, ct,
+            var movedAgain = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "alpha-78", "{\"host\":\"alpha-80.example.test\"}", Reachable, TestKeyRings.Healthy, null, ct,
                 policy: DarlingMcpAddServersPolicy.Default));
-            Assert.Equal("refused", covered["status"]!.GetValue<string>());
-            Assert.Equal("alpha-78.example.test", await ScalarAsync<string>(rig.Owner, "SELECT host FROM config_monitored_servers WHERE server_id = 7211", ct));
+            Assert.Equal("updated", movedAgain["status"]!.GetValue<string>());
+            Assert.Equal("alpha-80.example.test", await ScalarAsync<string>(rig.Owner, "SELECT host FROM config_monitored_servers WHERE server_id = 7211", ct));
             ok = true;
         }
         finally
@@ -729,10 +729,11 @@ public sealed class ServerEditLiveTests : IDisposable
         }
     }
 
-    /// <summary>#6281: over MCP a machine has one registration. Another database or read-only intent on a registered host is refused and names
-    /// the registered server; so is another database on a host whose registration was removed; the removed registration's own name is re-used.</summary>
+    /// <summary>#6281: over MCP another database or read-only intent on a registered machine is added as usual, unless a route with an agent
+    /// setting is scoped to the registration that holds the machine (its id, or a tag or a tag above one), a removed registration included. A route
+    /// with no scope never holds an add back. The removed registration's own name is re-used.</summary>
     [Fact]
-    public async Task TheAddServersTool_RefusesASecondRegistrationOfATarget_RemovedOnesIncluded_AndReusesARemovedRegistrationsOwnName()
+    public async Task TheAddServersTool_RefusesASecondRegistrationOfAMachineOnlyWhileAScopedAgentRouteCoversTheFirst()
     {
         var ct = TestContext.Current.CancellationToken;
         await using var rig = await OpenAsync(ct);
@@ -740,10 +741,16 @@ public sealed class ServerEditLiveTests : IDisposable
         try
         {
             await SeedServerAsync(rig.Owner, 7221, "alpha-75", "alpha-75.example.test", "integrated", null, null, ct);
+            await SeedServerAsync(rig.Owner, 7222, "alpha-78", "alpha-78.example.test", "integrated", null, null, ct);
+            await SeedServerAsync(rig.Owner, 7223, "alpha-79", "alpha-79.example.test", "integrated", null, null, ct);
             var removedId = ServerIdHelper.GetDeterministicHashCode("alpha-76.example.test:orders");
+            var removedPlainId = ServerIdHelper.GetDeterministicHashCode("alpha-81.example.test:orders");
             await ExecAsync(rig.Owner,
                 "INSERT INTO collect.servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date) " +
-                $"VALUES ({removedId}, 'alpha-76.example.test:orders', 'Removed Orders', FALSE, 16, now() AT TIME ZONE 'UTC', now() AT TIME ZONE 'UTC')", ct);
+                $"VALUES ({removedId}, 'alpha-76.example.test:orders', 'Removed Orders', FALSE, 16, now() AT TIME ZONE 'UTC', now() AT TIME ZONE 'UTC')," +
+                $"({removedPlainId}, 'alpha-81.example.test:orders', 'Removed Plain', FALSE, 16, now() AT TIME ZONE 'UTC', now() AT TIME ZONE 'UTC');" +
+                "INSERT INTO config.server_tags (id, name, parent_id) OVERRIDING SYSTEM VALUE VALUES (7321, 'fleet-b', NULL), (7322, 'prod-b', 7321);" +
+                "INSERT INTO config.server_tag_map (server_id, tag_id) VALUES (7223, 7322);", ct);
 
             async Task<(string Status, string Detail)> AddAsync(string json)
             {
@@ -752,23 +759,59 @@ public sealed class ServerEditLiveTests : IDisposable
                 return (row["status"]!.GetValue<string>(), row["detail"]!.GetValue<string>());
             }
 
-            var otherDatabase = await AddAsync("[{\"host\":\"alpha-75.example.test\",\"database\":\"billing\"}]");
-            Assert.Equal("collides", otherDatabase.Status);
-            Assert.Contains("alpha-75", otherDatabase.Detail, StringComparison.Ordinal);
-            var readOnly = await AddAsync("[{\"host\":\"ALPHA-75.example.test\",\"read_only_intent\":true}]");
-            Assert.Equal("collides", readOnly.Status);
+            /* Only a route with no scope (it applies to every server): the machine takes another database and another intent. */
+            await ExecAsync(rig.Owner, "INSERT INTO config.config_notification_routes (metric_match, agent_level) VALUES ('Deadlocks', 0)", ct);
+            Assert.Equal("added", (await AddAsync("[{\"host\":\"alpha-75.example.test\",\"database\":\"billing\"}]")).Status);
+            Assert.Equal("added", (await AddAsync("[{\"host\":\"ALPHA-75.example.test\",\"read_only_intent\":true}]")).Status);
+            Assert.Equal("added", (await AddAsync("[{\"host\":\"alpha-81.example.test\",\"database\":\"billing\"}]")).Status);
 
+            /* An Off route scoped to the registration holds the machine, whatever the database or intent. */
+            await ExecAsync(rig.Owner, "INSERT INTO config.config_notification_routes (metric_match, agent_level, scope_server_id) VALUES ('Blocking', 0, 7222)", ct);
+            var scoped = await AddAsync("[{\"host\":\"alpha-78.example.test\",\"database\":\"billing\"}]");
+            Assert.Equal("collides", scoped.Status);
+            Assert.Contains("alpha-78", scoped.Detail, StringComparison.Ordinal);
+            Assert.Equal("collides", (await AddAsync("[{\"host\":\"alpha-78.example.test\",\"read_only_intent\":true}]")).Status);
+
+            /* A route on a tag above the registration's own tag holds it too. */
+            await ExecAsync(rig.Owner, "INSERT INTO config.config_notification_routes (metric_match, agent_level, scope_tag_id) VALUES ('Blocking', 2, 7321)", ct);
+            Assert.Equal("collides", (await AddAsync("[{\"host\":\"alpha-79.example.test\",\"database\":\"billing\"}]")).Status);
+
+            /* A removed registration holds its machine only while a route is scoped to its id. */
+            await ExecAsync(rig.Owner, $"INSERT INTO config.config_notification_routes (metric_match, agent_level, scope_server_id) VALUES ('Blocking', 1, {removedId})", ct);
             var removed = await AddAsync("[{\"host\":\"alpha-76.example.test\",\"database\":\"billing\"}]");
             Assert.Equal("collides", removed.Status);
             Assert.Contains("Removed Orders", removed.Detail, StringComparison.Ordinal);
+            Assert.Equal("added", (await AddAsync("[{\"host\":\"alpha-81.example.test\",\"database\":\"audit\"}]")).Status);
 
-            Assert.Equal(1, await ScalarAsync<int>(rig.Owner, "SELECT count(*)::int FROM config_monitored_servers", ct));
+            Assert.Equal(3 + 4, await ScalarAsync<int>(rig.Owner, "SELECT count(*)::int FROM config_monitored_servers", ct));
 
+            /* The removed registration's own name is re-used, and a fresh machine is added. */
             var again = await AddAsync("[{\"host\":\"alpha-76.example.test\",\"database\":\"orders\"}]");
             Assert.Equal("added", again.Status);
-            var fresh = await AddAsync("[{\"host\":\"alpha-77.example.test\"}]");
-            Assert.Equal("added", fresh.Status);
+            Assert.Equal("added", (await AddAsync("[{\"host\":\"alpha-77.example.test\"}]")).Status);
             Assert.Equal(removedId, await ScalarAsync<int>(rig.Owner, "SELECT server_id FROM config_monitored_servers WHERE host = 'alpha-76.example.test'", ct));
+            ok = true;
+        }
+        finally
+        {
+            await DropRoleAsync(rig, ok);
+        }
+    }
+
+    /// <summary>#6281: several databases of one logical server go in one call; none of them has a route yet, so none holds another back.</summary>
+    [Fact]
+    public async Task TheAddServersTool_TakesSeveralDatabasesOfOneMachineInOneCall()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        var ok = false;
+        try
+        {
+            var answer = Parse(await Edit.AddServersAsync(rig.Mcp,
+                "[{\"host\":\"alpha-90.example.test\",\"database\":\"one\"},{\"host\":\"alpha-90.example.test\",\"database\":\"two\"}]",
+                Reachable, ct, ring: TestKeyRings.Healthy, policy: DarlingMcpAddServersPolicy.Default));
+            Assert.All(answer["results"]!.AsArray(), row => Assert.Equal("added", row!["status"]!.GetValue<string>()));
+            Assert.Equal(2, await ScalarAsync<int>(rig.Owner, "SELECT count(*)::int FROM config_monitored_servers WHERE host = 'alpha-90.example.test'", ct));
             ok = true;
         }
         finally
