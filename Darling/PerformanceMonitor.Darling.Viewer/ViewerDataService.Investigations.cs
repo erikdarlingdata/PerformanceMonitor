@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -39,7 +40,7 @@ public sealed partial class ViewerDataService
     public const int InvestigationNoteMaxLength = 2000;
 
     /// <summary>The longest environment profile; the V184 CHECK's bound.</summary>
-    public const int InvestigationProfileMaxLength = 4000;
+    public const int InvestigationProfileMaxLength = InvestigationProfiles.MaxLength;
 
     /// <summary>The longest close reason the viewer accepts.</summary>
     public const int InvestigationCloseReasonMaxLength = 500;
@@ -125,11 +126,9 @@ WHERE ($1::text IS NULL OR n.state = $1)
 ORDER BY (n.state = 'pending') DESC, n.created_at DESC, n.note_id DESC
 LIMIT 500";
 
-    /// <summary>Every environment profile: the fleet's (both scopes NULL), then per server, then per tag.</summary>
-    public const string InvestigationProfilesSelectSql = @"
-SELECT profile_id, scope_server_id, scope_tag_id, profile_text, modified_at, modified_by
-FROM config.agent_environment_profiles
-ORDER BY (scope_server_id IS NULL AND scope_tag_id IS NULL) DESC, scope_server_id NULLS LAST, scope_tag_id NULLS LAST";
+    /// <summary>Every environment profile: the fleet's (both scopes NULL), then per server, then per tag (#6264: the one copy is
+    /// <see cref="InvestigationProfiles.SelectSql"/>, which the web page shares).</summary>
+    public const string InvestigationProfilesSelectSql = InvestigationProfiles.SelectSql;
 
     /// <summary>Closes a request still in play or reported. $1 request, $2 actor, $3 reason. RETURNING the server for the
     /// journal row; no row when the request is gone, already closed or expired.</summary>
@@ -153,19 +152,13 @@ VALUES ($1, $2, $3, $4, 'approved', now() + make_interval(days => $5), now(), $4
 RETURNING note_id";
 
     /// <summary>Writes the one profile of a scope. $1 server, $2 tag (both NULL = fleet), $3 text, $4 actor.</summary>
-    public const string InvestigationProfileUpsertSql = @"
-INSERT INTO config.agent_environment_profiles (scope_server_id, scope_tag_id, profile_text, modified_at, modified_by)
-VALUES ($1, $2, $3, now(), $4)
-ON CONFLICT ((coalesce(scope_server_id, 0)), (coalesce(scope_tag_id, 0)))
-DO UPDATE SET profile_text = EXCLUDED.profile_text, modified_at = EXCLUDED.modified_at, modified_by = EXCLUDED.modified_by";
+    public const string InvestigationProfileUpsertSql = InvestigationProfiles.UpsertSql;
 
     /// <summary>Removes the profile of a scope (a profile saved blank). $1 server, $2 tag (both NULL = fleet).</summary>
-    public const string InvestigationProfileDeleteSql = @"
-DELETE FROM config.agent_environment_profiles
-WHERE coalesce(scope_server_id, 0) = coalesce($1::integer, 0) AND coalesce(scope_tag_id, 0) = coalesce($2::integer, 0)";
+    public const string InvestigationProfileDeleteSql = InvestigationProfiles.DeleteSql;
 
     /// <summary>The journal actor for a person: <c>person:&lt;login&gt;</c>, as the V184 journal records people.</summary>
-    public static string InvestigationPersonActor(string login) => "person:" + login.Trim();
+    public static string InvestigationPersonActor(string login) => InvestigationProfiles.PersonActor(login);
 
     /// <summary>The requests, newest first. <paramref name="state"/> is one of the five states, or null for all.</summary>
     public async Task<IReadOnlyList<InvestigationRequestViewRow>> GetInvestigationRequestsAsync(
@@ -322,24 +315,16 @@ WHERE coalesce(scope_server_id, 0) = coalesce($1::integer, 0) AND coalesce(scope
     /// <summary>Every environment profile: fleet first, then per server, then per tag.</summary>
     public async Task<IReadOnlyList<InvestigationProfileViewRow>> GetInvestigationProfilesAsync(CancellationToken cancellationToken = default)
     {
-        var rows = new List<InvestigationProfileViewRow>();
-        await using var command = _dataSource.CreateCommand(InvestigationProfilesSelectSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        var rows = await new InvestigationRequestStore(_dataSource, ViewerCommandDeadlines.CurrentInteractiveReadSeconds).ListProfilesAsync(cancellationToken);
+        return rows.Select(r => new InvestigationProfileViewRow
         {
-            rows.Add(new InvestigationProfileViewRow
-            {
-                ProfileId = reader.GetInt32(0),
-                ScopeServerId = reader.IsDBNull(1) ? null : reader.GetInt32(1),
-                ScopeTagId = reader.IsDBNull(2) ? null : reader.GetInt32(2),
-                ProfileText = reader.GetString(3),
-                ModifiedAtUtc = reader.GetDateTime(4),
-                ModifiedBy = reader.IsDBNull(5) ? null : reader.GetString(5),
-            });
-        }
-
-        return rows;
+            ProfileId = r.ProfileId,
+            ScopeServerId = r.ScopeServerId,
+            ScopeTagId = r.ScopeTagId,
+            ProfileText = r.ProfileText,
+            ModifiedAtUtc = r.ModifiedAtUtc,
+            ModifiedBy = r.ModifiedBy,
+        }).ToList();
     }
 
     /// <summary>
@@ -453,44 +438,26 @@ WHERE coalesce(scope_server_id, 0) = coalesce($1::integer, 0) AND coalesce(scope
     public async Task SaveInvestigationProfileAsync(
         int? scopeServerId, int? scopeTagId, string? profileText, string login, CancellationToken cancellationToken = default)
     {
-        var error = ValidateInvestigationLogin(login) ?? ValidateInvestigationProfile(scopeServerId, scopeTagId, profileText);
-        if (error is not null)
+        /* #6264: the check, the write and the journal row are InvestigationRequestStore.SaveProfileAsync, the copy the web page shares. */
+        try
         {
-            throw new ArgumentException(error, nameof(profileText));
+            await new InvestigationRequestStore(_dataSource, ViewerCommandDeadlines.CurrentInteractiveReadSeconds)
+                .SaveProfileAsync(scopeServerId, scopeTagId, profileText, login, cancellationToken);
         }
-
-        var blank = string.IsNullOrWhiteSpace(profileText);
-        var actor = InvestigationPersonActor(login);
-        await InTransactionAsync(async (connection, transaction) =>
+        catch (PostgresException ex) when (ex.SqlState == InsufficientPrivilegeSqlState)
         {
-            await using var command = new NpgsqlCommand(
-                blank ? InvestigationProfileDeleteSql : InvestigationProfileUpsertSql, connection, transaction);
-            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-            AddNullableInt(command, scopeServerId);
-            AddNullableInt(command, scopeTagId);
-            if (!blank)
-            {
-                command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = profileText!.Trim() });
-                command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = actor });
-            }
-
-            var changed = await command.ExecuteNonQueryAsync(cancellationToken);
-            if (changed > 0)
-            {
-                await JournalAsync(connection, transaction, null, scopeServerId, blank ? "profile_removed" : "profile_saved",
-                    actor, InvestigationProfileScopeReason(scopeServerId, scopeTagId), cancellationToken);
-            }
-
-            return changed;
-        }, cancellationToken);
+            throw new ViewerReadOnlyException(ex);
+        }
+        catch (PostgresException ex) when (ex.SqlState is UndefinedColumnSqlState or UndefinedTableSqlState)
+        {
+            throw new ViewerSchemaSkewException(ex);
+        }
     }
 
     /// <summary>The journal reason of a profile change, naming its scope: <c>fleet profile</c>, <c>server 7 profile</c> or
     /// <c>tag 3 profile</c>.</summary>
     public static string InvestigationProfileScopeReason(int? scopeServerId, int? scopeTagId) =>
-        scopeServerId is { } server ? string.Create(CultureInfo.InvariantCulture, $"server {server} profile")
-        : scopeTagId is { } tag ? string.Create(CultureInfo.InvariantCulture, $"tag {tag} profile")
-        : "fleet profile";
+        InvestigationProfiles.ScopeReason(scopeServerId, scopeTagId);
 
     /// <summary>How many requests the feedback list shows at most (the web page's list holds the same number).</summary>
     public const int InvestigationFeedbackListLimit = 200;
@@ -606,10 +573,7 @@ WHERE coalesce(scope_server_id, 0) = coalesce($1::integer, 0) AND coalesce(scope
 
     /// <summary>A profile: one scope at most (fleet, a server or a tag), at most 4,000 characters.</summary>
     public static string? ValidateInvestigationProfile(int? scopeServerId, int? scopeTagId, string? profileText) =>
-        scopeServerId.HasValue && scopeTagId.HasValue ? "A profile is for the fleet, one server or one tag, not a server and a tag."
-        : (profileText?.Trim().Length ?? 0) > InvestigationProfileMaxLength
-            ? string.Create(CultureInfo.InvariantCulture, $"A profile must be {InvestigationProfileMaxLength:N0} characters or fewer.")
-        : null;
+        InvestigationProfiles.Validate(scopeServerId, scopeTagId, profileText);
 
     private static NpgsqlCommand Command(NpgsqlConnection connection, string sql, Guid requestId)
     {

@@ -689,6 +689,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         MapMuteRules(app, postgres, logger);
         MapInvestigationNotes(app, new InvestigationRequestStore(postgres, McpCommandDeadlines.ReadSeconds), logger);
         MapThresholdOverrides(app, postgres, logger);
+        MapAgentSetup(app, postgres, logger);
         MapAgentChanges(app, new AgentChangeUndo(postgres, McpCommandDeadlines.ReadSeconds), logger, ownerSource);
         MapServerTags(app, postgres, logger);
         MapAdminServers(app, postgres);
@@ -1403,6 +1404,131 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
             }
         });
+    }
+
+    /// <summary>
+    /// The agent setup routes (#6264), level with the desktop Viewer: <c>GET /api/agent-setup/access</c> says whether this login can write;
+    /// <c>POST /api/notification-routes</c>, <c>PUT /api/notification-routes/{id}</c> and <c>DELETE /api/notification-routes/{id}</c> create, edit and
+    /// delete a route's agent channel, match, scope, enabled flag, resolution override and fallback (a route's webhooks and email are set in the
+    /// Viewer, never here); <c>GET /api/environment-profiles</c> lists the profiles and <c>PUT /api/environment-profiles</c> saves or removes one.
+    /// The writes need <c>application/json</c>, are born gated by the host's write gate (a read-only seat is refused every unsafe method), answer
+    /// 403 when the store refuses for privilege (SQLSTATE 42501: the <c>viewer</c> role of a managed or compose store), 404 for a route that is
+    /// gone and 400 with the shared rule's sentence for a refused value. The work is <see cref="DarlingWebAgentSetup"/>'s.
+    /// </summary>
+    private static void MapAgentSetup(WebApplication app, NpgsqlDataSource postgres, ILogger logger)
+    {
+        app.MapGet("/api/agent-setup/access", async (HttpContext context) =>
+        {
+            var stopwatch = Stopwatch.StartNew();
+            try
+            {
+                return Results.Json(await DarlingWebAgentSetup.AccessAsync(postgres, context.RequestAborted));
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                DarlingWebFailureLog.Report(logger, "/api/agent-setup/access", stopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
+                return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
+            }
+        });
+
+        app.MapGet("/api/environment-profiles", async (HttpContext context) =>
+        {
+            var stopwatch = Stopwatch.StartNew();
+            try
+            {
+                return DarlingWebStatementSweep.JsonText(
+                    await DarlingWebAgentSetup.ProfilesBodyAsync(postgres, context.RequestAborted),
+                    "/api/environment-profiles", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                DarlingWebFailureLog.Report(logger, "/api/environment-profiles", stopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
+                return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
+            }
+        });
+
+        app.MapPut("/api/environment-profiles", async Task<IResult> (HttpContext context) =>
+        {
+            var stopwatch = Stopwatch.StartNew();
+            var run = await AgentSetupRunAsync(context, logger, "/api/environment-profiles",
+                (body, editor, ct) => DarlingWebAgentSetup.SaveProfileAsync(postgres, body, editor, ct));
+            return DarlingWebStatementSweep.JsonText(
+                run.Body, "/api/environment-profiles", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, run.Status);
+        });
+
+        app.MapPost("/api/notification-routes", async Task<IResult> (HttpContext context) =>
+        {
+            var stopwatch = Stopwatch.StartNew();
+            var run = await AgentSetupRunAsync(context, logger, "/api/notification-routes",
+                (body, editor, ct) => DarlingWebAgentSetup.SaveRouteAsync(postgres, logger, null, body, editor, ct));
+            return DarlingWebStatementSweep.JsonText(
+                run.Body, "/api/notification-routes", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, run.Status);
+        });
+
+        app.MapPut("/api/notification-routes/{id:int}", async Task<IResult> (HttpContext context, int id) =>
+        {
+            var stopwatch = Stopwatch.StartNew();
+            var run = await AgentSetupRunAsync(context, logger, "/api/notification-routes/{id}",
+                (body, editor, ct) => DarlingWebAgentSetup.SaveRouteAsync(postgres, logger, id, body, editor, ct));
+            return DarlingWebStatementSweep.JsonText(
+                run.Body, "/api/notification-routes/{id}", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, run.Status);
+        });
+
+        app.MapDelete("/api/notification-routes/{id:int}", async (HttpContext context, int id) =>
+        {
+            var stopwatch = Stopwatch.StartNew();
+            try
+            {
+                var (status, answer) = await DarlingWebAgentSetup.DeleteRouteAsync(
+                    postgres, logger, id, DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
+                return DarlingWebStatementSweep.JsonText(
+                    answer, "/api/notification-routes/{id}", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, status);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                DarlingWebFailureLog.Report(logger, "/api/notification-routes/{id}", stopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
+                return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
+            }
+        });
+    }
+
+    /// <summary>One agent setup write: <c>application/json</c> required (the same CSRF discipline as the other web writes), the body a JSON
+    /// object, the seat's <see cref="DarlingWebSeat.EditorPrincipal"/> as the editor. Always answers a status and a body for the route to send
+    /// through the statement sweep: a refusal's sentence, or the fixed-sentence 500 or 503 of a failure.</summary>
+    private static async Task<(int Status, JsonNode Body)> AgentSetupRunAsync(
+        HttpContext context, ILogger logger, string route,
+        Func<JsonObject, string, CancellationToken, Task<(int Status, JsonNode Body)>> write)
+    {
+        if (!IsJsonContentType(context.Request.ContentType))
+        {
+            return (StatusCodes.Status415UnsupportedMediaType, new JsonObject { ["error"] = "Content-Type must be application/json." });
+        }
+
+        JsonObject? body;
+        try
+        {
+            body = await JsonNode.ParseAsync(context.Request.Body, cancellationToken: context.RequestAborted) as JsonObject;
+        }
+        catch (JsonException)
+        {
+            body = null;
+        }
+
+        if (body is null)
+        {
+            return (StatusCodes.Status400BadRequest, new JsonObject { ["error"] = "The body must be a JSON object." });
+        }
+
+        var stopwatch = Stopwatch.StartNew();
+        try
+        {
+            return await write(body, DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            DarlingWebFailureLog.Report(logger, route, stopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
+            return (DarlingWebFailureLog.StatusCode(ex), DarlingWebFailureLog.Body(ex));
+        }
     }
 
     /// <summary>The 403 sentence a note decision answers when the store refuses the write (SQLSTATE 42501): the web host runs on

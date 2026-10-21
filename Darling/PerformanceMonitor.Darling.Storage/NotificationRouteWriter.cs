@@ -110,6 +110,40 @@ UPDATE config_notification_routes SET
     modified_at = (now() AT TIME ZONE 'UTC')
 WHERE route_id = $1";
 
+    /// <summary>The column has no foreign key (V193), so a delete clears the references to the deleted route first (#6036).</summary>
+    public const string ClearFallbackSql =
+        "UPDATE config_notification_routes SET fallback_route_id = NULL, modified_at = (now() AT TIME ZONE 'UTC') WHERE fallback_route_id = $1";
+
+    public const string DeleteSql = "DELETE FROM config_notification_routes WHERE route_id = $1";
+
+    /// <summary>Clears every other route's fallback reference to the route, then deletes it, in one transaction (#6036; #6264: the one
+    /// copy the Viewer and the web page share). False when the route is gone. A store error (SQLSTATE 42501 for a login with no write
+    /// grant) propagates.</summary>
+    public static async Task<bool> DeleteAsync(
+        NpgsqlDataSource dataSource, int routeId, int timeoutSeconds, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(dataSource);
+        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await using (var clear = new NpgsqlCommand(ClearFallbackSql, connection, transaction))
+        {
+            clear.CommandTimeout = timeoutSeconds;
+            clear.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });
+            await clear.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        int deleted;
+        await using (var delete = new NpgsqlCommand(DeleteSql, connection, transaction))
+        {
+            delete.CommandTimeout = timeoutSeconds;
+            delete.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });
+            deleted = await delete.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return deleted > 0;
+    }
+
     /// <summary>The columns an update needs to carry a route's stored values forward: the four sealed destinations (or legacy
     /// plaintext) and the address list. Only a writer with the service's login reads them.</summary>
     public const string SelectStoredSql =

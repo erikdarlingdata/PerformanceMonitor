@@ -68,10 +68,9 @@ public sealed partial class ViewerDataService
         "UPDATE config_notification_routes SET enabled = $2, modified_at = (now() AT TIME ZONE 'UTC') WHERE route_id = $1";
 
     /// <summary>The column has no foreign key (V193), so a delete clears the references to the deleted route first (#6036).</summary>
-    public const string NotificationRouteClearFallbackSql =
-        "UPDATE config_notification_routes SET fallback_route_id = NULL, modified_at = (now() AT TIME ZONE 'UTC') WHERE fallback_route_id = $1";
+    public const string NotificationRouteClearFallbackSql = NotificationRouteWriter.ClearFallbackSql;
 
-    public const string NotificationRouteDeleteSql = "DELETE FROM config_notification_routes WHERE route_id = $1";
+    public const string NotificationRouteDeleteSql = NotificationRouteWriter.DeleteSql;
 
     /// <summary>Every route, in resolution order. A read-only seat gets the secret-free projection.</summary>
     public async Task<IReadOnlyList<NotificationRouteRow>> GetNotificationRoutesAsync(CancellationToken cancellationToken = default)
@@ -202,23 +201,7 @@ public sealed partial class ViewerDataService
     {
         try
         {
-            await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
-            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-            await using (var clear = new NpgsqlCommand(NotificationRouteClearFallbackSql, connection, transaction))
-            {
-                clear.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-                clear.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });
-                await clear.ExecuteNonQueryAsync(cancellationToken);
-            }
-
-            await using (var delete = new NpgsqlCommand(NotificationRouteDeleteSql, connection, transaction))
-            {
-                delete.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-                delete.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });
-                await delete.ExecuteNonQueryAsync(cancellationToken);
-            }
-
-            await transaction.CommitAsync(cancellationToken);
+            await NotificationRouteWriter.DeleteAsync(_dataSource, routeId, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
         }
         catch (PostgresException ex) when (ex.SqlState == InsufficientPrivilegeSqlState)
         {

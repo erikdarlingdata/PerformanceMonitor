@@ -53,6 +53,7 @@ public sealed class WebRouteStatementCensusTests
         ["\"/api/ping\""] = "liveness, no data",
         ["\"/api/webhook-signing\""] = "signing key presence and dates from the worker's in-process snapshot, no store read (#5998)",
         ["\"/api/session\""] = "the seat's capabilities",
+        ["\"/api/agent-setup/access\""] = "two booleans from the store login's privilege checks, no text (#6264)",
         ["\"/api/investigation-export\""] = "streams the file the shared export wrote, whose every line the credential-statement check already judged (InvestigationFeedbackExport.Line); a refused line refuses the whole download through the sweep's refusal (#6236)",
         ["\"/api/catalog\""] ="the compose vocabulary (labels; no statement or plan column, pinned by the L8 catalog census)",
         ["\"/api/fleet\""] = "fleet counts and server names",
