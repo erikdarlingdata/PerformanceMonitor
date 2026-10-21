@@ -29,23 +29,23 @@ The reads `list_investigation_requests` and `get_investigation_reports` need no 
 
 `mcp.allowWrites` serves the write tools to a person's MCP client. Today the investigation tools are served only when `mcp.allowWrites` is `false`. One token cannot tell an agent from a person, so Darling does not serve both to one token.
 
-If both settings are `true`, `mcp.allowWrites` wins. The write tools are served. `claim_investigation_request` and `submit_investigation_report` are not served. The start logs one Critical line, and `--validate-config` reports it.
+If both settings are `true`, `mcp.allowWrites` wins. The write tools are served. `claim_investigation_request` and `submit_investigation_report` are not served. The start logs one Critical line, and `--validate-config` prints a warning. Neither one stops the service or changes the exit code.
 
 For a setup, this means you choose one use for the MCP service at a time:
 
-- To run an agent, set `mcp.allowWrites` to `false` and restart the service. The investigation settings also serve the agent's action tools: mutes, custom rules, threshold overrides, signature merges and the server actions. Each one needs an `agent_action` argument.
+- To run an agent, set `mcp.allowWrites` to `false` and restart the service. Darling reads `mcp.allowWrites` and `mcp.allowInvestigations` once, at start. A running service does not reload `darling.json`, and turning MCP off and on with `--disable-mcp` and `--enable-mcp` does not read it again. The investigation settings also serve the agent's action tools: mutes, custom rules, threshold overrides, signature merges and the server actions. Each one needs an `agent_action` argument.
 - To use the write tools yourself, set `mcp.allowInvestigations` to `false` and `mcp.allowWrites` to `true`. Under `mcp.allowWrites`, the agent action tools are ordinary write tools and ignore `agent_action`.
 
 ### Check the setup
 
-Run `PerformanceMonitor.Darling.Service.exe --validate-config`. With `mcp.allowInvestigations` on, it reports these setups:
+Run `PerformanceMonitor.Darling.Service.exe --validate-config`. With `mcp.allowInvestigations` on, it prints a `WARNING:` line for each of these setups:
 
 - The MCP server is off. Turn MCP on, or turn `mcp.allowInvestigations` off.
 - No usable token is set. Set `mcp.network.encryptedToken` or `mcp.network.token`.
 - `mcp.allowWrites` is also on. Turn `mcp.allowWrites` off to serve the investigation tools.
-- No enabled route has an agent level above Off. This is a hint, not an error. No request opens until you add one.
+- No enabled route has an agent level above Off. This one prints as a `NOTE:`. No request opens until you add a route.
 
-The service log says the same at start-up. The first three stop the investigation tools from working. The route hint does not stop anything.
+The service log says the same at start-up. None of these changes the exit code of `--validate-config`, and none stops the service from starting. The first three keep the investigation tools from working. The route note does not stop anything.
 
 ## Create an agent route
 
