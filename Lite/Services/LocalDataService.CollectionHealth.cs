@@ -1139,6 +1139,10 @@ public class CollectionLogRow
     /// replica setting off, every collector but Query Store, and every run stored before the column existed.</summary>
     public string? ReadSource { get; set; }
 
+    /// <summary>#6254: the grids' message cell, <see cref="ErrorMessage"/> with the run's read source after it when it has one. Identical to
+    /// <see cref="ErrorMessage"/> (blank for none) when it has none. Shared wording with the health views' Note column.</summary>
+    public string MessageFormatted => CollectorHealthClassifier.FormatRunMessage(ErrorMessage, ReadSource);
+
     /// <summary>
     /// The clock of the server this run belongs to (#4766), stamped by the tab or window that lists it; null (a row
     /// built without one, such as the fleet-wide log the MCP tool serializes on its own) falls back to the active

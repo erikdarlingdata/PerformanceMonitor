@@ -120,6 +120,30 @@ public sealed class CollectionHealthReadSourceTests : IDisposable
         Assert.DoesNotContain("read_source", log, StringComparison.Ordinal);
     }
 
+    /// <summary>The per-run Collection Log grids' two reads fill the run's read source, and the message cell shows it only on that run.</summary>
+    [Fact]
+    public async Task CollectionLogGrids_ShowTheReadSourceOnTheRunThatHasOne()
+    {
+        var (service, _, server) = await StoreAsync("rs-e");
+        await RunAsync(server, "query_store", TimeSpan.FromMinutes(5), Replica);
+        await RunAsync(server, "query_store", TimeSpan.FromMinutes(9), null);
+        await RunAsync(server, "wait_stats", TimeSpan.FromMinutes(2), null);
+        var serverId = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
+
+        var grid = await service.GetRecentCollectionLogAsync(serverId, hoursBack: 1, cancellationToken: TestContext.Current.CancellationToken);
+        var drill = await service.GetCollectionLogByCollectorAsync(serverId, "query_store", DateTime.UtcNow.AddHours(-1), DateTime.UtcNow.AddMinutes(1));
+
+        Assert.Equal(3, grid.Count);
+        Assert.Equal("read source: " + Replica, grid.Single(r => r.ReadSource != null).MessageFormatted);
+        Assert.All(grid.Where(r => r.ReadSource == null), r => Assert.Equal("", r.MessageFormatted));
+        Assert.Equal(2, drill.Count);
+        Assert.Equal("read source: " + Replica, drill.Single(r => r.ReadSource != null).MessageFormatted);
+        Assert.Equal("", drill.Single(r => r.ReadSource == null).MessageFormatted);
+
+        Assert.Equal("a note; read source: " + Replica, new CollectionLogRow { ErrorMessage = "a note", ReadSource = Replica }.MessageFormatted);
+        Assert.Equal("a note", new CollectionLogRow { ErrorMessage = "a note", ReadSource = " " }.MessageFormatted);
+    }
+
     /// <summary>The log carries the key on the run that has one, per server and fleet-wide, and on no other run.</summary>
     [Fact]
     public async Task Log_CarriesTheReadSourceOnTheRunsThatHaveOne()

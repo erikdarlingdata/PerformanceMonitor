@@ -2557,6 +2557,20 @@ namespace PerformanceMonitor.Common
             var note = string.IsNullOrEmpty(recoveredNote)
                 ? runNote
                 : runNote.Length == 0 ? recoveredNote : recoveredNote + "; " + runNote;
+            return AppendReadSource(note, readSource);
+        }
+
+        /// <summary>
+        /// #6254: the per-run Collection Log grids' message cell. A run's own message (its error, or the note it left) with the run's
+        /// <c>read_source</c> after it, worded as the health views word it (<c>read source: replica 12, primary 2</c>). A run with no
+        /// read source (every run of a server with the replica setting off, every collector but Query Store, every run stored before the
+        /// column existed) returns the message exactly as it was, blank for none.
+        /// </summary>
+        public static string FormatRunMessage(string? message, string? readSource) =>
+            AppendReadSource(message ?? string.Empty, readSource);
+
+        private static string AppendReadSource(string note, string? readSource)
+        {
             if (string.IsNullOrWhiteSpace(readSource))
             {
                 return note;

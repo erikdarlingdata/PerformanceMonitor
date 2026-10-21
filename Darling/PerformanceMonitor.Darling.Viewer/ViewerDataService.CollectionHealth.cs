@@ -405,7 +405,8 @@ public sealed partial class ViewerDataService
             rows_collected,
             status,
             error_message,
-            server_name
+            server_name,
+            read_source
         FROM v_collection_log
         WHERE server_id = $1
         AND   collection_time >= $2
@@ -459,7 +460,8 @@ public sealed partial class ViewerDataService
             rows_collected,
             status,
             error_message,
-            server_name
+            server_name,
+            read_source
         FROM v_collection_log
         WHERE server_id = $1
         AND   collector_name = $2
@@ -1066,6 +1068,7 @@ LIMIT 1";
                 Status = reader.GetString(6),
                 ErrorMessage = reader.IsDBNull(7) ? null : reader.GetString(7),
                 ServerName = reader.IsDBNull(8) ? null : reader.GetString(8),
+                ReadSource = reader.IsDBNull(9) ? null : reader.GetString(9),
             });
         }
 
@@ -1116,6 +1119,14 @@ public class CollectionLogRow
     public int? RowsCollected { get; set; }
     public string Status { get; set; } = "";
     public string? ErrorMessage { get; set; }
+
+    /// <summary>#6254: where this run's Query Store rows were read from (for example <c>replica 12, primary 2</c>), or null: every run of a server with the
+    /// replica setting off, every collector but Query Store, and every run stored before the column existed.</summary>
+    public string? ReadSource { get; set; }
+
+    /// <summary>#6254: the grids' message cell, <see cref="ErrorMessage"/> with the run's read source after it when it has one. Identical to
+    /// <see cref="ErrorMessage"/> (blank for none) when it has none. Shared wording with the health views' Note column.</summary>
+    public string MessageFormatted => CollectorHealthClassifier.FormatRunMessage(ErrorMessage, ReadSource);
 
     public string CollectionTimeFormatted => ViewerTimeHelper.FormatForDisplay(CollectionTime, "yyyy-MM-dd HH:mm:ss");
 

@@ -75,6 +75,18 @@ public sealed class CollectionHealthReadSourceTests
         Assert.Equal(CollectorHealthClassifier.FormatCollectionNote("a note", 1, 1),
             CollectorHealthClassifier.FormatCollectionNote("a note", 1, 1, readSource: null));
     }
+
+    /// <summary>The per-run Collection Log grids' message cell: the run's own message untouched with no read source, and the source after it with one.</summary>
+    [Fact]
+    public void TheCollectionLogGridMessage_IsUnchangedWithNoReadSource_AndCarriesItWhenTheRunHasOne()
+    {
+        Assert.Equal("a note", new CollectionLogRow { ErrorMessage = "a note" }.MessageFormatted);
+        Assert.Equal("", new CollectionLogRow().MessageFormatted);
+        Assert.Equal("a note", new CollectionLogRow { ErrorMessage = "a note", ReadSource = "  " }.MessageFormatted);
+
+        Assert.Equal("a note; read source: " + Replica, new CollectionLogRow { ErrorMessage = "a note", ReadSource = Replica }.MessageFormatted);
+        Assert.Equal("read source: " + Replica, new CollectionLogRow { ReadSource = Replica }.MessageFormatted);
+    }
 }
 
 /// <summary>The same, end to end against a store: the tool reads the newest Query Store run's <c>read_source</c>.</summary>
@@ -185,5 +197,57 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE, sql_major_version = 15;
 
         var json = await DarlingMcpDataTools.GetCollectionHealth(postgres, ServerName, cancellationToken: ct);
         Assert.DoesNotContain("read_source", json, StringComparison.Ordinal);
+    });
+
+    private static JsonElement[] Runs(string json) =>
+        JsonDocument.Parse(json).RootElement.GetProperty("runs").EnumerateArray().Select(r => r.Clone()).ToArray();
+
+    /// <summary>get_collection_log carries the key on the run that has one, for one server and fleet-wide, and on no other run.</summary>
+    [Fact]
+    public Task Log_CarriesTheReadSourceOnTheRunsThatHaveOne_PerServerAndFleetWide() => RunAsync(async (connection, postgres, ct) =>
+    {
+        const string marker = "replica 987654, primary 3";
+        var now = DateTime.UtcNow;
+        await InsertRunAsync(connection, "query_store", now.AddMinutes(-5), marker, ct);
+        await InsertRunAsync(connection, "wait_stats", now.AddMinutes(-2), null, ct);
+
+        var perServer = Runs(await DarlingMcpDataTools.GetCollectionLog(postgres, ServerName, 24, 200, cancellationToken: ct));
+        Assert.Equal(marker, perServer.Single(r => r.GetProperty("collector").GetString() == "query_store").GetProperty("read_source").GetString());
+        Assert.All(perServer.Where(r => r.GetProperty("collector").GetString() == "wait_stats"), r => Assert.False(r.TryGetProperty("read_source", out _)));
+
+        var fleet = Runs(await DarlingMcpDataTools.GetCollectionLog(postgres, "*", 24, 200, cancellationToken: ct));
+        Assert.Equal(marker, fleet.Single(r => r.TryGetProperty("read_source", out var source) && source.GetString() == marker).GetProperty("read_source").GetString());
+        Assert.All(fleet.Where(r => r.GetProperty("collector").GetString() == "wait_stats"), r => Assert.False(r.TryGetProperty("read_source", out _)));
+    });
+
+    /// <summary>With NULL on every run, which is every server with the setting off, get_collection_log names no read_source anywhere.</summary>
+    [Fact]
+    public Task Log_WithNoReadSourceAnywhere_CarriesNoReadSourceKey() => RunAsync(async (connection, postgres, ct) =>
+    {
+        await InsertRunAsync(connection, "query_store", DateTime.UtcNow.AddMinutes(-5), null, ct);
+
+        var json = await DarlingMcpDataTools.GetCollectionLog(postgres, ServerName, 24, 200, cancellationToken: ct);
+        Assert.DoesNotContain("read_source", json, StringComparison.Ordinal);
+    });
+
+    /// <summary>The Viewer's two per-run Collection Log grid reads fill the run's read source, and the grid's message cell shows it only on that run.</summary>
+    [Fact]
+    public Task ViewerCollectionLogGrids_ShowTheReadSourceOnTheRunThatHasOne() => RunAsync(async (connection, postgres, ct) =>
+    {
+        var now = DateTime.UtcNow;
+        await InsertRunAsync(connection, "query_store", now.AddMinutes(-5), "replica 12, primary 2", ct);
+        await InsertRunAsync(connection, "query_store", now.AddMinutes(-9), null, ct);
+        await InsertRunAsync(connection, "wait_stats", now.AddMinutes(-2), null, ct);
+
+        await using var viewer = new ViewerDataService(ConnectionString!);
+        var grid = await viewer.GetRecentCollectionLogAsync(ServerId, now.AddHours(-1), now.AddMinutes(1), cancellationToken: ct);
+        var drill = await viewer.GetCollectionLogByCollectorAsync(ServerId, "query_store", now.AddHours(-1), now.AddMinutes(1), ct);
+
+        Assert.Equal(3, grid.Count);
+        Assert.Equal("read source: replica 12, primary 2", grid.Single(r => r.ReadSource != null).MessageFormatted);
+        Assert.All(grid.Where(r => r.ReadSource == null), r => Assert.Equal("", r.MessageFormatted));
+        Assert.Equal(2, drill.Count);
+        Assert.Equal("read source: replica 12, primary 2", drill.Single(r => r.ReadSource != null).MessageFormatted);
+        Assert.Equal("", drill.Single(r => r.ReadSource == null).MessageFormatted);
     });
 }

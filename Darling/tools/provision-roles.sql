@@ -648,7 +648,7 @@ GRANT SELECT (hypothetical_index_username) ON config.config_monitored_servers TO
 $v203$;
    END IF;
 END $$;
--- V211 (#6254): the Query Store replica HOST, on the registry. Non-secret, like host. Guarded on the column, so a store below V211
+-- V212 (#6254): the Query Store replica HOST, on the registry. Non-secret, like host. Guarded on the column, so a store below V212
 -- still commits the rest of the carve instead of failing on a column it does not have yet.
 DO $$
 BEGIN
@@ -764,7 +764,7 @@ GRANT SELECT (hypothetical_index_username) ON config.config_monitored_servers TO
 $v203$;
    END IF;
 END $$;
--- V211 (#6254): the Query Store replica HOST, on the registry. Non-secret, like host. Guarded on the column, so a store below V211
+-- V212 (#6254): the Query Store replica HOST, on the registry. Non-secret, like host. Guarded on the column, so a store below V212
 -- still commits the rest of the carve instead of failing on a column it does not have yet.
 DO $$
 BEGIN
@@ -1702,7 +1702,7 @@ BEGIN
       OR NEW.trust_server_certificate IS DISTINCT FROM OLD.trust_server_certificate
       OR NEW.multi_subnet_failover IS DISTINCT FROM OLD.multi_subnet_failover
       -- The Query Store replica (#6254) is a host the stored password would be sent to. Read through to_jsonb, blank as none, so this
-      -- function also runs on a store below V211 that does not have the column yet.
+      -- function also runs on a store below V212 that does not have the column yet.
       OR COALESCE(NULLIF(btrim(to_jsonb(NEW) ->> 'query_store_replica'), ''), '') IS DISTINCT FROM COALESCE(NULLIF(btrim(to_jsonb(OLD) ->> 'query_store_replica'), ''), '');
 
    -- A remediation secret that is kept goes with the login name it was stored for: that name is as much a part of how
