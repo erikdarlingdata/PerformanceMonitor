@@ -178,13 +178,13 @@ public class QueryStorePlanFetchTests
         Assert.DoesNotContain("qsq.query_id > ", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("SELECT TOP", sql, StringComparison.Ordinal);
 
-        Assert.Contains("JOIN sys.query_store_query_text AS qst", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM sys.query_store_query_text AS qst", sql, StringComparison.Ordinal);
         Assert.Contains("b.running_bytes - b.text_bytes < 12582912", sql, StringComparison.Ordinal);
         Assert.Contains("ROWS UNBOUNDED PRECEDING", sql, StringComparison.Ordinal);
 
         /* #2675: text is read once - materialised to #text_fetch, then budgeted/emitted from there, the same
            single-read shape as the plan fetch. */
-        Assert.Contains("INTO #text_fetch", sql, StringComparison.Ordinal);
+        Assert.Contains("INTO #text_fetch_text", sql, StringComparison.Ordinal);
         Assert.Equal(1, CountOf(sql, "query_sql_text = qst.query_sql_text"));
         Assert.Contains("SET NOCOUNT ON;", sql, StringComparison.Ordinal);
 

@@ -523,7 +523,8 @@ public sealed class QueryStoreCollectorDefinitionTests
            direct connections (on-prem the sp_executesql scope self-cleans). */
         Assert.Contains("DROP TABLE IF EXISTS #pm_qs_slice;", text, StringComparison.Ordinal);
         Assert.Contains("INTO #pm_qs_slice", text, StringComparison.Ordinal);
-        Assert.Contains("FROM #pm_qs_slice AS qsrs\nJOIN sys.query_store_plan AS qsp", Lf(text), StringComparison.Ordinal);
+        /* #6257: the shipping SELECT joins staged temp tables only; each Query Store view is read once, into its own temp. */
+        Assert.Contains("FROM #pm_qs_slice AS qsrs\nJOIN #pm_qs_plan AS qsp", Lf(text), StringComparison.Ordinal);
 
         /* The row SHAPE must not move: 55 selected columns, and the TOP/ORDER BY stay on the final
            SELECT so the cap counts intervals and can never truncate one interval's slices into a
@@ -583,14 +584,19 @@ public sealed class QueryStoreCollectorDefinitionTests
         /* Immediately before query_hash, exactly where the real column sat. */
         Assert.Contains("query_sql_text = CONVERT(nvarchar(1), NULL),\n    query_hash", Lf(nulled), StringComparison.Ordinal);
         /* The qst join is dropped with the flag on (text arrives by-ids); Lite keeps it. */
-        Assert.DoesNotContain("JOIN sys.query_store_query_text AS qst", nulled, StringComparison.Ordinal);
-        Assert.Contains("JOIN sys.query_store_query_text AS qst", inline, StringComparison.Ordinal);
+        Assert.DoesNotContain("query_store_query_text", nulled, StringComparison.Ordinal);
+        Assert.Contains("JOIN #pm_qs_text AS qst", inline, StringComparison.Ordinal);
 
         /* Ordinal-safety still holds: normalize out BOTH the text column and the Lite-only qst join, and
            the remainder - every other column at its ordinal - must be identical between the two forms. */
-        const string qstJoin = "JOIN sys.query_store_query_text AS qst\n  ON qst.query_text_id = qsq.query_text_id\n";
+        const string qstJoin = "JOIN #pm_qs_text AS qst\n  ON qst.query_text_id = qsq.query_text_id\n";
+        var stageStart = Lf(inline).IndexOf("\nSELECT /* PerformanceMonitorLite */\n    qst.query_text_id", StringComparison.Ordinal);
+        const string stageEndMarker = "CREATE CLUSTERED INDEX c ON #pm_qs_text (query_text_id);\n";
+        var stageEnd = Lf(inline).IndexOf(stageEndMarker, StringComparison.Ordinal) + stageEndMarker.Length;
+        Assert.True(stageStart > 0 && stageEnd > stageStart, "the inline form stages the text view into #pm_qs_text");
         Assert.Equal(
-            Lf(inline).Replace("query_sql_text = qst.query_sql_text,", "@@TEXT@@", StringComparison.Ordinal)
+            Lf(inline).Remove(stageStart, stageEnd - stageStart)
+                      .Replace("query_sql_text = qst.query_sql_text,", "@@TEXT@@", StringComparison.Ordinal)
                       .Replace(qstJoin, "", StringComparison.Ordinal),
             Lf(nulled).Replace("query_sql_text = CONVERT(nvarchar(1), NULL),", "@@TEXT@@", StringComparison.Ordinal));
     }
