@@ -1574,7 +1574,6 @@ export const SERVER_TABS = [
     label: "File I/O",
     build: (server, ctx) => [
       fileIoPanel(server, ctx),
-      seriesTrendPanel(server, ctx, "file_io_throughput"),
       table(
         "File I/O Stats",
         "get_file_io_stats",
@@ -1590,9 +1589,6 @@ export const SERVER_TABS = [
         span: 2,
         emptyText: "No tempdb samples in this window.",
       }),
-      /* #6297: the desktop's tempdb tab also charts the allocated size and the per-file I/O latency under the usage line. */
-      serverTrendPanel(server, ctx, "tempdb_size"),
-      seriesTrendPanel(server, ctx, "tempdb_file_io"),
       /* `noteKey` carries the read's own note when a Hyperscale log file is in the snapshot: its size is n/a
          (log service) and it is left out of these totals, so the page says so instead of looking short. */
       table(
@@ -1624,6 +1620,18 @@ export const SERVER_TABS = [
         SNAPSHOT,
         "No PVS rows. The collector reads a SQL Server 2019+ DMV, and a server with Accelerated Database Recovery off has nothing to report."
       ),
+    ],
+  },
+
+  /* #6296, #6297: the desktop's File I/O Throughput sub-tab and tempdb charts. Their own tab, not panels on File I/O: get_server_trend
+     reaches 7 days where the File I/O tab's reads reach 30, and a tab's reach is the smallest of its reads. */
+  {
+    id: "iotrends",
+    label: "I/O Trends",
+    build: (server, ctx) => [
+      seriesTrendPanel(server, ctx, "file_io_throughput"),
+      serverTrendPanel(server, ctx, "tempdb_size"),
+      seriesTrendPanel(server, ctx, "tempdb_file_io"),
     ],
   },
 

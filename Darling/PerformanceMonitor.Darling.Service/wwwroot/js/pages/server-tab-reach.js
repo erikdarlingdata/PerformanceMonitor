@@ -56,7 +56,13 @@ export const SQL_TAB_REACH = {
   io: {
     collector: "file_io_stats",
     reachReads: [
-      "get_file_io_trend", "get_server_trend", "get_tempdb_trend"
+      "get_file_io_trend", "get_tempdb_trend"
+    ]
+  },
+  iotrends: {
+    collector: "file_io_stats",
+    reachReads: [
+      "get_server_trend"
     ]
   },
   queries: {

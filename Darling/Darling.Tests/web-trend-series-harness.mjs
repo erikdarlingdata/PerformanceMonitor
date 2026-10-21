@@ -1,4 +1,4 @@
-/* #6296, #6297, #6298: runs the server page's File I/O tab (the throughput chart, the tempdb allocated size and the tempdb file I/O latency)
+/* #6296, #6297, #6298: runs the server page's I/O Trends tab (the throughput chart, the tempdb allocated size and the tempdb file I/O latency)
    and its Collection Health tab (the collector duration chart), in wwwroot/js/pages/server-tabs.js with the shipped panels.js, util.js and
    charts.js, against a scripted /api/read answer for get_server_trend, and prints as one line of JSON what each panel drew: its charts' titles
    and legend labels, its strips and its notes. WebTrendSeriesBehaviourTests starts it as
@@ -137,7 +137,7 @@ const report = (root, title) => {
   };
 };
 
-const io = await draw("io");
+const io = await draw("iotrends");
 const health = await draw("health");
 console.log(JSON.stringify({
   throughput: report(io, "File I/O Throughput"),
