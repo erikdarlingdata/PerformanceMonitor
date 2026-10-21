@@ -194,6 +194,10 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE, sql_engine_edition = $3
 
         var one = JsonDocument.Parse(await DarlingMcpHealthTools.GetDailySummary(s.Postgres, name, Day1.ToString("yyyy-MM-dd"), s.Registry, NullLogger.Instance, ct));
         Assert.Equal(2, one.RootElement.GetProperty("deadlock_count").GetInt32());
+        /* #6294: the day detail the web calendar prints comes from the same row, so it names this day's deadlocks and blocking
+           and offers the three drills (Top Queries is offered on every collected day). */
+        Assert.Contains(one.RootElement.GetProperty("reasons").EnumerateArray().Select(e => e.GetString()), line => line!.Contains("deadlock", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(new[] { "Deadlocks", "Blocking", "TopQueries" }, one.RootElement.GetProperty("drills").EnumerateArray().Select(e => e.GetString()).ToArray());
 
         DarlingHealthReader.ResetRangeCacheForTests();
         var noRegistry = JsonDocument.Parse(await DarlingMcpHealthTools.GetDailySummary(s.Postgres, name, Day1.ToString("yyyy-MM-dd"), null, null, ct));

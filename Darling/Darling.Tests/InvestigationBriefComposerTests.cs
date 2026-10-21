@@ -87,7 +87,7 @@ public sealed class InvestigationBriefComposerTests
     private static InvestigationAlertRecurrence Recurrence(int i) =>
         new("Metric" + i.ToString(System.Globalization.CultureInfo.InvariantCulture), new DateTime(2026, 10, 14, 2, 10, 0, DateTimeKind.Utc), 4, 1,
             new[] { new DateOnly(2026, 10, 13), new DateOnly(2026, 10, 12), new DateOnly(2026, 10, 11), new DateOnly(2026, 10, 10) },
-            new[] { new DateOnly(2026, 10, 9) });
+            new[] { new DateOnly(2026, 10, 9) }, new[] { 1, 2, 3, 4, 5 });
 
     private static InvestigationPriorLink PriorLink(int i) =>
         new(Guid.NewGuid(), Now.AddHours(-i - 1), "ticket", "https://tickets.example.com/browse/OPS-" + new string('9', 150) + i.ToString(System.Globalization.CultureInfo.InvariantCulture), null);
