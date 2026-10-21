@@ -2091,13 +2091,18 @@ ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS starts_at_utc time
     /// <summary>
     /// V211 (#6254): two nullable text columns. <c>config.config_monitored_servers.query_store_replica</c> is the host (or listener
     /// name) Query Store is read from instead of the server itself; NULL, the default for every existing row, keeps today's behaviour.
-    /// <c>config.collection_log.read_source</c> says which host a collection read came from; NULL on every existing row. Neither has a
+    /// <c>collect.collection_log.read_source</c> says which host a collection read came from; NULL on every existing row. Neither has a
     /// default and neither needs a backfill, so each <c>ADD COLUMN</c> is catalog-only. An older build ignores both columns and reads
     /// every row as it did before, so there is no rollback line. Idempotent.
     /// </summary>
     private const string V211Sql = @"
 ALTER TABLE config.config_monitored_servers ADD COLUMN IF NOT EXISTS query_store_replica text;
-ALTER TABLE config.collection_log ADD COLUMN IF NOT EXISTS read_source text;";
+ALTER TABLE collect.collection_log ADD COLUMN IF NOT EXISTS read_source text;
+
+/* The log lives in the collect schema, and its passthrough view freezes its column list at CREATE (the V80 lesson), so every read
+   of the log (the MCP tools, the web page, the Viewer) would never see read_source without this. Appending is the one alteration
+   CREATE OR REPLACE VIEW permits, which is exactly what an ADD COLUMN produces. */
+CREATE OR REPLACE VIEW collect.v_collection_log AS SELECT * FROM collect.collection_log;";
 
     private const string V209Sql = @"
 ALTER TABLE config.config_service ADD COLUMN IF NOT EXISTS query_store_fetch_top_n integer NOT NULL DEFAULT 100;";

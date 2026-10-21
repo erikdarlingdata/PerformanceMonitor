@@ -124,7 +124,10 @@ internal static class DarlingDataReader
         double? TextFetchTargetMs = null,
         double? TextFetchWriteMs = null,
         long? TextFetchIdsAttempted = null,
-        long? TextFetchProbeIds = null)
+        long? TextFetchProbeIds = null,
+        /* V211 (#6254): which host a Query Store run read from, e.g. "replica 12, primary 2 (redo_behind: Sales)". NULL on every run
+           written before the setting existed and on every run of a server with the setting off: the tools then show nothing. */
+        string? ReadSource = null)
     {
         /* The residual, derived rather than read (V108 stores no other_ms column on purpose): open + drain
            + this SUM to SqlDurationMs by construction, so a large value here is a real finding - cost in
@@ -4672,7 +4675,8 @@ FROM config.config_collector_schedules";
             text_fetch_target_ms,
             text_fetch_write_ms,
             text_fetch_ids_attempted,
-            text_fetch_probe_ids
+            text_fetch_probe_ids,
+            read_source
         FROM v_collection_log
         WHERE server_id = $1
         AND   collection_time >= $2
@@ -4847,7 +4851,8 @@ FROM config.config_collector_schedules";
             reader.IsDBNull(i + 22) ? null : Convert.ToDouble(reader.GetValue(i + 22)),
             reader.IsDBNull(i + 23) ? null : Convert.ToDouble(reader.GetValue(i + 23)),
             reader.IsDBNull(i + 24) ? null : Convert.ToInt64(reader.GetValue(i + 24)),
-            reader.IsDBNull(i + 25) ? null : Convert.ToInt64(reader.GetValue(i + 25)));
+            reader.IsDBNull(i + 25) ? null : Convert.ToInt64(reader.GetValue(i + 25)),
+            reader.IsDBNull(i + 26) ? null : reader.GetString(i + 26));
 
     /// <summary>One <see cref="CollectionLogEntry"/> plus which server it came from — the fleet-wide row shape
     /// (#4199), needed only because <see cref="GetCollectionLogFleetAsync"/> merges runs across every enabled
@@ -4898,7 +4903,8 @@ FROM config.config_collector_schedules";
             cl.text_fetch_target_ms,
             cl.text_fetch_write_ms,
             cl.text_fetch_ids_attempted,
-            cl.text_fetch_probe_ids
+            cl.text_fetch_probe_ids,
+            cl.read_source
         FROM v_collection_log cl
         JOIN servers s ON s.server_id = cl.server_id AND s.is_enabled
         WHERE cl.collection_time >= $1
