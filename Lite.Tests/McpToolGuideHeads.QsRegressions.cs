@@ -24,7 +24,8 @@ public sealed class McpToolGuideHeadsQsRegressionsTests
     [
         "get_query_store_top ranks EXPENSIVE, this ranks CHANGED.",
         "Gated: average CPU regressed over 25%.",
-        "duration_regression_percent, io_regression_percent (Lite only) and severity are null, not 0%, when their baseline is 0",
+        "Timeouts or errors that rose also qualify (regression_reason).",
+        "duration_regression_percent and severity are null, not 0%, when their baseline is 0",
         "additional_duration_ms is the ranking key.",
         "empty: no regression, or nothing yet in the baseline window.",
         "unavailable: no baseline exists yet.",
@@ -52,7 +53,7 @@ public sealed class McpToolGuideHeadsQsRegressionsTests
     public void Tail_CarriesOriginalProse_Verbatim()
     {
         var tail = McpToolGuideTests.Served(Tool).Tail!;
-        Assert.StartsWith("Finds queries whose Query Store performance got WORSE, by comparing each (database, query_id) group's averages", tail, StringComparison.Ordinal);
+        Assert.StartsWith("Finds queries whose Query Store performance got WORSE, by comparing each (database, query_id) group's per-execution cost", tail, StringComparison.Ordinal);
         Assert.Contains("get_query_store_top answers what is EXPENSIVE; the most expensive query is usually the one that always was.", tail, StringComparison.Ordinal);
         Assert.Contains("never as 0, which would read as no change when the truth is the largest possible one", tail, StringComparison.Ordinal);
         Assert.Contains("so a null percent never sorts as 0.", tail, StringComparison.Ordinal);

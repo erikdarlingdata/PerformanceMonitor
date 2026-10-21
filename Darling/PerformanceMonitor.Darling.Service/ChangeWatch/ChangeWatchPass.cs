@@ -78,13 +78,17 @@ WHERE server_id = $1 AND outcome = 'succeeded' AND action_time > $2 AND action_t
        cannot be dated, and reporting it at the return capture would open a watch bracketing the failback and not the change. #6239 round 3, L3: a change the
        plan-force ledger explains (a succeeded action on the plan AFTER the previous capture and up to this one) is skipped; a fixed 30 minutes missed an action
        early in a longer gap. The other capture's plans are probed with a LATERAL LIMIT 1 per plan row (an index probe on the capture's time), because as an
-       anti-join the planner hashes the whole day's rows on the other side. */
+       anti-join the planner hashes the whole day's rows on the other side.
+       #6234: the captures are a GROUP BY and not a SELECT DISTINCT. On TimescaleDB 2.30 the planner turns the DISTINCT over idx_query_store_forced_plans_markers into a
+       Custom Scan (SkipScan) (skip qual database_name > NULL), and when the mark is old or the markers are few next to the plan rows it fails at run time with XX000
+       "ScanKey for skip qual not found", so no plan change was read on a SQL Server fleet. SkipScan only rewrites DISTINCT; the GROUP BY keeps the same index scan. */
     internal const string PlanSnapshotChangesSql = @"
 WITH fresh AS (
     SELECT m.t, m.database_name, p.prev_t
-    FROM (SELECT DISTINCT collection_time AS t, database_name
+    FROM (SELECT collection_time AS t, database_name
           FROM collect.query_store_forced_plans
-          WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3 AND database_name IS NOT NULL AND plan_id IS NULL) AS m
+          WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3 AND database_name IS NOT NULL AND plan_id IS NULL
+          GROUP BY collection_time, database_name) AS m
     CROSS JOIN LATERAL (SELECT max(q.collection_time) AS prev_t
                         FROM collect.query_store_forced_plans AS q
                         WHERE q.server_id = $1 AND q.database_name = m.database_name AND q.plan_id IS NULL

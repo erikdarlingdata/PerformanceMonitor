@@ -8,22 +8,25 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
 
-/// <summary>One Query Store regression row — the DuckDB twin of Darling's
+/// <summary>One Query Store regression row - the DuckDB twin of Darling's
 /// <c>DarlingQueryStoreRegressionReader.RegressionRow</c>. Durations and CPU are ms (converted from the
-/// stored microseconds); reads are raw pages; the percents are plain deltas.
-/// <para>The three percents are NULLABLE (#3541 A12, contract rule 5). Each divides through
-/// <c>NULLIF(baseline, 0)</c>, so a query whose baseline side is 0 — no logical reads in every capture before
-/// the window, then 50,000 per execution inside it — has no ratio: the SQL returns NULL, and the reader used
-/// to coerce it to 0, which published the most dramatic possible I/O regression as
-/// <c>io_regression_percent: 0</c>, "no change". NULL stays NULL here and the tool says why. The CPU percent
-/// cannot actually arrive NULL (the WHERE gate <c>&gt; 25</c> drops a NULL comparison), but it is typed like
-/// its siblings so the three cannot drift in how they treat a missing denominator.</para></summary>
+/// stored microseconds); the percents are plain deltas. Logical reads are not reported (#5506, #6268): they are not a
+/// useful metric.
+/// <para>Both percents are NULLABLE (#3541 A12, contract rule 5). Each divides through
+/// <c>NULLIF(baseline, 0)</c>, so a query whose baseline side is 0 has no ratio: the SQL returns NULL, and the reader used
+/// to coerce it to 0, which published the most dramatic possible regression as "no change". NULL stays NULL here and the
+/// tool says why. A row flagged only for timeouts or errors can have no Regular runs on a side, so it has no cost comparison
+/// and both percents are NULL.</para>
+/// <para>#6268: <see cref="Aborted"/> and <see cref="Exception"/> are the other two groups of runs, beside the Regular figures
+/// above; <see cref="RegressionReason"/> says which of cost, timeouts and errors flagged the row.</para></summary>
 public sealed class QueryStoreRegressionRow
 {
     public string DatabaseName { get; set; } = "";
@@ -34,9 +37,6 @@ public sealed class QueryStoreRegressionRow
     public double BaselineCpuMs { get; set; }
     public double RecentCpuMs { get; set; }
     public double? CpuRegressionPercent { get; set; }
-    public double BaselineReads { get; set; }
-    public double RecentReads { get; set; }
-    public double? IoRegressionPercent { get; set; }
     public double AdditionalDurationMs { get; set; }
     public long BaselineExecCount { get; set; }
     public long RecentExecCount { get; set; }
@@ -47,10 +47,31 @@ public sealed class QueryStoreRegressionRow
     public DateTime? LastExecutionTime { get; set; }
     /// <summary>#6128: every regression that passed the gate, before the row cap. The same value on every row of one read.</summary>
     public long TotalCount { get; set; }
+    /// <summary>#6268: why the row is listed: cost, timeouts, errors, or a comma-separated combination in that order.</summary>
+    public string RegressionReason { get; set; } = "";
+    public double? BaselineRegularPerHour { get; set; }
+    public double? RecentRegularPerHour { get; set; }
+    public QueryStoreRunGroup Aborted { get; set; } = new();
+    public QueryStoreRunGroup Exception { get; set; } = new();
+}
+
+/// <summary>One group of runs (Aborted or Exception, #6268) of one query: the execution count and the per-execution CPU and
+/// duration (ms, weighted by execution count, null when the count is 0), and the count per hour, for the baseline and for the
+/// recent window. Darling twin: <c>DarlingQueryStoreRegressionReader.RunGroup</c>.</summary>
+public sealed class QueryStoreRunGroup
+{
+    public long BaselineCount { get; set; }
+    public long RecentCount { get; set; }
+    public double? BaselineCpuMs { get; set; }
+    public double? RecentCpuMs { get; set; }
+    public double? BaselineDurationMs { get; set; }
+    public double? RecentDurationMs { get; set; }
+    public double? BaselinePerHour { get; set; }
+    public double? RecentPerHour { get; set; }
 }
 
 /*
- * The Query Store regressions read (#2484) — Lite's port of Darling's, which is itself the viewer's port
+ * The Query Store regressions read (#2484) - Lite's port of Darling's, which is itself the viewer's port
  * of the Dashboard's report.query_store_regressions inline TVF. Two windowed passes over the SAME
  * v_query_store_stats view: BASELINE is a fixed lookback before the window start, RECENT is the window.
  *
@@ -58,13 +79,22 @@ public sealed class QueryStoreRegressionRow
  * CUMULATIVE per-interval snapshots and the collector re-fetches an open interval every cycle, so the same
  * interval is stored repeatedly with a growing execution_count. This read is the most exposed of any to
  * that: the baseline arm and the recent arm can have systematically different re-collection density per
- * interval — which alone moves the averages the regression percent is computed from and the 25% CPU gate,
+ * interval - which alone moves the averages the regression percent is computed from and the 25% CPU gate,
  * manufacturing and hiding regressions for reasons that have nothing to do with the query.
  *
- * One deliberate difference from Darling's: the query-text sample comes only from MAX(query_text) on the
- * fact rows. Darling resolves it from collect.query_store_text (#2150) and falls back to the fact rows;
- * that table is a Darling-store construct with no Lite equivalent, so Lite has only the fallback. It is a
- * difference in where the SAME text comes from, not in which rows the read returns.
+ * #6268 (Darling's #5506): THREE groups of runs are read per query, side by side: Regular (the cost the gate compares), Aborted
+ * (timeouts, cancels) and Exception (errors). Counting only Regular runs hides what a timeout or an error does (one 30 s timeout
+ * among 1,000 fast runs barely moves an average), and blending them into one average would hide it the same way. Cost is the
+ * Regular runs' CPU and duration per execution, WEIGHTED by execution count (the summed cost over the summed executions, not an
+ * average of interval averages), for both sides. A query is flagged for COST (Regular CPU up more than CostGatePercent), for
+ * TIMEOUTS or ERRORS (that group's per-hour rate in the recent window at least FailureRateMultiple times the baseline's, or any at
+ * all where the baseline had none, with at least FailureMinRecentRuns such runs in the recent window), or for several. The
+ * thresholds are QueryStoreRegressionRules', shared with Darling. Logical reads are not read at all.
+ *
+ * Differences from Darling's, none of them in which rows the read returns: the query-text sample comes only from the fact rows
+ * (Darling resolves it from collect.query_store_text, #2150, a Darling-store table Lite has no equivalent of); Lite keeps no
+ * per-day totals table, so the baseline always comes from the fact rows; and an interval belongs to the baseline or the recent
+ * window by the collection_time of its latest snapshot, as this read always did.
  */
 public partial class LocalDataService
 {
@@ -73,15 +103,17 @@ public partial class LocalDataService
     /// window's start, so the comparison period stops moving with retention. Before this the baseline was
     /// every retained row before the window with NO lower bound, so its cost tracked how much history the
     /// store still held rather than the window asked for. A regression against a baseline OLDER than 7 days
-    /// is no longer caught; a server retaining less than 7 days of Query Store history is unaffected — the
+    /// is no longer caught; a server retaining less than 7 days of Query Store history is unaffected - the
     /// bound never reaches further back than the unbounded read already stopped.
     /// </summary>
     public const int BaselineLookbackDays = 7;
 
     /// <summary>
     /// The queries whose Query Store performance got WORSE over [now - <paramref name="hoursBack"/>, now]
-    /// compared with a fixed <see cref="BaselineLookbackDays"/>-day baseline ending at the window's start,
-    /// ranked by execution-count-weighted extra duration.
+    /// compared with a fixed <see cref="BaselineLookbackDays"/>-day baseline ending at the window's start: Regular cost
+    /// per execution up, or Aborted (timeouts) or Exception (errors) runs up (#6268). Cost rows come first, ranked by
+    /// execution-count-weighted extra duration; rows listed only for timeouts or errors follow, by their recent failed runs,
+    /// and take at most <c>maxRows / FailureShareDivisor</c> slots (more only when the cost rows leave room).
     /// </summary>
     public async Task<List<QueryStoreRegressionRow>> GetQueryStoreRegressionsAsync(
         int serverId, int hoursBack = 24, int maxRows = 50, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
@@ -95,18 +127,25 @@ public partial class LocalDataService
         var baselineParamIndex = 4 + dbValues.Count;
         var limitIndex = baselineParamIndex + 1;
 
+        /* The per-hour rates divide by each window's own length: the baseline is [baseline start, window start), the recent
+           window [window start, window end]. Both are numbers computed here, written as invariant literals. */
+        var baseHours = (startTime - baselineStartTime).TotalHours.ToString("R", CultureInfo.InvariantCulture);
+        var recentHours = (endTime - startTime).TotalHours.ToString("R", CultureInfo.InvariantCulture);
+        var limit = "CAST($" + limitIndex + " AS INTEGER)";
+
         command.CommandText = @"
 WITH deduped_baseline AS (
-    /* LOAD-BEARING (correctness, not just perf) — #1841. Keep the LATEST cumulative snapshot per
-       interval before aggregating; see the file header for why this read is the most exposed to it. */
+    /* LOAD-BEARING (correctness, not just perf) - #1841. Keep the LATEST cumulative snapshot per
+       interval before aggregating; see the file header for why this read is the most exposed to it. Every outcome is
+       kept (#6268): the Regular cost below and the Aborted and Exception counts are separate FILTERs over this set. */
     SELECT
         database_name,
         query_id,
         plan_id,
+        execution_type_desc,
         execution_count,
         avg_duration_us,
         avg_cpu_time_us,
-        avg_logical_io_reads,
         ROW_NUMBER() OVER
         (
             PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
@@ -124,10 +163,10 @@ deduped_recent AS (
         database_name,
         query_id,
         plan_id,
+        execution_type_desc,
         execution_count,
         avg_duration_us,
         avg_cpu_time_us,
-        avg_logical_io_reads,
         last_execution_time,
         ROW_NUMBER() OVER
         (
@@ -143,11 +182,18 @@ baseline_performance AS (
     SELECT
         database_name,
         query_id,
-        AVG(CAST(avg_duration_us AS DOUBLE PRECISION)) / 1000.0 AS avg_duration_ms,
-        AVG(CAST(avg_cpu_time_us AS DOUBLE PRECISION)) / 1000.0 AS avg_cpu_time_ms,
-        AVG(CAST(avg_logical_io_reads AS DOUBLE PRECISION)) AS avg_logical_io_reads,
-        CAST(SUM(execution_count) AS BIGINT) AS exec_count,
-        CAST(COUNT(DISTINCT plan_id) AS INTEGER) AS plan_count
+        SUM(CAST(avg_duration_us AS DOUBLE PRECISION) * execution_count) FILTER (WHERE execution_type_desc = 'Regular')
+            / NULLIF(SUM(execution_count) FILTER (WHERE execution_type_desc = 'Regular'), 0) / 1000.0 AS avg_duration_ms,
+        SUM(CAST(avg_cpu_time_us AS DOUBLE PRECISION) * execution_count) FILTER (WHERE execution_type_desc = 'Regular')
+            / NULLIF(SUM(execution_count) FILTER (WHERE execution_type_desc = 'Regular'), 0) / 1000.0 AS avg_cpu_time_ms,
+        CAST(COALESCE(SUM(execution_count) FILTER (WHERE execution_type_desc = 'Regular'), 0) AS BIGINT) AS exec_count,
+        CAST(COUNT(DISTINCT plan_id) FILTER (WHERE execution_type_desc = 'Regular') AS INTEGER) AS plan_count,
+        CAST(COALESCE(SUM(execution_count) FILTER (WHERE execution_type_desc = 'Aborted'), 0) AS BIGINT) AS aborted_execs,
+        SUM(CAST(avg_cpu_time_us AS DOUBLE PRECISION) * execution_count) FILTER (WHERE execution_type_desc = 'Aborted') AS aborted_cpu_us,
+        SUM(CAST(avg_duration_us AS DOUBLE PRECISION) * execution_count) FILTER (WHERE execution_type_desc = 'Aborted') AS aborted_dur_us,
+        CAST(COALESCE(SUM(execution_count) FILTER (WHERE execution_type_desc = 'Exception'), 0) AS BIGINT) AS exception_execs,
+        SUM(CAST(avg_cpu_time_us AS DOUBLE PRECISION) * execution_count) FILTER (WHERE execution_type_desc = 'Exception') AS exception_cpu_us,
+        SUM(CAST(avg_duration_us AS DOUBLE PRECISION) * execution_count) FILTER (WHERE execution_type_desc = 'Exception') AS exception_dur_us
     FROM deduped_baseline
     WHERE rn = 1
     GROUP BY database_name, query_id
@@ -156,12 +202,19 @@ recent_performance AS (
     SELECT
         database_name,
         query_id,
-        AVG(CAST(avg_duration_us AS DOUBLE PRECISION)) / 1000.0 AS avg_duration_ms,
-        AVG(CAST(avg_cpu_time_us AS DOUBLE PRECISION)) / 1000.0 AS avg_cpu_time_ms,
-        AVG(CAST(avg_logical_io_reads AS DOUBLE PRECISION)) AS avg_logical_io_reads,
-        CAST(SUM(execution_count) AS BIGINT) AS exec_count,
-        CAST(COUNT(DISTINCT plan_id) AS INTEGER) AS plan_count,
-        MAX(last_execution_time) AS last_execution_time
+        SUM(CAST(avg_duration_us AS DOUBLE PRECISION) * execution_count) FILTER (WHERE execution_type_desc = 'Regular')
+            / NULLIF(SUM(execution_count) FILTER (WHERE execution_type_desc = 'Regular'), 0) / 1000.0 AS avg_duration_ms,
+        SUM(CAST(avg_cpu_time_us AS DOUBLE PRECISION) * execution_count) FILTER (WHERE execution_type_desc = 'Regular')
+            / NULLIF(SUM(execution_count) FILTER (WHERE execution_type_desc = 'Regular'), 0) / 1000.0 AS avg_cpu_time_ms,
+        CAST(COALESCE(SUM(execution_count) FILTER (WHERE execution_type_desc = 'Regular'), 0) AS BIGINT) AS exec_count,
+        CAST(COUNT(DISTINCT plan_id) FILTER (WHERE execution_type_desc = 'Regular') AS INTEGER) AS plan_count,
+        CAST(COALESCE(SUM(execution_count) FILTER (WHERE execution_type_desc = 'Aborted'), 0) AS BIGINT) AS aborted_execs,
+        SUM(CAST(avg_cpu_time_us AS DOUBLE PRECISION) * execution_count) FILTER (WHERE execution_type_desc = 'Aborted') AS aborted_cpu_us,
+        SUM(CAST(avg_duration_us AS DOUBLE PRECISION) * execution_count) FILTER (WHERE execution_type_desc = 'Aborted') AS aborted_dur_us,
+        CAST(COALESCE(SUM(execution_count) FILTER (WHERE execution_type_desc = 'Exception'), 0) AS BIGINT) AS exception_execs,
+        SUM(CAST(avg_cpu_time_us AS DOUBLE PRECISION) * execution_count) FILTER (WHERE execution_type_desc = 'Exception') AS exception_cpu_us,
+        SUM(CAST(avg_duration_us AS DOUBLE PRECISION) * execution_count) FILTER (WHERE execution_type_desc = 'Exception') AS exception_dur_us,
+        COALESCE(MAX(last_execution_time) FILTER (WHERE execution_type_desc = 'Regular'), MAX(last_execution_time)) AS last_execution_time
     FROM deduped_recent
     WHERE rn = 1
     GROUP BY database_name, query_id
@@ -183,45 +236,165 @@ recent_winner AS (
         WHERE rn = 1
     ) x
     WHERE wr = 1
+),
+/* #6268: a query is a candidate when it has recent Regular runs, or recent Aborted or Exception runs reaching the minimum. */
+candidates AS (
+    SELECT database_name, query_id
+    FROM recent_performance
+    WHERE exec_count > 0
+    OR    aborted_execs >= " + QueryStoreRegressionRules.FailureMinRecentRuns + @"
+    OR    exception_execs >= " + QueryStoreRegressionRules.FailureMinRecentRuns + @"
+),
+joined AS (
+    SELECT
+        k.database_name,
+        k.query_id,
+        b.avg_duration_ms AS base_dur_ms,
+        r.avg_duration_ms AS recent_dur_ms,
+        b.avg_cpu_time_ms AS base_cpu_ms,
+        r.avg_cpu_time_ms AS recent_cpu_ms,
+        COALESCE(b.exec_count, 0) AS base_execs,
+        r.exec_count AS recent_execs,
+        COALESCE(b.plan_count, 0) AS base_plans,
+        r.plan_count AS recent_plans,
+        r.last_execution_time,
+        COALESCE(b.aborted_execs, 0) AS base_aborted_execs,
+        r.aborted_execs AS recent_aborted_execs,
+        b.aborted_cpu_us AS base_aborted_cpu_us,
+        r.aborted_cpu_us AS recent_aborted_cpu_us,
+        b.aborted_dur_us AS base_aborted_dur_us,
+        r.aborted_dur_us AS recent_aborted_dur_us,
+        COALESCE(b.exception_execs, 0) AS base_exception_execs,
+        r.exception_execs AS recent_exception_execs,
+        b.exception_cpu_us AS base_exception_cpu_us,
+        r.exception_cpu_us AS recent_exception_cpu_us,
+        b.exception_dur_us AS base_exception_dur_us,
+        r.exception_dur_us AS recent_exception_dur_us
+    FROM candidates AS k
+    JOIN recent_performance AS r ON r.database_name = k.database_name AND r.query_id = k.query_id
+    LEFT JOIN baseline_performance AS b ON b.database_name = k.database_name AND b.query_id = k.query_id
+),
+flagged AS (
+    SELECT
+        j.*,
+        (j.recent_dur_ms - j.base_dur_ms) * 100.0 / NULLIF(j.base_dur_ms, 0) AS duration_regression_percent,
+        (j.recent_cpu_ms - j.base_cpu_ms) * 100.0 / NULLIF(j.base_cpu_ms, 0) AS cpu_regression_percent,
+        COALESCE((j.recent_cpu_ms - j.base_cpu_ms) * 100.0 / NULLIF(j.base_cpu_ms, 0) > " + QueryStoreRegressionRules.CostGatePercent + @", false) AS is_cost,
+        COALESCE(j.recent_aborted_execs >= " + QueryStoreRegressionRules.FailureMinRecentRuns + @"
+            AND (j.base_aborted_execs = 0
+                 OR (j.recent_aborted_execs / " + recentHours + @") >= " + QueryStoreRegressionRules.FailureRateMultiple + @" * (j.base_aborted_execs / " + baseHours + @")), false) AS is_timeouts,
+        COALESCE(j.recent_exception_execs >= " + QueryStoreRegressionRules.FailureMinRecentRuns + @"
+            AND (j.base_exception_execs = 0
+                 OR (j.recent_exception_execs / " + recentHours + @") >= " + QueryStoreRegressionRules.FailureRateMultiple + @" * (j.base_exception_execs / " + baseHours + @")), false) AS is_errors
+    FROM joined AS j
+),
+qualified AS (
+    SELECT
+        f.*,
+        /* A cost row keeps the duration bands (CRITICAL over 100%, HIGH over 50%, MEDIUM over 25%, else LOW). A failure row is
+           HIGH when its rate is at least FailureHighMultiple times the baseline's or the baseline had none, else MEDIUM; a row with
+           both takes the higher band. A failure never reads CRITICAL. */
+        CASE
+            WHEN NOT f.is_cost THEN 0
+            WHEN f.duration_regression_percent > 100 THEN 4
+            WHEN f.duration_regression_percent > 50 THEN 3
+            WHEN f.duration_regression_percent > 25 THEN 2
+            ELSE 1
+        END AS cost_rank,
+        GREATEST(
+            CASE WHEN NOT f.is_timeouts THEN 0
+                 WHEN f.base_aborted_execs = 0
+                      OR (f.recent_aborted_execs / " + recentHours + @") >= " + QueryStoreRegressionRules.FailureHighMultiple + @" * (f.base_aborted_execs / " + baseHours + @") THEN 3
+                 ELSE 2 END,
+            CASE WHEN NOT f.is_errors THEN 0
+                 WHEN f.base_exception_execs = 0
+                      OR (f.recent_exception_execs / " + recentHours + @") >= " + QueryStoreRegressionRules.FailureHighMultiple + @" * (f.base_exception_execs / " + baseHours + @") THEN 3
+                 ELSE 2 END) AS failure_rank,
+        (f.recent_dur_ms - f.base_dur_ms) * f.recent_execs AS additional_duration_ms
+    FROM flagged AS f
+    WHERE f.is_cost OR f.is_timeouts OR f.is_errors
+),
+ranked AS (
+    SELECT
+        q.*,
+        ROW_NUMBER() OVER
+        (
+            PARTITION BY q.is_cost
+            ORDER BY CASE WHEN q.is_cost THEN COALESCE(q.additional_duration_ms, 0) ELSE CAST(q.recent_aborted_execs + q.recent_exception_execs AS DOUBLE PRECISION) END DESC,
+                     q.database_name, q.query_id
+        ) AS class_rn,
+        COUNT(*) FILTER (WHERE q.is_cost) OVER () AS cost_total,
+        COUNT(*) FILTER (WHERE NOT q.is_cost) OVER () AS failure_total,
+        COUNT(*) OVER () AS total_count
+    FROM qualified AS q
+),
+slots AS (
+    /* Failure-only rows: their share of the cap, or more when the cost rows leave slots free. Cost rows take the rest. */
+    SELECT
+        GREATEST(LEAST(MAX(failure_total), " + limit + @" // " + QueryStoreRegressionRules.FailureShareDivisor + @"),
+                 LEAST(MAX(failure_total), " + limit + @" - MAX(cost_total))) AS failure_slots
+    FROM ranked
 )
 SELECT
     r.database_name,
     r.query_id,
-    b.avg_duration_ms AS baseline_duration_ms,
-    r.avg_duration_ms AS recent_duration_ms,
-    (r.avg_duration_ms - b.avg_duration_ms) * 100.0 / NULLIF(b.avg_duration_ms, 0) AS duration_regression_percent,
-    b.avg_cpu_time_ms AS baseline_cpu_ms,
-    r.avg_cpu_time_ms AS recent_cpu_ms,
-    (r.avg_cpu_time_ms - b.avg_cpu_time_ms) * 100.0 / NULLIF(b.avg_cpu_time_ms, 0) AS cpu_regression_percent,
-    b.avg_logical_io_reads AS baseline_reads,
-    r.avg_logical_io_reads AS recent_reads,
-    (r.avg_logical_io_reads - b.avg_logical_io_reads) * 100.0 / NULLIF(b.avg_logical_io_reads, 0) AS io_regression_percent,
-    (r.avg_duration_ms - b.avg_duration_ms) * r.exec_count AS additional_duration_ms,
-    b.exec_count AS baseline_exec_count,
-    r.exec_count AS recent_exec_count,
-    b.plan_count AS baseline_plan_count,
-    r.plan_count AS recent_plan_count,
-    CASE
-        WHEN (r.avg_duration_ms - b.avg_duration_ms) * 100.0 / NULLIF(b.avg_duration_ms, 0) > 100 THEN 'CRITICAL'
-        WHEN (r.avg_duration_ms - b.avg_duration_ms) * 100.0 / NULLIF(b.avg_duration_ms, 0) > 50 THEN 'HIGH'
-        WHEN (r.avg_duration_ms - b.avg_duration_ms) * 100.0 / NULLIF(b.avg_duration_ms, 0) > 25 THEN 'MEDIUM'
+    r.base_dur_ms AS baseline_duration_ms,
+    r.recent_dur_ms AS recent_duration_ms,
+    r.duration_regression_percent,
+    r.base_cpu_ms AS baseline_cpu_ms,
+    r.recent_cpu_ms AS recent_cpu_ms,
+    r.cpu_regression_percent,
+    COALESCE(r.additional_duration_ms, 0) AS additional_duration_ms,
+    r.base_execs AS baseline_exec_count,
+    r.recent_execs AS recent_exec_count,
+    r.base_plans AS baseline_plan_count,
+    r.recent_plans AS recent_plan_count,
+    CASE GREATEST(r.cost_rank, r.failure_rank)
+        WHEN 4 THEN 'CRITICAL'
+        WHEN 3 THEN 'HIGH'
+        WHEN 2 THEN 'MEDIUM'
         ELSE 'LOW'
     END AS severity,
     w.collection_id AS text_collection_id,
     r.last_execution_time,
     w.collection_time AS text_collection_time,
-    /* #6128: the rows that passed the gate, before LIMIT, in the same statement. */
-    COUNT(*) OVER () AS total_count
-FROM recent_performance AS r
-JOIN baseline_performance AS b
-  ON  b.database_name = r.database_name
-  AND b.query_id = r.query_id
+    r.is_cost,
+    r.is_timeouts,
+    r.is_errors,
+    r.base_aborted_execs AS base_aborted_count,
+    r.recent_aborted_execs AS recent_aborted_count,
+    r.base_aborted_cpu_us / NULLIF(r.base_aborted_execs, 0) / 1000.0 AS base_aborted_cpu_ms,
+    r.recent_aborted_cpu_us / NULLIF(r.recent_aborted_execs, 0) / 1000.0 AS recent_aborted_cpu_ms,
+    r.base_aborted_dur_us / NULLIF(r.base_aborted_execs, 0) / 1000.0 AS base_aborted_dur_ms,
+    r.recent_aborted_dur_us / NULLIF(r.recent_aborted_execs, 0) / 1000.0 AS recent_aborted_dur_ms,
+    r.base_exception_execs AS base_exception_count,
+    r.recent_exception_execs AS recent_exception_count,
+    r.base_exception_cpu_us / NULLIF(r.base_exception_execs, 0) / 1000.0 AS base_exception_cpu_ms,
+    r.recent_exception_cpu_us / NULLIF(r.recent_exception_execs, 0) / 1000.0 AS recent_exception_cpu_ms,
+    r.base_exception_dur_us / NULLIF(r.base_exception_execs, 0) / 1000.0 AS base_exception_dur_ms,
+    r.recent_exception_dur_us / NULLIF(r.recent_exception_execs, 0) / 1000.0 AS recent_exception_dur_ms,
+    /* Executions per hour, so the baseline (7 days) and the recent window (hours_back) compare in one unit. */
+    r.base_execs / " + baseHours + @" AS baseline_regular_per_hour,
+    r.recent_execs / " + recentHours + @" AS recent_regular_per_hour,
+    r.base_aborted_execs / " + baseHours + @" AS baseline_aborted_per_hour,
+    r.recent_aborted_execs / " + recentHours + @" AS recent_aborted_per_hour,
+    r.base_exception_execs / " + baseHours + @" AS baseline_exception_per_hour,
+    r.recent_exception_execs / " + recentHours + @" AS recent_exception_per_hour,
+    /* #6128: the rows that passed the flags, before the cap, in the same statement. */
+    r.total_count
+FROM ranked AS r
+CROSS JOIN slots AS s
 LEFT JOIN recent_winner AS w
   ON  w.database_name = r.database_name
   AND w.query_id = r.query_id
-WHERE (r.avg_cpu_time_ms - b.avg_cpu_time_ms) * 100.0 / NULLIF(b.avg_cpu_time_ms, 0) > 25
-ORDER BY additional_duration_ms DESC
-LIMIT $" + limitIndex;
+WHERE (r.is_cost AND r.class_rn <= " + limit + @" - s.failure_slots)
+OR    (NOT r.is_cost AND r.class_rn <= s.failure_slots)
+ORDER BY r.is_cost DESC,
+         CASE WHEN r.is_cost THEN COALESCE(r.additional_duration_ms, 0) END DESC,
+         r.recent_aborted_execs + r.recent_exception_execs DESC,
+         r.database_name,
+         r.query_id
+LIMIT " + limit;
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
@@ -237,7 +410,14 @@ LIMIT $" + limitIndex;
         {
         while (await reader.ReadAsync())
         {
-            textKeys.Add((reader.IsDBNull(17) ? null : reader.GetInt64(17), reader.IsDBNull(19) ? null : reader.GetDateTime(19)));
+            textKeys.Add((reader.IsDBNull(14) ? null : reader.GetInt64(14), reader.IsDBNull(16) ? null : reader.GetDateTime(16)));
+            var isCost = reader.GetBoolean(17);
+            var isTimeouts = reader.GetBoolean(18);
+            var isErrors = reader.GetBoolean(19);
+            var reasons = new List<string>(3);
+            if (isCost) reasons.Add("cost");
+            if (isTimeouts) reasons.Add("timeouts");
+            if (isErrors) reasons.Add("errors");
             rows.Add(new QueryStoreRegressionRow
             {
                 DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
@@ -248,18 +428,20 @@ LIMIT $" + limitIndex;
                 BaselineCpuMs = reader.IsDBNull(5) ? 0 : ToDouble(reader.GetValue(5)),
                 RecentCpuMs = reader.IsDBNull(6) ? 0 : ToDouble(reader.GetValue(6)),
                 CpuRegressionPercent = reader.IsDBNull(7) ? null : ToDouble(reader.GetValue(7)),
-                BaselineReads = reader.IsDBNull(8) ? 0 : ToDouble(reader.GetValue(8)),
-                RecentReads = reader.IsDBNull(9) ? 0 : ToDouble(reader.GetValue(9)),
-                IoRegressionPercent = reader.IsDBNull(10) ? null : ToDouble(reader.GetValue(10)),
-                AdditionalDurationMs = reader.IsDBNull(11) ? 0 : ToDouble(reader.GetValue(11)),
-                BaselineExecCount = reader.IsDBNull(12) ? 0 : Convert.ToInt64(reader.GetValue(12)),
-                RecentExecCount = reader.IsDBNull(13) ? 0 : Convert.ToInt64(reader.GetValue(13)),
-                BaselinePlanCount = reader.IsDBNull(14) ? 0 : Convert.ToInt32(reader.GetValue(14)),
-                RecentPlanCount = reader.IsDBNull(15) ? 0 : Convert.ToInt32(reader.GetValue(15)),
-                Severity = reader.IsDBNull(16) ? "" : reader.GetString(16),
+                AdditionalDurationMs = reader.IsDBNull(8) ? 0 : ToDouble(reader.GetValue(8)),
+                BaselineExecCount = reader.IsDBNull(9) ? 0 : Convert.ToInt64(reader.GetValue(9)),
+                RecentExecCount = reader.IsDBNull(10) ? 0 : Convert.ToInt64(reader.GetValue(10)),
+                BaselinePlanCount = reader.IsDBNull(11) ? 0 : Convert.ToInt32(reader.GetValue(11)),
+                RecentPlanCount = reader.IsDBNull(12) ? 0 : Convert.ToInt32(reader.GetValue(12)),
+                Severity = reader.IsDBNull(13) ? "" : reader.GetString(13),
                 QueryTextSample = "",
-                LastExecutionTime = reader.IsDBNull(18) ? null : reader.GetDateTime(18),
-                TotalCount = reader.IsDBNull(20) ? 0 : Convert.ToInt64(reader.GetValue(20)),
+                LastExecutionTime = reader.IsDBNull(15) ? null : reader.GetDateTime(15),
+                RegressionReason = string.Join(",", reasons),
+                Aborted = ReadRunGroup(reader, 20, 32 + 2, 32 + 3),
+                Exception = ReadRunGroup(reader, 26, 32 + 4, 32 + 5),
+                BaselineRegularPerHour = reader.IsDBNull(32) ? null : ToDouble(reader.GetValue(32)),
+                RecentRegularPerHour = reader.IsDBNull(33) ? null : ToDouble(reader.GetValue(33)),
+                TotalCount = reader.IsDBNull(38) ? 0 : Convert.ToInt64(reader.GetValue(38)),
             });
         }
         }
@@ -283,6 +465,18 @@ LIMIT $" + limitIndex;
 
         return rows;
     }
+
+    private static QueryStoreRunGroup ReadRunGroup(System.Data.Common.DbDataReader reader, int first, int baselinePerHour, int recentPerHour) => new()
+    {
+        BaselineCount = reader.IsDBNull(first) ? 0 : Convert.ToInt64(reader.GetValue(first)),
+        RecentCount = reader.IsDBNull(first + 1) ? 0 : Convert.ToInt64(reader.GetValue(first + 1)),
+        BaselineCpuMs = reader.IsDBNull(first + 2) ? null : ToDouble(reader.GetValue(first + 2)),
+        RecentCpuMs = reader.IsDBNull(first + 3) ? null : ToDouble(reader.GetValue(first + 3)),
+        BaselineDurationMs = reader.IsDBNull(first + 4) ? null : ToDouble(reader.GetValue(first + 4)),
+        RecentDurationMs = reader.IsDBNull(first + 5) ? null : ToDouble(reader.GetValue(first + 5)),
+        BaselinePerHour = reader.IsDBNull(baselinePerHour) ? null : ToDouble(reader.GetValue(baselinePerHour)),
+        RecentPerHour = reader.IsDBNull(recentPerHour) ? null : ToDouble(reader.GetValue(recentPerHour)),
+    };
 
     /// <summary>
     /// Whether this server has Query Store rows in the baseline lookback before the window, and whether it
