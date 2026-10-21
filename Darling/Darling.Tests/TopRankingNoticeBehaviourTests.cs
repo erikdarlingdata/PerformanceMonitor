@@ -149,4 +149,34 @@ public sealed class TopRankingNoticeBehaviourTests
             Assert.True(run.GetProperty("cards").GetProperty(card).GetProperty("textOnly").GetBoolean(), card + ": the notice must hold a text node and no element");
         }
     }
+
+    /// <summary>
+    /// #6303: each of the four grids draws the stored-plan button column and the History column after its data columns, and each
+    /// Top Procedures grid reads with <c>detail: "full"</c> and offers the Times, I/O and spills and Extremes column groups. Whatever way
+    /// the page composes those column lists, a grid that loses one of them fails here.
+    /// </summary>
+    [Fact]
+    public void EveryTopGrid_DrawsThePlanAndHistoryColumns_AndTheProceduresGridsKeepTheirGroupsAndFullRead()
+    {
+        var run = Run("columns");
+        foreach (var card in Cards)
+        {
+            var drawn = run.GetProperty("cards").GetProperty(card);
+            Assert.True(drawn.GetProperty("found").GetBoolean(), card + " must be drawn");
+            var headers = drawn.GetProperty("headers").EnumerateArray().Select(e => e.GetString()!).ToArray();
+            Assert.Contains("Plan", headers);
+            Assert.Equal("History", headers[^1]);
+            Assert.Equal("Plan", headers[^2]);
+        }
+
+        foreach (var card in new[] { "cpuProcedures", "queriesProcedures" })
+        {
+            var toggles = run.GetProperty("cards").GetProperty(card).GetProperty("groupToggles").EnumerateArray().Select(e => e.GetString()!).ToArray();
+            Assert.Equal(new[] { "Times", "I/O and spills", "Extremes" }, toggles);
+        }
+
+        var details = run.GetProperty("details").EnumerateArray().Select(e => e.GetString()!).Where(d => d.StartsWith("get_top_procedures_by_cpu:", StringComparison.Ordinal)).ToList();
+        Assert.True(details.Count >= 2, "both Top Procedures grids read: " + string.Join(", ", details));
+        Assert.All(details, d => Assert.Equal("get_top_procedures_by_cpu:full", d));
+    }
 }

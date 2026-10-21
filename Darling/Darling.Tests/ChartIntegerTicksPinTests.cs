@@ -69,10 +69,10 @@ public sealed class ChartIntegerTicksPinTests
 
         var tabs = Js("pages", "server-tabs.js");
 
-        /* The four Blocking Events / Deadlocks line panels (Overview and Locking tabs): each one that charts
+        /* The two Blocking Events / Deadlocks line panels (the Locking tab; the Overview draws its counts as strips, #6291): each one that charts
            COUNT_SERIES carries the format, counted against the panels that chart it. */
         var countPanels = Regex.Matches(tabs, @"(?:COUNT_SERIES|BLOCKING_REPORT_SERIES), \{").Count;
-        Assert.Equal(4, countPanels);
+        Assert.Equal(2, countPanels);
         Assert.Equal(countPanels, Regex.Matches(tabs, @"(?:COUNT_SERIES|BLOCKING_REPORT_SERIES), \{\n\s+subtitle: ctx\.label,\n\s+format: ""int"",").Count);
 
         /* The Blocked Sessions chart is a fanout spec rather than a line() call. */
