@@ -9,10 +9,12 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Collectors;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -26,12 +28,47 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// registration (removed ones included) that has such a scoped route. Without one the entry is added as before. A route with
 /// no scope applies to every server, so it never counts. The same storage name is not refused here: it is the existing
 /// duplicate answer, or the re-use of a removed registration's own id.
+/// <para>The host text alone cannot tell that two names reach one machine (a short name and its full domain name, a name and its
+/// address), so once the add or edit has connected, the name the server reports for itself (#6285) is compared with the name
+/// collected for each registration, and a match refuses just as the text match does. The text match stays: the identity adds to it.</para>
 /// </summary>
 public sealed partial class DarlingMcpServerAdminTools
 {
     /// <summary>A registration an add is compared with: a live definition (host, engine and port known) or a removed one
     /// (<c>collect.servers</c> keeps only its storage name).</summary>
-    internal sealed record RegisteredTarget(int ServerId, string StorageKey, string? Host, string? Engine, int Port, string Label, bool Removed);
+    internal sealed record RegisteredTarget(int ServerId, string StorageKey, string? Host, string? Engine, int Port, string Label, bool Removed,
+        string? Identity = null);
+
+    /// <summary>
+    /// The machine and instance a SQL Server reports for itself (<c>SERVERPROPERTY('ServerName')</c>), as one comparable key, or
+    /// null when there is none to compare (#6285). Case is folded. An Azure SQL Database names no machine of its own, so it has
+    /// none (edition 5). Resolved IP addresses are never compared: Azure SQL Database logical servers share gateway addresses.
+    /// </summary>
+    internal static string? MachineIdentityOf(string? serverName, int engineEdition)
+    {
+        if (engineEdition == 5 || string.IsNullOrWhiteSpace(serverName))
+        {
+            return null;
+        }
+
+        return serverName.Trim().ToLowerInvariant();
+    }
+
+    /// <summary>True for an identity the PostgreSQL probe makes (<c>system_identifier:port</c>). A SQL Server's name never holds a colon, so
+    /// the colon tells the two kinds apart without the registration's engine, which a removed registration no longer has.</summary>
+    internal static bool IsPostgresIdentity(string? identity) => identity is not null && identity.Contains(':', StringComparison.Ordinal);
+
+    /// <summary>#6340 round 2 (N1): true when a PostgreSQL target answered the probe but gave no identity, because the login may not call
+    /// <c>pg_control_system()</c>. An Aurora target gives none by design (the connect does not ask it), so the host-text match alone
+    /// decides there, and this is false for it.</summary>
+    internal static bool PostgresIdentityUnread(ConnectionProbeResult probe, string? probedIdentity) =>
+        probedIdentity is null && probe.Engine == CollectorTargetEngine.PostgreSql && !probe.IsAurora;
+
+    /// <summary>True when the server the add or edit reached reports the same identity that was collected for <paramref name="held"/>.
+    /// Either side having none is no match: such a registration is compared by its text alone.</summary>
+    internal static bool SameIdentity(RegisteredTarget held, string? probedIdentity) =>
+        probedIdentity is not null && held.Identity is not null
+        && string.Equals(held.Identity, probedIdentity, StringComparison.Ordinal);
 
     /// <summary>A check a write runs inside its own transaction, after the identity lock (#6281): non-null is the refusal text.</summary>
     internal delegate Task<string?> HeldCheck(NpgsqlConnection connection, NpgsqlTransaction transaction, CancellationToken cancellationToken);
@@ -135,15 +172,43 @@ public sealed partial class DarlingMcpServerAdminTools
 
     /// <summary>The refusal for an entry whose machine another registration holds while a route with an agent setting is
     /// scoped to that registration, or null. <paramref name="scopedRoute"/> is the shared lookup edit_server uses.
-    /// <paramref name="exceptServerId"/> is the registration an edit changes: it is not held against its own new address.</summary>
+    /// <paramref name="exceptServerId"/> is the registration an edit changes: it is not held against its own new address.
+    /// <paramref name="probedIdentity"/> is what the server the add or edit connected to reports for itself (#6285), or null before
+    /// the connection or when none was read: the text match applies either way, the identity match only when it is given.
+    /// <paramref name="textMatch"/> is false for an edit that does not move the registration's address (a change to another connection
+    /// field): then only the identity can refuse, and not when the server still reports the identity this registration already had,
+    /// because the machine did not change.</summary>
     internal static async Task<string?> TargetHeldRefusalAsync(
         IReadOnlyList<RegisteredTarget> held, ParsedServerEntry entry,
-        Func<int, CancellationToken, Task<int?>> scopedRoute, CancellationToken cancellationToken, int? exceptServerId = null, bool forEdit = false)
+        Func<int, CancellationToken, Task<int?>> scopedRoute, CancellationToken cancellationToken, int? exceptServerId = null, bool forEdit = false,
+        string? probedIdentity = null, bool textMatch = true, bool postgresIdentityUnread = false)
     {
+        if (exceptServerId is { } editedId && probedIdentity is not null
+            && held.FirstOrDefault(t => t.ServerId == editedId)?.Identity == probedIdentity)
+        {
+            probedIdentity = null;
+        }
+
         foreach (var other in held)
         {
+            /* #6285 round 1 (M2): the registration being edited, and, for an ADD only, a removed registration this entry's own
+               storage key re-uses (the same id, so the route that covers it follows). The key is compared as the id is made, by
+               its exact spelling: a different spelling of a removed covered registration's key becomes a new id outside the route.
+               An EDIT keeps its own id, so moving to a removed registration's key is not re-use. A live registration under the
+               same key is the duplicate gates' answer. */
             if (other.ServerId == exceptServerId
-                || string.Equals(other.StorageKey, entry.StorageKey, StringComparison.OrdinalIgnoreCase) || !SameTarget(other, entry))
+                || (!forEdit && ServerIdOf(entry) == other.ServerId))
+            {
+                continue;
+            }
+
+            var sameText = textMatch && SameTarget(other, entry);
+            var sameIdentity = SameIdentity(other, probedIdentity);
+            /* #6340 round 2 (N1): a PostgreSQL probe that read no identity (the login may not call pg_control_system()) cannot say
+               whether it reached the cluster a covered PostgreSQL registration holds under another name, so it is refused rather than
+               matched by host text alone. Only for an entry that moves an address (an add, or an edit of the address). */
+            var identityUnread = postgresIdentityUnread && textMatch && IsPostgresIdentity(other.Identity);
+            if (!sameText && !sameIdentity && !identityUnread)
             {
                 continue;
             }
@@ -153,8 +218,20 @@ public sealed partial class DarlingMcpServerAdminTools
                 continue;
             }
 
+            if (!sameText && !sameIdentity)
+            {
+                return (forEdit ? "Not saved: " : "Not added: ") + $"{entry.ProbeConfig.Host} cannot be checked against '{other.Label}'"
+                    + (other.Removed ? " (a removed registration)" : "")
+                    + $": the login this call connected with may not read the server's identity (pg_control_system()), and route {routeId} (an agent setting) "
+                    + "is scoped to that PostgreSQL registration, so "
+                    + (forEdit ? "this registration, moved there, " : "a second registration of the same cluster ")
+                    + "could sit outside that route. Use a login that may call pg_control_system() (PostgreSQL grants it to PUBLIC unless it was revoked: "
+                    + "GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO the login), or change this in the Viewer or on the web dashboard.";
+            }
+
             return (forEdit ? "Not saved: " : "Not added: ") + $"{entry.ProbeConfig.Host} is already registered as '{other.Label}'"
                 + (other.Removed ? " (a removed registration)" : "")
+                + (sameText ? "" : " (the server reports the same name for itself)")
                 + $", and route {routeId} (an agent setting) is scoped to it, so "
                 + (forEdit ? "this registration, moved there, would sit outside that route. " : "a second registration of the machine would sit outside that route. ")
                 + (forEdit ? "Where a registration connects is changed in the Viewer or on the web dashboard." : "Register another database or intent in the Viewer or on the web dashboard.");
@@ -165,6 +242,13 @@ public sealed partial class DarlingMcpServerAdminTools
 
     private const string RegisteredTargetsSql =
         "SELECT host, database, read_only_intent, engine, port, name, server_id FROM config_monitored_servers";
+
+    /// <summary>The identity each registration, live or removed, reported on its last connect (#6285, #6339), from the registry column
+    /// the connect writes (V212). Not from <c>collect.server_properties</c>: that table's <c>server_name</c> is the registration's
+    /// storage name, not what the server reports, and a retention purge deletes its rows. A registration that never connected since
+    /// the column arrived, or one that reported none, is not in the answer and is matched by its text alone.</summary>
+    private const string CollectedIdentitiesSql =
+        "SELECT server_id, machine_identity FROM collect.servers WHERE machine_identity IS NOT NULL";
 
     private const string RemovedRegistrationsSql =
         "SELECT server_name, display_name, server_id FROM collect.servers WHERE server_id NOT IN (SELECT server_id FROM config_monitored_servers)";
@@ -206,6 +290,28 @@ public sealed partial class DarlingMcpServerAdminTools
             }
         }
 
+        var identities = new Dictionary<int, string>();
+        await using (var command = new NpgsqlCommand(CollectedIdentitiesSql, connection) { Transaction = transaction })
+        {
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (MachineIdentityOf(reader.GetString(1), 0) is { } identity)
+                {
+                    identities[reader.GetInt32(0)] = identity;
+                }
+            }
+        }
+
+        for (var i = 0; i < targets.Count; i++)
+        {
+            if (identities.TryGetValue(targets[i].ServerId, out var collected))
+            {
+                targets[i] = targets[i] with { Identity = collected };
+            }
+        }
+
         return targets;
     }
 
@@ -213,10 +319,11 @@ public sealed partial class DarlingMcpServerAdminTools
     /// identity lock: a route that was set up while the probe ran is seen here, and nothing is written. Null when nothing
     /// holds the machine. <paramref name="exceptServerId"/> is the registration an edit changes.</summary>
     internal static async Task<string?> TargetHeldRefusalInTransactionAsync(
-        NpgsqlConnection connection, NpgsqlTransaction transaction, ParsedServerEntry entry, int? exceptServerId, CancellationToken cancellationToken, bool forEdit = false)
+        NpgsqlConnection connection, NpgsqlTransaction transaction, ParsedServerEntry entry, int? exceptServerId, CancellationToken cancellationToken, bool forEdit = false, string? probedIdentity = null,
+        bool textMatch = true, bool postgresIdentityUnread = false)
     {
         var held = await LoadRegisteredTargetsAsync(connection, transaction, cancellationToken);
         return await TargetHeldRefusalAsync(held, entry,
-            (serverId, token) => ScopedAgentRouteAsync(connection, transaction, serverId, token), cancellationToken, exceptServerId, forEdit);
+            (serverId, token) => ScopedAgentRouteAsync(connection, transaction, serverId, token), cancellationToken, exceptServerId, forEdit, probedIdentity, textMatch, postgresIdentityUnread);
     }
 }
