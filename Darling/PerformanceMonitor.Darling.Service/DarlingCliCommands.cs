@@ -550,6 +550,8 @@ public static partial class DarlingCliCommands
             return 1;
         }
 
+        await ReportAgentDispatchAsync(config, output, cancellationToken);
+
         output.WriteLine($"Validating connectivity to {targets.Count} server(s)...");
 
         var allReachable = true;
@@ -584,6 +586,43 @@ public static partial class DarlingCliCommands
             ? "All servers reachable."
             : "One or more servers failed the connection pre-flight (see above).");
         return allReachable ? 0 : 1;
+    }
+
+    /// <summary>
+    /// The agent dispatch checks for <c>--validate-config</c> (#6263): investigations on with MCP off, with no usable token,
+    /// with writes also on, or with no agent route. Nothing is read or printed when <c>mcp.allowInvestigations</c> is off.
+    /// Each finding is a <c>WARNING:</c> or a <c>NOTE:</c> line on <paramref name="output"/>, the same shape as the other
+    /// warnings in this verb. None of them changes the exit code: those configs ran before, so an upgrade must not start
+    /// failing a validation. The MCP switch and the route count come from the store when it answers, else from the file.
+    /// </summary>
+    internal static async Task ReportAgentDispatchAsync(
+        DarlingConfig config, TextWriter output, CancellationToken cancellationToken)
+    {
+        if (!config.Mcp.AllowInvestigations)
+        {
+            return;
+        }
+
+        var mcpEnabled = config.Mcp.Enabled;
+        int? agentRoutes = null;
+        if (TryBuildStoreConnectionString(config.Postgres, out var connectionString, out _)
+            && !string.IsNullOrWhiteSpace(connectionString))
+        {
+            var facts = await DarlingAgentDispatchChecks.TryReadStoreFactsAsync(
+                DarlingStoreConnection.WithApplicationName(connectionString, DarlingManagedPostgres.CliApplicationName),
+                cancellationToken);
+            /* The store did not answer: the file's switch stands and the route note is skipped. */
+            mcpEnabled = facts.McpEnabled ?? mcpEnabled;
+            agentRoutes = facts.AgentRoutes;
+        }
+
+        var (token, unreadable) = DarlingAgentDispatchChecks.ResolveToken(config.Mcp);
+        foreach (var finding in DarlingAgentDispatchChecks.Evaluate(config.Mcp, mcpEnabled, token, unreadable, agentRoutes))
+        {
+            output.WriteLine(
+                (finding.Severity == DarlingAgentDispatchChecks.AgentDispatchSeverity.Warning ? "WARNING: " : "NOTE: ")
+                + finding.Message);
+        }
     }
 
     /// <summary>
