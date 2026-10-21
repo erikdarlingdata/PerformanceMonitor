@@ -141,6 +141,58 @@ public sealed class TimeSlicerBehaviourTests
         Assert.StartsWith("Whole range", reset.GetProperty("readout").GetString());
     }
 
+    /// <summary>The Queries tab draws four slicers; the Active Queries and Query Store ones chart their own reads, and nothing is narrowed yet.</summary>
+    [Fact]
+    public void TheQueriesTab_HasASlicerOverActiveQueriesAndQueryStore()
+    {
+        var tab = Page().GetProperty("queriesTab");
+        var titles = tab.GetProperty("slicers").EnumerateArray().Select(e => e.GetString()).ToList();
+        Assert.Contains("Active queries", titles);
+        Assert.Contains("Query Store duration", titles);
+        Assert.True(tab.GetProperty("activeStripDrawn").GetBoolean());
+        Assert.True(tab.GetProperty("storeStripDrawn").GetBoolean());
+        Assert.Equal(("24", null), Ask(tab.GetProperty("activeList")));
+        Assert.Equal(("24", null), Ask(tab.GetProperty("activeGrid")));
+        Assert.Equal(("24", null), Ask(tab.GetProperty("store")));
+    }
+
+    /// <summary>A drag on the Active Queries strip makes the Active Queries snapshot list and grid, and the Query Store grid, read the selected window.</summary>
+    [Fact]
+    public void ReleasingTheDrag_MakesActiveQueriesAndQueryStoreReadTheSelectedWindow()
+    {
+        var dragged = Page().GetProperty("queriesDragged");
+        var expectedAsOf = dragged.GetProperty("expectedAsOf").GetString();
+        Assert.Equal(("6", expectedAsOf), Ask(dragged.GetProperty("activeList")));
+        Assert.Equal(("6", expectedAsOf), Ask(dragged.GetProperty("activeGrid")));
+        Assert.Equal(("6", expectedAsOf), Ask(dragged.GetProperty("store")));
+        Assert.Contains("narrowed to", dragged.GetProperty("title").GetString());
+    }
+
+    /// <summary>Picking a Query Store row overlays THAT query's history (keyed on its query id) over the page range, drawn from its own plan's points only.</summary>
+    [Fact]
+    public void PickingAQueryStoreRow_OverlaysThatQuerysHistory()
+    {
+        var overlay = Page().GetProperty("storeOverlay");
+        var ask = overlay.GetProperty("ask");
+        Assert.False(overlay.GetProperty("buttonPicked").GetBoolean(), "a click on a button inside the row is the button's, not a pick");
+        Assert.Equal("7", ask.GetProperty("query_id").GetString());
+        Assert.Equal(("24", null), Ask(ask));
+        Assert.StartsWith("M", overlay.GetProperty("path").GetString());
+        Assert.Equal(2, overlay.GetProperty("segments").GetInt32());
+        Assert.Contains("plan 3", overlay.GetProperty("note").GetString());
+        Assert.True(overlay.GetProperty("selected").GetBoolean());
+    }
+
+    /// <summary>Reset on the Query Store strip puts the page's range back for the Query Store grid and the Active Queries list and grid.</summary>
+    [Fact]
+    public void ResetOnTheQueriesTab_RestoresThePageRange()
+    {
+        var reset = Page().GetProperty("queriesReset");
+        Assert.Equal(("24", null), Ask(reset.GetProperty("activeList")));
+        Assert.Equal(("24", null), Ask(reset.GetProperty("activeGrid")));
+        Assert.Equal(("24", null), Ask(reset.GetProperty("store")));
+    }
+
     /// <summary>A narrowing belongs to the page range it was made under: a different range starts whole.</summary>
     [Fact]
     public void AChangedPageRange_DropsTheNarrowing()

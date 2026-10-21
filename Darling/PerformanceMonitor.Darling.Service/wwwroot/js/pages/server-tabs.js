@@ -42,7 +42,7 @@
 import { el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, metricNote, getPath, fmtMs, fmtInt, fmtRate, localTime, parseUtc, windowFromHours, daysText, dbScopeChip, dbFilteredEmptyText, sourceStrip, clampText, getActiveDatabaseFilter, queryWaitFilter, setQueryWaitFilter, waitIsLinked } from "../util.js";
 import { renderPanel, emptyHeadline, setPanelSignal, getPanelSignal, VIZ, worstFirst, newestFirst } from "../panels.js";
 import { memoryGrantChartPanels } from "./memory-grant-charts.js";
-import { activeQueriesSnapshotSlot, SNAPSHOT_ROW_CAP } from "./active-snapshots.js";
+import { activeQueriesSnapshotSlot, SNAPSHOT_ROW_CAP, SNAPSHOT_LIST_CAP } from "./active-snapshots.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../charts.js";
 import { multiPicker, mergeSeriesRows } from "../multi-picker.js";
 import { pgPlanColumn } from "./pg-plan-viewer.js";
@@ -965,6 +965,13 @@ function rankedCard(kind, build, cmp = null) {
     setPanelSignal(outer);
     mount(gridSlot, [card]);
   };
+  mountSliced(slot, gridSlot, slicer, cmp, draw);
+  draw();
+  return slot;
+}
+
+/* The slicer panel over a card's grid slot, and the card drawing again when ANY card narrows the page for this server (#6301). */
+function mountSliced(slot, gridSlot, slicer, cmp, draw) {
   if (slicer && slicer.node) {
     const off = onSliceChange((server) => {
       if (slot.isConnected === false) return off();
@@ -976,6 +983,33 @@ function rankedCard(kind, build, cmp = null) {
   } else {
     mount(slot, [gridSlot]);
   }
+}
+
+/**
+ * The Active Queries and Query Store cards under a time slicer (#6301 slice 2a): `tagFilteredCard` with the slicer over it. `build(picker, w,
+ * onRow)` draws the grid for `w`, the page range or the slicer's selection, and `onRow` is the Query Store row pick that overlays that query's
+ * history on the strip (null for Active Queries). `compare` hands the Compare picker the narrowed window, as the ranked cards do.
+ */
+function slicedTagCard(kind, cmp, build, compare = false) {
+  const slot = el("div", {}, []);
+  slot.style.display = "contents";
+  const gridSlot = el("div", {}, []);
+  gridSlot.style.display = "contents";
+  const slicer = rankedSlicer(kind, cmp);
+  let drawing = null;
+  const draw = () => {
+    if (drawing) drawing.abort();
+    const mine = new AbortController();
+    drawing = mine;
+    const outer = getPanelSignal();
+    if (outer) outer.addEventListener("abort", () => mine.abort(), { once: true });
+    const w = effectiveContext(cmp.server, cmp.ctx);
+    setPanelSignal(mine.signal);
+    const card = tagFilteredCard(kind, (picker) => build(picker, w, slicer ? slicer.onRow(null) : null), compare ? { server: cmp.server, ctx: w } : null);
+    setPanelSignal(outer);
+    mount(gridSlot, [card]);
+  };
+  mountSliced(slot, gridSlot, slicer, cmp, draw);
   draw();
   return slot;
 }
@@ -995,44 +1029,112 @@ const OVERLAY_METRICS = {
 };
 
 /**
- * The slicer for one ranked card: the strip charts the server's duration trend over the page range (get_query_duration_trend, or
- * get_procedure_duration_trend), a release narrows the page's window, and selecting a Top Queries row overlays that query's own trend
- * (get_query_trend, over the page range, the read the per-query picker below the grid uses).
+ * What each slicer charts on its strip, and what a row pick overlays on it (#6301). The strip reads once over the PAGE range, whatever the
+ * grid below holds:
+ *   queries     get_query_duration_trend; a row overlays get_query_trend for that query.
+ *   procedures  get_procedure_duration_trend; no row overlay (the web has no per-procedure trend read).
+ *   active      the snapshot list of get_active_queries (snapshots_only), sessions per snapshot; no row overlay.
+ *   querystore  get_query_store_duration_trend; a row overlays get_query_store_query_history for that query's plan, the read the grid's
+ *               own History button opens.
+ */
+function stripOf(kind, server, ctx) {
+  if (kind === "active") {
+    return { title: "Active queries", tool: "get_active_queries", params: { server, hours: ctx.hours, limit: SNAPSHOT_LIST_CAP, snapshots_only: true }, rows: (d) => d.snapshots, time: "collection_time", value: "row_count" };
+  }
+  if (kind === "querystore") {
+    return { title: "Query Store duration", tool: "get_query_store_duration_trend", params: { server, hours: ctx.hours }, rows: (d) => d.trend, time: "time", value: "value" };
+  }
+  const queries = kind === "queries";
+  return { title: queries ? "Query duration" : "Procedure duration", tool: queries ? "get_query_duration_trend" : "get_procedure_duration_trend", params: { server, hours: ctx.hours }, rows: (d) => d.trend, time: "time", value: "value" };
+}
+
+const timeOf = (v) => (parseUtc(v) || { getTime: () => NaN }).getTime();
+
+/* The row overlay of a kind: { eligible(row), key(row), read(row, ranking, signal) -> { points, label } | null }, or null when the kind has none. */
+function overlayOf(kind, server, ctx) {
+  if (kind === "queries") {
+    return {
+      /* get_query_trend keys on both values, so a row carrying neither is not offered, as in the per-query picker. */
+      eligible: (row) => !!(row && row.query_hash && row.database_name),
+      key: (row) => row.database_name + "|" + row.query_hash,
+      read: async (row, ranking, signal) => {
+        const metric = OVERLAY_METRICS[ranking] || OVERLAY_METRICS.cpu;
+        const trend = await readToolWithinKeptHistory("get_query_trend", { server, query_hash: row.query_hash, database_name: row.database_name, hours: ctx.hours }, signal);
+        if (trend.kind !== "data" || !trend.data) return null;
+        const points = (Array.isArray(trend.data.trend) ? trend.data.trend : []).map((r) => ({ t: timeOf(r.collection_time), v: Number(r[metric.key]) }));
+        return { points, label: row.database_name + " · " + truncate(row.query_text || "(no statement text captured)", 40) + " (" + metric.label + ")" };
+      },
+    };
+  }
+  if (kind === "querystore") {
+    return {
+      /* The history read keys on the database and the query id; the grid's row is one plan of that query. */
+      eligible: (row) => !!(row && row.database_name != null && row.query_id != null),
+      key: (row) => row.database_name + "|" + row.query_id + "|" + row.plan_id,
+      read: async (row, ranking, signal) => {
+        const res = await readToolWithinKeptHistory("get_query_store_query_history", { server, database_name: row.database_name, query_id: row.query_id, hours: ctx.hours }, signal);
+        if (res.kind !== "data" || !res.data) return null;
+        const all = Array.isArray(res.data.points) ? res.data.points : [];
+        const mine = row.plan_id == null ? all : all.filter((p) => p.plan_id === row.plan_id);
+        const points = mine.map((p) => ({ t: timeOf(p.collection_time), v: Number(p.avg_duration_ms) }));
+        return { points, label: row.database_name + " · query " + row.query_id + (row.plan_id == null ? "" : " plan " + row.plan_id) + " (avg duration ms)" };
+      },
+    };
+  }
+  return null;
+}
+
+/**
+ * The slicer for one card (`kind`: queries, procedures, active or querystore): the strip charts the kind's activity over the page range
+ * (stripOf), a release narrows the page's window, and selecting a row of a kind with a row overlay (overlayOf) draws that row's own timeline over
+ * the strip.
  */
 function rankedSlicer(kind, cmp) {
   const { server, ctx } = cmp;
   const win = windowOf(ctx);
   const rangeKey = rangeKeyOf(ctx);
-  const queries = kind === "queries";
+  const strip = stripOf(kind, server, ctx);
+  const overlay = overlayOf(kind, server, ctx);
   const slicer = timeSlicer({
     win,
     selection: getSlice(server, rangeKey),
-    title: queries ? "Query duration" : "Procedure duration",
+    title: strip.title,
     onCommit: (sel) => setSlice(server, rangeKey, sel),
   });
   if (!slicer.node) return null;
   const signal = getPanelSignal();
-  readToolWithinKeptHistory(queries ? "get_query_duration_trend" : "get_procedure_duration_trend", { server, hours: ctx.hours }, signal).then((res) => {
+  readToolWithinKeptHistory(strip.tool, strip.params, signal).then((res) => {
     if (res.kind !== "data" || !res.data) return;
-    const rows = Array.isArray(res.data.trend) ? res.data.trend : [];
-    slicer.setPoints(rows.map((r) => ({ t: (parseUtc(r.time) || { getTime: () => NaN }).getTime(), v: Number(r.value) })));
+    const rows = strip.rows(res.data);
+    slicer.setPoints((Array.isArray(rows) ? rows : []).map((r) => ({ t: timeOf(r[strip.time]), v: Number(r[strip.value]) })));
   });
 
   const pickKey = server + "|" + kind;
-  let selectedRow = null;
   let ranking = topRankingPick[kind];
   let loading = 0;
-  const overlayOf = async (row) => {
+  const show = async (row) => {
     const mine = ++loading;
-    const metric = OVERLAY_METRICS[ranking] || OVERLAY_METRICS.cpu;
-    const trend = await readToolWithinKeptHistory("get_query_trend", { server, query_hash: row.query_hash, database_name: row.database_name, hours: ctx.hours }, signal);
-    if (mine !== loading || trend.kind !== "data" || !trend.data) return;
-    const points = (Array.isArray(trend.data.trend) ? trend.data.trend : []).map((r) => ({ t: (parseUtc(r.collection_time) || { getTime: () => NaN }).getTime(), v: Number(r[metric.key]) }));
-    slicer.setOverlay(points, row.database_name + " · " + truncate(row.query_text || "(no statement text captured)", 40) + " (" + metric.label + ")");
+    const drawn = await overlay.read(row, ranking, signal);
+    if (mine !== loading || !drawn) return;
+    slicer.setOverlay(drawn.points, drawn.label);
   };
   const mark = (tr, on) => {
     tr.className = on ? (tr.className + " row-selected").trim() : tr.className.split(" ").filter((c) => c !== "row-selected").join(" ");
     tr.setAttribute("aria-pressed", on ? "true" : "false");
+  };
+  /* A row is picked by a click or Enter or Space ON THE ROW: a button inside it (the plan and History buttons) keeps its own click and its own keys. */
+  const pickable = (tr, handler) => {
+    tr.setAttribute("role", "button");
+    tr.setAttribute("tabindex", "0");
+    tr.addEventListener("click", (e) => {
+      if (e && e.target && e.target.closest && e.target.closest("button")) return;
+      handler(e);
+    });
+    tr.addEventListener("keydown", (e) => {
+      if (e.target !== tr || (e.key !== "Enter" && e.key !== " ")) return;
+      e.preventDefault();
+      handler(e);
+    });
   };
   return {
     node: slicer.node,
@@ -1040,22 +1142,19 @@ function rankedSlicer(kind, cmp) {
     follow: () => slicer.setSelection(getSlice(server, rangeKey)),
     onRow: (rankedBy) => {
       ranking = rankedBy;
-      if (!queries) return null;
-      /* A draw starts with no overlay: it comes back below for the picked query when that query is still among the rows. */
-      selectedRow = null;
+      if (!overlay) return null;
+      /* A draw starts with no overlay: it comes back below for the picked row when that row is still among the rows. */
       loading++;
       slicer.clearOverlay();
       return (row, tr) => {
-        /* get_query_trend keys on both values, so a row carrying neither is not offered, as in the per-query picker. */
-        if (!row || !row.query_hash || !row.database_name) return;
-        const key = row.database_name + "|" + row.query_hash;
+        if (!overlay.eligible(row)) return;
+        const key = overlay.key(row);
         tr.style.cursor = "pointer";
         tr.setAttribute("title", "Overlay this query's timeline on the time slicer");
-        makeActivatable(tr, (e) => {
+        pickable(tr, (e) => {
           if (e && e.type === "click" && selectionInside(tr)) return;
           if (overlayPicks.get(pickKey) === key) {
             overlayPicks.delete(pickKey);
-            selectedRow = null;
             mark(tr, false);
             loading++;
             slicer.clearOverlay();
@@ -1063,16 +1162,14 @@ function rankedSlicer(kind, cmp) {
           }
           overlayPicks.set(pickKey, key);
           for (const other of tr.parentNode ? tr.parentNode.children : []) if (other !== tr) mark(other, false);
-          selectedRow = row;
           mark(tr, true);
-          overlayOf(row);
+          show(row);
         });
         tr.setAttribute("aria-pressed", "false");
-        /* A redraw (a sort, a narrowing, the 60 s rebuild) puts the pick back on the same query when it is still in the grid. */
+        /* A redraw (a sort, a narrowing, the 60 s rebuild) puts the pick back on the same row when it is still in the grid. */
         if (overlayPicks.get(pickKey) === key) {
-          selectedRow = row;
           mark(tr, true);
-          overlayOf(row);
+          show(row);
         }
       };
     },
@@ -1911,24 +2008,33 @@ export const SERVER_TABS = [
         ),
         { server, ctx }
       ),
-      tagFilteredCard("querystore", (picker) =>
-        table(
-          "Query Store",
-          "get_query_store_top",
-          withTagPick({ server, hours: ctx.hours, top: 20 }, "querystore"),
-          "queries",
-          [...QUERY_STORE_COLUMNS, queryStorePlanColumn(server), queryStoreHistoryColumn(server, ctx.hours)],
-          ctx.label,
-          "No Query Store rows in this window.",
-          2,
-          "truncation_note",
-          /* #5094: when whole days came from the daily summary the answer says so (`approximate`), and its note is
-             drawn above the grid as text, so the totals are not read as exact. Null (no line) on an exact answer. */
-          ["approximation_note"],
-          null,
-          picker
-        ),
-        { server, ctx }
+      /* #6301: under the time slicer. The grid reads the slicer's window (`w`); the History button on a row still reads that query's history
+         over the page range (`ctx.hours`), the context the row's plans are read in, and a row pick overlays the same history on the strip. */
+      slicedTagCard(
+        "querystore",
+        { server, ctx },
+        (picker, w, onRow) =>
+          table(
+            "Query Store",
+            "get_query_store_top",
+            withTagPick(windowParams({ server, hours: w.hours, top: 20 }, w), "querystore"),
+            "queries",
+            [...QUERY_STORE_COLUMNS, queryStorePlanColumn(server), queryStoreHistoryColumn(server, ctx.hours)],
+            w.label,
+            "No Query Store rows in this window.",
+            2,
+            "truncation_note",
+            /* #5094: when whole days came from the daily summary the answer says so (`approximate`), and its note is
+               drawn above the grid as text, so the totals are not read as exact. Null (no line) on an exact answer. */
+            ["approximation_note"],
+            null,
+            picker,
+            null,
+            null,
+            false,
+            onRow
+          ),
+        true
       ),
       /* #2484: the Query Store Regressions tab -- the only tab in the per-server page that was entirely
          unreachable from a browser rather than merely reduced. Built with table(), not an object literal:
@@ -3612,15 +3718,16 @@ function activeQueriesPanel(server, ctx) {
   const wait = queryWaitFilter(server);
   /* #6302: the snapshot picker (active-snapshots.js) reads the window's snapshot times, under the tag pick and the wait filter the grid
      uses, and draws the grid for the latest one, or the one picked; "All snapshots in window" draws it as it was. */
-  return tagFilteredCard("active", (tagPicker) =>
-    activeQueriesSnapshotSlot(server, ctx, wait, withTagPick({}, "active"), (snapshotTime, snapPicker) =>
-      activeQueriesGrid(server, ctx, wait, snapshotTime, snapPicker ? el("div", {}, [tagPicker, snapPicker]) : tagPicker)
+  /* #6301: under the time slicer. `w` is the page range or the slicer's selection; the snapshot list and the grid both read it. */
+  return slicedTagCard("active", { server, ctx }, (tagPicker, w) =>
+    activeQueriesSnapshotSlot(server, w, wait, withTagPick({}, "active"), (snapshotTime, snapPicker) =>
+      activeQueriesGrid(server, w, wait, snapshotTime, snapPicker ? el("div", {}, [tagPicker, snapPicker]) : tagPicker)
     )
   );
 }
 
 function activeQueriesGrid(server, ctx, wait, snapshotTime, control) {
-  const base = wait ? { server, hours: ctx.hours, limit: 500, wait_type: wait } : { server, hours: ctx.hours, limit: 50 };
+  const base = windowParams(wait ? { server, hours: ctx.hours, limit: 500, wait_type: wait } : { server, hours: ctx.hours, limit: 50 }, ctx);
   const panel = table(
     "Active Queries",
     "get_active_queries",

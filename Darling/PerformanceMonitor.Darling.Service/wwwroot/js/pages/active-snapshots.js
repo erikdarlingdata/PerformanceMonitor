@@ -19,6 +19,7 @@
 import { el, mount, readToolWithinKeptHistory, loadingStrip, localTime, parseUtc } from "../util.js";
 import { getPanelSignal, setPanelSignal } from "../panels.js";
 import { SNAPSHOT_LATEST, SNAPSHOT_ALL, snapshotPick, setSnapshotPick } from "../snapshot-pick.js";
+import { windowParams } from "../time-slicer.js";
 
 export { SNAPSHOT_LATEST, SNAPSHOT_ALL, snapshotPick, setSnapshotPick, focusSnapshotAt } from "../snapshot-pick.js";
 
@@ -132,7 +133,8 @@ export function activeQueriesSnapshotSlot(server, ctx, wait, extraParams, drawTa
       mount(slot, [loadingStrip("Loading active-query snapshots…")]);
       let res;
       try {
-        const params = { server, hours: ctx.hours, limit: SNAPSHOT_LIST_CAP, snapshots_only: true, ...extraParams };
+        /* #6301: a narrowed window (ctx.narrowed) is read with its own end (as_of) as well as its hours. */
+        const params = windowParams({ server, hours: ctx.hours, limit: SNAPSHOT_LIST_CAP, snapshots_only: true, ...extraParams }, ctx);
         if (wait) params.wait_type = wait;
         /* The grid's own rule (util.js readWithinKeptHistory): a window longer than the history the server keeps is asked again
            at the hours it keeps, so the list and the grid read the same window (#6302). */
