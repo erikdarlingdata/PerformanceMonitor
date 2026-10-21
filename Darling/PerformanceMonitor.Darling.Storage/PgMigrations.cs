@@ -2088,7 +2088,7 @@ ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS starts_at_utc time
     /// <c>config.server_tags</c> and <c>config.server_tag_map</c>, could not be left to change the same set.
     ///
     /// <para><b>Which sessions.</b> A session whose login is <c>mcp</c>, or whose session setting <c>darling.surface</c> is
-    /// <c>mcp</c>: the MCP host sets that setting on its own connections, so an MCP that connects as the store's owner (no
+    /// <c>mcp</c>: the MCP host sets that setting inside each write's own transaction (transaction-local, so it ends with the commit or the rollback and a pooled connection never keeps it), so an MCP that connects as the store's owner (no
     /// <c>postgres.mcpConnectionString</c>), or as another login, is held to the rule too. The Viewer, the web dashboard and the
     /// service carry neither and are not held to it. The login test is on <c>session_user</c>, which a non-superuser cannot change,
     /// because the function is SECURITY DEFINER (it reads the route table, which <c>mcp</c> may not).</para>

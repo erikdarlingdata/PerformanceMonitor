@@ -468,6 +468,31 @@ VALUES (7, 'alpha-sql-01', 'alpha-sql-01', TRUE, 16, now() AT TIME ZONE 'UTC', n
         Assert.Equal("", await TextAsync(source, "SELECT coalesce(current_setting('darling.surface', true), '')"));
     }
 
+    /// <summary>The rollback path of the transaction-local marker (#6281): a write the guard REFUSES ends its transaction with a rollback,
+    /// and the one pooled connection it ran on must not keep the marker, or the next use of that connection (a read, or a write that is
+    /// not held) would run as an MCP surface it never was.</summary>
+    [Fact]
+    public async Task TheMcpDataSource_TheMarkerIsGoneAfterARefusedWrite_OnOneConnection()
+    {
+        await using var f = (await OpenAsync())!;
+        var ct = TestContext.Current.CancellationToken;
+
+        var builder = new NpgsqlConnectionStringBuilder(DarlingStoreConnection.PinSessionTimeZoneUtc(
+            DarlingStoreConnection.WithApplicationName(f.OwnerConnectionString, DarlingManagedPostgres.McpApplicationName)))
+        {
+            MaxPoolSize = 1,
+        };
+        await using var source = NpgsqlDataSource.Create(builder.ConnectionString);
+
+        AssertRefused(await DarlingMcpServerTagTools.AssignServerTag(source, f.Grand, new[] { 7 }, ct), f.AgentRoute);
+        Assert.Equal("", await TextAsync(source, "SELECT coalesce(current_setting('darling.surface', true), '')"));
+        Assert.Equal(0, await CountAsync(source, "SELECT count(*) FROM config.server_tag_map"));
+
+        /* The same connection still writes where nothing is held, and the marker is gone again afterwards. */
+        Assert.Equal("assigned", (string?)Parse(await DarlingMcpServerTagTools.AssignServerTag(source, f.Free, new[] { 7 }, ct))["status"]);
+        Assert.Equal("", await TextAsync(source, "SELECT coalesce(current_setting('darling.surface', true), '')"));
+    }
+
     private static async Task<string> TextAsync(NpgsqlDataSource source, string sql)
     {
         await using var command = source.CreateCommand(sql);

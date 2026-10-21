@@ -256,6 +256,45 @@ public sealed class McpRouteRoleLiveTests
         });
     }
 
+    /// <summary>#6281: the hold-back on a route with an agent setting is part of the write statement itself, so a route a person gave a setting
+    /// after the tool read it is still held back. A write that changed no row for that reason changes nothing else either: the other routes'
+    /// fallback references to a route that was not deleted stay. A route with no agent setting is written as before.</summary>
+    [Fact]
+    public async Task TheRouteWrites_HoldBackARouteWithAnAgentSettingThemselves_AndKeepTheFallbackReferences()
+    {
+        await WithMcpRoleAsync(async (owner, asMcp, ct) =>
+        {
+            await ExecAsync(owner,
+                "INSERT INTO config.config_notification_routes (metric_match, agent_level) VALUES ('Blocking', 0), ('Deadlocks', 1), ('High CPU', NULL);" +
+                "UPDATE config.config_notification_routes SET fallback_route_id = 1 WHERE route_id = 3;", ct);
+            var role = new NpgsqlConnectionStringBuilder(asMcp.ConnectionString).Username;
+            await ExecAsync(owner, $"GRANT DELETE, UPDATE (fallback_route_id) ON config.config_notification_routes TO {role}", ct);
+            var store = new PgNotificationRouteStore(asMcp);
+
+            /* The Off route is not turned off or deleted, and the agent route is neither turned off nor turned on. */
+            Assert.Equal(0, await store.SetEnabledAsync(1, false, ct));
+            Assert.Equal(0, await store.DeleteAsync(1, ct));
+            Assert.Equal(0, await store.SetEnabledAsync(2, false, ct));
+            Assert.Equal(0, await store.SetEnabledAsync(2, true, ct));
+            Assert.Equal(0, await store.DeleteAsync(2, ct));
+            Assert.True(await RouteEnabledAsync(owner, 1, ct));
+            Assert.True(await RouteEnabledAsync(owner, 2, ct));
+            Assert.Equal(3, await RouteCountAsync(owner, ct));
+            await using (var reference = owner.CreateCommand("SELECT fallback_route_id FROM config.config_notification_routes WHERE route_id = 3"))
+            {
+                Assert.Equal(1, (int)(await reference.ExecuteScalarAsync(ct))!);
+            }
+
+            /* An Off route is turned on; a route with no agent setting is turned off and deleted. */
+            await ExecAsync(owner, "UPDATE config.config_notification_routes SET enabled = false WHERE route_id = 1", ct);
+            Assert.Equal(1, await store.SetEnabledAsync(1, true, ct));
+            Assert.True(await RouteEnabledAsync(owner, 1, ct));
+            Assert.Equal(1, await store.SetEnabledAsync(3, false, ct));
+            Assert.Equal(1, await store.DeleteAsync(3, ct));
+            Assert.Equal(2, await RouteCountAsync(owner, ct));
+        });
+    }
+
     private static async Task<bool> RouteEnabledAsync(NpgsqlDataSource owner, int routeId, CancellationToken ct)
     {
         await using var command = owner.CreateCommand("SELECT enabled FROM config.config_notification_routes WHERE route_id = $1");

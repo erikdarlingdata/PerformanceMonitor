@@ -444,7 +444,7 @@ public sealed class AwsRoleEditTests
             Task.FromResult(new List<string>());
 
         public Task<Edit.ServerEditWrite> WriteAsync(
-            int serverId, DateTime expectedModifiedAt, IReadOnlyList<Edit.EditColumnValue> sets, string? newStorageKey, string? actualStorageKey, CancellationToken cancellationToken) =>
+            int serverId, DateTime expectedModifiedAt, IReadOnlyList<Edit.EditColumnValue> sets, string? newStorageKey, string? actualStorageKey, Edit.HeldCheck? heldCheck, CancellationToken cancellationToken) =>
             Task.FromResult(CountedWrite());
 
         private Edit.ServerEditWrite CountedWrite()

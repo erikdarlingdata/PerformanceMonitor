@@ -809,6 +809,10 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
     /// a chosen write can throw.</summary>
     private sealed class FakeDefinitions : DarlingMcpServerAdminTools.IServerDefinitions
     {
+        public Task<List<DarlingMcpServerAdminTools.RegisteredTarget>> LoadTargetsAsync(CancellationToken cancellationToken) => Task.FromResult(new List<DarlingMcpServerAdminTools.RegisteredTarget>());
+
+        public Task<int?> ScopedAgentRouteAsync(int serverId, CancellationToken cancellationToken) => Task.FromResult<int?>(null);
+
         private readonly Dictionary<int, string> _rows = new();
         private readonly List<string> _visibleToTheGate;
         private readonly int _faultOnInsert;
@@ -837,7 +841,7 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
             Task.FromResult(_visibleToTheGate.ToList());
 
         public Task<int> InsertAsync(
-            DarlingMcpServerAdminTools.ParsedServerEntry entry, string? encryptedPassword, string? actualStorageKey, CancellationToken cancellationToken)
+            DarlingMcpServerAdminTools.ParsedServerEntry entry, string? encryptedPassword, string? actualStorageKey, DarlingMcpServerAdminTools.HeldCheck? heldCheck, CancellationToken cancellationToken)
         {
             InsertAttempts++;
             if (InsertAttempts == _faultOnInsert)

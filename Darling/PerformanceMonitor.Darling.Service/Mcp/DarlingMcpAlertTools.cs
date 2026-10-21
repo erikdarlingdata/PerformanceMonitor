@@ -769,7 +769,12 @@ public sealed partial class DarlingMcpAlertTools
                 return JsonSerializer.Serialize(new { status = "unchanged", route = RoutePayload(existing) }, McpHelpers.JsonOptions);
             }
 
-            await store.SetEnabledAsync(route_id, enabled);
+            if (await store.SetEnabledAsync(route_id, enabled) == 0)
+            {
+                /* The write holds back a route with an agent setting in its own statement (#6281): one a person gave a setting after the read
+                   above is refused here, one removed in the meantime is not found. */
+                return await RefusedOrMissingAsync(store, route_id, "set_notification_route_enabled", !enabled);
+            }
 
             /* Re-read AFTER the write, so the reported row is the stored one (set_mute_rule_enabled's rule). */
             var stored = (await store.LoadSummariesAsync()).FirstOrDefault(r => r.RouteId == route_id);
@@ -858,7 +863,7 @@ public sealed partial class DarlingMcpAlertTools
 
             var deleted = await store.DeleteAsync(route_id);
             return deleted == 0
-                ? Outcome("not_found", $"No notification route with route_id {route_id}.")
+                ? await RefusedOrMissingAsync(store, route_id, "delete_notification_route", true)
                 : JsonSerializer.Serialize(new { status = "deleted", route_id }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
@@ -939,6 +944,21 @@ public sealed partial class DarlingMcpAlertTools
             : Outcome("refused",
                 $"Route {route.RouteId} is an agent route (agent_level {route.AgentLevel}): {tool} does not change it over MCP. " +
                 "Change it in the Viewer's Settings window (Notifications, routes) or on the web dashboard's admin notification routes page.");
+
+    /// <summary>The answer when a write that holds back a route with an agent setting changed no row (#6281): the route is read again,
+    /// and one that still exists is refused with the sentence the first check gives, one that is gone is not found.</summary>
+    private static async Task<string> RefusedOrMissingAsync(PgNotificationRouteStore store, int routeId, string tool, bool turnsOffOrDeletes)
+    {
+        var now = (await store.LoadSummariesAsync()).FirstOrDefault(r => r.RouteId == routeId);
+        if (now is null)
+        {
+            return Outcome("not_found", $"No notification route with route_id {routeId}.");
+        }
+
+        return AgentRouteRefusal(now, tool)
+            ?? (turnsOffOrDeletes ? OffRouteRefusal(now, tool) : null)
+            ?? Outcome("refused", $"Route {routeId} was not changed: its agent setting changed while this call ran. Read it again with get_notification_routes.");
+    }
 
     /// <summary>
     /// The refusal for turning off or deleting a route with an explicit Off setting (agent_level 0, #6281). An Off route keeps

@@ -123,7 +123,8 @@ ORDER BY route_id";
 UPDATE config_notification_routes
    SET enabled = $2,
        modified_at = (now() AT TIME ZONE 'UTC')
- WHERE route_id = $1";
+ WHERE route_id = $1
+   AND (agent_level IS NULL OR (agent_level = 0 AND $2))";
 
     /// <summary>The fallback write (#6036): the id and the stamp, nothing else.</summary>
     public const string SetFallbackSql = @"
@@ -140,7 +141,7 @@ UPDATE config_notification_routes
        modified_at = (now() AT TIME ZONE 'UTC')
  WHERE fallback_route_id = $1";
 
-    public const string DeleteSql = "DELETE FROM config_notification_routes WHERE route_id = $1";
+    public const string DeleteSql = "DELETE FROM config_notification_routes WHERE route_id = $1 AND agent_level IS NULL";
 
     public async Task<IReadOnlyList<RouteSummary>> LoadSummariesAsync(CancellationToken cancellationToken = default)
     {
@@ -270,7 +271,9 @@ UPDATE config_notification_routes
         return described;
     }
 
-    /// <summary>Sets the flag; returns the number of rows updated (0 = no such route).</summary>
+    /// <summary>Sets the flag; returns the number of rows updated. 0 is no such route, or a route that has an agent setting and so is
+    /// not turned off or changed over MCP (#6281): the condition is in the same statement as the write, so a setting a person adds
+    /// after the caller's read is still honoured. Only a route with no agent setting, or an Off one being turned on, is written.</summary>
     public async Task<int> SetEnabledAsync(int routeId, bool enabled, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(SetEnabledSql);
@@ -305,7 +308,8 @@ UPDATE config_notification_routes
     }
 
     /// <summary>Deletes the route and clears every other route's reference to it as its fallback, in one transaction;
-    /// returns the number of rows deleted (0 = no such route).</summary>
+    /// returns the number of rows deleted. 0 is no such route, or a route that has an agent setting (#6281): the statement itself
+    /// holds back such a route, and nothing is changed then (the fallback references are kept).</summary>
     public async Task<int> DeleteAsync(int routeId, CancellationToken cancellationToken = default)
     {
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
@@ -323,6 +327,12 @@ UPDATE config_notification_routes
             command.CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds;
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });
             deleted = await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        if (deleted == 0)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return 0;
         }
 
         await transaction.CommitAsync(cancellationToken);

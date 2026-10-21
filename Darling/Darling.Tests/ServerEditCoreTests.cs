@@ -77,7 +77,7 @@ public sealed class ServerEditCoreTests : IDisposable
             Task.FromResult(OtherKeys.ToList());
 
         public Task<Edit.ServerEditWrite> WriteAsync(
-            int serverId, DateTime expectedModifiedAt, IReadOnlyList<Edit.EditColumnValue> sets, string? newStorageKey, string? actualStorageKey, CancellationToken cancellationToken)
+            int serverId, DateTime expectedModifiedAt, IReadOnlyList<Edit.EditColumnValue> sets, string? newStorageKey, string? actualStorageKey, Edit.HeldCheck? heldCheck, CancellationToken cancellationToken)
         {
             Writes++;
             LastSets = sets.ToList();

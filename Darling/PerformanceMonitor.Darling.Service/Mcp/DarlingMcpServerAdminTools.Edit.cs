@@ -244,7 +244,8 @@ public sealed partial class DarlingMcpServerAdminTools
             return await EditServerCoreAsync(
                 new PostgresServerEditStore(postgres), target.Candidates[0].ServerId, changes!, probe,
                 ring, logger, cancellationToken, policy: policy,
-                agentRouteCovering: policy is null ? null : (id, token) => ScopedAgentRouteAsync(postgres, id, token));
+                agentRouteCovering: policy is null ? null : (id, token) => ScopedAgentRouteAsync(postgres, id, token),
+                loadTargets: policy is null ? null : token => LoadRegisteredTargetsAsync(postgres, token));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -282,6 +283,20 @@ LIMIT 1";
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         return await command.ExecuteScalarAsync(cancellationToken) is int routeId ? routeId : null;
     }
+
+    /// <summary>The same lookup on an open connection, inside <paramref name="transaction"/> (the write's own).</summary>
+    internal static async Task<int?> ScopedAgentRouteAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, int serverId, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(ScopedAgentRouteSql, connection) { Transaction = transaction };
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        return await command.ExecuteScalarAsync(cancellationToken) is int routeId ? routeId : null;
+    }
+
+    /// <summary>The sentence for an edit that moves a registration a route with an agent setting is scoped to (#6281).</summary>
+    private static string CoveredServerEditText(int routeId) =>
+        $"Route {routeId} has an agent setting and is scoped to this server or one of its tags, so where it connects (host, port, database or read-only intent) is changed in the Viewer or on the web dashboard, not over MCP. " +
+        "The display name and the other settings can still be changed here.";
 
     /* ─────────────────────────────── the core ─────────────────────────────── */
 
@@ -334,7 +349,8 @@ LIMIT 1";
     internal static async Task<string> EditServerCoreAsync(
         IServerEditStore store, int serverId, ServerEditChanges changes, ServerProbe probe, IPasswordKeyRing ring, ILogger? logger, CancellationToken cancellationToken,
         ILogger? probeLogger = null, DarlingMcpAddServersPolicy? policy = null,
-        Func<int, CancellationToken, Task<int?>>? agentRouteCovering = null)
+        Func<int, CancellationToken, Task<int?>>? agentRouteCovering = null,
+        Func<CancellationToken, Task<List<RegisteredTarget>>>? loadTargets = null)
     {
         var row = await store.ReadRowAsync(serverId, cancellationToken);
         if (row is null)
@@ -372,9 +388,18 @@ LIMIT 1";
            would point that route's coverage at another machine. The web route and the operator pass no check. */
         if (plan.AddressChanged && agentRouteCovering is not null && await agentRouteCovering(serverId, cancellationToken) is { } coveringRoute)
         {
-            return Outcome(EditStatus.Refused,
-                $"Route {coveringRoute} has an agent setting and is scoped to this server or one of its tags, so where it connects (host, port, database or read-only intent) is changed in the Viewer or on the web dashboard, not over MCP. " +
-                "The display name and the other settings can still be changed here.");
+            return Outcome(EditStatus.Refused, CoveredServerEditText(coveringRoute));
+        }
+
+        /* #6281: the add rule, for the address the edit moves to. A registration no route is scoped to is not pointed at a machine
+           another registration holds while a route with an agent setting is scoped to that one: this registration would sit outside
+           that route. The registration being edited is left out of the comparison. */
+        var heldEntry = new ParsedServerEntry(0, plan.ProbeConfig.Name, plan.NewStorageKey, plan.ProbeConfig, null);
+        var enforceHeld = plan.AddressChanged && agentRouteCovering is not null && loadTargets is not null;
+        if (enforceHeld
+            && await TargetHeldRefusalAsync(await loadTargets!(cancellationToken), heldEntry, agentRouteCovering!, cancellationToken, serverId, forEdit: true) is { } heldRefusal)
+        {
+            return Outcome(EditStatus.Refused, heldRefusal);
         }
 
         var otherKeys = new HashSet<string>(await store.LoadOtherStorageKeysAsync(serverId, cancellationToken), StringComparer.OrdinalIgnoreCase);
@@ -430,11 +455,19 @@ LIMIT 1";
                 : s).ToList();
         }
 
-        var write = await store.WriteAsync(serverId, row.ModifiedAt, sets, plan.AddressChanged ? plan.NewStorageKey : null, actualStorageKey, cancellationToken);
+        /* The same two checks again inside the write's transaction, under the identity lock: a route set up during the probe is seen
+           before the row changes. */
+        HeldCheck? heldCheck = !enforceHeld ? null : async (connection, transaction, token) =>
+            await ScopedAgentRouteAsync(connection, transaction, serverId, token) is { } routeNow
+                ? CoveredServerEditText(routeNow)
+                : await TargetHeldRefusalInTransactionAsync(connection, transaction, heldEntry, serverId, token, forEdit: true);
+        var write = await store.WriteAsync(serverId, row.ModifiedAt, sets, plan.AddressChanged ? plan.NewStorageKey : null, actualStorageKey, heldCheck, cancellationToken);
         switch (write.Kind)
         {
             case ServerEditWriteKind.NotFound:
                 return Outcome(EditStatus.NotFound, "This server's definition was removed while the edit ran; nothing was changed.");
+            case ServerEditWriteKind.TargetHeld:
+                return Outcome(EditStatus.Refused, write.Detail ?? "A route with an agent setting now covers this server or the machine it moves to; nothing was changed.");
             case ServerEditWriteKind.Occupied:
                 return OccupiedAnswer(plan.NewStorageKey);
             case ServerEditWriteKind.ActualOccupied:
@@ -1122,9 +1155,9 @@ LIMIT 1";
     /// <summary><c>Occupied</c>: another definition holds the address the edit moves to. <c>ActualOccupied</c>: another
     /// definition holds the storage key the probe's connected database gives (#5240), the refusal
     /// <see cref="ActualIdentityCollision"/> gives before the write. Neither commits.</summary>
-    internal enum ServerEditWriteKind { Written, NotFound, Conflict, Occupied, PasswordNeeded, ActualOccupied, ReferenceRefused, RemediationKept, ExternalIdNeeded, ExternalIdNeedsRole, InvalidValue }
+    internal enum ServerEditWriteKind { Written, NotFound, Conflict, Occupied, PasswordNeeded, ActualOccupied, ReferenceRefused, RemediationKept, ExternalIdNeeded, ExternalIdNeedsRole, InvalidValue, TargetHeld }
 
-    internal sealed record ServerEditWrite(ServerEditWriteKind Kind, DateTime ModifiedAt);
+    internal sealed record ServerEditWrite(ServerEditWriteKind Kind, DateTime ModifiedAt, string? Detail = null);
 
     /// <summary>The storage operations an edit performs, as a seam: the real one is
     /// <see cref="PostgresServerEditStore"/>; a test stands in one that swallows a row, moves <c>modified_at</c> or
@@ -1144,9 +1177,11 @@ LIMIT 1";
         /// the other rows' keys, read under the lock. An address another row holds undoes the write: the transaction is
         /// never committed. <paramref name="actualStorageKey"/> is the key the probe's connected database gives when it
         /// differs from the edit's own key (<see cref="ActualStorageKeyOf"/>), else null; a row holding it answers
-        /// <see cref="ServerEditWriteKind.ActualOccupied"/>, judged after <paramref name="newStorageKey"/>.</summary>
+        /// <see cref="ServerEditWriteKind.ActualOccupied"/>, judged after <paramref name="newStorageKey"/>. <paramref name="heldCheck"/>,
+        /// when given, runs last in the same transaction (#6281): a non-null answer is <see cref="ServerEditWriteKind.TargetHeld"/> with that
+        /// text, and the transaction is not committed.</summary>
         Task<ServerEditWrite> WriteAsync(
-            int serverId, DateTime expectedModifiedAt, IReadOnlyList<EditColumnValue> sets, string? newStorageKey, string? actualStorageKey, CancellationToken cancellationToken);
+            int serverId, DateTime expectedModifiedAt, IReadOnlyList<EditColumnValue> sets, string? newStorageKey, string? actualStorageKey, HeldCheck? heldCheck, CancellationToken cancellationToken);
     }
 
     /// <summary>The columns <see cref="ReadEditRowSql"/> reads, and the only ones an edit may name in a SET list.</summary>
@@ -1256,7 +1291,7 @@ FROM config_monitored_servers WHERE server_id = $1";
         }
 
         public async Task<ServerEditWrite> WriteAsync(
-            int serverId, DateTime expectedModifiedAt, IReadOnlyList<EditColumnValue> sets, string? newStorageKey, string? actualStorageKey, CancellationToken cancellationToken)
+            int serverId, DateTime expectedModifiedAt, IReadOnlyList<EditColumnValue> sets, string? newStorageKey, string? actualStorageKey, HeldCheck? heldCheck, CancellationToken cancellationToken)
         {
             var parameters = BuildEditFunctionParameters(serverId, expectedModifiedAt, sets);
             var postgres = _postgres;
@@ -1356,6 +1391,11 @@ FROM config_monitored_servers WHERE server_id = $1";
                 {
                     return new ServerEditWrite(ServerEditWriteKind.ActualOccupied, expectedModifiedAt);
                 }
+            }
+
+            if (heldCheck is not null && await heldCheck(connection, transaction, cancellationToken) is { } heldText)
+            {
+                return new ServerEditWrite(ServerEditWriteKind.TargetHeld, expectedModifiedAt, heldText);
             }
 
             await transaction.CommitAsync(cancellationToken);
