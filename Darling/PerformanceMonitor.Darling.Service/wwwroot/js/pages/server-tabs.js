@@ -53,6 +53,7 @@ import { deadlockGraphCell, processRowsInDatabases } from "./deadlock-graph.js";
 import { activePlanColumns, blockingPlanColumns, deadlockPlanColumn, planColumn, procedurePlanColumn, queryStorePlanColumn } from "./plan-viewer.js";
 import { queryStoreHistoryColumn } from "./query-store-history.js";
 import { systemEventsChartSpecs } from "./system-events-charts.js";
+import { comparePick, compareControl, compareCard, COMPARE_TOP } from "./top-compare.js";
 import { SQL_TAB_REACH, POSTGRES_TAB_REACH, withTabReach } from "./server-tab-reach.js";
 import { bloatVerdict, droppabilityVerdict, costFigure, lastScanNoteWord, fillfactorNoteWord, toastNoteWord, indexSkipWord } from "../pg-grid-text.js";
 
@@ -591,7 +592,7 @@ function perfmonRows(counters) {
  * null reads as the blank it is instead of flattening a chart to a zero nobody measured.
  */
 export function topQueriesPanel(server, ctx) {
-  return rankedCard("queries", (ranking, picker) => topQueriesCard(server, ctx, ranking, picker));
+  return rankedCard("queries", (ranking, picker) => topQueriesCard(server, ctx, ranking, picker), { server, ctx });
 }
 
 /* One draw of the card for one ranking (#5226): rankedCard draws it again on a pick, so the title and the rows follow the choice. */
@@ -846,7 +847,7 @@ function tagFilterPicker(kind, onPick) {
 }
 
 /** A grid drawn again on a tag pick: `build(picker)` draws the card with the tag filter under its title. Each draw aborts the one before it. */
-function tagFilteredCard(kind, build) {
+function tagFilteredCard(kind, build, cmp = null) {
   const slot = el("div", {}, []);
   slot.style.display = "contents";
   let drawing = null;
@@ -856,9 +857,9 @@ function tagFilteredCard(kind, build) {
     drawing = mine;
     const outer = getPanelSignal();
     if (outer) outer.addEventListener("abort", () => mine.abort(), { once: true });
-    const picker = el("div", { class: "picker-row" }, [tagFilterPicker(kind, draw)]);
+    const picker = el("div", { class: "picker-row" }, [tagFilterPicker(kind, draw), ...(cmp ? [compareControl(draw, slot)] : [])]);
     setPanelSignal(mine.signal);
-    const card = build(picker);
+    const card = cmp && comparePick.value !== "off" ? compareDrawn(kind, cmp, null, "Query Store", picker, mine.signal, () => build(picker)) : build(picker);
     setPanelSignal(outer);
     mount(slot, [card]);
   };
@@ -880,12 +881,40 @@ function tagColumn() {
   };
 }
 
+/* #6300: the Compare picker's delta card for a grid (top-compare.js). `cmp` is { server, ctx }; the read is the grid's own, asked for
+   the top COMPARE_TOP rows, once for the page's window and once with `as_of` shifted. `plain()` draws the grid as it is with Compare off. */
+function compareDrawn(kind, cmp, ranking, title, picker, signal, plain) {
+  const base = { server: cmp.server, hours: cmp.ctx.hours, top: COMPARE_TOP };
+  return compareCard({
+    kind,
+    server: cmp.server,
+    pick: comparePick.value,
+    title,
+    subtitle: cmp.ctx.label,
+    picker,
+    signal,
+    shell: panelShell,
+    viz: VIZ,
+    params: kind === "querystore" ? withTagPick(base, "querystore") : rankedParams(base, ranking, kind),
+    /* The plain grid is drawn after the two reads, so it takes this draw's signal again: a pick that redraws still aborts its read. */
+    plain: () => {
+      const outer = getPanelSignal();
+      setPanelSignal(signal);
+      try {
+        return plain();
+      } finally {
+        setPanelSignal(outer);
+      }
+    },
+  });
+}
+
 /**
  * A Top Queries or Top Procedures card (`kind` "queries" or "procedures") with its ranking selector. `build(ranking, picker)` draws the card
  * for the current pick and puts `picker` under its title; a pick stores the choice at module scope and draws the card again, so the title
  * ("Top Queries by Duration") and the rows follow it. Each draw aborts the one before it, as the Collection Log slot does.
  */
-function rankedCard(kind, build) {
+function rankedCard(kind, build, cmp = null) {
   const slot = el("div", {}, []);
   slot.style.display = "contents";
   let drawing = null;
@@ -907,9 +936,13 @@ function rankedCard(kind, build) {
         ranking
       ),
       tagFilterPicker(kind, draw),
+      ...(cmp ? [compareControl(draw, slot)] : []),
     ]);
     setPanelSignal(mine.signal);
-    const card = build(ranking, picker);
+    const card =
+      cmp && comparePick.value !== "off"
+        ? compareDrawn(kind, cmp, ranking, (kind === "queries" ? "Top Queries by " : "Top Procedures by ") + topRankingLabel(ranking), picker, mine.signal, () => build(ranking, picker))
+        : build(ranking, picker);
     setPanelSignal(outer);
     mount(slot, [card]);
   };
@@ -1306,7 +1339,8 @@ export const SERVER_TABS = [
           null,
           TOP_QUERY_GROUPS,
           picker
-        )
+        ),
+        { server, ctx }
       ),
       rankedCard("procedures", (ranking, picker) =>
         table(
@@ -1322,7 +1356,8 @@ export const SERVER_TABS = [
           null,
           TOP_PROC_GROUPS,
           picker
-        )
+        ),
+        { server, ctx }
       ),
     ],
   },
@@ -1721,7 +1756,8 @@ export const SERVER_TABS = [
           null,
           TOP_PROC_GROUPS,
           picker
-        )
+        ),
+        { server, ctx }
       ),
       tagFilteredCard("querystore", (picker) =>
         table(
@@ -1739,7 +1775,8 @@ export const SERVER_TABS = [
           ["approximation_note"],
           null,
           picker
-        )
+        ),
+        { server, ctx }
       ),
       /* #2484: the Query Store Regressions tab -- the only tab in the per-server page that was entirely
          unreachable from a browser rather than merely reduced. Built with table(), not an object literal:
