@@ -373,7 +373,7 @@ public sealed class DarlingMcpSessionTools
     /// list a picker is built from. <paramref name="limit"/> caps the snapshots, asked for one past so truncation is observed.
     /// </summary>
     private static async Task<string> SnapshotListAsync(
-        NpgsqlDataSource postgres, (int ServerId, string ServerName) resolved, int hoursBack, DateTime now, int limit, DatabaseFilter databases,
+        NpgsqlDataSource postgres, (int ServerId, string ServerName, string DisplayName) resolved, int hoursBack, DateTime now, int limit, DatabaseFilter databases,
         bool blockingOnly, string? waitFilter, QueryTagFilter? tags, string? databaseEcho, CancellationToken cancellationToken)
     {
         var page = await DarlingSessionReader.GetActiveQuerySnapshotsAsync(
