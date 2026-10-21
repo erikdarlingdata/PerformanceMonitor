@@ -52,6 +52,7 @@ import { downloadText } from "../grid-tools.js";
 import { deadlockGraphCell, processRowsInDatabases } from "./deadlock-graph.js";
 import { activePlanColumns, blockingPlanColumns, deadlockPlanColumn, planColumn, procedurePlanColumn, queryStorePlanColumn } from "./plan-viewer.js";
 import { queryStoreHistoryColumn } from "./query-store-history.js";
+import { statsHistoryColumn } from "./stats-history.js";
 import { SQL_TAB_REACH, POSTGRES_TAB_REACH, withTabReach } from "./server-tab-reach.js";
 import { bloatVerdict, droppabilityVerdict, costFigure, lastScanNoteWord, fillfactorNoteWord, toastNoteWord, indexSkipWord } from "../pg-grid-text.js";
 
@@ -615,7 +616,7 @@ function topQueriesCard(server, ctx, ranking, picker) {
     const parts = [
       VIZ.table(res.data, {
         rowsKey: "queries",
-        columns: [...TOP_QUERY_COLUMNS, planColumn(server)],
+        columns: [...TOP_QUERY_COLUMNS, planColumn(server), statsHistoryColumn("queries", server, ctx.hours)],
         groups: TOP_QUERY_GROUPS.groups,
         defaultGroups: TOP_QUERY_GROUPS.defaultGroups,
         emptyText:
@@ -1297,7 +1298,7 @@ export const SERVER_TABS = [
           "get_top_queries_by_cpu",
           rankedParams({ server, hours: ctx.hours, top: 20, detail: "full" }, ranking, "queries"),
           "queries",
-          [...TOP_QUERY_COLUMNS, planColumn(server)],
+          [...TOP_QUERY_COLUMNS, planColumn(server), statsHistoryColumn("queries", server, ctx.hours)],
           ctx.label,
           "No query stats in this window. Delta-based collection needs at least two cycles (~30 minutes) before it reports non-zero values.",
           2,
@@ -1313,7 +1314,7 @@ export const SERVER_TABS = [
           "get_top_procedures_by_cpu",
           rankedParams({ server, hours: ctx.hours, top: 20, detail: "full" }, ranking, "procedures"),
           "procedures",
-          [...TOP_PROC_COLUMNS, procedurePlanColumn(server)],
+          [...TOP_PROC_COLUMNS, procedurePlanColumn(server), statsHistoryColumn("procedures", server, ctx.hours)],
           ctx.label,
           "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes).",
           2,
@@ -1712,7 +1713,7 @@ export const SERVER_TABS = [
           "get_top_procedures_by_cpu",
           rankedParams({ server, hours: ctx.hours, top: 20, detail: "full" }, ranking, "procedures"),
           "procedures",
-          [...TOP_PROC_COLUMNS, procedurePlanColumn(server)],
+          [...TOP_PROC_COLUMNS, procedurePlanColumn(server), statsHistoryColumn("procedures", server, ctx.hours)],
           ctx.label,
           "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes).",
           2,

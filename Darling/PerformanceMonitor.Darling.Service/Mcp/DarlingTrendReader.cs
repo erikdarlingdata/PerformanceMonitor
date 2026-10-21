@@ -1173,6 +1173,15 @@ internal static class DarlingTrendReader
         DurationTrendRouting.BuildBucketedRawTrendSql("procedure_stats", withDatabaseFilter: true);
 
     /// <summary>
+    /// #6303: <see cref="ProcedureDurationTrendFilteredSql"/> for ONE procedure: $4 the database set, $5 the procedure's name as the
+    /// Top Procedures grid shows it (<see cref="DurationTrendRouting.ProcedureFullNameMatchSql"/>), $6 the bucket width. The filter
+    /// sits inside the aggregates, as the database filter does, so a collection in which this procedure ran nothing stays in the
+    /// bucket as zero work over its real seconds.
+    /// </summary>
+    public static readonly string ProcedureDurationTrendOneProcedureSql =
+        DurationTrendRouting.BuildBucketedRawTrendSql("procedure_stats", withDatabaseFilter: true, withProcedureFilter: true);
+
+    /// <summary>
     /// The Query Store duration trend - the viewer's <c>QueryStoreDurationTrendSql</c>, verbatim apart from
     /// the database filter, INCLUDING the #1841 tier-2 interval placement and its legacy arm.
     /// <para>Copied rather than simplified. The two arms are not decoration: arm 1 dedups each runtime
@@ -1327,13 +1336,25 @@ internal static class DarlingTrendReader
             ProcedureDurationTrendFilteredSql, postgres, serverId, startUtc, endUtc, route, bucketMinutes, databases, cancellationToken);
 
     /// <summary>
+    /// #6303: the procedure-stats duration trend of ONE procedure (<paramref name="procedureFullName"/>, the grid's <c>full_name</c>)
+    /// in the chosen database(s), down <paramref name="route"/> (raw or the hourly rollup, which groups by schema and object).
+    /// </summary>
+    public static Task<DurationTrendResult> GetProcedureDurationTrendAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, DurationTrendRoute route,
+        int bucketMinutes, DatabaseFilter databases, string procedureFullName, CancellationToken cancellationToken = default)
+        => ReadRoutedDurationTrendAsync(
+            ProcedureDurationTrendOneProcedureSql, postgres, serverId, startUtc, endUtc, route, bucketMinutes, databases, cancellationToken,
+            procedureFullName);
+
+    /// <summary>
     /// The shared body of the two routed reads: pick the tier's SQL, read the three-column point shape, and
     /// describe what came back. One method so the query and procedure trends cannot drift in how they
     /// route, read, or describe coverage.
     /// </summary>
     private static async Task<DurationTrendResult> ReadRoutedDurationTrendAsync(
         string rawSql, NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
-        DurationTrendRoute route, int bucketMinutes, DatabaseFilter databases, CancellationToken cancellationToken)
+        DurationTrendRoute route, int bucketMinutes, DatabaseFilter databases, CancellationToken cancellationToken,
+        string? procedureFullName = null)
     {
         ArgumentNullException.ThrowIfNull(route);
 
@@ -1352,11 +1373,18 @@ internal static class DarlingTrendReader
                 : DurationTrendRouting.BuildBucketedHourlyTrendSql(
                     route.HourlyFromClauseOrDefault, withDatabaseFilter: true,
                     /* #5449: the procedure rollups hold no row for an hour in which no procedure worked. */
-                    coverIdleHours: route.RawTable == "procedure_stats"));
+                    coverIdleHours: route.RawTable == "procedure_stats",
+                    withProcedureFilter: procedureFullName is not null));
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         /* #5244: $4 the database set (SQL NULL for every database), then $5 the bucket width, on both tiers. */
         command.Parameters.Add(databases.Parameter());
+        /* #6303: one procedure adds $5, its name, before the width ($6). */
+        if (procedureFullName is not null)
+        {
+            DarlingMcpReadParameters.AddText(command, procedureFullName);
+        }
+
         DarlingMcpReadParameters.AddInt(command, bucketMinutes);
         var points = await ReadBucketedDurationPointsAsync(command, cancellationToken);
 
