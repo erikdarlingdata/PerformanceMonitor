@@ -148,7 +148,7 @@ internal static class DarlingAgentDispatchChecks
         {
             using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             budget.CancelAfter(TimeSpan.FromSeconds(ServiceCommandDeadlines.CliStoreReadSeconds));
-            await using var source = NpgsqlDataSource.Create(connectionString);
+            await using var source = NpgsqlDataSource.Create(DarlingStoreConnection.PinSessionTimeZoneUtc(connectionString));
             bool? enabled = null;
             await using (var toggle = source.CreateCommand("SELECT mcp_enabled FROM config.config_service WHERE id = 1"))
             {

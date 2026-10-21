@@ -608,8 +608,7 @@ public static partial class DarlingCliCommands
             && !string.IsNullOrWhiteSpace(connectionString))
         {
             var facts = await DarlingAgentDispatchChecks.TryReadStoreFactsAsync(
-                DarlingStoreConnection.PinSessionTimeZoneUtc(
-                    DarlingStoreConnection.WithApplicationName(connectionString, DarlingManagedPostgres.CliApplicationName)),
+                DarlingStoreConnection.WithApplicationName(connectionString, DarlingManagedPostgres.CliApplicationName),
                 cancellationToken);
             /* The store did not answer: the file's switch stands and the route hint is skipped. */
             mcpEnabled = facts.McpEnabled ?? mcpEnabled;
