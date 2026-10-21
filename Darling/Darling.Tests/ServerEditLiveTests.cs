@@ -870,6 +870,114 @@ public sealed class ServerEditLiveTests : IDisposable
         }
     }
 
+    /// <summary>#6254 (security round 1, M1): the Query Store replica is a second machine the service connects to for a registration, so over MCP it
+    /// is held like the host. A server a route with an agent setting covers keeps its replica; a server no route covers is not given a replica on a
+    /// machine a covered registration holds (any spelling); a free machine, and the web dashboard (no policy), still take it.</summary>
+    [Fact]
+    public async Task AsTheMcpRole_TheQueryStoreReplica_IsHeldLikeTheHost_ForACoveredServerAndAHeldMachine()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        var ok = false;
+        try
+        {
+            await SeedServerAsync(rig.Owner, 7501, "rep-covered", "rep-covered.example.test", "integrated", null, null, ct);
+            await SeedServerAsync(rig.Owner, 7502, "rep-free", "rep-free.example.test", "integrated", null, null, ct);
+            await SeedServerAsync(rig.Owner, 7503, "rep-holder", "rep-holder.example.test", "integrated", null, null, ct);
+            await ExecAsync(rig.Owner,
+                "INSERT INTO config.config_notification_routes (metric_match, agent_level, scope_server_id) VALUES ('Blocking', 0, 7501);" +
+                "INSERT INTO config.config_notification_routes (metric_match, agent_level, scope_server_id) VALUES ('Blocking', 1, 7503)", ct);
+
+            async Task<JsonNode> EditAsync(string name, string changes) =>
+                Parse(await Edit.EditServerByNameAsync(rig.Mcp, name, changes, Reachable, TestKeyRings.Healthy, null, ct, policy: DarlingMcpAddServersPolicy.Default));
+            Task<string> ReplicaOfAsync(int id) =>
+                ScalarAsync<string>(rig.Owner, $"SELECT coalesce(query_store_replica, '') FROM config_monitored_servers WHERE server_id = {id}", ct);
+
+            /* A covered server: the replica cannot be set, and the refusal names it and where it is done. */
+            var covered = await EditAsync("rep-covered", "{\"query_store_replica\":\"rep-elsewhere.example.test\"}");
+            Assert.Equal("refused", covered["status"]!.GetValue<string>());
+            Assert.Contains("Query Store replica", covered["message"]!.GetValue<string>(), StringComparison.Ordinal);
+            Assert.Contains("Viewer", covered["message"]!.GetValue<string>(), StringComparison.Ordinal);
+            Assert.Equal("", await ReplicaOfAsync(7501));
+
+            /* A free server: not pointed at a machine a covered registration holds, in any spelling of the host. */
+            foreach (var spelled in new[] { "rep-holder.example.test", "REP-HOLDER.example.test.", "rep-holder.example.test,1433" })
+            {
+                var held = await EditAsync("rep-free", $"{{\"query_store_replica\":\"{spelled}\"}}");
+                Assert.Equal("refused", held["status"]!.GetValue<string>());
+                Assert.Contains("rep-holder", held["message"]!.GetValue<string>(), StringComparison.Ordinal);
+                Assert.Equal("", await ReplicaOfAsync(7502));
+            }
+
+            /* A machine nothing holds is taken, and a later change of another setting on the same server is not held by the replica it keeps. */
+            Assert.Equal("updated", (await EditAsync("rep-free", "{\"query_store_replica\":\"rep-listener.example.test\"}"))["status"]!.GetValue<string>());
+            Assert.Equal("rep-listener.example.test", await ReplicaOfAsync(7502));
+            Assert.Equal("updated", (await EditAsync("rep-free", "{\"display_name\":\"Free\"}"))["status"]!.GetValue<string>());
+
+            /* Without a policy (the web dashboard, the operator) the covered server takes a replica. */
+            var web = Parse(await Edit.EditServerCoreAsync(new Edit.PostgresServerEditStore(rig.Owner), 7501, "{\"query_store_replica\":\"rep-elsewhere.example.test\"}", Reachable, TestKeyRings.Healthy, null, ct));
+            Assert.Equal("updated", web["status"]!.GetValue<string>());
+            Assert.Equal("rep-elsewhere.example.test", await ReplicaOfAsync(7501));
+            ok = true;
+        }
+        finally
+        {
+            await DropRoleAsync(rig, ok);
+        }
+    }
+
+    /// <summary>#6254 (security round 1, M1): add_servers runs the replica host through the held-machine check the host goes through, so a new
+    /// registration is not given a replica on a machine a covered registration holds; and a replica with a protocol prefix (L3) is refused.</summary>
+    [Fact]
+    public async Task AsTheMcpRole_AddServers_HoldsTheReplicaHost_AndRefusesAProtocolPrefix()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        var ok = false;
+        try
+        {
+            await SeedServerAsync(rig.Owner, 7511, "rep-holder-2", "rep-holder-2.example.test", "integrated", null, null, ct);
+            await ExecAsync(rig.Owner, "INSERT INTO config.config_notification_routes (metric_match, agent_level, scope_server_id) VALUES ('Blocking', 0, 7511)", ct);
+
+            async Task<(string Status, string Detail)> AddAsync(string json)
+            {
+                var answer = Parse(await Edit.AddServersAsync(rig.Mcp, json, Reachable, ct, ring: TestKeyRings.Healthy, policy: DarlingMcpAddServersPolicy.Default));
+                var row = answer["results"]!.AsArray().Single()!;
+                return (row["status"]!.GetValue<string>(), row["detail"]!.GetValue<string>());
+            }
+
+            var held = await AddAsync("[{\"host\":\"rep-new-1.example.test\",\"query_store_replica\":\"Rep-Holder-2.example.test\"}]");
+            Assert.Equal("collides", held.Status);
+            Assert.Contains("rep-holder-2", held.Detail, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(0, await ScalarAsync<int>(rig.Owner, "SELECT count(*)::int FROM config_monitored_servers WHERE host = 'rep-new-1.example.test'", ct));
+
+            Assert.Equal("added", (await AddAsync("[{\"host\":\"rep-new-2.example.test\",\"query_store_replica\":\"rep-free-listener.example.test\"}]")).Status);
+            Assert.Equal("rep-free-listener.example.test",
+                await ScalarAsync<string>(rig.Owner, "SELECT query_store_replica FROM config_monitored_servers WHERE host = 'rep-new-2.example.test'", ct));
+
+            foreach (var replica in new[] { "np:\\\\attacker\\pipe\\sql\\query", "lpc:attacker", "admin:attacker", "tcp:attacker", "\\\\attacker\\share" })
+            {
+                var json = "[{\"host\":\"rep-new-3.example.test\",\"query_store_replica\":" + JsonValue.Create(replica)!.ToJsonString() + "}]";
+                var refused = await AddAsync(json);
+                Assert.NotEqual("added", refused.Status);
+                Assert.Equal(0, await ScalarAsync<int>(rig.Owner, "SELECT count(*)::int FROM config_monitored_servers WHERE host = 'rep-new-3.example.test'", ct));
+            }
+
+            /* The edit refuses the same values, with the same sentence. */
+            await SeedServerAsync(rig.Owner, 7512, "rep-edit-3", "rep-edit-3.example.test", "integrated", null, null, ct);
+            var edit = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "rep-edit-3",
+                "{\"query_store_replica\":" + JsonValue.Create("np:\\\\attacker\\pipe\\sql\\query")!.ToJsonString() + "}", Reachable,
+                TestKeyRings.Healthy, null, ct, policy: DarlingMcpAddServersPolicy.Default));
+            Assert.NotEqual("updated", edit["status"]!.GetValue<string>());
+            Assert.Equal("", await ScalarAsync<string>(rig.Owner, "SELECT coalesce(query_store_replica, '') FROM config_monitored_servers WHERE server_id = 7512", ct));
+            ok = true;
+        }
+        finally
+        {
+            await DropRoleAsync(rig, ok);
+        }
+    }
+
     /// <summary>#6281: a route set up while the connection test runs is seen by the write itself, which checks inside its own transaction: the edit
     /// is refused and nothing is saved, whether the route holds the machine the registration moves to or the registration itself; and an add whose
     /// machine gets a route during its test is refused the same way.</summary>

@@ -101,18 +101,30 @@ public sealed class QueryStoreReplicaSettingTests
         QueryStoreReplica = replica,
     };
 
+    /// <summary>A server whose saved password is sealed for the connection it holds, replica included (the way the store saves it).</summary>
+    private static MonitoredServer SealedServer(string? replica)
+    {
+        var server = Server(replica);
+        server.Name = "alpha";
+        server.EncryptedPassword = PasswordSeal.Seal(Secret, Key.PublicKey, server.SecretBinding);
+        return server;
+    }
+
+    private static IPasswordKeyRing Ring => DarlingPasswordKey.FromPrivateKey(Key);
+
     [Fact]
     public void The_replica_connection_is_the_servers_own_with_the_host_swapped_and_read_only_intent()
     {
-        var text = MonitoredServerConnection.BuildQueryStoreReplicaConnectionString(Server("replica-01,14331"), "pw-6254");
+        var text = MonitoredServerConnection.BuildQueryStoreReplicaConnectionString(SealedServer("replica-01,14331"), false, Ring);
 
         Assert.NotNull(text);
         var builder = new SqlConnectionStringBuilder(text);
-        var primary = new SqlConnectionStringBuilder(MonitoredServerConnection.BuildConnectionString(Server("replica-01,14331"), "pw-6254"));
+        var primary = new SqlConnectionStringBuilder(MonitoredServerConnection.BuildConnectionString(SealedServer("replica-01,14331"), Secret));
         Assert.Equal("replica-01,14331", builder.DataSource);
         Assert.Equal(ApplicationIntent.ReadOnly, builder.ApplicationIntent);
         Assert.Equal(ApplicationIntent.ReadWrite, primary.ApplicationIntent);
         Assert.Equal(primary.UserID, builder.UserID);
+        Assert.Equal(Secret, builder.Password);
         Assert.Equal(primary.Password, builder.Password);
         Assert.Equal(primary.Encrypt, builder.Encrypt);
         Assert.Equal(primary.TrustServerCertificate, builder.TrustServerCertificate);
@@ -125,10 +137,111 @@ public sealed class QueryStoreReplicaSettingTests
     [Fact]
     public void The_replica_connection_is_null_when_the_setting_is_empty_and_the_primary_string_is_unchanged()
     {
-        Assert.Null(MonitoredServerConnection.BuildQueryStoreReplicaConnectionString(Server(null), "pw-6254"));
-        Assert.Null(MonitoredServerConnection.BuildQueryStoreReplicaConnectionString(Server("   "), "pw-6254"));
+        Assert.Null(MonitoredServerConnection.BuildQueryStoreReplicaConnectionString(SealedServer(null), false, Ring));
+        Assert.Null(MonitoredServerConnection.BuildQueryStoreReplicaConnectionString(SealedServer("   "), false, Ring));
         Assert.Equal(
             MonitoredServerConnection.BuildConnectionString(Server(null), "pw-6254"),
             MonitoredServerConnection.BuildConnectionString(Server("replica-01"), "pw-6254"));
+    }
+
+    /* #6254 security round 1, L2: an Azure SQL Database reads Query Store from itself in this version. */
+    [Fact]
+    public void An_azure_sql_database_never_gets_a_replica_connection()
+    {
+        Assert.Null(MonitoredServerConnection.BuildQueryStoreReplicaConnectionString(SealedServer("replica-01"), true, Ring));
+    }
+
+    /* #6254 security round 1, L2: the host is the one the seal was opened with (the bound identity), not whatever the free property
+       says now, so a password opened for one replica is never sent to another. */
+    [Fact]
+    public void The_replica_host_is_the_one_the_password_seal_is_bound_to_not_the_free_property()
+    {
+        var server = SealedServer("bound-replica,14331");
+        server.StoredIdentity = ServerConnectionIdentity.FromStoredColumns(
+            server.Host, server.Port, server.Engine, server.Database, server.ReadOnlyIntent, server.Auth, server.Username,
+            server.EncryptMode, server.TrustServerCertificate, server.MultiSubnetFailover, "bound-replica,14331");
+        server.QueryStoreReplica = "attacker-chosen-host";
+
+        var text = MonitoredServerConnection.BuildQueryStoreReplicaConnectionString(server, false, Ring);
+
+        var builder = new SqlConnectionStringBuilder(text);
+        Assert.Equal("bound-replica,14331", builder.DataSource);
+        Assert.Equal(Secret, builder.Password);
+    }
+
+    /* #6254 security round 1, L2: a seal made for no replica, or another one, does not open for this replica: no connection string. */
+    [Theory]
+    [InlineData(null)]
+    [InlineData("another-replica")]
+    public void A_password_sealed_for_another_replica_is_not_sent_to_this_one(string? sealedFor)
+    {
+        var server = SealedServer(sealedFor);
+        server.StoredIdentity = null;
+        server.QueryStoreReplica = "replica-01";
+
+        Assert.Throws<InvalidOperationException>(() => MonitoredServerConnection.BuildQueryStoreReplicaConnectionString(server, false, Ring));
+    }
+
+    /* #6254 security round 1, L1: a stored env:/file: reference is not sealed, so no binding covers it. It goes to a replica only when
+       darling.json declares it; a store-only reference (a self-managed store whose trigger predates the replica) is refused. */
+    [Fact]
+    public void A_stored_reference_goes_to_a_replica_only_when_the_file_declares_it()
+    {
+        const string Variable = "SYNTH_REPLICA_PW_6254";
+        Environment.SetEnvironmentVariable(Variable, "reference-secret-6254");
+        try
+        {
+            var storeOnly = Server("replica-01");
+            storeOnly.Name = "alpha";
+            storeOnly.EncryptedPassword = "env:" + Variable;
+            storeOnly.EncryptedPasswordDeclaredByFile = false;
+
+            var refused = Assert.Throws<InvalidOperationException>(() => MonitoredServerConnection.BuildQueryStoreReplicaConnectionString(storeOnly, false, Ring));
+            Assert.DoesNotContain("reference-secret-6254", refused.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain(Variable, refused.Message, StringComparison.Ordinal);
+
+            storeOnly.EncryptedPasswordDeclaredByFile = true;
+            var declared = MonitoredServerConnection.BuildQueryStoreReplicaConnectionString(storeOnly, false, Ring);
+            Assert.Equal("reference-secret-6254", new SqlConnectionStringBuilder(declared).Password);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(Variable, null);
+        }
+    }
+
+    /* #6254 security round 1, L3: the replica becomes a Data Source the service opens with its own credentials; SqlClient reads a protocol
+       prefix or a UNC-looking value there as a named pipe over SMB. */
+    [Theory]
+    [InlineData("np:\\\\attacker\\pipe\\sql\\query")]
+    [InlineData("np:attacker")]
+    [InlineData("lpc:attacker")]
+    [InlineData("admin:attacker")]
+    [InlineData("tcp:attacker,1433")]
+    [InlineData("  NP:attacker")]
+    [InlineData("\\\\attacker\\share")]
+    [InlineData("\\attacker")]
+    [InlineData("//attacker/share")]
+    public void A_replica_with_a_protocol_prefix_or_a_path_is_refused(string value)
+    {
+        Assert.NotNull(QueryStoreReplicaSetting.Refusal(value));
+        var server = SealedServer(value);
+        Assert.Throws<InvalidOperationException>(() => MonitoredServerConnection.BuildQueryStoreReplicaConnectionString(server, false, Ring));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("replica-01")]
+    [InlineData("replica-01.example.test,14331")]
+    [InlineData("replica-01\\INST2")]
+    [InlineData("ag1-listener")]
+    [InlineData("10.1.2.3,1433")]
+    [InlineData("[fe80::1]")]
+    [InlineData("2001:db8::1")]
+    public void A_plain_host_host_port_instance_or_listener_name_is_allowed(string? value)
+    {
+        Assert.Null(QueryStoreReplicaSetting.Refusal(value));
     }
 }

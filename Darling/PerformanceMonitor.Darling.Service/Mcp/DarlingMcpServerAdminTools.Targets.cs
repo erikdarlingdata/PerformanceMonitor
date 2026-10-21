@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -93,7 +94,19 @@ public sealed partial class DarlingMcpServerAdminTools
     internal static bool SameTarget(RegisteredTarget held, ParsedServerEntry entry)
     {
         var config = entry.ProbeConfig;
-        var wanted = MachineKeyOf(config.Host, config.Engine, config.Port);
+        return SameMachine(held, config.Host, config.Engine, config.Port);
+    }
+
+    /// <summary>The Query Store replica of an entry is a SQL Server endpoint the service connects to, so it is a machine the
+    /// entry points at exactly as its host is (#6254). The value is a host[,port] or a listener name; the port and instance are
+    /// folded from it by <see cref="MachineKeyOf"/>.</summary>
+    internal static bool SameReplicaTarget(RegisteredTarget held, ParsedServerEntry entry)
+        => QueryStoreReplicaSetting.Normalize(entry.ProbeConfig.QueryStoreReplica) is { } replica
+            && SameMachine(held, replica, null, 0);
+
+    private static bool SameMachine(RegisteredTarget held, string host, string? engine, int hostPort)
+    {
+        var wanted = MachineKeyOf(host, engine, hostPort);
         if (!held.Removed)
         {
             return held.Host is not null && string.Equals(MachineKeyOf(held.Host, held.Engine, held.Port), wanted, StringComparison.Ordinal);
@@ -138,12 +151,22 @@ public sealed partial class DarlingMcpServerAdminTools
     /// <paramref name="exceptServerId"/> is the registration an edit changes: it is not held against its own new address.</summary>
     internal static async Task<string?> TargetHeldRefusalAsync(
         IReadOnlyList<RegisteredTarget> held, ParsedServerEntry entry,
-        Func<int, CancellationToken, Task<int?>> scopedRoute, CancellationToken cancellationToken, int? exceptServerId = null, bool forEdit = false)
+        Func<int, CancellationToken, Task<int?>> scopedRoute, CancellationToken cancellationToken, int? exceptServerId = null, bool forEdit = false,
+        bool checkHost = true, bool checkReplica = true)
     {
         foreach (var other in held)
         {
-            if (other.ServerId == exceptServerId
-                || string.Equals(other.StorageKey, entry.StorageKey, StringComparison.OrdinalIgnoreCase) || !SameTarget(other, entry))
+            if (other.ServerId == exceptServerId)
+            {
+                continue;
+            }
+
+            /* #6254: the host and the Query Store replica are both machines the service connects to for this registration, so
+               each is held to the same rule. An edit passes only the one it changes (a replica-only edit leaves the host alone). */
+            var hostHeld = checkHost
+                && !string.Equals(other.StorageKey, entry.StorageKey, StringComparison.OrdinalIgnoreCase) && SameTarget(other, entry);
+            var replicaHeld = !hostHeld && checkReplica && SameReplicaTarget(other, entry);
+            if (!hostHeld && !replicaHeld)
             {
                 continue;
             }
@@ -153,7 +176,8 @@ public sealed partial class DarlingMcpServerAdminTools
                 continue;
             }
 
-            return (forEdit ? "Not saved: " : "Not added: ") + $"{entry.ProbeConfig.Host} is already registered as '{other.Label}'"
+            var named = hostHeld ? entry.ProbeConfig.Host : QueryStoreReplicaSetting.Normalize(entry.ProbeConfig.QueryStoreReplica)!;
+            return (forEdit ? "Not saved: " : "Not added: ") + $"{named} is already registered as '{other.Label}'"
                 + (other.Removed ? " (a removed registration)" : "")
                 + $", and route {routeId} (an agent setting) is scoped to it, so "
                 + (forEdit ? "this registration, moved there, would sit outside that route. " : "a second registration of the machine would sit outside that route. ")
@@ -213,10 +237,11 @@ public sealed partial class DarlingMcpServerAdminTools
     /// identity lock: a route that was set up while the probe ran is seen here, and nothing is written. Null when nothing
     /// holds the machine. <paramref name="exceptServerId"/> is the registration an edit changes.</summary>
     internal static async Task<string?> TargetHeldRefusalInTransactionAsync(
-        NpgsqlConnection connection, NpgsqlTransaction transaction, ParsedServerEntry entry, int? exceptServerId, CancellationToken cancellationToken, bool forEdit = false)
+        NpgsqlConnection connection, NpgsqlTransaction transaction, ParsedServerEntry entry, int? exceptServerId, CancellationToken cancellationToken, bool forEdit = false,
+        bool checkHost = true, bool checkReplica = true)
     {
         var held = await LoadRegisteredTargetsAsync(connection, transaction, cancellationToken);
         return await TargetHeldRefusalAsync(held, entry,
-            (serverId, token) => ScopedAgentRouteAsync(connection, transaction, serverId, token), cancellationToken, exceptServerId, forEdit);
+            (serverId, token) => ScopedAgentRouteAsync(connection, transaction, serverId, token), cancellationToken, exceptServerId, forEdit, checkHost, checkReplica);
     }
 }

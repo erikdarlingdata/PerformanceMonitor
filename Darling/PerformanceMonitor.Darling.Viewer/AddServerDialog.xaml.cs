@@ -647,6 +647,14 @@ public partial class AddServerDialog : Window
 
         var isPostgres = PostgresEngineRadio.IsChecked == true;
 
+        /* #6254: the replica is a host the service connects to with its own credentials; a protocol prefix or a path is refused here
+           and again where the row is written (ViewerDataService), so no other caller can store one. */
+        if (!isPostgres && QueryStoreReplicaSetting.Refusal(QueryStoreReplicaBox.Text) is { } replicaRefusal)
+        {
+            error = replicaRefusal;
+            return null;
+        }
+
         /* #3499: the engine string. An EDIT carries the row's stored spelling VERBATIM — the radios are
            locked, and rewriting "aurora-postgresql" to "postgres" would be the dialog silently re-spelling a
            value it did not author (harmless to TargetEngine, but an edit must not mangle what it was not asked

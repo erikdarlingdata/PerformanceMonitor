@@ -1788,7 +1788,9 @@ GRANT INSERT, DELETE ON config.config_monitored_servers TO mcp;
 REVOKE UPDATE ON config.config_monitored_servers FROM mcp;
 -- The role and external ID of a server are set only through the edit function (and an INSERT): mcp's UPDATE
 -- names every other column of the table and leaves out aws_role_arn, aws_external_id and the generated
--- aws_external_id_set. A column added to the table later is added to this list.
+-- aws_external_id_set, and query_store_replica (#6254), a host the service connects to with its own credentials:
+-- it changes only through the edit function, never add it here. A column added to the table later is added to this list
+-- unless it is one of those.
 GRANT UPDATE (server_id, name, host, database, auth, username, encrypted_password, encrypt_mode, trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd, capture_plans, is_enabled, created_at, modified_at, alert_delivery_mode_override, engine, port, plan_force_bot_enabled, remediation_username, remediation_encrypted_password)
    ON config.config_monitored_servers TO mcp;
 

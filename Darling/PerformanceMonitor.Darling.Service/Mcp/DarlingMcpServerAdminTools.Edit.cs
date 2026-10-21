@@ -296,7 +296,7 @@ LIMIT 1";
 
     /// <summary>The sentence for an edit that moves a registration a route with an agent setting is scoped to (#6281).</summary>
     private static string CoveredServerEditText(int routeId) =>
-        $"Route {routeId} has an agent setting and is scoped to this server or one of its tags, so where it connects (host, port, database or read-only intent) is changed in the Viewer or on the web dashboard, not over MCP. " +
+        $"Route {routeId} has an agent setting and is scoped to this server or one of its tags, so where it connects (host, port, database, read-only intent or Query Store replica) is changed in the Viewer or on the web dashboard, not over MCP. " +
         "The display name and the other settings can still be changed here.";
 
     /* ─────────────────────────────── the core ─────────────────────────────── */
@@ -387,7 +387,7 @@ LIMIT 1";
         /* #6281: over MCP, where a registration connects is not changed while a route with an agent setting applies to the
            server (its id, one of its tags or a tag above; a route with no scope does not count): the edit keeps the id and the tags, so it
            would point that route's coverage at another machine. The web route and the operator pass no check. */
-        if (plan.AddressChanged && agentRouteCovering is not null && await agentRouteCovering(serverId, cancellationToken) is { } coveringRoute)
+        if (plan.MovesConnection && agentRouteCovering is not null && await agentRouteCovering(serverId, cancellationToken) is { } coveringRoute)
         {
             return Outcome(EditStatus.Refused, CoveredServerEditText(coveringRoute));
         }
@@ -396,9 +396,9 @@ LIMIT 1";
            another registration holds while a route with an agent setting is scoped to that one: this registration would sit outside
            that route. The registration being edited is left out of the comparison. */
         var heldEntry = new ParsedServerEntry(0, plan.ProbeConfig.Name, plan.NewStorageKey, plan.ProbeConfig, null);
-        var enforceHeld = plan.AddressChanged && agentRouteCovering is not null && loadTargets is not null;
+        var enforceHeld = plan.MovesConnection && agentRouteCovering is not null && loadTargets is not null;
         if (enforceHeld
-            && await TargetHeldRefusalAsync(await loadTargets!(cancellationToken), heldEntry, agentRouteCovering!, cancellationToken, serverId, forEdit: true) is { } heldRefusal)
+            && await TargetHeldRefusalAsync(await loadTargets!(cancellationToken), heldEntry, agentRouteCovering!, cancellationToken, serverId, forEdit: true, checkHost: plan.AddressChanged, checkReplica: plan.ReplicaChanged) is { } heldRefusal)
         {
             return Outcome(EditStatus.Refused, heldRefusal);
         }
@@ -461,7 +461,7 @@ LIMIT 1";
         HeldCheck? heldCheck = !enforceHeld ? null : async (connection, transaction, token) =>
             await ScopedAgentRouteAsync(connection, transaction, serverId, token) is { } routeNow
                 ? CoveredServerEditText(routeNow)
-                : await TargetHeldRefusalInTransactionAsync(connection, transaction, heldEntry, serverId, token, forEdit: true);
+                : await TargetHeldRefusalInTransactionAsync(connection, transaction, heldEntry, serverId, token, forEdit: true, checkHost: plan.AddressChanged, checkReplica: plan.ReplicaChanged);
         var write = await store.WriteAsync(serverId, row.ModifiedAt, sets, plan.AddressChanged ? plan.NewStorageKey : null, actualStorageKey, heldCheck, cancellationToken);
         switch (write.Kind)
         {
@@ -930,6 +930,13 @@ LIMIT 1";
         public string NewStorageKey { get; set; } = "";
         public string NewName { get; set; } = "";
         public bool AddressChanged { get; set; }
+
+        /// <summary>True when the edit changes the Query Store replica (#6254): another machine the service connects to for this
+        /// registration, so the agent-route guard counts it as it counts the address.</summary>
+        public bool ReplicaChanged { get; set; }
+
+        /// <summary>The address or the replica moves: what the #6281 agent-route guard refuses over MCP.</summary>
+        public bool MovesConnection => AddressChanged || ReplicaChanged;
         public bool NeedsProbe { get; set; }
         public bool Reconnects { get; set; }
         public string? PlaintextSecret { get; set; }
@@ -1066,6 +1073,7 @@ LIMIT 1";
         };
         var oldKey = ServerIdHelper.BuildStorageName(row.Host, row.Database, row.ReadOnlyIntent, row.Engine, row.Port);
         plan.AddressChanged = !string.Equals(plan.NewStorageKey, oldKey, StringComparison.Ordinal);
+        plan.ReplicaChanged = QueryStoreReplicaSetting.Differ(replica, row.QueryStoreReplica);
 
         void Set(string field, NpgsqlDbType type, object? value, bool changed)
         {

@@ -2861,9 +2861,12 @@ END
 $fn$;
 REVOKE ALL ON FUNCTION {config}.request_mcp_command(text, integer, integer, text) FROM PUBLIC;";
 
-    // A new column on config.config_monitored_servers is added to this list. A column that holds a secret goes into the
-    // exclusion list of ServerEditLiveTests (the NOT IN (...) beside the column-set check) instead, and stays out of the grant.
-    /// <summary>The columns of <c>config.config_monitored_servers</c> the <c>mcp</c> login may UPDATE directly (#5452): every column except the AWS role, the external ID and the generated external-ID flag, which change only through <c>config.edit_monitored_server</c>. <c>tools/provision-roles.sql</c> carries the same list.</summary>
+    // A new column on config.config_monitored_servers is added to this list, EXCEPT a column that holds a secret or that decides where
+    // the service connects with credentials it holds: those change only through config.edit_monitored_server (which checks the
+    // stored password binding and, over MCP, the agent-route guard) and go into the exclusion list of ServerEditLiveTests (the
+    // NOT IN (...) beside the column-set check) instead. query_store_replica (#6254) is one: never add it here, a direct UPDATE
+    // would skip the edit core.
+    /// <summary>The columns of <c>config.config_monitored_servers</c> the <c>mcp</c> login may UPDATE directly (#5452): every column except the AWS role, the external ID, the generated external-ID flag and <c>query_store_replica</c> (#6254), which change only through <c>config.edit_monitored_server</c>. <c>tools/provision-roles.sql</c> carries the same list.</summary>
     internal const string McpMonitoredServerUpdateColumns =
         "server_id, name, host, database, auth, username, encrypted_password, encrypt_mode, trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd, capture_plans, is_enabled, created_at, modified_at, alert_delivery_mode_override, engine, port, plan_force_bot_enabled, remediation_username, remediation_encrypted_password";
 

@@ -35,4 +35,44 @@ public static class QueryStoreReplicaSetting
     /// is false against the setting it was saved or declared for.</summary>
     public static bool Differ(string? a, string? b) =>
         !string.Equals(Normalize(a), Normalize(b), StringComparison.Ordinal);
+
+    /// <summary>Why <paramref name="value"/> may not be a replica, or null when it may be (also null for an empty setting). The
+    /// setting becomes the <c>Data Source</c> of a connection the service opens with its own credentials, and SqlClient reads a
+    /// protocol prefix there (<c>np:</c>, <c>lpc:</c>, <c>admin:</c>, <c>tcp:</c>) and a UNC-looking value as a named-pipe path,
+    /// which on Windows opens an SMB connection to a machine the writer names. So a replica is a plain host, <c>host,port</c>,
+    /// <c>host\instance</c> or listener name: any <c>letters:</c> prefix, and any value that starts with a backslash or slash,
+    /// is refused. (An IPv6 literal goes in brackets.)</summary>
+    public static string? Refusal(string? value)
+    {
+        if (Normalize(value) is not { } text)
+        {
+            return null;
+        }
+
+        if (text[0] is '\\' or '/')
+        {
+            return "query_store_replica must be a host name, host,port or listener name, not a path.";
+        }
+
+        var colon = text.IndexOf(':');
+        if (colon > 0 && IsLetters(text.AsSpan(0, colon)))
+        {
+            return "query_store_replica must be a host name, host,port or listener name, without a protocol prefix such as np: or tcp:.";
+        }
+
+        return null;
+    }
+
+    private static bool IsLetters(ReadOnlySpan<char> span)
+    {
+        foreach (var c in span)
+        {
+            if (!char.IsAsciiLetter(c))
+            {
+                return false;
+            }
+        }
+
+        return span.Length > 0;
+    }
 }
