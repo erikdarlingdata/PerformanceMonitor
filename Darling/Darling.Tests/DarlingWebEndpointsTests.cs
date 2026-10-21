@@ -389,8 +389,8 @@ public sealed class DarlingWebEndpointsTests
 
     /// <summary>The bare-string arm survives as the floor under everything the producers no longer emit: the
     /// four sentences here WERE the wire shape of these refusals until #3739 (they are the envelope's <c>message</c>
-    /// now, and classify as <c>Refusal</c> above); what still reaches this arm is the <c>list_servers</c> miss on
-    /// an empty registry. The resolver's registry-read fault used to reach it too; since #4283 it is a server error
+    /// now, and classify as <c>Refusal</c> above); <c>list_servers</c> on an empty registry used to reach it and now answers
+    /// the <c>empty</c> envelope (#6277). The resolver's registry-read fault used to reach it too; since #4283 it is a server error
     /// (the fact below). Kept at 400 so a producer nobody shaped is still refused rather than passed through as
     /// data.</summary>
     [Theory]
@@ -398,7 +398,6 @@ public sealed class DarlingWebEndpointsTests
     [InlineData("Invalid hours_back value '9999'. Must be a positive integer (1-168).")]
     [InlineData("Missing required parameter 'wait_type'.")]
     [InlineData("baseline_hours_back must be greater than hours_back.")]
-    [InlineData("No servers are registered yet. The service registers each monitored server on its first successful connection.")]
     [InlineData("")]
     public void ClassifyToolResponse_OtherBareStrings_AreClientErrors(string result) =>
         Assert.Equal(DarlingWebEndpoints.ToolResponseKind.ClientError, DarlingWebEndpoints.ClassifyToolResponse(result));

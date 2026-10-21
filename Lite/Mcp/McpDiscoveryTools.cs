@@ -78,7 +78,9 @@ public sealed class McpDiscoveryTools
         var servers = serverManager.GetEnabledServers();
         if (servers.Count == 0)
         {
-            return "No servers are configured.";
+            /* #6277: the `empty` status envelope, the same true negative Darling's list_servers answers an empty
+               registry with, rather than bare prose a JSON client cannot tell from a refusal. */
+            return McpHelpers.Status("empty", "No servers are configured.");
         }
 
         var lines = new List<string> { $"Monitored servers ({servers.Count}):\n" };

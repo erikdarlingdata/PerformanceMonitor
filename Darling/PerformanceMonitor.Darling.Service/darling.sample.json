@@ -138,24 +138,37 @@
       "encryptedPassword": "<output of --encrypt-password>",
       "trustServerCertificate": false,
       "encryptMode": "Mandatory",
-      // OPTIONAL second credential, for the Level 3 server actions an agent can run (#5632): force or unforce a
-      // plan, evict a cached plan, kill a session. The monitoring credential above stays READ-ONLY forever and is
-      // never used for a write. Omit both keys (the default) and this server has no remediation surface.
+      // OPTIONAL second credential, for operator-initiated remediation (#2138) and for the Level 3 server actions an
+      // agent can run (#5632): force or unforce a plan, evict a cached plan, kill a session. The monitoring
+      // credential above stays READ-ONLY forever and is never used for a write. Omit both keys (the default) and a
+      // server you add has no remediation login. On a server that is already registered, omitting them changes nothing.
       // Both halves are required; one alone counts as unarmed and the service says so at connect.
-      // An action also needs a Level 3 route and that server's action switch, which is off until the store owner
-      // turns it on (docs/darling-agent-dispatch.md). Darling reads these two keys only when it first adds the
-      // server to the store.
       // Least privilege: ALTER on each database you intend to force a plan in. ALTER SERVER STATE only if you want
       // to evict a plan. ALTER ANY CONNECTION only if you want an agent to kill a session (it can kill ANY session).
-      // The secret must be an env:NAME or file:/path reference. There is no plaintext variant and no encrypted
-      // blob: an action refuses any other form.
+      // An agent action also needs a Level 3 route and that server's action switch, which is off until the store owner
+      // turns it on (docs/darling-agent-dispatch.md).
+      // An env:NAME or file:/path reference works everywhere. A DPAPI blob (--encrypt-password on THIS
+      // machine, same format as encryptedPassword) still works for operator remediation, but agent server
+      // actions (plan force, eviction, kill) refuse it: use a reference for those. There is deliberately
+      // no plaintext variant of this one. When BOTH keys are set they are re-read on every start and replace the
+      // registered server's login, but only on the server that pairs with this entry and connects the same way. Removing
+      // the keys, or setting only one, leaves the server's login as it is: it disarms nothing. To stop agent actions on
+      // a server, turn off its action switches, or turn off agent changes service-wide (the switches cover agent actions only,
+      // not operator remediation from the Viewer). To remove a server's remediation login entirely, so neither agents nor
+      // operators can use it, take both keys out of this file and run, as the store owner: UPDATE config_monitored_servers
+      // SET remediation_username = NULL, remediation_encrypted_password = NULL, modified_at = now() AT TIME ZONE 'UTC'
+      // WHERE name = 'alpha-sql-01';  A server that is not in this file is never touched. Services that share one store
+      // should declare the same logins, because each copies its own file when it starts.
       "remediationUsername": "",
       "remediationEncryptedPassword": "",
       // OPTIONAL, PostgreSQL targets only (#6170). The login the "Test an index" check runs under. The check never runs
       // under the monitoring login, because planning a statement can run a function another role created. With neither key
       // set the check is refused and says what to set up. The login needs CONNECT on the database, USAGE on the schemas and
       // SELECT on the tables of the statements to test, and nothing else: no pg_monitor, pg_read_all_stats,
-      // pg_read_all_data or superuser. The password is an env:NAME or file:/path reference only.
+      // pg_read_all_data or superuser. The password is an env:NAME or file:/path reference only. When BOTH keys are set
+      // here they are applied to the registered server on every start (set, or replaced), and the log says so. Leaving
+      // them out never clears a login already on the server, because it can also be set on the store row. Only a
+      // reference is written, and only to the server that pairs with this entry and connects the same way.
       "hypotheticalIndexUsername": "",
       "hypotheticalIndexEncryptedPassword": "",
       "excludedDatabases": [ "StageDb" ]
