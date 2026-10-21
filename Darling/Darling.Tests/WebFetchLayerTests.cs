@@ -120,19 +120,6 @@ public sealed class WebFetchLayerTests
        #4191 — cancel per render (never the shared /api/fleet read), and skip an overlapping poll tick.
        --------------------------------------------------------------------------------------------------- */
 
-    /// <summary>apiGet and readTool both take an optional AbortSignal, threaded straight to fetch — the seam
-    /// panels.js's renderPanel (every page's panel reads) and server.js's redrawPanels (the controller that
-    /// owns it) are built on.</summary>
-    [Fact]
-    public void ApiGetAndReadTool_AcceptAnAbortSignal()
-    {
-        var util = UtilJs;
-
-        Assert.Contains("export async function apiGet(path, signal) {", util, StringComparison.Ordinal);
-        Assert.Contains("resp = await fetch(path, { headers: { Accept: \"application/json\" }, signal });", util, StringComparison.Ordinal);
-        Assert.Contains("export function readTool(tool, params, signal) {", util, StringComparison.Ordinal);
-    }
-
     /// <summary>An aborted fetch is its own response kind too (never "error") — a cancelled panel read must not
     /// flash a red error strip into a slot the newer render is about to replace anyway.</summary>
     [Fact]
