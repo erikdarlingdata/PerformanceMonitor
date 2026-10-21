@@ -2781,18 +2781,18 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var (body, bodyRefusal) = await ReadInvestigationWriteBodyAsync(context);
             if (body is null)
             {
-                return bodyRefusal!;
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = bodyRefusal }, route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status400BadRequest);
             }
 
             var reason = body["reason"] is JsonValue reasonValue && reasonValue.TryGetValue<string>(out var reasonText) ? reasonText : null;
             if (InvestigationPersonWrites.ValidateCloseReason(reason) is { } reasonRefusal)
             {
-                return ErrorResult(reasonRefusal, StatusCodes.Status400BadRequest);
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = reasonRefusal }, route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status400BadRequest);
             }
 
             if (PersonWriteActor(context) is not { } actor)
             {
-                return PersonWriteActorRefusedResult();
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = PersonWriteActorRefusal }, route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status400BadRequest);
             }
 
             try
@@ -2808,7 +2808,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
             catch (Exception ex) when (IsInsufficientPrivilege(ex))
             {
-                return ErrorResult(InvestigationWriteRefusedMessage, StatusCodes.Status403Forbidden);
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = InvestigationWriteRefusedMessage }, route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -2829,7 +2829,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var (body, bodyRefusal) = await ReadInvestigationWriteBodyAsync(context);
             if (body is null)
             {
-                return bodyRefusal!;
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = bodyRefusal }, route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status400BadRequest);
             }
 
             var text = body["note_text"] is JsonValue textValue && textValue.TryGetValue<string>(out var noteText) ? noteText : null;
@@ -2853,12 +2853,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             if (InvestigationPersonWrites.ValidateNote(text, days) is { } noteRefusal)
             {
-                return ErrorResult(noteRefusal, StatusCodes.Status400BadRequest);
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = noteRefusal }, route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status400BadRequest);
             }
 
             if (PersonWriteActor(context) is not { } actor)
             {
-                return PersonWriteActorRefusedResult();
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = PersonWriteActorRefusal }, route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status400BadRequest);
             }
 
             try
@@ -2875,7 +2875,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
             catch (Exception ex) when (IsInsufficientPrivilege(ex))
             {
-                return ErrorResult(InvestigationWriteRefusedMessage, StatusCodes.Status403Forbidden);
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = InvestigationWriteRefusedMessage }, route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -2900,28 +2900,28 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             if (PersonWriteActor(context) is not { } actor)
             {
-                return PersonWriteActorRefusedResult();
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = PersonWriteActorRefusal }, route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status400BadRequest);
             }
 
             try
             {
-                var result = await practice.OpenAsync(source, actor, context.RequestAborted);
-                if (result.Outcome != InvestigationPracticeOutcome.Opened)
+                var (outcome, practiceId, storeSentence) = await practice.OpenAsync(source, actor, context.RequestAborted);
+                if (outcome != InvestigationPracticeOutcome.Opened)
                 {
                     /* The store's own sentence says why the case was not replayed (never an exception's text). */
                     return DarlingWebStatementSweep.JsonText(
-                        new JsonObject { ["error"] = result.Message ?? "The practice request was not opened.", ["outcome"] = result.Outcome.ToString(), ["request_id"] = result.RequestId?.ToString() },
+                        new JsonObject { ["error"] = storeSentence ?? "The practice request was not opened.", ["outcome"] = outcome.ToString(), ["request_id"] = practiceId?.ToString() },
                         route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted,
-                        result.Outcome == InvestigationPracticeOutcome.NotFound ? StatusCodes.Status404NotFound : StatusCodes.Status409Conflict);
+                        outcome == InvestigationPracticeOutcome.NotFound ? StatusCodes.Status404NotFound : StatusCodes.Status409Conflict);
                 }
 
                 return DarlingWebStatementSweep.JsonText(
-                    new JsonObject { ["status"] = "opened", ["request_id"] = result.RequestId?.ToString(), ["source_request_id"] = source.ToString(), ["opened_by"] = actor },
+                    new JsonObject { ["status"] = "opened", ["request_id"] = practiceId?.ToString(), ["source_request_id"] = source.ToString(), ["opened_by"] = actor },
                     route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
             }
             catch (Exception ex) when (IsInsufficientPrivilege(ex))
             {
-                return ErrorResult(InvestigationWriteRefusedMessage, StatusCodes.Status403Forbidden);
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = InvestigationWriteRefusedMessage }, route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -2939,11 +2939,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         return InvestigationPersonWrites.ValidateLogin(login) is null ? InvestigationPersonWrites.PersonActor(login) : null;
     }
 
-    private static IResult PersonWriteActorRefusedResult() =>
-        ErrorResult("The signed-in name cannot be recorded as the person who made this change.", StatusCodes.Status400BadRequest);
+    private const string PersonWriteActorRefusal = "The signed-in name cannot be recorded as the person who made this change.";
 
-    /// <summary>Reads a bounded JSON object body for the investigation writes: the object, or the refusal to answer.</summary>
-    private static async Task<(JsonObject? Body, IResult? Refusal)> ReadInvestigationWriteBodyAsync(HttpContext context)
+    /// <summary>Reads a bounded JSON object body for the investigation writes: the object, or the plain sentence that refuses it.</summary>
+    private static async Task<(JsonObject? Body, string? Refusal)> ReadInvestigationWriteBodyAsync(HttpContext context)
     {
         string text;
         try
@@ -2952,7 +2951,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         }
         catch (InvalidDataException)
         {
-            return (null, ErrorResult("Request body is too large.", StatusCodes.Status400BadRequest));
+            return (null, "Request body is too large.");
         }
 
         try
@@ -2966,7 +2965,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         {
         }
 
-        return (null, ErrorResult("The body must be a JSON object.", StatusCodes.Status400BadRequest));
+        return (null, "The body must be a JSON object.");
     }
 
     /// <summary>PURE: the practice scores body (see <see cref="MapInvestigationPractice"/>).</summary>
