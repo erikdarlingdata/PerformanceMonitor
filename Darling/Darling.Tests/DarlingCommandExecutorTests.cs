@@ -445,7 +445,8 @@ public sealed class DarlingCommandExecutorTests
         Assert.Equal(CommandKind.Fail, DarlingCommandExecutor.ResolvePlan(Command(type, args: "{\"called_id\": 0}")).Kind);
         Assert.Equal(CommandKind.Fail, DarlingCommandExecutor.ResolvePlan(Command(type, args: "{\"confirm\": true}")).Kind);
         Assert.Equal(CommandKind.Fail, DarlingCommandExecutor.ResolvePlan(new ClaimedCommand(1, type, null, "{\"called_id\": 12}", null)).Kind);
-        Assert.Equal(CommandKind.Fail, DarlingCommandExecutor.ResolvePlan(new ClaimedCommand(1, type, null, "{\"called_id\": 12}", "bad login!")).Kind);
+        Assert.Equal(CommandKind.Fail, DarlingCommandExecutor.ResolvePlan(new ClaimedCommand(1, type, null, "{\"called_id\": 12}", "bad<login>")).Kind);
+        Assert.Equal(CommandKind.UndoPlanChange, DarlingCommandExecutor.ResolvePlan(new ClaimedCommand(1, type, null, "{\"called_id\": 12}", "Alice O'Neil")).Kind);
         Assert.Equal(CommandKind.UndoPlanChange, DarlingCommandExecutor.ResolvePlan(new ClaimedCommand(1, type, null, "{\"called_id\": 12}", "CORP\\alice")).Kind);
     }
 

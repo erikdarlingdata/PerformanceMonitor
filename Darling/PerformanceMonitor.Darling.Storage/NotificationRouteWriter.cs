@@ -133,7 +133,7 @@ WHERE route_id = $1";
         NpgsqlDataSource dataSource, int routeId, int timeoutSeconds, CancellationToken cancellationToken, string? login = null)
     {
         ArgumentNullException.ThrowIfNull(dataSource);
-        if (login is not null && InvestigationProfiles.ValidateLogin(login) is { } loginError)
+        if (login is not null && InvestigationPersonWrites.ValidateLogin(login) is { } loginError)
         {
             throw new NotificationRouteRefusedException(loginError, NotificationRouteRefusalKind.Validation);
         }
@@ -160,7 +160,7 @@ WHERE route_id = $1";
         {
             await InvestigationPersonJournal.InsertAsync(
                 connection, transaction, null, routeId, before!.ScopeServerId, AgentChangedEvent,
-                InvestigationProfiles.PersonActor(login), change.Reason, change.Detail, timeoutSeconds, cancellationToken);
+                InvestigationPersonWrites.PersonActor(login), change.Reason, change.Detail, timeoutSeconds, cancellationToken);
         }
 
         await transaction.CommitAsync(cancellationToken);
@@ -178,7 +178,7 @@ WHERE route_id = $1";
         NpgsqlDataSource dataSource, int routeId, bool enabled, int timeoutSeconds, CancellationToken cancellationToken, string? login = null)
     {
         ArgumentNullException.ThrowIfNull(dataSource);
-        if (login is not null && InvestigationProfiles.ValidateLogin(login) is { } loginError)
+        if (login is not null && InvestigationPersonWrites.ValidateLogin(login) is { } loginError)
         {
             throw new NotificationRouteRefusedException(loginError, NotificationRouteRefusalKind.Validation);
         }
@@ -203,7 +203,7 @@ WHERE route_id = $1";
             {
                 await InvestigationPersonJournal.InsertAsync(
                     connection, transaction, null, routeId, before.ScopeServerId, AgentChangedEvent,
-                    InvestigationProfiles.PersonActor(login), change.Reason, change.Detail, timeoutSeconds, cancellationToken);
+                    InvestigationPersonWrites.PersonActor(login), change.Reason, change.Detail, timeoutSeconds, cancellationToken);
             }
         }
 
@@ -622,7 +622,7 @@ WHERE route_id = $1";
             throw new NotificationRouteRefusedException(early, NotificationRouteRefusalKind.Validation);
         }
 
-        if (login is not null && InvestigationProfiles.ValidateLogin(login) is { } loginError)
+        if (login is not null && InvestigationPersonWrites.ValidateLogin(login) is { } loginError)
         {
             throw new NotificationRouteRefusedException(loginError, NotificationRouteRefusalKind.Validation);
         }
@@ -693,7 +693,7 @@ WHERE route_id = $1";
         {
             await InvestigationPersonJournal.InsertAsync(
                 connection, transaction, null, routeId, resolved.ScopeServerId, AgentChangedEvent,
-                InvestigationProfiles.PersonActor(login), change.Reason, change.Detail, timeoutSeconds, cancellationToken);
+                InvestigationPersonWrites.PersonActor(login), change.Reason, change.Detail, timeoutSeconds, cancellationToken);
         }
 
         await transaction.CommitAsync(cancellationToken);

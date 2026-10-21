@@ -44,10 +44,14 @@ public sealed partial class ViewerDataService
     /// running loop to finish before the UI reports "still running / try again".</summary>
     public static readonly TimeSpan ImperativeCommandTimeout = TimeSpan.FromMinutes(3);
 
+    /// <summary>A pause writes the service row, which an agent change in progress holds until its remote work ends (at most 30 s). The
+    /// service waits up to 60 s for it, so the viewer waits 60 s plus the claim's poll and the report (#5632).</summary>
+    public static readonly TimeSpan PauseCommandTimeout = TimeSpan.FromSeconds(75);
+
     /// <summary>Enqueues a <c>pause</c> (service stops collecting on its next reconcile) and waits for the
     /// terminal result. Returns null on timeout. Read-only seats throw <see cref="ViewerReadOnlyException"/>.</summary>
     public Task<CommandResult?> PauseServiceAsync(CancellationToken cancellationToken = default) =>
-        RunCommandAsync(CommandPause, targetServerId: null, argsJson: null, RequestedBy(), timeout: null, cancellationToken);
+        RunCommandAsync(CommandPause, targetServerId: null, argsJson: null, RequestedBy(), PauseCommandTimeout, cancellationToken);
 
     /// <summary>Enqueues a <c>resume</c> (service resumes collecting) and waits for the terminal result.</summary>
     public Task<CommandResult?> ResumeServiceAsync(CancellationToken cancellationToken = default) =>

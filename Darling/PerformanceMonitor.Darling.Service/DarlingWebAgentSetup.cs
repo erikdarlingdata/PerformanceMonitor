@@ -32,7 +32,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// store's time), the same row the Viewer's save writes; the write is also logged with the seat that made it.
 /// <para>Who may write (#6274): only a signed-in admin (<see cref="Hosting.DarlingWebSeat.IsSignedInAdmin"/>). A dashboard with no sign-in
 /// registers no seat, so a process on the host would otherwise write as the default shared-token seat; it is refused 403 with
-/// <see cref="SignInMessage"/> and nothing is written. The routes in <see cref="DarlingWebEndpoints"/> are also born gated by the host's method
+/// <see cref="DarlingWebEndpoints.InvestigationWriteSignInMessage"/> and nothing is written. The routes in <see cref="DarlingWebEndpoints"/> are also born gated by the host's method
 /// gate (a read-only seat is refused every unsafe method), and the store decides the rest: a login with no write grant gets SQLSTATE 42501,
 /// answered 403 with a fixed sentence. The agent's token is the MCP listener's credential and is not a web credential, so it reaches none of
 /// these routes.</para>
@@ -52,9 +52,6 @@ internal static class DarlingWebAgentSetup
     internal const string RefusedMessage =
         "This dashboard signs in to the store as the viewer role, so it cannot change agent routes or environment profiles. "
         + "Use the Viewer app, or run the web under the admin login.";
-
-    /// <summary>The 403 sentence of a write from a request that is not a signed-in admin (#6274).</summary>
-    internal const string SignInMessage = "Sign in to the web as an admin to make this change, or use the Viewer.";
 
     /// <summary>The body keys a route write accepts. Anything else is refused by name (never its value).</summary>
     private static readonly string[] s_routeKeys =
@@ -107,7 +104,7 @@ SELECT has_table_privilege(current_user, 'config_notification_routes', 'INSERT')
             }
         }
 
-        answer["sign_in_message"] = SignInMessage;
+        answer["sign_in_message"] = DarlingWebEndpoints.InvestigationWriteSignInMessage;
         return answer;
     }
 

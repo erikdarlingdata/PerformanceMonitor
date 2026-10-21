@@ -110,23 +110,35 @@ public sealed partial class InvestigationRequestStore
             return new AgentActionRefusal(AgentActionCodes.UnknownServerAction,
                 "That is not a server action. The actions are force_plan, evict_plan and kill_session.");
 
-        /* 1: the service-wide switch. A store with no row reads as on, its default, as the Level 2 gate reads it. */
-        bool enabled;
-        await using (var command = Command(connection, transaction, AgentActionsEnabledSql))
-        {
-            enabled = await command.ExecuteScalarAsync(cancellationToken) is not bool flag || flag;
-        }
+        /* 1: the service-wide switch, the one read the write-time re-check uses (without the lock, here). */
+        if (await ActionsOffRefusalAsync(connection, transaction, lockRow: false, cancellationToken) is { } off)
+            return off;
 
-        if (!enabled)
-            return new AgentActionRefusal(AgentActionCodes.ActionsOff,
-                "Agent changes are turned off for this service (config_service.agent_actions_enabled). Report what you would change instead.");
+        /* 2 and 3: the claim, Level 3, the request's server and this server's switch, the conditions the write re-checks. */
+        if (await ServerActionConditionsRefusalAsync(connection, transaction, request, call.ServerAction, call.Action, call.Target,
+                hooks.LoadLevels, now, practice: true, cancellationToken) is { } refusal)
+            return refusal;
 
-        if (ClaimOrPracticeRefusal(request, call.Action, now, practice: true) is { } claimRefusal)
+        /* 4: this server's remediation login. */
+        return await CredentialRefusalAsync(request!.ServerId, request.ServerName, hooks.ReadCredential, person: false, cancellationToken);
+    }
+
+    /// <summary>
+    /// The conditions of a server action that can change between the gate and the write, checked in ONE place so the gate and the write's
+    /// re-check cannot drift (#5632): the claim (and, in the gate, the practice flag), Level 3 over the live routes (the lowest level among the
+    /// request's metrics wins), the request's own server, and this server's switch for this action (no row is off). The refusal codes and
+    /// words are the same in both places.
+    /// </summary>
+    private async Task<AgentActionRefusal?> ServerActionConditionsRefusalAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
+        AgentActionRequest? request, string serverAction, AgentAction action, AgentActionTarget target,
+        Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<Func<string, int, int?>>> loadLevels, DateTime now, bool practice,
+        CancellationToken cancellationToken)
+    {
+        if (ClaimOrPracticeRefusal(request, action, now, practice) is { } claimRefusal)
             return claimRefusal;
         var live = request!;
 
-        /* 2: Level 3. The request's routes are read once, and the lowest level among its metrics wins. */
-        var level = await ResolveRequestLevelAsync(connection, transaction, live, hooks.LoadLevels, ServerActionLevel, cancellationToken);
+        var level = await ResolveRequestLevelAsync(connection, transaction, live, loadLevels, ServerActionLevel, cancellationToken);
         if (level == 2)
             return new AgentActionRefusal(AgentActionCodes.NotLevel3,
                 "Level 2 changes only the monitoring store. A server action needs a Level 3 route. Report what you would change instead.");
@@ -134,14 +146,23 @@ public sealed partial class InvestigationRequestStore
             return new AgentActionRefusal(AgentActionCodes.NotLevel3,
                 "This request is not Level 3: its routes do not let an agent act on a monitored server. Report what you would change instead.");
 
-        if (call.Target.ServerId != live.ServerId)
+        if (target.ServerId != live.ServerId)
             return new AgentActionRefusal(AgentActionCodes.OtherServer,
-                $"This action targets {call.Target.ServerName}; the request is for {live.ServerName}. An action runs only on the request's server.");
+                $"This action targets {target.ServerName}; the request is for {live.ServerName}. An action runs only on the request's server.");
 
-        /* 3 and 4: this server's switch and its remediation login, the two server-side conditions. */
-        return await SwitchAndCredentialRefusalAsync(connection, transaction, live.ServerId, live.ServerName, call.ServerAction, hooks.ReadCredential,
-            person: false, cancellationToken);
+        return await ServerActionSwitchRefusalAsync(connection, transaction, live.ServerId, live.ServerName, serverAction, person: false,
+            cancellationToken);
     }
+
+    /// <summary>The server action a gated kind runs, null for a kind that only changes the monitoring store. The write's re-check keys on it,
+    /// so a call site cannot forget to name its action.</summary>
+    internal static string? ServerActionForKind(string kind) => kind switch
+    {
+        AgentChangeKinds.PlanForce or AgentChangeKinds.PlanUnforce => ServerActionNames.ForcePlan,
+        AgentChangeKinds.PlanEvict => ServerActionNames.EvictPlan,
+        AgentChangeKinds.SessionKill => ServerActionNames.KillSession,
+        _ => null,
+    };
 
     /// <summary>
     /// The two server-side conditions of the gate, shared by an agent's action and a person's undo (#5632, step 9): 3 this server's switch for this
@@ -151,6 +172,16 @@ public sealed partial class InvestigationRequestStore
     internal async Task<AgentActionRefusal?> SwitchAndCredentialRefusalAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
         int serverId, string serverName, string serverAction, Func<int, CancellationToken, Task<ServerCredentialState>> readCredential, bool person,
         CancellationToken cancellationToken)
+    {
+        if (await ServerActionSwitchRefusalAsync(connection, transaction, serverId, serverName, serverAction, person, cancellationToken) is { } off)
+            return off;
+
+        return await CredentialRefusalAsync(serverId, serverName, readCredential, person, cancellationToken);
+    }
+
+    /// <summary>Condition 3: this server's switch for this action. No row is off. A person is told how to turn it on.</summary>
+    private async Task<AgentActionRefusal?> ServerActionSwitchRefusalAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
+        int serverId, string serverName, string serverAction, bool person, CancellationToken cancellationToken)
     {
         bool on;
         await using (var command = Command(connection, transaction, ServerActionSwitchSql, P(serverId), PText(serverAction)))
@@ -163,6 +194,13 @@ public sealed partial class InvestigationRequestStore
                 ? $"{serverAction} is turned off for {serverName}, so Darling will not change that server. To allow it, set enabled to true for that server and action in config.config_server_actions. Or remove the plan force in SQL Server yourself."
                 : $"{serverAction} is turned off for {serverName}. Every server action starts off until a person turns it on for that server.");
 
+        return null;
+    }
+
+    /// <summary>Condition 4: the remediation login, a reference only.</summary>
+    private static async Task<AgentActionRefusal?> CredentialRefusalAsync(int serverId, string serverName,
+        Func<int, CancellationToken, Task<ServerCredentialState>> readCredential, bool person, CancellationToken cancellationToken)
+    {
         return await readCredential(serverId, cancellationToken) switch
         {
             ServerCredentialState.Reference => null,

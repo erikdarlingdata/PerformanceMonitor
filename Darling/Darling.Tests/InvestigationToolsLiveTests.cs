@@ -309,6 +309,86 @@ public sealed class InvestigationToolsLiveTests
         });
     }
 
+    /// <summary>#5632 acceptance test, claim side: a brief_format this Darling does not compose is refused as
+    /// <c>unsupported_format</c>, the message names the format sent and the one composed, the refusal is journaled once for
+    /// the request, and the request is left open and unclaimed. Format 1 and an omitted format still claim.</summary>
+    [Theory]
+    [InlineData(2)]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public async Task Claim_AnUnsupportedBriefFormat_IsRefused_NamingBothFormats_AndJournaledOnce(int sent)
+    {
+        await RunAsync(async (store, dataSource, connection, ct) =>
+        {
+            var id = (await store.OpenOrJoinAsync(Alert(), ct)).RequestId!.Value.ToString();
+            var composer = new InvestigationBriefComposer(new PgInvestigationBriefSourceReader(dataSource), new McpDataDetailSetting(McpDataDetail.Full), DarlingInvestigationBriefTools.Tools);
+
+            for (var attempt = 0; attempt < 2; attempt++)
+            {
+                var refused = Root(await DarlingMcpInvestigationTools.ClaimAsync(store, composer, id, "agent-a", null, sent, ct));
+                Assert.Equal("unsupported_format", refused.GetProperty("status").GetString());
+                var message = refused.GetProperty("message").GetString()!;
+                Assert.Contains("brief_format " + sent.ToString(System.Globalization.CultureInfo.InvariantCulture) + " is not supported", message, StringComparison.Ordinal);
+                Assert.Contains("brief_format " + InvestigationFormats.BriefFormat.ToString(System.Globalization.CultureInfo.InvariantCulture), message.Substring(message.IndexOf("Darling composes", StringComparison.Ordinal)), StringComparison.Ordinal);
+            }
+
+            /* Nothing was claimed, and the refusal is one journal row however often the agent retries. */
+            Assert.Equal("open|0", await ScalarAsync(connection,
+                $"SELECT state || '|' || claim_count FROM config.investigation_requests WHERE request_id = '{id}'", ct));
+            Assert.Equal("1|agent:agent-a", await ScalarAsync(connection,
+                $"SELECT count(*) || '|' || min(actor) FROM config.investigation_journal WHERE request_id = '{id}' AND event = 'refused' AND reason = 'claim:unsupported_format'", ct));
+
+            /* The format the agent was built for still claims, and so does leaving it out. */
+            var claimed = Root(await DarlingMcpInvestigationTools.ClaimAsync(store, composer, id, "agent-a", null, InvestigationFormats.BriefFormat, ct));
+            Assert.Equal("claimed", claimed.GetProperty("status").GetString());
+            var omitted = Root(await DarlingMcpInvestigationTools.ClaimAsync(store, composer, id, "agent-a", claimed.GetProperty("claim_id").GetString(), null, ct));
+            Assert.Contains(omitted.GetProperty("status").GetString(), new[] { "claimed", "renewed" });
+        });
+    }
+
+    /// <summary>#5632 acceptance test, report side: format 1 (the previous format, once a format 2 exists) is accepted; a
+    /// format this Darling does not accept is refused as <c>unsupported_format</c>, naming the format sent and every accepted
+    /// format, stores nothing, and is journaled once under the claiming agent. A number outside the 16-bit range is refused
+    /// too, not wrapped into an accepted format (65537 would wrap to 1).</summary>
+    [Theory]
+    [InlineData(2)]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(65537)]
+    public async Task Submit_AnUnsupportedReportFormat_IsRefused_NamingBothFormats_AndJournaledOnce(int sent)
+    {
+        await RunAsync(async (store, dataSource, connection, ct) =>
+        {
+            var id = (await store.OpenOrJoinAsync(Alert(), ct)).RequestId!.Value.ToString();
+            var composer = new InvestigationBriefComposer(new PgInvestigationBriefSourceReader(dataSource), new McpDataDetailSetting(McpDataDetail.Full), DarlingInvestigationBriefTools.Tools);
+            var claimId = Root(await DarlingMcpInvestigationTools.ClaimAsync(store, composer, id, "agent-a", null, null, ct))
+                .GetProperty("claim_id").GetString()!;
+
+            for (var attempt = 0; attempt < 2; attempt++)
+            {
+                var refused = Root(await DarlingMcpInvestigationTools.SubmitAsync(store, id, claimId, sent, "real", "a blocking chain", Evidence,
+                    "summary", null, null, ct));
+                Assert.Equal("unsupported_format", refused.GetProperty("status").GetString());
+                var message = refused.GetProperty("message").GetString()!;
+                /* The format sent (a number past the 16-bit range is shown at its clamp) and every format accepted. */
+                var shown = Math.Clamp(sent, short.MinValue, short.MaxValue).ToString(System.Globalization.CultureInfo.InvariantCulture);
+                Assert.Contains("report_format " + shown + " is not supported", message, StringComparison.Ordinal);
+                Assert.Contains("accepts report_format " + string.Join(", ", InvestigationFormats.AcceptedReportFormats), message, StringComparison.Ordinal);
+            }
+
+            Assert.Equal("0", await ScalarAsync(connection, $"SELECT count(*)::text FROM config.investigation_reports WHERE request_id = '{id}'", ct));
+            Assert.Equal("1|agent:agent-a", await ScalarAsync(connection,
+                $"SELECT count(*) || '|' || min(actor) FROM config.investigation_journal WHERE request_id = '{id}' AND event = 'refused' AND reason = 'submit:unsupported_format'", ct));
+
+            /* The same claim then reports in format 1, so the refusal cost the agent nothing. */
+            var accepted = Root(await DarlingMcpInvestigationTools.SubmitAsync(store, id, claimId, 1, "real", "a blocking chain", Evidence,
+                "summary", null, null, ct));
+            Assert.Equal("reported", accepted.GetProperty("status").GetString());
+            Assert.Equal("1", await ScalarAsync(connection,
+                $"SELECT count(*)::text FROM config.investigation_reports WHERE request_id = '{id}' AND report_format = 1", ct));
+        });
+    }
+
     /// <summary>#6004: a family_of that names no request is refused as invalid, naming the id, and nothing is stored; one that
     /// names a request is stored and served back, with the queries run.</summary>
     [Fact]

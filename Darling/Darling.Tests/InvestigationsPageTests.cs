@@ -94,6 +94,18 @@ public sealed class InvestigationsPageTests
         Assert.Equal(new[] { "reported", "claimed", "opened" }, journal.Select(r => r[1]));
     }
 
+    /// <summary>A seat that can edit but has no signed-in admin (a dashboard with no sign-in, or a signed-in viewer's twin) is told to
+    /// sign in, and is given no Close form: the service would answer 403 to it.</summary>
+    [Fact]
+    public void ASeatThatCanEditButIsNotSignedInAsAnAdmin_SeesTheSignInSentence_InsteadOfTheCloseForm()
+    {
+        var picked = Run().GetProperty("picked");
+        var lines = Strings(picked.GetProperty("signInLines"));
+        Assert.Equal(new[] { "Sign in to the web as an admin to make this change, or use the Viewer." }, lines);
+        Assert.Equal(0, picked.GetProperty("closeInputs").GetInt32());
+        Assert.Equal(0, picked.GetProperty("closeButtons").GetInt32());
+    }
+
     [Fact]
     public void TheRebuild_KeepsTheOpenRequest_AndCloseEmptiesThePane()
     {

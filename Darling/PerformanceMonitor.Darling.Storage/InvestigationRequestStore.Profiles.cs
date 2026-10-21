@@ -35,9 +35,6 @@ public static class InvestigationProfiles
     /// <summary>The longest profile text, in characters (the V184 CHECK's twin).</summary>
     public const int MaxLength = 4000;
 
-    /// <summary>The longest login the journal actor names: room for a signed-in web person's subject (207 characters at most).</summary>
-    public const int MaxLoginLength = 256;
-
     /// <summary>Every environment profile: the fleet's (both scopes NULL), then per server, then per tag.</summary>
     public const string SelectSql = @"
 SELECT profile_id, scope_server_id, scope_tag_id, profile_text, modified_at, modified_by
@@ -78,15 +75,6 @@ WHERE coalesce(scope_server_id, 0) = coalesce($1::integer, 0) AND coalesce(scope
         : (profileText?.Trim().Length ?? 0) > MaxLength
             ? string.Create(CultureInfo.InvariantCulture, $"A profile must be {MaxLength:N0} characters or fewer.")
         : null;
-
-    /// <summary>The login the actor names: not blank, at most <see cref="MaxLoginLength"/> characters.</summary>
-    public static string? ValidateLogin(string? login) =>
-        string.IsNullOrWhiteSpace(login) ? "The viewer could not tell who you are, so it cannot record the change."
-        : login.Trim().Length > MaxLoginLength ? string.Create(CultureInfo.InvariantCulture, $"The login is longer than {MaxLoginLength} characters.")
-        : null;
-
-    /// <summary>The journal actor for a person: <c>person:&lt;login&gt;</c>, as the V184 journal records people.</summary>
-    public static string PersonActor(string login) => "person:" + login.Trim();
 
     /// <summary>The journal reason of a profile change, naming its scope: <c>fleet profile</c>, <c>server 7 profile</c> or
     /// <c>tag 3 profile</c>.</summary>
@@ -147,14 +135,14 @@ public sealed partial class InvestigationRequestStore
         int? scopeServerId, int? scopeTagId, string? profileText, string login, DateTime? expectedModifiedAt,
         CancellationToken cancellationToken = default)
     {
-        var error = InvestigationProfiles.ValidateLogin(login) ?? InvestigationProfiles.Validate(scopeServerId, scopeTagId, profileText);
+        var error = InvestigationPersonWrites.ValidateLogin(login) ?? InvestigationProfiles.Validate(scopeServerId, scopeTagId, profileText);
         if (error is not null)
         {
             throw new ArgumentException(error, nameof(profileText));
         }
 
         var blank = string.IsNullOrWhiteSpace(profileText);
-        var actor = InvestigationProfiles.PersonActor(login);
+        var actor = InvestigationPersonWrites.PersonActor(login);
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         DateTime? current;

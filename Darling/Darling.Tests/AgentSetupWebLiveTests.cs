@@ -493,6 +493,50 @@ public sealed class AgentSetupWebLiveTests
         });
     }
 
+    /* The one person-name rule (#6265) reaches the web's profile and route writes: a signed-in name with a space and an apostrophe is a real
+       name, stamped exactly as a note decision stamps it (person:<name>) on the profile row and in both journal rows. */
+    [Fact]
+    public async Task APersonNameWithASpaceAndAnApostrophe_SavesAProfileAndARouteChange_StampedAsANoteDecisionStampsIt()
+    {
+        await WithWebRoutesAsync("admin", async (owner, _, Send, ct) =>
+        {
+            var seeded = await SeedRouteAsync(owner, "performance", ct);
+
+            Assert.Equal(200, (await Send("PUT", "/api/environment-profiles", Json, "{\"profile_text\":\"fleet: OLTP\"}")).Status);
+            Assert.Equal(200, (await Send("PUT", $"/api/notification-routes/{seeded}", Json, "{\"agent_level\":3}")).Status);
+
+            Assert.Equal("person:Alice O'Neil", await ScalarAsync(owner, "SELECT modified_by FROM config.agent_environment_profiles", ct));
+            Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'profile_saved' AND actor = 'person:Alice O''Neil'", ct));
+            Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'route_agent_changed' AND actor = 'person:Alice O''Neil'", ct));
+        }, seat: new DarlingWebSeat("Alice O'Neil", true));
+    }
+
+    /* A signed-in name the shared rule refuses (here an angle bracket) never reaches a store write: every route and profile write answers
+       400 with the fixed sentence the web's note decisions answer, never the name, and nothing is saved or journaled. */
+    [Fact]
+    public async Task APersonNameTheSharedRuleRefuses_IsRefusedWithTheNoteDecisionSentence_ByEveryProfileAndRouteWrite_WritingNothing()
+    {
+        const string sentence = "The signed-in name cannot be recorded as the person who made this change.";
+        await WithWebRoutesAsync("admin", async (owner, _, Send, ct) =>
+        {
+            var seeded = await SeedRouteAsync(owner, "performance", ct);
+
+            var profile = await Send("PUT", "/api/environment-profiles", Json, "{\"profile_text\":\"fleet: OLTP\"}");
+            var edit = await Send("PUT", $"/api/notification-routes/{seeded}", Json, "{\"agent_level\":3}");
+            var create = await Send("POST", "/api/notification-routes", Json, "{\"metric_match\":\"blocking\"}");
+            var delete = await Send("DELETE", $"/api/notification-routes/{seeded}", null);
+            foreach (var answer in new[] { profile, edit, create, delete })
+            {
+                Assert.Equal(400, answer.Status);
+                Assert.Equal(sentence, (string)answer.Body!["error"]!);
+            }
+
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.agent_environment_profiles", ct));
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE actor LIKE 'person:%'", ct));
+            Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config_notification_routes", ct));
+        }, seat: new DarlingWebSeat("Eve <b>", true));
+    }
+
     /* The write gate is the host's, by method, and the setup's own gate is the signed-in admin (#6274). A read-only seat (an OIDC viewer) is
        refused every unsafe method by the host before routing, so each new write route is born gated; this runs the four writes through the
        host's seat step and tells the host's refusal from the handler's by its sentence, so it fails when the gate is removed. */
@@ -549,7 +593,7 @@ public sealed class AgentSetupWebLiveTests
             var access = await Send("GET", "/api/agent-setup/access", null);
             Assert.False((bool)access.Body!["can_edit_routes"]!);
             Assert.False((bool)access.Body["can_edit_profiles"]!);
-            Assert.Equal(DarlingWebAgentSetup.SignInMessage, (string)access.Body["sign_in_message"]!);
+            Assert.Equal(DarlingWebEndpoints.InvestigationWriteSignInMessage, (string)access.Body["sign_in_message"]!);
             var profiles = await Send("GET", "/api/environment-profiles", null);
             Assert.False((bool)profiles.Body!["can_edit"]!);
 
