@@ -121,4 +121,24 @@ public sealed class WebTrendSeriesBehaviourTests
         Assert.Equal([sentence], drawn.GetProperty("strips").EnumerateArray().Select(e => e.GetString()!));
         Assert.Empty(drawn.GetProperty("charts").EnumerateArray());
     }
+
+    /// <summary>
+    /// A quiet window answers the service's own sentence, which says "in the last 48 hours" whatever window the page asked for (it never sees
+    /// the custom range's end). The page shows the panel's sentence about "this window" instead, as the panels that set emptyWins do, so a custom
+    /// past window is never described as the last 48 hours.
+    /// </summary>
+    [Theory]
+    [InlineData("throughput")]
+    [InlineData("tempdbSize")]
+    [InlineData("tempdbFileIo")]
+    [InlineData("collectors")]
+    public void AQuietCustomPastWindow_NeverSaysItIsTheLast48Hours(string card)
+    {
+        var drawn = Card(Run("quiet"), card);
+        var strips = drawn.GetProperty("strips").EnumerateArray().Select(e => e.GetString()!).ToList();
+        var sentence = Assert.Single(strips);
+        Assert.Contains("in this window", sentence);
+        Assert.DoesNotContain("48 hours", sentence);
+        Assert.Empty(drawn.GetProperty("charts").EnumerateArray());
+    }
 }

@@ -3,7 +3,8 @@
    charts.js, against a scripted /api/read answer for get_server_trend, and prints as one line of JSON what each panel drew: its charts' titles
    and legend labels, its strips and its notes. WebTrendSeriesBehaviourTests starts it as
        node web-trend-series-harness.mjs <path to wwwroot/js> <scenario>
-   with <scenario> data (every metric answers series or points) or empty (every metric answers the {status, message} envelope). The whole js
+   with <scenario> data (every metric answers series or points), empty (every metric answers the unavailable {status, message} envelope) or
+   quiet (every metric answers the empty envelope the service words as "in the last 48 hours", and the page draws a custom past window of 48 hours). The whole js
    tree is copied into a scratch folder first (#5279). Only the DOM and fetch are stand-ins. */
 import fs from "node:fs";
 import os from "node:os";
@@ -58,6 +59,7 @@ globalThis.location = { hash: "#/server/a/io" };
 
 const T = (m) => "2026-10-21T" + String(10 + Math.floor(m / 60)).padStart(2, "0") + ":" + String(m % 60).padStart(2, "0") + ":00";
 const ENVELOPE = (message) => ({ status: "unavailable", message });
+const QUIET = (metric) => ({ status: "empty", message: "No " + metric + " rows recorded for sql2019 in the last 48 hours. This server HAS collected them before." });
 const DATA = {
   file_io_throughput: {
     aggregate_note: "THROUGHPUT NOTE",
@@ -91,7 +93,7 @@ globalThis.fetch = async (url) => {
   const name = u.pathname.replace("/api/read/", "");
   const metric = u.searchParams.get("metric");
   let body = {};
-  if (name === "get_server_trend" && DATA[metric]) body = scenario === "empty" ? ENVELOPE(EMPTY[metric]) : DATA[metric];
+  if (name === "get_server_trend" && DATA[metric]) body = scenario === "empty" ? ENVELOPE(EMPTY[metric]) : scenario === "quiet" ? QUIET(metric) : DATA[metric];
   return { status: 200, ok: true, text: async () => JSON.stringify(body) };
 };
 process.on("unhandledRejection", () => {});
@@ -112,7 +114,8 @@ const flush = async () => { for (let i = 0; i < 25; i++) await new Promise((r) =
 const draw = async (tabId) => {
   const tab = modules.tabs.SERVER_TABS.find((t) => t.id === tabId);
   const root = new FakeNode("main");
-  modules.util.mount(root, tab.build("a", { hours: 24, label: "last 24 hours" }));
+  const ctx = scenario === "quiet" ? { hours: 48, label: "custom: 10/19 10:00 to 10/21 10:00", custom: true } : { hours: 24, label: "last 24 hours" };
+  modules.util.mount(root, tab.build("a", ctx));
   await flush();
   return root;
 };
