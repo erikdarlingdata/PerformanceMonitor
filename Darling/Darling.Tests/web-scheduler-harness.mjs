@@ -114,6 +114,7 @@ const sandbox = {
   favoriteStar: () => null,
   alertBadge: () => null,
   initSidebarCollapse() {},
+  initNarrowNav() {},
   initSidebarSearch() {},
   paintServerList() {},
   makeScrollReset: () => () => false,
