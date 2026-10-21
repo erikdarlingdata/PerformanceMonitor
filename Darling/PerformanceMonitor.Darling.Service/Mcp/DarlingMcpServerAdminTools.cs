@@ -470,6 +470,7 @@ public sealed partial class DarlingMcpServerAdminTools
                of the connection, so a re-added server would otherwise get its old tags back and rejoin
                tag-scoped alert rules. */
             int affected;
+            string? tagGuardRefusal = null;
             await using (var connection = await postgres.OpenConnectionAsync())
             await using (var transaction = await connection.BeginTransactionAsync())
             {
@@ -488,34 +489,45 @@ public sealed partial class DarlingMcpServerAdminTools
                 {
                     clear.CommandTimeout = McpCommandDeadlines.ReadSeconds;
                     clear.Parameters.Add(new NpgsqlParameter<int> { TypedValue = resolved.ServerId });
-                    await clear.ExecuteNonQueryAsync();
+                    try
+                    {
+                        await clear.ExecuteNonQueryAsync();
+                    }
+                    catch (PostgresException ex) when (ex.SqlState == "DL403")
+                    {
+                        /* #6281: the store's guard on the tag writes refused the clearing of this server's tag rows, because one of its
+                           tags is the tag of a route with an agent setting, or is under or over it. The delete above shares this
+                           transaction and is rolled back with it (nothing is committed on this path), so the server is still defined. */
+                        tagGuardRefusal = ex.MessageText;
+                    }
                 }
 
-                /* #5977: the server's query-tag assignments, rules and map rows go in the same transaction, for the
-                   same reason (server_id is a hash, so orphaned rows would come back when the server is re-added). Only this
-                   server's rows: an all-server assignment or rule (server_id NULL) and the tags themselves stay. */
-                foreach (var queryTagSql in QueryTagSchema.ClearForServerSqls)
+                if (tagGuardRefusal is null)
                 {
-                    await using var queryTagClear = new NpgsqlCommand(queryTagSql, connection) { Transaction = transaction };
-                    queryTagClear.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-                    queryTagClear.Parameters.Add(new NpgsqlParameter<int> { TypedValue = resolved.ServerId });
-                    await queryTagClear.ExecuteNonQueryAsync();
-                }
+                    /* #5977: the server's query-tag assignments, rules and map rows go in the same transaction, for the
+                       same reason (server_id is a hash, so orphaned rows would come back when the server is re-added). Only this
+                       server's rows: an all-server assignment or rule (server_id NULL) and the tags themselves stay. */
+                    foreach (var queryTagSql in QueryTagSchema.ClearForServerSqls)
+                    {
+                        await using var queryTagClear = new NpgsqlCommand(queryTagSql, connection) { Transaction = transaction };
+                        queryTagClear.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                        queryTagClear.Parameters.Add(new NpgsqlParameter<int> { TypedValue = resolved.ServerId });
+                        await queryTagClear.ExecuteNonQueryAsync();
+                    }
 
-                await transaction.CommitAsync();
+                    await transaction.CommitAsync();
+                }
+            }
+
+            if (tagGuardRefusal is not null)
+            {
+                return Outcome("refused", tagGuardRefusal + " The server was not removed: its tag assignments are changed in the Viewer or on the web dashboard first.");
             }
 
             return affected > 0
                 ? RemovedAnswer(resolvedDefinition, target.MatchedBy)
                 : Outcome("not_found",
                     $"'{resolved.DisplayName}' was defined when this call resolved it but its definition was gone by the time the delete ran (a concurrent remove); nothing was changed.");
-        }
-        catch (PostgresException ex) when (ex.SqlState == "DL403")
-        {
-            /* #6281: the store's guard on the tag writes refused the clearing of this server's tag rows because one of its tags is, or is
-               under or over, the tag of a route with an agent setting. The delete and the clear share one transaction, so the server
-               is still defined and nothing was changed. A refusal, not an error: removing it is done in the Viewer or on the web dashboard. */
-            return Outcome("refused", ex.MessageText + " The server was not removed.");
         }
         catch (Exception ex)
         {
