@@ -149,6 +149,10 @@ const tool = (url) => url.pathname.replace("/api/read/", "");
 const ago = (m) => new Date(Date.now() - m * 60000).toISOString().slice(0, 19);
 const LATCHES = ["LATCH_A", "LATCH_B", "LATCH_C", "LATCH_D", "LATCH_E", "LATCH_F", "LATCH_G"];
 const SPINS = ["SPIN_A", "SPIN_B", "SPIN_C"];
+/* #6359: the MCP callers' notes as TrendBuckets.AggregateNote / LevelNote write them (field names, bucket_minutes advice). The page
+   must not print them, so the harness serves them and the tests read what the panel drew instead. */
+const MCP_SUMMED = "Each point summarizes the collections in one 1-hour bucket and is stamped at the bucket's start. Counts are summed across the bucket, and rates are recomputed from those sums, so a bucket the window cuts short holds smaller counts but a true rate. peak_* and worst_* are the single most extreme collection inside the bucket. The width was chosen to keep this answer near 1500 points; pass bucket_minutes (1-1440) for another width, or narrow hours_back for finer points.";
+const MCP_LEVEL = "Each point averages the samples in one 1-hour bucket and is stamped at the bucket's start. A level is averaged, never summed, and peak_* is the highest single sample inside the bucket. The width was chosen to keep this answer near 1500 points; pass bucket_minutes (1-1440) for another width, or narrow hours_back for finer points.";
 const pts = (f) => [{ time: ago(10), ...f(1) }, { time: ago(5), ...f(2) }];
 let mode = "data";
 let missing = null;
@@ -162,13 +166,13 @@ answer = (url) => {
   if (mode === "allMissing") return data({ status: "empty", message: "None of the named were recorded.", hints: { missing_names: (url.searchParams.get("names") || "").split(",").filter(Boolean) } });
   if (mode === "empty") return data({ status: "empty", message: "No " + metric + " recorded in the last 24 hour(s)." });
   if (metric === "session_stats") {
-    return data({ server: "SRV1", metric, trend: pts((k) => ({ total_sessions: 10 * k, running_sessions: k, sleeping_sessions: 5, background_sessions: 2, dormant_sessions: 1, idle_sessions_over_30min: 0, sessions_waiting_for_memory: 0, databases_with_connections: 3, top_application_name: "AppOne", top_application_connections: 4, top_host_name: "HostOne", top_host_connections: 6 })), aggregate_note: "Session note.", discontinuities });
+    return data({ server: "SRV1", metric, trend: pts((k) => ({ total_sessions: 10 * k, running_sessions: k, sleeping_sessions: 5, background_sessions: 2, dormant_sessions: 1, idle_sessions_over_30min: 0, sessions_waiting_for_memory: 0, databases_with_connections: 3, top_application_name: "AppOne", top_application_connections: 4, top_host_name: "HostOne", top_host_connections: 6 })), bucket: "1 hour", bucket_minutes: 60, aggregate_note: MCP_LEVEL, discontinuities });
   }
   const named = (url.searchParams.get("names") || "").split(",").filter(Boolean);
   const present = named.filter((c) => c !== missing);
   const key = metric === "latch" ? "latch_class" : "spinlock_name";
   const field = metric === "latch" ? "wait_time_ms_per_second" : "collisions_per_second";
-  const body = { server: "SRV1", metric, series: present.map((c) => ({ [key]: c, trend: pts((k) => ({ [field]: 5 * k })) })), discontinuities };
+  const body = { server: "SRV1", metric, bucket: "1 hour", bucket_minutes: 60, aggregate_note: MCP_SUMMED, series: present.map((c) => ({ [key]: c, trend: pts((k) => ({ [field]: 5 * k })) })), discontinuities };
   if (missing && named.includes(missing)) body.missing_names = [missing];
   return data(body);
 };
@@ -206,7 +210,7 @@ const texts = (root, cls) => all(root, (n) => String(n.className).includes(cls))
 const scenarios = {
   latch: async () => {
     const root = await build("latch");
-    return { reads: trendReads(), checked: checkedNames(root), listed: boxes(root).length, chart: chartInfo(), notices: texts(root, "notice") };
+    return { reads: trendReads(), checked: checkedNames(root), listed: boxes(root).length, chart: chartInfo(), notices: texts(root, "notice"), notes: texts(root, "mp-metric-note") };
   },
   spinlock: async () => {
     const root = await build("spinlock");

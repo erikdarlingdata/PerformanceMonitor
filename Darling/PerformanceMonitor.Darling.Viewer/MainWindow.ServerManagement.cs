@@ -976,9 +976,12 @@ public partial class MainWindow
                travels; a SQL server's secret does not cross machines, so it lands locally only). */
             var pushedToStore = 0;
             var collidedInStore = 0;
+            var refusedHostsInStore = 0;
             if (_dataService is not null && !_dataService.IsReadOnly && OperatingSystem.IsWindows())
             {
-                (pushedToStore, collidedInStore) = await ViewerServerMigration.ImportFromStoreAsync(_serverStore, ProfileStore, _dataService);
+                var storeImport = await ViewerServerMigration.ImportFromStoreAsync(_serverStore, ProfileStore, _dataService);
+                (pushedToStore, collidedInStore) = storeImport;
+                refusedHostsInStore = storeImport.Refused;
             }
 
             /* #2434: "Imported N" is a claim about a file, and the registry write behind it can refuse —
@@ -1003,6 +1006,10 @@ public partial class MainWindow
             if (collidedInStore > 0)
             {
                 message += $"\n{collidedInStore} not added to the monitored store: the id matches a different server already there (see the viewer log).";
+            }
+            if (refusedHostsInStore > 0)
+            {
+                message += $"\n{refusedHostsInStore} not added to the monitored store: the host is a named pipe, admin or path-style one, which is not accepted (see the viewer log).";
             }
             if (copied > 0)
             {

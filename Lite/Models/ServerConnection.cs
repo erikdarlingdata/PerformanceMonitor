@@ -477,7 +477,8 @@ public class ServerConnection : INotifyPropertyChanged
     {
         var builder = new SqlConnectionStringBuilder
         {
-            DataSource = ServerName,
+            /* tcp: so SqlClient never falls back to a named pipe over SMB with this process's Windows credentials (#6352). */
+            DataSource = ServerHostSetting.TcpDataSource(ServerName),
             InitialCatalog = string.IsNullOrWhiteSpace(DatabaseName) ? "master" : DatabaseName,
             ApplicationName = "PerformanceMonitorLite",
             ConnectTimeout = 15,

@@ -17,7 +17,7 @@
  * was read for (hours and the custom range), and a rebuild under a different window reads it again. Every string is
  * drawn through el() as text.
  */
-import { el, readTool, fmtMs, localTime, windowFromHours, activeRangeStamp, windowNoteText } from "../util.js";
+import { el, readTool, fmtMs, localTime, wholeWindowFromHours, widenedWindowNote, activeRangeStamp, windowNoteText } from "../util.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "../charts.js";
 import { planSourceCell } from "./plan-viewer.js";
 import { dockPanelUnderRow, undockPanel } from "../plan-row.js";
@@ -105,7 +105,7 @@ async function load(key, server, row, hours, stamp) {
       database_name: row.database_name,
       query_id: row.query_id,
       hours,
-    });
+    }, undefined, { wholeWindow: true });
   } catch (e) {
     res = { kind: "error", message: e && e.message ? e.message : String(e) };
   }
@@ -125,7 +125,7 @@ function toggle(server, row, hours) {
     return;
   }
   const stamp = stampOf(hours);
-  openHistories.set(key, { phase: "loading", stamp, window: windowFromHours(hours) });
+  openHistories.set(key, { phase: "loading", stamp, window: wholeWindowFromHours(hours), widened: widenedWindowNote(hours) });
   redraw(key);
   return load(key, server, row, hours, stamp);
 }
@@ -183,9 +183,10 @@ function panelFor(key, server, hours) {
   const state = openHistories.get(key);
   if (state.phase === "loading") return el("div", { class: "plan-panel qs-history" }, [el("div", { class: "strip loading", text: "Loading the query's history..." })]);
   const r = state.result;
+  const widened = state.widened ? el("div", { class: "strip notice", text: state.widened }) : null;
   if (r.kind !== "data") {
     const note = r.note ? el("div", { class: "strip notice", text: r.note }) : null;
-    return el("div", { class: "plan-panel qs-history" }, [note, el("div", { class: r.kind === "error" ? "strip error" : "strip empty", text: r.message })]);
+    return el("div", { class: "plan-panel qs-history" }, [widened, note, el("div", { class: r.kind === "error" ? "strip error" : "strip empty", text: r.message })]);
   }
   const d = r.data;
   const notice = d.window_truncated
@@ -196,7 +197,7 @@ function panelFor(key, server, hours) {
     : null;
   const plansCut = d.plans_truncated ? el("div", { class: "strip notice", text: "Only the " + d.plans.length + " plans with the most total duration are listed." }) : null;
   const cut = d.points_truncated ? el("div", { class: "strip notice", text: "The chart shows the newest " + d.points.length.toLocaleString("en-US") + " snapshots of the window; older ones are not drawn." }) : null;
-  return el("div", { class: "plan-panel qs-history" }, [notice, plansCut, cut, chartFor(key, d, hours, state.window), planTable(server, d, key)]);
+  return el("div", { class: "plan-panel qs-history" }, [widened, notice, plansCut, cut, chartFor(key, d, hours, state.window), planTable(server, d, key)]);
 }
 
 /**
@@ -218,7 +219,7 @@ export function queryStoreHistoryColumn(server, hours) {
       const open = openHistories.get(key);
       if (open && open.stamp !== stampOf(hours)) {
         const stamp = stampOf(hours);
-        openHistories.set(key, { phase: "loading", stamp, window: windowFromHours(hours) });
+        openHistories.set(key, { phase: "loading", stamp, window: wholeWindowFromHours(hours), widened: widenedWindowNote(hours) });
         load(key, server, row, hours, stamp);
       }
       const draw = () => {
