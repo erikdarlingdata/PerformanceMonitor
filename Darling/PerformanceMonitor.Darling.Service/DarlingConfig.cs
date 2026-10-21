@@ -2602,10 +2602,9 @@ public sealed class MonitoredServer
     public string? RemediationUsername { get; set; }
 
     /// <summary>
-    /// The remediation credential's DPAPI-LocalMachine blob, base64 — produced by the same
-    /// <c>--encrypt-password</c> as <see cref="EncryptedPassword"/>, and resolvable as an
-    /// <c>env:</c>/<c>file:</c> reference by the same <c>DarlingSecretSource</c>. There is deliberately no
-    /// plaintext sibling of this one (no counterpart to <see cref="Password"/>): the dev-convenience
+    /// The remediation credential's secret, as an <c>env:</c>/<c>file:</c> reference that <c>DarlingSecretSource</c>
+    /// resolves. A Level 3 server action (#5632) refuses any other form (<c>credential_not_reference</c>). There is
+    /// deliberately no plaintext sibling of this one (no counterpart to <see cref="Password"/>): the dev-convenience
     /// plaintext slot exists because a wrong monitoring password fails a read, and a wrong remediation
     /// password fails a write to a production server.
     /// </summary>
