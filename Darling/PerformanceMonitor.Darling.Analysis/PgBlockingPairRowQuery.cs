@@ -70,6 +70,27 @@ internal static class PgBlockingPairRowQuery
     public const string SpidFilter = @"AND blocking_spid IS NOT NULL
 AND blocking_spid <> 0";
 
+    /// <summary>
+    /// The window pair-row read the block-chain views feed <see cref="BlockingChainReconstructor"/> (the Viewer's grid menu
+    /// and the web's Block chain action, #6292). Full SQL text; <see cref="SpidFilter"/> drops the missing-blocker sentinel so
+    /// no consumer invents a SPID-0 apex. $1 server_id, $2/$3 the event-time window, $4 the <see cref="EventWindowFloor"/>
+    /// for $2: <c>v_blocked_process_reports</c> is a hypertable partitioned on <c>collection_time</c>, so the floor lets the
+    /// planner skip every chunk older than the window without being able to drop a row (#4229).
+    /// </summary>
+    public const string WindowRowsSql = $@"
+        SELECT
+            {LeadingColumns},
+            blocked_sql_text, blocking_sql_text,
+            {IdentityColumns},
+            contentious_object,
+            {TrailingIdentityColumns}
+        FROM v_blocked_process_reports
+        WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+        AND   collection_time >= $4
+        {SpidFilter}
+        ORDER BY event_time DESC
+        LIMIT 5000";
+
     /// <summary>The DMV-snapshot fallback fetch (see <see cref="AppendDmvSnapshotRowsAsync"/>) —
     /// Lite's query text verbatim, exposed const for the ungated dialect pins.</summary>
     public const string DmvSnapshotSql = $@"
