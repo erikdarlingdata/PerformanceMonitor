@@ -1550,7 +1550,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     /* A plan undo writes to the monitored server, so it needs a signed-in admin, not just the web's store login (#6269). */
                     if (!DarlingWebSeat.IsSignedInAdmin(context))
                     {
-                        return ErrorResult(MonitoredServerWriteSeatMessage, StatusCodes.Status403Forbidden);
+                        return SignedInAdminRequiredResult();
                     }
 
                     if (!await changes.CanDecideAsync(context.RequestAborted))
@@ -3485,6 +3485,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     internal const string MonitoredServerWriteSeatMessage =
         "Sign in to the dashboard as an admin to do this, or use the Viewer app. A dashboard with no sign-in configured only lists.";
 
+    /// <summary>The 403 of a write that needs a signed-in admin: the fixed <see cref="MonitoredServerWriteSeatMessage"/> sentence in the error envelope.</summary>
+    private static IResult SignedInAdminRequiredResult() =>
+        ErrorResult(MonitoredServerWriteSeatMessage, StatusCodes.Status403Forbidden);
+
     /// <summary>The 403 a refused switch change answers when the web signs in to the store as the viewer role (#6269).</summary>
     internal const string ServerActionRefusedMessage =
         "This dashboard signs in to the store as the viewer role, so it cannot change server action switches. "
@@ -3549,7 +3553,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 /* A signed-in admin comes first: the store login the web runs on says nothing about who is calling (#6269). */
                 if (!DarlingWebSeat.IsSignedInAdmin(context))
                 {
-                    return ErrorResult(MonitoredServerWriteSeatMessage, StatusCodes.Status403Forbidden);
+                    return SignedInAdminRequiredResult();
                 }
 
                 /* The admin check comes before anything is read or written. */

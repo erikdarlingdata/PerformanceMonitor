@@ -109,7 +109,7 @@ internal static class DarlingMcpInstructions
                         : string.Empty));
         else if (!adminServed)
             off.Add($"`{DarlingMcpWritePolicy.ServerAdminSetting}` is off, so the {adminCount} tools that add, edit and remove " +
-                    "monitored servers, or switch a server's agent actions on and off, are not served");
+                    "monitored servers, or switch agent actions, are not served");
         if (!investigationsServed && investigationCount > 0)
             off.Add(writesServed
                 ? $"the {investigationCount} investigation tools stay off while `{DarlingMcpWritePolicy.WritesSetting}` is on (one token " +
