@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -69,6 +70,15 @@ internal static class DarlingMemoryGrantReader
     public sealed record MemoryGrantRow(
         DateTime CollectionTime, int PoolId, double AvailableMemoryMb, double GrantedMemoryMb, double UsedMemoryMb,
         long GranteeCount, long WaiterCount, long TimeoutErrorCountDelta, long ForcedGrantCountDelta);
+
+    /// <summary>One point of get_memory_grants' <c>chart: true</c> series (#6299): one resource pool at one bucket of the
+    /// window. <see cref="CollectionTime"/> is the bucket's start, or the one collection's own time when every bucket of the
+    /// answer holds exactly one collection (the viewer's #4349 rule, see <see cref="GetMemoryGrantChartAsync"/>).
+    /// <see cref="Snapshots"/> is how many collections the point averages. A NULL column reads as 0, as the viewer's chart does.</summary>
+    public sealed record MemoryGrantChartRow(
+        DateTime CollectionTime, int PoolId, double AvailableMemoryMb, double GrantedMemoryMb, double UsedMemoryMb,
+        double TargetMemoryMb, double MaxTargetMemoryMb, long GranteeCount, long WaiterCount,
+        long TimeoutErrorCountDelta, long ForcedGrantCountDelta, long Snapshots);
 
     /// <summary>
     /// One (resource_semaphore_id, pool_id) — or, for the pool lens, one pool with <see cref="ResourceSemaphoreId"/>
@@ -223,6 +233,55 @@ internal static class DarlingMemoryGrantReader
         }
 
         return rows;
+    }
+
+    /// <summary>
+    /// The per-collection series behind the viewer's two Memory Grants charts (#6299), through the viewer's own SQL text
+    /// (<see cref="PerformanceMonitor.Darling.Storage.TrendBucketSql.MemoryGrantChartDataSql"/>): one point per bucket per pool across the WHOLE
+    /// window, never the newest snapshot's rows. Zero handling is the viewer's: a NULL column reads as 0, and a collection with no
+    /// grants is a real point of zeros. A window with no collection returns no row at all, so the caller says "no data"
+    /// rather than drawing a line of zeros. Like the viewer (<c>ViewerDataService.GetMemoryGrantChartDataAsync</c>), when EVERY
+    /// bucket returned holds exactly one collection each point is stamped at that collection's own time instead of the bucket grid
+    /// (#4349), so a sparse window does not draw its dots on a grid the collector never ran on. $4 is the bucket width in minutes.
+    /// </summary>
+    public static async Task<List<MemoryGrantChartRow>> GetMemoryGrantChartAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int bucketMinutes, CancellationToken cancellationToken = default)
+    {
+        var rows = new List<MemoryGrantChartRow>();
+        var firstTimes = new List<DateTime>();
+        var everyBucketSingleton = true;
+        await using var command = postgres.CreateCommand(PerformanceMonitor.Darling.Storage.TrendBucketSql.MemoryGrantChartDataSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
+        DarlingMcpReadParameters.AddInt(command, bucketMinutes);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var snapshots = reader.GetInt64(12);
+            if (snapshots != 1)
+            {
+                everyBucketSingleton = false;
+            }
+
+            firstTimes.Add(reader.GetDateTime(11));
+            rows.Add(new MemoryGrantChartRow(
+                reader.GetDateTime(1),
+                reader.IsDBNull(0) ? 0 : reader.GetInt32(0),
+                reader.IsDBNull(2) ? 0 : reader.GetDouble(2),
+                reader.IsDBNull(3) ? 0 : reader.GetDouble(3),
+                reader.IsDBNull(4) ? 0 : reader.GetDouble(4),
+                reader.IsDBNull(9) ? 0 : reader.GetDouble(9),
+                reader.IsDBNull(10) ? 0 : reader.GetDouble(10),
+                reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
+                reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
+                reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
+                reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
+                snapshots));
+        }
+
+        return everyBucketSingleton
+            ? rows.Select((r, i) => r with { CollectionTime = firstTimes[i] }).ToList()
+            : rows;
     }
 
     /* ─────────────────────────── the window, per semaphore / per pool (#3541 A10) ─────────────────────────── */
