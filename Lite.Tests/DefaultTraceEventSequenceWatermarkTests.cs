@@ -137,8 +137,7 @@ public sealed class DefaultTraceEventSequenceWatermarkTests
                 .Where(e => (cutoff is { } c && e.Start >= c)
                     || (e.Start >= TraceStart
                         && ((continues == true && lastSequence is { } l && e.Sequence > l) || continues == false)))
-                .OrderByDescending(e => e.Start)
-                .ToList();
+                .ToList();                                          /* file order: the query has no ORDER BY (#6304) */
 
             using var reader = BuildReader(read, CurrentFile, TraceStart);
             var kept = await definition.ReadAsync(reader, context, CancellationToken.None);
@@ -219,6 +218,23 @@ public sealed class DefaultTraceEventSequenceWatermarkTests
         set.Tables.Add(payload);
         set.Tables.Add(tail);
         return set.CreateDataReader();
+    }
+
+    /* ---- #6304: the query no longer sorts on the server (the Sort's memory grant timed out on small servers) ---- */
+
+    [Fact]
+    public async Task ReadAsync_ReturnsNewestFirst_ThoughTheServerSendsFileOrder()
+    {
+        var host = new TraceHost();
+        host.Write(s_noon.AddMinutes(-30));
+        host.Write(s_noon.AddSeconds(3));
+        host.Write(s_noon.AddMinutes(-10));        /* written last, started before the one above it */
+
+        var kept = await host.PollAsync();
+
+        Assert.Equal(
+            new DateTime?[] { s_noon.AddSeconds(3), s_noon.AddMinutes(-10), s_noon.AddMinutes(-30) },
+            kept.Select(r => r.EventTime).ToArray());
     }
 
     /* ---- the defect: a stall written after the poll that moved the watermark past its StartTime ---- */
