@@ -658,6 +658,13 @@ td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
 .chart .hover-line { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; }
 .chart .hover-dot { stroke: var(--bg-dark); stroke-width: 1.5; }
 .chart .series-dot { stroke: var(--bg-dark); stroke-width: 1.5; } /* a single-bucket series' resting marker (no segment to stroke) */
+/* #6291: the Overview's stacked strips: a title and the crosshair's readout over each strip; the baseline band sits behind a line. */
+.chart .overview-strips { display: block; max-width: 100%; user-select: none; }
+.chart .overview-strips .strip-title { fill: var(--fg); font-size: 12px; font-weight: 600; }
+.chart .overview-strips .strip-readout { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.chart .overview-strips .strip-none { fill: var(--dim); font-size: 11px; }
+.chart .overview-strips .strip-band { fill: rgba(46, 174, 241, 0.14); }
+.chart .overview-strips .strip-anomaly { fill: #ef5350; stroke: var(--bg-dark); stroke-width: 1; }
 
 .chart-legend {
   display: flex;

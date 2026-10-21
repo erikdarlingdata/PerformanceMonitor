@@ -52,6 +52,7 @@ import { downloadText } from "../grid-tools.js";
 import { deadlockGraphCell, processRowsInDatabases } from "./deadlock-graph.js";
 import { activePlanColumns, blockingPlanColumns, deadlockPlanColumn, planColumn, procedurePlanColumn, queryStorePlanColumn } from "./plan-viewer.js";
 import { queryStoreHistoryColumn } from "./query-store-history.js";
+import { fillOverviewStrips } from "./overview-strips.js";
 import { SQL_TAB_REACH, POSTGRES_TAB_REACH, withTabReach } from "./server-tab-reach.js";
 import { bloatVerdict, droppabilityVerdict, costFigure, lastScanNoteWord, fillfactorNoteWord, toastNoteWord, indexSkipWord } from "../pg-grid-text.js";
 
@@ -916,6 +917,13 @@ function rankedCard(kind, build) {
   return slot;
 }
 
+/** #6291: the Overview's five stacked strips (CPU, waits, blocking and deadlocks, buffer pool, file I/O latency): see overview-strips.js. */
+function overviewStripsPanel(server, ctx) {
+  const { panel, body } = panelShell("Overview timeline", ctx.label, 2, "get_file_io_trend");
+  fillOverviewStrips(body, server, ctx);
+  return panel;
+}
+
 /**
  * What a File I/O Latency line is, for the subtitle (#5244 PR5): exactly one chosen database draws one line per file ("per
  * file"); every database, or two or more, draw one line per database and file type. It follows the same rule as the route
@@ -1193,34 +1201,10 @@ export const SERVER_TABS = [
     build: (server, ctx) => [
       stat("Overview", "get_server_summary", { server }, OVERVIEW_STATS, SNAPSHOT, 2),
       stat("Server Properties", "get_server_properties", { server }, PROPERTY_STATS, SNAPSHOT, 2),
-      line("CPU Utilization", "get_cpu_utilization", { server, hours: ctx.hours }, "samples", "sample_time", CPU_SERIES, {
-        subtitle: ctx.label,
-        format: "pct",
-        unit: "%",
-        emptyText: "No CPU samples in this window.",
-      }),
-      line("Memory", "get_memory_trend", { server, hours: ctx.hours }, "trend", "time", MEMORY_SERIES, {
-        subtitle: ctx.label,
-        format: "mb",
-        emptyText: "No memory samples in this window.",
-      }),
-      line("Blocked process report trend", "get_blocking_trend", { server, hours: ctx.hours }, "trend", "time", BLOCKING_REPORT_SERIES, {
-        subtitle: ctx.label,
-        format: "int",
-        unit: "reports",
-        atTimeItem: "blocking",
-        sourceKey: "source",
-        bySource: BLOCKING_BY_SOURCE,
-        emptyText: "No blocked process reports in this window — an empty trend here means none were captured, not that nothing was collected.",
-      }),
-      line("Deadlocks", "get_deadlock_trend", { server, hours: ctx.hours }, "trend", "time", COUNT_SERIES, {
-        subtitle: ctx.label,
-        format: "int",
-        atTimeItem: "deadlocks",
-        emptyText: DEADLOCKS_EMPTY_TEXT,
-        emptyWins: true,
-      }),
-      fileIoPanel(server, ctx),
+      /* #6291: the desktop Overview's five stacked strips on one time axis and one crosshair. The CPU, Memory, Blocked process
+         report and Deadlocks charts that sat here live on the CPU, Memory, Blocking and Deadlocks tabs (and the File I/O tab
+         keeps both latency charts), so nothing is unreachable; the strips replace the four separate Overview charts and the File I/O panel. */
+      overviewStripsPanel(server, ctx),
       table(
         "Analysis Findings",
         "get_analysis_findings",
