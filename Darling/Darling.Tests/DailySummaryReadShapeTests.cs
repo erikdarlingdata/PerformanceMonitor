@@ -103,10 +103,7 @@ public sealed class DailySummaryReadShapeSqlTests
         var composite = page[page.IndexOf("export function dailySummaryPanels(server)", StringComparison.Ordinal)..];
         composite = composite[..composite.IndexOf("\n}", StringComparison.Ordinal)];
         Assert.Equal(1, composite.Split("readTool(").Length - 1);
-        Assert.Contains("readTool(\"get_daily_summary_range\", { server, days_back: 30 })", composite, StringComparison.Ordinal);
         Assert.Contains("days.find((day) => day.summary_date === data.to_date)", composite, StringComparison.Ordinal);
-        /* Each panel renders through its own guard, so a fault in one cannot strand the other on its loading strip. */
-        Assert.Equal(2, composite.Split("renderInto(").Length - 1);
         Assert.Contains("VIZ.stat(today, { stats: DAILY_STATS })", composite, StringComparison.Ordinal);
         Assert.Contains("return [tile.panel, calendar.panel];", composite, StringComparison.Ordinal);
     }

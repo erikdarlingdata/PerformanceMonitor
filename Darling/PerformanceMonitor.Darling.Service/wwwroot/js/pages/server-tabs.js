@@ -55,6 +55,7 @@ import { deadlockGraphCell, processRowsInDatabases } from "./deadlock-graph.js";
 import { activePlanColumns, blockingPlanColumns, deadlockPlanColumn, planColumn, procedurePlanColumn, queryStorePlanColumn } from "./plan-viewer.js";
 import { queryStoreHistoryColumn } from "./query-store-history.js";
 import { memoryGrantChartPanels } from "./memory-grant-charts.js";
+import { dailyHealthCalendar } from "./daily-calendar.js";
 import { systemEventsChartSpecs } from "./system-events-charts.js";
 import { comparePick, compareControl, compareCard, COMPARE_TOP } from "./top-compare.js";
 import { SQL_TAB_REACH, POSTGRES_TAB_REACH, withTabReach } from "./server-tab-reach.js";
@@ -1026,15 +1027,17 @@ export function fileIoPanel(server, ctx) {
  * but one blank in one column of a thirty-row grid is easy to read past, so the read's list is rendered as ONE
  * notice line above the rows. A composite rather than a table() descriptor because table()'s `noteKey` carries
  * a server-authored STRING (#3278) and this disclosure is a server-authored LIST: the dates are the server's,
- * the sentence around them is the page's, and no figure here is one the page derived (R1). The span is a fixed
- * 30 days and says so, deliberately not ctx.hours — the page's range tops out well short of a month, and a
- * calendar drawn over six hours is not a calendar.
+ * the sentence around them is the page's, and no figure here is one the page derived (R1). The span is the
+ * calendar's month (the fetch reaches 31 days so the current month is whole), deliberately not ctx.hours — the page's
+ * range tops out well short of a month, and a calendar drawn over six hours is not a calendar. #6294: the calendar
+ * panel is a month calendar (daily-calendar.js) whose "Show as table" is this grid over the shown month.
  */
 export function dailySummaryPanels(server) {
   const tile = panelShell("Daily Summary", "today (UTC)", 2, "get_daily_summary_range");
-  const calendar = panelShell("Daily Health Calendar", "last 30 days (UTC)", 2, "get_daily_summary_range");
+  const calendar = panelShell("Daily Health Calendar", "month (UTC)", 2, "get_daily_summary_range");
   (async () => {
-    const res = await readTool("get_daily_summary_range", { server, days_back: 30 });
+    /* 31 days, not 30 (#6294): the month calendar's current month starts on the 1st, which is up to 30 days before today. */
+    const res = await readTool("get_daily_summary_range", { server, days_back: 31 });
     if (res.kind === "error") {
       mount(tile.body, readErrorStrip(res.message));
       return mount(calendar.body, readErrorStrip(res.message));
@@ -1044,7 +1047,10 @@ export function dailySummaryPanels(server) {
          as_of); for today's tile the fact is simpler. "unavailable" (nothing ever collected) says the same thing
          to both panels, so it is the server's sentence on both. */
       mount(tile.body, emptyStrip(res.status === "empty" ? "Nothing has been collected for this server today (UTC)." : res.message));
-      return mount(calendar.body, emptyStrip(res.message));
+      /* "empty" is a span with no day while the server has history elsewhere, so the calendar still opens, every day "no data", and an
+         earlier month can be stepped to (#6294); "unavailable" is a server nothing was ever collected for, which has no month to show. */
+      if (res.status !== "empty") return mount(calendar.body, emptyStrip(res.message));
+      return renderInto(calendar.body, () => dailyHealthCalendar({ server, initial: null, read: readTool, renderTable: (month) => dailyRangeGrid(month.rows, month.missing) }));
     }
 
     /* Each panel renders on its own, the way fanout() guards its specs: a render fault in one says so in that
@@ -1058,30 +1064,36 @@ export function dailySummaryPanels(server) {
         : emptyStrip("Nothing has been collected for this server yet " + (data.to_date ? "on " + data.to_date : "today") + " (UTC).");
     });
 
-    renderInto(calendar.body, () => {
-      const grid = VIZ.table(data, {
-        rowsKey: "days",
-        columns: DAILY_RANGE_COLUMNS,
-        /* Click-through 10: newest day first, as the other grids open. */
-        orderRows: newestFirst("summary_date"),
-        emptyText:
-          "No collected days in this range. A day with any collection appears here, so a missing day is a gap in collection.",
-      });
-
-      const missing = Array.isArray(data.days_missing) ? data.days_missing : [];
-      if (!missing.length) return grid;
-      const plural = missing.length === 1 ? "" : "s";
-      return [
-        noticeStrip(
-          "Unique queries not materialized for " + missing.length + " day" + plural + " (" + missing.join(", ") + "): " +
-            "the rollup tier that answers this range never carried " + (plural ? "those days" : "that day") +
-            " for this server, so the cell says so rather than 0. The service's start-up repair closes such days the next time it runs."
-        ),
-        grid,
-      ];
-    });
+    /* The month calendar (#6294, daily-calendar.js) over the same fetch; "Show as table" is the grid this panel was, over the shown month. */
+    renderInto(calendar.body, () => dailyHealthCalendar({ server, initial: data, read: readTool, renderTable: (month) => dailyRangeGrid(month.rows, month.missing) }));
   })();
   return [tile.panel, calendar.panel];
+}
+
+/** The Daily Health Calendar's table: one row per collected day, newest first, with the #3653 A6 notice above it for the days whose
+ *  unique_queries the rollup tier never carried (a server-authored LIST, so a composite rather than table()'s string `noteKey`). */
+function dailyRangeGrid(rows, missing) {
+  const grid = VIZ.table(
+    { days: rows },
+    {
+      rowsKey: "days",
+      columns: DAILY_RANGE_COLUMNS,
+      /* Click-through 10: newest day first, as the other grids open. */
+      orderRows: newestFirst("summary_date"),
+      emptyText:
+        "No collected days in this month. A day with any collection appears here, so a missing day is a gap in collection.",
+    }
+  );
+  if (!missing.length) return grid;
+  const plural = missing.length === 1 ? "" : "s";
+  return [
+    noticeStrip(
+      "Unique queries not materialized for " + missing.length + " day" + plural + " (" + missing.join(", ") + "): " +
+        "the rollup tier that answers this range never carried " + (plural ? "those days" : "that day") +
+        " for this server, so the cell says so rather than 0. The service's start-up repair closes such days the next time it runs."
+    ),
+    grid,
+  ];
 }
 
 /** Mount what `render` returns into `body`, or an error strip naming the fault if it throws. */
