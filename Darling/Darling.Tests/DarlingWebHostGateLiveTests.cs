@@ -409,7 +409,7 @@ public sealed class DarlingWebHostGateLiveTests
         Assert.Equal(StatusCodes.Status200OK, ctx.Response.StatusCode);
         Assert.Equal("text/html; charset=utf-8", ctx.Response.ContentType);
         Assert.Contains(DarlingWebHostService.ReNavigationScriptBlock, body, StringComparison.Ordinal);
-        Assert.Equal("location.replace(location.href);", System.Text.RegularExpressions.Regex.Match(body, "<script>(.*?)</script>").Groups[1].Value);
+        Assert.Contains("location.reload()", body, StringComparison.Ordinal);
         Assert.Equal(DarlingWebHostService.ReNavigationPagePolicy, ctx.Response.Headers["Content-Security-Policy"].ToString());
         Assert.Equal("no-store", ctx.Response.Headers.CacheControl.ToString());
         Assert.Equal(0, ctx.Response.Headers.SetCookie.Count);

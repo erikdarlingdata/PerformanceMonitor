@@ -2442,10 +2442,13 @@ public sealed class DarlingWebHostService : BackgroundService
     }
 
     /// <summary>
-    /// The page a cross-site page request with no session cookie is answered with (#6286): it re-navigates to the
-    /// SAME address, path, query and <c>#/...</c> fragment included. A navigation started by a script on this site
-    /// is same-site, so the Strict session cookie travels with it, as on the signed-in landing page. The target is
-    /// the page's own <c>location</c> and nothing the request carried, so the page cannot send anyone elsewhere.
+    /// The page a cross-site page request with no session cookie is answered with (#6286): it reloads itself, which
+    /// asks for the SAME address again, path, query and <c>#/...</c> fragment included. A navigation started by a
+    /// script on this site is same-site, so the Strict session cookie travels with it, as on the signed-in landing
+    /// page. The script reloads rather than calling <c>location.replace(location.href)</c> because an address that
+    /// carries a fragment is a same-document navigation to a script: the browser does nothing and the page stays.
+    /// The script names no address at all, so the page cannot send anyone elsewhere; and a page that is itself the
+    /// result of a reload does not reload again, so a browser that still marked the request cross-site cannot loop.
     /// </summary>
     internal static Task WriteReNavigationPageAsync(HttpContext context)
     {
@@ -2455,7 +2458,7 @@ public sealed class DarlingWebHostService : BackgroundService
         var html =
             "<!doctype html><html lang='en'><head><meta charset='utf-8'><title>Darling Web</title>" + IconLinkHtml + "</head>"
             + "<body style='background:#181b1f;color:#E4E6EB;font-family:system-ui'>"
-            + "<p>Opening the dashboard…</p>"
+            + "<p id='m'>Opening the dashboard…</p>"
             + ReNavigationScriptBlock
             + "</body></html>";
         context.Response.Headers[DarlingWebSecurityHeaders.ContentSecurityPolicyHeader] = ReNavigationPagePolicy;
@@ -2463,7 +2466,7 @@ public sealed class DarlingWebHostService : BackgroundService
     }
 
     /// <summary>The re-navigation page's only inline script: constant text, so its hash does not depend on the request.</summary>
-    internal const string ReNavigationScriptBlock = "<script>location.replace(location.href);</script>";
+    internal const string ReNavigationScriptBlock = "<script>var n=performance.getEntriesByType('navigation')[0];if(n&&n.type==='reload'){document.getElementById('m').textContent='Open the address again to continue.';}else{location.reload();}</script>";
 
     /// <summary>The re-navigation page's policy: the default plus the hash of <see cref="ReNavigationScriptBlock"/>.</summary>
     internal static readonly string ReNavigationPagePolicy = DarlingWebSecurityHeaders.PolicyForInlinePage(ReNavigationScriptBlock);
