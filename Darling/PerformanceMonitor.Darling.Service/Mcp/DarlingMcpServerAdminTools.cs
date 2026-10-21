@@ -1448,9 +1448,14 @@ ON CONFLICT (server_id) DO NOTHING";
             return "query_store_replica is for SQL Server servers only.";
         }
 
-        return replica.Length > 255 || replica.Any(c => char.IsControl(c) || char.IsSurrogate(c))
-            ? "query_store_replica must be a host name, host,port or listener name of at most 255 characters."
-            : null;
+        if (replica.Length > 255 || replica.Any(c => char.IsControl(c) || char.IsSurrogate(c)))
+        {
+            return "query_store_replica must be a host name, host,port or listener name of at most 255 characters.";
+        }
+
+        /* A protocol prefix (np:, lpc:, admin:) or a UNC-looking value is a connection the service would open with its own
+           credentials to a machine the caller names (a named pipe over SMB): refused for every auth mode. */
+        return QueryStoreReplicaSetting.Refusal(replica);
     }
 
     /// <summary>The <c>server_id</c> an entry is stored under: the deterministic hash of its storage key, the same

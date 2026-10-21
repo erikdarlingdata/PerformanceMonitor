@@ -842,6 +842,13 @@ WHERE server_id = $1";
     /// <summary>Binds the 21 upsert/insert parameters ($1..$21) from a row (created_at/modified_at are server-side).</summary>
     private static void BindMonitoredServer(NpgsqlCommand command, MonitoredServerRow row)
     {
+        /* #6254: every write of a row binds here. A replica with a protocol prefix or a path is a connection the service would open with
+           its own credentials to a machine the writer names, so it is never stored, whatever surface the row came from. */
+        if (QueryStoreReplicaSetting.Refusal(row.QueryStoreReplica) is { } replicaRefusal)
+        {
+            throw new ArgumentException(replicaRefusal, nameof(row));
+        }
+
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = row.ServerId });                 // $1
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = row.Name });                  // $2
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = row.Host });                  // $3

@@ -118,6 +118,9 @@ public sealed class PasswordBindingCensusTests
         {
             "DisplayName", "UsesSqlAuth", "UsesServicePrincipal", "UsesManagedIdentity", "IsPostgres",
             "HasRemediationCredential", "RemediationUsername",
+            /* #6254: the replica builder takes the replica from the identity the password seal is opened with (the binding itself,
+               not a setting) and the password from DarlingSecrets, which opens the seal against that same identity. */
+            "ConnectionIdentity",
         };
         var bound = IdentityProperties().ToHashSet(StringComparer.Ordinal);
         var read = Regex.Matches(Source("PerformanceMonitor.Darling.Service/MonitoredServerConnection.cs"), @"\bserver\.([A-Za-z_]\w*)")
