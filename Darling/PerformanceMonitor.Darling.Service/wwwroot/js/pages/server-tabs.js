@@ -54,6 +54,7 @@ import { deadlockGraphCell, processRowsInDatabases } from "./deadlock-graph.js";
 import { activePlanColumns, blockingPlanColumns, deadlockPlanColumn, planColumn, procedurePlanColumn, queryStorePlanColumn } from "./plan-viewer.js";
 import { queryStoreHistoryColumn } from "./query-store-history.js";
 import { memoryGrantChartPanels } from "./memory-grant-charts.js";
+import { systemEventsChartSpecs } from "./system-events-charts.js";
 import { comparePick, compareControl, compareCard, COMPARE_TOP } from "./top-compare.js";
 import { SQL_TAB_REACH, POSTGRES_TAB_REACH, withTabReach } from "./server-tab-reach.js";
 import { bloatVerdict, droppabilityVerdict, costFigure, lastScanNoteWord, fillfactorNoteWord, toastNoteWord, indexSkipWord } from "../pg-grid-text.js";
@@ -2056,8 +2057,8 @@ export const SERVER_TABS = [
     id: "events",
     label: "System Events",
     note:
-      "These are the system_health session and default trace, parsed on read. The desktop viewer additionally " +
-      "charts the corruption and contention counters hour-by-hour; here they are the raw parsed rows.",
+      "These are the system_health session and default trace, parsed on read. The corruption and contention " +
+      "counters are charted below (each point is the largest value in its time bucket); the raw parsed rows follow.",
     build: (server, ctx) => [
       /* The CPU chart reads the whole window as time buckets (chart: true, #6158); a limit of 50 drew only the newest
          few hours of a day. The entries table below keeps the newest-rows read. */
@@ -2073,6 +2074,8 @@ export const SERVER_TABS = [
           unit: "%",
           emptyText: "No system_health entries in this window.",
         },
+        /* The Corruption and Contention Events charts (#6295), off the same fetch. */
+        ...systemEventsChartSpecs(ctx.label),
       ]),
       ...fanout("get_health_parser_system_health", { server, hours: ctx.hours, limit: 50 }, [
         {
