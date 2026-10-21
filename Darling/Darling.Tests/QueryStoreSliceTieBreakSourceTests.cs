@@ -47,7 +47,9 @@ public sealed class QueryStoreSliceTieBreakSourceTests
     private static readonly (string Path, int Sites)[] DedupSites =
     [
         (Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.QueryStore.cs"), 4),
-        (Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.QueryStoreRegressions.cs"), 2),
+        /* Since #5506 the regressions read (the MCP tool and the viewer twin) builds its SQL in one place: one dedup window
+           over the raw rows, filtered by four rn = 1 reads. It was two sites in the viewer file and two in the MCP reader. */
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Storage", "QueryStoreRegressionBaseline.cs"), 1),
         (Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.QueryTrends.cs"), 1),
         (Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.ItemTimeline.cs"), 1),
         (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingDataReader.cs"), 1),
