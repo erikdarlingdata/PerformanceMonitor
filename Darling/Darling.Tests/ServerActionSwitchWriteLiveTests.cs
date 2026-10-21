@@ -1,0 +1,490 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Text.Json.Nodes;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using ModelContextProtocol.Server;
+using Npgsql;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
+using Xunit;
+
+namespace Darling.Tests;
+
+/* #1776 own-store: every fact mints its own scratch database through ScratchPostgres and never touches another test's rows,
+   so the class is deliberately NOT [Collection("live-postgres")]. */
+
+/// <summary>
+/// #6269: a person (or an MCP client under <c>mcp.allowServerAdmin</c>) turns a server's action switch on and off. One service
+/// method writes <c>config.config_server_actions</c> as the store owner and journals the change; the Viewer command, the web route and
+/// the MCP tool each reach it. The grants on the table are untouched, so the tests also show the admin, viewer and mcp roles still
+/// cannot write it themselves.
+/// </summary>
+public sealed class ServerActionSwitchWriteLiveTests
+{
+    private const string RolePassword = "switch-write-live-pw";
+    private const int SqlServerId = 1;
+    private const int PostgresId = 2;
+
+    private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+
+    [Fact]
+    public async Task TheService_TurnsASwitchOnThenOff_JournalingEachChangeWithThePersonSurfaceAndBeforeAfter_AndAnUnchangedCallWritesNothing()
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            var on = await ServerActionSwitches.SetAsync(owner, SqlServerId, "force_plan", true, "person:alice", ServerActionSurfaces.Viewer, ct);
+            Assert.True(on.Succeeded);
+            Assert.Equal("set", on.Status);
+            Assert.Equal("True", await ScalarAsync(owner, "SELECT enabled FROM config.config_server_actions WHERE server_id = 1 AND action = 'force_plan'", ct));
+            Assert.Equal("person:alice", await ScalarAsync(owner, "SELECT set_by FROM config.config_server_actions WHERE server_id = 1 AND action = 'force_plan'", ct));
+
+            var again = await ServerActionSwitches.SetAsync(owner, SqlServerId, "force_plan", true, "person:alice", ServerActionSurfaces.Viewer, ct);
+            Assert.Equal("unchanged", again.Status);
+            Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'server_action_switched'", ct));
+
+            var off = await ServerActionSwitches.SetAsync(owner, SqlServerId, "force_plan", false, "person:bob", ServerActionSurfaces.Web, ct);
+            Assert.Equal("set", off.Status);
+            Assert.Equal("False", await ScalarAsync(owner, "SELECT enabled FROM config.config_server_actions WHERE server_id = 1 AND action = 'force_plan'", ct));
+
+            Assert.Equal("2", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'server_action_switched'", ct));
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'server_action_switched' AND actor NOT LIKE 'person:%'", ct));
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event LIKE 'action_%'", ct));
+            var first = await ScalarAsync(owner, "SELECT detail::text FROM config.investigation_journal WHERE actor = 'person:alice'", ct);
+            var detail = JsonNode.Parse(first!)!;
+            Assert.Equal("force_plan", (string)detail["action"]!);
+            Assert.Equal("viewer", (string)detail["surface"]!);
+            Assert.Equal("off", (string)detail["before"]!);
+            Assert.Equal("on", (string)detail["after"]!);
+            var second = JsonNode.Parse((await ScalarAsync(owner, "SELECT detail::text FROM config.investigation_journal WHERE actor = 'person:bob'", ct))!)!;
+            Assert.Equal("web", (string)second["surface"]!);
+            Assert.Equal("on", (string)second["before"]!);
+            Assert.Equal("off", (string)second["after"]!);
+        });
+    }
+
+    [Fact]
+    public async Task TheService_RefusesAnUnknownAction_AnActionTheEngineCannotRun_AndAnUnknownServer_WritingAndJournalingNothing()
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            var unknown = await ServerActionSwitches.SetAsync(owner, SqlServerId, "drop_database", true, "person:alice", ServerActionSurfaces.Viewer, ct);
+            Assert.Equal("unknown_action", unknown.Code);
+            Assert.Equal("unknown_action", (await ServerActionSwitches.SetAsync(owner, SqlServerId, null, true, "person:alice", ServerActionSurfaces.Viewer, ct)).Code);
+
+            var wrongEngine = await ServerActionSwitches.SetAsync(owner, PostgresId, "force_plan", true, "person:alice", ServerActionSurfaces.Viewer, ct);
+            Assert.Equal("not_for_engine", wrongEngine.Code);
+            Assert.Equal("not_for_engine", (await ServerActionSwitches.SetAsync(owner, PostgresId, "evict_plan", true, "person:alice", ServerActionSurfaces.Viewer, ct)).Code);
+
+            Assert.Equal("unknown_server", (await ServerActionSwitches.SetAsync(owner, 404, "force_plan", true, "person:alice", ServerActionSurfaces.Viewer, ct)).Code);
+
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.config_server_actions", ct));
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal", ct));
+
+            /* A session kill runs on PostgreSQL too. */
+            Assert.Equal("set", (await ServerActionSwitches.SetAsync(owner, PostgresId, "kill_session", true, "person:alice", ServerActionSurfaces.Viewer, ct)).Status);
+
+            var list = await ServerActionSwitches.ListAsync(owner, ct);
+            var pg = list.Single(s => s.ServerId == PostgresId);
+            Assert.False(pg.Actions.Single(a => a.Action == "force_plan").Valid);
+            Assert.True(pg.Actions.Single(a => a.Action == "kill_session").Enabled);
+            Assert.DoesNotContain(list.Single(s => s.ServerId == SqlServerId).Actions, a => a.Enabled);
+        });
+    }
+
+    [Fact]
+    public async Task TheGate_ReadsTheNewState_OnTheNextAction_RefusedOff_PassedOn_RefusedOffAgain()
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            await ExecAsync(owner, "UPDATE config.config_monitored_servers SET remediation_username = 'svc_fix', remediation_encrypted_password = 'env:FIX_PASSWORD' WHERE server_id = 1", ct);
+            var now = new DateTime(2026, 10, 21, 12, 0, 0, DateTimeKind.Utc);
+            var store = new InvestigationRequestStore(owner, 30, () => now);
+            var alert = new InvestigationAlert(1, SqlServerId, "alpha-sql-01", "blocking", "Blocking", now, Array.Empty<string>(), null, 20, 100, LeaseMinutes: 15, ExpiryMinutes: 240) { AutonomyLevel = 3 };
+            var opened = await store.OpenOrJoinAsync(alert, ct);
+            var claim = await store.ClaimAsync(opened.RequestId!.Value, "agent-a", ct);
+            var call = new ServerActionCall("force_query_store_plan", ServerActionNames.ForcePlan,
+                new AgentAction(opened.RequestId!.Value, claim.ClaimId!.Value, "agent-a", "the plan regressed", "[{\"tool\":\"get_query_store_top\",\"arguments\":{},\"key_numbers\":\"12\"}]"),
+                new AgentActionTarget(SqlServerId, "alpha-sql-01", null, null));
+            var hooks = new ServerActionHooks
+            {
+                LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, int?>>((_, _) => 3),
+                ReadCredential = (serverId, token) => store.ReadServerCredentialStateAsync(owner, serverId, token),
+            };
+
+            Assert.Equal(AgentActionCodes.SwitchOff, (await store.CheckServerActionAsync(call, hooks, ct))?.Reason);
+            await ServerActionSwitches.SetAsync(owner, SqlServerId, "force_plan", true, "person:alice", ServerActionSurfaces.Viewer, ct);
+            Assert.Null(await store.CheckServerActionAsync(call, hooks, ct));
+            await ServerActionSwitches.SetAsync(owner, SqlServerId, "force_plan", false, "person:alice", ServerActionSurfaces.Viewer, ct);
+            Assert.Equal(AgentActionCodes.SwitchOff, (await store.CheckServerActionAsync(call, hooks, ct))?.Reason);
+        });
+    }
+
+    [Fact]
+    public async Task TheViewerCommand_SetsTheSwitchAsThePersonInRequestedBy_AndRefusesABadLoginABadBodyAndAnUnknownAction()
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            var executor = new DarlingCommandExecutor(owner, new NoCommandHost(), "test-instance", null);
+
+            var good = await RunCommandAsync(owner, executor, SqlServerId, "{\"action\":\"kill_session\",\"enabled\":true}", "alice", ct);
+            Assert.Equal("succeeded", good.Status);
+            Assert.Equal("set", (string)JsonNode.Parse(good.Result!)!["status"]!);
+            Assert.Equal("True", await ScalarAsync(owner, "SELECT enabled FROM config.config_server_actions WHERE server_id = 1 AND action = 'kill_session'", ct));
+            Assert.Equal("person:alice", await ScalarAsync(owner, "SELECT actor FROM config.investigation_journal WHERE event = 'server_action_switched'", ct));
+            Assert.Equal("viewer", await ScalarAsync(owner, "SELECT detail->>'surface' FROM config.investigation_journal WHERE event = 'server_action_switched'", ct));
+
+            var off = await RunCommandAsync(owner, executor, SqlServerId, "{\"action\":\"kill_session\",\"enabled\":false}", "alice", ct);
+            Assert.Equal("succeeded", off.Status);
+            Assert.Equal("False", await ScalarAsync(owner, "SELECT enabled FROM config.config_server_actions WHERE server_id = 1 AND action = 'kill_session'", ct));
+            Assert.Equal("2", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'server_action_switched'", ct));
+
+            /* Refused: a name the journal's person rule refuses, a non-boolean, no action, no server, an unknown action, a wrong engine. */
+            foreach (var (server, args, by) in new (int?, string, string)[]
+            {
+                (SqlServerId, "{\"action\":\"force_plan\",\"enabled\":true}", "bad name with spaces"),
+                (SqlServerId, "{\"action\":\"force_plan\",\"enabled\":\"yes\"}", "alice"),
+                (SqlServerId, "{\"enabled\":true}", "alice"),
+                (null, "{\"action\":\"force_plan\",\"enabled\":true}", "alice"),
+                (SqlServerId, "{\"action\":\"drop_database\",\"enabled\":true}", "alice"),
+                (PostgresId, "{\"action\":\"force_plan\",\"enabled\":true}", "alice"),
+            })
+            {
+                var refused = await RunCommandAsync(owner, executor, server, args, by, ct);
+                Assert.Equal("failed", refused.Status);
+            }
+
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.config_server_actions WHERE action = 'force_plan'", ct));
+            Assert.Equal("2", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'server_action_switched'", ct));
+        });
+    }
+
+    [Fact]
+    public async Task TheMcpTool_SetsTheSwitch_JournaledByTheMcpCallerNeverAnAgentOrAPerson_AndRefusesWithoutTheOwnerSourceAndForAnUnknownServer()
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            const string actor = "mcp:token 3fa9c1d2, client says: claude-desktop 1.2.3";
+            var set = JsonNode.Parse(await DarlingMcpServerActionTools.RunAsync(owner, owner, null, "alpha-sql", "evict_plan", true, actor, ct))!;
+            Assert.Equal("set", (string)set["status"]!);
+            Assert.Equal("off", (string)set["before"]!);
+            Assert.Equal("on", (string)set["after"]!);
+            Assert.False((bool)set["undo"]!["arguments"]!["enabled"]!);
+            Assert.Equal(actor, await ScalarAsync(owner, "SELECT actor FROM config.investigation_journal WHERE event = 'server_action_switched'", ct));
+            Assert.Equal("mcp", await ScalarAsync(owner, "SELECT detail->>'surface' FROM config.investigation_journal WHERE event = 'server_action_switched'", ct));
+
+            var back = JsonNode.Parse(await DarlingMcpServerActionTools.RunAsync(owner, owner, null, "alpha-sql-01", "evict_plan", false, actor, ct))!;
+            Assert.Equal("False", await ScalarAsync(owner, "SELECT enabled FROM config.config_server_actions WHERE server_id = 1 AND action = 'evict_plan'", ct));
+            Assert.Equal("set", (string)back["status"]!);
+
+            Assert.Equal("no_owner_source", (string)JsonNode.Parse(await DarlingMcpServerActionTools.RunAsync(owner, null, null, "alpha-sql-01", "evict_plan", true, actor, ct))!["code"]!);
+            Assert.Equal("unknown_action", (string)JsonNode.Parse(await DarlingMcpServerActionTools.RunAsync(owner, owner, null, "alpha-sql-01", "nope", true, actor, ct))!["code"]!);
+            Assert.Equal("not_for_engine", (string)JsonNode.Parse(await DarlingMcpServerActionTools.RunAsync(owner, owner, null, "alpha-pg-01", "force_plan", true, actor, ct))!["code"]!);
+            var unknownServer = JsonNode.Parse(await DarlingMcpServerActionTools.RunAsync(owner, owner, null, "no-such-server", "evict_plan", true, actor, ct))!;
+            Assert.NotEqual("set", (string?)unknownServer["status"]);
+            Assert.Equal("2", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'server_action_switched'", ct));
+        });
+    }
+
+    [Fact]
+    public void TheMcpTool_IsServedOnlyUnderAllowServerAdmin_AndNeverToAnInvestigationAgentEvenWhenItsToolSetNamesIt()
+    {
+        const string tool = "set_server_action";
+        var (tools, _, _) = McpToolsListBudgetTests.BuildServedTools();
+        Assert.Contains(tools, t => t.ProtocolTool.Name == tool);
+        Assert.Contains(tools, t => t.ProtocolTool.Name == "get_server_actions");
+
+        bool Served(McpConfig config, string token = "write-gate-token-value")
+        {
+            var effective = DarlingMcpWritePolicy.ResolveForStart(config, token, out _);
+            var collection = new McpServerPrimitiveCollection<McpServerTool>();
+            foreach (var t in tools)
+                collection.Add(t);
+            return DarlingMcpWritePolicy.FilterToolCollection(collection, effective).Any(t => t.ProtocolTool.Name == tool);
+        }
+
+        Assert.False(Served(new McpConfig()));
+        Assert.False(Served(new McpConfig { AllowWrites = true }));
+        Assert.False(Served(new McpConfig { AllowServerAdmin = true }));
+        Assert.False(Served(new McpConfig { AllowWrites = true, AllowServerAdmin = true }, token: string.Empty));
+        Assert.True(Served(new McpConfig { AllowWrites = true, AllowServerAdmin = true }));
+
+        /* An investigation-token caller (writes off, investigations on) cannot reach it, even if the agent tool set named it. */
+        var investigator = DarlingMcpWritePolicy.Resolve(new McpConfig { AllowInvestigations = true }, tokenPresent: true);
+        Assert.True(investigator.Investigations);
+        Assert.False(investigator.Offers(tool));
+        Assert.False(investigator.Offers(tool, new HashSet<string>(StringComparer.Ordinal) { tool }));
+    }
+
+    [Fact]
+    public async Task TheWebRoutes_AsAdmin_ListAndSetSwitches_JournaledWithThePerson_AndRefuseBadInput()
+    {
+        await WithWebAsync("admin", async (owner, login, Send, ct) =>
+        {
+            var list = await Send("GET", "/api/server-actions", null);
+            Assert.Equal(200, list.Status);
+            Assert.True((bool)list.Body!["can_decide"]!);
+            Assert.Equal(2, list.Body["servers"]!.AsArray().Count);
+
+            var on = await Send("PUT", "/api/servers/1/actions/force_plan", "application/json", "{\"enabled\":true}");
+            Assert.Equal(200, on.Status);
+            Assert.Equal("set", (string)on.Body!["status"]!);
+            Assert.Equal("True", await ScalarAsync(owner, "SELECT enabled FROM config.config_server_actions WHERE server_id = 1 AND action = 'force_plan'", ct));
+            Assert.Equal("web", await ScalarAsync(owner, "SELECT detail->>'surface' FROM config.investigation_journal WHERE event = 'server_action_switched'", ct));
+            Assert.StartsWith("person:", await ScalarAsync(owner, "SELECT actor FROM config.investigation_journal WHERE event = 'server_action_switched'", ct), StringComparison.Ordinal);
+
+            var read = await Send("GET", "/api/server-actions", null);
+            var row = read.Body!["servers"]!.AsArray().Single(s => (int)s!["server_id"]! == 1)!["actions"]!.AsArray().Single(a => (string?)a!["action"] == "force_plan")!;
+            Assert.True((bool)row["enabled"]!);
+
+            Assert.Equal(200, (await Send("PUT", "/api/servers/1/actions/force_plan", "application/json", "{\"enabled\":false}")).Status);
+            Assert.Equal("False", await ScalarAsync(owner, "SELECT enabled FROM config.config_server_actions WHERE server_id = 1 AND action = 'force_plan'", ct));
+            Assert.Equal("2", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'server_action_switched'", ct));
+
+            Assert.Equal(400, (await Send("PUT", "/api/servers/1/actions/drop_database", "application/json", "{\"enabled\":true}")).Status);
+            Assert.Equal(400, (await Send("PUT", "/api/servers/1/actions/force_plan", "application/json", "{\"enabled\":\"yes\"}")).Status);
+            Assert.Equal(400, (await Send("PUT", "/api/servers/1/actions/force_plan", "application/json", "[1]")).Status);
+            Assert.Equal(409, (await Send("PUT", "/api/servers/2/actions/force_plan", "application/json", "{\"enabled\":true}")).Status);
+            Assert.Equal(404, (await Send("PUT", "/api/servers/99/actions/force_plan", "application/json", "{\"enabled\":true}")).Status);
+            Assert.Equal(415, (await Send("PUT", "/api/servers/1/actions/force_plan", "text/plain", "{\"enabled\":true}")).Status);
+            Assert.Equal("2", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'server_action_switched'", ct));
+
+            /* The admin login itself still cannot write the table: the route had to use the service's owner connection. */
+            var direct = await Assert.ThrowsAsync<PostgresException>(async () =>
+                await ExecAsync(login, "INSERT INTO config.config_server_actions (server_id, action, enabled, set_by) VALUES (1, 'kill_session', true, 'x')", ct));
+            Assert.Equal("42501", direct.SqlState);
+        });
+    }
+
+    [Fact]
+    public async Task TheWebRoutes_AsViewer_ListButRefuseEveryChangeWith403_ChangingNothing()
+    {
+        await WithWebAsync("viewer", async (owner, _, Send, ct) =>
+        {
+            var list = await Send("GET", "/api/server-actions", null);
+            Assert.Equal(200, list.Status);
+            Assert.False((bool)list.Body!["can_decide"]!);
+
+            var refused = await Send("PUT", "/api/servers/1/actions/force_plan", "application/json", "{\"enabled\":true}");
+            Assert.Equal(403, refused.Status);
+            Assert.Equal(DarlingWebEndpoints.ServerActionRefusedMessage, (string)refused.Body!["error"]!);
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.config_server_actions", ct));
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal", ct));
+        });
+    }
+
+    [Fact]
+    public async Task TheGrantsAreUnchanged_NoManagedRoleCanWriteTheSwitchTable_ButEachCanReadIt()
+    {
+        foreach (var role in new[] { "admin", "viewer", "mcp" })
+        {
+            await WithWebAsync(role, async (owner, login, _, ct) =>
+            {
+                Assert.Equal("0", await ScalarAsync(login, "SELECT count(*) FROM config.config_server_actions", ct));
+                foreach (var sql in new[]
+                {
+                    "INSERT INTO config.config_server_actions (server_id, action, enabled, set_by) VALUES (1, 'kill_session', true, 'x')",
+                    "UPDATE config.config_server_actions SET enabled = true",
+                    "DELETE FROM config.config_server_actions",
+                })
+                {
+                    var ex = await Assert.ThrowsAsync<PostgresException>(async () => await ExecAsync(login, sql, ct));
+                    Assert.Equal("42501", ex.SqlState);
+                }
+            });
+        }
+    }
+
+    // ---- harness ------------------------------------------------------------------------------------------------
+
+    private delegate Task<(int Status, JsonNode? Body)> Sender(string method, string path, string? contentType, string? payload = null);
+
+    private static async Task SeedAsync(NpgsqlDataSource owner, CancellationToken ct)
+    {
+        await ExecAsync(owner, "INSERT INTO config.config_service (id) VALUES (1) ON CONFLICT DO NOTHING", ct);
+        await ExecAsync(owner, "INSERT INTO config.config_monitored_servers (server_id, name, host) VALUES (1, 'alpha-sql-01', 'alpha-sql-01.example.test')", ct);
+        await ExecAsync(owner, "INSERT INTO config.config_monitored_servers (server_id, name, host, engine) VALUES (2, 'alpha-pg-01', 'alpha-pg-01.example.test', 'postgresql')", ct);
+        await ExecAsync(owner, "INSERT INTO collect.servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date) "
+            + "VALUES (1, 'alpha-sql-01', 'alpha-sql-01', TRUE, 15, now(), now()), (2, 'alpha-pg-01', 'alpha-pg-01', TRUE, 15, now(), now())", ct);
+    }
+
+    private static async Task WithStoreAsync(Func<NpgsqlDataSource, CancellationToken, Task> body)
+    {
+        var baseConnectionString = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the server action switch live tests.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+        }
+
+        await using var owner = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var bodySucceeded = false;
+        try
+        {
+            await SeedAsync(owner, ct);
+            await body(owner, ct);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
+        }
+    }
+
+    private static async Task WithWebAsync(string managedRole, Func<NpgsqlDataSource, NpgsqlDataSource, Sender, CancellationToken, Task> body)
+    {
+        var baseConnectionString = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the server action switch live tests.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var roleName = "switch_seat_" + Guid.NewGuid().ToString("N")[..8];
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+        }
+
+        await using var owner = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var bodySucceeded = false;
+        try
+        {
+            await SeedAsync(owner, ct);
+            await ExecAsync(owner, $"CREATE ROLE {roleName} LOGIN NOSUPERUSER PASSWORD '{RolePassword}'", ct);
+            foreach (var statement in ViewerGrantReplay.StatementsFor(roleName, scratch.DatabaseName, managedRole))
+            {
+                await ExecAsync(owner, statement, ct);
+            }
+
+            var asSeat = new NpgsqlConnectionStringBuilder(scratch.ConnectionString)
+            {
+                Username = roleName,
+                Password = RolePassword,
+                SearchPath = "config,public",
+                Pooling = false,
+            }.ConnectionString;
+            await using var webLogin = NpgsqlDataSource.Create(asSeat);
+
+            var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+            {
+                ContentRootPath = Path.Combine(RepoFile.Root, "Darling", "PerformanceMonitor.Darling.Service"),
+                WebRootPath = "wwwroot",
+            });
+            builder.WebHost.UseTestServer();
+            builder.Logging.ClearProviders();
+            builder.Services.AddSingleton(webLogin);
+            await using var app = builder.Build();
+            var ownerSeam = new StoreOwnerSource();
+            ownerSeam.Publish(owner);
+            DarlingWebEndpoints.MapAll(app, webLogin, new CollectorRuntimeState(), new CapturingTestLogger(), ownerSource: ownerSeam);
+            await app.StartAsync(ct);
+            using var server = app.GetTestServer();
+
+            async Task<(int Status, JsonNode? Body)> Send(string method, string path, string? contentType, string? payload = null)
+            {
+                var context = await server.SendAsync(request =>
+                {
+                    request.Request.Method = method;
+                    request.Request.Path = path;
+                    request.Request.Headers.Host = "localhost";
+                    if (contentType is not null)
+                    {
+                        request.Request.ContentType = contentType;
+                    }
+
+                    request.Request.Body = new MemoryStream(Encoding.UTF8.GetBytes(payload ?? (method == "PUT" ? "{}" : "")));
+                });
+                using var reader = new StreamReader(context.Response.Body);
+                var text = await reader.ReadToEndAsync(ct);
+                return (context.Response.StatusCode, string.IsNullOrWhiteSpace(text) ? null : JsonNode.Parse(text));
+            }
+
+            await body(owner, webLogin, new Sender(Send), ct);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (connection, token) =>
+            {
+                NpgsqlConnection.ClearAllPools();
+                await using var drop = new NpgsqlCommand($"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName}", connection);
+                await drop.ExecuteNonQueryAsync(token);
+            });
+        }
+    }
+
+    private static async Task<(string Status, string? Result)> RunCommandAsync(
+        NpgsqlDataSource owner, DarlingCommandExecutor executor, int? server, string args, string requestedBy, CancellationToken ct)
+    {
+        long id;
+        await using (var insert = new NpgsqlCommand(
+            "INSERT INTO config.config_command (requested_by, command_type, target_server_id, args_json, status) VALUES ($1, 'set_server_action', $2, $3::jsonb, 'pending') RETURNING command_id"))
+        {
+            insert.Parameters.Add(new NpgsqlParameter<string> { TypedValue = requestedBy, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
+            insert.Parameters.Add(new NpgsqlParameter<int?> { TypedValue = server, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer });
+            insert.Parameters.Add(new NpgsqlParameter<string> { TypedValue = args, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
+            await using var connection = await owner.OpenConnectionAsync(ct);
+            insert.Connection = connection;
+            id = Convert.ToInt64(await insert.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
+        }
+
+        Assert.True(await executor.PollOnceAsync(ct));
+        return (
+            (await ScalarAsync(owner, $"SELECT status FROM config.config_command WHERE command_id = {id}", ct))!,
+            await ScalarAsync(owner, $"SELECT result_json::text FROM config.config_command WHERE command_id = {id}", ct));
+    }
+
+    private sealed class NoCommandHost : IDarlingCommandHost
+    {
+        private static Task<CommandOutcome> No() => throw new InvalidOperationException("the switch command does not use the host");
+
+        public Task<CommandOutcome> SnapshotNowAsync(int serverId, IReadOnlyList<string>? collectors, CancellationToken cancellationToken) => No();
+
+        public Task<CommandOutcome> AnalyzeNowAsync(int serverId, CancellationToken cancellationToken) => No();
+
+        public Task<CommandOutcome> PurgeNowAsync(int? customRetentionDays, CancellationToken cancellationToken) => No();
+
+        public Task<CommandOutcome> FetchPlanAsync(int serverId, PlanFetchRequest request, CancellationToken cancellationToken) => No();
+
+        public Task<CommandOutcome> ExecuteActualPlanAsync(int serverId, ActualPlanRequest request, CancellationToken cancellationToken) => No();
+
+        public Task<CommandOutcome> TestHypotheticalIndexAsync(int serverId, HypotheticalIndexRequest request, CancellationToken cancellationToken) => No();
+
+        public Task<CommandOutcome> FetchActiveQueriesLiveAsync(int serverId, CancellationToken cancellationToken) => No();
+    }
+
+    private static async Task ExecAsync(NpgsqlDataSource source, string sql, CancellationToken ct)
+    {
+        await using var command = source.CreateCommand(sql);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task<string?> ScalarAsync(NpgsqlDataSource source, string sql, CancellationToken ct)
+    {
+        await using var command = source.CreateCommand(sql);
+        return Convert.ToString(await command.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
+    }
+}

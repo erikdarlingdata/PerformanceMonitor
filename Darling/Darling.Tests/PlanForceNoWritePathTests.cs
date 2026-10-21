@@ -181,6 +181,8 @@ public sealed class PlanForceNoWritePathTests
             nameof(DarlingMcpPlanForceTools) + "." + nameof(DarlingMcpPlanForceTools.UnforceQueryStorePlan),
             /* #6230: the undo is the way back from a force, run by the same code the web route runs; its gate is the force tools (that server force_plan switch and remediation login). */
             nameof(DarlingMcpPlanUndoTools) + "." + nameof(DarlingMcpPlanUndoTools.UndoPlanChange),
+        /* #6269: the server action switch tool writes config.config_server_actions, which only the store owner can write. */
+        nameof(DarlingMcpServerActionTools) + "." + nameof(DarlingMcpServerActionTools.SetServerAction),
         }, takers);
     }
 

@@ -402,6 +402,22 @@ WHERE status = 'in_progress'
                 return new CommandOutcome(answer.Succeeded, answer.Code ?? answer.Status, answer.ToJson().ToJsonString());
             }
 
+            case CommandKind.SetServerAction:
+            {
+                /* #6269: a person's change to one server action switch, from the Viewer. The service's own store source is the owner source
+                   here (the only role that can write the table); the change is journaled as person:<requested_by>, surface viewer. */
+                if (!SetServerActionArgs.TryParse(command.ArgsJson, out var switchArgs) || command.TargetServerId is not int switchServer)
+                {
+                    return new CommandOutcome(false, "invalid args_json", ErrorJson("set_server_action needs target_server_id and args_json {action, enabled}"));
+                }
+
+                var result = await ServerActionSwitches.SetAsync(_postgres, switchServer, switchArgs.Action, switchArgs.Enabled,
+                    AgentChangeUndo.PersonActor(command.RequestedBy ?? string.Empty), ServerActionSurfaces.Viewer, cancellationToken);
+                _logger?.LogInformation("Command {Id} (set_server_action {Action} on server {ServerId}) => {Status} {Code}",
+                    command.CommandId, switchArgs.Action, switchServer, result.Status, result.Code);
+                return new CommandOutcome(result.Succeeded, result.Code ?? result.Status, result.ToJson().ToJsonString());
+            }
+
             default:
                 return new CommandOutcome(false, "unknown command_type", ErrorJson("unknown command_type"));
         }
@@ -542,6 +558,23 @@ WHERE status = 'in_progress'
                 return UndoPlanChangeArgs.LoginIsValid(command.RequestedBy)
                     ? new CommandPlan(CommandKind.UndoPlanChange, null, null, "plan change undone", null)
                     : Fail("undo_plan_change requires requested_by to be the person's login (1 to 64 letters, digits or . _ : - @ \\)");
+
+            case "set_server_action":
+                /* #6269: a person's switch change, run in the service as the store owner. args_json {action, enabled}; the action name and the
+                   server's engine are checked when it runs, and requested_by is the person (a name PersonActor refuses is refused here). */
+                if (command.TargetServerId is not int)
+                {
+                    return Fail("set_server_action requires target_server_id");
+                }
+
+                if (!SetServerActionArgs.TryParse(command.ArgsJson, out _))
+                {
+                    return Fail("set_server_action requires args_json with an action and a true or false enabled");
+                }
+
+                return UndoPlanChangeArgs.LoginIsValid(command.RequestedBy)
+                    ? new CommandPlan(CommandKind.SetServerAction, null, null, "server action switch set", null)
+                    : Fail("set_server_action requires requested_by to be the person's login (1 to 64 letters, digits or . _ : - @ \\)");
 
             case "fetch_active_queries":
                 /* Worker-delegated like fetch_plan (needs the target's LIVE runtime connection to read what is
@@ -1036,6 +1069,10 @@ public enum CommandKind
     /// statement without a confirm, and writes only with one. The Viewer cannot write to a monitored server, so it asks the service.</summary>
     UndoPlanChange,
 
+    /// <summary><c>set_server_action</c> (#6269): a person turns one server's action switch on or off. Run in the service as the store owner,
+    /// because no other role can write <c>config.config_server_actions</c>; the person is <c>requested_by</c>.</summary>
+    SetServerAction,
+
     /// <summary><c>fetch_active_queries</c>: read the LIVE running-request DMV snapshot from a server on demand (via
     /// the host, running the shared Active Queries collector's query) and return the rows in result_json. Read-only.</summary>
     FetchActiveQueries,
@@ -1047,6 +1084,39 @@ public enum CommandKind
 
     /// <summary>Bad arguments or an unknown command_type — report failed without touching the store.</summary>
     Fail,
+}
+
+/// <summary>The arguments of <c>set_server_action</c> (#6269): <c>{action, enabled}</c>. Both are required and <c>enabled</c> must be a JSON boolean.
+/// The action name is checked against the fixed list, and the server's engine, when the command runs.</summary>
+internal sealed record SetServerActionArgs(string Action, bool Enabled)
+{
+    internal static bool TryParse(string? json, out SetServerActionArgs args)
+    {
+        args = new SetServerActionArgs(string.Empty, false);
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("action", out var action) || action.ValueKind != JsonValueKind.String
+                || !root.TryGetProperty("enabled", out var enabled) || enabled.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+            {
+                return false;
+            }
+
+            args = new SetServerActionArgs(action.GetString() ?? string.Empty, enabled.ValueKind == JsonValueKind.True);
+            return true;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
 }
 
 /// <summary>The arguments of <c>undo_plan_change</c> (#5632, step 9): <c>{called_id, confirm, statement}</c>. <c>statement</c> is the text the person was

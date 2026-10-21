@@ -228,6 +228,8 @@ public sealed class ReadAdmissionCoverageCensusTests
         [WebFile + "GET \"/api/agent-changes/{id:long}/muted-alerts\""] = "definition read: the alerts muted since one agent mute (one capped alert-log read; #5917)",
         [WebFile + "PUT \"/api/agent-changes/{id:long}/undo\""] = "write",
         [WebFile + "PUT \"/api/agent-changes/switch\""] = "write",
+        [WebFile + "GET \"/api/server-actions\""] = "definition read: every server with its three action switches (one registry join, small; #6269)",
+        [WebFile + "PUT \"/api/servers/{id:int}/actions/{action}\""] = "write",
         [WebFile + "PUT \"/api/investigation-notes/{id:long}/approve\""] = "write",
         [WebFile + "PUT \"/api/investigation-notes/{id:long}/reject\""] = "write",
         [WebFile + "GET \"/api/threshold-overrides\""] = "definition read: the threshold overrides, one small config table, plus the registry's names (#5916)",

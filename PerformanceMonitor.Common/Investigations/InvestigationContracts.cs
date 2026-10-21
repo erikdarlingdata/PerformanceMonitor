@@ -322,6 +322,15 @@ public static class ServerActionNames
 
     /// <summary>Every server action, the table's CHECK list.</summary>
     public static readonly IReadOnlyList<string> All = new[] { ForcePlan, EvictPlan, KillSession };
+
+    /// <summary>
+    /// Whether <paramref name="action"/> can ever run on a server of that engine (#6269): a Query Store plan force and a plan-cache
+    /// eviction are SQL Server only, and a session kill runs on SQL Server and on PostgreSQL. A switch for an action the engine
+    /// cannot run is refused, so no row says "on" for something the server can never do. False for a name not in <see cref="All"/>.
+    /// </summary>
+    public static bool IsValidForEngine(string? action, bool postgres) =>
+        string.Equals(action, KillSession, StringComparison.Ordinal)
+        || (!postgres && (string.Equals(action, ForcePlan, StringComparison.Ordinal) || string.Equals(action, EvictPlan, StringComparison.Ordinal)));
 }
 
 /// <summary>What a server's remediation slots hold, as the server-action gate classifies them (#5632, step 5). The gate never

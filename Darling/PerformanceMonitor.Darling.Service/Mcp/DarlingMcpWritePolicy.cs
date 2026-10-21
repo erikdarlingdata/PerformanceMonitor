@@ -26,7 +26,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <item><see cref="McpConfig.AllowWrites"/> (<c>mcp.allowWrites</c>) offers the tools that change alerting,
 /// mutes, custom alert rules and Custom Views, and the analysis mute.</item>
 /// <item><see cref="McpConfig.AllowServerAdmin"/> (<c>mcp.allowServerAdmin</c>) additionally offers
-/// <c>add_servers</c>, <c>edit_server</c> and <c>remove_server</c>. It does nothing unless <c>mcp.allowWrites</c> is also on.</item>
+/// <c>add_servers</c>, <c>edit_server</c>, <c>remove_server</c> and <c>set_server_action</c>. It does nothing unless <c>mcp.allowWrites</c> is also on.</item>
 /// </list>
 /// A write that is not allowed is ABSENT from the served tool collection, not merely hidden from
 /// <c>tools/list</c>: the SDK's <c>tools/call</c> dispatch consults the same collection, so the call fails as an
@@ -56,6 +56,7 @@ internal static class DarlingMcpWritePolicy
         "add_servers",
         "remove_server",
         "edit_server",
+        "set_server_action",
     };
 
     /// <summary>
@@ -71,6 +72,7 @@ internal static class DarlingMcpWritePolicy
         "add_servers",
         "remove_server",
         "edit_server",
+        "set_server_action",
         "mute_analysis_finding",
         "create_mute_rule",
         "update_mute_rule",
@@ -206,6 +208,7 @@ internal static class DarlingMcpWritePolicy
         "add_servers",
         "remove_server",
         "edit_server",
+        "set_server_action",
     };
 
     internal static bool IsWrite(string toolName) => WriteTools.Contains(toolName);
