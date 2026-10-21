@@ -243,7 +243,7 @@ ON CONFLICT (server_id, action) DO UPDATE SET enabled = EXCLUDED.enabled, set_by
         ArgumentNullException.ThrowIfNull(source);
         var servers = new List<(int Id, string Name, string Engine, Dictionary<string, (bool Enabled, string? SetBy, DateTime? At)> Rows)>();
         await using var connection = await source.OpenConnectionAsync(cancellationToken);
-        await using var command = new NpgsqlCommand(ListSql, connection);
+        await using var command = new NpgsqlCommand(ListSql, connection) { CommandTimeout = StorageCommandDeadlines.McpReadSeconds };
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
