@@ -170,6 +170,16 @@ SELECT /* PerformanceMonitorLite */
                "Manage Servers, or the 'database' field for it in darling.json.";
     }
 
+    /// <summary>
+    /// #6254: the connection string for the server's Query Store replica, null when none is set. The same secret resolution as
+    /// <see cref="ResolveConnectionString"/>; the builder is <see cref="MonitoredServerConnection.BuildQueryStoreReplicaConnectionString"/>.
+    /// </summary>
+    public static string? ResolveQueryStoreReplicaConnectionString(MonitoredServer config, ILogger? logger = null)
+    {
+        string? password = config.RequiresResolvedSecret ? DarlingSecrets.ResolvePassword(config, out _) : null;
+        return MonitoredServerConnection.BuildQueryStoreReplicaConnectionString(config, password);
+    }
+
     public static string ResolveConnectionString(MonitoredServer config, ILogger? logger = null)
     {
         string? password = null;
