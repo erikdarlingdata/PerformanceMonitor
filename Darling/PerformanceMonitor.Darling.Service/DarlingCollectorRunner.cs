@@ -765,6 +765,7 @@ public sealed class DarlingCollectorRunner
                     "SELECT database_name, max(collection_time) FROM collect.query_store_stats WHERE server_id = $1 "
                     + "AND collection_time > (now() AT TIME ZONE 'UTC') - interval '24 hours' "
                     + "AND replica_role IS NOT NULL AND lower(replica_role) <> 'primary' GROUP BY database_name", seedConnection);
+                seedCommand.CommandTimeout = CommandTimeoutSeconds;
                 seedCommand.Parameters.AddWithValue(server.ServerId);
                 var seeds = new List<(string, DateTime)>();
                 await using (var seedReader = await seedCommand.ExecuteReaderAsync(cancellationToken))
