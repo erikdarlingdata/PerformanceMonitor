@@ -121,6 +121,8 @@ public sealed class DiagnosticsBundleAliasHardeningTests
         var root = new JsonObject { ["sections"] = new JsonObject { ["x"] = new JsonObject { ["msg"] = "main rows remaining" } } };
         var (leaks, text) = a.Finish(root, DiagnosticsBundle.WriteOptions);
         Assert.Empty(leaks);
+
+        /* #6256: the standalone name is still verified and replaced; the same letters inside "remaining" are not a name. */
         Assert.DoesNotContain("main rows", text!, StringComparison.Ordinal);
         Assert.Contains("remaining", text!, StringComparison.Ordinal);
     }
@@ -165,51 +167,121 @@ public sealed class DiagnosticsBundleAliasHardeningTests
         Assert.NotNull(bothText);
     }
 
-    /* ── #6256: a known name is replaced only between non-word characters ── */
+    /* ── #6256: a leftover name is replaced when it is a whole sub-token of its identifier, not inside a plain letter run ── */
 
     private static JsonObject OneValue(string text) =>
         new() { ["sections"] = new JsonObject { ["x"] = new JsonObject { ["msg"] = text } } };
 
-    [Fact]
-    public void ALoginNameInsideALongerWord_IsLeftAlone_AndTheStandaloneLoginIsAliased()
+    private static string Message(string serialized) =>
+        JsonNode.Parse(serialized)!["sections"]!["x"]!["msg"]!.GetValue<string>();
+
+    [Theory]
+    [InlineData("sales", "wholesales report")]
+    [InlineData("data", "the database is up")]
+    [InlineData("admin", "an administrator signed in")]
+    public void ANameInsideAnOrdinaryWord_IsNeitherReplacedNorCountedAsALeftover(string name, string input)
     {
         var a = new BundleAliaser();
-        a.AddName(AliasKind.Login, "apps");
-        a.AddName(AliasKind.Login, "app");
+        a.AddName(AliasKind.Login, name);
 
-        /* The scan: the 3-character login is aliased, the words that contain it are not touched. */
-        var scanned = a.Alias("login app ran application and appsettings");
-        Assert.DoesNotContain("login app ", scanned, StringComparison.Ordinal);
-        Assert.Contains("application", scanned, StringComparison.Ordinal);
-        Assert.Contains("appsettings", scanned, StringComparison.Ordinal);
-
-        /* The verify pass: a 4-character login the scan never saw is replaced alone, appsettings stays whole. */
-        var (leaks, text) = a.Finish(OneValue("apps connected; appsettings loaded"), DiagnosticsBundle.WriteOptions);
+        var (leaks, text) = a.Finish(OneValue(input), DiagnosticsBundle.WriteOptions);
         Assert.Empty(leaks);
-        Assert.Contains("appsettings loaded", text!, StringComparison.Ordinal);
-        Assert.DoesNotContain("apps connected", text!, StringComparison.Ordinal);
-        Assert.Contains("login-", text!, StringComparison.Ordinal);
+        Assert.Equal(input, Message(text!));
     }
 
     [Theory]
-    [InlineData("user 'NAME' failed")]
-    [InlineData("user NAME. Then")]
-    [InlineData("user [NAME] failed")]
-    [InlineData("user NAME\\ failed")]
-    [InlineData("DOMAIN\\NAME failed")]
-    [InlineData("user=NAME;pwd")]
-    public void ALoginNextToPunctuation_IsStillAliased(string template)
+    [InlineData("sqlprod", "restore SQLPROD_Full.bak now")]
+    [InlineData("sqlprod", "job DBA_SQLPROD_Backup ran")]
+    [InlineData("prod", "see prod01 and prod-02")]
+    [InlineData("sqlprod", "see SQLPRODBackup today")]
+    [InlineData("sales", "open SalesReport now")]
+    [InlineData("sales", "open the sales_report.csv")]
+    [InlineData("prod", "path C:\\backups\\prod\\full.bak")]
+    public void AnIdentifierShapedLeftover_IsStillReplaced(string name, string input)
+    {
+        var a = new BundleAliaser();
+        a.AddName(AliasKind.Server, name);
+
+        var (leaks, text) = a.Finish(OneValue(input), DiagnosticsBundle.WriteOptions);
+        Assert.Empty(leaks);
+        Assert.DoesNotContain(name, Message(text!), StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("server-", Message(text!), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ASubTokenMatch_ReplacesOnlyTheOccurrencesThatQualify()
+    {
+        var a = new BundleAliaser();
+        a.AddName(AliasKind.Server, "sales");
+
+        var (leaks, text) = a.Finish(OneValue("wholesales and SalesReport and sales and unsalesly"), DiagnosticsBundle.WriteOptions);
+        Assert.Empty(leaks);
+        var message = Message(text!);
+        Assert.StartsWith("wholesales and ", message, StringComparison.Ordinal);
+        Assert.EndsWith(" and unsalesly", message, StringComparison.Ordinal);
+        Assert.Matches(@"^wholesales and server-\d+Report and server-\d+ and unsalesly$", message);
+    }
+
+    [Fact]
+    public void TheLongestLeftoverName_IsReplacedFirst_AndAliasTextIsNeverRewritten()
+    {
+        var a = new BundleAliaser();
+        a.AddName(AliasKind.Server, "prod");
+        a.AddName(AliasKind.Server, "prod_two");
+        var alias = a.Alias("prod_two");
+
+        var (leaks, text) = a.Finish(OneValue("prod_two and prod and " + alias), DiagnosticsBundle.WriteOptions);
+        Assert.Empty(leaks);
+        var message = Message(text!);
+        Assert.DoesNotContain("prod", message, StringComparison.OrdinalIgnoreCase);
+        Assert.Matches(@"^server-\d+ and server-\d+ and server-\d+$", message);
+        Assert.EndsWith(" and " + alias, message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AStandaloneLeftoverName_IsStillCaught_InAValueAndInAKey()
+    {
+        var a = new BundleAliaser();
+        a.AddName(AliasKind.Login, "apps");
+
+        var (valueLeaks, valueText) = a.Finish(OneValue("apps is down, appsettings is up"), DiagnosticsBundle.WriteOptions);
+        Assert.Empty(valueLeaks);
+        Assert.DoesNotContain("apps is down", valueText!, StringComparison.Ordinal);
+        Assert.Contains("appsettings is up", valueText!, StringComparison.Ordinal);
+
+        /* A data-shaped key is never rewritten, so a name in one is reported and no text comes back. */
+        var keyed = new JsonObject { ["sections"] = new JsonObject { ["x"] = new JsonObject { ["apps node"] = 1 } } };
+        var (keyLeaks, keyText) = a.Finish(keyed, DiagnosticsBundle.WriteOptions);
+        Assert.NotEmpty(keyLeaks);
+        Assert.Null(keyText);
+
+        /* The serialized bytes hold the apostrophe as an escape; the name after it is still standalone. */
+        var escaped = new JsonObject { ["sections"] = new JsonObject { ["x"] = new JsonObject { ["'apps' node"] = 1 } } };
+        var (escapedLeaks, escapedText) = a.Finish(escaped, DiagnosticsBundle.WriteOptions);
+        Assert.NotEmpty(escapedLeaks);
+        Assert.Null(escapedText);
+
+        /* A name inside a plain word in a key is no leftover. */
+        var word = new JsonObject { ["sections"] = new JsonObject { ["x"] = new JsonObject { ["appsettings node"] = 1 } } };
+        var (wordLeaks, wordText) = a.Finish(word, DiagnosticsBundle.WriteOptions);
+        Assert.Empty(wordLeaks);
+        Assert.NotNull(wordText);
+    }
+
+    [Fact]
+    public void AShortLoginNameInsideALongerWord_IsLeftAlone_AndPunctuationNeighboursAreAliased()
     {
         var a = new BundleAliaser();
         a.AddName(AliasKind.Login, "app");
-        a.AddName(AliasKind.Login, "apps");
 
-        var scanned = a.Alias(template.Replace("NAME", "app", StringComparison.Ordinal));
-        Assert.DoesNotContain("app", scanned, StringComparison.OrdinalIgnoreCase);
+        var scanned = a.Alias("login app ran application and appsettings and app_pool");
+        Assert.DoesNotContain("login app ", scanned, StringComparison.Ordinal);
+        Assert.Contains("application and appsettings and app_pool", scanned, StringComparison.Ordinal);
 
-        var (leaks, text) = a.Finish(OneValue(template.Replace("NAME", "apps", StringComparison.Ordinal)), DiagnosticsBundle.WriteOptions);
-        Assert.Empty(leaks);
-        Assert.DoesNotContain("apps", text!, StringComparison.OrdinalIgnoreCase);
+        foreach (var input in new[] { "user 'app' failed", "user app. Then", "user [app] failed", "user app\\ failed", "DOMAIN\\app failed", "user=app;pwd" })
+        {
+            Assert.DoesNotContain("app", a.Alias(input), StringComparison.OrdinalIgnoreCase);
+        }
     }
 
     [Fact]
@@ -225,48 +297,5 @@ public sealed class DiagnosticsBundleAliasHardeningTests
         var (leaks, text) = a.Finish(OneValue("connect to db01.example.internal failed"), DiagnosticsBundle.WriteOptions);
         Assert.Empty(leaks);
         Assert.DoesNotContain("db01", text!, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("example", text!, StringComparison.OrdinalIgnoreCase);
-    }
-
-    [Fact]
-    public void ANameInsideAnUnderscoreIdentifier_IsNotAliased_AndTheVerifyPassDoesNotFlagIt()
-    {
-        var a = new BundleAliaser();
-        a.AddName(AliasKind.Login, "apps");
-
-        var (leaks, text) = a.Finish(OneValue("pool apps_pool and apps_pool_2 and my_apps"), DiagnosticsBundle.WriteOptions);
-        Assert.Empty(leaks);
-        Assert.Contains("pool apps_pool and apps_pool_2 and my_apps", text!, StringComparison.Ordinal);
-
-        /* A data-shaped key is checked as written bytes: a name glued to a longer word in a key is no leftover either. */
-        var keyed = new JsonObject { ["sections"] = new JsonObject { ["x"] = new JsonObject { ["appsettings node"] = 1 } } };
-        var (keyLeaks, keyText) = a.Finish(keyed, DiagnosticsBundle.WriteOptions);
-        Assert.Empty(keyLeaks);
-        Assert.NotNull(keyText);
-    }
-
-    [Fact]
-    public void AStandaloneLeftoverName_IsStillCaughtByTheVerifyPass()
-    {
-        var a = new BundleAliaser();
-        a.AddName(AliasKind.Login, "apps");
-
-        /* In a value it is replaced; the identifier next to it is not. */
-        var (valueLeaks, valueText) = a.Finish(OneValue("apps is down, apps_pool is up"), DiagnosticsBundle.WriteOptions);
-        Assert.Empty(valueLeaks);
-        Assert.DoesNotContain("apps is down", valueText!, StringComparison.Ordinal);
-        Assert.Contains("apps_pool is up", valueText!, StringComparison.Ordinal);
-
-        /* In a data-shaped key, which is never rewritten, it is reported and no text comes back. */
-        var keyed = new JsonObject { ["sections"] = new JsonObject { ["x"] = new JsonObject { ["apps node"] = 1 } } };
-        var (keyLeaks, keyText) = a.Finish(keyed, DiagnosticsBundle.WriteOptions);
-        Assert.NotEmpty(keyLeaks);
-        Assert.Null(keyText);
-
-        /* The serialized bytes hold the apostrophe as an escape; the name after it is still standalone. */
-        var escaped = new JsonObject { ["sections"] = new JsonObject { ["x"] = new JsonObject { ["'apps' node"] = 1 } } };
-        var (escapedLeaks, escapedText) = a.Finish(escaped, DiagnosticsBundle.WriteOptions);
-        Assert.NotEmpty(escapedLeaks);
-        Assert.Null(escapedText);
     }
 }

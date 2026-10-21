@@ -45,9 +45,10 @@ internal sealed record BundleLeak(string Section, string Field, string Class);
 /// <para><b>The scan</b> rewrites string VALUES, never keys, with one compiled alternation, longest token first, with
 /// word-character boundaries so <c>sales</c> does not match inside <c>wholesales</c>. It runs in one pass, so an alias
 /// is never re-scanned. <see cref="Finish"/> is the proof: it scans the serialized bytes and the JSON-unescaped text
-/// for every known token of <see cref="VerifyMinimumLength"/> characters or more as a whole name (the same boundary
-/// as the scan), replaces a leftover whole name, and reports anything that still survives. A name that only occurs
-/// inside a longer word (<c>apps</c> in <c>appsettings</c>) is neither a leftover nor rewritten (#6256).</para>
+/// for every known token of <see cref="VerifyMinimumLength"/> characters or more as a plain substring, replaces a
+/// glued hit, and reports anything that still survives. A hit counts when the name is a whole sub-token of the
+/// identifier it sits in (see <see cref="EdgeIsSubTokenBoundary"/>); a name buried inside an ordinary run of letters
+/// (<c>data</c> in <c>database</c>) is neither a leftover nor rewritten (#6256).</para>
 /// </summary>
 internal sealed class BundleAliaser
 {
@@ -628,10 +629,9 @@ internal sealed class BundleAliaser
 
     /// <summary>
     /// The proof. Serializes <paramref name="root"/> (indented), scans the bytes and the JSON-unescaped text for every
-    /// known token and secret, replaces a whole name the scan missed, and scans again. A token is a hit only between
-    /// non-word characters (see <see cref="ContainsWholeName"/>), so a name inside a longer word is left alone and
-    /// is not reported (#6256). A secret is still matched as a plain substring. Returns the leaks that survive, and
-    /// the final serialized text when there are none.
+    /// known token and secret, replaces a name that was glued to other characters (which the boundary rule let
+    /// through) when it is a whole sub-token of its identifier (#6256), and scans again. A secret is matched as a
+    /// plain substring. Returns the leaks that survive, and the final serialized text when there are none.
     /// </summary>
     internal (IReadOnlyList<BundleLeak> Leaks, string? Text) Finish(JsonNode root, JsonSerializerOptions options)
     {
@@ -655,8 +655,8 @@ internal sealed class BundleAliaser
                 return (leaks, null);
             }
 
-            var names = WholeNameRegex(tokens);
-            ReplaceLeftover(root, names, new HashSet<string>(_aliasByToken.Values, StringComparer.OrdinalIgnoreCase));
+            var names = TokenBuckets(tokens);
+            ReplaceGlued(root, names, new HashSet<string>(_aliasByToken.Values, StringComparer.OrdinalIgnoreCase));
         }
 
         var finalText = root.ToJsonString(options);
@@ -899,7 +899,7 @@ internal sealed class BundleAliaser
                 continue;
             }
 
-            if (ContainsWholeName(maskedValues, token) || ContainsWholeName(maskedBytes, token))
+            if (ContainsSubToken(maskedValues, token) || ContainsSubToken(maskedBytes, token))
             {
                 leaks.Add(Locate(values, token, "name"));
             }
@@ -937,20 +937,59 @@ internal sealed class BundleAliaser
 
     /// <summary>
     /// Blanks each JSON escape sequence (<c>\u0027</c>, <c>\n</c>, <c>\\</c>) in serialized text, so the letter after the
-    /// backslash is not mistaken for a word character that glues to the name which follows it.
+    /// backslash is not mistaken for part of a word that runs into the name which follows it.
     /// </summary>
     private static string MaskJsonEscapes(string serialized) =>
         s_jsonEscape.Replace(serialized, m => new string('\u0001', m.Length));
 
-    private static bool IsWordChar(char c) => c is (>= 'A' and <= 'Z') or (>= 'a' and <= 'z') or (>= '0' and <= '9') or '_';
-
     /// <summary>
-    /// True when <paramref name="token"/> occurs in <paramref name="text"/> (case-insensitive) with no word character
-    /// <c>[A-Za-z0-9_]</c> directly before or after it, the same boundary the scan and the secret pass use. A side is
-    /// only checked when the name's own edge character is a word character: a name that starts or ends with
-    /// punctuation has no word edge to protect, so it matches wherever it did before the boundary existed (#6256).
+    /// True when the match of <paramref name="length"/> characters at <paramref name="at"/> in <paramref name="text"/>
+    /// is a whole sub-token of the identifier it sits in, on both edges. An edge is a boundary unless the name's own
+    /// edge character and its neighbour are both letters in one ordinary run. Two letters still split a run at a
+    /// camelCase transition: a lower-case letter then an upper-case one (<c>Sales|Report</c>), or an upper-case run
+    /// whose next letter starts an Upper+lower word (<c>SQLPROD|Backup</c>). A digit, <c>_</c>, <c>-</c>, <c>.</c>, a
+    /// path separator, whitespace and the ends of the text are always boundaries. The judgement reads the actual
+    /// characters; the name itself is matched case-insensitively. <c>wholesales</c> holds <c>sales</c>,
+    /// <c>database</c> holds <c>data</c> and <c>administrator</c> holds <c>admin</c> inside plain letter runs, so none
+    /// of them is a hit; <c>prod01</c>, <c>SQLPROD_Full.bak</c> and <c>SalesReport</c> are (#6256).
     /// </summary>
-    internal static bool ContainsWholeName(string text, string token)
+    internal static bool EdgeIsSubTokenBoundary(string text, int at, int length)
+    {
+        var end = at + length;
+        if (length == 0)
+        {
+            return false;
+        }
+
+        if (at > 0 && char.IsLetter(text[at - 1]) && char.IsLetter(text[at]))
+        {
+            var prev = text[at - 1];
+            var first = text[at];
+            var camel = (char.IsLower(prev) && char.IsUpper(first))
+                || (char.IsUpper(prev) && char.IsUpper(first) && at + 1 < text.Length && char.IsLower(text[at + 1]));
+            if (!camel)
+            {
+                return false;
+            }
+        }
+
+        if (end < text.Length && char.IsLetter(text[end - 1]) && char.IsLetter(text[end]))
+        {
+            var last = text[end - 1];
+            var next = text[end];
+            var camel = (char.IsLower(last) && char.IsUpper(next))
+                || (char.IsUpper(last) && char.IsUpper(next) && end + 1 < text.Length && char.IsLower(text[end + 1]));
+            if (!camel)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>True when <paramref name="token"/> occurs in <paramref name="text"/> (case-insensitive) as a whole sub-token (see <see cref="EdgeIsSubTokenBoundary"/>).</summary>
+    internal static bool ContainsSubToken(string text, string token)
     {
         var start = 0;
         while (token.Length > 0 && start <= text.Length - token.Length)
@@ -961,10 +1000,7 @@ internal sealed class BundleAliaser
                 return false;
             }
 
-            var end = at + token.Length;
-            var clearBefore = at == 0 || !IsWordChar(token[0]) || !IsWordChar(text[at - 1]);
-            var clearAfter = end >= text.Length || !IsWordChar(token[^1]) || !IsWordChar(text[end]);
-            if (clearBefore && clearAfter)
+            if (EdgeIsSubTokenBoundary(text, at, token.Length))
             {
                 return true;
             }
@@ -975,23 +1011,14 @@ internal sealed class BundleAliaser
         return false;
     }
 
-    /// <summary>
-    /// One alternation of the tokens, longest first, each with the <see cref="ContainsWholeName"/> boundary. The
-    /// lookarounds read the real neighbouring characters of the text it runs over.
-    /// </summary>
-    private static Regex WholeNameRegex(IEnumerable<string> tokens)
-    {
-        var parts = tokens
+    /// <summary>The tokens grouped by upper-cased first character, longest first inside a group.</summary>
+    private static Dictionary<char, List<string>> TokenBuckets(IEnumerable<string> tokens) =>
+        tokens
             .Where(t => t.Length > 0)
             .OrderByDescending(t => t.Length)
             .ThenBy(t => t, StringComparer.Ordinal)
-            .Select(t => (IsWordChar(t[0]) ? "(?<![A-Za-z0-9_])" : string.Empty) + Regex.Escape(t) + (IsWordChar(t[^1]) ? "(?![A-Za-z0-9_])" : string.Empty))
-            .ToList();
-        return new Regex(
-            parts.Count == 0 ? "(?!)" : string.Join('|', parts),
-            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant,
-            TimeSpan.FromSeconds(5));
-    }
+            .GroupBy(t => char.ToUpperInvariant(t[0]))
+            .ToDictionary(g => g.Key, g => g.ToList());
 
     /// <summary>
     /// True for text the alias generator itself mints (<c>server-3</c>, <c>ip-1</c>): a token that is exactly one of the
@@ -1007,7 +1034,7 @@ internal sealed class BundleAliaser
     {
         foreach (var (path, text) in values)
         {
-            if (cls == "name" ? ContainsWholeName(text, needle) : text.Contains(needle, StringComparison.OrdinalIgnoreCase))
+            if (cls == "name" ? ContainsSubToken(text, needle) : text.Contains(needle, StringComparison.OrdinalIgnoreCase))
             {
                 return new BundleLeak(SectionOf(path), FieldOf(path), cls);
             }
@@ -1039,7 +1066,7 @@ internal sealed class BundleAliaser
         var masked = MaskAliasText(unescaped, minted);
         foreach (var token in _aliasByToken.Keys)
         {
-            if (Verifiable(token) && !TokenIsAliasText(token, minted) && ContainsWholeName(masked, token))
+            if (Verifiable(token) && !TokenIsAliasText(token, minted) && ContainsSubToken(masked, token))
             {
                 hits.Add(token);
             }
@@ -1048,7 +1075,7 @@ internal sealed class BundleAliaser
         return hits;
     }
 
-    private void ReplaceLeftover(JsonNode? node, Regex names, HashSet<string> minted)
+    private void ReplaceGlued(JsonNode? node, Dictionary<char, List<string>> names, HashSet<string> minted)
     {
         switch (node)
         {
@@ -1057,11 +1084,11 @@ internal sealed class BundleAliaser
                 {
                     if (obj[key] is JsonValue v && v.TryGetValue<string>(out var text))
                     {
-                        obj[key] = _productValues.Contains(text) ? text : ReplaceWholeNames(text, names, minted);
+                        obj[key] = _productValues.Contains(text) ? text : ReplaceNoBoundary(text, names, minted);
                     }
                     else
                     {
-                        ReplaceLeftover(obj[key], names, minted);
+                        ReplaceGlued(obj[key], names, minted);
                     }
                 }
 
@@ -1071,11 +1098,11 @@ internal sealed class BundleAliaser
                 {
                     if (array[i] is JsonValue v && v.TryGetValue<string>(out var text))
                     {
-                        array[i] = _productValues.Contains(text) ? text : ReplaceWholeNames(text, names, minted);
+                        array[i] = _productValues.Contains(text) ? text : ReplaceNoBoundary(text, names, minted);
                     }
                     else
                     {
-                        ReplaceLeftover(array[i], names, minted);
+                        ReplaceGlued(array[i], names, minted);
                     }
                 }
 
@@ -1084,24 +1111,45 @@ internal sealed class BundleAliaser
     }
 
     /// <summary>
-    /// Replaces each known name that stands between non-word characters, except inside alias text the generator
-    /// minted (which is output, never information). The text is matched whole with the minted spans blanked to a
-    /// non-word character, so the boundary reads the real neighbouring characters and a name cannot match across an
-    /// alias; the replacement is written into the original text.
+    /// Replaces each occurrence of a token that is a whole sub-token of its identifier (see
+    /// <see cref="EdgeIsSubTokenBoundary"/>), longest token first at each position, except inside alias text the
+    /// generator minted (which is output, never information). The text is matched with the minted spans blanked to a
+    /// non-letter character, so the edge checks read the real neighbouring characters and a name cannot match inside
+    /// or across an alias; the replacement is written into the original text.
     /// </summary>
-    private string ReplaceWholeNames(string text, Regex names, HashSet<string> minted)
+    private string ReplaceNoBoundary(string text, Dictionary<char, List<string>> names, HashSet<string> minted)
     {
+        var masked = MaskAliasText(text, minted);
         var result = new StringBuilder(text.Length);
         var last = 0;
-        foreach (Match m in names.Matches(MaskAliasText(text, minted)))
+        var i = 0;
+        while (i < masked.Length)
         {
-            if (m.Length == 0 || !_aliasByToken.TryGetValue(text.Substring(m.Index, m.Length), out var alias))
+            string? hit = null;
+            if (names.TryGetValue(char.ToUpperInvariant(masked[i]), out var candidates))
             {
+                foreach (var token in candidates)
+                {
+                    if (i + token.Length <= masked.Length
+                        && string.Compare(masked, i, token, 0, token.Length, StringComparison.OrdinalIgnoreCase) == 0
+                        && EdgeIsSubTokenBoundary(masked, i, token.Length)
+                        && _aliasByToken.ContainsKey(token))
+                    {
+                        hit = token;
+                        break;
+                    }
+                }
+            }
+
+            if (hit is null)
+            {
+                i++;
                 continue;
             }
 
-            result.Append(text, last, m.Index - last).Append(alias);
-            last = m.Index + m.Length;
+            result.Append(text, last, i - last).Append(_aliasByToken[hit]);
+            i += hit.Length;
+            last = i;
         }
 
         result.Append(text, last, text.Length - last);
