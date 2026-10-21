@@ -1623,6 +1623,18 @@ export const SERVER_TABS = [
     ],
   },
 
+  /* #6296, #6297: the desktop's File I/O Throughput sub-tab and tempdb charts. Their own tab, not panels on File I/O: get_server_trend
+     reaches 7 days where the File I/O tab's reads reach 30, and a tab's reach is the smallest of its reads. */
+  {
+    id: "iotrends",
+    label: "I/O Trends",
+    build: (server, ctx) => [
+      seriesTrendPanel(server, ctx, "file_io_throughput"),
+      serverTrendPanel(server, ctx, "tempdb_size"),
+      seriesTrendPanel(server, ctx, "tempdb_file_io"),
+    ],
+  },
+
   {
     id: "queries",
     label: "Queries",
@@ -2172,6 +2184,8 @@ export const SERVER_TABS = [
          back the individual runs. This is the tab people reach for when the rollup says HEALTHY and
          collection still looks wrong, and until now the WPF viewer was the only way to it. */
       collectionLogPanel(server, ctx),
+      /* #6298: the desktop's Duration Trends chart, the longest run of each collector over the range. */
+      seriesTrendPanel(server, ctx, "collector_duration"),
     ],
   },
 
@@ -4229,6 +4243,15 @@ const SERVER_TRENDS = {
     ],
     emptyText: "No plan cache samples in this window.",
   },
+  /* #6297: the desktop's tempdb tab draws the reserved plus unallocated space as one "Allocated MB" line. */
+  tempdb_size: {
+    title: "tempdb Allocated Size",
+    metric: "tempdb_size",
+    unit: "MB",
+    series: [{ key: "allocated_mb", label: "Allocated MB" }],
+    emptyText: "No tempdb space samples in this window.",
+    emptyWins: true,
+  },
 };
 
 /** A get_server_trend line panel for `kind` (a key of SERVER_TRENDS), over the page's range and its `as_of`. */
@@ -4238,7 +4261,7 @@ export function serverTrendPanel(server, ctx, kind) {
   (async () => {
     const res = await readToolWithinKeptHistory("get_server_trend", { server, metric: spec.metric, hours: ctx.hours }, ctx && ctx.signal);
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
-    if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message || spec.emptyText)]);
+    if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(emptyHeadline(spec, res) || spec.emptyText)]);
     const points = res.data.trend || [];
     if (!points.length) return mount(body, [keptWindowStrip(res), emptyStrip(spec.emptyText)]);
     /* #3653 A5: the payload's baseline discontinuities as a notice above the chart. */
@@ -4255,6 +4278,101 @@ export function serverTrendPanel(server, ctx, kind) {
         unit: spec.unit,
         ...windowFromHours(res.keptHours || ctx.hours),
       }, "server-trend|" + server + "|" + spec.metric, chartZoomScope(ctx.hours)),
+      typeof res.data.aggregate_note === "string" && res.data.aggregate_note ? metricNote(res.data.aggregate_note) : null,
+    ]);
+  })();
+  return panel;
+}
+
+/**
+ * The get_server_trend metrics that follow named series, drawn as the desktop draws them (#6296, #6298, #6297): one line per
+ * file or collector, over the page's range and its `as_of`, with no `names` so the read picks its own heaviest five (the desktop
+ * keeps the top ten files by throughput, the top twelve tempdb files by latency, and every collector; the read takes no count, so the page shows five). A chart's `value` is the
+ * figure one point plots, and a point with none is left out of that line, never drawn as 0. The buckets are the read's own: nothing
+ * is re-aggregated here.
+ */
+const SERIES_TRENDS = {
+  file_io_throughput: {
+    title: "File I/O Throughput",
+    subtitle: "read and write MB/s per file",
+    seriesKey: "file_label",
+    emptyText: "No file I/O samples in this window.",
+    emptyWins: true,
+    note: "One line per file, the five that moved the most bytes in the window.",
+    charts: [
+      { title: "Read throughput (MB/s)", unit: "MB/s", value: (r) => r.read_mb_per_sec, empty: "No reads in this window." },
+      { title: "Write throughput (MB/s)", unit: "MB/s", value: (r) => r.write_mb_per_sec, empty: "No writes in this window." },
+    ],
+  },
+  tempdb_file_io: {
+    title: "tempdb File I/O Latency",
+    subtitle: "avg read plus write latency per tempdb file",
+    seriesKey: "file_name",
+    emptyText: "No tempdb file I/O samples in this window.",
+    emptyWins: true,
+    note: "One line per tempdb file: its average read latency plus its average write latency, the five files with the most I/O in the window.",
+    charts: [
+      {
+        title: "Read plus write latency (ms)",
+        unit: "ms",
+        value: (r) => (r.avg_read_latency_ms == null && r.avg_write_latency_ms == null ? null : (r.avg_read_latency_ms || 0) + (r.avg_write_latency_ms || 0)),
+        empty: "No tempdb file I/O samples in this window.",
+      },
+    ],
+  },
+  collector_duration: {
+    title: "Collector Duration Trends",
+    subtitle: "longest successful run per collector",
+    seriesKey: "collector_name",
+    emptyText: "No successful collector runs in this window.",
+    emptyWins: true,
+    note: "One line per collector, the five with the longest run in the window; the Viewer's chart draws every collector. Each point is the longest run in its bucket, and a collector needs runs in two buckets to draw a line, so a collector that ran in only one bucket of a short window has no line.",
+    minPoints: 2,
+    charts: [
+      { title: "Longest run (ms)", unit: "ms", value: (r) => r.max_duration_ms, empty: "No collector ran in two or more buckets of this window, so there is no line to draw." },
+    ],
+  },
+};
+
+/** A get_server_trend panel for a named-series metric (a key of SERIES_TRENDS): one chart per spec chart over one read. */
+export function seriesTrendPanel(server, ctx, kind) {
+  const spec = SERIES_TRENDS[kind];
+  const { panel, body } = panelShell(spec.title, spec.subtitle + ", " + ctx.label, 2, "get_server_trend");
+  (async () => {
+    const res = await readToolWithinKeptHistory("get_server_trend", { server, metric: kind, hours: ctx.hours }, ctx && ctx.signal);
+    if (res.kind === "error") return mount(body, readErrorStrip(res.message));
+    if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(emptyHeadline(spec, res) || spec.emptyText)]);
+    const series = (res.data.series || []).filter((s) => s && s[spec.seriesKey] != null);
+    if (!series.length) return mount(body, [keptWindowStrip(res), emptyStrip(spec.emptyText)]);
+    /* #3653 A5: the payload's baseline discontinuities as a notice above the charts. */
+    const notes = discontinuityNotes(res.data);
+    const draw = (chart) => {
+      /* A file or collector keeps its colour in every chart of the panel: the palette index is its place in the read, not in the
+         chart it has points in (the write chart skips a file that wrote nothing). */
+      const drawn = series
+        .map((s, i) => ({ index: i, label: s[spec.seriesKey], rows: (s.trend || []).map((r) => ({ time: r.time, v: chart.value(r) })).filter((r) => r.v != null) }))
+        .filter((d) => d.rows.length >= (spec.minPoints || 1))
+        .map((d) => ({ ...d, key: "s" + d.index, color: SERIES_COLORS[d.index % SERIES_COLORS.length] }));
+      return drawn.length
+        ? [
+            el("h4", { text: chart.title }),
+            zoomableLineChart({
+              atTime: { server },
+              points: mergeSeriesRows(drawn, "time", "v"),
+              xKey: "time",
+              series: drawn.map((d) => ({ key: d.key, label: d.label, color: d.color })),
+              formatValue: (v) => (Math.round(v * 100) / 100).toLocaleString() + " " + chart.unit,
+              unit: chart.unit,
+              ...windowFromHours(res.keptHours || ctx.hours),
+            }, "series-trend|" + server + "|" + kind + "|" + chart.unit, chartZoomScope(ctx.hours)),
+          ]
+        : [el("h4", { text: chart.title }), emptyStrip(chart.empty)];
+    };
+    mount(body, [
+      keptWindowStrip(res),
+      notes.length ? noticeStrip(notes.join(" ")) : null,
+      ...spec.charts.flatMap(draw),
+      el("div", { class: "mp-metric-note", text: spec.note }),
       typeof res.data.aggregate_note === "string" && res.data.aggregate_note ? metricNote(res.data.aggregate_note) : null,
     ]);
   })();

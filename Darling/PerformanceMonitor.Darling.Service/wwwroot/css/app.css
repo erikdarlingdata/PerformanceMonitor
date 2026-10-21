@@ -138,9 +138,12 @@ a:hover { text-decoration: underline; }
 .alert-badge.warn { background: var(--sev-warning, var(--warn)); }
 .alert-badge.crit { background: var(--sev-critical, var(--err)); }
 .sidebar-collapse { float: right; background: none; border: 1px solid var(--border); color: var(--dim); border-radius: var(--radius-sm); cursor: pointer; }
-#app.sidebar-collapsed #sidebar { width: 2.5rem; flex-basis: 2.5rem; overflow: hidden; }
-#app.sidebar-collapsed #sidebar > :not(.brand),
-#app.sidebar-collapsed #sidebar .brand > :not(.sidebar-collapse) { display: none; }
+/* The icon-rail collapse is a wide-window feature; below 769 px the sidebar is the overlay menu instead (#6315, see the end of the shell). */
+@media (min-width: 769px) {
+  #app.sidebar-collapsed #sidebar { width: 2.5rem; flex-basis: 2.5rem; overflow: hidden; }
+  #app.sidebar-collapsed #sidebar > :not(.brand),
+  #app.sidebar-collapsed #sidebar .brand > :not(.sidebar-collapse) { display: none; }
+}
 .viewer-settings { padding: 0.5rem 1.25rem; font-size: 0.8rem; color: var(--dim); }
 .sev-color-row { display: flex; justify-content: space-between; align-items: center; margin: 4px 0; text-transform: capitalize; }
 .sev-color-reset { margin-top: 6px; }
@@ -150,6 +153,70 @@ a:hover { text-decoration: underline; }
   min-width: 0;
   padding: 1.25rem 1.5rem calc(3rem + 28px); /* extra bottom padding clears the fixed status bar */
   overflow-x: hidden;
+}
+
+/* #6315: the phone-width shell. The top bar, backdrop and menu button are hidden above 768 px, so nothing at 769 px and wider
+   changes. At 768 px and below the sidebar leaves the flow: a fixed overlay under the top bar, closed until the button opens it
+   (js/narrow-nav.js sets #app.nav-open). The content takes the full width with a 16 px gutter; a wide table, chart or tab bar
+   scrolls inside its own container (.table-wrap, .subtabs, ...), never the page. */
+#topbar, #nav-backdrop { display: none; }
+@media (max-width: 768px) {
+  #app { display: block; }
+  #topbar {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    position: sticky;
+    top: 0;
+    height: 48px;
+    padding: 0 1rem;
+    background: var(--bg-dark);
+    border-bottom: 1px solid var(--border);
+    z-index: 40;
+  }
+  .nav-toggle {
+    width: 2.25rem;
+    height: 2.25rem;
+    font-size: 1.25rem;
+    line-height: 1;
+    color: var(--fg);
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+  }
+  .nav-toggle:hover { border-color: var(--accent); }
+  .nav-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .topbar-title { font-size: 1.05rem; font-weight: 600; color: var(--accent); }
+  #sidebar {
+    position: fixed;
+    top: 48px;
+    left: 0;
+    bottom: 0;
+    width: min(var(--sidebar-width), 85vw);
+    height: auto;
+    z-index: 30;
+    visibility: hidden;
+    transform: translateX(-100%);
+    transition: transform 0.15s ease-out, visibility 0s linear 0.15s;
+  }
+  #app.nav-open #sidebar {
+    visibility: visible;
+    transform: none;
+    transition: transform 0.15s ease-out;
+  }
+  #app.nav-open #nav-backdrop {
+    display: block;
+    position: fixed;
+    inset: 48px 0 0 0;
+    background: rgba(0, 0, 0, 0.55);
+    z-index: 25;
+  }
+  .sidebar-collapse { display: none; }
+  #main { padding-left: 16px; padding-right: 16px; }
+}
+@media (max-width: 768px) and (prefers-reduced-motion: reduce) {
+  #sidebar, #app.nav-open #sidebar { transition: none; }
 }
 
 /* ─────────────────────────── page header ─────────────────────────── */
@@ -407,6 +474,9 @@ a:hover { text-decoration: underline; }
   align-items: stretch;
   gap: 0.6rem;
   margin-bottom: 1.25rem;
+  /* #6315: lets the narrow-content rule at the end of this file key off the rollup's own width (inline-size only: the width still
+     comes from the parent, not from the tiles). */
+  container-type: inline-size;
 }
 .rollup-group { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(88px, 1fr); gap: 0.6rem; }
 .rollup-divider { width: 1px; background: var(--border); margin: 0.1rem 0.3rem; flex: 0 0 auto; }
@@ -1370,3 +1440,57 @@ pre.code {
 /* #6214: a personal view in the sidebar's My views group, and the "Personal view of X" note on its page. */
 .view-item.is-personal { font-style: italic; }
 .view-personal-note { font-weight: 600; }
+
+/* #6315 fix round: nothing may be wider than the content column, so the page never has a clipped, unreachable edge
+   (#main is overflow-x: hidden). Three causes, fixed as classes rather than page by page:
+   - (900 px and narrower) a grid child has min-width: auto, so long text or a wide control (a select holding a query's text)
+     stretches its card or tile past the track. Every grid parent the pages share gets min-width: 0 on its children, and a control's select
+     shrinks to its card (the select cuts the long option text; the full text shows when it opens);
+   - the fleet and AG rollup groups were one non-wrapping grid row, so 5 tiles ran past the edge at phone width. At 600 px and
+     narrower a group takes the full row and its tiles wrap, and the 1 px divider between the groups is hidden. 601 to 768 px
+     keep the old layout, which still fits there;
+   - the fixed status bar was one 28 px row, so up to 900 px its items wrapped inside narrow columns and were cut. It now grows
+     to as many lines as it needs, each item stays on one line, and #main keeps clear of it. A bar that fits on one line keeps
+     its 28 px height. */
+@media (max-width: 900px) {
+  #statusbar {
+    height: auto;
+    min-height: 28px;
+    flex-wrap: wrap;
+    column-gap: 0.6rem;
+    row-gap: 0.1rem;
+    padding: 0.3rem 1rem;
+  }
+  #statusbar .sb-item { white-space: nowrap; }
+  #statusbar .sb-sep { display: none; }
+  #main { padding-bottom: calc(3rem + 56px); }
+  .grid > *, .panel-grid > *, .stats > *, .rollup-group > *, .picker-row > * { min-width: 0; }
+  .range-control, .picker-row > * { max-width: 100%; }
+  .range-control > select, .range-select-inline, .sort-select { min-width: 0; max-width: 100%; text-overflow: ellipsis; }
+}
+@media (max-width: 600px) {
+  .rollup-group {
+    flex: 1 1 100%;
+    grid-auto-flow: row;
+    grid-template-columns: repeat(auto-fit, minmax(88px, 1fr));
+    grid-auto-columns: auto;
+  }
+  .rollup-divider { display: none; }
+  .rollup .tile { min-width: 0; }
+  #main { padding-bottom: calc(3rem + 84px); }
+}
+
+/* #6315 round 2: the same wrap as the 600 px rule, keyed off the width the rollup really has instead of the window's. Five 88 px tiles
+   and their four 0.6rem gaps need one row of 440 px plus 2.4rem; a content column narrower than that (769 to about 785 px with the sidebar open, or a small laptop
+   window with the sidebar expanded) clipped the last tile, and #main is overflow-x: hidden so it could not be scrolled to. The 600 px
+   rule stays: at 600 px the column is 568 px wide, which fits, but the phone layout keeps its stacked groups. */
+@container (width < calc(440px + 2.4rem)) {
+  .rollup-group {
+    flex: 1 1 100%;
+    grid-auto-flow: row;
+    grid-template-columns: repeat(auto-fit, minmax(88px, 1fr));
+    grid-auto-columns: auto;
+  }
+  .rollup-divider { display: none; }
+  .rollup .tile { min-width: 0; }
+}

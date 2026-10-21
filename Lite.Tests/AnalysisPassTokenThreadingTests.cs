@@ -213,8 +213,10 @@ public sealed class AnalysisPassTokenThreadingTests
            decision. The other four have no catch at all and never had one — their reads propagate
            straight to the pass, which is the same outcome by a shorter route.
            29 since #5631: the plan-input check adds two (the plan comparison and the plan fetch), each letting the
-           pass's own abandonment through and swallowing a fault so the candidate stays, counted unverified. */
-        Assert.Equal(29, AnalysisSources()
+           pass's own abandonment through and swallowing a fault so the candidate stays, counted unverified.
+           30 since #6267: the failure read of the plan-regression pass is one more; it lets the abandonment through and
+           records any other fault as a collection caveat. */
+        Assert.Equal(30, AnalysisSources()
             .Where(s => Path.GetFileName(s.File).StartsWith("DuckDbFactCollector.", StringComparison.Ordinal))
             .SelectMany(s => s.Code)
             .Count(line => classified.IsMatch(line)));

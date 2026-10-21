@@ -65,6 +65,7 @@ import { renderJobHistory } from "./pages/job-history.js";
 import { refreshAttention, clearViewGroups, onChange as onLocalChange } from "./viewer-local.js";
 import { initSidebarCollapse, initSeverityColorSettings } from "./viewer-local-ui.js";
 import { initSidebarSearch, paintServerList } from "./sidebar.js";
+import { initNarrowNav } from "./narrow-nav.js";
 
 /* The shell (sidebar, view list, AG nav) refreshes every POLL_MS; the page re-renders on its own interval. */
 const POLL_MS = 60000;
@@ -757,6 +758,7 @@ function start() {
   initAutoRefreshToggle();
   initPageRefreshControl();
   initSidebarCollapse(document.getElementById("app"), document.getElementById("sidebar-collapse"));
+  initNarrowNav(document.getElementById("app"), document.getElementById("nav-toggle"), document.getElementById("sidebar"));
   initSidebarSearch(document.getElementById("server-search"), paintSidebar);
   initSeverityColorSettings(document.getElementById("viewer-settings"));
   onLocalChange(paintSidebar);
