@@ -7,6 +7,7 @@
  */
 
 using System;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -41,7 +42,7 @@ public static class QueryStoreReplicaSetting
     /// protocol prefix there (<c>np:</c>, <c>lpc:</c>, <c>admin:</c>) and a UNC-looking value as a named-pipe path,
     /// which on Windows opens an SMB connection to a machine the writer names. So a replica is a plain host, <c>host,port</c>,
     /// <c>host\instance</c> or listener name: any <c>letters:</c> prefix, and any value that starts with a backslash or slash,
-    /// is refused. (An IPv6 literal goes in brackets.) The one prefix allowed is <c>tcp:</c> (any case, the ruling on #6254): it
+    /// is refused, read the way SqlClient reads the protocol word (white space before the colon is ignored, so "np :x" is a prefix). (An IPv6 literal goes in brackets, or is written bare.) The one prefix allowed is <c>tcp:</c> (any case, the ruling on #6254): it
     /// forces TCP and names no other transport, so the part after it is judged by the same rules and may not be a path or carry
     /// another prefix.</summary>
     public static string? Refusal(string? value)
@@ -65,30 +66,15 @@ public static class QueryStoreReplicaSetting
             }
         }
 
-        if (text[0] is '\\' or '/')
+        /* The host part is judged by the rule the host field uses (#6352), which reads the protocol word the way SqlClient does: trimmed,
+           so "np :x" and "np<tab>:x" are a named pipe too. */
+        if (ServerHostSetting.Refusal(text) is not null)
         {
-            return "query_store_replica must be a host name, host,port or listener name, not a path.";
-        }
-
-        var colon = text.IndexOf(':');
-        if (colon > 0 && IsLetters(text.AsSpan(0, colon)))
-        {
-            return "query_store_replica must be a host name, host,port or listener name, without a protocol prefix other than tcp:.";
+            return text[0] is '\\' or '/'
+                ? "query_store_replica must be a host name, host,port or listener name, not a path."
+                : "query_store_replica must be a host name, host,port or listener name, without a protocol prefix other than tcp:.";
         }
 
         return null;
-    }
-
-    private static bool IsLetters(ReadOnlySpan<char> span)
-    {
-        foreach (var c in span)
-        {
-            if (!char.IsAsciiLetter(c))
-            {
-                return false;
-            }
-        }
-
-        return span.Length > 0;
     }
 }

@@ -128,6 +128,21 @@ public sealed class QueryStoreReplicaSettingTests
         Assert.Equal(Secret, builder.Password);
     }
 
+    /* #6352: a replica on another machine is dialled over TCP only (SqlClient would otherwise fall back to a named pipe over SMB with the
+       service's Windows identity); a replica on this machine keeps its shared-memory path. */
+    [Theory]
+    [InlineData("replica-01", "tcp:replica-01")]
+    [InlineData("replica-01\\INST2", "tcp:replica-01\\INST2")]
+    [InlineData("10.1.2.3,1433", "tcp:10.1.2.3,1433")]
+    [InlineData("localhost", "localhost")]
+    [InlineData("(local)", "(local)")]
+    public void A_remote_replica_gets_tcp_in_front_and_a_local_one_does_not(string replica, string dataSource)
+    {
+        var text = MonitoredServerConnection.BuildQueryStoreReplicaConnectionString(SealedServer(replica), false, Ring);
+
+        Assert.Equal(dataSource, new SqlConnectionStringBuilder(text).DataSource);
+    }
+
     [Fact]
     public void The_replica_connection_is_the_servers_own_with_the_host_swapped_and_read_only_intent()
     {
@@ -136,7 +151,7 @@ public sealed class QueryStoreReplicaSettingTests
         Assert.NotNull(text);
         var builder = new SqlConnectionStringBuilder(text);
         var primary = new SqlConnectionStringBuilder(MonitoredServerConnection.BuildConnectionString(SealedServer("replica-01,14331"), Secret));
-        Assert.Equal("replica-01,14331", builder.DataSource);
+        Assert.Equal("tcp:replica-01,14331", builder.DataSource);
         Assert.Equal(ApplicationIntent.ReadOnly, builder.ApplicationIntent);
         Assert.Equal(ApplicationIntent.ReadWrite, primary.ApplicationIntent);
         Assert.Equal(primary.UserID, builder.UserID);
@@ -181,7 +196,7 @@ public sealed class QueryStoreReplicaSettingTests
         var text = MonitoredServerConnection.BuildQueryStoreReplicaConnectionString(server, false, Ring);
 
         var builder = new SqlConnectionStringBuilder(text);
-        Assert.Equal("bound-replica,14331", builder.DataSource);
+        Assert.Equal("tcp:bound-replica,14331", builder.DataSource);
         Assert.Equal(Secret, builder.Password);
     }
 
@@ -239,6 +254,9 @@ public sealed class QueryStoreReplicaSettingTests
     [InlineData("TCP:tcp:attacker")]
     [InlineData("tcp:")]
     [InlineData("  NP:attacker")]
+    [InlineData("np :\\\\attacker\\pipe\\sql\\query")]
+    [InlineData("np\t:\\\\attacker\\pipe\\sql\\query")]
+    [InlineData("tcp:np\t:attacker")]
     [InlineData("\\\\attacker\\share")]
     [InlineData("\\attacker")]
     [InlineData("//attacker/share")]
