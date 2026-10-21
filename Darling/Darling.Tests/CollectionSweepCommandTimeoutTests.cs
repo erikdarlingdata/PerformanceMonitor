@@ -166,7 +166,9 @@ public sealed class CollectionSweepCommandTimeoutTests
     /// a THREADED PARAMETER — a stronger bound than a constant — on the target path rather than this
     /// budget.</para>
     /// </summary>
-    private const int ExpectedSweepCommandSites = 13;
+    /* 15 since #6351: UpsertServerAsync reads the identity it is about to overwrite and, on a changed identity, the other enabled
+       registrations holding it; both carry the sweep deadline like the upsert. */
+    private const int ExpectedSweepCommandSites = 15;
 
     /// <summary>The five COPY writers, counted for the same reason. Five since #3601: RdsLogEventIngestor is
     /// RdsDeadlockIngestor's write over the log-event definition, and it was looked at by a person — the same
