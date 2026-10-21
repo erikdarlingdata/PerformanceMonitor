@@ -112,6 +112,22 @@ public sealed class QueryStoreReplicaSettingTests
 
     private static IPasswordKeyRing Ring => DarlingPasswordKey.FromPrivateKey(Key);
 
+    /* The ruling on #6254: a tcp: prefix is allowed and reaches the connection as typed; SqlClient reads it as "TCP only", and the
+       host and port after it are what it dials. */
+    [Theory]
+    [InlineData("tcp:replica-01,14331")]
+    [InlineData("TCP:replica-01")]
+    public void A_tcp_prefixed_replica_is_passed_through_to_the_data_source_as_typed(string replica)
+    {
+        var text = MonitoredServerConnection.BuildQueryStoreReplicaConnectionString(SealedServer(replica), false, Ring);
+
+        Assert.NotNull(text);
+        var builder = new SqlConnectionStringBuilder(text);
+        Assert.Equal(replica, builder.DataSource);
+        Assert.Equal(ApplicationIntent.ReadOnly, builder.ApplicationIntent);
+        Assert.Equal(Secret, builder.Password);
+    }
+
     [Fact]
     public void The_replica_connection_is_the_servers_own_with_the_host_swapped_and_read_only_intent()
     {
@@ -218,7 +234,10 @@ public sealed class QueryStoreReplicaSettingTests
     [InlineData("np:attacker")]
     [InlineData("lpc:attacker")]
     [InlineData("admin:attacker")]
-    [InlineData("tcp:attacker,1433")]
+    [InlineData("tcp:np:attacker")]
+    [InlineData("tcp:\\\\attacker\\share")]
+    [InlineData("TCP:tcp:attacker")]
+    [InlineData("tcp:")]
     [InlineData("  NP:attacker")]
     [InlineData("\\\\attacker\\share")]
     [InlineData("\\attacker")]
@@ -241,6 +260,10 @@ public sealed class QueryStoreReplicaSettingTests
     [InlineData("10.1.2.3,1433")]
     [InlineData("[fe80::1]")]
     [InlineData("2001:db8::1")]
+    [InlineData("tcp:attacker,1433")]
+    [InlineData("TCP:replica-01")]
+    [InlineData("tcp:[fe80::1],1433")]
+    [InlineData("tcp:2001:db8::1")]
     public void A_plain_host_host_port_instance_or_listener_name_is_allowed(string? value)
     {
         Assert.Null(QueryStoreReplicaSetting.Refusal(value));
