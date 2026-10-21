@@ -217,7 +217,7 @@ public sealed class DarlingConfigTests
     {
         var connectionString = MonitoredServerConnection.BuildConnectionString(Server());
         var parsed = new SqlConnectionStringBuilder(connectionString);
-
+        Assert.Equal("tcp:SQL2022", parsed.DataSource);
         Assert.Equal("SQL2022", parsed.DataSource);
         Assert.Equal("master", parsed.InitialCatalog);
         Assert.Equal("PerformanceMonitorDarling", parsed.ApplicationName);

@@ -34,7 +34,8 @@ public static class MonitoredServerConnection
 
         var builder = new SqlConnectionStringBuilder
         {
-            DataSource = server.Host,
+            /* tcp: so SqlClient never falls back to a named pipe over SMB with this process's Windows credentials (#6352). */
+            DataSource = PerformanceMonitor.Common.ServerHostSetting.TcpDataSource(server.Host),
             InitialCatalog = string.IsNullOrWhiteSpace(server.Database) ? "master" : server.Database,
             ApplicationName = "PerformanceMonitorDarling",
             ConnectTimeout = 15,
@@ -144,7 +145,8 @@ public static class MonitoredServerConnection
 
         var builder = new SqlConnectionStringBuilder
         {
-            DataSource = server.Host,
+            /* tcp: so SqlClient never falls back to a named pipe over SMB with this process's Windows credentials (#6352). */
+            DataSource = PerformanceMonitor.Common.ServerHostSetting.TcpDataSource(server.Host),
             InitialCatalog = string.IsNullOrWhiteSpace(server.Database) ? "master" : server.Database,
             ApplicationName = RemediationApplicationName,
             ConnectTimeout = 15,
