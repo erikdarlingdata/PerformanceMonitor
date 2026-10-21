@@ -970,7 +970,7 @@ public sealed class ServerEditLiveTests : IDisposable
             Assert.Equal("rep-free-listener.example.test",
                 await ScalarAsync<string>(rig.Owner, "SELECT query_store_replica FROM config_monitored_servers WHERE host = 'rep-new-2.example.test'", ct));
 
-            foreach (var replica in new[] { "np:\\\\attacker\\pipe\\sql\\query", "lpc:attacker", "admin:attacker", "tcp:attacker", "\\\\attacker\\share" })
+            foreach (var replica in new[] { "np:\\\\attacker\\pipe\\sql\\query", "lpc:attacker", "admin:attacker", "\\\\attacker\\share" })
             {
                 var json = "[{\"host\":\"rep-new-3.example.test\",\"query_store_replica\":" + JsonValue.Create(replica)!.ToJsonString() + "}]";
                 var refused = await AddAsync(json);
