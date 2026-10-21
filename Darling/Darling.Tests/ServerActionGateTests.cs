@@ -444,6 +444,87 @@ public sealed class ServerActionGateLiveTests
         });
     }
 
+    /* The write's levels come from rows the hook reads in the write's own transaction: a route's level, or the server's tag rows (a tag-scoped
+       route matches a server through them). A person's change to those rows that has not committed when the write reads them is waited for,
+       because the write holds them FOR SHARE; a plain read would see the committed old rows and write. */
+    private AgentActionHooks RowHooks(string levelSql, Func<CancellationToken, Task> inFlight) => new()
+    {
+        LoadLevels = async (connection, transaction, token) =>
+        {
+            await using var read = new NpgsqlCommand(levelSql, connection, transaction);
+            var level = Convert.ToInt32(await read.ExecuteScalarAsync(token), CultureInfo.InvariantCulture);
+            return (_, _) => level;
+        },
+        ReadBefore = async (_, _, token) =>
+        {
+            await inFlight(token);
+            return "{\"reason\":\"old\"}";
+        },
+        Write = (_, _, _) => { _writes++; return Task.FromResult<string?>("{\"reason\":\"new\"}"); },
+    };
+
+    /* A route or tag edit normally bumps the service row's version, and the write reads that row FOR SHARE, so it would wait for the edit anyway.
+       These edits do not bump (a direct edit with triggers off), so only the lock on the rows themselves makes the write wait. */
+    private const string NoVersionBump = "SET LOCAL session_replication_role = replica; ";
+
+    private static Func<CancellationToken, Task> UncommittedChange(NpgsqlDataSource source, string sql, Action<Task> keep) => async token =>
+    {
+        var writer = await source.OpenConnectionAsync(token);
+        var transaction = await writer.BeginTransactionAsync(token);
+        await using (var update = new NpgsqlCommand(sql, writer, transaction))
+        {
+            await update.ExecuteNonQueryAsync(token);
+        }
+
+        keep(Task.Run(async () =>
+        {
+            await Task.Delay(1000, CancellationToken.None);
+            await transaction.CommitAsync(CancellationToken.None);
+            await transaction.DisposeAsync();
+            await writer.DisposeAsync();
+        }, CancellationToken.None));
+    };
+
+    [Fact]
+    public async Task TheWrite_WaitsForARouteBeingLowered_ThenRefusesLevelThree_AndNothingReachesTheServer()
+    {
+        await RunAsync(async (store, connection, source, ct) =>
+        {
+            await ArmAsync(connection, switchOn: true, "svc", "env:X", ct);
+            await ExecAsync(connection, "INSERT INTO config.config_notification_routes (route_id, metric_match, agent_level) OVERRIDING SYSTEM VALUE VALUES (4001, 'Blocking', 3)", ct);
+            var (request, claim) = await OpenAndClaimAsync(store, 3);
+            Task? commit = null;
+            var hooks = RowHooks("SELECT agent_level FROM config.config_notification_routes WHERE route_id = 4001",
+                UncommittedChange(source, NoVersionBump + "UPDATE config.config_notification_routes SET agent_level = 2 WHERE route_id = 4001", t => commit = t));
+            var result = await store.RunAgentActionAsync(WriteCall(request, claim), hooks, ct);
+            await commit!;
+            Assert.Equal(AgentActionCodes.NotLevel3, result.Refusal?.Reason);
+            Assert.Equal(0, _writes);
+            Assert.Equal("action_called|action_failed", await EventsAsync(connection, request, ct));
+        });
+    }
+
+    [Fact]
+    public async Task TheWrite_WaitsForAServerTagBeingRemoved_ThenRefusesLevelThree_AndNothingReachesTheServer()
+    {
+        await RunAsync(async (store, connection, source, ct) =>
+        {
+            await ArmAsync(connection, switchOn: true, "svc", "env:X", ct);
+            await ExecAsync(connection, "INSERT INTO config.server_tags (id, name) OVERRIDING SYSTEM VALUE VALUES (9101, 'prod')", ct);
+            await ExecAsync(connection, "INSERT INTO config.server_tag_map (server_id, tag_id) VALUES (7, 9101)", ct);
+            var (request, claim) = await OpenAndClaimAsync(store, 3);
+            Task? commit = null;
+            /* A tag-scoped Level 3 route reaches the server only while it holds the tag: the level is 3 with the tag row and 0 without. */
+            var hooks = RowHooks("SELECT CASE WHEN EXISTS (SELECT 1 FROM config.server_tag_map WHERE server_id = 7) THEN 3 ELSE 0 END",
+                UncommittedChange(source, NoVersionBump + "DELETE FROM config.server_tag_map WHERE server_id = 7", t => commit = t));
+            var result = await store.RunAgentActionAsync(WriteCall(request, claim), hooks, ct);
+            await commit!;
+            Assert.Equal(AgentActionCodes.NotLevel3, result.Refusal?.Reason);
+            Assert.Equal(0, _writes);
+            Assert.Equal("action_called|action_failed", await EventsAsync(connection, request, ct));
+        });
+    }
+
     private async Task RunAsync(Func<InvestigationRequestStore, NpgsqlConnection, NpgsqlDataSource, CancellationToken, Task> body)
     {
         var baseConnectionString = ConnectionString;

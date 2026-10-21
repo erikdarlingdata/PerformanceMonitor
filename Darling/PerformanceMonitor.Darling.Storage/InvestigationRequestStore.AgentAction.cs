@@ -122,6 +122,12 @@ public sealed partial class InvestigationRequestStore
     /// waits for the write. The <c>mcp</c> role may lock them: it holds <c>UPDATE</c> on two columns of the table.</summary>
     internal const string RoutesLockSql = "SELECT 1 FROM config.config_notification_routes FOR SHARE";
 
+    /// <summary>The tag tree and the server-to-tag rows a tag-scoped route is expanded from, <c>FOR SHARE</c> for the write's transaction (mcp holds
+    /// the UPDATE grant on both, so the lock needs no new grant).</summary>
+    internal const string TagsLockSql = "SELECT 1 FROM config.server_tags FOR SHARE";
+
+    internal const string TagMapLockSql = "SELECT 1 FROM config.server_tag_map FOR SHARE";
+
     /// <summary>The request row the gate checks, held <c>FOR SHARE</c> for the gate's transaction (#5912), so a submit,
     /// release or claim (each takes the row <c>FOR UPDATE</c> or updates it) waits for the gate, and the gate for them.</summary>
     internal const string AgentActionRequestSql = @"
@@ -397,6 +403,10 @@ RETURNING journal_id";
             await ServerActionSwitchLock.AcquireSharedAsync(connection, transaction, call.Target.ServerId, serverAction,
                 _commandTimeoutSeconds, cancellationToken);
         await ExecAsync(connection, transaction, RoutesLockSql, cancellationToken);
+        /* A tag-scoped route matches a server through the tag tree and the server's tag rows, so those are held too: a tag removed from the server
+           after the write began would otherwise change which route (and level) applies. Same order as the routes, before the service row. */
+        await ExecAsync(connection, transaction, TagsLockSql, cancellationToken);
+        await ExecAsync(connection, transaction, TagMapLockSql, cancellationToken);
 
         if (await ActionsOffRefusalAsync(connection, transaction, lockRow: true, cancellationToken) is { } off)
             return off;
