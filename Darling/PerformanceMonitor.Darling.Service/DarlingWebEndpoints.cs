@@ -97,6 +97,7 @@ public static class DarlingWebEndpoints
     internal static readonly IReadOnlySet<string> WebOnlyReadNames = new HashSet<string>(StringComparer.Ordinal)
     {
         "get_alert_details",
+        "get_block_chain",
     };
 
     /// <summary>The tool names deliberately absent from the <c>/api/read/*</c> 1:1 read surface. <c>analyze_server</c>
@@ -7513,6 +7514,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             /* ── blocking / deadlocks (DarlingMcpBlockingTools) ── */
             ["get_blocked_process_xml"] = R(CatBlocking, "Blocked-process-report XML captures.", PServer(), PHours(24), PLimit(5), PDatabases(), PAsOf()),
+            /* #6292: a web-only read (no MCP tool behind it, see WebOnlyReadNames): the lead-blocker tree of one blocked-process row,
+               fetched when the row's Block chain action is used. The key is the page's own row identity. */
+            ["get_block_chain"] = R(CatBlocking, "The lead-blocker tree of one blocked-process row: the lead blocker at the root and the sessions it blocks under it, built from the blocked-process reports and DMV blocking snapshots within five minutes of the row, exactly as the desktop viewer builds it.", PServer(), PReqText("event_time"), PReqInt("blocked_spid"), PInt("blocked_ecid", 0)),
             ["get_blocking"] = R(CatBlocking, "Blocking chains observed in the window.", PServer(), PHours(24), PLimit(30), PDatabases(), PAsOf()),
             ["get_blocking_trend"] = R(CatBlocking, "Blocking-event counts over time.", PServer(), PHours(24), PDatabases(), PAsOf()),
             ["get_deadlock_detail"] = R(CatBlocking, "Deadlock graph detail for recent deadlocks.", PServer(), PHours(24), PLimit(5), PBool("full_graph", true), PAsOf()),
@@ -8519,6 +8523,14 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_blocking"] = (c, pg, an) => DatabaseNames(c) is { } databases
                 ? DarlingMcpBlockingTools.GetBlocking(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), null, false, AsOf(c), databases, DarlingMcpBlockingTools.WebSqlTextPreviewLength, registryState, logger, c.RequestAborted)
                 : DatabaseNamesRefusal(c),
+            /* #6292: the web-only Block chain read. A key that is present but unreadable is refused, never defaulted; an omitted ecid is 0, as the
+               grid carries it. The tree is the Viewer's own, built by the shared reconstruction. */
+            ["get_block_chain"] = (c, pg, an) => !RequireText(c, "event_time", out var chainEventTime)
+                ? MissingParam("event_time")
+                : !OptionalInt(c, "blocked_spid", out var chainSpid) ? UnparseableParam("blocked_spid")
+                : chainSpid is null ? MissingParam("blocked_spid")
+                : !OptionalInt(c, "blocked_ecid", out var chainEcid) ? UnparseableParam("blocked_ecid")
+                : DarlingWebBlockChain.GetBlockChain(pg, Server(c), chainEventTime, chainSpid.Value, chainEcid ?? 0, c.RequestAborted),
             ["get_blocking_trend"] = (c, pg, an) => DatabaseNames(c) is { } databases
                 ? DarlingMcpBlockingTools.GetBlockingTrend(pg, Server(c), Hours(c, 24), AsOf(c), databases, c.RequestAborted)
                 : DatabaseNamesRefusal(c),
