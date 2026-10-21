@@ -245,7 +245,8 @@ CREATE TRIGGER test_fail_every_undone BEFORE INSERT ON config.investigation_jour
             Assert.Null(await c.Sql.ForcedPlanAsync(query, c.Ct));
             Assert.Empty(await RowsAsync(c, "action_undone"));
             Assert.Equal(refusedBefore, (await RowsAsync(c, "refused")).Count);
-            var change = Assert.Single((await new AgentChangeUndo(c.Source, 30).ReadAsync(50, c.Ct)).Changes);
+            /* The person's attempt is on the list as a call with no result; the change it tried to undo is still offered. */
+            var change = Assert.Single((await new AgentChangeUndo(c.Source, 30).ReadAsync(50, c.Ct)).Changes, x => x.CalledId == called);
             Assert.Null(change.UndoneBy);
             Assert.True(change.CanTryUndo(DateTime.UtcNow));
 
@@ -263,11 +264,10 @@ CREATE TRIGGER test_fail_every_undone BEFORE INSERT ON config.investigation_jour
         await RunAsync(Without.Nothing, async c =>
         {
             var (query, planA, _) = await c.Sql.TwoPlansAsync("pf13z", c.Ct);
-            PerformanceMonitor.Darling.Remediation.SqlServerRemediationExecutor.PlanWriteSeam.Value = async (command, token) =>
-            {
-                await command.ExecuteNonQueryAsync(token);
+            /* The reply is lost before the procedure ran, so the plan is not forced: the tool reads it again and leaves the call with no result row.
+               (When the plan is forced, the call gets a late action_done: PlanForceToolLiveTests.UndoJournal.) */
+            PerformanceMonitor.Darling.Remediation.SqlServerRemediationExecutor.PlanWriteSeam.Value = (_, _) =>
                 throw new System.IO.IOException("The connection was reset.");
-            };
             string answer;
             try
             {
@@ -279,7 +279,7 @@ CREATE TRIGGER test_fail_every_undone BEFORE INSERT ON config.investigation_jour
             }
 
             Assert.Equal("outcome_unknown", (string?)Parse(answer)["status"]);
-            Assert.Equal(planA, await c.Sql.ForcedPlanAsync(query, c.Ct));
+            Assert.Null(await c.Sql.ForcedPlanAsync(query, c.Ct));
             Assert.Single(await RowsAsync(c, "action_called"));
             Assert.Empty(await RowsAsync(c, "action_failed"));
             Assert.Empty(await RowsAsync(c, "action_done"));

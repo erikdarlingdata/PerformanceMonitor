@@ -252,6 +252,10 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
         {
             ArgumentNullException.ThrowIfNull(ownerSource);
             var store = new InvestigationRequestStore(_owner._dataSource, _owner._commandTimeoutSeconds);
+            /* The shared form of the server's switch lock, in the session's transaction and before the switch is read, as an agent's write takes it:
+               a switch writer that takes the exclusive form then waits for this undo, and an undo that starts after it reads the committed switch. */
+            await ServerActionSwitchLock.AcquireSharedAsync(_connection, _transaction, Facts.ServerId, ServerActionNames.ForcePlan,
+                _owner._commandTimeoutSeconds, cancellationToken);
             var refusal = await store.SwitchAndCredentialRefusalAsync(_connection, _transaction, Facts.ServerId, Facts.ServerName, ServerActionNames.ForcePlan,
                 (serverId, token) => store.ReadServerCredentialStateAsync(ownerSource, serverId, token), person: true, cancellationToken);
             if (refusal is not null)
@@ -277,6 +281,46 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
                 PText("refused"), PText(Actor), PText(code),
                 PText(new JsonObject { ["tool"] = PlanUndoTool, ["called_id"] = Facts.CalledId }.ToJsonString()), PText(onceKey));
             await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        /// <summary>
+        /// The undo's write was sent and its reply was lost, or the call was cancelled while it ran (#5632): the plan may have changed. Journals the
+        /// attempt as an <c>action_called</c> row of kind <see cref="AgentChangeKinds.PlanUndo"/> with the person as the actor and no result row,
+        /// the way a kill whose reply was lost is journaled, so the Agent changes list reads it as "result unknown" next to the change it tried to
+        /// undo. It is written and committed here with no cancellation (the caller's token may be the thing that fired), on a fresh connection when
+        /// the session's own cannot take it. The change itself stays offered: its next undo reads the server first. Best effort: a store that
+        /// cannot be written leaves only the service log.
+        /// </summary>
+        public async Task RecordOutcomeUnknownAsync(string statement)
+        {
+            var detail = new JsonObject
+            {
+                ["kind"] = AgentChangeKinds.PlanUndo,
+                ["tool"] = PlanUndoTool,
+                ["called_id"] = Facts.CalledId,
+                ["target"] = Facts.Target?.DeepClone(),
+                ["statement"] = statement,
+            }.ToJsonString();
+            try
+            {
+                await _owner.JournalAsync(_connection, _transaction, "action_called", Actor, Facts.RequestId, Facts.ServerId, detail, CancellationToken.None);
+                await _transaction.CommitAsync(CancellationToken.None);
+                _done = true;
+                return;
+            }
+            catch (Exception)
+            {
+                /* The session's transaction cannot take it: write it on its own. */
+            }
+
+            try
+            {
+                await using var connection = await _owner._dataSource.OpenConnectionAsync(CancellationToken.None);
+                await _owner.JournalAsync(connection, null, "action_called", Actor, Facts.RequestId, Facts.ServerId, detail, CancellationToken.None);
+            }
+            catch (Exception)
+            {
+            }
         }
 
         /// <summary>
@@ -386,8 +430,10 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
             {
                 try
                 {
-                    RecordedLate = attempt == 0 && _sessionLocked && _connection.State == System.Data.ConnectionState.Open
-                        ? await InsertLateAsync(_connection, text, takeLock: false, endFirst: true)
+                    /* While this session's connection is open every attempt runs on it: a statement timeout or a deadlock leaves it usable and it holds
+                       the call's lock, so a fresh connection would wait on a lock its own session holds. A fresh one is for a broken connection only. */
+                    RecordedLate = _connection.State == System.Data.ConnectionState.Open
+                        ? await InsertLateAsync(_connection, text, takeLock: !_sessionLocked, endFirst: true)
                         : await InsertLateOnFreshConnectionAsync(text);
                     _lateHandled = true;
                     return;
@@ -451,28 +497,42 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
         public async ValueTask DisposeAsync()
         {
             _done = true;
-            await _transaction.DisposeAsync();
-            if (_sessionLocked)
+            try
             {
                 try
                 {
-                    await using var unlock = _owner.Command(_connection, null, "SELECT pg_advisory_unlock($1)", P(Facts.CalledId));
-                    await unlock.ExecuteNonQueryAsync(CancellationToken.None);
+                    await _transaction.DisposeAsync();
                 }
                 catch (Exception)
                 {
-                    /* A pooled connection keeps a session lock until it is reused: close this one for good instead. */
+                    /* A broken connection: the unlock below fails too and the pool is cleared. */
+                }
+
+                if (_sessionLocked)
+                {
                     try
                     {
-                        NpgsqlConnection.ClearPool(_connection);
+                        await using var unlock = _owner.Command(_connection, null, "SELECT pg_advisory_unlock($1)", P(Facts.CalledId));
+                        await unlock.ExecuteNonQueryAsync(CancellationToken.None);
                     }
                     catch (Exception)
                     {
+                        /* A pooled connection keeps a session lock until it is reused: have the data source close its connections for good instead.
+                           (NpgsqlConnection.ClearPool clears only the pools of connection strings, not a data source's.) */
+                        try
+                        {
+                            _owner._dataSource.Clear();
+                        }
+                        catch (Exception)
+                        {
+                        }
                     }
                 }
             }
-
-            await _connection.DisposeAsync();
+            finally
+            {
+                await _connection.DisposeAsync();
+            }
         }
     }
 }

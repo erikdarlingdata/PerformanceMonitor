@@ -297,7 +297,14 @@ public sealed class DarlingMcpPlanForceTools
                 if (result.Refusal is { } refused)
                     return DarlingAgentActionGate.RefusalAnswer(refused);
                 if (result.OutcomeUnknown && unknown is not null)
+                {
+                    /* A force whose reply was lost may still have taken effect: read the plan again, and when it is forced, journal action_done late so the
+                       post-force checks run. A read that fails or shows it not forced leaves the call as it is, with no result row. */
+                    if (force && result.CalledId is long unknownCalled)
+                        await RecordUnknownForceTookEffectAsync(store, executor, permit, logger, action!, resolved.ServerId, unknownCalled, statement, query_id, plan_id);
                     return Answer("outcome_unknown", null, unknown.Message, new { dry_run = false, statement, before = beforeState, journal_id = result.CalledId });
+                }
+
                 return WithWarnings(Answer("done", null,
                     $"Plan {plan_id} was {(force ? "forced" : "unforced")} for query {query_id} in {beforeState.Database}. Check with get_forced_plans.",
                     new { dry_run = false, statement, before = beforeState, after, undo = AgentPlanUndoBuilder.For(force, resolved.ServerName, beforeState.Database, query_id, plan_id, beforeState.ForcedPlan?.PlanId, beforeState.ForcedPlan?.ForcingType), journal_id = result.CalledId }),
@@ -311,6 +318,34 @@ public sealed class DarlingMcpPlanForceTools
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError(tool, ex);
+        }
+    }
+
+    /// <summary>How long the read after a force with an unknown outcome may take. It has its own token: the call's may be the one that fired.</summary>
+    private static readonly TimeSpan UnknownForceReadTimeout = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// A forward force was sent and its reply was lost (#5632): the plan may be forced, and a force with no <c>action_done</c> gets no post-force
+    /// checks. Reads the plan's state again with a fresh token (on the executor's own connection, which is a fresh one per call) and, when the plan is
+    /// forced now, journals <c>action_done</c> marked <c>recorded_late</c>, as for a force the store could not record. Best effort: a read or a
+    /// write that fails, or a plan that is not forced, leaves the call with no result row, which reads as "result unknown".
+    /// </summary>
+    private static async Task RecordUnknownForceTookEffectAsync(InvestigationRequestStore store, SqlServerRemediationExecutor executor, ServerActionPermit permit,
+        ILogger logger, AgentAction action, int serverId, long calledId, string statement, long queryId, long planId)
+    {
+        try
+        {
+            using var fresh = new CancellationTokenSource(UnknownForceReadTimeout);
+            var read = await executor.ReadPlanStateAsync(permit, queryId, planId, fresh.Token);
+            if (read.State is not { } state || state.RequestedPlan is not { IsForced: true })
+                return;
+            var after = JsonSerializer.Serialize(new { statement, state, message = "The reply to the force was lost; the plan was found forced when the server was read again." });
+            await store.RecordForceTookEffectAsync(action.RequestId, serverId, action.AgentId, calledId, after,
+                "The reply to the force was lost; the plan was found forced when the server was read again.");
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning("The state read after the force of plan {PlanId} for query {QueryId} with an unknown outcome failed: {Message}", planId, queryId, ex.Message);
         }
     }
 
@@ -970,10 +1005,12 @@ public sealed class DarlingMcpPlanForceTools
             : await executor.UnforcePlanAsync(stepPermit, facts.QueryId, step.PlanId, dryRun: false, ct);
         if (written.Outcome == RemediationOutcome.Unknown)
         {
-            /* The write was sent and its reply was lost, or the call was cancelled while it ran (#5632): the plan may have changed. Nothing is
-               journaled: not undone (the server did not confirm it) and not refused (it was not). The change stays offered for undo, and the
-               server-state check on the next try decides whether the undo still applies. */
+            /* The write was sent and its reply was lost, or the call was cancelled while it ran (#5632): the plan may have changed. It is not
+               journaled as undone (the server did not confirm it) or refused (it was not): the attempt is an action_called row with no result,
+               as for a kill, so a possible change by a person shows in the Agent changes list as "result unknown" and not only in the service log.
+               The change stays offered for undo, and the server-state check on the next try decides whether the undo still applies. */
             logger.LogWarning("The undo of plan change {CalledId} was sent, but its outcome is unknown: {Message}", facts.CalledId, written.Message);
+            await session.RecordOutcomeUnknownAsync(statement);
             return new PlanUndoAnswer(PlanUndoAnswer.OutcomeUnknown, RemediationResult.Reasons.OutcomeUnknown, UndoOutcomeUnknownWords, statement, stateNode);
         }
 

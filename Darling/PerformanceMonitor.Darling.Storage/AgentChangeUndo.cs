@@ -752,7 +752,7 @@ ORDER BY journal_id DESC LIMIT 1",
         return await command.ExecuteScalarAsync(cancellationToken) is string text ? JsonNode.Parse(text) as JsonObject ?? new JsonObject() : null;
     }
 
-    private async Task JournalAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, string journalEvent, string actor,
+    private async Task JournalAsync(NpgsqlConnection connection, NpgsqlTransaction? transaction, string journalEvent, string actor,
         Guid? requestId, int? serverId, string detailJson, CancellationToken cancellationToken)
     {
         await using var command = Command(connection, transaction, InvestigationRequestStore.AgentActionJournalSql,
