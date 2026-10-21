@@ -126,13 +126,21 @@ WHERE route_id = $1";
 
     /// <summary>Clears every other route's fallback reference to the route, then deletes it, in one transaction (#6036; #6264: the one
     /// copy the Viewer and the web page share). False when the route is gone. A store error (SQLSTATE 42501 for a login with no write
-    /// grant) propagates.</summary>
+    /// grant) propagates. #6274: when <paramref name="login"/> names the person deleting and the route had an agent level (an Off route
+    /// stops the lookup, so deleting it can hand its servers to a broader agent route), a <c>route_agent_changed</c> journal row is
+    /// written in the same transaction.</summary>
     public static async Task<bool> DeleteAsync(
-        NpgsqlDataSource dataSource, int routeId, int timeoutSeconds, CancellationToken cancellationToken)
+        NpgsqlDataSource dataSource, int routeId, int timeoutSeconds, CancellationToken cancellationToken, string? login = null)
     {
         ArgumentNullException.ThrowIfNull(dataSource);
+        if (login is not null && InvestigationProfiles.ValidateLogin(login) is { } loginError)
+        {
+            throw new NotificationRouteRefusedException(loginError, NotificationRouteRefusalKind.Validation);
+        }
+
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var before = login is null ? null : await TryLockAsync(connection, transaction, routeId, timeoutSeconds, cancellationToken);
         await using (var clear = new NpgsqlCommand(ClearFallbackSql, connection, transaction))
         {
             clear.CommandTimeout = timeoutSeconds;
@@ -148,8 +156,59 @@ WHERE route_id = $1";
             deleted = await delete.ExecuteNonQueryAsync(cancellationToken);
         }
 
+        if (deleted > 0 && login is not null && AgentChange(before, null) is { } change)
+        {
+            await InvestigationPersonJournal.InsertAsync(
+                connection, transaction, null, routeId, before!.ScopeServerId, AgentChangedEvent,
+                InvestigationProfiles.PersonActor(login), change.Reason, change.Detail, timeoutSeconds, cancellationToken);
+        }
+
         await transaction.CommitAsync(cancellationToken);
         return deleted > 0;
+    }
+
+    public const string SetEnabledSql =
+        "UPDATE config_notification_routes SET enabled = $2, modified_at = (now() AT TIME ZONE 'UTC') WHERE route_id = $1";
+
+    /// <summary>Turns a route on or off (#6274: the one copy the Viewer's toggle shares). False when the route is gone. When
+    /// <paramref name="login"/> names the person and the route has an agent level, the change is journaled as
+    /// <c>route_agent_changed</c> in the same transaction: a disabled route is dropped from the lookup, so turning an Off route off
+    /// can hand its servers to a broader agent route.</summary>
+    public static async Task<bool> SetEnabledAsync(
+        NpgsqlDataSource dataSource, int routeId, bool enabled, int timeoutSeconds, CancellationToken cancellationToken, string? login = null)
+    {
+        ArgumentNullException.ThrowIfNull(dataSource);
+        if (login is not null && InvestigationProfiles.ValidateLogin(login) is { } loginError)
+        {
+            throw new NotificationRouteRefusedException(loginError, NotificationRouteRefusalKind.Validation);
+        }
+
+        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var before = login is null ? null : await TryLockAsync(connection, transaction, routeId, timeoutSeconds, cancellationToken);
+        int updated;
+        await using (var update = new NpgsqlCommand(SetEnabledSql, connection, transaction))
+        {
+            update.CommandTimeout = timeoutSeconds;
+            update.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });
+            update.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = enabled });
+            updated = await update.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        if (updated > 0 && login is not null && before is not null)
+        {
+            var after = before.Clone();
+            after.Enabled = enabled;
+            if (AgentChange(before, after) is { } change)
+            {
+                await InvestigationPersonJournal.InsertAsync(
+                    connection, transaction, null, routeId, before.ScopeServerId, AgentChangedEvent,
+                    InvestigationProfiles.PersonActor(login), change.Reason, change.Detail, timeoutSeconds, cancellationToken);
+            }
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return updated > 0;
     }
 
     /// <summary>The columns an update needs to carry a route's stored values forward: the four sealed destinations (or legacy
@@ -655,17 +714,8 @@ WHERE route_id = $1";
         NpgsqlConnection connection, NpgsqlTransaction transaction, int routeId, DateTime? expected, int timeoutSeconds,
         CancellationToken cancellationToken)
     {
-        await using var command = new NpgsqlCommand(LockSql, connection, transaction);
-        command.CommandTimeout = timeoutSeconds;
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        if (!await reader.ReadAsync(cancellationToken))
-        {
-            throw new NotificationRouteRefusedException(ConflictText, NotificationRouteRefusalKind.Conflict);
-        }
-
-        var row = ReadStoredRow(reader);
-        if (expected is { } want && want != default && row.ModifiedAtUtc?.Ticks != want.Ticks)
+        var row = await TryLockAsync(connection, transaction, routeId, timeoutSeconds, cancellationToken);
+        if (row is null || (expected is { } want && want != default && row.ModifiedAtUtc?.Ticks != want.Ticks))
         {
             throw new NotificationRouteRefusedException(ConflictText, NotificationRouteRefusalKind.Conflict);
         }
@@ -673,11 +723,24 @@ WHERE route_id = $1";
         return row;
     }
 
-    /// <summary>The reason and the before and after JSON of a change to the agent level, limits, scope or match, or null when none of them
-    /// changed. A new route (<paramref name="before"/> null) journals only when it sets an agent level.</summary>
-    private static (string Reason, string Detail)? AgentChange(NotificationRouteDraft? before, NotificationRouteDraft after)
+    /// <summary>Locks the route row for the rest of the transaction and returns it as it is now, or null when the route is gone.</summary>
+    private static async Task<NotificationRouteDraft?> TryLockAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, int routeId, int timeoutSeconds, CancellationToken cancellationToken)
     {
-        if (before is null && after.AgentLevel is null)
+        await using var command = new NpgsqlCommand(LockSql, connection, transaction);
+        command.CommandTimeout = timeoutSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken) ? ReadStoredRow(reader) : null;
+    }
+
+    /// <summary>The reason and the before and after JSON of a change to the agent level, limits, scope or match, or to whether the route
+    /// is enabled, or null when none of them changed. A new route (<paramref name="before"/> null) journals only when it sets an agent
+    /// level; a deleted one (<paramref name="after"/> null) only when it had one. A disabled route is dropped from the agent lookup (an
+    /// Off route included), so enabling or disabling a route that has or had an agent level moves servers between agent routes.</summary>
+    private static (string Reason, string Detail)? AgentChange(NotificationRouteDraft? before, NotificationRouteDraft? after)
+    {
+        if ((before is null && after?.AgentLevel is null) || (after is null && before?.AgentLevel is null))
         {
             return null;
         }
@@ -691,14 +754,19 @@ WHERE route_id = $1";
             }
         }
 
-        Compare("metric_match", before?.MetricMatch.Trim(), after.MetricMatch.Trim());
-        Compare("scope_server_id", before?.ScopeServerId, after.ScopeServerId);
-        Compare("scope_tag_id", before?.ScopeTagId, after.ScopeTagId);
-        Compare("agent_level", before?.AgentLevel, after.AgentLevel);
-        Compare("agent_max_per_hour", before?.AgentMaxPerHour, after.AgentMaxPerHour);
-        Compare("agent_max_per_day", before?.AgentMaxPerDay, after.AgentMaxPerDay);
-        Compare("agent_lease_minutes", before?.AgentLeaseMinutes, after.AgentLeaseMinutes);
-        Compare("agent_expiry_minutes", before?.AgentExpiryMinutes, after.AgentExpiryMinutes);
+        Compare("metric_match", before?.MetricMatch.Trim(), after?.MetricMatch.Trim());
+        Compare("scope_server_id", before?.ScopeServerId, after?.ScopeServerId);
+        Compare("scope_tag_id", before?.ScopeTagId, after?.ScopeTagId);
+        Compare("agent_level", before?.AgentLevel, after?.AgentLevel);
+        Compare("agent_max_per_hour", before?.AgentMaxPerHour, after?.AgentMaxPerHour);
+        Compare("agent_max_per_day", before?.AgentMaxPerDay, after?.AgentMaxPerDay);
+        Compare("agent_lease_minutes", before?.AgentLeaseMinutes, after?.AgentLeaseMinutes);
+        Compare("agent_expiry_minutes", before?.AgentExpiryMinutes, after?.AgentExpiryMinutes);
+        if (before?.AgentLevel is not null || after?.AgentLevel is not null)
+        {
+            Compare("enabled", before?.Enabled, after?.Enabled);
+        }
+
         if (names.Count == 0)
         {
             return null;
@@ -714,10 +782,11 @@ WHERE route_id = $1";
             ["agent_max_per_day"] = row.AgentMaxPerDay,
             ["agent_lease_minutes"] = row.AgentLeaseMinutes,
             ["agent_expiry_minutes"] = row.AgentExpiryMinutes,
+            ["enabled"] = row.Enabled,
         };
 
         var detail = new System.Text.Json.Nodes.JsonObject { ["before"] = Describe(before), ["after"] = Describe(after) };
-        return ("changed " + string.Join(", ", names), detail.ToJsonString());
+        return (after is null ? "deleted route" : "changed " + string.Join(", ", names), detail.ToJsonString());
     }
 
     /// <summary>Whether the route holds a signing key sealed for a stored URL text other than <paramref name="newUrlText"/> (#5998).

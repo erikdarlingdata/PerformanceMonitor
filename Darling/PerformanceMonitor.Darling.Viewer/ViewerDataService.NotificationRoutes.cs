@@ -64,8 +64,7 @@ public sealed partial class ViewerDataService
 
     public const string NotificationRouteUpdateSql = NotificationRouteWriter.UpdateSql;
 
-    public const string NotificationRouteSetEnabledSql =
-        "UPDATE config_notification_routes SET enabled = $2, modified_at = (now() AT TIME ZONE 'UTC') WHERE route_id = $1";
+    public const string NotificationRouteSetEnabledSql = NotificationRouteWriter.SetEnabledSql;
 
     /// <summary>The column has no foreign key (V193), so a delete clears the references to the deleted route first (#6036).</summary>
     public const string NotificationRouteClearFallbackSql = NotificationRouteWriter.ClearFallbackSql;
@@ -194,22 +193,48 @@ public sealed partial class ViewerDataService
         }
     }
 
-    public async Task SetNotificationRouteEnabledAsync(int routeId, bool enabled, CancellationToken cancellationToken = default)
-    {
-        await using var command = _dataSource.CreateCommand(NotificationRouteSetEnabledSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });
-        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = enabled });
-        await ExecuteWriteAsync(command, cancellationToken);
-    }
+    public Task SetNotificationRouteEnabledAsync(int routeId, bool enabled, CancellationToken cancellationToken = default) =>
+        SetNotificationRouteEnabledAsync(routeId, enabled, null, cancellationToken);
 
-    /// <summary>Clears every other route's fallback reference to the route (the column has no foreign key), then deletes it,
-    /// in one transaction (#6036).</summary>
-    public async Task DeleteNotificationRouteAsync(int routeId, CancellationToken cancellationToken = default)
+    /// <summary>Turns a route on or off. #6274: <paramref name="login"/> is the person; turning a route that has an agent level on or
+    /// off writes a <c>route_agent_changed</c> journal row in the same transaction (a disabled Off route no longer stops the lookup).</summary>
+    public async Task SetNotificationRouteEnabledAsync(int routeId, bool enabled, string? login, CancellationToken cancellationToken = default)
     {
         try
         {
-            await NotificationRouteWriter.DeleteAsync(_dataSource, routeId, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+            await NotificationRouteWriter.SetEnabledAsync(
+                _dataSource, routeId, enabled, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken, login);
+        }
+        catch (NotificationRouteRefusedException ex)
+        {
+            throw new ArgumentException(ex.Message, nameof(login));
+        }
+        catch (PostgresException ex) when (ex.SqlState == InsufficientPrivilegeSqlState)
+        {
+            throw new ViewerReadOnlyException(ex);
+        }
+        catch (PostgresException ex) when (ex.SqlState is UndefinedColumnSqlState or UndefinedTableSqlState)
+        {
+            throw new ViewerSchemaSkewException(ex);
+        }
+    }
+
+    public Task DeleteNotificationRouteAsync(int routeId, CancellationToken cancellationToken = default) =>
+        DeleteNotificationRouteAsync(routeId, null, cancellationToken);
+
+    /// <summary>Clears every other route's fallback reference to the route (the column has no foreign key), then deletes it,
+    /// in one transaction (#6036). #6274: <paramref name="login"/> is the person; deleting a route that had an agent level writes a
+    /// <c>route_agent_changed</c> journal row in the same transaction.</summary>
+    public async Task DeleteNotificationRouteAsync(int routeId, string? login, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await NotificationRouteWriter.DeleteAsync(
+                _dataSource, routeId, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken, login);
+        }
+        catch (NotificationRouteRefusedException ex)
+        {
+            throw new ArgumentException(ex.Message, nameof(login));
         }
         catch (PostgresException ex) when (ex.SqlState == InsufficientPrivilegeSqlState)
         {

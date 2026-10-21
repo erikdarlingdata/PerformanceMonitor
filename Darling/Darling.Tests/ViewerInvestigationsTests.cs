@@ -73,7 +73,7 @@ public sealed class ViewerInvestigationsValidationTests
         Assert.StartsWith("The viewer could not tell who you are", decide.Message, StringComparison.Ordinal);
         var note = await Assert.ThrowsAsync<ArgumentException>(() => viewer.WriteInvestigationNoteAsync(null, null, "text", "erik", 400));
         Assert.StartsWith("A note is kept from 1 to 365 days.", note.Message, StringComparison.Ordinal);
-        var profile = await Assert.ThrowsAsync<ArgumentException>(() => viewer.SaveInvestigationProfileAsync(1, 2, "text", "erik"));
+        var profile = await Assert.ThrowsAsync<ArgumentException>(() => viewer.SaveInvestigationProfileAsync(1, 2, "text", "erik", null));
         Assert.StartsWith("A profile is for the fleet, one server or one tag", profile.Message, StringComparison.Ordinal);
 
         /* #5913: feedback is refused in the rules' words, and a blank login before any store call. */

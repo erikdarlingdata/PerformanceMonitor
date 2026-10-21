@@ -51,6 +51,22 @@ VALUES ($1, $2, $3, now(), $4)
 ON CONFLICT ((coalesce(scope_server_id, 0)), (coalesce(scope_tag_id, 0)))
 DO UPDATE SET profile_text = EXCLUDED.profile_text, modified_at = EXCLUDED.modified_at, modified_by = EXCLUDED.modified_by";
 
+    /// <summary>Writes the first profile of a scope and nothing when one already exists (#6274). $1 server, $2 tag, $3 text, $4 actor.</summary>
+    public const string InsertNewSql = @"
+INSERT INTO config.agent_environment_profiles (scope_server_id, scope_tag_id, profile_text, modified_at, modified_by)
+VALUES ($1, $2, $3, now(), $4)
+ON CONFLICT DO NOTHING";
+
+    /// <summary>Locks the profile of a scope and returns its <c>modified_at</c> (#6274). $1 server, $2 tag (both NULL = fleet).</summary>
+    public const string LockSql = @"
+SELECT modified_at FROM config.agent_environment_profiles
+WHERE coalesce(scope_server_id, 0) = coalesce($1::integer, 0) AND coalesce(scope_tag_id, 0) = coalesce($2::integer, 0)
+FOR UPDATE";
+
+    /// <summary>The sentence a save answers when the scope's profile was changed or removed since the screen read it, or a first save
+    /// finds one already there.</summary>
+    public const string ConflictText = "This profile was changed or removed since you opened it. Reload it and make the change again.";
+
     /// <summary>Removes the profile of a scope (a profile saved blank). $1 server, $2 tag (both NULL = fleet).</summary>
     public const string DeleteSql = @"
 DELETE FROM config.agent_environment_profiles
@@ -78,6 +94,15 @@ WHERE coalesce(scope_server_id, 0) = coalesce($1::integer, 0) AND coalesce(scope
         scopeServerId is { } server ? string.Create(CultureInfo.InvariantCulture, $"server {server} profile")
         : scopeTagId is { } tag ? string.Create(CultureInfo.InvariantCulture, $"tag {tag} profile")
         : "fleet profile";
+}
+
+/// <summary>A profile save found the scope's profile changed or removed since the screen read it (#6274). The message is the
+/// sentence to show.</summary>
+public sealed class InvestigationProfileConflictException : Exception
+{
+    public InvestigationProfileConflictException() : base(InvestigationProfiles.ConflictText)
+    {
+    }
 }
 
 public sealed partial class InvestigationRequestStore
@@ -113,9 +138,14 @@ public sealed partial class InvestigationRequestStore
     /// are told leaves a trace (#5632 review L2). A blank save on a scope with no profile changes nothing and journals nothing. Returns
     /// whether a row was written or removed. Throws <see cref="ArgumentException"/> with the rule's sentence when the login or the profile
     /// is refused; a store error (including SQLSTATE 42501 for a login with no write grant) propagates.
+    /// <para>#6274: <paramref name="expectedModifiedAt"/> is the <c>modified_at</c> the writer's screen read for the scope, or null when it
+    /// showed no profile. The scope's row is locked first; a row that is gone, or whose <c>modified_at</c> is not the expected one, or a
+    /// first save that finds a profile already there, throws <see cref="InvestigationProfileConflictException"/> and writes nothing: two
+    /// admins' edits never silently replace one another. A blank save of a scope that has no profile, expecting none, changes nothing.</para>
     /// </summary>
     public async Task<bool> SaveProfileAsync(
-        int? scopeServerId, int? scopeTagId, string? profileText, string login, CancellationToken cancellationToken = default)
+        int? scopeServerId, int? scopeTagId, string? profileText, string login, DateTime? expectedModifiedAt,
+        CancellationToken cancellationToken = default)
     {
         var error = InvestigationProfiles.ValidateLogin(login) ?? InvestigationProfiles.Validate(scopeServerId, scopeTagId, profileText);
         if (error is not null)
@@ -127,11 +157,36 @@ public sealed partial class InvestigationRequestStore
         var actor = InvestigationProfiles.PersonActor(login);
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-        var changed = blank
-            ? await ExecAsync(connection, transaction, InvestigationProfiles.DeleteSql, cancellationToken,
-                NullableInt(scopeServerId), NullableInt(scopeTagId))
-            : await ExecAsync(connection, transaction, InvestigationProfiles.UpsertSql, cancellationToken,
-                NullableInt(scopeServerId), NullableInt(scopeTagId), P(profileText!.Trim()), P(actor));
+        DateTime? current;
+        await using (var lockCommand = Command(connection, transaction, InvestigationProfiles.LockSql, NullableInt(scopeServerId), NullableInt(scopeTagId)))
+        {
+            current = await lockCommand.ExecuteScalarAsync(cancellationToken) is DateTime stamp ? stamp : null;
+        }
+
+        /* The version the screen read must be the row's now: a changed, removed or newly created profile is the other admin's work. */
+        var expectedNone = expectedModifiedAt is null;
+        if (expectedNone ? current is not null : current is null || expectedModifiedAt!.Value.Ticks != current.Value.Ticks)
+        {
+            throw new InvestigationProfileConflictException();
+        }
+
+        int changed;
+        if (blank)
+        {
+            changed = current is null ? 0 : await ExecAsync(connection, transaction, InvestigationProfiles.DeleteSql, cancellationToken,
+                NullableInt(scopeServerId), NullableInt(scopeTagId));
+        }
+        else
+        {
+            changed = await ExecAsync(connection, transaction, expectedNone ? InvestigationProfiles.InsertNewSql : InvestigationProfiles.UpsertSql,
+                cancellationToken, NullableInt(scopeServerId), NullableInt(scopeTagId), P(profileText!.Trim()), P(actor));
+            if (changed == 0)
+            {
+                /* A first save that raced another first save: the row is theirs. */
+                throw new InvestigationProfileConflictException();
+            }
+        }
+
         if (changed > 0)
         {
             /* The store's clock, not this process's (#6274): the row is dated by now() in SQL, as the profile row is. */

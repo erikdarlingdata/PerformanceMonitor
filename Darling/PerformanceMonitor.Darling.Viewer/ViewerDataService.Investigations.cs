@@ -436,13 +436,16 @@ RETURNING note_id";
     /// leaves a trace (#5632 review L2). A blank save on a scope with no profile changes nothing and journals nothing.
     /// </summary>
     public async Task SaveInvestigationProfileAsync(
-        int? scopeServerId, int? scopeTagId, string? profileText, string login, CancellationToken cancellationToken = default)
+        int? scopeServerId, int? scopeTagId, string? profileText, string login, DateTime? expectedModifiedAt,
+        CancellationToken cancellationToken = default)
     {
-        /* #6264: the check, the write and the journal row are InvestigationRequestStore.SaveProfileAsync, the copy the web page shares. */
+        /* #6264: the check, the write and the journal row are InvestigationRequestStore.SaveProfileAsync, the copy the web page shares.
+           #6274: expectedModifiedAt is the modified_at the window showed for the scope (null = it showed none); a profile changed or
+           removed since throws InvestigationProfileConflictException and nothing is written. */
         try
         {
             await new InvestigationRequestStore(_dataSource, ViewerCommandDeadlines.CurrentInteractiveReadSeconds)
-                .SaveProfileAsync(scopeServerId, scopeTagId, profileText, login, cancellationToken);
+                .SaveProfileAsync(scopeServerId, scopeTagId, profileText, login, expectedModifiedAt, cancellationToken);
         }
         catch (PostgresException ex) when (ex.SqlState == InsufficientPrivilegeSqlState)
         {

@@ -11,7 +11,7 @@
      PUT    /api/notification-routes/{id}    edit a route (a field left out keeps its saved value)
      DELETE /api/notification-routes/{id}    delete a route
      GET    /api/environment-profiles        the profiles, with max_length and can_edit
-     PUT    /api/environment-profiles        {scope_server_id?, scope_tag_id?, profile_text}; blank text removes the scope's profile
+     PUT    /api/environment-profiles        {scope_server_id?, scope_tag_id?, profile_text, expected_modified_at?}; blank text removes the profile
      GET    /api/agent-setup/access          {can_edit_routes, can_edit_profiles}: whether the store login holds the write grants
    Editing shows only when the session can make changes AND the store login holds the grants; the viewer role (managed and compose
    stores) lists only, and a write the store refuses anyway answers 403 with its own sentence, which is shown as it came. A route's own
@@ -396,11 +396,11 @@ function profileForm(profiles, fleet, maxLength, ctx) {
   const scope = el("select", { class: "tag-input", "data-field": "profile-scope" }, choices.map((o) => el("option", { value: o.value, text: o.label })));
   scope.value = profileScope;
   const textBox = el("textarea", { class: "tag-input", rows: "8", maxlength: String(maxLength), "data-field": "profile-text" });
-  const savedOf = (value) => {
+  const profileOf = (value) => {
     const ids = profileScopeIds(value);
-    const p = profiles.find((x) => (x.scope_server_id ?? null) === ids.scope_server_id && (x.scope_tag_id ?? null) === ids.scope_tag_id);
-    return p ? p.profile_text : "";
+    return profiles.find((x) => (x.scope_server_id ?? null) === ids.scope_server_id && (x.scope_tag_id ?? null) === ids.scope_tag_id);
   };
+  const savedOf = (value) => profileOf(value)?.profile_text ?? "";
   textBox.value = profileText !== null ? profileText : savedOf(profileScope);
   scope.addEventListener("change", () => {
     profileScope = scope.value;
@@ -415,7 +415,16 @@ function profileForm(profiles, fleet, maxLength, ctx) {
       profileBusy = true;
       let out;
       try {
-        out = profileOutcome(await apiWrite("PUT", "/api/environment-profiles", { ...profileScopeIds(scope.value), profile_text: textBox.value }));
+        /* The version the page read for this scope (#6274): a profile saved by someone else since is refused with 409, not overwritten.
+           A scope with no profile sends none, and the store refuses it if a profile has appeared. */
+        const read = profileOf(scope.value);
+        const res = await apiWrite("PUT", "/api/environment-profiles", {
+          ...profileScopeIds(scope.value), profile_text: textBox.value,
+          ...(read ? { expected_modified_at: read.modified_at_utc } : {}),
+        });
+        out = profileOutcome(res);
+        /* After a refusal the draft is dropped, so the repaint shows what is saved now and the next save carries its version. */
+        if (res && res.status === 409) profileText = null;
       } catch (e) {
         out = { message: "Could not save the profile: " + (e && e.message ? e.message : String(e)), isError: true };
       }

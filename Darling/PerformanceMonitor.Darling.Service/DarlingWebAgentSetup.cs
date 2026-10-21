@@ -65,6 +65,9 @@ internal static class DarlingWebAgentSetup
         "expected_modified_at",
     ];
 
+    /// <summary>The body keys a profile write accepts (#6274). <c>modified_by</c> is not one: the signed-in person is the author.</summary>
+    private static readonly string[] s_profileKeys = ["scope_server_id", "scope_tag_id", "profile_text", "expected_modified_at"];
+
     /// <summary>Whether this store login can write routes and profiles: the routes table and the profile table for INSERT and UPDATE, and the
     /// journal for INSERT. The viewer role cannot, and the page then lists only.</summary>
     internal static async Task<JsonObject> AccessAsync(NpgsqlDataSource postgres, CancellationToken ct)
@@ -125,7 +128,8 @@ SELECT has_table_privilege(current_user, 'config_notification_routes', 'INSERT')
             {
                 if (body["expected_modified_at"] is not JsonValue expectedNode || expectedNode.GetValueKind() != JsonValueKind.String
                     || !DateTime.TryParse(expectedNode.GetValue<string>(), CultureInfo.InvariantCulture,
-                        DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var expected))
+                        DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var expected)
+                    || expected == default)
                 {
                     return Error(400, "expected_modified_at is required: send the modified_at_utc the page read for this route.");
                 }
@@ -181,13 +185,18 @@ SELECT has_table_privilege(current_user, 'config_notification_routes', 'INSERT')
     {
         try
         {
-            if (!await NotificationRouteWriter.DeleteAsync(postgres, routeId, McpCommandDeadlines.ReadSeconds, ct))
+            /* The editor is the person: deleting a route set to an agent level journals route_agent_changed (#6274). */
+            if (!await NotificationRouteWriter.DeleteAsync(postgres, routeId, McpCommandDeadlines.ReadSeconds, ct, editor))
             {
                 return Error(404, "That route is gone.");
             }
 
             logger.LogInformation("Web route write: deleted route {RouteId} by {Editor}", routeId, editor);
             return (200, new JsonObject { ["status"] = "deleted", ["route_id"] = routeId });
+        }
+        catch (NotificationRouteRefusedException ex)
+        {
+            return Error(400, ex.Message);
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.InsufficientPrivilege)
         {
@@ -238,13 +247,37 @@ SELECT has_table_privilege(current_user, 'config_notification_routes', 'INSERT')
             return Error(400, "profile_text must be text.");
         }
 
+        /* Only the page's own fields: who saved is the signed-in person, never a field of the body. */
+        if (body.Select(p => p.Key).FirstOrDefault(k => !s_profileKeys.Contains(k, StringComparer.Ordinal)) is { } unknown)
+        {
+            return Error(400, "Unknown field: " + (unknown.Length > 40 ? unknown[..40] : unknown) + ".");
+        }
+
+        /* The version the page read for this scope; absent or null when it showed no profile (#6274). */
+        DateTime? expected = null;
+        if (body["expected_modified_at"] is { } expectedNode && expectedNode.GetValueKind() != JsonValueKind.Null)
+        {
+            if (expectedNode.GetValueKind() != JsonValueKind.String
+                || !DateTime.TryParse(expectedNode.GetValue<string>(), CultureInfo.InvariantCulture,
+                    DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var parsed))
+            {
+                return Error(400, "expected_modified_at must be the modified_at_utc the page read for this profile.");
+            }
+
+            expected = parsed;
+        }
+
         var profileText = text?.GetValueKind() == JsonValueKind.String ? text.GetValue<string>() : null;
         try
         {
             var changed = await new InvestigationRequestStore(postgres, McpCommandDeadlines.ReadSeconds)
-                .SaveProfileAsync(server, tag, profileText, editor, ct);
+                .SaveProfileAsync(server, tag, profileText, editor, expected, ct);
             var status = !changed ? "unchanged" : string.IsNullOrWhiteSpace(profileText) ? "removed" : "saved";
             return (200, new JsonObject { ["status"] = status, ["scope_server_id"] = server, ["scope_tag_id"] = tag });
+        }
+        catch (InvestigationProfileConflictException ex)
+        {
+            return Error(409, ex.Message);
         }
         catch (ArgumentException ex)
         {

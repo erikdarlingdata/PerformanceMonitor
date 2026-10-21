@@ -85,10 +85,18 @@ FROM config.investigation_notes WHERE note_id = {written}", ct));
             Assert.Equal("1", await ScalarAsync(owner,
                 "SELECT count(*) FROM config.investigation_journal WHERE event = 'note_written' AND actor = 'person:tester'", ct));
 
-            await viewer.SaveInvestigationProfileAsync(null, null, "fleet: OLTP, business hours 08-18", "tester", ct);
-            await viewer.SaveInvestigationProfileAsync(7, null, "srv-7: reporting replica", "tester", ct);
-            await viewer.SaveInvestigationProfileAsync(null, 3, "tag 3: dev servers", "tester", ct);
-            await viewer.SaveInvestigationProfileAsync(null, null, "fleet: OLTP, 24x7", "tester", ct);
+            async Task<DateTime?> ShownAsync(int? server, int? tag) =>
+                (await viewer.GetInvestigationProfilesAsync(ct)).FirstOrDefault(p => p.ScopeServerId == server && p.ScopeTagId == tag)?.ModifiedAtUtc;
+
+            await viewer.SaveInvestigationProfileAsync(null, null, "fleet: OLTP, business hours 08-18", "tester", null, ct);
+            await viewer.SaveInvestigationProfileAsync(7, null, "srv-7: reporting replica", "tester", null, ct);
+            await viewer.SaveInvestigationProfileAsync(null, 3, "tag 3: dev servers", "tester", null, ct);
+            var staleFleet = await ShownAsync(null, null);
+
+            /* #6274: the window showed the fleet profile, someone else saved it, and this save is refused: the text stays theirs. */
+            await viewer.SaveInvestigationProfileAsync(null, null, "fleet: OLTP, 24x7", "tester", staleFleet, ct);
+            await Assert.ThrowsAsync<InvestigationProfileConflictException>(
+                () => viewer.SaveInvestigationProfileAsync(null, null, "fleet: an out-of-date edit", "tester", staleFleet, ct));
             var profiles = await viewer.GetInvestigationProfilesAsync(ct);
             Assert.Equal(3, profiles.Count);
             Assert.Equal("fleet: OLTP, 24x7", profiles[0].ProfileText);
@@ -98,9 +106,9 @@ FROM config.investigation_notes WHERE note_id = {written}", ct));
             Assert.Contains(profiles, p => p.ScopeServerId == 7 && p.ProfileText == "srv-7: reporting replica");
             Assert.Contains(profiles, p => p.ScopeTagId == 3 && p.ProfileText == "tag 3: dev servers");
 
-            await viewer.SaveInvestigationProfileAsync(7, null, "  ", "tester", ct);
+            await viewer.SaveInvestigationProfileAsync(7, null, "  ", "tester", await ShownAsync(7, null), ct);
             Assert.DoesNotContain(await viewer.GetInvestigationProfilesAsync(ct), p => p.ScopeServerId == 7);
-            await viewer.SaveInvestigationProfileAsync(7, null, "", "tester", ct);
+            await viewer.SaveInvestigationProfileAsync(7, null, "", "tester", null, ct);
 
             /* #5632 review L2: every save and the blank save are journaled in order (request NULL, server = the scope's
                server, NULL for the fleet and a tag); the second blank save removed nothing and journals nothing. */
@@ -131,7 +139,7 @@ INSERT INTO config.agent_environment_profiles (profile_text, modified_by) VALUES
             await Assert.ThrowsAsync<ViewerReadOnlyException>(() => viewer.CloseInvestigationRequestAsync(requestId, "tester", "no", ct));
             await Assert.ThrowsAsync<ViewerReadOnlyException>(() => viewer.DecideInvestigationNoteAsync(note.NoteId, true, "tester", ct));
             await Assert.ThrowsAsync<ViewerReadOnlyException>(() => viewer.WriteInvestigationNoteAsync(null, null, "note", "tester", cancellationToken: ct));
-            await Assert.ThrowsAsync<ViewerReadOnlyException>(() => viewer.SaveInvestigationProfileAsync(null, null, "x", "tester", ct));
+            await Assert.ThrowsAsync<ViewerReadOnlyException>(() => viewer.SaveInvestigationProfileAsync(null, null, "x", "tester", null, ct));
             Assert.Equal("open|pending|fleet", await ScalarAsync(owner, @"
 SELECT (SELECT state FROM config.investigation_requests) || '|' || (SELECT state FROM config.investigation_notes)
        || '|' || (SELECT profile_text FROM config.agent_environment_profiles)", ct));

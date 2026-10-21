@@ -174,7 +174,7 @@ public partial class NotificationRoutesWindow : Window
 
         try
         {
-            await _dataService.SetNotificationRouteEnabledAsync(selected.RouteId, !selected.Enabled);
+            await _dataService.SetNotificationRouteEnabledAsync(selected.RouteId, !selected.Enabled, Environment.UserName);
             await LoadRoutesAsync();
         }
         catch (Exception ex)
@@ -200,7 +200,7 @@ public partial class NotificationRoutesWindow : Window
 
         try
         {
-            await _dataService.DeleteNotificationRouteAsync(selected.RouteId);
+            await _dataService.DeleteNotificationRouteAsync(selected.RouteId, Environment.UserName);
             await LoadRoutesAsync();
         }
         catch (Exception ex)
@@ -218,7 +218,7 @@ public partial class NotificationRoutesWindow : Window
 
         try
         {
-            await _dataService.SetNotificationRouteEnabledAsync(route.RouteId, cb.IsChecked == true);
+            await _dataService.SetNotificationRouteEnabledAsync(route.RouteId, cb.IsChecked == true, Environment.UserName);
         }
         catch (Exception ex)
         {

@@ -14,6 +14,7 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -61,6 +62,10 @@ public sealed class AgentSetupWebLiveTests
         await using var command = source.CreateCommand(sql);
         await command.ExecuteNonQueryAsync(ct);
     }
+
+    /// <summary>The fleet profile's version as a page would have read it.</summary>
+    private static async Task<DateTime?> ProfileVersionAsync(NpgsqlDataSource owner, CancellationToken ct) =>
+        (await new InvestigationRequestStore(owner, 30).ListProfilesAsync(ct)).FirstOrDefault(p => p.ScopeServerId is null && p.ScopeTagId is null)?.ModifiedAtUtc;
 
     private static async Task<NpgsqlDataSource> MigratedAsync(ScratchPostgres scratch, CancellationToken ct)
     {
@@ -153,6 +158,23 @@ public sealed class AgentSetupWebLiveTests
                 {
                     var current = await ScalarAsync(owner, $"SELECT to_char(modified_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.US') FROM config_notification_routes WHERE route_id = {editedId}", ct);
                     json = "{\"expected_modified_at\":\"" + (string.IsNullOrEmpty(current) ? "2000-01-01T00:00:00" : current) + "\"" + (json.Length > 2 ? "," : "") + json[1..];
+                }
+
+                /* A profile save carries the modified_at the page read for its scope, when the scope has a profile (#6274). */
+                if (method == "PUT" && json is not null && path.StartsWith("/api/environment-profiles", StringComparison.Ordinal)
+                    && !json.Contains("expected_modified_at", StringComparison.Ordinal) && !path.Contains("nostamp", StringComparison.Ordinal)
+                    && JsonNode.Parse(json) is JsonObject profileBody
+                    && (profileBody["scope_server_id"] is null || profileBody["scope_server_id"]!.GetValueKind() == JsonValueKind.Number)
+                    && (profileBody["scope_tag_id"] is null || profileBody["scope_tag_id"]!.GetValueKind() == JsonValueKind.Number))
+                {
+                    var serverScope = profileBody["scope_server_id"]?.GetValue<int>() ?? 0;
+                    var tagScope = profileBody["scope_tag_id"]?.GetValue<int>() ?? 0;
+                    var current = await ScalarAsync(owner, $"SELECT to_char(modified_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.US') FROM config.agent_environment_profiles WHERE coalesce(scope_server_id, 0) = {serverScope} AND coalesce(scope_tag_id, 0) = {tagScope}", ct);
+                    if (!string.IsNullOrEmpty(current))
+                    {
+                        profileBody["expected_modified_at"] = current;
+                        json = profileBody.ToJsonString();
+                    }
                 }
 
                 path = path.Replace("?nostamp=1", "", StringComparison.Ordinal);
@@ -390,7 +412,7 @@ public sealed class AgentSetupWebLiveTests
         await WithWebRoutesAsync("viewer", async (owner, viewer, Send, ct) =>
         {
             var seeded = await SeedRouteAsync(owner, "performance", ct);
-            await new InvestigationRequestStore(owner, 30).SaveProfileAsync(null, null, "fleet: OLTP", "tester", ct);
+            await new InvestigationRequestStore(owner, 30).SaveProfileAsync(null, null, "fleet: OLTP", "tester", null, ct);
 
             var access = await Send("GET", "/api/agent-setup/access", null);
             Assert.False((bool)access.Body!["can_edit_routes"]!);
@@ -506,7 +528,7 @@ public sealed class AgentSetupWebLiveTests
         await WithWebRoutesAsync("admin", async (owner, _, Send, ct) =>
         {
             var seeded = await SeedRouteAsync(owner, "performance", ct);
-            await new InvestigationRequestStore(owner, 30).SaveProfileAsync(null, null, "fleet: OLTP", "tester", ct);
+            await new InvestigationRequestStore(owner, 30).SaveProfileAsync(null, null, "fleet: OLTP", "tester", null, ct);
             var routeBefore = await ScalarAsync(owner, $"SELECT agent_level || '|' || agent_max_per_hour || '|' || enabled || '|' || smtp_recipients || '|' || modified_at FROM config_notification_routes WHERE route_id = {seeded}", ct);
 
             foreach (var (method, path, json) in new[]
@@ -608,10 +630,13 @@ public sealed class AgentSetupWebLiveTests
             Assert.Equal("|3|20|60", await ScalarAsync(owner,
                 "SELECT coalesce(detail->'before'->>'agent_level','') || '|' || (detail->'after'->>'agent_level') || '|' || (detail->'before'->>'agent_max_per_hour') || '|' || (detail->'after'->>'agent_max_per_hour') FROM config.investigation_journal WHERE event = 'route_agent_changed'", ct));
 
-            /* The scope is part of it; an enabled flag or a destination is not. */
+            /* The scope is part of it; a destination is not. Turning an agent route off is (#6274 round 2: it drops out of the lookup). */
             Assert.Equal(200, (await Send("PUT", $"/api/notification-routes/{seeded}", Json, $"{{\"scope_server_id\":{ServerId}}}")).Status);
-            Assert.Equal(200, (await Send("PUT", $"/api/notification-routes/{seeded}", Json, "{\"enabled\":false,\"email_recipients\":\"ops2@example.com\"}")).Status);
+            Assert.Equal(200, (await Send("PUT", $"/api/notification-routes/{seeded}", Json, "{\"email_recipients\":\"ops2@example.com\"}")).Status);
             Assert.Equal("2", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'route_agent_changed'", ct));
+            Assert.Equal(200, (await Send("PUT", $"/api/notification-routes/{seeded}", Json, "{\"enabled\":false}")).Status);
+            Assert.Equal("changed enabled", await ScalarAsync(owner, "SELECT reason FROM config.investigation_journal WHERE event = 'route_agent_changed' ORDER BY journal_id DESC LIMIT 1", ct));
+            Assert.Equal("3", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'route_agent_changed'", ct));
             Assert.Equal(ServerId.ToString(CultureInfo.InvariantCulture), await ScalarAsync(owner, "SELECT server_id FROM config.investigation_journal WHERE event = 'route_agent_changed' ORDER BY journal_id DESC LIMIT 1", ct));
 
             /* The Viewer's writer: the same row from the same code, by the login it names. */
@@ -626,8 +651,170 @@ public sealed class AgentSetupWebLiveTests
             var third = again.Clone();
             third.AgentLevel = 2;
             await NotificationRouteWriter.SaveAsync(owner, third, again, new WebhookProxies(null, null, null, null), null, null, 30, ct);
-            Assert.Equal("3", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'route_agent_changed'", ct));
+            Assert.Equal("4", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'route_agent_changed'", ct));
         }, seat: new DarlingWebSeat("alice", true));
+    }
+
+    /* #6274 round 2: a route set to agent Off stops the agent lookup for its servers, and a disabled or deleted route is dropped from it, so
+       disabling, enabling or deleting such a route hands the servers to a broader agent route. Each of those is journaled with the person, in
+       the same transaction, from the web (the PUT's enabled flag and the DELETE) and from the shared writer the Viewer's toggle and delete use.
+       A route with no agent level takes no part in the lookup: turning it off or deleting it writes nothing. */
+    [Fact]
+    public async Task AgentRoutes_DisablingEnablingOrDeleting_ARouteWithAnAgentLevel_IsJournaled_AndOneWithoutIsNot()
+    {
+        await WithWebRoutesAsync("admin", async (owner, _, Send, ct) =>
+        {
+            var off = await SeedRouteAsync(owner, "performance", ct);
+            await ExecAsync(owner, $"UPDATE config_notification_routes SET agent_level = 0, scope_server_id = {ServerId} WHERE route_id = {off}", ct);
+            var plain = await SeedRouteAsync(owner, "blocking", ct);
+            const string Journal = "SELECT count(*) FROM config.investigation_journal WHERE event = 'route_agent_changed'";
+
+            /* Web: disable, enable, delete of the Off route. */
+            Assert.Equal(200, (await Send("PUT", $"/api/notification-routes/{off}", Json, "{\"enabled\":false}")).Status);
+            Assert.Equal($"person:alice|{off}|changed enabled|{ServerId}|true|false", await ScalarAsync(owner,
+                "SELECT actor || '|' || route_id || '|' || reason || '|' || server_id || '|' || (detail->'before'->>'enabled') || '|' || (detail->'after'->>'enabled') "
+                + "FROM config.investigation_journal WHERE event = 'route_agent_changed' ORDER BY journal_id DESC LIMIT 1", ct));
+            Assert.Equal(200, (await Send("PUT", $"/api/notification-routes/{off}", Json, "{\"enabled\":true}")).Status);
+            Assert.Equal("2", await ScalarAsync(owner, Journal, ct));
+            Assert.Equal(200, (await Send("DELETE", $"/api/notification-routes/{off}", null)).Status);
+            Assert.Equal($"person:alice|{off}|deleted route|{ServerId}|0", await ScalarAsync(owner,
+                "SELECT actor || '|' || route_id || '|' || reason || '|' || server_id || '|' || (detail->'before'->>'agent_level') "
+                + "FROM config.investigation_journal WHERE event = 'route_agent_changed' ORDER BY journal_id DESC LIMIT 1", ct));
+            Assert.Equal("0", await ScalarAsync(owner, $"SELECT count(*) FROM config_notification_routes WHERE route_id = {off}", ct));
+
+            /* A route with no agent level: nothing is written, from the web or the shared writer. */
+            Assert.Equal(200, (await Send("PUT", $"/api/notification-routes/{plain}", Json, "{\"enabled\":false}")).Status);
+            Assert.True(await NotificationRouteWriter.SetEnabledAsync(owner, plain, true, 30, ct, "bob"));
+            Assert.True(await NotificationRouteWriter.DeleteAsync(owner, plain, 30, ct, "bob"));
+            Assert.Equal("3", await ScalarAsync(owner, Journal, ct));
+
+            /* The Viewer's writer: toggle and delete of an agent route journal by the login they name; with no login (the MCP tools) they do not. */
+            var again = await SeedRouteAsync(owner, "performance", ct);
+            await ExecAsync(owner, $"UPDATE config_notification_routes SET agent_level = 2 WHERE route_id = {again}", ct);
+            Assert.True(await NotificationRouteWriter.SetEnabledAsync(owner, again, false, 30, ct));
+            Assert.Equal("3", await ScalarAsync(owner, Journal, ct));
+            Assert.True(await NotificationRouteWriter.SetEnabledAsync(owner, again, true, 30, ct, "bob"));
+            Assert.True(await NotificationRouteWriter.SetEnabledAsync(owner, again, true, 30, ct, "bob"));
+            Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE actor = 'person:bob' AND reason = 'changed enabled'", ct));
+            Assert.True(await NotificationRouteWriter.DeleteAsync(owner, again, 30, ct, "bob"));
+            Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE actor = 'person:bob' AND reason = 'deleted route'", ct));
+            Assert.False(await NotificationRouteWriter.DeleteAsync(owner, again, 30, ct, "bob"));
+            Assert.Equal("5", await ScalarAsync(owner, Journal, ct));
+        }, seat: new DarlingWebSeat("alice", true));
+    }
+
+    /* #6274 round 2: profiles refuse a stale save the way routes do. The page's copy of the profile carries the modified_at it read; a profile
+       saved or removed since is a 409 with the reload sentence, the text stays the other admin's, and no journal row is written. A first
+       save needs no version. The Viewer's save is the same store method. */
+    [Fact]
+    public async Task EnvironmentProfiles_AStaleSave_Is409_AndLeavesTheTextAndTheJournalAlone_ViaTheWebAndTheStore()
+    {
+        await WithWebRoutesAsync("admin", async (owner, _, Send, ct) =>
+        {
+            const string Journal = "SELECT count(*) FROM config.investigation_journal WHERE event IN ('profile_saved', 'profile_removed')";
+            var store = new InvestigationRequestStore(owner, 30);
+
+            /* A first save has no version; a second first-save finds the profile there and is refused. */
+            Assert.Equal(200, (await Send("PUT", "/api/environment-profiles?nostamp=1", Json, "{\"profile_text\":\"SQLPROD01 runs payroll 01:00-03:00, change nothing\"}")).Status);
+            var late = await Send("PUT", "/api/environment-profiles?nostamp=1", Json, "{\"profile_text\":\"a second first save\"}");
+            Assert.Equal(409, late.Status);
+            Assert.Equal(InvestigationProfiles.ConflictText, (string)late.Body!["error"]!);
+
+            /* The page loads this profile (the version it shows is the modified_at_utc it was sent), and another admin changes it. */
+            var pageRead = (string)(await Send("GET", "/api/environment-profiles", null)).Body!["profiles"]![0]!["modified_at_utc"]!;
+            await Task.Delay(20, ct);
+            Assert.True(await store.SaveProfileAsync(null, null, "SQLPROD01 runs payroll 01:00-03:00 and 22:00-23:00", "carol", DateTime.Parse(pageRead, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal), ct));
+            Assert.Equal("2", await ScalarAsync(owner, Journal, ct));
+
+            var stale = await Send("PUT", "/api/environment-profiles", Json, $"{{\"expected_modified_at\":\"{pageRead}\",\"profile_text\":\"a typo fix on an hour-old page\"}}");
+            Assert.Equal(409, stale.Status);
+            Assert.Equal(InvestigationProfiles.ConflictText, (string)stale.Body!["error"]!);
+            Assert.Equal("SQLPROD01 runs payroll 01:00-03:00 and 22:00-23:00|person:carol", await ScalarAsync(owner, "SELECT profile_text || '|' || modified_by FROM config.agent_environment_profiles", ct));
+            Assert.Equal("2", await ScalarAsync(owner, Journal, ct));
+
+            /* A stale blank save is refused too: it does not remove the other admin's text. */
+            Assert.Equal(409, (await Send("PUT", "/api/environment-profiles", Json, $"{{\"expected_modified_at\":\"{pageRead}\",\"profile_text\":\"\"}}")).Status);
+            Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config.agent_environment_profiles", ct));
+
+            /* The Viewer's call: a version that is old, and one for a profile that was removed since, are both refused. */
+            var oldVersion = DateTime.Parse(pageRead, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal);
+            await Assert.ThrowsAsync<InvestigationProfileConflictException>(() => store.SaveProfileAsync(null, null, "an out-of-date edit", "dave", oldVersion, ct));
+            await Assert.ThrowsAsync<InvestigationProfileConflictException>(() => store.SaveProfileAsync(null, null, "added over a profile the screen did not show", "dave", null, ct));
+            var current = (await store.ListProfilesAsync(ct))[0].ModifiedAtUtc;
+            Assert.True(await store.SaveProfileAsync(null, null, "   ", "dave", current, ct));
+            await Assert.ThrowsAsync<InvestigationProfileConflictException>(() => store.SaveProfileAsync(null, null, "edit of a removed profile", "erin", current, ct));
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.agent_environment_profiles", ct));
+            Assert.Equal("3", await ScalarAsync(owner, Journal, ct));
+
+            /* A version of the wrong shape is a 400, and the default date is not a pass. */
+            Assert.Equal(400, (await Send("PUT", "/api/environment-profiles", Json, "{\"expected_modified_at\":17,\"profile_text\":\"x\"}")).Status);
+            Assert.Equal(400, (await Send("PUT", "/api/environment-profiles", Json, "{\"expected_modified_at\":\"not a date\",\"profile_text\":\"x\"}")).Status);
+        }, seat: new DarlingWebSeat("alice", true));
+    }
+
+    /* The page's round trip: the modified_at_utc a GET answers is sent back verbatim as expected_modified_at and is accepted, for routes and
+       for profiles. The other tests stamp their PUTs from SQL; this one uses only what the page is given. */
+    [Fact]
+    public async Task TheModifiedAtTheListAnswers_SentBackVerbatim_IsAcceptedAsTheVersion_ForRoutesAndProfiles()
+    {
+        await WithWebRoutesAsync("admin", async (owner, _, Send, ct) =>
+        {
+            var seeded = await SeedRouteAsync(owner, "performance", ct);
+            /* The route page reads its routes through get_notification_routes; modified_at_utc is what it is given. */
+            var routeVersion = System.Text.Json.JsonDocument.Parse(await DarlingMcpAlertTools.GetNotificationRoutes(owner, ct)).RootElement
+                .GetProperty("routes").EnumerateArray().Single(r => r.GetProperty("route_id").GetInt32() == seeded).GetProperty("modified_at_utc").GetString()!;
+            Assert.Equal(200, (await Send("PUT", $"/api/notification-routes/{seeded}", Json, $"{{\"expected_modified_at\":\"{routeVersion}\",\"agent_level\":1}}")).Status);
+            Assert.Equal(409, (await Send("PUT", $"/api/notification-routes/{seeded}", Json, $"{{\"expected_modified_at\":\"{routeVersion}\",\"agent_level\":2}}")).Status);
+
+            Assert.Equal(200, (await Send("PUT", "/api/environment-profiles", Json, "{\"profile_text\":\"fleet: OLTP\"}")).Status);
+            var profileVersion = (string)(await Send("GET", "/api/environment-profiles", null)).Body!["profiles"]![0]!["modified_at_utc"]!;
+            Assert.Equal(200, (await Send("PUT", "/api/environment-profiles", Json, $"{{\"expected_modified_at\":\"{profileVersion}\",\"profile_text\":\"fleet: OLTP, 24x7\"}}")).Status);
+            Assert.Equal(409, (await Send("PUT", "/api/environment-profiles", Json, $"{{\"expected_modified_at\":\"{profileVersion}\",\"profile_text\":\"fleet: stale\"}}")).Status);
+            Assert.Equal("fleet: OLTP, 24x7", await ScalarAsync(owner, "SELECT profile_text FROM config.agent_environment_profiles", ct));
+        }, seat: new DarlingWebSeat("alice", true));
+    }
+
+    /* Round 1's remaining cases, over the web: a signing key blocks a change of the URL text (RemoveKeyFirstText), a padded "-" clears like a
+       bare one (and the clear is not mistaken for a value), and a profile body cannot name who saved it. */
+    [Fact]
+    public async Task AgentRoutes_RemoveKeyFirst_APaddedDashClears_AndAProfileBodyCannotNameItsAuthor()
+    {
+        using var key = PasswordPrivateKey.Generate();
+        var ring = DarlingPasswordKey.FromPrivateKey(key);
+        await WithWebRoutesAsync("admin", async (owner, _, Send, ct) =>
+        {
+            async Task<string> Stored(int id, string column) => await ScalarAsync(owner, $"SELECT {column} FROM config_notification_routes WHERE route_id = {id}", ct) ?? "";
+            var created = await Send("POST", "/api/notification-routes", Json,
+                "{\"metric_match\":\"blocking\",\"slack_webhook_url\":\"https://hooks.example.test/services/T000/B000/slack-token\",\"generic_webhook_url\":\"https://generic.example.test/in/one\"}");
+            Assert.Equal(200, created.Status);
+            var seeded = (int)created.Body!["route_id"]!;
+
+            /* A signing key sealed for the generic URL's stored text: a change of that text, or clearing it, is refused with the shared sentence
+               and writes nothing. */
+            await ExecAsync(owner, $"UPDATE config_notification_routes SET signing_key = 'seal:v1:key' WHERE route_id = {seeded}", ct);
+            var generic = await Stored(seeded, "generic_url");
+            var changed = await Send("PUT", $"/api/notification-routes/{seeded}", Json, "{\"generic_webhook_url\":\"https://generic.example.test/in/two\"}");
+            Assert.Equal(400, changed.Status);
+            Assert.Equal(NotificationRouteWriter.RemoveKeyFirstText, (string)changed.Body!["error"]!);
+            var padded = await Send("PUT", $"/api/notification-routes/{seeded}", Json, "{\"generic_webhook_url\":\"  -  \"}");
+            Assert.Equal(400, padded.Status);
+            Assert.Equal(NotificationRouteWriter.RemoveKeyFirstText, (string)padded.Body!["error"]!);
+            Assert.Equal(generic, await Stored(seeded, "generic_url"));
+            await ExecAsync(owner, $"UPDATE config_notification_routes SET signing_key = '' WHERE route_id = {seeded}", ct);
+
+            /* Without a key, a padded dash clears the destination, as a bare one does, and only that destination. */
+            Assert.Equal(200, (await Send("PUT", $"/api/notification-routes/{seeded}", Json, "{\"slack_webhook_url\":\" - \"}")).Status);
+            Assert.Equal("", await Stored(seeded, "slack_url"));
+            Assert.Equal(generic, await Stored(seeded, "generic_url"));
+
+            /* A profile body names no author: modified_by is refused by name and nothing is written. */
+            var forged = await Send("PUT", "/api/environment-profiles", Json, "{\"profile_text\":\"fleet: OLTP\",\"modified_by\":\"person:somebody-else\"}");
+            Assert.Equal(400, forged.Status);
+            Assert.Equal("Unknown field: modified_by.", (string)forged.Body!["error"]!);
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.agent_environment_profiles", ct));
+            Assert.Equal(200, (await Send("PUT", "/api/environment-profiles", Json, "{\"profile_text\":\"fleet: OLTP\"}")).Status);
+            Assert.Equal("person:alice", await ScalarAsync(owner, "SELECT modified_by FROM config.agent_environment_profiles", ct));
+        }, ring, seat: new DarlingWebSeat("alice", true));
     }
 
     /* The profile journal row is dated by the store, not the process that wrote it: a store given a clock years off still writes a row dated
@@ -638,8 +825,8 @@ public sealed class AgentSetupWebLiveTests
         await WithWebRoutesAsync("admin", async (owner, _, _, ct) =>
         {
             var skewed = new InvestigationRequestStore(owner, 30, () => new DateTime(2001, 1, 1, 0, 0, 0, DateTimeKind.Utc));
-            Assert.True(await skewed.SaveProfileAsync(null, null, "fleet: OLTP", "alice", ct));
-            Assert.True(await skewed.SaveProfileAsync(null, null, "   ", "alice", ct));
+            Assert.True(await skewed.SaveProfileAsync(null, null, "fleet: OLTP", "alice", null, ct));
+            Assert.True(await skewed.SaveProfileAsync(null, null, "   ", "alice", await ProfileVersionAsync(owner, ct), ct));
             Assert.Equal("2|0", await ScalarAsync(owner,
                 "SELECT count(*) || '|' || count(*) FILTER (WHERE abs(extract(epoch FROM now() - event_time)) > 120) FROM config.investigation_journal WHERE event IN ('profile_saved', 'profile_removed')", ct));
         });
