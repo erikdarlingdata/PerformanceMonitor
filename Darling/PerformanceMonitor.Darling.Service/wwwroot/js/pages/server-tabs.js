@@ -49,6 +49,7 @@ import { analysisFindingsTab } from "./analysis-findings.js";
 import { findingTitle, severityLabel } from "./analysis-findings.js";
 import { collectorRunBar, runNowColumns } from "./collector-run.js";
 import { downloadText } from "../grid-tools.js";
+import { blockChainColumn } from "./block-chain.js";
 import { deadlockGraphCell, processRowsInDatabases } from "./deadlock-graph.js";
 import { activePlanColumns, blockingPlanColumns, deadlockPlanColumn, planColumn, procedurePlanColumn, queryStorePlanColumn } from "./plan-viewer.js";
 import { queryStoreHistoryColumn } from "./query-store-history.js";
@@ -1423,8 +1424,8 @@ export const SERVER_TABS = [
        more than this page's widest Range. The note names that Range from the presets (tabNote), so narrowing them
        cannot leave it wrong. */
     note: (widestHours) =>
-      "Blocked-process reports are shown here as their captured XML. The block-chain view " +
-      "is one of the desktop-viewer features this page does not have. A deadlock graph can be drawn from its row. This page shows at most " +
+      "Blocked-process reports are shown here as their captured XML. A Blocking row's Block chain button shows its lead-blocker tree, " +
+      "as the desktop viewer does. A deadlock graph can be drawn from its row. This page shows at most " +
       daysText(widestHours) +
       ". A Custom View can show more blocking and deadlock history.",
     build: (server, ctx) => [
@@ -1449,7 +1450,7 @@ export const SERVER_TABS = [
         "get_blocking",
         { server, hours: ctx.hours, limit: 30 },
         "events",
-        [...BLOCKING_COLUMNS, ...blockingPlanColumns(server)],
+        [...BLOCKING_COLUMNS, ...blockingPlanColumns(server), blockChainColumn(server)],
         ctx.label,
         "No blocking events in this window.",
         2,
