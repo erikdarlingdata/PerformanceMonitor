@@ -829,12 +829,12 @@ public partial class AddServerDialog : Window
                     AddedServer.AzureClientId = null;
                     AddedServer.AzureTenantId = null;
                     AddedServer.ManagedIdentityClientId = null;
-                    _serverManager.UpdateServer(AddedServer, null, null, _originalHost);
+                    _serverManager.UpdateServer(AddedServer, null, null);
                     _serverManager.CredentialService.DeleteCredential(AddedServer.Id);
                 }
                 else
                 {
-                    _serverManager.UpdateServer(AddedServer, username, password, _originalHost);
+                    _serverManager.UpdateServer(AddedServer, username, password);
                 }
             }
             else

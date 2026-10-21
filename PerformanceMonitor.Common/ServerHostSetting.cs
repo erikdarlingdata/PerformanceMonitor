@@ -165,13 +165,23 @@ public static class ServerHostSetting
         }
 
         var colon = text.IndexOf(':');
-        return colon > 0 && IsAllLetters(text.AsSpan(0, colon)) && !IPAddress.TryParse(text, out _);
+        if (colon <= 0)
+        {
+            return false;
+        }
+
+        /* The word is trimmed of all Unicode whitespace exactly as Refusal trims it, because SqlClient trims it: "tcp :host"
+           and "np :x" are explicit protocols (#6352). */
+        var word = text.AsSpan(0, colon).Trim();
+        return word.Length > 0 && IsAllLetters(word) && !IPAddress.TryParse(text, out _);
     }
 
     /// <summary>True when the host, without a <c>\instance</c> or <c>,port</c> tail, names this machine.</summary>
     private static bool IsThisMachine(string text)
     {
-        if (text.StartsWith("(localdb)", StringComparison.OrdinalIgnoreCase))
+        /* SqlClient reads a host as LocalDB only when it starts with "(localdb)\"; "(localdb)x" and "(localdb) \x" go to
+           the network code (TCP, then a named pipe), so they are not this machine (#6352). */
+        if (text.StartsWith(@"(localdb)\", StringComparison.OrdinalIgnoreCase))
         {
             return true;
         }
