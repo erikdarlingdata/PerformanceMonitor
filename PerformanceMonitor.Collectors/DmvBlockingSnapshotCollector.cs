@@ -206,6 +206,9 @@ WHERE wt.blocking_session_id IS NOT NULL
 AND   wt.blocking_session_id <> 0
 AND   wt.blocking_session_id <> wt.session_id
 AND   wt.session_id > 50
+/* #6312: session_id > 50 is not a user-session test on Azure SQL Database, where internal sessions carry ids above 50
+   and wait on each other; an idle database raised a blocking alert for 5 sessions. Only a user session's wait is blocking. */
+AND   ses_b.is_user_process = 1
 AND   wt.session_id <> @@SPID
 AND   (
           wt.wait_type LIKE N'LCK[_]%'

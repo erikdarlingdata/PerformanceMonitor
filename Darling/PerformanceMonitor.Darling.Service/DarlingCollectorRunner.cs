@@ -2747,6 +2747,17 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
                listed: the note below speaks of user databases, and a list of master alone has none to blame it on
                (#4961). Other collectors read the list as it came. Mirrors Lite. */
             var listedDatabaseCount = databases.Count;
+
+            /* #6312: an XE read (attention, blocked_process_report) is of a database-scoped session, which an
+               Azure SQL Database master cannot host. Reading it answered "XE session is not running" on every sweep and
+               counted master as a failed database, so a healthy server carried a failure note and a real failure hid
+               behind it. Left out and not counted as listed, like the long-query read below. Mirrors Lite. */
+            if (definition.SkipsMasterDatabase)
+            {
+                databases = AzureSweepScope.WithoutMaster(databases);
+                listedDatabaseCount = databases.Count;
+            }
+
             if (definition.SkipsSeparatelyMonitoredDatabases)
             {
                 databases = databases.FindAll(LongQueryTraceDatabases.CanHoldSession);
@@ -3385,7 +3396,9 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
                        failed. The stamp travels with the exception through the rethrow, so a message can
                        name the database it means. */
                     CollectorFaultDatabase.Stamp(ex, databaseName);
-                    firstFailure ??= ex;
+                    /* #6312: a connection failure outranks the others, so an outage (a firewall rule, a paused database)
+                       is not reported as the missing XE session some other database answered first. */
+                    firstFailure = AzureSweepScope.PreferConnectionFailure(firstFailure, ex, DarlingXeSessions.ErrorNumbersOf);
 
                     /* #2111: the yield-to-live stamp + adaptive-shrink count for the Azure SQL DB
                        arm — query_store reaches THIS per-database loop there, not the enumeration

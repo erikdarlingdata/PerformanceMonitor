@@ -119,6 +119,10 @@ public sealed class BlockedProcessReportCollector : CollectorDefinitionBase<Bloc
     /// </summary>
     public override bool RunsPerDatabase(CollectorTargetInfo target) => target.IsAzureSqlDb;
 
+    /* #6312: the session is database-scoped on Azure SQL Database and master cannot host one, so the fan-out leaves
+       master out instead of counting its "XE session is not running" as a failed database every sweep. */
+    public override bool SkipsMasterDatabase => true;
+
     /// <summary>
     /// Per-database watermark for the per-database sessions (database_name is the blocked
     /// process's currentdbname, parsed since the column's introduction): each database's ring

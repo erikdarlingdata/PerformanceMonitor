@@ -57,6 +57,13 @@ public interface ICollectorDefinition<TRow> : ICollectorSchemaInfo
     bool SkipsSeparatelyMonitoredDatabases { get; }
 
     /// <summary>
+    /// True when the per-database read on an Azure SQL Database logical server leaves out <c>master</c>, which cannot
+    /// host a database-scoped Extended Events session (#6312). True for the collectors that read one and get nothing else from master (attention,
+    /// blocked_process_report); false for deadlocks, whose master item reads the server-wide telemetry blob, and for every other collector, which reads the list as the server gave it.
+    /// </summary>
+    bool SkipsMasterDatabase { get; }
+
+    /// <summary>
     /// Time column the host should read its latest already-collected value of (from the host's
     /// own store) before building the query — exposed to the definition as
     /// <see cref="CollectorContext.Watermark"/> for server-side filters and client-side dedup.
