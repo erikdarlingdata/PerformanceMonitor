@@ -26,8 +26,6 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class ViewerKnownPatternEditorTests
 {
-    private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-
     private static string LongNote => new('n', KnownPatternMatcher.MaxNoteLength + 1);
 
     public static IEnumerable<object?[]> RefusedForms()
@@ -122,9 +120,15 @@ public sealed class ViewerKnownPatternEditorTests
         Assert.Equal("(any)", fleet.TimeDisplay);
         Assert.Contains("#99", gone.ServerDisplay, StringComparison.Ordinal);
     }
+}
 
-    /* #1776 own-store: the facts mint their own scratch database through ScratchPostgres and touch no other test's rows, so the class is
-       deliberately NOT [Collection("live-postgres")]. */
+/* #1776 own-store: the facts mint their own scratch database through ScratchPostgres and touch no other test's rows, so the class is
+   deliberately NOT [Collection("live-postgres")]. */
+
+/// <summary>#6334: the Viewer's known-pattern writes against a migrated scratch store, and the editor's gate on a store below V214.</summary>
+public sealed class ViewerKnownPatternEditorLivePostgresTests
+{
+    private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     private static async Task<(ScratchPostgres Scratch, NpgsqlConnection Connection)> MigratedStoreAsync(System.Threading.CancellationToken ct)
     {
