@@ -629,6 +629,38 @@ CROSS JOIN LATERAL (SELECT NULL::bigint AS n UNION ALL SELECT generate_series(1,
         });
     }
 
+    [Fact]
+    public async Task PlanDetection_AfterADayOfMissedPasses_ReadsTheMarkersWithoutTheSkipScanFailure()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            /* #6234: the marker read as SELECT DISTINCT over idx_query_store_forced_plans_markers failed on TimescaleDB 2.30 with
+               XX000 "ScanKey for skip qual not found" (Custom Scan (SkipScan) on the index, skip qual database_name > NULL), so no plan change was ever read.
+               The shape the planner picks SkipScan for, and the one a production store was in: a mark almost a day old (change detection that had not
+               completed for a day: the service stopped, or an earlier pass failed, and a failed pass does not move the mark) over a table where the markers are
+               about half of one percent of the rows (two databases, a capture every ten minutes, 200 forced plans each). The older test above has a 30-minute window and
+               one marker row in 21, so it never got that plan; and a scratch store has no TimescaleDB extension until it is enabled, the plain-PostgreSQL planner never
+               has a SkipScan to pick, so the extension is enabled here the way the product enables it (the table stays the plain table V195 makes). */
+            var timescaleEnabled = await LiveTimescaleProbe.TryEnableAsync(h.Connection.ConnectionString, ct);
+            Assert.True(timescaleEnabled, "TimescaleDB must be available on CI: the failure only exists under its planner");
+            await ExecAsync(h.Connection, @"
+INSERT INTO collect.query_store_forced_plans (collection_id, collection_time, server_id, server_name, database_name, plan_id, query_id)
+SELECT row_number() OVER (), c.t, $1, 'x', d.name, p.n, p.n * 10
+FROM generate_series($2::timestamp - interval '24 hours', $2::timestamp, interval '10 minutes') AS c(t)
+CROSS JOIN (VALUES ('db1'), ('db2')) AS d(name)
+CROSS JOIN LATERAL (SELECT NULL::bigint AS n UNION ALL SELECT generate_series(1, 200)) AS p(n)", ct, ServerId, Naive(h.Now));
+            /* One plan is forced in db1 at the newest capture. */
+            await ForcedPlanAsync(h.Connection, h.Now, "db1", 999, 201, ct);
+            await ExecAsync(h.Connection, "ANALYZE collect.query_store_forced_plans", ct);
+
+            var found = await h.NewPass().ReadChangesAsync(ServerId, h.Now.AddHours(-23.5), h.Now, ct);
+
+            var change = Assert.Single(found, c => c.Kind == "plan_force");
+            Assert.Equal(201, change.PlanId);
+            Assert.Equal("db1", change.DatabaseName);
+        });
+    }
+
     private static double RowsEmittedFromTable(System.Text.Json.JsonElement node, string table)
     {
         var rows = 0d;
