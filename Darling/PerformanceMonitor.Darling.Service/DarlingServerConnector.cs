@@ -174,11 +174,10 @@ SELECT /* PerformanceMonitorLite */
     /// #6254: the connection string for the server's Query Store replica, null when none is set. The same secret resolution as
     /// <see cref="ResolveConnectionString"/>; the builder is <see cref="MonitoredServerConnection.BuildQueryStoreReplicaConnectionString"/>.
     /// </summary>
-    public static string? ResolveQueryStoreReplicaConnectionString(MonitoredServer config, ILogger? logger = null)
-    {
-        string? password = config.RequiresResolvedSecret ? DarlingSecrets.ResolvePassword(config, out _) : null;
-        return MonitoredServerConnection.BuildQueryStoreReplicaConnectionString(config, password);
-    }
+    public static string? ResolveQueryStoreReplicaConnectionString(MonitoredServer config, bool isAzureSqlDatabase, ILogger? logger = null) =>
+        /* The builder takes the replica from the identity the password seal opens with and resolves the password itself (a stored
+           reference only when darling.json declares it), and returns null for an Azure SQL Database. */
+        MonitoredServerConnection.BuildQueryStoreReplicaConnectionString(config, isAzureSqlDatabase);
 
     public static string ResolveConnectionString(MonitoredServer config, ILogger? logger = null)
     {

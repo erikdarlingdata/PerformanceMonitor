@@ -822,7 +822,7 @@ public sealed class DarlingCollectorRunner
             await ReadQueryStoreRedoAsync(targetProvider, primaryConnection, run.PrimaryRedo, cancellationToken);
 
             var replicaConnectionString = QueryStoreReplicaConnectionStringOverrideForTests?.Invoke(server)
-                ?? DarlingServerConnector.ResolveQueryStoreReplicaConnectionString(server.Config, _logger);
+                ?? DarlingServerConnector.ResolveQueryStoreReplicaConnectionString(server.Config, server.Target.IsAzureSqlDb, _logger);
             var replicaPlan = QueryStoreCollector.Instance.BuildReplicaEnumerationQuery(context);
             if (replicaConnectionString is null || replicaPlan is null)
             {
