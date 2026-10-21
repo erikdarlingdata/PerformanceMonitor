@@ -117,8 +117,9 @@ public sealed class QueryStoreSliceTieBreakSourceTests
            by its own per-file assertion, and this states the total the fix actually swept.
            12 -> 18 with #2827: the plan-regression dedup states its ordering once per projected column
            (7) where the window form stated it once, so the same logical site now contributes seven.
-           18 -> 19 with #5631: the eighth ordered array_agg in that dedup (avg_rowcount). */
-        Assert.Equal(19, total);
+           18 -> 19 with #5631: the eighth ordered array_agg in that dedup (avg_rowcount).
+           19 -> 18 with #5506: the viewer's two regressions dedups became the one shared window in Storage. */
+        Assert.Equal(18, total);
     }
 
     /// <summary>
