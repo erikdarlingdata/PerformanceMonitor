@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Buffers;
 using System.Net;
 
 namespace PerformanceMonitor.Common;
@@ -34,6 +35,7 @@ public static class ServerHostSetting
 {
     /// <summary>The longest value echoed back in a refusal, so a long paste does not fill the message.</summary>
     private const int MaxEchoLength = 80;
+    private static readonly SearchValues<char> HostTailChars = SearchValues.Create("\\,");
 
     /// <summary>
     /// Null when <paramref name="host"/> may be saved as a SQL Server host; otherwise the plain sentence to refuse
@@ -200,7 +202,7 @@ public static class ServerHostSetting
             return true;
         }
 
-        var end = text.IndexOfAny(new[] { '\\', ',' });
+        var end = text.AsSpan().IndexOfAny(HostTailChars);
         var name = (end < 0 ? text : text[..end]).Trim();
         return name == "."
             || name.Equals("(local)", StringComparison.OrdinalIgnoreCase)
