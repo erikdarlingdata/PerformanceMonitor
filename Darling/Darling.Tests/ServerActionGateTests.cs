@@ -308,6 +308,142 @@ public sealed class ServerActionGateLiveTests
         });
     }
 
+    private int _writes;
+
+    /// <summary>The write of a plan force: <c>ReadBefore</c> runs in the gate's transaction, after the gate's checks passed and before the
+    /// write's own transaction opens, which is where a person changes something mid-flight.</summary>
+    private AgentActionHooks WriteHooks(Func<int> resolved, Func<CancellationToken, Task> inFlight) => new()
+    {
+        LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, int?>>((_, _) => resolved()),
+        ReadBefore = async (_, _, token) =>
+        {
+            await inFlight(token);
+            return "{\"reason\":\"old\"}";
+        },
+        Write = (_, _, _) => { _writes++; return Task.FromResult<string?>("{\"reason\":\"new\"}"); },
+    };
+
+    private static AgentActionCall WriteCall(Guid request, Guid claim, string kind = AgentChangeKinds.PlanForce)
+    {
+        var call = Call(request, claim);
+        return new AgentActionCall("force_plan", kind, call.Action, call.Target);
+    }
+
+    private async Task<string?> EventsAsync(NpgsqlConnection connection, Guid request, CancellationToken ct) =>
+        await ScalarAsync(connection,
+            $"SELECT string_agg(event, '|' ORDER BY journal_id) FROM config.investigation_journal WHERE request_id = '{request}' AND event LIKE 'action_%'", ct);
+
+    [Fact]
+    public async Task TheWrite_ReChecksTheServersSwitch_RefusesSwitchOff_JournalsActionFailed_AndNothingReachesTheServer()
+    {
+        await RunAsync(async (store, connection, source, ct) =>
+        {
+            await ArmAsync(connection, switchOn: true, "svc", "env:X", ct);
+            var (request, claim) = await OpenAndClaimAsync(store, 3);
+            /* The gate has passed this server's switch; a person turns it off now, before the write's own transaction. */
+            var hooks = WriteHooks(() => 3, token => ExecAsync(connection,
+                "UPDATE config.config_server_actions SET enabled = false WHERE server_id = 7 AND action = 'force_plan'", token));
+            var result = await store.RunAgentActionAsync(WriteCall(request, claim), hooks, ct);
+            Assert.Equal(AgentActionCodes.SwitchOff, result.Refusal?.Reason);
+            Assert.NotNull(result.CalledId);
+            Assert.Equal(0, _writes);
+            Assert.Equal("action_called|action_failed", await EventsAsync(connection, request, ct));
+        });
+    }
+
+    [Fact]
+    public async Task TheWrite_ReChecksLevelThree_RefusesARouteLoweredToLevelTwo_JournalsActionFailed_AndNothingReachesTheServer()
+    {
+        await RunAsync(async (store, connection, source, ct) =>
+        {
+            await ArmAsync(connection, switchOn: true, "svc", "env:X", ct);
+            var (request, claim) = await OpenAndClaimAsync(store, 3);
+            var level = 3;
+            /* The routes are read again by the write: a person lowers the route to Level 2 after the gate read it as 3. */
+            var hooks = WriteHooks(() => level, token => { level = 2; return Task.CompletedTask; });
+            var result = await store.RunAgentActionAsync(WriteCall(request, claim), hooks, ct);
+            Assert.Equal(AgentActionCodes.NotLevel3, result.Refusal?.Reason);
+            Assert.NotNull(result.CalledId);
+            Assert.Equal(0, _writes);
+            Assert.Equal("action_called|action_failed", await EventsAsync(connection, request, ct));
+        });
+    }
+
+    [Fact]
+    public async Task TheWrite_WaitsForASwitchWriterHoldingTheSwitchLock_ThenRefuses()
+    {
+        await RunAsync(async (store, connection, source, ct) =>
+        {
+            await ArmAsync(connection, switchOn: true, "svc", "env:X", ct);
+            /* The table's bump trigger updates config_service, which the write also waits on; it is off here so only the advisory lock is under test. */
+            await ExecAsync(connection, "ALTER TABLE config.config_server_actions DISABLE TRIGGER trg_bump_server_actions", ct);
+            var (request, claim) = await OpenAndClaimAsync(store, 3);
+            Task? commit = null;
+            /* A switch writer: takes the exclusive form of the lock, turns the switch off and commits a second later. The write must wait
+               for that commit and then see the switch off; without the lock it reads the committed "on" and writes. */
+            var hooks = WriteHooks(() => 3, async token =>
+            {
+                var writer = await source.OpenConnectionAsync(token);
+                var transaction = await writer.BeginTransactionAsync(token);
+                await ServerActionSwitchLock.AcquireExclusiveAsync(writer, transaction, 7, ServerActionNames.ForcePlan, 30, token);
+                await using (var update = new NpgsqlCommand(
+                    "UPDATE config.config_server_actions SET enabled = false WHERE server_id = 7 AND action = 'force_plan'", writer, transaction))
+                {
+                    await update.ExecuteNonQueryAsync(token);
+                }
+
+                commit = Task.Run(async () =>
+                {
+                    await Task.Delay(1000, CancellationToken.None);
+                    await transaction.CommitAsync(CancellationToken.None);
+                    await transaction.DisposeAsync();
+                    await writer.DisposeAsync();
+                }, CancellationToken.None);
+            });
+            var result = await store.RunAgentActionAsync(WriteCall(request, claim), hooks, ct);
+            await commit!;
+            Assert.Equal(AgentActionCodes.SwitchOff, result.Refusal?.Reason);
+            Assert.Equal(0, _writes);
+            Assert.Equal("action_called|action_failed", await EventsAsync(connection, request, ct));
+        });
+    }
+
+    [Fact]
+    public async Task TheWrite_WaitsForTheServiceSwitchToBeChanged_ThenRefuses()
+    {
+        await RunAsync(async (store, connection, source, ct) =>
+        {
+            await ArmAsync(connection, switchOn: true, "svc", "env:X", ct);
+            await ExecAsync(connection, "UPDATE config.config_service SET agent_actions_enabled = true", ct);
+            var (request, claim) = await OpenAndClaimAsync(store, 3);
+            Task? commit = null;
+            /* The service-wide switch is turned off by a change that has not committed when the write reads it. The row is read FOR SHARE,
+               so the read waits for that commit and sees off; a plain read sees the committed "on". */
+            var hooks = WriteHooks(() => 3, async token =>
+            {
+                var writer = await source.OpenConnectionAsync(token);
+                var transaction = await writer.BeginTransactionAsync(token);
+                await using (var update = new NpgsqlCommand("UPDATE config.config_service SET agent_actions_enabled = false", writer, transaction))
+                {
+                    await update.ExecuteNonQueryAsync(token);
+                }
+
+                commit = Task.Run(async () =>
+                {
+                    await Task.Delay(1000, CancellationToken.None);
+                    await transaction.CommitAsync(CancellationToken.None);
+                    await transaction.DisposeAsync();
+                    await writer.DisposeAsync();
+                }, CancellationToken.None);
+            });
+            var result = await store.RunAgentActionAsync(WriteCall(request, claim), hooks, ct);
+            await commit!;
+            Assert.Equal(AgentActionCodes.ActionsOff, result.Refusal?.Reason);
+            Assert.Equal(0, _writes);
+            Assert.Equal("action_called|action_failed", await EventsAsync(connection, request, ct));
+        });
+    }
+
     private async Task RunAsync(Func<InvestigationRequestStore, NpgsqlConnection, NpgsqlDataSource, CancellationToken, Task> body)
     {
         var baseConnectionString = ConnectionString;
