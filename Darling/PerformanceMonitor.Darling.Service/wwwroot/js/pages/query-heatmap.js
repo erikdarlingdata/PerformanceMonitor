@@ -178,7 +178,8 @@ export function queryHeatmapCard({ server, hours, label, columns, emptyText }) {
       subtitle: label,
       read: "get_query_heatmap",
       params,
-      viz: "heatmap",
+      /* viz stays "table": the page's window note, source wording and database chip key off it. `render` draws the grid in its place. */
+      viz: "table",
       render: (data, desc) => renderHeatmapBody(data, { server, columns, desc }),
       emptyText,
       span: 2,
