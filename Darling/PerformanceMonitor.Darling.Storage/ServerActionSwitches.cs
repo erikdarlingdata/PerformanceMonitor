@@ -100,10 +100,12 @@ ORDER BY s.name, s.server_id";
     /// <paramref name="lockWaitSeconds"/> (60 s, the wait a switch-off already has); past that nothing is changed and the answer is
     /// <c>switch_busy</c>.</para>
     /// </summary>
+#pragma warning disable CA1068 // #6269: lockWaitSeconds is a test knob that trails the token; putting it first would shift every positional caller
     public static async Task<ServerActionSwitchResult> SetAsync(
         NpgsqlDataSource owner, int serverId, string? action, bool enabled, string actor, string surface, CancellationToken cancellationToken = default,
         int lockWaitSeconds = InvestigationRequestStore.AgentOffSwitchWaitSeconds)
     {
+#pragma warning restore CA1068
         ArgumentNullException.ThrowIfNull(owner);
         if (string.IsNullOrWhiteSpace(actor))
             throw new ArgumentException("A switch change needs the name of who made it.", nameof(actor));
