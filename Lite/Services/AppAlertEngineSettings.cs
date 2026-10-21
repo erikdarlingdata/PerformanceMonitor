@@ -77,6 +77,11 @@ public sealed class AppAlertEngineSettings : IAlertEngineSettings
         AttentionEvaluator.ClampBars(App.AlertClientTimeoutsWarningPerMinute, App.AlertClientTimeoutsCriticalPerMinute).Warning;
     public int ClientTimeoutsCriticalPerMinute =>
         AttentionEvaluator.ClampBars(App.AlertClientTimeoutsWarningPerMinute, App.AlertClientTimeoutsCriticalPerMinute).Critical;
+    /* #5736: the relative bars' multiples, clamped the way the floors are. */
+    public int ClientTimeoutsWarningMultiple =>
+        AttentionBaselineMath.ClampMultiples(App.AlertClientTimeoutsWarningMultiple, App.AlertClientTimeoutsCriticalMultiple).Warning;
+    public int ClientTimeoutsCriticalMultiple =>
+        AttentionBaselineMath.ClampMultiples(App.AlertClientTimeoutsWarningMultiple, App.AlertClientTimeoutsCriticalMultiple).Critical;
     public int LongRunningQueryThresholdMinutes => App.AlertLongRunningQueryThresholdMinutes;
 
     /* The six long-running-query read knobs — Lite exposes all six as real settings. */

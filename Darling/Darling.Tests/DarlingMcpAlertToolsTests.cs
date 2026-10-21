@@ -1197,7 +1197,7 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         Assert.True(ct["enabled"]!.GetValue<bool>());
         Assert.Equal(4, ct["warning_per_minute"]!.GetValue<int>());
         Assert.Equal(25, ct["critical_per_minute"]!.GetValue<int>());
-        Assert.Equal(new[] { "enabled", "warning_per_minute", "critical_per_minute" }, ct.AsObject().Select(p => p.Key).ToArray());
+        Assert.Equal(new[] { "enabled", "warning_per_minute", "critical_per_minute", "warning_multiple", "critical_multiple" }, ct.AsObject().Select(p => p.Key).ToArray());
 
         /* A stored pair the engine would rewrite is reported the way the engine reads it. */
         var crossed = SampleSettingsRow() with { ClientTimeoutsWarningPerMinute = 9, ClientTimeoutsCriticalPerMinute = 3 };
@@ -1322,7 +1322,9 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         /* #5640 (V179): deliberately NOT the shipped false / 10 / 60 -- enabled TRUE against the shipped OFF, and a pair of 4 and 25 -- for
            the same reason: a payload that dropped the columns and fell back to the engine defaults would not match. */
         ClientTimeoutsEnabled: true, ClientTimeoutsWarningPerMinute: 4, ClientTimeoutsCriticalPerMinute: 25,
-        ExcludedVolumes: new[] { "S:\\", "/mnt/scratch" });
+        ExcludedVolumes: new[] { "S:\\", "/mnt/scratch" },
+        /* #5736 (V211): not the shipped 3 / 10, for the same reason as the floors above. */
+        ClientTimeoutsWarningMultiple: 2, ClientTimeoutsCriticalMultiple: 7);
 
     [Fact]
     public void AlertSettingsSql_ReadsSingleGlobalRow()
