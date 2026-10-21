@@ -27,13 +27,7 @@ namespace PerformanceMonitorLite.Tests;
 /// </summary>
 public class ScreenReaderRowNamesTests
 {
-    private static void Settle(Window window)
-    {
-        window.Show();
-        var frame = new DispatcherFrame();
-        window.Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(() => frame.Continue = false));
-        Dispatcher.PushFrame(frame);
-    }
+    private static void Settle(Window window) => StaTestThread.Settle(window);
 
     private static void Walk(AutomationPeer peer, List<AutomationPeer> into)
     {

@@ -48,6 +48,12 @@ internal sealed class ScratchPostgres : IAsyncDisposable
     /// </summary>
     public string UnpinnedConnectionString { get; }
 
+    /// <summary>
+    /// Whether TimescaleDB is enabled in this database (#6317). True by default wherever the cluster has the library
+    /// preloaded; false when the test opted out with <c>plainPostgres: true</c>, or when the cluster cannot load it.
+    /// </summary>
+    public bool TimescaleEnabled { get; private set; }
+
     private ScratchPostgres(string adminConnectionString, string databaseName, string connectionString, string unpinnedConnectionString)
     {
         UnpinnedConnectionString = unpinnedConnectionString;
@@ -65,12 +71,36 @@ internal sealed class ScratchPostgres : IAsyncDisposable
     /// <summary>One start-of-run sweep per cluster per process, keyed by host and port.</summary>
     private static readonly ConcurrentDictionary<string, Lazy<Task>> Sweeps = new();
 
+    /// <summary>Clusters (host and port) where enabling TimescaleDB failed once; the rest of the run creates plain databases there (#6317).</summary>
+    private static readonly ConcurrentDictionary<string, bool> ClustersWithoutTimescale = new();
+
     private static int _exitDrainHooked;
 
     /// <summary>Drop attempts on dispose: a transient refusal (a session that has not finished closing) should not leak.</summary>
     private const int DropAttempts = 3;
 
-    public static async Task<ScratchPostgres> CreateAsync(string baseConnectionString, CancellationToken cancellationToken)
+    /// <summary>
+    /// Mints the scratch database. <b>TimescaleDB is on by default (#6317)</b>, the way the product's store always runs
+    /// it, so a read or write a test makes goes through the planner production uses. A plain table in a database that has
+    /// the extension can still be planned with a TimescaleDB-only plan (#6234: a SkipScan failed with
+    /// <c>ScanKey for skip qual not found</c> in production while the same statement passed on plain PostgreSQL), so the
+    /// extension itself, not only a converted hypertable, is what the default mirrors.
+    ///
+    /// <para>The extension goes in right after <c>CREATE DATABASE</c>, into <c>public</c> (the database has no <c>collect</c>
+    /// schema yet, and creating one first makes <c>MigrateAsync</c> take the store for an already-moved one), and BEFORE the
+    /// test's own <c>MigrateAsync</c>. That is the order of a
+    /// restarted service (extension from the last start, then migrate), not of a brand-new store (migrate, then extension,
+    /// which the shared live-postgres store keeps: see <see cref="LivePostgresStoreFixture"/>). The only migration that
+    /// branches on the extension is V23, and with the extension present it converts <c>collection_log</c> to a hypertable a
+    /// step early instead of leaving it to <c>EnsureCollectionLogHypertableAsync</c>. A test that needs the store without
+    /// the extension, or needs that table plain, passes <paramref name="plainPostgres"/>.</para>
+    ///
+    /// <para>A cluster that lacks the library is handled by <see cref="LiveTimescaleProbe"/>: it enables on its own
+    /// connection, because a failed <c>CREATE EXTENSION</c> terminates the backend, and returns false, and the database is
+    /// then plain PostgreSQL, which is what those tests ran on before.</para>
+    /// </summary>
+    /// <param name="plainPostgres">Leave TimescaleDB off. Only for a test whose subject is the store WITHOUT the extension.</param>
+    public static async Task<ScratchPostgres> CreateAsync(string baseConnectionString, CancellationToken cancellationToken, bool plainPostgres = false)
     {
         HookExitDrain();
         await SweepOncePerClusterAsync(baseConnectionString, cancellationToken);
@@ -107,12 +137,34 @@ internal sealed class ScratchPostgres : IAsyncDisposable
 
         /* Pinned to UTC the way every product store connection is, so a cluster whose default zone is behind UTC
            cannot skew timestamp round trips (a chunk's range_end read back through a ::timestamp cast). */
-        return new ScratchPostgres(
+        var scratch = new ScratchPostgres(
             baseConnectionString,
             databaseName,
             PerformanceMonitor.Darling.Storage.DarlingStoreConnection.PinSessionTimeZoneUtc(builder.ConnectionString),
             builder.ConnectionString);
+
+        var clusterKey = builder.Host + ":" + builder.Port;
+        if (!plainPostgres && !ClustersWithoutTimescale.ContainsKey(clusterKey))
+        {
+            try
+            {
+                scratch.TimescaleEnabled = await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, cancellationToken);
+                if (!scratch.TimescaleEnabled)
+                {
+                    /* The cluster cannot load the library: do not pay a failed CREATE EXTENSION (it ends the backend) per database. */
+                    ClustersWithoutTimescale[clusterKey] = true;
+                }
+            }
+            catch
+            {
+                await TryDropAsync(baseConnectionString, databaseName);
+                throw;
+            }
+        }
+
+        return scratch;
     }
+
 
     /// <summary>
     /// Drops the database, retrying a transient refusal. A drop that still fails is reported and the database stays

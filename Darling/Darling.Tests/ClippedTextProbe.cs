@@ -38,44 +38,7 @@ internal static class ClippedTextProbe
         /* Each step is named, so a body that never returns says in the hang guard's message which of the three it was in. */
         StaTestThread.Step("Settle: the layout pass before the idle frame");
         window.UpdateLayout();
-        var dispatcher = window.Dispatcher;
-        var frame = new DispatcherFrame();
-        var idle = false;
-        var operations = 0;
-        var lastPriority = DispatcherPriority.Invalid;
-        DispatcherHookEventHandler counter = (_, e) =>
-        {
-            operations++;
-            lastPriority = e.Operation.Priority;
-        };
-        dispatcher.Hooks.OperationStarted += counter;
-
-        /* Send priority and promoted by the dispatcher on every pass, so it fires even when the queue is never empty. */
-        var expiry = new DispatcherTimer(DispatcherPriority.Send, dispatcher) { Interval = limit };
-        expiry.Tick += (_, _) => frame.Continue = false;
-        try
-        {
-            dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(() =>
-            {
-                idle = true;
-                frame.Continue = false;
-            }));
-            expiry.Start();
-            StaTestThread.Step("Settle: waiting in the frame for the dispatcher to reach application idle");
-            Dispatcher.PushFrame(frame);
-        }
-        finally
-        {
-            expiry.Stop();
-            dispatcher.Hooks.OperationStarted -= counter;
-        }
-
-        if (!idle)
-        {
-            throw new TimeoutException(
-                $"The dispatcher did not reach application idle within {limit.TotalMilliseconds:0} ms: it ran {operations} operations meanwhile, the last at priority {lastPriority}. "
-                + "A layout or a handler that queues work ahead of idle without end looks like this (#6216).");
-        }
+        StaTestThread.WaitForIdle(window.Dispatcher, limit);
 
         StaTestThread.Step("Settle: the layout pass after the idle frame");
         window.UpdateLayout();
