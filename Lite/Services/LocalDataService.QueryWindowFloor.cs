@@ -297,17 +297,17 @@ public partial class LocalDataService
     /// one (no row and no logged run of that collector in the window) gives way to the other's. A tool that reads only the
     /// first collector's rows (the report XML) passes <c>includeAlsoCovered: false</c> to probe that collector alone.</para>
     /// </summary>
-    public async Task<DateTime?> GetQueryWindowFloorAsync(QueryWindowRelation relation, int serverId, DateTime startUtc, DateTime endUtc, ServerClock? serverClock = null, bool includeAlsoCovered = true, CancellationToken cancellationToken = default, DateTime? rowsNotBeforeUtc = null)
+    public async Task<DateTime?> GetQueryWindowFloorAsync(QueryWindowRelation relation, int serverId, DateTime startUtc, DateTime endUtc, ServerClock? serverClock = null, bool includeAlsoCovered = true, DateTime? rowsNotBeforeUtc = null, CancellationToken cancellationToken = default)
     {
-        var own = await GetOwnQueryWindowFloorAsync(relation, serverId, startUtc, endUtc, serverClock, cancellationToken, rowsNotBeforeUtc);
+        var own = await GetOwnQueryWindowFloorAsync(relation, serverId, startUtc, endUtc, serverClock, rowsNotBeforeUtc, cancellationToken);
         return includeAlsoCovered && QueryWindowRelationAlsoCoveredBy(relation) is QueryWindowRelation also
-            ? EarlierCoverageFloor(own, await GetOwnQueryWindowFloorAsync(also, serverId, startUtc, endUtc, serverClock, cancellationToken, rowsNotBeforeUtc))
+            ? EarlierCoverageFloor(own, await GetOwnQueryWindowFloorAsync(also, serverId, startUtc, endUtc, serverClock, rowsNotBeforeUtc, cancellationToken))
             : own;
     }
 
     /// <summary>One relation's own probe, which <see cref="GetQueryWindowFloorAsync"/> documents. Each call opens and releases its
     /// own connection, so the two answers of a grid fed by two collectors never nest the non-recursive read lock.</summary>
-    private async Task<DateTime?> GetOwnQueryWindowFloorAsync(QueryWindowRelation relation, int serverId, DateTime startUtc, DateTime endUtc, ServerClock? serverClock, CancellationToken cancellationToken = default, DateTime? rowsNotBeforeUtc = null)
+    private async Task<DateTime?> GetOwnQueryWindowFloorAsync(QueryWindowRelation relation, int serverId, DateTime startUtc, DateTime endUtc, ServerClock? serverClock, DateTime? rowsNotBeforeUtc = null, CancellationToken cancellationToken = default)
     {
         var view = QueryWindowRelationView(relation);
         using var _q = TimeQuery("GetQueryWindowFloorAsync", $"{view} window floor");
