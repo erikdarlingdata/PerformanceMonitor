@@ -5204,6 +5204,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ? await ResolveQueryStoreWideEligibleAsync(postgres, serverScope, start, end, hasWindowEnd ? end : (DateTime?)null, cancellationToken, plan)
             : default;
         var queryStoreWideEligible = wideResolution.Eligible;
+        /* #6115: the servers the gate refused. The panel reads them raw and every other server in scope from the interval table. Null when
+           every server passed (today's all-wide text) and when none did (today's all-raw text, Eligible false). */
+        var rawServerIds = wideResolution.RawServerIds;
 
         /* #5582: a wide-table read the daily summary says cannot finish inside the statement timeout is refused here, in
            milliseconds, before any fact row is read. Both callers of this runner (the web endpoint and the MCP tool
@@ -5222,7 +5225,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 stampThrough = wideResolution.StampThrough;
             }
 
-            if (await QueryStoreWideReadGuard.CheckAsync(postgres, serverScope, countedStart, end, logger, cancellationToken, limit, stampThrough) is { } tooBig)
+            /* #6115: the guard's wide estimate leaves out the servers read raw (the interval table never reads them), and ADDS the raw half's
+               rows, counted from the collection log over the window's own start (the raw half is not clamped to the wide start) at 1.0 each,
+               against the same limit. One statement reads both halves under one timeout, so the sum is what must fit. The wide figure is
+               exactly what the guard counted before #6115 for those servers, so a split panel is never let through that today's code would
+               refuse for the same wide rows; the raw rows can only refuse more. A panel whose every server passes adds nothing and is
+               unchanged. A log that cannot answer adds nothing: the guard fails open, as it always has. */
+            if (await QueryStoreWideReadGuard.CheckAsync(postgres, serverScope, countedStart, end, logger, cancellationToken, limit, stampThrough, rawServerIds, start) is { } tooBig)
             {
                 return ComposeRunOutcome.BadRequest(tooBig);
             }
@@ -5277,7 +5286,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
         await using var snapshot = hourlyEdgesSnapshot;
 
-        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, queryStoreWideEligible, wideResolution.WideStart, HourlyEdges: snapshot?.Verdict, ModuleMapThrough: snapshot?.ModuleMapThrough ?? moduleMap.Through, UnregisteredServers: unregisteredServers, QueryStoreGroupMembers: wideResolution.GroupMembers, QueryStoreStampThrough: stampThrough, ModuleMapMissing: moduleMap.Missing);
+        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, queryStoreWideEligible, wideResolution.WideStart, HourlyEdges: snapshot?.Verdict, ModuleMapThrough: snapshot?.ModuleMapThrough ?? moduleMap.Through, UnregisteredServers: unregisteredServers, QueryStoreGroupMembers: wideResolution.GroupMembers, QueryStoreStampThrough: stampThrough, ModuleMapMissing: moduleMap.Missing, QueryStoreRawServerIds: rawServerIds);
         var (compiled, compileError) = ComposeCompiler.Compile(plan!, runContext);
         if (compileError is not null)
         {
@@ -5295,7 +5304,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         }
 
         ReadScope.NoteSource(
-            queryStoreWideEligible ? ReadScope.SourceIntervalTable : snapshot?.Verdict is not null ? ReadScope.SourceHourlyEdges : ReadScope.SourceRaw);
+            queryStoreWideEligible ? ReadScope.SourceIntervalTable : snapshot?.Verdict is not null ? ReadScope.SourceHourlyEdges : ReadScope.SourceRaw,
+            queryStoreWideEligible && rawServerIds is { Count: > 0 } ? "split_raw_servers" : null);
 
         try
         {
@@ -5369,11 +5379,23 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             if (queryStoreWideEligible && wideResolution.WideStart is DateTime historyStart && historyStart > start)
             {
                 payload["query_store_history_starts"] = McpHelpers.FormatEffectiveStart(historyStart);
-                payload["query_store_history_note"] = QueryStoreHistoryNote(historyStart, wideResolution.Bound, wideResolution.SettingServer);
+                payload["query_store_history_note"] = QueryStoreHistoryNote(historyStart, wideResolution.Bound, wideResolution.SettingServer)
+                    + (rawServerIds is { Count: > 0 }
+                        ? " Servers whose interval table could not serve the window were read from the raw tables, from the window's own start (#6115)."
+                        : string.Empty);
                 if (wideResolution.SettingServer is not null)
                 {
                     payload["query_store_history_set_by"] = wideResolution.SettingServer;
                 }
+            }
+
+            /* #6115 review: a split run whose passing servers did not move the wide start has no history note above, so the payload always says on its
+               own how many servers were read raw. */
+            if (queryStoreWideEligible && rawServerIds is { Count: > 0 })
+            {
+                payload["query_store_raw_servers_note"] = rawServerIds.Count == 1
+                    ? "1 server whose interval table could not serve the window was read from the raw tables, from the window's own start (#6115)."
+                    : $"{rawServerIds.Count} servers whose interval table could not serve the window were read from the raw tables, from the window's own start (#6115).";
             }
 
             return ComposeRunOutcome.Ok(payload);
@@ -5428,7 +5450,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// a refused clause on any server in scope makes the whole panel raw — every input here leans toward raw,
     /// the same rule #3953 already applies to the single-server reads.
     /// </summary>
-    internal static async Task<(bool Eligible, DateTime? WideStart, QueryStoreIntervalWide.WideStartBound Bound, string? SettingServer, long? GroupMembers, DateTime? StampThrough)> ResolveQueryStoreWideEligibleAsync(
+    internal static async Task<(bool Eligible, DateTime? WideStart, QueryStoreIntervalWide.WideStartBound Bound, string? SettingServer, long? GroupMembers, DateTime? StampThrough, IReadOnlyList<int>? RawServerIds)> ResolveQueryStoreWideEligibleAsync(
         NpgsqlDataSource postgres, IReadOnlyList<string>? serverScope, DateTime start, DateTime end,
         DateTime? literalWindowEnd, System.Threading.CancellationToken cancellationToken, PanelPlan? groupMembersFor = null)
     {
@@ -5489,8 +5511,25 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             /* The floors are one store-wide answer: the first server to reach that step reads them into this
                cache and the rest reuse them; a check that refuses before that step never reads them. */
             var storeWide = new QueryStoreIntervalWide.StoreWideInputsCache();
+
+            /* #6115: the gate decides per server, and a server that fails no longer sends the whole panel to raw: it reads raw, and the
+               servers that pass read the interval table (the split). Each server is in exactly one set, so no row is read twice.
+               A server with no coverage row AND no Query Store row in the window is neither: it adds no cost to either half, so it
+               must not make the fleet read raw (option 1 of the issue). It is classified with the passing servers, because the wide
+               half is "every server not read raw", and a server that reads nothing there costs nothing; and it is left out of the
+               wide start, because it has no history to bound. A server with no coverage row and rows in the window cannot use the
+               interval table, so it reads raw like any refused server. Decided from the two small probes below, never from the gate,
+               whose own answer for such a server is always "refuse". */
+            var covered = await ReadQueryStoreCoveredServersAsync(connection, cancellationToken);
+            var rawServers = new List<int>();
+            var passed = 0;
             foreach (var (serverId, serverName) in wideServers)
             {
+                if (!covered.Contains(serverId) && !await QueryStoreServerHasRowsAsync(connection, serverId, start, end, cancellationToken))
+                {
+                    continue;
+                }
+
                 var plan = await QueryStoreIntervalWide.ResolveReadAsync(
                     connection, serverId, start, end, literalWindowEnd, ComposeQueryStoreWideMinWindow,
                     McpCommandDeadlines.ReadSeconds, ReadScope.Current?.Logger, cancellationToken, storeWide);
@@ -5501,9 +5540,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                         ReadScope.Note(ReadFallback.GateFailed);
                     }
 
-                    return default;
+                    /* A server whose decision faulted reads raw too: raw is the exact source, and a fault leans toward it, as it always did. */
+                    rawServers.Add(serverId);
+                    continue;
                 }
 
+                passed++;
                 if (plan.ReadStart > wideStart)
                 {
                     wideStart = plan.ReadStart;
@@ -5512,6 +5554,16 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 }
             }
 
+            /* No server could read the interval table: the whole panel reads raw, as it did before #6115. */
+            if (passed == 0)
+            {
+                return default;
+            }
+
+            /* A server in scope that is not enabled is not gated, and the all-wide text has always read its retained rows from the
+               interval table unchecked. The split keeps that: it is on the wide side, and costs the raw half nothing. */
+            IReadOnlyList<int>? rawServerIds = rawServers.Count > 0 ? rawServers : null;
+
             /* #5582: for a Query Store RankedTimeSeries panel, the members of its group dimension, on this same connection, so the
                compiler can bound the single-scan base CTE (buckets x members). Null for any other panel, and when unknown. */
             long? groupMembers = groupMembersFor is null
@@ -5519,15 +5571,47 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 : await QueryStoreGroupMembers.ResolveAsync(connection, groupMembersFor, wideServers.Count, cancellationToken);
 
             /* #5582 part 3: where the compose rollup stops answering, on this same connection. Null (today's route) on any fault. */
-            var stampThrough = await ResolveQueryStoreStampThroughAsync(connection, scopedServerIds.ToArray(), wideStart, end, schemaVersion, cancellationToken);
+            var stampThrough = await ResolveQueryStoreStampThroughAsync(
+                connection, (rawServerIds is null ? scopedServerIds : scopedServerIds.Except(rawServerIds).ToList()).ToArray(), wideStart, end, schemaVersion, cancellationToken);
 
-            return (true, wideStart, bound, settingServer, groupMembers, stampThrough);
+            return (true, wideStart, bound, settingServer, groupMembers, stampThrough, rawServerIds);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             ReadScope.NoteFallback(ReadFallback.GateFailed, "#4605 compose Query Store wide-table eligibility check", ex);
             return default;
         }
+    }
+
+    /// <summary>#6115: the servers with a coverage row for the interval table. $1 none.</summary>
+    internal const string QueryStoreCoveredServersSql = "SELECT server_id FROM collect.query_store_interval_wide_coverage";
+
+    /// <summary>#6115: whether a server holds any raw Query Store row in the window ($1 server, $2 start, $3 end). One index probe on
+    /// (server_id, collection_time), and it stops at the first row.</summary>
+    internal const string QueryStoreServerHasRowsSql =
+        "SELECT EXISTS (SELECT 1 FROM collect.query_store_stats WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3)";
+
+    private static async Task<HashSet<int>> ReadQueryStoreCoveredServersAsync(NpgsqlConnection connection, System.Threading.CancellationToken cancellationToken)
+    {
+        var covered = new HashSet<int>();
+        await using var command = new NpgsqlCommand(QueryStoreCoveredServersSql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds };
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            covered.Add(reader.GetInt32(0));
+        }
+
+        return covered;
+    }
+
+    private static async Task<bool> QueryStoreServerHasRowsAsync(
+        NpgsqlConnection connection, int serverId, DateTime start, DateTime end, System.Threading.CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(QueryStoreServerHasRowsSql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer, Value = serverId });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(start, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(end, DateTimeKind.Unspecified) });
+        return (bool)(await command.ExecuteScalarAsync(cancellationToken))!;
     }
 
     /// <summary>
