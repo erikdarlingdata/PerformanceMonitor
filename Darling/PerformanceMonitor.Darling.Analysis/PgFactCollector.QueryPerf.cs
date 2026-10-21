@@ -769,6 +769,7 @@ ORDER BY c.regression_factor DESC";
         /* #3902: cleared first, so a read that fails below leaves "not known" for the drill-down rather
            than a list some earlier pass stamped on a reused context. */
         context.PlanRegressionOffenders = null;
+        context.PlanRegressionFailures = null;
         context.PlanRegressionReadsIntervalTable = null;
         context.PlanRegressionWindowStart = null;
 
@@ -955,6 +956,20 @@ ORDER BY c.regression_factor DESC";
                 snapshot = null;
             }
 
+            /* #6267: the queries whose timeouts or errors rose. The cost read above counts Regular runs only, so a plan that
+               regresses into timeouts or errors is found here, from the wide table's non-Regular rows (the partial index's
+               predicate). A failed read costs the failure half only: the cost half below still reports, and the failure is
+               recorded as a collection caveat. */
+            var failures = new List<PlanRegressionFailureRule.Failure>();
+            try
+            {
+                failures = await ReadPlanRegressionFailuresAsync(connection, context, rawWindowStart, collectionBound);
+            }
+            catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+            {
+                ReportCollectionFailure(ex, context);
+            }
+
             /* #5630: drop the queries whose two plans were not compiled for the same inputs, keep the worst 20 of the
                rest. Everything that reads the list downstream (the offenders, the regressed-queries drill-down, the
                force-plan targets built from it) sees only the kept queries. The drill-down names a query by
@@ -1042,6 +1057,7 @@ ORDER BY c.regression_factor DESC";
             }
 
             context.PlanRegressionOffenders = offenders;
+            context.PlanRegressionFailures = failures;
 
             /* #5448: M is recorded only now, after the read has succeeded. A read that threw leaves "not known" (null), as the
                AnalysisContext doc says, so the drill-down does not start at an edge no fact read from. */
@@ -1064,7 +1080,7 @@ ORDER BY c.regression_factor DESC";
                     planReads.Count, context.ServerId, planReadFailure.GetType().Name);
             }
 
-            if (offenderCount == 0) return;
+            if (offenderCount == 0 && failures.Count == 0) return;
 
             var fact = new Fact
             {
@@ -1075,11 +1091,6 @@ ORDER BY c.regression_factor DESC";
                 Metadata = new Dictionary<string, double>
                 {
                     ["offender_count"] = offenderCount,
-                    ["worst_regression_factor"] = worstFactor,
-                    ["worst_query_id"] = worstQueryId,
-                    ["latest_cpu_per_exec_us"] = worstLatestCpu,
-                    ["best_cpu_per_exec_us"] = worstBestCpu,
-                    ["regressed_dimension"] = worstDimension,
                     ["latest_is_forced"] = worstLatestForced,
                     ["force_failure_count"] = worstForceFailures,
                     /* #3953: 1 when this pass read the latest-snapshot interval table, 0 for the raw slice. */
@@ -1095,6 +1106,20 @@ ORDER BY c.regression_factor DESC";
                     ["worst_input_basis"] = worstInputBasis,
                 }
             };
+
+            /* The cost figures exist only when a plan's cost regressed: a fact raised by failures alone carries none, so the
+               advice reads their absence as "no cost regression" and not as a zero factor (#6267). */
+            if (offenderCount > 0)
+            {
+                fact.Metadata["worst_regression_factor"] = worstFactor;
+                fact.Metadata["worst_query_id"] = worstQueryId;
+                fact.Metadata["latest_cpu_per_exec_us"] = worstLatestCpu;
+                fact.Metadata["best_cpu_per_exec_us"] = worstBestCpu;
+                fact.Metadata["regressed_dimension"] = worstDimension;
+            }
+
+            /* #6267: the failure figures, and the larger of the two values. */
+            fact.Value = Math.Max(worstFactor, PlanRegressionFailureRule.AddMetadata(fact.Metadata, failures));
 
             /* #3953: the worst offender's best plan's age at the window's end, in days. Absent only if the read
                returned no timestamp, which a plan with executions in the window cannot do. */
