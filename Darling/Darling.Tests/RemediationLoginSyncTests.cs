@@ -144,6 +144,187 @@ public sealed class RemediationLoginSyncTests
         Assert.Equal(ServerCredentialState.Missing, InvestigationRequestStore.ClassifyCredential(user, secret));
     }
 
+    private static object HypoEntry(string name, string? user = null, string? secret = null)
+    {
+        var entry = new Dictionary<string, object> { ["name"] = name, ["host"] = name + ".example.test" };
+        if (user is not null)
+        {
+            entry["hypotheticalIndexUsername"] = user;
+        }
+
+        if (secret is not null)
+        {
+            entry["hypotheticalIndexEncryptedPassword"] = secret;
+        }
+
+        return entry;
+    }
+
+    private static async Task<(string? User, string? Secret)> HypoSlotAsync(NpgsqlDataSource owner, string name, CancellationToken ct)
+    {
+        await using var command = owner.CreateCommand(
+            "SELECT hypothetical_index_username, hypothetical_index_encrypted_password FROM config_monitored_servers WHERE name = $1");
+        command.Parameters.AddWithValue(name);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        Assert.True(await reader.ReadAsync(ct), "no registry row for " + name);
+        return (reader.IsDBNull(0) ? null : reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetString(1));
+    }
+
+    /// <summary>The "Test an index" login (#6170) follows darling.json on a restart when BOTH keys are in the file: set, then replaced.
+    /// It is never cleared and never half written, because an owner's UPDATE on the store row is a documented way to set it; a server
+    /// that is not in the file is untouched; the log names the server and the secret's shape and never a login or a reference; and the
+    /// row the sync writes still earns the "declared by the file" mark that lets darling.json name one of Darling's own files.</summary>
+    [Fact]
+    public async Task HypotheticalIndexLogin_FollowsTheFileWhenBothKeysArePresent_AndIsNeverClearedOrHalfWritten()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratchStore, owner, _) = await ServerAddViewerRoleLiveTests.OpenAsync(ct);
+        await using var scratchHolder = scratchStore;
+        await using var ownerHolder = owner;
+        var logger = new CapturingLogger();
+
+        /* First start: alpha has none, bravo and charlie have a login, delta and echo have none. */
+        var first = DarlingConfig.Parse(Json(
+            HypoEntry("alpha-sql-01"),
+            HypoEntry("bravo-sql-01", "bravo_check", ThirdReference),
+            HypoEntry("charlie-sql-01", "charlie_check", FirstReference),
+            HypoEntry("delta-sql-01"),
+            HypoEntry("echo-sql-01")));
+        await new StoreConfigProvider(owner, logger).SeedIfEmptyAsync(first, ct);
+
+        /* An owner set delta's login with an UPDATE (the README's way); another server was added outside the file with its own. */
+        await using (var update = owner.CreateCommand(
+            "UPDATE config_monitored_servers SET hypothetical_index_username = 'delta_check', "
+            + "hypothetical_index_encrypted_password = 'env:DELTA_CHECK_PASSWORD_6270' WHERE name = 'delta-sql-01'"))
+        {
+            await update.ExecuteNonQueryAsync(ct);
+        }
+
+        await using (var insert = owner.CreateCommand(
+            "INSERT INTO config_monitored_servers (server_id, name, host, hypothetical_index_username, hypothetical_index_encrypted_password) "
+            + "VALUES (6270001, 'web-added-sql-01', 'web-added-sql-01.example.test', 'web_check', 'env:WEB_ADDED_CHECK_PASSWORD_6270')"))
+        {
+            await insert.ExecuteNonQueryAsync(ct);
+        }
+
+        logger.Lines.Clear();
+
+        /* Restart: alpha gains a login, bravo's secret is replaced, charlie loses both keys in the file, delta has no keys in the file,
+           echo has only a username in the file. */
+        var second = DarlingConfig.Parse(Json(
+            HypoEntry("alpha-sql-01", "alpha_check", SecondReference),
+            HypoEntry("bravo-sql-01", "bravo_check", FirstReference),
+            HypoEntry("charlie-sql-01"),
+            HypoEntry("delta-sql-01"),
+            HypoEntry("echo-sql-01", "echo_check")));
+        var provider = new StoreConfigProvider(owner, logger);
+        await provider.SeedIfEmptyAsync(second, ct);
+
+        Assert.Equal(("alpha_check", SecondReference), await HypoSlotAsync(owner, "alpha-sql-01", ct));
+        Assert.Equal(("bravo_check", FirstReference), await HypoSlotAsync(owner, "bravo-sql-01", ct));
+        Assert.Equal(("charlie_check", FirstReference), await HypoSlotAsync(owner, "charlie-sql-01", ct));
+        Assert.Equal(("delta_check", "env:DELTA_CHECK_PASSWORD_6270"), await HypoSlotAsync(owner, "delta-sql-01", ct));
+        Assert.Equal((null, null), await HypoSlotAsync(owner, "echo-sql-01", ct));
+        Assert.Equal(("web_check", "env:WEB_ADDED_CHECK_PASSWORD_6270"), await HypoSlotAsync(owner, "web-added-sql-01", ct));
+
+        var said = string.Join("\n", logger.Lines);
+        Assert.Contains("Hypothetical-index login for server 'alpha-sql-01' set", said, StringComparison.Ordinal);
+        Assert.Contains("Hypothetical-index login for server 'bravo-sql-01' changed", said, StringComparison.Ordinal);
+        Assert.Contains("env reference", said, StringComparison.Ordinal);
+        Assert.DoesNotContain("Remediation login", said, StringComparison.Ordinal);
+        foreach (var untouched in new[] { "charlie-sql-01", "delta-sql-01", "echo-sql-01", "web-added-sql-01" })
+        {
+            Assert.DoesNotContain(untouched, said, StringComparison.Ordinal);
+        }
+
+        foreach (var secret in new[]
+                 {
+                     FirstReference, SecondReference, ThirdReference, "ALPHA_REMEDIATION", "BRAVO_REMEDIATION", "DELTA_CHECK", "WEB_ADDED_CHECK",
+                     "alpha_check", "bravo_check", "charlie_check", "delta_check", "echo_check", "web_check",
+                 })
+        {
+            Assert.DoesNotContain(secret, said, StringComparison.Ordinal);
+        }
+
+        /* The row the sync wrote equals the file's text, so the "declared by the file" mark (which lets darling.json name one of
+           Darling's own files for this server) is still earned; before the sync it was not (bravo's row held the old reference). */
+        var view = await provider.LoadViewAsync(second, ct);
+        Assert.NotNull(view);
+        var servers = view!.EnabledServers.ToDictionary(s => s.DisplayName, StringComparer.OrdinalIgnoreCase);
+        Assert.True(servers["alpha-sql-01"].HypotheticalIndexEncryptedPasswordDeclaredByFile);
+        Assert.True(servers["bravo-sql-01"].HypotheticalIndexEncryptedPasswordDeclaredByFile);
+
+        /* A third start with the same file changes nothing and says nothing. */
+        logger.Lines.Clear();
+        await new StoreConfigProvider(owner, logger).SeedIfEmptyAsync(second, ct);
+        Assert.DoesNotContain(logger.Lines, line => line.Contains("Hypothetical-index login", StringComparison.Ordinal));
+    }
+
+    /// <summary>A sync that fails says so with the exception's type and SQLSTATE and nothing else: a PostgreSQL error can carry the row's
+    /// values, and the row holds a secret reference and a login. The trigger below makes the store refuse the write with a message that
+    /// repeats the new values, so a log line built from the message would carry them.</summary>
+    [Fact]
+    public async Task AFailingSync_LogsTheErrorTypeAndSqlState_AndNoSecretReferenceOrLogin()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratchStore, owner, _) = await ServerAddViewerRoleLiveTests.OpenAsync(ct);
+        await using var scratchHolder = scratchStore;
+        await using var ownerHolder = owner;
+        var logger = new CapturingLogger();
+
+        await new StoreConfigProvider(owner, logger).SeedIfEmptyAsync(
+            DarlingConfig.Parse(Json(HypoEntry("alpha-sql-01"), Entry("bravo-sql-01"))), ct);
+
+        foreach (var statement in new[]
+                 {
+                     "CREATE FUNCTION refuse_login_6270() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+                     + "RAISE EXCEPTION 'refused % / % / % / %', NEW.hypothetical_index_username, NEW.hypothetical_index_encrypted_password, "
+                     + "NEW.remediation_username, NEW.remediation_encrypted_password; END $$",
+                     "CREATE TRIGGER refuse_login_6270 BEFORE UPDATE OF hypothetical_index_username, remediation_username "
+                     + "ON config_monitored_servers FOR EACH ROW EXECUTE FUNCTION refuse_login_6270()",
+                 })
+        {
+            await using var command = owner.CreateCommand(statement);
+            await command.ExecuteNonQueryAsync(ct);
+        }
+
+        logger.Lines.Clear();
+        var config = DarlingConfig.Parse(JsonSerializer.Serialize(new
+        {
+            servers = new object[]
+            {
+                new Dictionary<string, object>
+                {
+                    ["name"] = "alpha-sql-01", ["host"] = "alpha-sql-01.example.test",
+                    ["hypotheticalIndexUsername"] = "alpha_check", ["hypotheticalIndexEncryptedPassword"] = SecondReference,
+                },
+                new Dictionary<string, object>
+                {
+                    ["name"] = "bravo-sql-01", ["host"] = "bravo-sql-01.example.test",
+                    ["remediationUsername"] = "bravo_fix", ["remediationEncryptedPassword"] = ThirdReference,
+                },
+            },
+        }));
+        await new StoreConfigProvider(owner, logger).SeedIfEmptyAsync(config, ct);
+
+        Assert.Equal((null, null), await HypoSlotAsync(owner, "alpha-sql-01", ct));
+        Assert.Equal((null, null), await SlotAsync(owner, "bravo-sql-01", ct));
+
+        var failures = logger.Lines.Where(line => line.Contains("Could not sync", StringComparison.Ordinal)).ToList();
+        Assert.Equal(2, failures.Count);
+        foreach (var line in failures)
+        {
+            Assert.Contains("SQLSTATE P0001", line, StringComparison.Ordinal);
+            Assert.Contains("PostgresException", line, StringComparison.Ordinal);
+        }
+
+        var said = string.Join("\n", logger.Lines);
+        foreach (var secret in new[] { SecondReference, ThirdReference, "alpha_check", "bravo_fix", "ALPHA_REMEDIATION", "BRAVO_REMEDIATION", "alpha-remediation" })
+        {
+            Assert.DoesNotContain(secret, said, StringComparison.Ordinal);
+        }
+    }
+
     /// <summary>A DPAPI blob as the remediation secret is warned about by <c>--validate-config</c>, with the server's name and the
     /// shape and not the value; a reference and an unarmed entry are not.</summary>
     [Fact]

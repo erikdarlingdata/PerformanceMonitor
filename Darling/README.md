@@ -613,7 +613,7 @@ Set up the login the way you set up the remediation login:
 5. Give it a SCRAM-SHA-256 password (`password_encryption = 'scram-sha-256'` when you set it), and a `scram-sha-256` line in `pg_hba.conf`. The check signs in with SCRAM-SHA-256 only. A server that asks for a password in clear text, MD5, or no password at all is refused before the password is sent. Unless the server entry verifies the server's certificate in full (encryption not `Optional` and `Trust server certificate` off), the check also needs SCRAM channel binding, so TLS must be on at the server (`ssl = on`).
 6. Set `hypotheticalIndexUsername` to the login name and `hypotheticalIndexEncryptedPassword` to an `env:NAME` or `file:/path` reference to its password.
 
-**For a server that is already in the store**, darling.json is read only to add servers the store does not have, so the two keys in the file do not change a server already there. Set them on the store row, as the store's owner role, the same way as the remediation pair (the web dashboard, the MCP `edit_server` tool and the desktop viewer cannot set either pair, by design). For example, in `psql` as the owner:
+**For a server that is already in the store**, there are two ways. If you set BOTH keys in darling.json for that server, Darling applies them on every start (it sets the login, or replaces it when the file's differ), and the log says which server and the shape of the secret, never the login or the reference. Leaving the keys out of darling.json never clears a login the server already has. The other way is to set them on the store row, as the store's owner role (the web dashboard, the MCP `edit_server` tool and the desktop viewer cannot set either pair, by design). For example, in `psql` as the owner:
 
 ```sql
 UPDATE config.config_monitored_servers
@@ -623,7 +623,7 @@ SET hypothetical_index_username = 'pm_index_check',
 WHERE name = 'my-pg-server';
 ```
 
-The service picks the change up when it next reloads its server list. Once the password column is set, the web dashboard, the MCP `edit_server` tool and the desktop viewer refuse to change how that server is reached (host, port, database, authentication, username, encryption), as they do for a remediation login: change it on the service host, with the same `UPDATE` as the owner. Removing the two columns (`SET ... = NULL`) lifts that.
+The service picks the change up when it next reloads its server list. Once the password column is set, the web dashboard, the MCP `edit_server` tool and the desktop viewer refuse to change how that server is reached (host, port, database, authentication, username, encryption), as they do for a remediation login: change it on the service host, with the same `UPDATE` as the owner. Removing the two columns (`SET ... = NULL`) lifts that, unless darling.json still has both keys for the server: the next start puts them back.
 
 A bring-your-own store needs one step after the service upgrades the store to V203. Run `tools/provision-roles.sql` again, so `config.edit_monitored_server` and the password-rules trigger know the new password column. The service replaces both on each start when its login owns them, and warns once, naming the script, when it does not. The compose store and managed provisioning do this on their own.
 

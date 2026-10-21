@@ -152,6 +152,7 @@ public sealed class StoreConfigProvider
             /* #6262: the one setting darling.json still owns after the seed. It has its own failure scope, so a refusal there
                never stops the service row below from being seeded. */
             await SyncRemediationLoginsAsync(connection, config, cancellationToken);
+            await SyncHypotheticalIndexLoginsAsync(connection, config, cancellationToken);
 
             /* LAST — its presence marks the seed complete (the reload gate keys on config_version). */
             if (await CountAsync(connection, "config_service", cancellationToken) == 0)
@@ -167,8 +168,21 @@ public sealed class StoreConfigProvider
         }
     }
 
-    /// <summary>One change <see cref="PlanRemediationSync"/> found: the registry row to write, what it becomes, and the verb for the log.</summary>
+    /// <summary>One change <see cref="PlanRemediationSync"/> or <see cref="PlanHypotheticalIndexSync"/> found: the registry row to write, what it becomes, and the verb for the log.</summary>
     internal sealed record RemediationSyncChange(int ServerId, string Name, string? Username, string? Secret, string Action, string Note);
+
+    /// <summary>Which of a registered server's two login slots a sync pass writes, and how the file's keys map onto it.</summary>
+    private sealed record LoginSlot(
+        string Label, string UserColumn, string SecretColumn,
+        Func<MonitoredServer, string?> FileUser, Func<MonitoredServer, string?> FileSecret, bool ClearWhenAbsent);
+
+    private static readonly LoginSlot RemediationSlot = new(
+        "Remediation login", "remediation_username", "remediation_encrypted_password",
+        s => s.RemediationUsername, s => s.RemediationEncryptedPassword, ClearWhenAbsent: true);
+
+    private static readonly LoginSlot HypotheticalIndexSlot = new(
+        "Hypothetical-index login", "hypothetical_index_username", "hypothetical_index_encrypted_password",
+        s => s.HypotheticalIndexUsername, s => s.HypotheticalIndexEncryptedPassword, ClearWhenAbsent: false);
 
     /// <summary>
     /// #6262: darling.json is the only writer of a server's remediation login (the web, the viewer and edit_server cannot set it, so
@@ -178,13 +192,26 @@ public sealed class StoreConfigProvider
     /// owner's connection, the one the seed uses. Logs one line per change that names the server and the slot's shape, never the
     /// login or the secret. A failure is warned and the start goes on.
     /// </summary>
-    internal async Task SyncRemediationLoginsAsync(NpgsqlConnection connection, DarlingConfig config, CancellationToken ct)
+    internal Task SyncRemediationLoginsAsync(NpgsqlConnection connection, DarlingConfig config, CancellationToken ct) =>
+        SyncLoginSlotAsync(connection, config, RemediationSlot, ct);
+
+    /// <summary>
+    /// #6262: the same sync for the PostgreSQL "Test an index" login (#6170), with one difference: the file never CLEARS it. The
+    /// README documents an owner-role UPDATE on the store row as a way to set this pair, so darling.json is not its only writer, and
+    /// a file without the keys must not undo that. Only an entry with BOTH keys present sets or replaces the slot (a half login in
+    /// the file is ignored); the secret is written as the file has it, so the same-reference check that lets darling.json name one
+    /// of Darling's own files for this server (<c>HypotheticalIndexEncryptedPasswordDeclaredByFile</c>) keeps matching.
+    /// </summary>
+    internal Task SyncHypotheticalIndexLoginsAsync(NpgsqlConnection connection, DarlingConfig config, CancellationToken ct) =>
+        SyncLoginSlotAsync(connection, config, HypotheticalIndexSlot, ct);
+
+    private async Task SyncLoginSlotAsync(NpgsqlConnection connection, DarlingConfig config, LoginSlot slot, CancellationToken ct)
     {
         try
         {
             var stored = new List<(int Id, string Name, string? Username, string? Secret)>();
             using (var read = new NpgsqlCommand(
-                "SELECT server_id, name, remediation_username, remediation_encrypted_password FROM config_monitored_servers",
+                $"SELECT server_id, name, {slot.UserColumn}, {slot.SecretColumn} FROM config_monitored_servers",
                 connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds })
             await using (var reader = await read.ExecuteReaderAsync(ct))
             {
@@ -195,10 +222,10 @@ public sealed class StoreConfigProvider
                 }
             }
 
-            foreach (var change in PlanRemediationSync(config.Servers, stored))
+            foreach (var change in PlanLoginSync(config.Servers, stored, slot))
             {
                 using var write = new NpgsqlCommand(
-                    "UPDATE config_monitored_servers SET remediation_username = $2, remediation_encrypted_password = $3, modified_at = $4 WHERE server_id = $1",
+                    $"UPDATE config_monitored_servers SET {slot.UserColumn} = $2, {slot.SecretColumn} = $3, modified_at = $4 WHERE server_id = $1",
                     connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
                 write.Parameters.AddWithValue(change.ServerId);
                 AddNullableText(write, change.Username);
@@ -207,16 +234,19 @@ public sealed class StoreConfigProvider
                 if (await write.ExecuteNonQueryAsync(ct) > 0)
                 {
                     _logger?.LogInformation(
-                        "Remediation login for server '{Server}' {Action} from darling.json (secret: {Shape}).{Note}",
-                        change.Name, change.Action, DarlingSecrets.RemediationSlotShape(change.Secret), change.Note);
+                        "{Slot} for server '{Server}' {Action} from darling.json (secret: {Shape}).{Note}",
+                        slot.Label, change.Name, change.Action, DarlingSecrets.RemediationSlotShape(change.Secret), change.Note);
                 }
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* The exception's message is deliberately not logged: a PostgreSQL error can carry a row's values (a constraint's DETAIL
+               line), and the row holds a secret reference. The type and the SQLSTATE say what happened without repeating any of it. */
+            var sqlState = (ex as PostgresException ?? ex.InnerException as PostgresException)?.SqlState ?? "none";
             _logger?.LogWarning(
-                "Could not sync the remediation logins from darling.json to the registry; the registry keeps what it has: {Message}",
-                ex.Message);
+                "Could not sync the {Slot} from darling.json to the registry; the registry keeps what it has (error: {ErrorType}, SQLSTATE {SqlState}).",
+                slot.Label.ToLowerInvariant() + "s", ex.GetType().Name, sqlState);
         }
     }
 
@@ -227,7 +257,19 @@ public sealed class StoreConfigProvider
     /// </summary>
     internal static IReadOnlyList<RemediationSyncChange> PlanRemediationSync(
         IEnumerable<MonitoredServer>? fileServers,
-        IReadOnlyList<(int Id, string Name, string? Username, string? Secret)> stored)
+        IReadOnlyList<(int Id, string Name, string? Username, string? Secret)> stored) =>
+        PlanLoginSync(fileServers, stored, RemediationSlot);
+
+    /// <summary>The pure half of <see cref="SyncHypotheticalIndexLoginsAsync"/>: the same pairing, but only an entry with both keys is listed.</summary>
+    internal static IReadOnlyList<RemediationSyncChange> PlanHypotheticalIndexSync(
+        IEnumerable<MonitoredServer>? fileServers,
+        IReadOnlyList<(int Id, string Name, string? Username, string? Secret)> stored) =>
+        PlanLoginSync(fileServers, stored, HypotheticalIndexSlot);
+
+    private static List<RemediationSyncChange> PlanLoginSync(
+        IEnumerable<MonitoredServer>? fileServers,
+        IReadOnlyList<(int Id, string Name, string? Username, string? Secret)> stored,
+        LoginSlot slot)
     {
         var changes = new List<RemediationSyncChange>();
         var file = (fileServers ?? Enumerable.Empty<MonitoredServer>()).Where(s => s is not null).ToList();
@@ -256,8 +298,13 @@ public sealed class StoreConfigProvider
                 continue;
             }
 
-            var user = string.IsNullOrWhiteSpace(entry.RemediationUsername) ? null : entry.RemediationUsername;
-            var secret = string.IsNullOrWhiteSpace(entry.RemediationEncryptedPassword) ? null : entry.RemediationEncryptedPassword;
+            var user = string.IsNullOrWhiteSpace(slot.FileUser(entry)) ? null : slot.FileUser(entry);
+            var secret = string.IsNullOrWhiteSpace(slot.FileSecret(entry)) ? null : slot.FileSecret(entry);
+            if (!slot.ClearWhenAbsent && (user is null || secret is null))
+            {
+                continue;
+            }
+
             var heldUser = string.IsNullOrWhiteSpace(match.Username) ? null : match.Username;
             var heldSecret = string.IsNullOrWhiteSpace(match.Secret) ? null : match.Secret;
             if (string.Equals(user, heldUser, StringComparison.Ordinal) && string.Equals(secret, heldSecret, StringComparison.Ordinal))
@@ -269,7 +316,12 @@ public sealed class StoreConfigProvider
             var note = user is null || secret is null
                 ? " It is unarmed: darling.json has only one of remediationUsername and remediationEncryptedPassword."
                 : "";
-            changes.Add(new RemediationSyncChange(match.Id, match.Name, user, secret, action, note));
+            if (!slot.ClearWhenAbsent && !DarlingSecretSource.IsReference(secret))
+            {
+                note = " It is not an env: or file: reference, so the check will refuse it.";
+            }
+
+            changes.Add(new RemediationSyncChange(match.Id, match.Name ?? string.Empty, user, secret, action, note));
         }
 
         return changes;

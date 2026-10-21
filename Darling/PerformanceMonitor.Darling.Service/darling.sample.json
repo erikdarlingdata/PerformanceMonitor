@@ -160,7 +160,9 @@
       // under the monitoring login, because planning a statement can run a function another role created. With neither key
       // set the check is refused and says what to set up. The login needs CONNECT on the database, USAGE on the schemas and
       // SELECT on the tables of the statements to test, and nothing else: no pg_monitor, pg_read_all_stats,
-      // pg_read_all_data or superuser. The password is an env:NAME or file:/path reference only.
+      // pg_read_all_data or superuser. The password is an env:NAME or file:/path reference only. When BOTH keys are set
+      // here they are applied to the registered server on every start (set, or replaced), and the log says so. Leaving
+      // them out never clears a login already on the server, because it can also be set on the store row.
       "hypotheticalIndexUsername": "",
       "hypotheticalIndexEncryptedPassword": "",
       "excludedDatabases": [ "StageDb" ]

@@ -2625,7 +2625,9 @@ public sealed class MonitoredServer
     /// CONNECT, USAGE on the schemas and SELECT on the tables of the statements to test. Null here means the check is refused on this
     /// server with a message that says what to set up. There is no fallback.</para>
     ///
-    /// <para>Read from the file at seed time like the other credential fields. Presence is the auth mode: always SQL auth.</para>
+    /// <para>Presence is the auth mode: always SQL auth. Read at seed time, and (#6262) when BOTH keys are in the file they are also applied
+    /// to the registered server on every start (<c>StoreConfigProvider.SyncHypotheticalIndexLoginsAsync</c>): set, or replaced. The file
+    /// never clears the slot, because an owner's UPDATE on the store row is a documented way to set it too.</para>
     /// </summary>
     [JsonPropertyName("hypotheticalIndexUsername")]
     public string? HypotheticalIndexUsername { get; set; }
