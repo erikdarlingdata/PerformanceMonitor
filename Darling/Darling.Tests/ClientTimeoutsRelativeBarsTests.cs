@@ -196,13 +196,13 @@ public sealed class ClientTimeoutsRelativeBarsTests
 
         /* The server now has its capture. Inside the hour it is still answered from the cache. */
         h.Adapter.AttentionBaseline = Normal(150);
-        h.Now = h.Now.AddMinutes(AttentionBaselineMath.NoBaselineRefreshMinutes - 1);
+        h.Now = h.Now.AddMinutes(AttentionBaselineMath.NoBaselineRefreshMinutes - 10);
         h.Adapter.Attention = AttentionAlertTests.StormWindow(h.Now, 1500);   // 500 a minute
         await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
         Assert.Equal(1, h.Adapter.AttentionBaselineReads);
 
-        /* An hour on, nowhere near the day, the baseline is read and applies. */
-        h.Now = h.Now.AddMinutes(2);
+        /* An hour on (and past the cooldown), nowhere near the day, the baseline is read and applies. */
+        h.Now = h.Now.AddMinutes(11);
         h.Adapter.Attention = AttentionAlertTests.StormWindow(h.Now, 1500);
         await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
 
