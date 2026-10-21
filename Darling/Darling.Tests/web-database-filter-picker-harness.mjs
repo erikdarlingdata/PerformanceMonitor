@@ -400,6 +400,32 @@ try {
       out.listed = boxes(popover).map((b) => b.attrs["aria-label"]);
       out.note = popover.byClass("db-filter-cut").map((n) => n.textContent);
     },
+    /* #4190 / #6310: how often the server page re-reads /api/fleet. An unseen server reads it; a tab click on a remembered card younger
+       than 60 s does not; the poll does; a tab click once the remembered card is over 60 s old does (the header tiles must not lag the
+       charts, which re-read on every click). Date.now is moved forward by hand, so no wait is real. */
+    async fleetRefetch() {
+      const realNow = Date.now;
+      let skew = 0;
+      Date.now = () => realNow() + skew;
+      const fleetReads = () => urls.filter((u) => u.startsWith("/api/fleet")).length;
+      const { page } = await open();
+      out.afterUnseen = fleetReads();
+      const server = await import(pathToFileURL(path.join(scratch, "pages", "server.js")).href);
+      server.renderServer(page, "SRV1", "cpu", {});
+      await settle();
+      out.afterFreshClick = fleetReads();
+      server.renderServer(page, "SRV1", "cpu", { poll: true });
+      await settle();
+      out.afterPoll = fleetReads();
+      skew = 61000;
+      server.renderServer(page, "SRV1", "cpu", {});
+      await settle();
+      out.afterOldClick = fleetReads();
+      server.renderServer(page, "SRV1", "cpu", {});
+      await settle();
+      out.afterClickOnRefreshedCard = fleetReads();
+      Date.now = realNow;
+    },
     /* The inventory read failed: the sentence shows and the stored names stay listed, so the choice can still be undone. */
     async loadFails() {
       inventoryStatus = 500;
