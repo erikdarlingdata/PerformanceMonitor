@@ -42,14 +42,14 @@ public sealed class McpMachineIdentityTests
 
     /// <summary>A definitions table that holds the given registrations, scopes an agent route to <see cref="HeldId"/> only,
     /// and records every insert.</summary>
-    private sealed class Definitions(List<Core.RegisteredTarget> held) : Core.IServerDefinitions
+    private sealed class Definitions(List<Core.RegisteredTarget> held, int routedId = HeldId) : Core.IServerDefinitions
     {
         public List<string> Inserted { get; } = [];
 
         public Task<List<Core.RegisteredTarget>> LoadTargetsAsync(CancellationToken cancellationToken) => Task.FromResult(held);
 
         public Task<int?> ScopedAgentRouteAsync(int serverId, CancellationToken cancellationToken) =>
-            Task.FromResult<int?>(serverId == HeldId ? RouteId : null);
+            Task.FromResult<int?>(serverId == routedId ? RouteId : null);
 
         public Task<List<string>> LoadStorageKeysAsync(CancellationToken cancellationToken) => Task.FromResult(new List<string>());
 
@@ -220,5 +220,115 @@ public sealed class McpMachineIdentityTests
         var (status, _) = await EditToAsync("10.0.0.5", Unreachable, [Held("sqlprod01", "sqlprod01")]);
 
         Assert.Equal("connection_failed", status);
+    }
+
+    /* ---------------- round 1 of the security review (M2, L1) and PostgreSQL (#6339) ---------------- */
+
+    private static int IdOf(string host) => PerformanceMonitor.Common.ServerIdHelper.GetDeterministicHashCode(new MonitoredServer { Host = host }.StorageName);
+
+    [Fact]
+    public async Task AddingAnotherSpellingOfARemovedCoveredKey_IsRefused_AndTheExactKeyReusesItsId()
+    {
+        /* The removed registration was stored as SQLPROD01 (its id is that spelling's hash) and a route is scoped to that id. */
+        var removed = Held("SQLPROD01", null, serverId: IdOf("SQLPROD01"), removed: true);
+
+        /* Another spelling is a new id outside the route: refused (the storage-name skip used to wave it through). */
+        var lower = new Definitions([removed], routedId: removed.ServerId);
+        var (status, detail) = await AddAsync(lower, "sqlprod01", Reports("unrelated"));
+        Assert.Equal("collides", status);
+        Assert.Contains("a removed registration", detail, StringComparison.Ordinal);
+        Assert.Empty(lower.Inserted);
+
+        /* The exact key makes the same id, so the route that covers it follows the new row. */
+        var exact = new Definitions([removed], routedId: removed.ServerId);
+        Assert.Equal("added", (await AddAsync(exact, "SQLPROD01", Reports("unrelated"))).Status);
+    }
+
+    [Fact]
+    public async Task AnEditToARemovedCoveredKey_IsRefused_BecauseAnEditKeepsItsOwnId()
+    {
+        var removed = Held("10.0.0.5", null, serverId: IdOf("10.0.0.5"), removed: true);
+        var held = new List<Core.RegisteredTarget> { removed };
+
+        var (changes, error) = Core.ParseEditChanges(JsonSerializer.Serialize(new { host = "10.0.0.5" }));
+        Assert.Null(error);
+        var answer = JsonNode.Parse(await Core.EditServerCoreAsync(new OneRowStore(), 41, changes!, Reports(null), TestKeyRings.Healthy, null, CancellationToken.None,
+            policy: DarlingMcpAddServersPolicy.Default,
+            agentRouteCovering: (id, _) => Task.FromResult<int?>(id == removed.ServerId ? RouteId : null),
+            loadTargets: _ => Task.FromResult(held)))!;
+
+        Assert.Equal("refused", answer["status"]!.GetValue<string>());
+        Assert.Contains("a removed registration", answer["message"]!.GetValue<string>(), StringComparison.Ordinal);
+    }
+
+    private static async Task<JsonNode> EditSubnetAsync(string probedIdentity, List<Core.RegisteredTarget> held)
+    {
+        var (changes, error) = Core.ParseEditChanges(JsonSerializer.Serialize(new { multi_subnet_failover = true }));
+        Assert.Null(error);
+        return JsonNode.Parse(await Core.EditServerCoreAsync(new OneRowStore(), 41, changes!, Reports(probedIdentity), TestKeyRings.Healthy, null, CancellationToken.None,
+            policy: DarlingMcpAddServersPolicy.Default,
+            agentRouteCovering: (id, _) => Task.FromResult<int?>(id == HeldId ? RouteId : null),
+            loadTargets: _ => Task.FromResult(held)))!;
+    }
+
+    [Fact]
+    public async Task AnEditThatChangesOnlyMultiSubnetFailover_IsHeldToTheIdentityTheServerReports()
+    {
+        var answer = await EditSubnetAsync("sqlprod01", [Held("sqlprod01", "sqlprod01")]);
+
+        Assert.Equal("refused", answer["status"]!.GetValue<string>());
+        Assert.Contains($"route {RouteId}", answer["message"]!.GetValue<string>(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AnEditThatChangesOnlyMultiSubnetFailover_IsNotRefusedForAMachineItAlreadyWas_OrByHostText()
+    {
+        /* The registration already reports the held identity (it sits beside the covered one from before the route): the machine
+           did not change, so nothing is refused and the edit reaches the write. */
+        await Assert.ThrowsAsync<InvalidOperationException>(() => EditSubnetAsync("sqlprod01",
+            [Held("sqlprod01", "sqlprod01"), Held("alpha-01", "sqlprod01", serverId: 41)]));
+
+        /* A held registration with the same host text but no identity: the address did not move, so the text rule is not applied. */
+        await Assert.ThrowsAsync<InvalidOperationException>(() => EditSubnetAsync("another", [Held("alpha-01.example.test", null)]));
+    }
+
+    /* PostgreSQL (#6339): the cluster's system_identifier and port, as the connect probe reads them. */
+
+    private static Core.RegisteredTarget HeldPostgres(string host, int port, string? identity) =>
+        new(HeldId, host + ":pg" + (port == 5432 ? "" : ":" + port), host, "postgres", port, "pg-prod", false, identity);
+
+    private static Task<string?> PostgresAddRefusalAsync(Core.RegisteredTarget held, string host, int port, string? probedIdentity)
+    {
+        var config = new MonitoredServer { Host = host, Engine = "postgres", Port = port };
+        var entry = new Core.ParsedServerEntry(0, host, config.StorageName, config, null);
+        return Core.TargetHeldRefusalAsync([held], entry, (id, _) => Task.FromResult<int?>(id == HeldId ? RouteId : null), CancellationToken.None,
+            probedIdentity: Core.MachineIdentityOf(probedIdentity, 0));
+    }
+
+    [Fact]
+    public async Task OnePostgresClusterUnderTwoHostNames_IsRefused()
+    {
+        var refusal = await PostgresAddRefusalAsync(HeldPostgres("db1.corp.example.test", 5432, "7699170741796808760:5432"), "10.2.3.4", 5432, "7699170741796808760:5432");
+
+        Assert.NotNull(refusal);
+        Assert.Contains("the server reports the same name for itself", refusal, StringComparison.Ordinal);
+        Assert.Contains($"route {RouteId}", refusal, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("7699170741796808760:5433")]
+    [InlineData("1234567890123456789:5432")]
+    public async Task TwoPostgresClustersOnOneHost_AreNotOneMachine(string reported)
+    {
+        /* Held: the cluster on 5432. Added: another port or another cluster, on a host name that is not the same text. */
+        Assert.Null(await PostgresAddRefusalAsync(HeldPostgres("db1.corp.example.test", 5432, "7699170741796808760:5432"), "10.2.3.4", 5433, reported));
+    }
+
+    [Fact]
+    public async Task APostgresRegistrationWithNoIdentity_IsMatchedByItsTextAlone()
+    {
+        /* The role may not call pg_control_system(): nothing was stored, so another name goes through, and the same host text is still held. */
+        Assert.Null(await PostgresAddRefusalAsync(HeldPostgres("db1", 5432, null), "10.2.3.4", 5432, "7699170741796808760:5432"));
+        Assert.NotNull(await PostgresAddRefusalAsync(HeldPostgres("db1", 5432, null), "DB1", 5432, null));
     }
 }

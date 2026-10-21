@@ -36,10 +36,15 @@ public static class DarlingObservability
        engine_kind (V82, #2530) is written on BOTH arms, unlike is_enabled: it is a probed fact about the
        target rather than an operator decision, so the re-connect arm is exactly where a re-pointed
        registration (same storage name, different engine) has to correct it. Internal so a pure test can pin
-       the shape without a live store. */
+       the shape without a live store.
+
+       machine_identity (V211, #6285, #6339) is written on BOTH arms like engine_kind, and with NULL when the connect read none:
+       what the target reports for itself is a fact about the target, so a re-pointed registration (an address that now reaches
+       another machine) has to correct it, and an Azure SQL Database or a PostgreSQL role that may not call pg_control_system()
+       reports none. The registry is never purged and keeps a removed registration's row, so the identity outlives the registration. */
     internal const string UpsertServerSql = @"
-INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, engine_kind, created_date, modified_date, monthly_cost_usd, postgres_major_version)
-VALUES ($1, $2, $3, TRUE, $4, $5, $6, $7, $7, $8, $9)
+INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, engine_kind, created_date, modified_date, monthly_cost_usd, postgres_major_version, machine_identity)
+VALUES ($1, $2, $3, TRUE, $4, $5, $6, $7, $7, $8, $9, $10)
 ON CONFLICT (server_id) DO UPDATE SET
     server_name = EXCLUDED.server_name,
     display_name = EXCLUDED.display_name,
@@ -48,7 +53,8 @@ ON CONFLICT (server_id) DO UPDATE SET
     engine_kind = EXCLUDED.engine_kind,
     modified_date = EXCLUDED.modified_date,
     monthly_cost_usd = EXCLUDED.monthly_cost_usd,
-    postgres_major_version = EXCLUDED.postgres_major_version;";
+    postgres_major_version = EXCLUDED.postgres_major_version,
+    machine_identity = EXCLUDED.machine_identity;";
 
     /* Mirror the DESIRED config (config.config_monitored_servers) onto the OBSERVED registry
        (collect.servers) for the two fields the viewer/FinOps read straight off collect.servers: is_enabled
@@ -173,6 +179,10 @@ ON CONFLICT (server_id) DO UPDATE SET
                 server.Target.Engine == CollectorTargetEngine.PostgreSql && server.Target.PostgresMajorVersion > 0
                     ? server.Target.PostgresMajorVersion
                     : (object)DBNull.Value);
+            /* The machine's own name (V211, #6285, #6339), folded to the form the add and edit tools compare. NULL when the connect
+               read none. */
+            command.Parameters.AddWithValue(
+                (object?)Mcp.DarlingMcpServerAdminTools.MachineIdentityOf(server.MachineIdentity, server.EngineEdition) ?? DBNull.Value);
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
         catch (Exception ex)

@@ -159,6 +159,7 @@ public sealed partial class DarlingMcpServerAdminTools
         "A new database or read_only_intent on a machine (engine, host and port) another registration already holds is added as usual, " +
         "unless a route with an agent setting is scoped to that registration (its id, one of its tags or a tag above one; a route with no scope does not count) " +
         "- a removed registration included. Then the entry is refused as status \"collides\" and names that registration, because the route is tied to it. Register the other database in the Viewer or on the web dashboard. " +
+        "The machine is also recognised by the name its server reports for itself (a SQL Server's own name, a PostgreSQL cluster's identifier and port), so one machine reached under another host name is held the same way, and two machines that report the same name (cloned images, containers sharing a hostname, a PostgreSQL replica and its primary) are treated as one machine: register those in the Viewer or on the web dashboard. " +
         "A SQL password or service-principal client secret is sealed with the service's password key before it is " +
         "stored, and is never returned. password is the password itself: a value that starts with env: or file: is " +
         "rejected as \"invalid\", because references are set in the configuration file. " +

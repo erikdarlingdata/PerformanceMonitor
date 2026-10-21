@@ -475,6 +475,11 @@ ALTER TABLE IF EXISTS config.config_service DROP COLUMN IF EXISTS query_store_fe
 DROP TRIGGER IF EXISTS trg_agent_route_tag_guard ON config.server_tag_map;
 DROP TRIGGER IF EXISTS trg_agent_route_tag_guard ON config.server_tags;
 DROP FUNCTION IF EXISTS config.agent_route_tag_guard();"),
+
+        // /// V211 (#6285): the machine identity on the server registry. The column is the probe's newest sentinel. Safe on a store that never had it.
+        new(211, "hasServerMachineIdentity",
+            @"
+ALTER TABLE IF EXISTS collect.servers DROP COLUMN IF EXISTS machine_identity;"),
     ];
 
     /// <summary>

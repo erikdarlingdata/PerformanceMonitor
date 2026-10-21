@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -162,21 +163,35 @@ public sealed partial class DarlingMcpServerAdminTools
     /// scoped to that registration, or null. <paramref name="scopedRoute"/> is the shared lookup edit_server uses.
     /// <paramref name="exceptServerId"/> is the registration an edit changes: it is not held against its own new address.
     /// <paramref name="probedIdentity"/> is what the server the add or edit connected to reports for itself (#6285), or null before
-    /// the connection or when none was read: the text match applies either way, the identity match only when it is given.</summary>
+    /// the connection or when none was read: the text match applies either way, the identity match only when it is given.
+    /// <paramref name="textMatch"/> is false for an edit that does not move the registration's address (a change to another connection
+    /// field): then only the identity can refuse, and not when the server still reports the identity this registration already had,
+    /// because the machine did not change.</summary>
     internal static async Task<string?> TargetHeldRefusalAsync(
         IReadOnlyList<RegisteredTarget> held, ParsedServerEntry entry,
         Func<int, CancellationToken, Task<int?>> scopedRoute, CancellationToken cancellationToken, int? exceptServerId = null, bool forEdit = false,
-        string? probedIdentity = null)
+        string? probedIdentity = null, bool textMatch = true)
     {
+        if (exceptServerId is { } editedId && probedIdentity is not null
+            && held.FirstOrDefault(t => t.ServerId == editedId)?.Identity == probedIdentity)
+        {
+            probedIdentity = null;
+        }
+
         foreach (var other in held)
         {
+            /* #6285 round 1 (M2): the registration being edited, and, for an ADD only, a removed registration this entry's own
+               storage key re-uses (the same id, so the route that covers it follows). The key is compared as the id is made, by
+               its exact spelling: a different spelling of a removed covered registration's key becomes a new id outside the route.
+               An EDIT keeps its own id, so moving to a removed registration's key is not re-use. A live registration under the
+               same key is the duplicate gates' answer. */
             if (other.ServerId == exceptServerId
-                || string.Equals(other.StorageKey, entry.StorageKey, StringComparison.OrdinalIgnoreCase))
+                || (!forEdit && ServerIdHelper.GetDeterministicHashCode(entry.StorageKey) == other.ServerId))
             {
                 continue;
             }
 
-            var sameText = SameTarget(other, entry);
+            var sameText = textMatch && SameTarget(other, entry);
             if (!sameText && !SameIdentity(other, probedIdentity))
             {
                 continue;
@@ -201,13 +216,12 @@ public sealed partial class DarlingMcpServerAdminTools
     private const string RegisteredTargetsSql =
         "SELECT host, database, read_only_intent, engine, port, name, server_id FROM config_monitored_servers";
 
-    /// <summary>The newest collected <c>server_name</c> (<c>SERVERPROPERTY('ServerName')</c>) of each registration, live or removed,
-    /// that has one (#6285). A registration with no collected snapshot is not in the answer and is matched by its text alone.</summary>
+    /// <summary>The identity each registration, live or removed, reported on its last connect (#6285, #6339), from the registry column
+    /// the connect writes (V211). Not from <c>collect.server_properties</c>: that table's <c>server_name</c> is the registration's
+    /// storage name, not what the server reports, and a retention purge deletes its rows. A registration that never connected since
+    /// the column arrived, or one that reported none, is not in the answer and is matched by its text alone.</summary>
     private const string CollectedIdentitiesSql =
-        "SELECT s.server_id, p.server_name, p.engine_edition "
-        + "FROM (SELECT server_id FROM config_monitored_servers UNION SELECT server_id FROM collect.servers) AS s "
-        + "CROSS JOIN LATERAL (SELECT sp.server_name, sp.engine_edition FROM collect.server_properties AS sp "
-        + "WHERE sp.server_id = s.server_id AND sp.server_name IS NOT NULL ORDER BY sp.collection_time DESC LIMIT 1) AS p";
+        "SELECT server_id, machine_identity FROM collect.servers WHERE machine_identity IS NOT NULL";
 
     private const string RemovedRegistrationsSql =
         "SELECT server_name, display_name, server_id FROM collect.servers WHERE server_id NOT IN (SELECT server_id FROM config_monitored_servers)";
@@ -256,7 +270,7 @@ public sealed partial class DarlingMcpServerAdminTools
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
-                if (MachineIdentityOf(reader.GetString(1), reader.IsDBNull(2) ? 0 : reader.GetInt32(2)) is { } identity)
+                if (MachineIdentityOf(reader.GetString(1), 0) is { } identity)
                 {
                     identities[reader.GetInt32(0)] = identity;
                 }
@@ -278,10 +292,11 @@ public sealed partial class DarlingMcpServerAdminTools
     /// identity lock: a route that was set up while the probe ran is seen here, and nothing is written. Null when nothing
     /// holds the machine. <paramref name="exceptServerId"/> is the registration an edit changes.</summary>
     internal static async Task<string?> TargetHeldRefusalInTransactionAsync(
-        NpgsqlConnection connection, NpgsqlTransaction transaction, ParsedServerEntry entry, int? exceptServerId, CancellationToken cancellationToken, bool forEdit = false, string? probedIdentity = null)
+        NpgsqlConnection connection, NpgsqlTransaction transaction, ParsedServerEntry entry, int? exceptServerId, CancellationToken cancellationToken, bool forEdit = false, string? probedIdentity = null,
+        bool textMatch = true)
     {
         var held = await LoadRegisteredTargetsAsync(connection, transaction, cancellationToken);
         return await TargetHeldRefusalAsync(held, entry,
-            (serverId, token) => ScopedAgentRouteAsync(connection, transaction, serverId, token), cancellationToken, exceptServerId, forEdit, probedIdentity);
+            (serverId, token) => ScopedAgentRouteAsync(connection, transaction, serverId, token), cancellationToken, exceptServerId, forEdit, probedIdentity, textMatch);
     }
 }
