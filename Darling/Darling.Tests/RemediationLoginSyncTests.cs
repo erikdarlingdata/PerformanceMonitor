@@ -26,8 +26,9 @@ namespace Darling.Tests;
    so it is not serialized against the live-postgres collection. */
 
 /// <summary>
-/// A server's remediation login follows darling.json on every start (#6262). The seed reads the two keys only for a new row, so a
-/// change to an existing server was dropped without a word. These tests start the store the way the service does
+/// A server's remediation login follows darling.json on every start when the entry names both keys (#6262). The seed reads the two keys
+/// only for a new row, so a change to an existing server was dropped without a word. The sync never clears a login, writes only to the
+/// registered server that pairs with the entry and connects the same way, and never lets one failing row stop the next. These tests start the store the way the service does
 /// (<see cref="StoreConfigProvider.SeedIfEmptyAsync"/>), restart it with a changed file, and read the registry row back.
 /// </summary>
 public sealed class RemediationLoginSyncTests
@@ -64,10 +65,11 @@ public sealed class RemediationLoginSyncTests
         return (reader.IsDBNull(0) ? null : reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetString(1));
     }
 
-    /// <summary>An existing server gets a login added, replaced or removed by a restart with a changed darling.json; a server added
-    /// elsewhere is never touched; the log says what happened and never prints the login or the secret.</summary>
+    /// <summary>An existing server gets a login added or replaced by a restart with a changed darling.json; an entry without the keys leaves
+    /// the login it has (it was set in the store, or the keys were removed, and neither disarms anything); a plain password is not written;
+    /// a server added elsewhere is never touched; the log says what happened and never prints the login or the secret.</summary>
     [Fact]
-    public async Task ARestartWithAChangedFile_SetsReplacesAndClearsTheLogin_AndLeavesOtherServersAlone()
+    public async Task ARestartWithAChangedFile_SetsAndReplacesTheLogin_NeverClearsOne_AndLeavesOtherServersAlone()
     {
         var ct = TestContext.Current.CancellationToken;
         var (scratchStore, owner, _) = await ServerAddViewerRoleLiveTests.OpenAsync(ct);
@@ -79,7 +81,8 @@ public sealed class RemediationLoginSyncTests
         var first = DarlingConfig.Parse(Json(
             Entry("alpha-sql-01"),
             Entry("bravo-sql-01", "bravo_fix", ThirdReference),
-            Entry("charlie-sql-01", "charlie_fix", FirstReference)));
+            Entry("charlie-sql-01", "charlie_fix", FirstReference),
+            Entry("delta-sql-01")));
         await new StoreConfigProvider(owner, logger).SeedIfEmptyAsync(first, ct);
         Assert.Equal((null, null), await SlotAsync(owner, "alpha-sql-01", ct));
 
@@ -93,24 +96,28 @@ public sealed class RemediationLoginSyncTests
 
         logger.Lines.Clear();
 
-        /* Restart with a changed file: alpha gains a login, bravo's secret is replaced, charlie loses both keys. */
+        /* Restart with a changed file: alpha gains a login, bravo's secret is replaced, charlie loses both keys, delta names a plain password. */
         var second = DarlingConfig.Parse(Json(
             Entry("alpha-sql-01", "alpha_fix", SecondReference),
             Entry("bravo-sql-01", "bravo_fix", FirstReference),
-            Entry("charlie-sql-01")));
+            Entry("charlie-sql-01"),
+            Entry("delta-sql-01", "delta_fix", "hunter2-plain-6262")));
         await new StoreConfigProvider(owner, logger).SeedIfEmptyAsync(second, ct);
 
         Assert.Equal(("alpha_fix", SecondReference), await SlotAsync(owner, "alpha-sql-01", ct));
         Assert.Equal(("bravo_fix", FirstReference), await SlotAsync(owner, "bravo-sql-01", ct));
-        Assert.Equal((null, null), await SlotAsync(owner, "charlie-sql-01", ct));
+        Assert.Equal(("charlie_fix", FirstReference), await SlotAsync(owner, "charlie-sql-01", ct));
+        Assert.Equal((null, null), await SlotAsync(owner, "delta-sql-01", ct));
         Assert.Equal(("web_fix", "env:WEB_ADDED_PASSWORD_6262"), await SlotAsync(owner, "web-added-sql-01", ct));
 
         var said = string.Join("\n", logger.Lines);
         Assert.Contains("'alpha-sql-01' set", said, StringComparison.Ordinal);
         Assert.Contains("'bravo-sql-01' changed", said, StringComparison.Ordinal);
-        Assert.Contains("'charlie-sql-01' cleared", said, StringComparison.Ordinal);
+        Assert.DoesNotContain("charlie-sql-01", said, StringComparison.Ordinal);
+        Assert.Contains("'delta-sql-01' not applied", said, StringComparison.Ordinal);
+        Assert.Contains("plain text value", said, StringComparison.Ordinal);
         Assert.DoesNotContain("web-added-sql-01", said, StringComparison.Ordinal);
-        foreach (var secret in new[] { FirstReference, SecondReference, ThirdReference, "ALPHA_REMEDIATION", "BRAVO_REMEDIATION", "alpha_fix", "bravo_fix", "charlie_fix" })
+        foreach (var secret in new[] { FirstReference, SecondReference, ThirdReference, "ALPHA_REMEDIATION", "BRAVO_REMEDIATION", "alpha_fix", "bravo_fix", "charlie_fix", "delta_fix", "hunter2" })
         {
             Assert.DoesNotContain(secret, said, StringComparison.Ordinal);
         }
@@ -118,12 +125,13 @@ public sealed class RemediationLoginSyncTests
         /* A third start with the same file changes nothing and says nothing. */
         logger.Lines.Clear();
         await new StoreConfigProvider(owner, logger).SeedIfEmptyAsync(second, ct);
-        Assert.DoesNotContain(logger.Lines, line => line.Contains("Remediation login", StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.Lines, line => line.Contains("Remediation login", StringComparison.Ordinal) && !line.Contains("delta-sql-01", StringComparison.Ordinal));
     }
 
-    /// <summary>One key alone in the file is written as it is, which leaves the server unarmed, and the log says why.</summary>
+    /// <summary>One key alone in the file changes nothing: the login the server has stays, and the log says why. (A half login written as it
+    /// stood used to unarm the server; removing keys no longer disarms anything.)</summary>
     [Fact]
-    public async Task OneKeyAlone_LeavesTheServerUnarmed_AndTheLogSaysSo()
+    public async Task OneKeyAlone_LeavesTheLoginAsItIs_AndTheLogSaysSo()
     {
         var ct = TestContext.Current.CancellationToken;
         var (scratchStore, owner, _) = await ServerAddViewerRoleLiveTests.OpenAsync(ct);
@@ -138,10 +146,10 @@ public sealed class RemediationLoginSyncTests
 
         var (user, secret) = await SlotAsync(owner, "alpha-sql-01", ct);
         Assert.Equal("alpha_fix", user);
-        Assert.Null(secret);
-        Assert.Contains(logger.Lines, line => line.Contains("'alpha-sql-01' changed", StringComparison.Ordinal)
-            && line.Contains("unarmed", StringComparison.Ordinal));
-        Assert.Equal(ServerCredentialState.Missing, InvestigationRequestStore.ClassifyCredential(user, secret));
+        Assert.Equal(FirstReference, secret);
+        Assert.Contains(logger.Lines, line => line.Contains("'alpha-sql-01' not changed", StringComparison.Ordinal)
+            && line.Contains("only one of", StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.Lines, line => line.Contains("alpha_fix", StringComparison.Ordinal) || line.Contains(FirstReference, StringComparison.Ordinal));
     }
 
     private static object HypoEntry(string name, string? user = null, string? secret = null)
@@ -232,7 +240,8 @@ public sealed class RemediationLoginSyncTests
         Assert.Contains("Hypothetical-index login for server 'bravo-sql-01' changed", said, StringComparison.Ordinal);
         Assert.Contains("env reference", said, StringComparison.Ordinal);
         Assert.DoesNotContain("Remediation login", said, StringComparison.Ordinal);
-        foreach (var untouched in new[] { "charlie-sql-01", "delta-sql-01", "echo-sql-01", "web-added-sql-01" })
+        Assert.Contains("'echo-sql-01' not changed", said, StringComparison.Ordinal);
+        foreach (var untouched in new[] { "charlie-sql-01", "delta-sql-01", "web-added-sql-01" })
         {
             Assert.DoesNotContain(untouched, said, StringComparison.Ordinal);
         }
@@ -257,7 +266,7 @@ public sealed class RemediationLoginSyncTests
         /* A third start with the same file changes nothing and says nothing. */
         logger.Lines.Clear();
         await new StoreConfigProvider(owner, logger).SeedIfEmptyAsync(second, ct);
-        Assert.DoesNotContain(logger.Lines, line => line.Contains("Hypothetical-index login", StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.Lines, line => line.Contains("Hypothetical-index login", StringComparison.Ordinal) && !line.Contains("echo-sql-01", StringComparison.Ordinal));
     }
 
     /// <summary>A sync that fails says so with the exception's type and SQLSTATE and nothing else: a PostgreSQL error can carry the row's
@@ -318,11 +327,154 @@ public sealed class RemediationLoginSyncTests
             Assert.Contains("PostgresException", line, StringComparison.Ordinal);
         }
 
+        Assert.Contains(failures, line => line.Contains("'alpha-sql-01'", StringComparison.Ordinal));
+        Assert.Contains(failures, line => line.Contains("'bravo-sql-01'", StringComparison.Ordinal));
+
         var said = string.Join("\n", logger.Lines);
         foreach (var secret in new[] { SecondReference, ThirdReference, "alpha_check", "bravo_fix", "ALPHA_REMEDIATION", "BRAVO_REMEDIATION", "alpha-remediation" })
         {
             Assert.DoesNotContain(secret, said, StringComparison.Ordinal);
         }
+    }
+
+    private static async Task ExecAsync(NpgsqlDataSource owner, string sql, CancellationToken ct)
+    {
+        await using var command = owner.CreateCommand(sql);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static DarlingConfig OneServer(string name, string user, string secret)
+    {
+        return DarlingConfig.Parse(Json(Entry(name, user, secret)));
+    }
+
+    /// <summary>A row whose host was changed by a direct store UPDATE since darling.json was written is not armed on the next start: the
+    /// login would go to a host the file never named. Both slots, and the log names the server and not the login or the reference.</summary>
+    [Fact]
+    public async Task ARowWhoseHostChanged_IsNotArmed_ByTheNextStart()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratchStore, owner, _) = await ServerAddViewerRoleLiveTests.OpenAsync(ct);
+        await using var scratchHolder = scratchStore;
+        await using var ownerHolder = owner;
+        var logger = new CapturingLogger();
+
+        await new StoreConfigProvider(owner, logger).SeedIfEmptyAsync(DarlingConfig.Parse(Json(Entry("alpha-sql-01"))), ct);
+        await ExecAsync(owner, "UPDATE config_monitored_servers SET host = 'elsewhere.example.test' WHERE name = 'alpha-sql-01'", ct);
+        logger.Lines.Clear();
+
+        var config = DarlingConfig.Parse(Json(new Dictionary<string, object>
+        {
+            ["name"] = "alpha-sql-01", ["host"] = "alpha-sql-01.example.test",
+            ["remediationUsername"] = "alpha_fix", ["remediationEncryptedPassword"] = FirstReference,
+            ["hypotheticalIndexUsername"] = "alpha_check", ["hypotheticalIndexEncryptedPassword"] = SecondReference,
+        }));
+        await new StoreConfigProvider(owner, logger).SeedIfEmptyAsync(config, ct);
+
+        Assert.Equal((null, null), await SlotAsync(owner, "alpha-sql-01", ct));
+        Assert.Equal((null, null), await HypoSlotAsync(owner, "alpha-sql-01", ct));
+        var said = string.Join("\n", logger.Lines);
+        Assert.Contains("'alpha-sql-01' not applied: the registered server connects differently", said, StringComparison.Ordinal);
+        foreach (var secret in new[] { FirstReference, SecondReference, "alpha_fix", "alpha_check" })
+        {
+            Assert.DoesNotContain(secret, said, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>A server removed and added again under the same name at another host is not armed with the old entry's login: the name pairs,
+    /// the connection does not.</summary>
+    [Fact]
+    public async Task AServerRemovedAndReAddedAtAnotherHost_IsNotArmed()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratchStore, owner, _) = await ServerAddViewerRoleLiveTests.OpenAsync(ct);
+        await using var scratchHolder = scratchStore;
+        await using var ownerHolder = owner;
+        var logger = new CapturingLogger();
+
+        await new StoreConfigProvider(owner, logger).SeedIfEmptyAsync(DarlingConfig.Parse(Json(Entry("alpha-sql-01"))), ct);
+        await ExecAsync(owner, "DELETE FROM config_monitored_servers WHERE name = 'alpha-sql-01'", ct);
+        await ExecAsync(owner,
+            "INSERT INTO config_monitored_servers (server_id, name, host) VALUES (6262002, 'alpha-sql-01', 'other-host.example.test')", ct);
+        logger.Lines.Clear();
+
+        await new StoreConfigProvider(owner, logger).SeedIfEmptyAsync(OneServer("alpha-sql-01", "alpha_fix", FirstReference), ct);
+
+        Assert.Equal((null, null), await SlotAsync(owner, "alpha-sql-01", ct));
+        Assert.Contains(logger.Lines, line => line.Contains("'alpha-sql-01' not applied: the registered server connects differently", StringComparison.Ordinal));
+    }
+
+    /// <summary>A row that is edited between the sync's read and its write is left as the edit made it: the write is conditional on the
+    /// row's modified_at. The next start plans it again.</summary>
+    [Fact]
+    public async Task ARowEditedBetweenTheReadAndTheWrite_IsNotOverwritten()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratchStore, owner, _) = await ServerAddViewerRoleLiveTests.OpenAsync(ct);
+        await using var scratchHolder = scratchStore;
+        await using var ownerHolder = owner;
+        var logger = new CapturingLogger();
+        var provider = new StoreConfigProvider(owner, logger);
+
+        await provider.SeedIfEmptyAsync(DarlingConfig.Parse(Json(Entry("alpha-sql-01"))), ct);
+        var config = OneServer("alpha-sql-01", "alpha_fix", FirstReference);
+        logger.Lines.Clear();
+
+        await using (var connection = await owner.OpenConnectionAsync(ct))
+        {
+            await provider.SyncRemediationLoginsAsync(
+                connection, config, ct,
+                afterRead: token => ExecAsync(
+                    owner,
+                    "UPDATE config_monitored_servers SET host = 'moved.example.test', modified_at = modified_at + interval '1 second' WHERE name = 'alpha-sql-01'",
+                    token));
+        }
+
+        Assert.Equal((null, null), await SlotAsync(owner, "alpha-sql-01", ct));
+        Assert.Contains(logger.Lines, line => line.Contains("'alpha-sql-01' not applied: the registry row changed", StringComparison.Ordinal));
+
+        /* The next start sees the moved host and still does not arm the row. */
+        logger.Lines.Clear();
+        await provider.SeedIfEmptyAsync(config, ct);
+        Assert.Equal((null, null), await SlotAsync(owner, "alpha-sql-01", ct));
+        Assert.Contains(logger.Lines, line => line.Contains("connects differently", StringComparison.Ordinal));
+    }
+
+    /// <summary>One row the store refuses does not stop the next server: the failure is logged with the server name, the exception type and
+    /// the SQLSTATE, and the following server in the file is written.</summary>
+    [Fact]
+    public async Task AFailingRow_DoesNotStopTheNextServer()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratchStore, owner, _) = await ServerAddViewerRoleLiveTests.OpenAsync(ct);
+        await using var scratchHolder = scratchStore;
+        await using var ownerHolder = owner;
+        var logger = new CapturingLogger();
+
+        await new StoreConfigProvider(owner, logger).SeedIfEmptyAsync(
+            DarlingConfig.Parse(Json(Entry("alpha-sql-01"), Entry("bravo-sql-01"), Entry("charlie-sql-01"))), ct);
+        await ExecAsync(owner,
+            "CREATE FUNCTION refuse_boom_6262() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+            + "IF NEW.remediation_username = 'boom_fix' THEN RAISE EXCEPTION 'refused %', NEW.remediation_username; END IF; RETURN NEW; END $$", ct);
+        await ExecAsync(owner,
+            "CREATE TRIGGER refuse_boom_6262 BEFORE UPDATE OF remediation_username ON config_monitored_servers "
+            + "FOR EACH ROW EXECUTE FUNCTION refuse_boom_6262()", ct);
+        logger.Lines.Clear();
+
+        await new StoreConfigProvider(owner, logger).SeedIfEmptyAsync(
+            DarlingConfig.Parse(Json(
+                Entry("alpha-sql-01", "boom_fix", FirstReference),
+                Entry("bravo-sql-01", "bravo_fix", SecondReference),
+                Entry("charlie-sql-01", "charlie_fix", ThirdReference))), ct);
+
+        Assert.Equal((null, null), await SlotAsync(owner, "alpha-sql-01", ct));
+        Assert.Equal(("bravo_fix", SecondReference), await SlotAsync(owner, "bravo-sql-01", ct));
+        Assert.Equal(("charlie_fix", ThirdReference), await SlotAsync(owner, "charlie-sql-01", ct));
+        var failure = Assert.Single(logger.Lines, line => line.Contains("Could not sync", StringComparison.Ordinal));
+        Assert.Contains("'alpha-sql-01'", failure, StringComparison.Ordinal);
+        Assert.Contains("PostgresException", failure, StringComparison.Ordinal);
+        Assert.Contains("SQLSTATE P0001", failure, StringComparison.Ordinal);
+        Assert.DoesNotContain("boom_fix", string.Join("\n", logger.Lines), StringComparison.Ordinal);
     }
 
     /// <summary>A DPAPI blob as the remediation secret is warned about by <c>--validate-config</c>, with the server's name and the

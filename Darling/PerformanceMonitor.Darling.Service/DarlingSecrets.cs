@@ -335,6 +335,14 @@ public static class DarlingSecrets
                 continue;
             }
 
+            if (!RemediationSecretAccepted(server.RemediationEncryptedPassword))
+            {
+                warnings.Add(
+                    $"Server '{server.DisplayName}': remediationEncryptedPassword is a {RemediationSlotShape(server.RemediationEncryptedPassword)}, not an env: or file: reference, "
+                    + "so remediation and agent server actions both refuse it, and the start does not copy it into the store. Use an env:NAME or file:/path reference.");
+                continue;
+            }
+
             warnings.Add(
                 $"Server '{server.DisplayName}': remediationEncryptedPassword is a {RemediationSlotShape(server.RemediationEncryptedPassword)}, not an env: or file: reference. "
                 + "Operator remediation can still open it, but agent server actions (plan force, plan eviction and session kill) refuse it. "
@@ -350,7 +358,26 @@ public static class DarlingSecrets
         : stored.StartsWith("env:", StringComparison.Ordinal) ? "env reference"
         : stored.StartsWith("file:", StringComparison.Ordinal) ? "file reference"
         : PasswordSeal.IsSealed(stored) ? "sealed value"
-        : "DPAPI blob";
+        : LooksLikeLegacyDpapiBlob(stored) ? "DPAPI blob"
+        : "plain text value";
+
+    /// <summary>
+    /// The base64 of the first bytes every Windows DPAPI blob starts with (version 1 and the provider GUID). It is the marker the
+    /// gate, the store tests and the README already use for "an old-format value": a plain password never starts with it.
+    /// </summary>
+    private const string DpapiBlobPrefix = "AQAAANCMnd8BFdERjHoAwE";
+
+    /// <summary>True for text that has the shape of an old-format DPAPI blob. It does not open the blob; only the machine that wrote it can.</summary>
+    internal static bool LooksLikeLegacyDpapiBlob(string? stored) =>
+        stored is not null && stored.StartsWith(DpapiBlobPrefix, StringComparison.Ordinal);
+
+    /// <summary>
+    /// Whether the remediation connection can use this text: the shapes <see cref="ResolveRemediationPassword(MonitoredServer, IPasswordKeyRing?)"/>
+    /// has an arm for (an <c>env:</c> or <c>file:</c> reference, a sealed value, a DPAPI blob). A plain password has none, so the login sync
+    /// does not copy one into the store.
+    /// </summary>
+    internal static bool RemediationSecretAccepted(string? stored) =>
+        DarlingSecretSource.IsReference(stored) || PasswordSeal.IsSealed(stored) || LooksLikeLegacyDpapiBlob(stored);
 
     /// <summary>True for stored text that is neither blank, a reference, nor a sealed value: the old DPAPI format.</summary>
     internal static bool IsLegacyDpapi(string? stored) =>

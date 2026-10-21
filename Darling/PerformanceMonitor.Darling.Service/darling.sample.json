@@ -152,8 +152,11 @@
       // An env:NAME or file:/path reference works everywhere. A DPAPI blob (--encrypt-password on THIS
       // machine, same format as encryptedPassword) still works for operator remediation, but agent server
       // actions (plan force, eviction, kill) refuse it: use a reference for those. There is deliberately
-      // no plaintext variant of this one. Both keys are re-read on every start and replace the registered
-      // server's login; remove both to clear it. A server that is not in this file is never touched.
+      // no plaintext variant of this one. When BOTH keys are set they are re-read on every start and replace the
+      // registered server's login, but only on the server that pairs with this entry and connects the same way. Removing
+      // the keys, or setting only one, leaves the server's login as it is: it disarms nothing (turn a server's actions
+      // off with its action switches). A server that is not in this file is never touched. Services that share one store
+      // should declare the same logins, because each copies its own file when it starts.
       "remediationUsername": "",
       "remediationEncryptedPassword": "",
       // OPTIONAL, PostgreSQL targets only (#6170). The login the "Test an index" check runs under. The check never runs
@@ -162,7 +165,8 @@
       // SELECT on the tables of the statements to test, and nothing else: no pg_monitor, pg_read_all_stats,
       // pg_read_all_data or superuser. The password is an env:NAME or file:/path reference only. When BOTH keys are set
       // here they are applied to the registered server on every start (set, or replaced), and the log says so. Leaving
-      // them out never clears a login already on the server, because it can also be set on the store row.
+      // them out never clears a login already on the server, because it can also be set on the store row. Only a
+      // reference is written, and only to the server that pairs with this entry and connects the same way.
       "hypotheticalIndexUsername": "",
       "hypotheticalIndexEncryptedPassword": "",
       "excludedDatabases": [ "StageDb" ]
