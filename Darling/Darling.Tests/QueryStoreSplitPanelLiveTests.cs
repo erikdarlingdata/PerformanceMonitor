@@ -168,7 +168,7 @@ VALUES (1, (now() AT TIME ZONE 'UTC') - interval '30 hours', now() AT TIME ZONE 
         var sql = outcome.Payload!["sql"]!.GetValue<string>();
         Assert.Contains("query_store_interval_wide", sql, StringComparison.Ordinal);
         Assert.Contains("qs_rn", sql, StringComparison.Ordinal);
-        var servers = outcome.Payload["rows"]!.AsArray().Select(r => r!["server_name"]!.GetValue<string>()).OrderBy(s => s, StringComparer.Ordinal).ToArray();
+        var servers = outcome.Payload["rows"]!.AsArray().Select(r => r!["server"]!.GetValue<string>()).OrderBy(s => s, StringComparer.Ordinal).ToArray();
         Assert.Equal(new[] { "srv1", "srv2", "srv3", "srv4" }, servers);
     }
 
