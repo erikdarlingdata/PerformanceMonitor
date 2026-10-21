@@ -103,6 +103,14 @@ check stop "last line is the GATE STOP line" $(last | grep -qF "GATE STOP: selec
 check stop "no -class run" $(! grep -q -- '-class' "$calls"; echo $?)
 check stop "the Guard stage still ran" $(grep -c -- '^[a-z]* -trait Stage=Guard' "$calls" | grep -qx 2; echo $?)
 
+# 4b. CI's FULL answer (a keep-full file changed) is the whole suite too, even when the symbol set is a few classes: a STOP,
+# never a GREEN on that partial set (#6336; #6309 reported GREEN on 146 classes while CI ran everything)
+run_gate full '{"full": true, "selected": {}, "why": {}, "seconds": {}, "total": {}}' "$list_d" "$list_l" --skip-build
+check full "exit 3" $([ $rc -eq 3 ]; echo $?)
+check full "last line is the GATE STOP line naming CI's FULL answer" $(last | grep -qF "GATE STOP: selection is the whole suite (CI's map answers FULL)"; echo $?)
+check full "no -class run" $(! grep -q -- '-class' "$calls"; echo $?)
+check full "the Guard stage still ran" $(grep -c -- '^[a-z]* -trait Stage=Guard' "$calls" | grep -qx 2; echo $?)
+
 # 5. batches are cut by length: 401 classes under a 2000-character budget run in several batches, each under it
 FAKE_CLASS_TOTAL=3 PRE_PUSH_MAX_CLASSES=1000 PRE_PUSH_ARG_BUDGET=2000 run_gate chunks "$sel_big" "$list_big" "$list_l" --skip-build
 nb=$(grep -c '^darling -class ' "$calls")

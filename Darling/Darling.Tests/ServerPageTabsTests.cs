@@ -881,7 +881,7 @@ public sealed class ServerPageTabsTests
     /// <summary>
     /// The tabs whose desktop twin does something the browser cannot say so, in the tab itself.
     ///
-    /// <para>Plan analysis, the query heatmap, cached-plan retrieval and actual-plan re-execution all need either
+    /// <para>Plan analysis, cached-plan retrieval and actual-plan re-execution all need either
     /// a plan renderer or a command back to the monitored server, and this read-only seat has neither. The same
     /// goes for the interactive deadlock graph (the block-chain tree is on the page since #6292). A reader told to open the desktop viewer
     /// is better served than one given a web page that looks like plan analysis and is not — so the absence is
@@ -893,7 +893,7 @@ public sealed class ServerPageTabsTests
         var js = ServerTabsJs;
 
         Assert.Contains("are in the desktop viewer, not on this page", js, StringComparison.Ordinal);
-        Assert.Contains("Plan analysis, the query heatmap", js, StringComparison.Ordinal);
+        Assert.Contains("Plan analysis, cached-plan retrieval", js, StringComparison.Ordinal);
 
         /* The note renders — a `note` field with no renderer is the same silence in a different place. */
         Assert.Contains("const strip = noticeStrip(note);", js, StringComparison.Ordinal);
