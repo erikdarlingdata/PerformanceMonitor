@@ -1287,7 +1287,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var decidedBy = NoteDecider(DarlingWebSeat.FromContext(context));
             if (InvestigationPersonWrites.ValidateActor(decidedBy) is not null)
             {
-                return ErrorResult(PersonWriteActorRefusal, StatusCodes.Status400BadRequest);
+                return PersonActorRefusedResult();
             }
 
             if (InvestigationNoteRules.ValidateDecidedBy(decidedBy) is { } refused)
@@ -1332,7 +1332,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var decidedBy = NoteDecider(DarlingWebSeat.FromContext(context));
             if (InvestigationPersonWrites.ValidateActor(decidedBy) is not null)
             {
-                return ErrorResult(PersonWriteActorRefusal, StatusCodes.Status400BadRequest);
+                return PersonActorRefusedResult();
             }
 
             if (InvestigationNoteRules.ValidateDecidedBy(decidedBy) is { } refused)
@@ -2986,6 +2986,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     }
 
     private const string PersonWriteActorRefusal = "The signed-in name cannot be recorded as the person who made this change.";
+
+    /// <summary>The 400 a person-made change answers when the signed-in name cannot be recorded: the fixed <see cref="PersonWriteActorRefusal"/> sentence, never the name.</summary>
+    private static IResult PersonActorRefusedResult() => ErrorResult(PersonWriteActorRefusal, StatusCodes.Status400BadRequest);
 
     /// <summary>Reads a bounded JSON object body for the investigation writes: the object, or the plain sentence that refuses it.</summary>
     private static async Task<(JsonObject? Body, string? Refusal)> ReadInvestigationWriteBodyAsync(HttpContext context)
