@@ -146,10 +146,9 @@ public sealed class FinOpsPageShellTests
         Assert.Contains("aria-current", src);
         Assert.DoesNotContain("role: \"tab", src);
         Assert.DoesNotContain("aria-selected", src);
-        Assert.Contains("/^No servers are registered/.test(", body);
-        /* An empty registry is a definite answer: both branches go through showEmpty, which is not behind the hadCache guard. */
+        /* An empty registry is a definite answer: the empty branch goes through showEmpty (#6277: the empty envelope, no longer prose read as an error), which is not behind the hadCache guard. */
         Assert.Contains("return showEmpty();", body);
-        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(body, @"return showEmpty\(\);").Count);
+        Assert.Equal(1, System.Text.RegularExpressions.Regex.Matches(body, @"return showEmpty\(\);").Count);
         var emptyIdx = Array.FindIndex(lines, l => l.Trim() == "const showEmpty = () => {");
         var showIdx = Array.FindIndex(lines, l => l.Trim() == "const show = (node) => {");
         Assert.True(emptyIdx >= 0 && showIdx >= 0, "showEmpty and show must both exist");

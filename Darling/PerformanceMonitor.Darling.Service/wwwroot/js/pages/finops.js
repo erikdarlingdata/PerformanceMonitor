@@ -218,8 +218,6 @@ export function renderFinops(main, server, tabId, opts) {
       controller.abort();
       if (body) mount(body, emptyStrip("No servers are registered yet."));
     };
-    /* An empty registry answers with prose, which the read classifies as an error; it is the empty case. */
-    if (res.kind === "error" && /^No servers are registered/.test(res.message || "")) return showEmpty();
     if (res.kind === "error") return show(errorStrip(res.message));
     const rows = res.kind === "data" ? orderServers(serverRows(res.data)) : [];
     if (rows.length === 0) return showEmpty();
