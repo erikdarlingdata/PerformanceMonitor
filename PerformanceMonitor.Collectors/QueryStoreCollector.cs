@@ -52,7 +52,7 @@ namespace PerformanceMonitor.Collectors;
 /// whichever the engine emitted first — a grid could show an in-memory sliver in place of the interval's
 /// total. The emitted row SHAPE is untouched by that change; only the row COUNT per interval is.</para>
 /// </summary>
-public sealed class QueryStoreCollector : CollectorDefinitionBase<QueryStoreCollector.Row>
+public sealed partial class QueryStoreCollector : CollectorDefinitionBase<QueryStoreCollector.Row>
 {
     public static QueryStoreCollector Instance { get; } = new();
 
@@ -169,7 +169,7 @@ DECLARE
    as the enumeration's SECOND result set — the driver's probe-failure contract — because the FIRST one
    is the item list the runners collect from. */
 DECLARE
-    @probe_failures TABLE (name sysname, error_text nvarchar(4000));
+    @probe_failures TABLE (name sysname, error_text nvarchar(4000));/*FACTS_DECLARE*/
 
 DECLARE
     @db sysname,
@@ -246,7 +246,7 @@ BEGIN
         SET @exec_sp = QUOTENAME(@db) + N'.sys.sp_executesql';
 
         INSERT @result (name)
-        EXECUTE @exec_sp @sql;
+        EXECUTE @exec_sp @sql;/*FACTS_READ*/
     END TRY
     BEGIN CATCH
         /* The failure modes this catches are ordinary and per-database (mid-restore, an AG failover
@@ -278,7 +278,7 @@ SELECT /* PerformanceMonitorLite */
     error_text
 FROM @probe_failures
 ORDER BY
-    name;";
+    name;/*FACTS_RESULT*/";
 
     /// <summary>
     /// The eligibility gate the Azure per-database path runs against the CURRENT database before the
@@ -518,6 +518,12 @@ END;
         var (exclusionClause, exclusionParameters) = DatabaseScopeFilter.BuildEnumerationPredicate(context, "d.name");
         var text = OnPremDatabaseListQueryText
             .Replace("/*EXCLUSION_FILTER*/", exclusionClause, StringComparison.Ordinal);
+
+        /* #6254 / #6279: the per-database facts the routing and the look-back need (flush interval, capturing
+           secondary), read inside the probe loop that already visits every database. Off (the placeholders
+           vanish) unless the server has a replica set, or it is SQL Server 2022+ where a capturing secondary
+           can exist; the first two result sets keep their contract either way. */
+        text = ApplyEnumerationFacts(text, context);
 
         return new CollectorQuery(text, exclusionParameters);
     }
