@@ -114,7 +114,7 @@ does not fail anything, so look at the NOTICE lines on a pull request that chang
 
 - A page: one entry in `pages.json` (`name`, `hash`, and `nav` for a shell route or `server` for a server tab). Add
   `expect.panels` (by `title` or by `panel`, the read name) with `state` and `minRows`, or `expect.grids` for a page
-  with no panel cards. Take the panel names from a run's log: it prints every panel with its state and row count.
+  with no panel cards, or `expect.strips` (`key`, `state`) for a strip inside the Overview timeline panel's one SVG. Take the panel names from a run's log: it prints every panel with its state and row count.
   A `panel` key is unambiguous only for a read that feeds one card; key a fanout panel (several cards sharing one read) by `title`.
 - A table: one more section in `seed.sql`, in the same shape, with its own `collection_id` range (the ranges are in
   each section's comment). `UiSmokeSeedAppliesLiveTests` (Darling.Tests) applies the seed to a freshly migrated store

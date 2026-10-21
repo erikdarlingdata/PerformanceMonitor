@@ -76,7 +76,11 @@ public sealed class DarlingMcpMemoryGrantToolsSurfaceAndSqlTests
     public void ParamContract_ServerHours_AllOptional(string toolName)
     {
         var p = McpParams(toolName);
-        Assert.Equal(new[] { "server_name", "hours_back", "as_of" }, p.Select(x => x.Name).ToArray());
+        /* #6299: get_memory_grants also takes chart + bucket_minutes, the whole-window series the web's two grant charts draw. */
+        var expected = toolName == "get_memory_grants"
+            ? new[] { "server_name", "hours_back", "as_of", "chart", "bucket_minutes" }
+            : new[] { "server_name", "hours_back", "as_of" };
+        Assert.Equal(expected, p.Select(x => x.Name).ToArray());
         Assert.All(p, x => Assert.True(x.Optional, $"{toolName}.{x.Name} must be optional"));
     }
 

@@ -48,7 +48,6 @@ public sealed class WebAuditLaneDLabelTests
         Assert.Contains("line(\"Deadlock trend\", \"get_deadlock_trend\", { server, hours: ctx.hours }, \"trend\", \"time\", COUNT_SERIES, {\n        subtitle: ctx.label,\n        format: \"int\",\n        atTimeItem: \"deadlocks\",\n        emptyText: DEADLOCKS_EMPTY_TEXT,", tabs, StringComparison.Ordinal);
         Assert.Contains("const DEADLOCKS_EMPTY_TEXT = \"No deadlocks in this window.\";", tabs, StringComparison.Ordinal);
         Assert.Contains("        ctx.label,\n        DEADLOCKS_EMPTY_TEXT,\n        2,\n        \"separately_monitored_note\"", tabs, StringComparison.Ordinal);
-        Assert.Contains("line(\"Deadlocks\", \"get_deadlock_trend\", { server, hours: ctx.hours }, \"trend\", \"time\", COUNT_SERIES, {\n        subtitle: ctx.label,\n        format: \"int\",\n        atTimeItem: \"deadlocks\",\n        emptyText: DEADLOCKS_EMPTY_TEXT,\n        emptyWins: true,", tabs, StringComparison.Ordinal);
         Assert.DoesNotContain("an empty trend here means none happened", tabs, StringComparison.Ordinal);
     }
 
