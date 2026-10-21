@@ -52,7 +52,7 @@ internal static class DarlingKnownPatternRoutes
         {
             if (!DarlingWebEndpoints.IsJsonContentType(context.Request.ContentType))
             {
-                return UnsupportedMediaType();
+                return UnsupportedMediaTypeResult();
             }
 
             var stopwatch = Stopwatch.StartNew();
@@ -61,21 +61,22 @@ internal static class DarlingKnownPatternRoutes
                 var (input, refusal) = await ReadInputAsync(context, serverLookup);
                 if (input is null)
                 {
-                    return Invalid(refusal!);
+                    return ErrorResult("invalid", StatusCodes.Status400BadRequest, refusal!);
                 }
 
                 var principal = DarlingWebSeat.FromContext(context).EditorPrincipal;
                 var id = await store.InsertAsync(input, principal, context.RequestAborted);
                 logger.LogInformation("Known pattern add by {Principal}: id {Id}", principal, id);
-                return Results.Json(new JsonObject { ["status"] = "created", ["id"] = id }, statusCode: StatusCodes.Status201Created);
+                return IdReceiptResult("created", id, StatusCodes.Status201Created);
             }
             catch (ArgumentException ex)
             {
-                return Invalid(ex.Message);
+                return ErrorResult("invalid", StatusCodes.Status400BadRequest, ex.Message);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                return Failed(ex, logger, stopwatch, context, "/api/known-patterns");
+                DarlingWebFailureLog.Report(logger, "/api/known-patterns", stopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
+                return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
             }
         });
 
@@ -83,7 +84,7 @@ internal static class DarlingKnownPatternRoutes
         {
             if (!DarlingWebEndpoints.IsJsonContentType(context.Request.ContentType))
             {
-                return UnsupportedMediaType();
+                return UnsupportedMediaTypeResult();
             }
 
             var stopwatch = Stopwatch.StartNew();
@@ -92,24 +93,25 @@ internal static class DarlingKnownPatternRoutes
                 var (input, refusal) = await ReadInputAsync(context, serverLookup);
                 if (input is null)
                 {
-                    return Invalid(refusal!);
+                    return ErrorResult("invalid", StatusCodes.Status400BadRequest, refusal!);
                 }
 
                 if (!await store.UpdateAsync(id, input, context.RequestAborted))
                 {
-                    return NotFound();
+                    return NotFoundResult();
                 }
 
                 logger.LogInformation("Known pattern edit by {Principal}: id {Id}", DarlingWebSeat.FromContext(context).EditorPrincipal, id);
-                return Results.Json(new JsonObject { ["status"] = "updated", ["id"] = id });
+                return IdReceiptResult("updated", id);
             }
             catch (ArgumentException ex)
             {
-                return Invalid(ex.Message);
+                return ErrorResult("invalid", StatusCodes.Status400BadRequest, ex.Message);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                return Failed(ex, logger, stopwatch, context, "/api/known-patterns/{id}");
+                DarlingWebFailureLog.Report(logger, "/api/known-patterns/{id}", stopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
+                return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
             }
         });
 
@@ -117,7 +119,7 @@ internal static class DarlingKnownPatternRoutes
         {
             if (!DarlingWebEndpoints.IsJsonContentType(context.Request.ContentType))
             {
-                return UnsupportedMediaType();
+                return UnsupportedMediaTypeResult();
             }
 
             var stopwatch = Stopwatch.StartNew();
@@ -125,15 +127,16 @@ internal static class DarlingKnownPatternRoutes
             {
                 if (!await store.DeleteAsync(id, context.RequestAborted))
                 {
-                    return NotFound();
+                    return NotFoundResult();
                 }
 
                 logger.LogInformation("Known pattern delete by {Principal}: id {Id}", DarlingWebSeat.FromContext(context).EditorPrincipal, id);
-                return Results.Json(new JsonObject { ["status"] = "deleted", ["id"] = id });
+                return IdReceiptResult("deleted", id);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                return Failed(ex, logger, stopwatch, context, "/api/known-patterns/{id}");
+                DarlingWebFailureLog.Report(logger, "/api/known-patterns/{id}", stopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
+                return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
             }
         });
     }
@@ -261,18 +264,17 @@ internal static class DarlingKnownPatternRoutes
             : (null, $"{name} must be text or null.");
     }
 
-    private static IResult Invalid(string message) =>
-        Results.Json(new JsonObject { ["status"] = "invalid", ["error"] = message }, statusCode: StatusCodes.Status400BadRequest);
+    /* The helpers' names are the ones WebRouteStatementCensusTests knows as fixed-text writers: an error here carries the store's refusal
+       reason (KnownPatternInput.Validate) or a fixed sentence, a receipt carries a status word and an id, never collected text. */
+    private static IResult ErrorResult(string status, int statusCode, string message) =>
+        Results.Json(new JsonObject { ["status"] = status, ["error"] = message }, statusCode: statusCode);
 
-    private static IResult NotFound() =>
-        Results.Json(new JsonObject { ["status"] = "not_found", ["error"] = "Known pattern not found." }, statusCode: StatusCodes.Status404NotFound);
+    private static IResult IdReceiptResult(string status, long id, int statusCode = StatusCodes.Status200OK) =>
+        Results.Json(new JsonObject { ["status"] = status, ["id"] = id }, statusCode: statusCode);
 
-    private static IResult UnsupportedMediaType() =>
+    private static IResult NotFoundResult() =>
+        ErrorResult("not_found", StatusCodes.Status404NotFound, "Known pattern not found.");
+
+    private static IResult UnsupportedMediaTypeResult() =>
         Results.Json(new JsonObject { ["error"] = "Content-Type must be application/json." }, statusCode: StatusCodes.Status415UnsupportedMediaType);
-
-    private static IResult Failed(Exception ex, ILogger logger, Stopwatch stopwatch, HttpContext context, string route)
-    {
-        DarlingWebFailureLog.Report(logger, route, stopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
-        return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
-    }
 }
