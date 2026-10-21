@@ -108,6 +108,30 @@ try {
       out.text = cell.textContent;
       out.nodes = shape(cell).length;
     },
+    /* The grid redraws every row when it refreshes (once a minute): the same row comes back as a NEW cell. */
+    refresh: async () => {
+      reply = () => ({ status: 200, body: chainAnswer() });
+      const first = blockChainCell("srv", row);
+      button(first).fire("click"); await tick();
+      const again = blockChainCell("srv", { ...row });
+      out.afterRedraw = { label: button(again).textContent, shape: shape(again) };
+      /* Closing and opening the redrawn cell still does not read again. */
+      button(again).fire("click"); button(again).fire("click"); await tick();
+      out.afterToggle = shape(again).length;
+      /* A redraw while the first read is still in flight joins it instead of reading again. */
+      const inFlightRow = { ...row, blocked_spid: 71 };
+      const slow = blockChainCell("srv", inFlightRow);
+      button(slow).fire("click");
+      const joined = blockChainCell("srv", { ...inFlightRow });
+      await tick();
+      out.joinedShape = shape(joined).length;
+      out.readsForInFlight = readsOf().filter((q) => q.blocked_spid === "71").length;
+      /* A row that is not the same row (another session) is its own closed cell and reads for itself. */
+      const other = blockChainCell("srv", { ...row, blocked_spid: 99 });
+      out.otherLabel = button(other).textContent;
+      out.otherShape = shape(other).length;
+      out.reads = readsOf().length;
+    },
     nokey: async () => {
       out.cellText = blockChainCell("srv", { blocked_spid: 58 }).textContent;
       out.buttons = blockChainCell("srv", { blocked_spid: 58 }).all("button").length;

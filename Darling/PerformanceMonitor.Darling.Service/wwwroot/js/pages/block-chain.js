@@ -2,6 +2,7 @@
    the desktop viewer's Block Chain window shows them. The service builds the tree (get_block_chain, the viewer's own
    reconstruction); this file only draws what it returns. Every collected value reaches the page as text. */
 
+import { dockPanelUnderRow, undockPanel } from "../plan-row.js";
 import { el, readTool, loadingStrip, errorStrip, emptyStrip, noticeStrip, fmtMs, localTime } from "../util.js";
 
 const NONE_TEXT = "No blocking chain could be rebuilt for this session near this report.";
@@ -67,59 +68,84 @@ export function drawBlockChain(answer) {
   return host;
 }
 
-/** The Block chain cell of one Blocking row: a button that reads the chain once and shows it under the button, and hides it
- *  again. A row without its event time or blocked session has nothing to key the read on, so it is a dash. */
+/* What each opened row holds, by the row's own identity (server, event time, blocked session), so a grid that draws again
+   (the page's refresh redraws every row) finds its chain still open and already read instead of closing it or reading it a
+   second time. `body` is the one panel element: the read fills it in, whichever cell currently holds it. Oldest entries are
+   dropped past MAX_ENTRIES so a long session does not keep every chain it ever opened. */
+const entries = new Map();
+const MAX_ENTRIES = 50;
+
+function entryFor(key) {
+  let entry = entries.get(key);
+  if (!entry) {
+    entry = { open: false, loaded: false, pending: false, body: el("div", { class: "block-chain-body plan-panel" }) };
+    entries.set(key, entry);
+    if (entries.size > MAX_ENTRIES) entries.delete(entries.keys().next().value);
+  }
+  return entry;
+}
+
+/** Reads the chain into the entry's panel (once, until it has loaded). */
+async function load(server, row, entry) {
+  if (entry.loaded || entry.pending) return;
+  entry.pending = true;
+  const body = entry.body;
+  body.textContent = "";
+  body.appendChild(loadingStrip("Reading the block chain…"));
+  let res;
+  try {
+    res = await readTool("get_block_chain", {
+      server,
+      event_time: row.event_time,
+      blocked_spid: row.blocked_spid,
+      blocked_ecid: row.blocked_ecid == null ? 0 : row.blocked_ecid,
+    });
+  } catch (e) {
+    res = { kind: "error", message: String((e && e.message) || e) };
+  }
+  entry.pending = false;
+  body.textContent = "";
+  if (res.kind === "data" && res.data && res.data.chain) {
+    entry.loaded = true;
+    body.appendChild(drawBlockChain(res.data));
+  } else if (res.kind === "empty" || (res.kind === "data" && res.data && res.data.status === "empty")) {
+    entry.loaded = true;
+    body.appendChild(emptyStrip((res.data && res.data.message) || res.message || NONE_TEXT));
+  } else {
+    body.appendChild(errorStrip((res && res.message) || "The block chain could not be read."));
+  }
+}
+
+/** The Block chain cell of one Blocking row: a button that reads the chain once and shows it in a panel under the row (the
+ *  stored-plan panel's placement, js/plan-row.js, not inside the last column), and hides it again. A row without its event
+ *  time or blocked session has nothing to key the read on, so it is a dash. */
 export function blockChainCell(server, row) {
   if (!row || row.event_time == null || row.event_time === "" || row.blocked_spid == null) return document.createTextNode("—");
-  const host = el("div", { class: "block-chain-cell" });
-  const button = el("button", {
-    type: "button",
-    class: "grid-tool",
-    text: "Block chain",
-    "aria-expanded": "false",
-    title: "Show the lead blocker and the sessions it blocks, for this report",
-  });
-  const body = el("div", { class: "block-chain-body" });
-  let state = "closed";
-  let loaded = false;
-
-  const show = async () => {
-    state = "open";
-    button.textContent = "Hide block chain";
-    button.setAttribute("aria-expanded", "true");
-    host.appendChild(body);
-    if (loaded) return;
-    body.appendChild(loadingStrip("Reading the block chain…"));
-    let res;
-    try {
-      res = await readTool("get_block_chain", {
-        server,
-        event_time: row.event_time,
-        blocked_spid: row.blocked_spid,
-        blocked_ecid: row.blocked_ecid == null ? 0 : row.blocked_ecid,
-      });
-    } catch (e) {
-      res = { kind: "error", message: String((e && e.message) || e) };
-    }
-    body.textContent = "";
-    if (res.kind === "data" && res.data && res.data.chain) {
-      loaded = true;
-      body.appendChild(drawBlockChain(res.data));
-    } else if (res.kind === "empty" || (res.kind === "data" && res.data && res.data.status === "empty")) {
-      loaded = true;
-      body.appendChild(emptyStrip((res.data && res.data.message) || res.message || NONE_TEXT));
-    } else {
-      body.appendChild(errorStrip((res && res.message) || "The block chain could not be read."));
-    }
+  const ecid = row.blocked_ecid == null ? 0 : row.blocked_ecid;
+  const entry = entryFor([server, row.event_time, row.blocked_spid, ecid].join("|"));
+  const host = el("div", { class: "plan-cell" });
+  const draw = () => {
+    while (host.firstChild) host.removeChild(host.firstChild);
+    const button = el("button", {
+      type: "button",
+      class: "grid-tool",
+      text: entry.open ? "Hide block chain" : "Block chain",
+      "aria-expanded": entry.open ? "true" : "false",
+      title: "Show the lead blocker and the sessions it blocks, for this report",
+    });
+    button.addEventListener("click", () => {
+      entry.open = !entry.open;
+      draw();
+      if (entry.open) load(server, row, entry);
+    });
+    host.appendChild(button);
+    if (entry.open) dockPanelUnderRow(host, entry.body);
+    else undockPanel(host);
   };
-  const hide = () => {
-    state = "closed";
-    button.textContent = "Block chain";
-    button.setAttribute("aria-expanded", "false");
-    host.removeChild(body);
-  };
-  button.addEventListener("click", () => (state === "open" ? hide() : show()));
-  host.appendChild(button);
+  draw();
+  /* A row drawn again while its chain is open and not yet read (a refresh landed mid-read) joins the read in flight; one that
+     is open and read just shows it. Neither starts a second read. */
+  if (entry.open) load(server, row, entry);
   return host;
 }
 

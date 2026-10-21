@@ -115,6 +115,26 @@ public sealed class BlockChainWebTests
     }
 
     [Fact]
+    public void AGridRefresh_KeepsAnOpenChainOpen_WithoutReadingItAgain()
+    {
+        var r = Run("refresh");
+
+        /* The redrawn cell of the same row comes back open, already drawn. */
+        Assert.Equal("Hide block chain", r.GetProperty("afterRedraw").GetProperty("label").GetString());
+        Assert.Equal(3, r.GetProperty("afterRedraw").GetProperty("shape").GetArrayLength());
+        Assert.Equal(3, r.GetProperty("afterToggle").GetInt32());
+
+        /* A redraw mid-read joins the read in flight. */
+        Assert.Equal(3, r.GetProperty("joinedShape").GetInt32());
+        Assert.Equal(1, r.GetProperty("readsForInFlight").GetInt32());
+
+        /* Another row is its own, closed cell. Two rows were read, once each, in the whole scenario. */
+        Assert.Equal("Block chain", r.GetProperty("otherLabel").GetString());
+        Assert.Equal(0, r.GetProperty("otherShape").GetInt32());
+        Assert.Equal(2, r.GetProperty("reads").GetInt32());
+    }
+
+    [Fact]
     public void ARowWithNoEventTime_HasNoButton()
     {
         var r = Run("nokey");

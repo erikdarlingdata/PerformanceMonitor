@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
@@ -47,6 +48,12 @@ public sealed class BlockChainWebReadLiveTests
         using var doc = JsonDocument.Parse(json);
         return doc.RootElement.Clone();
     }
+
+    private const int ServerOffsetMinutes = -420;
+
+    /// <summary>A session's transaction start on the server's own clock: the session's number of minutes before the event, then seven hours behind UTC.</summary>
+    private static DateTime ServerLocalTranStart(DateTime eventTimeUtc, int spid) =>
+        eventTimeUtc.AddMinutes(-spid).AddMinutes(ServerOffsetMinutes);
 
     private static string Query(DateTime eventTime, int spid, int ecid = 0) =>
         "?server=" + ServerName + "&event_time=" + Uri.EscapeDataString(eventTime.ToString("o")) + "&blocked_spid=" + spid + "&blocked_ecid=" + ecid;
@@ -92,6 +99,26 @@ public sealed class BlockChainWebReadLiveTests
     }
 
     [Fact]
+    public async Task GetBlockChain_TransactionStarts_AreServedInUtc_NotAsTheServersLocalClock()
+    {
+        await RunAsync(async (postgres, eventTime, ct) =>
+        {
+            var answer = await ReadAsync(postgres, Query(eventTime, 58));
+            var apex = answer.GetProperty("chain");
+            var middle = Assert.Single(apex.GetProperty("children").EnumerateArray());
+            var leaf = Assert.Single(middle.GetProperty("children").EnumerateArray());
+
+            /* The page reads each stamp as UTC, so each must be the instant the transaction began: its session's number of minutes
+               before the event, whatever the server's own clock said. Stored as seen, these read seven hours early. */
+            foreach (var (node, spid) in new[] { (apex, 52), (middle, 55), (leaf, 58) })
+            {
+                var started = DateTime.Parse(node.GetProperty("tran_started").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+                Assert.Equal(eventTime.AddMinutes(-spid), started);
+            }
+        });
+    }
+
+    [Fact]
     public async Task GetBlockChain_ASessionInNoChain_SaysSo_AndABadEventTimeIsRefused()
     {
         await RunAsync(async (postgres, eventTime, ct) =>
@@ -131,6 +158,12 @@ public sealed class BlockChainWebReadLiveTests
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
             var eventTime = DarlingMcpTestData.Naive(DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-10));
 
+            /* The monitored server runs on UTC-7 (a fixed offset, no zone id): the transaction stamps in its reports are its own
+               wall clock, seven hours behind the UTC event_time they sit beside. */
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, utc_offset_minutes) VALUES ($1,$2,$3,$4,$5)",
+                CollectionIdGenerator.Next(), eventTime.AddMinutes(-5), ServerId, ServerName, ServerOffsetMinutes);
+
             /* (monitor_loop, blocked, blocking, wait ms, blocking login) */
             var pairs = new (int Loop, int Blocked, int Blocking, int Wait, string BlockingLogin)[]
             {
@@ -145,9 +178,10 @@ public sealed class BlockChainWebReadLiveTests
     (blocked_report_id, collection_time, server_id, server_name, event_time, database_name,
      blocked_spid, blocked_ecid, blocking_spid, blocking_ecid, wait_time_ms, lock_mode,
      blocked_sql_text, blocking_sql_text, blocked_process_report_xml, monitor_loop,
-     blocking_login_name, blocked_login_name)
-VALUES ($1,$2,$3,$4,$5,'SalesDb',$6,0,$7,0,$8,'X','SELECT 1','UPDATE t SET c = 1','<blocked-process-report/>',$9,$10,'victim')",
-                    CollectionIdGenerator.Next(), eventTime.AddSeconds(30), ServerId, ServerName, eventTime, blocked, blocking, wait, loop, login);
+     blocking_login_name, blocked_login_name, blocked_last_tran_started, blocking_last_tran_started)
+VALUES ($1,$2,$3,$4,$5,'SalesDb',$6,0,$7,0,$8,'X','SELECT 1','UPDATE t SET c = 1','<blocked-process-report/>',$9,$10,'victim',$11,$12)",
+                    CollectionIdGenerator.Next(), eventTime.AddSeconds(30), ServerId, ServerName, eventTime, blocked, blocking, wait, loop, login,
+                    ServerLocalTranStart(eventTime, blocked), ServerLocalTranStart(eventTime, blocking));
             }
 
             await body(postgres, eventTime, ct);
@@ -174,7 +208,7 @@ VALUES ($1,$2,$3,$4,$5,'SalesDb',$6,0,$7,0,$8,'X','SELECT 1','UPDATE t SET c = 1
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(
-            $"DELETE FROM blocked_process_reports WHERE server_id = {ServerId}; DELETE FROM dmv_blocking_snapshots WHERE server_id = {ServerId};",
+            $"DELETE FROM blocked_process_reports WHERE server_id = {ServerId}; DELETE FROM dmv_blocking_snapshots WHERE server_id = {ServerId}; DELETE FROM server_properties WHERE server_id = {ServerId};",
             connection);
         await cleanup.ExecuteNonQueryAsync(ct);
     }

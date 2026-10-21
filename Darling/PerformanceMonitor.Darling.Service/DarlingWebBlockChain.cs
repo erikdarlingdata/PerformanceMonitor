@@ -12,6 +12,7 @@ using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -41,6 +42,11 @@ internal static class DarlingWebBlockChain
 
         try
         {
+            /* The pair rows' transaction stamps are the monitored server's local clock (the report XML's lasttranstarted, the DMV's
+               transaction_begin_time), while the page reads every time it is sent as UTC. get_blocking converts the same stamps
+               through the server's clock; this read does too, with the same reader, so the two never show one transaction at
+               two times (#6292). */
+            var clock = await DarlingServerClockReader.ReadAsync(postgres, resolved.ServerId, cancellationToken);
             var model = await PgBlockChainRead.ReadModelAsync(
                 postgres, resolved.ServerId, eventTimeUtc, blockedSpid, blockedEcid, McpCommandDeadlines.ReadSeconds, cancellationToken);
 
@@ -59,7 +65,7 @@ internal static class DarlingWebBlockChain
                 ["cycle_detected"] = model.CycleDetected,
                 ["depth_capped"] = model.DepthCapped,
                 ["traversal_truncated"] = model.TraversalTruncated,
-                ["chain"] = Node(model.Roots[0]),
+                ["chain"] = Node(model.Roots[0], clock),
             }.ToJsonString(McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -68,12 +74,12 @@ internal static class DarlingWebBlockChain
         }
     }
 
-    /// <summary>One session of the tree and, under it, the sessions it blocks. Empty text is null, as the page's other reads send it.</summary>
-    internal static JsonObject Node(BlockingChainNode n)
+    /// <summary>One session of the tree and, under it, the sessions it blocks. Empty text is null, as the page's other reads send it; the transaction start is served as UTC.</summary>
+    internal static JsonObject Node(BlockingChainNode n, ServerClock clock)
     {
         var children = new JsonArray();
         foreach (var child in n.Children)
-            children.Add(Node(child));
+            children.Add(Node(child, clock));
 
         return new JsonObject
         {
@@ -88,7 +94,7 @@ internal static class DarlingWebBlockChain
             ["host_name"] = Text(n.HostName),
             ["client_app"] = Text(n.ClientApp),
             ["contentious_object"] = Text(n.ContentiousObject),
-            ["tran_started"] = n.TranStarted?.ToString("o", CultureInfo.InvariantCulture),
+            ["tran_started"] = n.TranStarted is { } started ? clock.ToUtc(started).ToString("o", CultureInfo.InvariantCulture) : null,
             ["sql_text"] = Text(McpHelpers.TruncateStatement(n.SqlText, SqlTextLength)),
             ["sql_text_truncated"] = n.SqlText.Length > SqlTextLength,
             ["children"] = children,
