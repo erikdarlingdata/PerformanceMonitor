@@ -32,6 +32,7 @@ public sealed class CollectionHealthReadSourceTests : IDisposable
     private readonly string _tempDir;
     private readonly string _dbPath;
     private long _nextId = 1;
+    private DuckDbInitializer? _initializer;
 
     public CollectionHealthReadSourceTests()
     {
@@ -42,6 +43,7 @@ public sealed class CollectionHealthReadSourceTests : IDisposable
 
     public void Dispose()
     {
+        _initializer?.Dispose();
         try { if (Directory.Exists(_tempDir)) Directory.Delete(_tempDir, recursive: true); }
         catch { /* Best-effort cleanup */ }
     }
@@ -61,7 +63,7 @@ public sealed class CollectionHealthReadSourceTests : IDisposable
 
     private async Task<(LocalDataService Service, ServerManager Servers, ServerConnection Server)> StoreAsync(string name)
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        var initializer = _initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeFromTemplateAsync();
         var configDir = Path.Combine(_tempDir, "config");
         Directory.CreateDirectory(configDir);
