@@ -191,19 +191,20 @@ export function planComparison(kind, currentRes, baselineRes) {
 /* ─────────── the picker ─────────── */
 
 /* Every grid on the page that offers the picker: a pick redraws all of those still on the page, so the one pick is the pick of
-   all three. Entries whose slot the page threw away (a tab switch, a rebuild) are dropped as they are met. */
-const drawers = new Set();
+   all three. Entries whose slot the page threw away (a tab switch, a rebuild) are dropped as they are met. One entry per slot: a grid under
+   the time slicer builds its Compare control again on every slice, and the latest draw is the one that counts (#6301 review). */
+const drawers = new Map();
 
 /** The Compare select. `draw` redraws the grid it sits in; `slot` is that grid's holder, to tell when the page has dropped it. */
 export function compareControl(draw, slot) {
   const entry = { draw, slot };
-  drawers.add(entry);
+  drawers.set(slot || entry, entry);
   const sel = el("select", { class: "range-select-inline", "aria-label": "Compare" }, COMPARE_OPTIONS.map((o) => el("option", { value: o.value, text: o.label })));
   sel.value = comparePick.value;
   sel.addEventListener("change", () => {
     comparePick.value = sel.value;
-    for (const d of [...drawers]) {
-      if (d.slot && d.slot.isConnected === false) drawers.delete(d);
+    for (const [key, d] of [...drawers]) {
+      if (d.slot && d.slot.isConnected === false) drawers.delete(key);
       else d.draw();
     }
   });

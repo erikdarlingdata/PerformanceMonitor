@@ -1589,6 +1589,7 @@ pre.code {
 .slicer-title { font-weight: 600; color: var(--fg); }
 .slicer-readout { color: var(--muted); flex: 1 1 12rem; min-width: 0; overflow-wrap: anywhere; }
 .slicer-overlay-note { color: var(--warn); font-size: 0.74rem; overflow-wrap: anywhere; }
+.slicer-strip-note { color: var(--muted); font-size: 0.74rem; overflow-wrap: anywhere; }
 .slicer-reset { padding: 0.1rem 0.6rem; font-size: 0.74rem; }
 .slicer-track { position: relative; height: 56px; background: var(--bg-dark); border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: crosshair; touch-action: none; user-select: none; overflow: hidden; }
 .slicer-svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; pointer-events: none; }

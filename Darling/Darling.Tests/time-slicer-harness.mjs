@@ -72,8 +72,13 @@ const answerFor = (name, params) => {
   if (name === "get_blocking_trend" || name === "get_deadlock_trend") {
     return { trend: [1, 7, 13, 19].map((h, i) => ({ time: iso(START + h * HOUR), count: 2 + i })) };
   }
-  if (name === "get_blocking") return { events: [{ event_time: iso(END - 3 * HOUR), database_name: "db1", blocked_session_id: 55, blocking_session_id: 51 }] };
-  if (name === "get_deadlocks") return { deadlocks: [{ event_time: iso(END - 3 * HOUR), database_name: "db1" }] };
+  /* Three events: one inside the 6-to-12-hour selection a drag from 25% to 50% makes, one before its start and one after its end. */
+  if (name === "get_blocking") {
+    return { events: [[13, "blk_in"], [20, "blk_before"], [3, "blk_after"]].map(([h, db]) => ({ event_time: iso(END - h * HOUR), database_name: db, blocked_session_id: 55, blocking_session_id: 51 })) };
+  }
+  if (name === "get_deadlocks") {
+    return { deadlocks: [[13, "dl_in"], [20, "dl_before"], [3, "dl_after"]].map(([h, db]) => ({ deadlock_time: iso(END - h * HOUR), victim_process_id: db, process_summary: db })) };
+  }
   if (name === "get_query_duration_trend" || name === "get_procedure_duration_trend") {
     return { trend: [0, 6, 12, 18].map((h, i) => ({ time: iso(START + h * HOUR), value: 10 + i * 5 })) };
   }
@@ -81,7 +86,11 @@ const answerFor = (name, params) => {
     return { trend: [3, 9, 15].map((h, i) => ({ collection_time: iso(START + h * HOUR), avg_cpu_ms: 100 * (i + 1), avg_elapsed_ms: 50, execution_count: 4 })) };
   }
   if (name === "get_active_queries") {
-    if (params.get("snapshots_only")) return { snapshots: [{ collection_time: iso(END - 2 * HOUR), row_count: 3 }, { collection_time: iso(END - 8 * HOUR), row_count: 5 }], total_snapshot_times: 2 };
+    /* Server k's snapshot list was cut by the read's cap: the strip says so. */
+    if (params.get("snapshots_only")) {
+      const cut = params.get("server") === "k";
+      return { snapshots: [{ collection_time: iso(END - 2 * HOUR), row_count: 3 }, { collection_time: iso(END - 8 * HOUR), row_count: 5 }], total_snapshot_times: cut ? 1234 : 2, truncated: cut };
+    }
     return { queries: [{ session_id: 51, database_name: "db1", query_text: "select active", collection_time: iso(END - 2 * HOUR) }] };
   }
   if (name === "get_query_store_top") {
@@ -100,6 +109,7 @@ globalThis.fetch = async (url) => {
   const name = u.pathname.replace("/api/read/", "");
   asks.push({
     name,
+    server: u.searchParams.get("server"),
     hours: u.searchParams.get("hours"),
     as_of: u.searchParams.get("as_of"),
     hash: u.searchParams.get("query_hash"),
@@ -119,7 +129,7 @@ try {
   fs.cpSync(jsDir, scratch, { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
   const load = (rel) => import(pathToFileURL(path.join(scratch, rel)).href);
-  modules = { util: await load("util.js"), tabs: await load(path.join("pages", "server-tabs.js")) };
+  modules = { util: await load("util.js"), tabs: await load(path.join("pages", "server-tabs.js")), panels: await load("panels.js"), slicer: await load("time-slicer.js") };
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });
 }
@@ -312,6 +322,99 @@ out.historyNarrowed = {
 const sroot = await draw(ctxOf(), "queries", "f");
 await drag(sroot, 250, 500, "Query Store duration");
 out.storeHistoryNarrowed = { ask: await historyOf(sroot, /select qs/, "get_query_store_query_history"), expectedAsOf: new Date(START + 12 * HOUR).toISOString() };
+
+/* ───────────── review round 1 (#6301) ───────────── */
+const pageText = (root) => all(root).filter((n) => n.tag === "tr").map((n) => n.textContent).join("\n");
+const countOf = (name, server, filter = () => true) => asks.filter((a) => a.name === name && a.server === server && filter(a)).length;
+
+/* 15. Rebuilding the page (the 60 s poll aborts the panel signal and builds every card again) leaves no listener behind: after six rebuilds a drag
+   on the live card re-reads each grid ONCE, not once per dead card. */
+let prevSignal = null;
+let live = null;
+const dead = [];
+for (let i = 0; i < 6; i++) {
+  if (live) dead.push({ root: live, title: all(live).find((n) => n.tag === "h3" && n.textContent.startsWith("Top Queries")) });
+  if (prevSignal) prevSignal.abort();
+  prevSignal = new AbortController();
+  modules.panels.setPanelSignal(prevSignal.signal);
+  live = await draw(ctxOf(), "cpu", "g");
+}
+asks.length = 0;
+await drag(live, 250, 500);
+/* A listener left by a dead card would draw that card's grid again (the same reads are joined into one fetch, so the cards' own nodes tell). */
+out.rebuilds = { redrawnDeadCards: dead.filter((d) => !all(d.root).includes(d.title)).length, deadCards: dead.length, liveReads: countOf("get_top_queries_by_cpu", "g") };
+modules.panels.setPanelSignal(undefined);
+
+/* 16. The Blocking and Deadlocks grids list only the events inside the selection (the read itself is whole hours back from its end); unnarrowed they list all. */
+asks.length = 0;
+const eroot = await draw(ctxOf(), "blocking", "m");
+out.eventsWhole = pageText(eroot);
+await drag(eroot, 250, 500, "Deadlocks");
+out.eventsNarrowed = pageText(eroot);
+
+/* 17. A press with no travel on the selection, and Escape with nothing narrowed, change nothing: no grid reads again. */
+const nroot = await draw(ctxOf(), "cpu", "n");
+await drag(nroot, 250, 500);
+asks.length = 0;
+const nbody = byClass(nroot, "slicer-sel")[0];
+nbody.fire("pointerdown", { clientX: 375, button: 0, pointerId: 2 });
+byClass(nroot, "slicer-track")[0].fire("pointerup", { clientX: 375, pointerId: 2 });
+await flush();
+out.noTravel = countOf("get_top_queries_by_cpu", "n") + countOf("get_top_procedures_by_cpu", "n");
+byClass(nroot, "slicer-reset")[0].fire("click", {});
+await flush();
+asks.length = 0;
+byClass(nroot, "slicer-sel")[0].fire("keydown", { key: "Escape" });
+await flush();
+out.escapeIdle = countOf("get_top_queries_by_cpu", "n") + countOf("get_top_procedures_by_cpu", "n");
+
+/* 18. N narrowings, then one Compare change: each card draws once for it, as it would with no narrowing. */
+const compareChange = async (root, value) => {
+  asks.length = 0;
+  const select = all(root).find((n) => n.tag === "select" && n.attrs["aria-label"] === "Compare");
+  select.value = value;
+  select.fire("change", {});
+  await flush();
+  return countOf("get_top_queries_by_cpu", "j") + countOf("get_top_procedures_by_cpu", "j");
+};
+const croot = await draw(ctxOf(), "cpu", "j");
+const compareBase = await compareChange(croot, "yesterday");
+await compareChange(croot, "off");
+await drag(croot, 100, 300);
+await drag(croot, 150, 400);
+await drag(croot, 250, 500);
+out.compare = { once: compareBase, afterNarrowings: await compareChange(croot, "yesterday") };
+await compareChange(croot, "off");
+
+/* 19. The Active strip says so when the snapshot list was cut; a whole list says nothing. */
+const kroot = await draw(ctxOf(), "queries", "k");
+out.activeNote = { cut: byClass(slicerOf(kroot, "Active queries"), "slicer-strip-note")[0].textContent, whole: byClass(slicerOf(qroot, "Active queries"), "slicer-strip-note")[0].textContent };
+
+/* 20. A row's overlay is read once: narrowing (a grid redraw that puts the pick back on its row) draws it from the first read. */
+const oroot = await draw(ctxOf(), "cpu", "o");
+asks.length = 0;
+all(oroot).find((n) => n.tag === "tr" && n.attrs["aria-pressed"] === "false" && /select 1/.test(n.textContent)).fire("click", {});
+await flush();
+const overlayFirst = countOf("get_query_trend", "o");
+asks.length = 0;
+await drag(oroot, 250, 500);
+out.overlayReads = { first: overlayFirst, afterNarrowing: countOf("get_query_trend", "o"), stillDrawn: (byClass(oroot, "slicer-overlay")[0].attrs.d || "").startsWith("M") };
+
+/* 21. A held narrowing is clamped to a tab's reach, never dropped by it: the same page range read by a tab that reaches only the last 12 hours
+   shows the part of the selection inside that reach (or none), and the longer tab has it back. */
+const S = modules.slicer;
+const longCtx = { hours: 24, startMs: START, endMs: END, rangeKey: "preset:24" };
+const shortCtx = { hours: 12, startMs: END - 12 * HOUR, endMs: END, rangeKey: "preset:24" };
+S.setSlice("r", "preset:24", { startMs: START + 6 * HOUR, endMs: START + 18 * HOUR });
+const onShort = S.effectiveContext("r", shortCtx, END);
+const outsideShort = S.effectiveContext("r", { ...shortCtx, startMs: END - 4 * HOUR, hours: 4 }, END);
+out.reach = {
+  shortNarrowed: onShort.narrowed === true,
+  shortStart: onShort.startMs === END - 12 * HOUR ? "clamped" : onShort.startMs,
+  heldAfter: !!S.getSlice("r", "preset:24"),
+  longAgain: S.effectiveContext("r", longCtx, END).narrowed === true,
+  outside: outsideShort.narrowed === true,
+};
 
 console.log(JSON.stringify(out));
 process.exit(0);

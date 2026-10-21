@@ -1221,10 +1221,17 @@ export function alertDeliveryState(a) {
  *  that answers over the whole hours the grid ranked over (a row's History) shows all of that window. */
 export function readTool(tool, params, signal, options) {
   const plan = planCustomRange(tool, params, !!(options && options.wholeWindow));
+  const selection = params ? params[TRIM_TO] : undefined;
   return apiGetJoined("/api/read/" + tool + buildQuery(withDatabaseFilter(tool, plan.params)), signal)
     .then(localizeWindowNote)
-    .then((res) => finishCustomRange(res, plan));
+    .then((res) => finishCustomRange(res, plan))
+    .then((res) => (selection && res && res.kind === "data" ? { ...res, data: trimToRange(res.data, selection.startMs, selection.endMs, 0) } : res));
 }
+
+/** #6301: a read of an event list (blocking, deadlocks, active snapshots) that carries this key, as `{ startMs, endMs }`, has its rows cut to
+ *  that exact pair afterwards. A narrowed read is whole hours back from the selection's end, so without the cut the grid would list events from
+ *  before the selection. A symbol, so it never reaches the query string. Totals and rankings do not carry it: they aggregate. */
+export const TRIM_TO = Symbol("trimTo");
 
 /* ─────────────────────────── custom range (server page) ─────────────────────────── */
 

@@ -283,4 +283,82 @@ public sealed class TimeSlicerBehaviourTests
         Assert.Equal("7", narrowed.GetProperty("ask").GetProperty("query_id").GetString());
         Assert.Equal(("6", narrowed.GetProperty("expectedAsOf").GetString()), Ask(narrowed.GetProperty("ask")));
     }
+
+    /// <summary>Review round 1: the page rebuilds (the 60 s poll) leave no slicer listener behind, so a drag draws only the live card, not the dead ones.</summary>
+    [Fact]
+    public void RebuildingThePage_LeavesNoListenerBehind()
+    {
+        var rebuilds = Page().GetProperty("rebuilds");
+        Assert.Equal(5, rebuilds.GetProperty("deadCards").GetInt32());
+        Assert.Equal(0, rebuilds.GetProperty("redrawnDeadCards").GetInt32());
+        Assert.True(rebuilds.GetProperty("liveReads").GetInt32() >= 1);
+    }
+
+    /// <summary>Review round 1: a narrowed event list shows only the events inside the selection; unnarrowed it shows them all.</summary>
+    [Fact]
+    public void ANarrowedEventGrid_ListsOnlyTheEventsInsideTheSelection()
+    {
+        var page = Page();
+        var whole = page.GetProperty("eventsWhole").GetString()!;
+        var narrowed = page.GetProperty("eventsNarrowed").GetString()!;
+        foreach (var marker in new[] { "blk_in", "blk_before", "blk_after", "dl_in", "dl_before", "dl_after" })
+        {
+            Assert.Contains(marker, whole);
+        }
+
+        Assert.Contains("blk_in", narrowed);
+        Assert.Contains("dl_in", narrowed);
+        foreach (var marker in new[] { "blk_before", "blk_after", "dl_before", "dl_after" })
+        {
+            Assert.DoesNotContain(marker, narrowed);
+        }
+    }
+
+    /// <summary>Review round 1: a press with no travel on the selection, and Escape with nothing narrowed, read no grid again.</summary>
+    [Fact]
+    public void AnUnchangedWindow_ReadsNothingAgain()
+    {
+        Assert.Equal(0, Page().GetProperty("noTravel").GetInt32());
+        Assert.Equal(0, Page().GetProperty("escapeIdle").GetInt32());
+    }
+
+    /// <summary>Review round 1: after several narrowings one Compare change draws each card as many times as it does with none.</summary>
+    [Fact]
+    public void CompareAfterNarrowings_DrawsEachCardOnce()
+    {
+        var compare = Page().GetProperty("compare");
+        Assert.True(compare.GetProperty("once").GetInt32() > 0);
+        Assert.Equal(compare.GetProperty("once").GetInt32(), compare.GetProperty("afterNarrowings").GetInt32());
+    }
+
+    /// <summary>Review round 1: the Active strip says so when the snapshot list was cut to its newest rows; a whole list says nothing.</summary>
+    [Fact]
+    public void TheActiveStrip_SaysWhenItsSnapshotListWasCut()
+    {
+        var note = Page().GetProperty("activeNote");
+        Assert.Equal("newest 2 of 1234 snapshot times", note.GetProperty("cut").GetString());
+        Assert.Equal("", note.GetProperty("whole").GetString());
+    }
+
+    /// <summary>Review round 1: a picked row's overlay is read once; a narrowing draws it from that read.</summary>
+    [Fact]
+    public void ARowsOverlay_IsReadOncePerSlicer()
+    {
+        var overlay = Page().GetProperty("overlayReads");
+        Assert.Equal(1, overlay.GetProperty("first").GetInt32());
+        Assert.Equal(0, overlay.GetProperty("afterNarrowing").GetInt32());
+        Assert.True(overlay.GetProperty("stillDrawn").GetBoolean());
+    }
+
+    /// <summary>Review round 1: a held narrowing is clamped to a tab's reach, not dropped by it, so a tab that reaches less and back keeps the selection.</summary>
+    [Fact]
+    public void AShorterReachTab_ClampsTheHeldNarrowing_AndKeepsIt()
+    {
+        var reach = Page().GetProperty("reach");
+        Assert.True(reach.GetProperty("shortNarrowed").GetBoolean());
+        Assert.Equal("clamped", reach.GetProperty("shortStart").GetString());
+        Assert.True(reach.GetProperty("heldAfter").GetBoolean());
+        Assert.True(reach.GetProperty("longAgain").GetBoolean());
+        Assert.False(reach.GetProperty("outside").GetBoolean());
+    }
 }

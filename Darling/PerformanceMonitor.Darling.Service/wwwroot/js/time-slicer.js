@@ -26,7 +26,7 @@
  * without a clock.
  */
 
-import { el, localTime } from "./util.js";
+import { el, localTime, TRIM_TO } from "./util.js";
 import { MINIMUM_SPAN_MS } from "./time-range.js";
 
 const HOUR_MS = 3600000;
@@ -59,6 +59,11 @@ export function getSlice(server, rangeKey) {
 
 /** Hold `sel` ({ startMs, endMs }, or null for the whole range) for `server` under `rangeKey`, and tell every listener (the cards on screen). */
 export function setSlice(server, rangeKey, sel) {
+  /* An unchanged window changes nothing, so no card reads again: a click with no travel on a handle or the selection, or Escape with nothing narrowed. */
+  const held = slices.get(server);
+  const valid = sel && Number.isFinite(sel.startMs) && Number.isFinite(sel.endMs) && sel.endMs > sel.startMs;
+  if (!valid && !held) return;
+  if (valid && held && held.rangeKey === rangeKey && held.startMs === sel.startMs && held.endMs === sel.endMs) return;
   if (sel && Number.isFinite(sel.startMs) && Number.isFinite(sel.endMs) && sel.endMs > sel.startMs) slices.set(server, { rangeKey, startMs: sel.startMs, endMs: sel.endMs });
   else slices.delete(server);
   for (const fn of [...listeners]) fn(server);
@@ -123,9 +128,14 @@ export function effectiveContext(server, ctx, nowMs = Date.now()) {
   return sel ? narrowedContext(ctx, sel) : ctx;
 }
 
-/** `params` for a read over the context's window: `hours`, and `as_of` when the context is narrowed (an explicit end is never re-anchored by the page range). */
-export function windowParams(params, w) {
-  return w && w.narrowed ? { ...params, hours: w.hours, as_of: w.asOf } : { ...params, hours: w.hours };
+/** `params` for a read over the context's window: `hours`, and `as_of` when the context is narrowed (an explicit end is never re-anchored by the page range).
+ *  `trim` (event lists: blocking, deadlocks, active snapshots) also cuts the answer's rows to the selection itself, because the narrowed read is whole hours
+ *  back from its end and would list events from before the selection; totals and rankings leave it off, their label says they aggregate. */
+export function windowParams(params, w, trim = false) {
+  if (!(w && w.narrowed)) return { ...params, hours: w.hours };
+  const out = { ...params, hours: w.hours, as_of: w.asOf };
+  if (trim && Number.isFinite(w.startMs) && Number.isFinite(w.endMs)) out[TRIM_TO] = { startMs: w.startMs, endMs: w.endMs };
+  return out;
 }
 
 /**
@@ -203,7 +213,7 @@ export function timeSlicer(o) {
   const span = win.endMs - win.startMs;
   const minSpan = o.minSpanMs || MINIMUM_SPAN_MS;
   const keyDelay = o.keyDelayMs == null ? KEY_COMMIT_MS : o.keyDelayMs;
-  if (!(span > minSpan)) return { node: null, setPoints() {}, setOverlay() {}, clearOverlay() {}, setSelection() {}, selection: () => null };
+  if (!(span > minSpan)) return { node: null, setPoints() {}, setNote() {}, setOverlay() {}, clearOverlay() {}, setSelection() {}, selection: () => null };
   const minFrac = minSpan / span;
   const stepFrac = Math.max(minFrac, 1 / 40);
 
@@ -234,8 +244,9 @@ export function timeSlicer(o) {
   const readout = el("span", { class: "slicer-readout", role: "status", "aria-live": "polite" });
   const reset = el("button", { type: "button", class: "btn slicer-reset", text: "Reset", title: "Back to the whole range" });
   const overlayNote = el("span", { class: "slicer-overlay-note" });
+  const stripNote = el("span", { class: "slicer-strip-note" });
   const node = el("div", { class: "slicer", "data-slicer": o.title || "slicer" }, [
-    el("div", { class: "slicer-head" }, [el("span", { class: "slicer-title", text: o.title || "Time range" }), readout, overlayNote, reset]),
+    el("div", { class: "slicer-head" }, [el("span", { class: "slicer-title", text: o.title || "Time range" }), readout, stripNote, overlayNote, reset]),
     track,
     el("div", { class: "slicer-axis" }, [
       el("span", { text: localTime(new Date(win.startMs).toISOString()) }),
@@ -414,6 +425,10 @@ export function timeSlicer(o) {
       overlay = next && next.length ? next : null;
       overlayLabel = label || "";
       paintStrip();
+    },
+    /** A note about the strip itself (the activity list was cut), shown beside the readout; empty text clears it. */
+    setNote(text) {
+      stripNote.textContent = text || "";
     },
     clearOverlay() {
       overlay = null;

@@ -25,6 +25,11 @@ export { SNAPSHOT_LATEST, SNAPSHOT_ALL, snapshotPick, setSnapshotPick, focusSnap
 
 /* The newest snapshot times one list holds. A one-hour window at the collector's pace is far below this. */
 export const SNAPSHOT_LIST_CAP = 500;
+
+/** The sentence for a snapshot list the read cut to its newest rows, or "" when it was whole (the picker and the time slicer's Active strip say it alike). */
+export function snapshotTruncatedNote(truncated, shown, total) {
+  return truncated ? "newest " + shown + " of " + total + " snapshot times" : "";
+}
 /* A snapshot's own rows: the cap the wait drill-down uses, for the same reason (a busy capture holds many requests). */
 export const SNAPSHOT_ROW_CAP = 500;
 
@@ -134,7 +139,7 @@ export function activeQueriesSnapshotSlot(server, ctx, wait, extraParams, drawTa
       let res;
       try {
         /* #6301: a narrowed window (ctx.narrowed) is read with its own end (as_of) as well as its hours. */
-        const params = windowParams({ server, hours: ctx.hours, limit: SNAPSHOT_LIST_CAP, snapshots_only: true, ...extraParams }, ctx);
+        const params = windowParams({ server, hours: ctx.hours, limit: SNAPSHOT_LIST_CAP, snapshots_only: true, ...extraParams }, ctx, true);
         if (wait) params.wait_type = wait;
         /* The grid's own rule (util.js readWithinKeptHistory): a window longer than the history the server keeps is asked again
            at the hours it keeps, so the list and the grid read the same window (#6302). */
@@ -150,7 +155,7 @@ export function activeQueriesSnapshotSlot(server, ctx, wait, extraParams, drawTa
       mount(slot, [drawWith(mine.signal, null, null)]);
       return;
     }
-    const note = list.truncated ? "newest " + list.snapshots.length + " of " + list.total + " snapshot times" : "";
+    const note = snapshotTruncatedNote(list.truncated, list.snapshots.length, list.total);
     mount(slot, [build(list.snapshots, note, mine.signal)]);
   };
 

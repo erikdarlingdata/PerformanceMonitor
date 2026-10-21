@@ -42,7 +42,7 @@
 import { el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, chartNote, chartNoteText, getPath, fmtMs, fmtInt, fmtRate, localTime, parseUtc, windowFromHours, daysText, dbScopeChip, dbFilteredEmptyText, sourceStrip, clampText, getActiveDatabaseFilter, queryWaitFilter, setQueryWaitFilter, waitIsLinked } from "../util.js";
 import { renderPanel, emptyHeadline, setPanelSignal, getPanelSignal, VIZ, worstFirst, newestFirst } from "../panels.js";
 import { memoryGrantChartPanels } from "./memory-grant-charts.js";
-import { activeQueriesSnapshotSlot, SNAPSHOT_ROW_CAP, SNAPSHOT_LIST_CAP } from "./active-snapshots.js";
+import { activeQueriesSnapshotSlot, SNAPSHOT_ROW_CAP, SNAPSHOT_LIST_CAP, snapshotTruncatedNote } from "./active-snapshots.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../charts.js";
 import { statsHistoryColumn, historyTarget, procedurePoints } from "./stats-history.js";
 import { multiPicker, mergeSeriesRows } from "../multi-picker.js";
@@ -932,12 +932,12 @@ function compareDrawn(kind, cmp, ranking, title, picker, signal, plain) {
  * Collection Log slot does. A slicer release stores the narrowed window at page scope (time-slicer.js) and every card on screen for the
  * server draws its grid again for it; the strip itself is not redrawn, so a sort pick or a slice never reads the strip's activity again.
  */
-function rankedCard(kind, build, cmp = null) {
+function rankedCard(kind, build, cmp) {
   const slot = el("div", {}, []);
   slot.style.display = "contents";
   const gridSlot = el("div", {}, []);
   gridSlot.style.display = "contents";
-  const slicer = cmp ? rankedSlicer(kind, cmp) : null;
+  const slicer = rankedSlicer(kind, cmp);
   let drawing = null;
   const draw = () => {
     if (drawing) drawing.abort();
@@ -946,7 +946,7 @@ function rankedCard(kind, build, cmp = null) {
     const outer = getPanelSignal();
     if (outer) outer.addEventListener("abort", () => mine.abort(), { once: true });
     const ranking = topRankingPick[kind];
-    const w = cmp ? effectiveContext(cmp.server, cmp.ctx) : null;
+    const w = effectiveContext(cmp.server, cmp.ctx);
     const picker = el("div", { class: "picker-row" }, [
       pickerControl(
         "Rank by",
@@ -958,12 +958,12 @@ function rankedCard(kind, build, cmp = null) {
         ranking
       ),
       tagFilterPicker(kind, draw),
-      ...(cmp ? [compareControl(draw, slot)] : []),
+      compareControl(draw, slot),
     ]);
     setPanelSignal(mine.signal);
     const onRow = slicer ? slicer.onRow(ranking) : null;
     const card =
-      cmp && comparePick.value !== "off"
+      comparePick.value !== "off"
         ? compareDrawn(kind, { server: cmp.server, ctx: w }, ranking, (kind === "queries" ? "Top Queries by " : "Top Procedures by ") + topRankingLabel(ranking), picker, mine.signal, () => build(ranking, picker, w, onRow))
         : build(ranking, picker, w, onRow);
     setPanelSignal(outer);
@@ -984,6 +984,13 @@ function mountSliced(slot, gridSlot, slicer, cmp, draw, follow = false) {
       if (slicer) slicer.follow();
       draw();
     });
+    /* The page redraws (the 60 s poll, a range or tab change) abort this signal, and a card that dies with it must not stay subscribed: a rebuilt
+       grid used to add its listener every time and keep the dead card tree alive until some later slice found it detached (#6301 review). */
+    const outer = getPanelSignal();
+    if (outer) {
+      if (outer.aborted) off();
+      else outer.addEventListener("abort", off, { once: true });
+    }
   }
   mount(slot, slicer && slicer.node ? [el("div", { class: "panel card span-2 slicer-panel" }, [slicer.node]), gridSlot] : [gridSlot]);
 }
@@ -1067,7 +1074,7 @@ const PROCEDURE_OVERLAY_METRICS = {
  */
 function stripOf(kind, server, ctx) {
   if (kind === "active") {
-    return { title: "Active queries", tool: "get_active_queries", params: { server, hours: ctx.hours, limit: SNAPSHOT_LIST_CAP, snapshots_only: true }, rows: (d) => d.snapshots, time: "collection_time", value: "row_count" };
+    return { title: "Active queries", tool: "get_active_queries", params: { server, hours: ctx.hours, limit: SNAPSHOT_LIST_CAP, snapshots_only: true }, rows: (d) => d.snapshots, time: "collection_time", value: "row_count", note: (d) => snapshotTruncatedNote(d.truncated === true, Array.isArray(d.snapshots) ? d.snapshots.length : 0, d.total_snapshot_times) };
   }
   if (kind === "blocking" || kind === "deadlocks") {
     const blocking = kind === "blocking";
@@ -1153,14 +1160,37 @@ function rankedSlicer(kind, cmp) {
     if (res.kind !== "data" || !res.data) return;
     const rows = strip.rows(res.data);
     slicer.setPoints((Array.isArray(rows) ? rows : []).map((r) => ({ t: timeOf(r[strip.time]), v: Number(r[strip.value]) })));
+    /* The Active strip reads the newest snapshots only: say so when the list was cut, so a blank stretch of a long range is not read as quiet. */
+    if (strip.note) slicer.setNote(strip.note(res.data));
   });
 
   const pickKey = server + "|" + kind;
   let ranking = topRankingPick[kind];
   let loading = 0;
+  /* The page range does not change within one slicer, so a row's overlay read is made once per row and ranking: a sort, a narrowing or any other
+     grid redraw that puts the pick back on its row draws from here instead of reading again. A failed or empty read is not kept. */
+  const drawnReads = new Map();
+  const readOverlay = (row) => {
+    const cacheKey = overlay.key(row) + "|" + ranking;
+    let pending = drawnReads.get(cacheKey);
+    if (!pending) {
+      pending = overlay.read(row, ranking, signal).then(
+        (drawn) => {
+          if (!drawn) drawnReads.delete(cacheKey);
+          return drawn;
+        },
+        (e) => {
+          drawnReads.delete(cacheKey);
+          throw e;
+        }
+      );
+      drawnReads.set(cacheKey, pending);
+    }
+    return pending;
+  };
   const show = async (row) => {
     const mine = ++loading;
-    const drawn = await overlay.read(row, ranking, signal);
+    const drawn = await readOverlay(row);
     if (mine !== loading || !drawn) return;
     slicer.setOverlay(drawn.points, drawn.label);
   };
@@ -1768,7 +1798,7 @@ export const SERVER_TABS = [
         table(
           "Blocking",
           "get_blocking",
-          windowParams({ server, hours: w.hours, limit: 30 }, w),
+          windowParams({ server, hours: w.hours, limit: 30 }, w, true),
           "events",
           [...BLOCKING_COLUMNS, ...blockingPlanColumns(server), blockChainColumn(server)],
           w.label,
@@ -1783,7 +1813,7 @@ export const SERVER_TABS = [
         table(
           "Deadlocks",
           "get_deadlocks",
-          windowParams({ server, hours: w.hours, limit: 20 }, w),
+          windowParams({ server, hours: w.hours, limit: 20 }, w, true),
           "deadlocks",
           [...DEADLOCK_COLUMNS, deadlockPlanColumn(server)],
           w.label,
@@ -1875,7 +1905,7 @@ export const SERVER_TABS = [
           table(
             "Blocked Process Reports",
             "get_blocked_process_xml",
-            windowParams({ server, hours: w.hours, limit: 5 }, w),
+            windowParams({ server, hours: w.hours, limit: 5 }, w, true),
             "reports",
             BPR_COLUMNS,
             w.label,
@@ -3776,7 +3806,8 @@ function activeQueriesPanel(server, ctx) {
 }
 
 function activeQueriesGrid(server, ctx, wait, snapshotTime, control) {
-  const base = windowParams(wait ? { server, hours: ctx.hours, limit: 500, wait_type: wait } : { server, hours: ctx.hours, limit: 50 }, ctx);
+  /* The "All snapshots" grid is an event list, cut to the selection; a picked snapshot is one instant and is read as it is. */
+  const base = windowParams(wait ? { server, hours: ctx.hours, limit: 500, wait_type: wait } : { server, hours: ctx.hours, limit: 50 }, ctx, !snapshotTime);
   const panel = table(
     "Active Queries",
     "get_active_queries",
@@ -4370,7 +4401,7 @@ function deadlockGraphsPanel(server, ctx) {
   const panel = table(
     "Deadlock Graphs",
     "get_deadlock_detail",
-    windowParams({ server, hours: ctx.hours, limit: 5 }, ctx),
+    windowParams({ server, hours: ctx.hours, limit: 5 }, ctx, true),
     "deadlocks",
     deadlockXmlColumns(server, scope),
     ctx.label,
