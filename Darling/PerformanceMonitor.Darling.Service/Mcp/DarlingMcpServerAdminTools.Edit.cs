@@ -183,8 +183,9 @@ public sealed partial class DarlingMcpServerAdminTools
         "\"collides\": the new address belongs to another monitored server, or the connection lands in a database " +
         "another one covers. \"connection_failed\": the probe could not connect, nothing was saved. \"unchanged\": " +
         "the request equals the stored values, nothing was written. updated returns {status, server, display_name, " +
-        "server_id, changed:[field names], reconnects, tested, modified_at, note}; reconnects says whether the " +
-        "service drops and re-opens its connection to the server. server_name is resolved as remove_server resolves it.")]
+        "server_id, changed:[field names], reconnects, tested, query_store_replica_test, modified_at, note}; reconnects says whether the " +
+        "service drops and re-opens its connection to the server; query_store_replica_test is the replica's own connection result when the " +
+        "server has one and the edit was tested (a replica that does not open is a note, the edit is still saved). server_name is resolved as remove_server resolves it.")]
     public static Task<string> EditServer(
         NpgsqlDataSource postgres,
         [Description("The monitored server to edit: its display name or storage name / address. A partial name is accepted only when it matches exactly one definition.")] string server_name,
@@ -414,6 +415,7 @@ LIMIT 1";
         }
 
         var tested = false;
+        string? replicaTest = null;
         ParsedServerEntry? probedEntry = null;
         string? connectedDatabase = null;
         string? actualStorageKey = null;
@@ -440,6 +442,8 @@ LIMIT 1";
             }
 
             tested = true;
+            /* #6254: the replica's own result, beside the primary's. A replica that would not open is a note, not a refusal. */
+            replicaTest = QueryStoreReplicaReply(plan.ProbeConfig, probeResult, probeLogger ?? logger, false, plan.PlaintextSecret, plan.PlaintextExternalId);
             probedEntry = new ParsedServerEntry(0, plan.ProbeConfig.Name, plan.NewStorageKey, plan.ProbeConfig, null);
             connectedDatabase = probeResult.ConnectedDatabase;
 
@@ -545,6 +549,7 @@ LIMIT 1";
             new_aws_role_arn = plan.ChangedFields.Contains("aws_role_arn") ? plan.NewAwsRoleArn : null,
             reconnects = plan.Reconnects,
             tested,
+            query_store_replica_test = replicaTest,
             modified_at = ModifiedAtToken(write.ModifiedAt),
             note = plan.AddressChanged ? EditNoteSweep + " " + EditNoteAddress : EditNoteSweep,
         }, McpHelpers.JsonOptions);

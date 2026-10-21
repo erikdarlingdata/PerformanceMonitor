@@ -540,6 +540,32 @@ public partial class AddServerDialog : Window
             ambientFailure,
             string.IsNullOrEmpty(App.DataDirectory) ? null : System.IO.Path.Combine(App.DataDirectory, "logs"));
 
+    /// <summary>
+    /// #6254: opens the Query Store replica named in the dialog, on the dialog's own connection string with the replica host and
+    /// read-only intent (<see cref="QueryStoreReplicaConnectionTest"/>). Null when the box is empty.
+    /// </summary>
+    private async System.Threading.Tasks.Task<(string Host, string? Error)?> RunReplicaConnectionTestAsync()
+    {
+        if (string.IsNullOrWhiteSpace(QueryStoreReplicaBox.Text))
+        {
+            return null;
+        }
+
+        TestButton.IsEnabled = false;
+        SaveButton.IsEnabled = false;
+        StatusText.Text = "Testing the Query Store replica...";
+        try
+        {
+            return await QueryStoreReplicaConnectionTest.RunAsync(BuildConnectionBuilder().ConnectionString, QueryStoreReplicaBox.Text);
+        }
+        finally
+        {
+            TestButton.IsEnabled = true;
+            SaveButton.IsEnabled = true;
+            StatusText.Text = string.Empty;
+        }
+    }
+
     private async void TestButton_Click(object sender, RoutedEventArgs e)
     {
         if (string.IsNullOrEmpty(ServerNameBox.Text.Trim()))
@@ -555,7 +581,22 @@ public partial class AddServerDialog : Window
             var message = serverVersion != null
                 ? $"Successfully connected to {ServerNameBox.Text.Trim()}!\n\n{serverVersion}"
                 : $"Successfully connected to {ServerNameBox.Text.Trim()}!";
-            MessageBox.Show(message, "Connection Successful", MessageBoxButton.OK, MessageBoxImage.Information);
+
+            /* #6254: a server that names a Query Store replica is tested on both connections, and the two results are shown apart. A
+               replica that does not open is a warning and not a failed test: collection reads Query Store from the primary. */
+            var replicaTest = await RunReplicaConnectionTestAsync();
+            if (replicaTest is { } replicaResult)
+            {
+                MessageBox.Show(
+                    message + "\n\n" + QueryStoreReplicaConnectionTest.Compose(replicaResult),
+                    replicaResult.Error is null ? "Connection Successful" : "Connection Successful, replica not reached",
+                    MessageBoxButton.OK,
+                    replicaResult.Error is null ? MessageBoxImage.Information : MessageBoxImage.Warning);
+            }
+            else
+            {
+                MessageBox.Show(message, "Connection Successful", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
 
             if (AddedServer != null && InteractiveModeSelected)
             {

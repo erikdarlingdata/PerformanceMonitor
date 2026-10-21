@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
@@ -415,6 +416,35 @@ public sealed class AdminServerEditBehaviourTests
             var actual = JsonNode.Parse(results[i].GetRawText());
             Assert.True(JsonNode.DeepEquals(JsonNode.Parse(Answers[i].Expected), actual), Answers[i].Name + ": got " + results[i].GetRawText());
         }
+    }
+
+    // #6254: the edit tested the Query Store replica beside the primary. The notice carries the replica's result, a replica that would not
+    // open is a warning in the same "Saved" notice (the save went through), and a server with no replica says nothing about one.
+    [Fact]
+    public void ASavedEdit_SaysWhetherTheQueryStoreReplicaOpened_AndSaysNothingWhenThereIsNone_Pure()
+    {
+        static JsonNode Body(string? replica) => JsonNode.Parse(JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["status"] = "updated",
+            ["display_name"] = "Charlie",
+            ["note"] = "Takes effect at the next collection cycle.",
+            ["tested"] = true,
+            ["query_store_replica_test"] = replica,
+        }))!;
+
+        const string failed = "Query Store replica r1: could not connect. Collection reads Query Store from the primary until it can. The service log has the details.";
+        var results = PureAll(
+            ("interpretEdit", new object?[] { 200, Body("Query Store replica r1: connected."), null }),
+            ("interpretEdit", new object?[] { 200, Body(failed), null }),
+            ("interpretEdit", new object?[] { 200, Body(null), null }));
+
+        const string lead = "Saved \"Charlie\". Takes effect at the next collection cycle. The connection was tested before saving.";
+        Assert.Equal("updated", results[0].GetProperty("kind").GetString());
+        Assert.Equal(lead + " Query Store replica r1: connected.", results[0].GetProperty("notice").GetString());
+        Assert.Equal("updated", results[1].GetProperty("kind").GetString());
+        Assert.True(results[1].GetProperty("close").GetBoolean());
+        Assert.Equal(lead + " " + failed, results[1].GetProperty("notice").GetString());
+        Assert.Equal(lead, results[2].GetProperty("notice").GetString());
     }
 
     private const string UnexpectedAnswer = "The service gave an answer this page does not understand, so it is not known whether anything was saved. Your entries are kept; check the server list before saving again.";

@@ -1071,7 +1071,8 @@ public partial class AddServerDialog : Window
                 parts.Add("no msdb access (SQL Agent job data unavailable)");
             }
 
-            return string.Join(" — ", parts) + ".";
+            /* #6254: the Query Store replica's own result, after the primary's. */
+            return string.Join(" — ", parts) + "." + (ViewerDataService.ProbeReplicaNote(root) is { } replicaNote ? " " + replicaNote : "");
         }
         catch (JsonException)
         {

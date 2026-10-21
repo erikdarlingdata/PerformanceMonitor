@@ -592,7 +592,10 @@ export function interpretEdit(status, body, message, expired) {
     const name = asText(b.display_name) || asText(b.server);
     const note = typeof b.note === "string" && b.note ? " " + b.note : "";
     const tested = b.tested === true ? " The connection was tested before saving." : "";
-    return { kind: "updated", close: true, reread: true, notice: (name ? 'Saved "' + name + '".' : "Saved.") + note + tested };
+    /* #6254: the Query Store replica's own connection result, said beside the primary's. A replica that would not open is a
+       warning in the same notice, not a failed save: the service reads Query Store from the primary until it can. */
+    const replica = typeof b.query_store_replica_test === "string" && b.query_store_replica_test ? " " + b.query_store_replica_test : "";
+    return { kind: "updated", close: true, reread: true, notice: (name ? 'Saved "' + name + '".' : "Saved.") + note + tested + replica };
   }
   if (status === 200 && word === "unchanged") return { kind: "unchanged", close: true, reread: false, notice: "No change was needed; nothing was written." };
   return { kind: "failed", close: false, reread: false, banner: sentence };

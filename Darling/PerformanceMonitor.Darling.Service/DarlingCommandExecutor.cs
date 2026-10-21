@@ -831,6 +831,11 @@ WHERE status = 'in_progress'
                 isAurora = probe.IsAurora,
                 isInRecovery = probe.IsInRecovery,
                 facts = DarlingServerConnector.DescribeProbeFacts(probe),
+                /* #6254: the Query Store replica's own result, beside the primary's (null on a server with none). A replica that
+                   would not open leaves this a "connected" result: collection reads the primary. The dialogs show the note. */
+                queryStoreReplica = probe.QueryStoreReplica,
+                queryStoreReplicaError = probe.QueryStoreReplicaError,
+                queryStoreReplicaNote = DarlingServerConnector.DescribeQueryStoreReplica(probe),
             });
             return ("connected", json);
         }

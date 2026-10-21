@@ -350,7 +350,9 @@ public sealed partial class DarlingMcpServerAdminTools
                     var rowsWritten = await definitions.InsertAsync(entry, encryptedPassword, actualStorageKey, heldCheck, cancellationToken);
                     if (rowsWritten > 0)
                     {
-                        results.Add(new ServerResult(entry.Order, entry.DisplayName, AddStatus.Added, DescribeProbe(probeResult)));
+                        results.Add(new ServerResult(entry.Order, entry.DisplayName, AddStatus.Added,
+                            DescribeProbe(probeResult, QueryStoreReplicaReply(entry.ProbeConfig, probeResult, logger, revealConnectError,
+                                entry.PlaintextPassword, entry.ProbeConfig.AwsExternalId))));
                     }
                     else if (rowsWritten == InsertKeyClaimed)
                     {
@@ -1731,8 +1733,31 @@ ON CONFLICT (server_id) DO NOTHING";
     /// <summary>The probed facts for an <c>added</c> server, from the same describer the
     /// <c>--test-connection</c> CLI line uses (<see cref="DarlingServerConnector.DescribeProbeFacts"/>), so the
     /// two cannot drift and a PostgreSQL target reads as one here too.</summary>
-    private static string DescribeProbe(ConnectionProbeResult probe) =>
-        $"Connected — {DarlingServerConnector.DescribeProbeFacts(probe)}.";
+    private static string DescribeProbe(ConnectionProbeResult probe, string? replicaLine = null) =>
+        $"Connected — {DarlingServerConnector.DescribeProbeFacts(probe)}." + (replicaLine is null ? "" : " " + replicaLine);
+
+    /// <summary>
+    /// #6254: what an add or an edit says about the Query Store replica its connection test also opened, or null when the server has
+    /// none. A replica that would not open is a note and never a refusal: the primary answered, the server is saved, and collection reads
+    /// Query Store from the primary. The reply carries a fixed sentence (the driver's text goes to the service log, redacted and bounded,
+    /// as <see cref="ConnectFailureReply"/> does); only the <c>--add-server</c> verb (<paramref name="revealError"/>) shows the driver's text.
+    /// </summary>
+    internal static string? QueryStoreReplicaReply(
+        MonitoredServer server, ConnectionProbeResult probe, ILogger? logger, bool revealError, params string?[] secrets)
+    {
+        var line = DarlingServerConnector.DescribeQueryStoreReplica(probe, revealError: false);
+        if (line is null || string.IsNullOrEmpty(probe.QueryStoreReplicaError))
+        {
+            return line;
+        }
+
+        var driverText = RedactEditSecret(probe.QueryStoreReplicaError, secrets);
+        logger?.LogWarning("Query Store replica test for {Target} failed: {DriverText}",
+            Hosting.DarlingHttpRefusalLog.Sanitize(probe.QueryStoreReplica, 512), Hosting.DarlingHttpRefusalLog.Sanitize(driverText, 512));
+        return revealError
+            ? DarlingServerConnector.DescribeQueryStoreReplica(probe with { QueryStoreReplicaError = driverText }, revealError: true)
+            : line;
+    }
 
     /// <summary>The canonical <c>engine</c> values, as written to the store.</summary>
     internal const string EngineSqlServer = "sqlserver";
