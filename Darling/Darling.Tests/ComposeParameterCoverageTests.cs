@@ -155,6 +155,7 @@ public sealed class ComposeParameterCoverageTests
         + (serverScoped && context.UnregisteredServers is { Count: > 0 } ? 1 : 0)
         + (PredictsWideStartBind(plan, context) ? 1 : 0)
         + (PredictsStampThroughBind(plan, context) ? 1 : 0)
+        + (PredictsSplitRawServersBind(plan, context) ? 1 : 0)
         + (PredictsHourlyEdgesBinds(plan, context) ? 2 : 0)
         + (PredictsModuleOverlayFloorBind(plan, context) ? 1 : 0)
         + plan.Filters.Count
@@ -199,6 +200,13 @@ public sealed class ComposeParameterCoverageTests
         && through > (PredictsWideStartBind(plan, context) ? context.QueryStoreWideStart!.Value : context.StartUtc)
         && string.Equals(plan.Measure.SourceTable, "query_store_stats", StringComparison.Ordinal)
         && plan.Aggregate != ComposeAggregate.PercentileCont;
+
+    /// <summary>The #6115 rule from intent alone: a wide-eligible Query Store run that names servers to read raw (the split) binds the
+    /// refused server ids once, as one <c>int[]</c>. Not read back from the compiler's parameters.</summary>
+    internal static bool PredictsSplitRawServersBind(PanelPlan plan, ComposeRunContext context) =>
+        context.QueryStoreWideEligible
+        && context.QueryStoreRawServerIds is { Count: > 0 }
+        && string.Equals(plan.Measure.SourceTable, "query_store_stats", StringComparison.Ordinal);
 
     /// <summary>
     /// The same prediction for an annotation query, whose parameter set is the window plus the optional
@@ -394,8 +402,9 @@ public sealed class ComposeParameterCoverageTests
         var code = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(path));
         var sites = Regex.Matches(code, @"\bp\.Add[A-Za-z]+\s*\(").Count;
 
-        /* 28: the 27 before #5582 part 3, plus the one $stampThrough bind, folded into the rule as PredictsStampThroughBind. */
-        Assert.Equal(28, sites);
+        /* 29: the 27 before #5582 part 3, plus the one $stampThrough bind (PredictsStampThroughBind), plus the one split bind of the servers
+           read raw (#6115, PredictsSplitRawServersBind). A spelling failure: this pin counts call sites, and the new site is predicted. */
+        Assert.Equal(29, sites);
     }
 
     /// <summary>
