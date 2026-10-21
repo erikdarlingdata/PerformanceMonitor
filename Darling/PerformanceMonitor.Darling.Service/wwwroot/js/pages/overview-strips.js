@@ -19,7 +19,7 @@
  * only arithmetic here is the one the desktop does too: the file I/O strip is the read latency of every file at a bucket,
  * weighted by that file's reads. Times are the reads' UTC stamps. A strip with no samples says so; it is never a zero line.
  */
-import { el, mount, parseUtc, windowFromHours, readTool, readToolWithinKeptHistory, getActiveDatabaseFilter, keptWindowStrip, emptyStrip, readErrorStrip } from "../util.js";
+import { el, mount, parseUtc, axisTime, windowFromHours, readTool, readToolWithinKeptHistory, getActiveDatabaseFilter, keptWindowStrip, emptyStrip, readErrorStrip } from "../util.js";
 import { chartZoomScope } from "../charts.js";
 import { gapThresholdMs, splitAtGaps } from "../chart-gaps.js";
 
@@ -254,10 +254,10 @@ function niceMax(v) {
   return 10 * pow;
 }
 
+/* The axis labels and the crosshair readout read in the browser's local time, through the same formatter the line charts use, so they
+   agree with the zoom chip and the rest of the page (#6360); the date joins the clock when the window is longer than a day and a half. */
 function timeLabel(ms, spanMs) {
-  const d = new Date(ms);
-  const hm = d.toISOString().slice(11, 16);
-  return spanMs > 36 * 3600000 ? d.toISOString().slice(5, 10) + " " + hm : hm;
+  return axisTime(new Date(ms), spanMs > 36 * 3600000);
 }
 
 /**
@@ -488,11 +488,14 @@ export function fillOverviewStrips(body, server, ctx) {
     const id = "overview-strips|" + server;
     const scope = chartZoomScope(ctx.hours);
     const host = el("div", { class: "chart overview-strips-host" });
+    /* The width the strips were last drawn at; 0 when the host was not laid out yet (drawStrips then falls back to its default width). */
+    let drawnW = 0;
     const draw = () => {
       const held = getZoom(id, scope);
       const domain = sharedDomain(strips, window, held);
       if (!domain) return mount(host, emptyStrip("No overview samples in this window."));
       const width = host.getBoundingClientRect ? host.getBoundingClientRect().width : 0;
+      drawnW = width;
       const { node } = drawStrips(strips, domain, width, (from, to) => {
         setZoom(id, scope, from, to);
         draw();
@@ -507,15 +510,14 @@ export function fillOverviewStrips(body, server, ctx) {
     };
     draw();
     mount(body, [keptWindowStrip(results.find((r) => r.keptHours || r.presetHours) || null), host]);
-    /* A resize (a phone turned, a panel widened) redraws at the new width, as the line charts do; the zoom is held, so it carries over. */
+    /* The first draw ran before the host was in the page, so it measured 0 and drew at the default width, which the browser then scaled
+       down to the real one (#6360). A resize (a phone turned, a panel widened) redraws at the new width, as the line charts do, and so
+       does the observer's first report, which is the host's laid-out width: it is compared with the width the strips were drawn at, not
+       with one read right after mounting. The zoom is held, so it carries over. */
     if (typeof ResizeObserver === "function") {
-      let last = host.getBoundingClientRect().width;
       new ResizeObserver(() => {
         const w = host.getBoundingClientRect().width;
-        if (host.isConnected !== false && w > 0 && Math.abs(w - last) > 2) {
-          last = w;
-          draw();
-        }
+        if (host.isConnected !== false && w > 0 && Math.abs(w - drawnW) > 2) draw();
       }).observe(host);
     }
   })();
