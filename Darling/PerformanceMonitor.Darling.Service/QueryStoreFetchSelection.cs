@@ -65,22 +65,43 @@ internal static class QueryStoreFetchSelection
         IReadOnlyList<QueryStoreCollector.Row> rows,
         int topN,
         IReadOnlySet<long>? alwaysPlanIds = null,
-        IReadOnlySet<long>? alwaysQueryIds = null)
+        IReadOnlySet<long>? alwaysQueryIds = null,
+        IReadOnlyList<QueryStoreCollector.Row>? alreadyStored = null)
     {
         var plans = new HashSet<long>();
         var queries = new HashSet<long>();
         var considered = new HashSet<long>();
 
-        /* One total per (database, interval, plan): the slices and execution types of one plan in one interval are rows of ONE plan's hour. */
-        var perPlanHour = new Dictionary<(string Database, long Interval, long PlanId), Totals>();
+        /* The rank is over the whole hour, not over this run's batch. A run reads only the plans active since the last one, so a batch of a few dozen
+           plans would put every one of them in the top N and select everything. The hour's rows an earlier run already stored (alreadyStored) are
+           merged in under the same key, and this run's row wins: it is the newer cumulative snapshot of the same (plan, interval, execution type,
+           replica). Plans that appear only in the stored rows rank (they can push a batch plan out of the top N) but are never fetched here: they are
+           not in the batch, and a later run that reads them ranks them again. */
+        var merged = new Dictionary<(string Database, long Interval, long PlanId, string ExecutionType, string Replica), QueryStoreCollector.Row>();
+        if (alreadyStored is not null)
+        {
+            foreach (var row in alreadyStored)
+            {
+                if (row.PlanId > 0)
+                {
+                    merged[KeyOf(row)] = row;
+                }
+            }
+        }
+
         foreach (var row in rows)
         {
-            if (row.PlanId <= 0)
+            if (row.PlanId > 0)
             {
-                continue;
+                merged[KeyOf(row)] = row;
+                considered.Add(row.PlanId);
             }
+        }
 
-            considered.Add(row.PlanId);
+        /* One total per (database, interval, plan): the slices and execution types of one plan in one interval are rows of ONE plan's hour. */
+        var perPlanHour = new Dictionary<(string Database, long Interval, long PlanId), Totals>();
+        foreach (var row in merged.Values)
+        {
             var key = (row.DatabaseName ?? "", IntervalOf(row), row.PlanId);
             perPlanHour.TryGetValue(key, out var totals);
             totals ??= new Totals(row.QueryId);
@@ -127,9 +148,13 @@ internal static class QueryStoreFetchSelection
             }
         }
 
+        /* Only plans this run read can be fetched by it. */
         foreach (var plan in ranked)
         {
-            plans.Add(plan);
+            if (considered.Contains(plan))
+            {
+                plans.Add(plan);
+            }
         }
 
         foreach (var plan in always)
@@ -145,8 +170,11 @@ internal static class QueryStoreFetchSelection
             }
         }
 
-        return new Selection(plans, queries, ranked.Count, considered.Count);
+        return new Selection(plans, queries, plans.Count, considered.Count);
     }
+
+    private static (string Database, long Interval, long PlanId, string ExecutionType, string Replica) KeyOf(QueryStoreCollector.Row row) =>
+        (row.DatabaseName ?? "", IntervalOf(row), row.PlanId, row.ExecutionTypeDesc ?? "", row.ReplicaRole ?? "");
 
     private static void RankInto(
         HashSet<long> into, List<(long PlanId, Totals Totals)> members, int topN, Func<Totals, double> metric)

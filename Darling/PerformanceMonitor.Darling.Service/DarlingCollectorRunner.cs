@@ -6032,7 +6032,53 @@ AND   collection_time >= $3", storeConnection))
                 }
             }
 
-            var selection = QueryStoreFetchSelection.Select(rows, topN, alwaysPlans, alwaysQueries);
+            /* The hour's rows earlier runs already stored, so the rank is over the whole database-hour (see QueryStoreFetchSelection). Raw rows of the
+               intervals this batch names, newest snapshot per (plan, interval, execution type, replica). Bounded below by the oldest interval start
+               in the batch: a row of an interval is collected no earlier than the interval begins. */
+            var intervalIds = rows.Where(r => r.RuntimeStatsIntervalId is not null).Select(r => r.RuntimeStatsIntervalId!.Value).Distinct().ToArray();
+            var stored = new List<QueryStoreCollector.Row>();
+            if (intervalIds.Length > 0)
+            {
+                var starts = rows.Where(r => r.IntervalStartTimeUtc is not null).Select(r => r.IntervalStartTimeUtc!.Value).ToList();
+                var floor = DateTime.SpecifyKind(starts.Count > 0 ? starts.Min() : context.CollectionTime - s_alwaysFetchLookBack, DateTimeKind.Unspecified);
+                using var hour = new NpgsqlCommand(@"
+SELECT DISTINCT ON (plan_id, runtime_stats_interval_id, execution_type_desc, replica_role)
+       plan_id, query_id, runtime_stats_interval_id, execution_type_desc, replica_role, execution_count, avg_cpu_time_us, avg_duration_us,
+       avg_physical_io_reads, avg_logical_io_writes, max_query_max_used_memory, max_tempdb_space_used
+FROM query_store_stats
+WHERE server_id = $1
+AND   database_name = $2
+AND   collection_time >= $3
+AND   runtime_stats_interval_id = ANY($4)
+ORDER BY plan_id, runtime_stats_interval_id, execution_type_desc, replica_role, collection_time DESC", storeConnection);
+                hour.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+                hour.Parameters.Add(new NpgsqlParameter<int> { TypedValue = server.ServerId });
+                hour.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName });
+                hour.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = floor });
+                hour.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint, Value = intervalIds });
+                await using var reader = await hour.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    stored.Add(new QueryStoreCollector.Row
+                    {
+                        DatabaseName = databaseName,
+                        PlanId = reader.GetInt64(0),
+                        QueryId = reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
+                        RuntimeStatsIntervalId = reader.GetInt64(2),
+                        ExecutionTypeDesc = reader.IsDBNull(3) ? null : reader.GetString(3),
+                        ReplicaRole = reader.IsDBNull(4) ? null : reader.GetString(4),
+                        ExecutionCount = reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
+                        AvgCpuTimeUs = reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
+                        AvgDurationUs = reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
+                        AvgPhysicalIoReads = reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
+                        AvgLogicalIoWrites = reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
+                        MaxQueryMaxUsedMemory = reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
+                        MaxTempdbSpaceUsed = reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
+                    });
+                }
+            }
+
+            var selection = QueryStoreFetchSelection.Select(rows, topN, alwaysPlans, alwaysQueries, stored);
             _logger?.LogDebug(
                 "  [{Server}] query_store [{Database}] fetch top {TopN}: {Selected} of {Considered} plan(s) selected ({Ranked} by rank, the rest forced or named by plan correction)",
                 server.Config.DisplayName, databaseName, topN, selection.PlanIds.Count, selection.ConsideredPlans, selection.RankedPlans);
