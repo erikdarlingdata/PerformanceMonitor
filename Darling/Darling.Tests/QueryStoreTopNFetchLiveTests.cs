@@ -75,10 +75,11 @@ public sealed class QueryStoreTopNFetchLiveTests
         return value is null or DBNull ? null : Convert.ToInt64(value, CultureInfo.InvariantCulture);
     }
 
-    /// <summary>The query text of one tagged query: a plain scan of one table, with a comment tag so each tag is its own query.</summary>
+    /// <summary>The query text of one tagged query: a plain scan of one table. The tag is the column alias, because simple parameterization drops a comment and
+    /// would fold every query into one text; an alias stays in the parameterized text and makes each tag its own query.</summary>
     private static string QueryText(string tag, bool hot) => hot
-        ? $"/*pm6211 {tag}*/ SELECT COUNT_BIG(*) FROM dbo.t WHERE pad = 'y' OPTION (MAXDOP 1)"
-        : $"/*pm6211 {tag}*/ SELECT TOP (1) id FROM dbo.t";
+        ? $"SELECT COUNT_BIG(*) AS {tag} FROM dbo.t WHERE pad = 'y' OPTION (MAXDOP 1)"
+        : $"SELECT TOP (1) id AS {tag} FROM dbo.t";
 
     private static async Task RunQueryAsync(string database, string tag, bool hot, int times, CancellationToken ct)
     {
@@ -95,14 +96,14 @@ public sealed class QueryStoreTopNFetchLiveTests
     private static async Task<(long QueryId, long PlanId)> IdsAsync(string database, string tag, CancellationToken ct)
     {
         var textId = await ScalarAsync(database,
-            "SELECT TOP (1) query_text_id FROM sys.query_store_query_text WHERE query_sql_text LIKE N'/*pm6211 ' + @tag + N'*/%';", null, ct, tag);
+            "SELECT TOP (1) query_text_id FROM sys.query_store_query_text WHERE query_sql_text LIKE N'%AS ' + @tag + N' FROM dbo%' OR query_sql_text LIKE N'%AS ' + @tag + N' FROM [[]dbo]%';", null, ct, tag);
         var queryId = await ScalarAsync(database, "SELECT TOP (1) query_id FROM sys.query_store_query WHERE query_text_id = @k;", textId, ct);
         var planId = await ScalarAsync(database, "SELECT TOP (1) plan_id FROM sys.query_store_plan WHERE query_id = @k ORDER BY plan_id;", queryId, ct);
         if (queryId is null || planId is null)
         {
-            var texts = await ScalarAsync(database, "SELECT COUNT_BIG(*) FROM sys.query_store_query_text WHERE query_sql_text LIKE N'%pm6211%';", null, ct);
+            var texts = await ScalarAsync(database, "SELECT COUNT_BIG(*) FROM sys.query_store_query_text WHERE query_sql_text LIKE N'%AS cold%' OR query_sql_text LIKE N'%AS hot%';", null, ct);
             var state = await ScalarAsync(database, "SELECT actual_state FROM sys.database_query_store_options;", null, ct);
-            Assert.Fail($"Query Store holds no plan for {tag}: text id {textId}, query id {queryId}, plan id {planId}; {texts} pm6211 texts, actual_state {state}");
+            Assert.Fail($"Query Store holds no plan for {tag}: text id {textId}, query id {queryId}, plan id {planId}; {texts} tagged texts, actual_state {state}");
         }
 
         return (queryId!.Value, planId!.Value);
