@@ -208,7 +208,7 @@ public sealed class ClientTimeoutsRelativeBarsTests
 
         Assert.Equal(2, h.Adapter.AttentionBaselineReads);
         Assert.Contains(h.Deliverer.Outcomes, o => o.MetricName == AttentionEvaluator.MetricName
-            && o.ShortMessage?.Contains("Baseline for this server: 150.0 per minute", StringComparison.Ordinal) == true);
+            && o.ShortMessage != null && o.ShortMessage.Contains("Baseline for this server: 150.0 per minute", StringComparison.Ordinal));
         Assert.True(AttentionBaselineMath.NoBaselineRefreshMinutes < AttentionBaselineMath.RefreshHours * 60);
     }
 
