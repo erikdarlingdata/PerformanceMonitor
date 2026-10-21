@@ -31,6 +31,7 @@ public sealed class ClientTimeoutsReadTests : IClassFixture<SharedDuckDbFixture>
     private const int StormServer = 56401;
     private const int QuietServer = 56402;
     private const int StaleServer = 56403;
+    private const int BaselineServer = 56404;
 
     private readonly DuckDbInitializer _duckDb;
 
@@ -309,6 +310,74 @@ VALUES (799, $1, 'test-server', $2, $3, 5, $4, 'The specified object Performance
 
         var (_, page) = await new LocalDataService(_duckDb).GetAttentionRangeAsync(server, newest.AddHours(-1), newest, 4);
         Assert.Equal(expected.Take(5).ToArray(), page.Select(x => x.StatementText).ToArray());
+    }
+
+    /// <summary>One successful run a minute for <paramref name="minutes"/> minutes ending the minute before <paramref name="now"/>, and a count row
+    /// two seconds into each run's minute holding <paramref name="perMinute"/> attentions. Bulk inserts, so a multi-day server is one statement each.</summary>
+    private async Task SeedSteadyAsync(int serverId, DateTime now, int minutes, int perMinute, long idBase)
+    {
+        var first = now.AddMinutes(-minutes);
+        var last = now.AddMinutes(-1);
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        using var log = connection.CreateCommand();
+        log.CommandText = @"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status)
+SELECT $1 + row_number() OVER (ORDER BY t), $2, 'test-server', $3, t, 5, 'SUCCESS'
+FROM generate_series($4::TIMESTAMP, $5::TIMESTAMP, INTERVAL 1 MINUTE) AS g(t)";
+        log.Parameters.Add(new DuckDBParameter { Value = idBase });
+        log.Parameters.Add(new DuckDBParameter { Value = serverId });
+        log.Parameters.Add(new DuckDBParameter { Value = AttentionWindowSql.CollectorName });
+        log.Parameters.Add(new DuckDBParameter { Value = first });
+        log.Parameters.Add(new DuckDBParameter { Value = last });
+        await log.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+
+        using var counts = connection.CreateCommand();
+        counts.CommandText = @"
+INSERT INTO attention_events (attention_event_id, collection_time, server_id, server_name, event_kind, attention_count)
+SELECT $1 + row_number() OVER (ORDER BY t), t + INTERVAL 2 SECOND, $2, 'test-server', $3, $4
+FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL 1 MINUTE) AS g(t)";
+        counts.Parameters.Add(new DuckDBParameter { Value = idBase + 1_000_000 });
+        counts.Parameters.Add(new DuckDBParameter { Value = serverId });
+        counts.Parameters.Add(new DuckDBParameter { Value = AttentionWindowSql.KindCount });
+        counts.Parameters.Add(new DuckDBParameter { Value = (long)perMinute });
+        counts.Parameters.Add(new DuckDBParameter { Value = first });
+        counts.Parameters.Add(new DuckDBParameter { Value = last });
+        await counts.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task TheBaseline_OfASteadyServer_IsReadFromDuckDb_AndIsItsNormalRate()
+    {
+        /* #5736: the real DuckDB read of the shared per-minute statement, which the engine tests only fake. Two days of one run a minute with a
+           count row of 150 in each: every 3-minute average is 150, so the p99.9 is 150. */
+        var now = DateTime.UtcNow;
+        now = new DateTime(now.Ticks - (now.Ticks % TimeSpan.TicksPerMinute), DateTimeKind.Utc);
+        await SeedSteadyAsync(BaselineServer, now, 2 * 1440, 150, 9_000_000);
+
+        var baseline = await new LocalDataService(_duckDb).GetAttentionBaselineAsync(BaselineServer, now);
+
+        Assert.NotNull(baseline);
+        Assert.Equal(150d, baseline!.P999ThreeMinuteAverage, 3);
+        Assert.Equal(2 * 1440, baseline.MinutesObserved);
+        Assert.Null(await new LocalDataService(_duckDb).GetAttentionBaselineAsync(BaselineServer + 1, now));
+    }
+
+    [Fact]
+    public async Task TheBaseline_OfAServerWithUnderADayOfCapture_IsNull_AndSoIsAStrayRunPlusAnHour()
+    {
+        var now = DateTime.UtcNow;
+        now = new DateTime(now.Ticks - (now.Ticks % TimeSpan.TicksPerMinute), DateTimeKind.Utc);
+
+        /* 12 hours is under the day. */
+        await SeedSteadyAsync(BaselineServer, now, 720, 150, 9_000_000);
+        Assert.Null(await new LocalDataService(_duckDb).GetAttentionBaselineAsync(BaselineServer, now));
+
+        /* One stray run two days ago plus an hour of recent capture spans two days but observed 61 minutes. */
+        var stray = BaselineServer + 2;
+        await LogAsync(9_500_000, stray, now.AddDays(-2));
+        await SeedSteadyAsync(stray, now, 60, 150, 9_600_000);
+        Assert.Null(await new LocalDataService(_duckDb).GetAttentionBaselineAsync(stray, now));
     }
 
     private async Task LogAsync(long logId, int serverId, DateTime time)

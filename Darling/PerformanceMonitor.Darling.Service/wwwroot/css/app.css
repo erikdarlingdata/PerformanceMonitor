@@ -1508,3 +1508,38 @@ pre.code {
   .rollup-divider { display: none; }
   .rollup .tile { min-width: 0; }
 }
+
+/* ─────────────────────────── month calendar (#6294) ─────────────────────────── */
+/* The Daily Health Calendar: weeks as rows, one cell per UTC day in its health band's colour. Seven equal columns that may shrink
+   below their content (minmax(0, 1fr)), so the grid fits a 375 px phone without a horizontal page scroll. */
+.daycal-head { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin-bottom: 0.6rem; }
+.daycal-month { min-width: 9rem; text-align: center; }
+.daycal-btn { background: var(--card); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 0.2rem 0.6rem; font: inherit; cursor: pointer; }
+.daycal-btn:hover:not([disabled]) { border-color: var(--accent); }
+.daycal-btn[disabled] { opacity: 0.45; cursor: default; }
+.daycal-grid { display: flex; flex-direction: column; gap: 3px; max-width: 46rem; }
+.daycal-week { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 3px; }
+.daycal-name { text-align: center; color: var(--muted); font-size: 0.72rem; }
+.daycal-cell { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 2.8rem; min-width: 0; overflow: hidden; padding: 0.15rem; border: 1px solid var(--border); border-radius: 4px; background: var(--card); color: var(--fg); font: inherit; cursor: pointer; }
+.daycal-cell.daycal-pad { visibility: hidden; cursor: default; }
+.daycal-num { font-weight: 600; }
+.daycal-word { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.62rem; }
+.daycal-cell.band-Healthy { background: rgba(129, 199, 132, 0.22); border-color: var(--band-healthy); }
+.daycal-cell.band-Warning { background: rgba(255, 213, 79, 0.22); border-color: var(--band-warning); }
+.daycal-cell.band-Critical { background: rgba(229, 115, 115, 0.26); border-color: var(--band-critical); }
+.daycal-cell.band-NoData { background: transparent; border-style: dashed; color: var(--muted); }
+.daycal-cell.today .daycal-num { text-decoration: underline; }
+.daycal-cell.selected { outline: 2px solid var(--accent); outline-offset: 1px; }
+.daycal-cell:focus-visible, .daycal-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.daycal-legend { margin-top: 0.5rem; font-size: 0.78rem; }
+.daycal-detail { margin-top: 0.8rem; }
+.daycal-detail-title { margin: 0 0 0.3rem; }
+.daycal-band { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 10px; font-weight: 600; }
+.daycal-band.band-Healthy { background: rgba(129, 199, 132, 0.16); color: var(--ok); }
+.daycal-band.band-Warning { background: rgba(255, 213, 79, 0.16); color: var(--warn); }
+.daycal-band.band-Critical { background: rgba(229, 115, 115, 0.18); color: var(--err); }
+.daycal-band.band-NoData { background: rgba(168, 174, 186, 0.16); color: var(--muted); }
+.daycal-why { margin-top: 0.4rem; }
+.daycal-reasons { margin: 0.2rem 0 0.4rem 1.1rem; padding: 0; }
+.daycal-metrics { overflow-wrap: anywhere; }
+.daycal-drills { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.5rem; }

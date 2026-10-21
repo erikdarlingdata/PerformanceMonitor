@@ -109,10 +109,20 @@ public sealed record InvestigationPriorLink(Guid RequestId, DateTime RecordedAtU
 /// <paramref name="MutedDates"/> those with at least one muted fire (a date can be in both), each newest first.
 /// <paramref name="AroundUtc"/> is the request's first alert, shared by every linked metric, not that metric's own first alert.
 /// Zero is a real answer: no history says <c>0</c>, it does not leave the metric out.
+/// <paramref name="DaysAgo"/> (#6261) are the whole days back (1 = the occurrence of this time 24 hours before the first alert)
+/// on which the metric fired inside the window, muted or not, from <see cref="InvestigationAlertStreak.DaysAgo"/>'s rule.
 /// </summary>
 public sealed record InvestigationAlertRecurrence(
-    string MetricName, DateTime AroundUtc, int Fired, int Muted, IReadOnlyList<DateOnly> FiredDates, IReadOnlyList<DateOnly> MutedDates)
+    string MetricName, DateTime AroundUtc, int Fired, int Muted, IReadOnlyList<DateOnly> FiredDates, IReadOnlyList<DateOnly> MutedDates,
+    IReadOnlyList<int> DaysAgo)
 {
+    /// <summary>#6261: how many days in a row, counting back from the one before the first alert, the metric fired inside the
+    /// window. At most <see cref="Days"/>; a muted fire counts (it fired). See <see cref="InvestigationAlertStreak"/>.</summary>
+    public int StreakDays => InvestigationAlertStreak.Length(DaysAgo);
+
+    /// <summary>#6261: the streak filled the whole look-back, so it is a floor, not an exact count.</summary>
+    public bool StreakAtLeastDaysWindow => StreakDays >= Days;
+
     /// <summary>Minutes either side of the first alert's clock time that still count as the same time of day.</summary>
     public const int WindowMinutes = 30;
 
