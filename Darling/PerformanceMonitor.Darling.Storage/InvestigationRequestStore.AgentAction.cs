@@ -113,6 +113,15 @@ public sealed partial class InvestigationRequestStore
     internal const string AgentActionsEnabledSql =
         "SELECT agent_actions_enabled FROM config.config_service WHERE id = 1";
 
+    /// <summary>The same read for the write's own transaction: the row is held <c>FOR SHARE</c> to the end of the write, so turning agent
+    /// changes off waits for the writes in flight, and a write that starts after it commits reads it off (#5632). The <c>mcp</c> role may
+    /// lock the row: it holds <c>UPDATE</c> on two columns of it.</summary>
+    internal const string AgentActionsEnabledLockedSql = AgentActionsEnabledSql + " FOR SHARE";
+
+    /// <summary>Every route row, <c>FOR SHARE</c> for the write's transaction: a route lowered, disabled or deleted after the write's re-check
+    /// waits for the write. The <c>mcp</c> role may lock them: it holds <c>UPDATE</c> on two columns of the table.</summary>
+    internal const string RoutesLockSql = "SELECT 1 FROM config.config_notification_routes FOR SHARE";
+
     /// <summary>The request row the gate checks, held <c>FOR SHARE</c> for the gate's transaction (#5912), so a submit,
     /// release or claim (each takes the row <c>FOR UPDATE</c> or updates it) waits for the gate, and the gate for them.</summary>
     internal const string AgentActionRequestSql = @"
@@ -175,7 +184,7 @@ RETURNING journal_id";
         await using (var transaction = await connection.BeginTransactionAsync(cancellationToken))
         {
             var request = await ReadAgentActionRequestAsync(connection, transaction, action.RequestId, cancellationToken);
-            var refusal = await ActionsOffRefusalAsync(connection, transaction, cancellationToken)
+            var refusal = await ActionsOffRefusalAsync(connection, transaction, lockRow: false, cancellationToken)
                 ?? await LiveChecksAsync(connection, transaction, request, call, hooks, now, cancellationToken);
 
             AgentActionContext? context = null;
@@ -244,9 +253,9 @@ RETURNING journal_id";
             await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
             var request = await ReadAgentActionRequestAsync(connection, transaction, action.RequestId, cancellationToken);
-            /* The switch is read again here (#5632): a person can turn agent changes off between the committed action_called row and the write. */
-            var recheck = await ActionsOffRefusalAsync(connection, transaction, cancellationToken)
-                ?? await LiveChecksAsync(connection, transaction, request, call, hooks, writeNow, cancellationToken, practice: false);
+            /* Everything the gate checked is checked again here (#5632): a person can turn agent changes off, turn this server's switch off or
+               lower the route between the committed action_called row and the write, and a kill cannot be undone. */
+            var recheck = await WriteTimeRefusalAsync(connection, transaction, request, call, hooks, writeNow, cancellationToken);
             if (recheck is not null)
             {
                 await JournalReturningAsync(connection, transaction, writeNow, action.RequestId, request?.ServerId,
@@ -374,10 +383,36 @@ RETURNING journal_id";
         await transaction.CommitAsync(cancellationToken);
     }
 
-    /// <summary>Check 2: the service's agent switch (<c>config_service.agent_actions_enabled</c>). Null when it is on. Read in the gate and again before the write.</summary>
-    private async Task<AgentActionRefusal?> ActionsOffRefusalAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, CancellationToken cancellationToken)
+    /// <summary>
+    /// The re-check in the write's own transaction (#5632): every condition the gate checked that a person can change in between, with the
+    /// rows read held <c>FOR SHARE</c> (or the advisory lock for the server's switch) until the write ends. A server action also needs Level 3
+    /// and this server's switch for its action, through the same code the gate runs. The locks are taken first and in one order, routes
+    /// before the service row, because a route write bumps the service row's version, so the other order could deadlock with it.
+    /// </summary>
+    private async Task<AgentActionRefusal?> WriteTimeRefusalAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
+        AgentActionRequest? request, AgentActionCall call, AgentActionHooks hooks, DateTime now, CancellationToken cancellationToken)
     {
-        await using var command = Command(connection, transaction, AgentActionsEnabledSql);
+        var serverAction = ServerActionForKind(call.Kind);
+        if (serverAction is not null)
+            await ServerActionSwitchLock.AcquireSharedAsync(connection, transaction, call.Target.ServerId, serverAction,
+                _commandTimeoutSeconds, cancellationToken);
+        await ExecAsync(connection, transaction, RoutesLockSql, cancellationToken);
+
+        if (await ActionsOffRefusalAsync(connection, transaction, lockRow: true, cancellationToken) is { } off)
+            return off;
+
+        return serverAction is null
+            ? await LiveChecksAsync(connection, transaction, request, call, hooks, now, cancellationToken, practice: false)
+            : await ServerActionConditionsRefusalAsync(connection, transaction, request, serverAction, call.Action, call.Target,
+                hooks.LoadLevels, now, practice: false, cancellationToken);
+    }
+
+    /// <summary>Check 2: the service's agent switch (<c>config_service.agent_actions_enabled</c>). Null when it is on. Read in the gate and again before the write
+    /// (<paramref name="lockRow"/>: the write's read holds the row <c>FOR SHARE</c>).</summary>
+    private async Task<AgentActionRefusal?> ActionsOffRefusalAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, bool lockRow,
+        CancellationToken cancellationToken)
+    {
+        await using var command = Command(connection, transaction, lockRow ? AgentActionsEnabledLockedSql : AgentActionsEnabledSql);
         var enabled = await command.ExecuteScalarAsync(cancellationToken) is not bool on || on;
         return enabled ? null
             : new AgentActionRefusal(AgentActionCodes.ActionsOff,
