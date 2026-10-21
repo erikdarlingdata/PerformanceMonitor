@@ -358,6 +358,10 @@ FROM collect.query_store_stats AS r WHERE r.server_id = 1", ct);
         Assert.Equal(0L, under.Value.DailyRows);
         var ranUnder = await RunPanelAsync(source, ct);
         Assert.True(ranUnder.Payload is not null, "a raw half under the limit must run: " + ranUnder.Error);
+        /* #6115 review (F2): the payload itself says how many servers were read raw, whether or not the wide start moved. */
+        Assert.Equal(
+            "1 server whose interval table could not serve the window was read from the raw tables, from the window's own start (#6115).",
+            ranUnder.Payload!["query_store_raw_servers_note"]!.GetValue<string>());
 
         /* Over the limit: ten million more rows. No server has a built day, so the wide half counts nothing and the raw half alone refuses. */
         await LogRowsAsync(connection, 2, 4, "2 hours", ComposeLimits.MaxQueryStoreWideRows + 3_000_000, ct);
@@ -375,6 +379,52 @@ FROM collect.query_store_stats AS r WHERE r.server_id = 1", ct);
         var both = await RunPanelAsync(source, ct);
         Assert.True(both.Payload is null);
         Assert.Contains("Query Store rows (2 servers, ", both.Error, StringComparison.Ordinal);
+    }
+
+    /// <summary>#6115 review (F1): a server with no built day is counted from the collection log rows INSIDE the panel's window, not its newest day
+    /// times the window's days. Before the fix every recently disabled server (the daily builder's GC deletes its built rows) added a full day for every
+    /// day of the window, so a mature store's fleet panel near the limit was refused where it ran before.</summary>
+    [Fact]
+    public async Task AServerWithNoBuiltDay_IsCountedForTheLogRowsInsideTheWindowOnly()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DARLING_TEST_PG")), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(Environment.GetEnvironmentVariable("DARLING_TEST_PG")!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await SeedAsync(connection, ct);
+        await using var source = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var end = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var start = end.AddDays(-7);
+
+        /* Server 1 has no built day and collected only before the window: it adds 0 (it is the newest day of a server that stopped). */
+        await LogRowsAsync(connection, 1, 1, "10 days", 1_000_000, ct);
+        var before = await QueryStoreWideReadGuard.EstimateAsync(source, null, null, ct, null, start, end);
+        Assert.Equal(new QueryStoreWideReadGuard.Estimate(0, 0), before);
+        Assert.Equal(0L, before!.Value.RowsOver(start, end));
+
+        /* Server 2 has no built day and collected 5,000 rows inside the window (and 1,000 before it): the estimate adds the 5,000. */
+        await LogRowsAsync(connection, 2, 2, "2 days", 3_000, ct);
+        await LogRowsAsync(connection, 3, 2, "5 days", 2_000, ct);
+        await LogRowsAsync(connection, 4, 2, "9 days", 1_000, ct);
+        var inside = await QueryStoreWideReadGuard.EstimateAsync(source, null, null, ct, null, start, end);
+        Assert.Equal(1, inside!.Value.Servers);
+        Assert.InRange(inside.Value.RowsOver(start, end), 5_000L, 5_010L);
+
+        /* A mature store: every enabled server has a built day, one disabled server has only old log rows (the GC removed its built rows).
+           The estimate is what origin/dev gave: the built days alone. */
+        await ExecAsync(connection, "DELETE FROM collect.collection_log", ct);
+        await ExecAsync(connection, "UPDATE collect.servers SET is_enabled = FALSE WHERE server_id = 5", ct);
+        await ExecAsync(connection,
+            "INSERT INTO collect.query_store_top_daily_built (server_id, day, pass, built_at, source_rows) "
+            + "VALUES (1, DATE '2026-01-01', 2, now() AT TIME ZONE 'UTC', 100), (2, DATE '2026-01-01', 2, now() AT TIME ZONE 'UTC', 200), "
+            + "(3, DATE '2026-01-01', 2, now() AT TIME ZONE 'UTC', 300), (4, DATE '2026-01-01', 2, now() AT TIME ZONE 'UTC', 400)", ct);
+        await LogRowsAsync(connection, 5, 5, "20 days", 9_000_000, ct);
+        await LogRowsAsync(connection, 6, 5, "21 days", 9_000_000, ct);
+        var mature = await QueryStoreWideReadGuard.EstimateAsync(source, null, null, ct, null, start, end);
+        Assert.Equal(new QueryStoreWideReadGuard.Estimate(1_000, 4), mature);
     }
 
     /// <summary>#6115: a server with no built day in <c>collect.query_store_top_daily_built</c> (the most recently enrolled copies) is counted from

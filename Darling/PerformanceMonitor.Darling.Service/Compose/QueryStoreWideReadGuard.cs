@@ -54,6 +54,12 @@ internal static class QueryStoreWideReadGuard
     /// (<c>query_store</c>) stored over the day that ends at the server's newest log row. <c>rows_collected</c> counts stored snapshots, so
     /// it over-counts the interval table a little and leans toward refusing. A server with neither a built day nor a log row adds 0, and
     /// a fault in the lookup fails open (<see cref="EstimateAsync"/> returns null). $2 are the servers a split panel reads raw (NULL for none).</para>
+    ///
+    /// <para>The log's rows are counted only INSIDE the panel's window, $3 to $4 (the wide counted range): the rows the server collected there,
+    /// spread over the window's days so <see cref="Estimate.RowsOver(DateTime, DateTime)"/> gives back exactly those rows. A server that stopped
+    /// collecting before the window (a disabled one, whose built rows the daily builder's GC deletes, or one whose built days expired) adds 0, as
+    /// it did before #6115; a newly enrolled one counts what it really collected. With no window ($3 and $4 NULL) the figure is the day that ends
+    /// at the server's newest log row.</para>
     /// </summary>
     internal const string PerServerRowsSql = @"
 SELECT COALESCE(SUM(t.day_rows), 0)::bigint, COUNT(*)::integer
@@ -85,14 +91,21 @@ FROM
     ) AS a
     CROSS JOIN LATERAL
     (
-        SELECT SUM(x.rows_collected)::bigint AS day_rows
+        SELECT SUM(x.rows_collected)::bigint AS window_rows
         FROM collect.collection_log AS x
         WHERE x.server_id = s.server_id
           AND x.collector_name = '" + QueryStoreRawCollector + @"'
-          AND x.collection_time > a.anchor - interval '1 day'
+          AND x.collection_time > COALESCE($3::timestamp, a.anchor - interval '1 day')
+          AND x.collection_time <= COALESCE($4::timestamp, a.anchor)
+    ) AS w
+    CROSS JOIN LATERAL
+    (
+        SELECT CEIL(w.window_rows / (EXTRACT(EPOCH FROM
+                   COALESCE($4::timestamp, a.anchor) - COALESCE($3::timestamp, a.anchor - interval '1 day')) / 86400.0))::bigint AS day_rows
     ) AS l
     WHERE NOT EXISTS (SELECT 1 FROM collect.query_store_top_daily_built AS nb WHERE nb.server_id = s.server_id)
-      AND l.day_rows IS NOT NULL
+      AND w.window_rows IS NOT NULL
+      AND COALESCE($4::timestamp, a.anchor) > COALESCE($3::timestamp, a.anchor - interval '1 day')
       AND ($1::text[] IS NULL OR s.server_name = ANY($1))
       AND ($2::integer[] IS NULL OR s.server_id <> ALL($2))
 ) AS t;";
@@ -131,12 +144,12 @@ FROM
     /// </summary>
     internal static async Task<Estimate?> EstimateAsync(
         NpgsqlDataSource postgres, IReadOnlyList<string>? serverScope, ILogger? logger, CancellationToken cancellationToken,
-        IReadOnlyList<int>? excludedServerIds = null)
+        IReadOnlyList<int>? excludedServerIds = null, DateTime? windowStart = null, DateTime? windowEnd = null)
     {
         try
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-            return await ReadEstimateAsync(connection, PerServerRowsSql, serverScope, excludedServerIds, cancellationToken);
+            return await ReadEstimateAsync(connection, PerServerRowsSql, serverScope, excludedServerIds, windowStart, windowEnd, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -301,7 +314,8 @@ WHERE b.daily_rows IS NOT NULL
 
     /// <summary>The Query Store estimate's reader: $1 the scoped names (or NULL).</summary>
     private static async Task<Estimate?> ReadEstimateAsync(
-        NpgsqlConnection connection, string sql, IReadOnlyList<string>? serverScope, IReadOnlyList<int>? excludedServerIds, CancellationToken cancellationToken)
+        NpgsqlConnection connection, string sql, IReadOnlyList<string>? serverScope, IReadOnlyList<int>? excludedServerIds,
+        DateTime? windowStart, DateTime? windowEnd, CancellationToken cancellationToken)
     {
         await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds };
         command.Parameters.Add(ScopeParameter(serverScope));
@@ -309,6 +323,16 @@ WHERE b.daily_rows IS NOT NULL
         {
             NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer,
             Value = excludedServerIds is { Count: > 0 } ? (object)excludedServerIds.ToArray() : DBNull.Value,
+        });
+        command.Parameters.Add(new NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlDbType.Timestamp,
+            Value = windowStart is { } ws ? DateTime.SpecifyKind(ws, DateTimeKind.Unspecified) : DBNull.Value,
+        });
+        command.Parameters.Add(new NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlDbType.Timestamp,
+            Value = windowEnd is { } we ? DateTime.SpecifyKind(we, DateTimeKind.Unspecified) : DBNull.Value,
         });
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -400,7 +424,7 @@ WHERE b.daily_rows IS NOT NULL
         NpgsqlDataSource postgres, IReadOnlyList<string>? serverScope, DateTime countedStart, DateTime countedEnd,
         ILogger? logger, CancellationToken cancellationToken, long limit = ComposeLimits.MaxQueryStoreWideRows,
         DateTime? stampThrough = null, IReadOnlyList<int>? excludedServerIds = null, DateTime? rawCountedStart = null) =>
-        Refusal(await EstimateSplitAsync(postgres, serverScope, countedEnd, logger, excludedServerIds, rawCountedStart ?? countedStart, cancellationToken), countedStart, countedEnd, limit, stampThrough);
+        Refusal(await EstimateSplitAsync(postgres, serverScope, countedEnd, logger, excludedServerIds, rawCountedStart ?? countedStart, cancellationToken, countedStart), countedStart, countedEnd, limit, stampThrough);
 
     /// <summary>The collector the Query Store raw half of a split panel is counted under in the collection log (#6115): the Query Store
     /// collector's own name, whose <c>rows_collected</c> is what it stored into <c>collect.query_store_stats</c>.</summary>
@@ -413,9 +437,9 @@ WHERE b.daily_rows IS NOT NULL
     /// </summary>
     internal static async Task<Estimate?> EstimateSplitAsync(
         NpgsqlDataSource postgres, IReadOnlyList<string>? serverScope, DateTime countedEnd, ILogger? logger,
-        IReadOnlyList<int>? rawServerIds, DateTime rawCountedStart, CancellationToken cancellationToken)
+        IReadOnlyList<int>? rawServerIds, DateTime rawCountedStart, CancellationToken cancellationToken, DateTime? wideCountedStart = null)
     {
-        var wide = await EstimateAsync(postgres, serverScope, logger, cancellationToken, rawServerIds);
+        var wide = await EstimateAsync(postgres, serverScope, logger, cancellationToken, rawServerIds, wideCountedStart, wideCountedStart is null ? null : countedEnd);
         if (wide is not { } found || rawServerIds is not { Count: > 0 })
         {
             return wide;

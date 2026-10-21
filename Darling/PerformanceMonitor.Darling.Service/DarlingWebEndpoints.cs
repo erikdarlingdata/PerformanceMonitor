@@ -5292,6 +5292,15 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 }
             }
 
+            /* #6115 review: a split run whose passing servers did not move the wide start has no history note above, so the payload always says on its
+               own how many servers were read raw. */
+            if (queryStoreWideEligible && rawServerIds is { Count: > 0 })
+            {
+                payload["query_store_raw_servers_note"] = rawServerIds.Count == 1
+                    ? "1 server whose interval table could not serve the window was read from the raw tables, from the window's own start (#6115)."
+                    : $"{rawServerIds.Count} servers whose interval table could not serve the window were read from the raw tables, from the window's own start (#6115).";
+            }
+
             return ComposeRunOutcome.Ok(payload);
         }
         catch (PostgresException ex)
