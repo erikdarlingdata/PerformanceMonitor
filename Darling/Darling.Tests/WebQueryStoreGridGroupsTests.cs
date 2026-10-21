@@ -83,8 +83,8 @@ public sealed class WebQueryStoreGridGroupsTests
     public void EachGrid_StartsOnItsCoreColumns_WithATogglePerGroup()
     {
         var r = Run("defaults");
-        Assert.Equal(new[] { "Columns:", "CPU and reads", "Executions and plans" }, Arr(r, "regressions", "toggles"));
-        Assert.Equal(new[] { "Severity", "Database", "Query", "QueryID", "ExtraDuration", "Duration+%", "BaselineDuration", "RecentDuration", "CPU+%", "Reads+%", "LastExec" },
+        Assert.Equal(new[] { "Columns:", "CPU", "Executions and plans", "Timeouts (Aborted)", "Errors (Exception)" }, Arr(r, "regressions", "toggles"));
+        Assert.Equal(new[] { "Severity", "Why", "Database", "Query", "QueryID", "RecentTimeouts", "RecentErrors", "ExtraDuration", "Duration+%", "BaselineDuration", "RecentDuration", "CPU+%", "LastExec" },
             Arr(r, "regressions", "heads"));
         Assert.Equal(new[] { "Columns:", "I/O and rows", "Session" }, Arr(r, "completions", "toggles"));
         Assert.Equal(new[] { "Time", "Statement", "EventType", "Duration", "CPU", "Result", "Database", "Object", "QueryHash" },
@@ -104,8 +104,10 @@ public sealed class WebQueryStoreGridGroupsTests
         Assert.Contains("RevertedAt", Arr(r, "plansOn"));
         Assert.DoesNotContain("ValidSince", Arr(r, "allOff"));
         Assert.DoesNotContain("RegressedPlan", Arr(r, "allOff"));
-        Assert.Equal(new[] { "BaseExecs", "RecentExecs", "BaselinePlans", "RecentPlans" },
-            Arr(r, "regressionsExecs").Where(h => h.StartsWith("Base", StringComparison.Ordinal) && h != "BaselineDuration" || h.StartsWith("Recent", StringComparison.Ordinal) && h != "RecentDuration").ToArray());
+        var execs = Arr(r, "regressionsExecs");
+        foreach (var h in new[] { "BaseExecs", "RecentExecs", "BaselinePlans", "RecentPlans", "BaselineExecs/Hour", "RecentExecs/Hour" })
+            Assert.Contains(h, execs);
+        Assert.DoesNotContain("BaselineTimeoutsExecs", execs);
         Assert.Equal(new[] { "SPID", "App", "Login" }, Arr(r, "completionsSession").Skip(8).Take(3).ToArray());
     }
 

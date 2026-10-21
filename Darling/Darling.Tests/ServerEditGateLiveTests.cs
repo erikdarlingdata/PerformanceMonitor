@@ -86,6 +86,65 @@ public sealed class ServerEditGateLiveTests
         return (ctx.Response.StatusCode, await new System.IO.StreamReader(ctx.Response.Body).ReadToEndAsync());
     }
 
+    /// <summary>The same real pipeline in loopback mode with no access token: no gate is registered, so no seat is stored for a request.</summary>
+    private static async Task<TestServer> BuildTokenlessLoopbackServer()
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Logging.ClearProviders();
+        var postgres = NpgsqlDataSource.Create("Host=localhost;Database=postgres;Username=darling");
+        builder.Services.AddSingleton(postgres);
+        DarlingWebHostService.ConfigureResponseCompression(builder.Services);
+        var app = builder.Build();
+        var host = new DarlingWebHostService(
+            NullLogger<DarlingWebHostService>.Instance, new WebRuntimeState(), new CollectorRuntimeState(), new WebTlsCertificateState(), new BaselineCache());
+        host.ConfigurePipeline(
+            app, postgres, networkMode: false, networkListenIp: null, allowedCidr: IPNetwork.Parse("127.0.0.1/32"), accessToken: "",
+            oidcClient: null);
+        await app.StartAsync();
+        return app.GetTestServer();
+    }
+
+    /// <summary>The four agent setup writes (#6264). A read-only seat and a request with no signed-in admin are both refused before any
+    /// body is read or the store is touched, which is why the pool points at nothing.</summary>
+    public static TheoryData<string, string, string> AgentSetupWrites => new()
+    {
+        { "POST", "/api/notification-routes", "{\"metric_match\":\"blocking\",\"agent_level\":3}" },
+        { "PUT", "/api/notification-routes/41", "{\"expected_modified_at\":\"2026-01-01T00:00:00\",\"agent_level\":3}" },
+        { "DELETE", "/api/notification-routes/41", "" },
+        { "PUT", "/api/environment-profiles", "{\"profile_text\":\"fleet: do nothing\"}" },
+    };
+
+    [Theory]
+    [MemberData(nameof(AgentSetupWrites))]
+    public async Task AReadOnlySignIn_IsRefused403_OnEveryAgentSetupWrite_ByTheRealPipeline(string method, string path, string body)
+    {
+        using var server = await BuildServer();
+        var (status, answer) = await SendAsync(server, method, path, Cookie("bob", WebOidcRole.Viewer), body);
+        Assert.Equal(StatusCodes.Status403Forbidden, status);
+        Assert.Contains("read-only", answer, StringComparison.Ordinal);
+        Assert.DoesNotContain("do nothing", answer, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [MemberData(nameof(AgentSetupWrites))]
+    public async Task ATokenlessLoopbackDashboard_RefusesEveryAgentSetupWrite_WithTheSignInSentence_ByTheRealPipeline(string method, string path, string body)
+    {
+        using var server = await BuildTokenlessLoopbackServer();
+        var ctx = await server.SendAsync(c =>
+        {
+            c.Request.Method = method;
+            c.Request.Path = path;
+            c.Request.Headers.Host = "localhost";
+            c.Connection.RemoteIpAddress = IPAddress.Loopback;
+            c.Request.ContentType = "application/json";
+            c.Request.Body = new System.IO.MemoryStream(Encoding.UTF8.GetBytes(body));
+        });
+        var answer = await new System.IO.StreamReader(ctx.Response.Body).ReadToEndAsync();
+        Assert.Equal(StatusCodes.Status403Forbidden, ctx.Response.StatusCode);
+        Assert.Contains("Sign in to the web as an admin", answer, StringComparison.Ordinal);
+    }
+
     private const string Edit = "{\"display_name\":\"x\",\"password\":\"Zq9-fake-secret-must-never-appear-7XK\"}";
 
     [Theory]

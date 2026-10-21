@@ -48,9 +48,6 @@ public sealed class ViewerQueryStoreRegressionRow
     public double BaselineCpuMs { get; set; }
     public double RecentCpuMs { get; set; }
     public double CpuRegressionPercent { get; set; }
-    public double BaselineReads { get; set; }
-    public double RecentReads { get; set; }
-    public double IoRegressionPercent { get; set; }
     public double AdditionalDurationMs { get; set; }
     public long BaselineExecCount { get; set; }
     public long RecentExecCount { get; set; }
@@ -65,6 +62,35 @@ public sealed class ViewerQueryStoreRegressionRow
     /// <summary>Gates "Get Actual Plan (re-run)" — the service re-executes by QueryId (BuildActualPlanArgsForQueryStore).</summary>
     public bool CanGetActualPlan => QueryId != 0;
     public DateTime? LastExecutionTime { get; set; }
+
+    /// <summary>#5506: why the row is listed: <c>cost</c> (Regular CPU up more than 25%), <c>timeouts</c> (Aborted runs per hour
+    /// at least doubled), <c>errors</c> (Exception runs per hour at least doubled), or a comma-separated combination.</summary>
+    public string RegressionReason { get; set; } = "";
+
+    /// <summary>#5506: Aborted runs (timeouts, cancels): count, CPU and duration per execution, baseline and recent. Null
+    /// figures read as an empty cell, the count as 0.</summary>
+    public long BaselineAbortedCount { get; set; }
+    public long RecentAbortedCount { get; set; }
+    public double? BaselineAbortedCpuMs { get; set; }
+    public double? RecentAbortedCpuMs { get; set; }
+    public double? BaselineAbortedDurationMs { get; set; }
+    public double? RecentAbortedDurationMs { get; set; }
+
+    /// <summary>#5506: Exception runs (errors), the same six figures.</summary>
+    public long BaselineExceptionCount { get; set; }
+    public long RecentExceptionCount { get; set; }
+    public double? BaselineExceptionCpuMs { get; set; }
+    public double? RecentExceptionCpuMs { get; set; }
+    public double? BaselineExceptionDurationMs { get; set; }
+    public double? RecentExceptionDurationMs { get; set; }
+
+    /// <summary>#5506: runs per hour for each group, so the 7-day baseline and the recent window compare in one unit.</summary>
+    public double? BaselineRegularPerHour { get; set; }
+    public double? RecentRegularPerHour { get; set; }
+    public double? BaselineAbortedPerHour { get; set; }
+    public double? RecentAbortedPerHour { get; set; }
+    public double? BaselineExceptionPerHour { get; set; }
+    public double? RecentExceptionPerHour { get; set; }
 
     /// <summary>The last-execution stamp, naive UTC in the store, converted to the display mode.</summary>
     public string LastExecutionTimeLocal => ViewerDataService.FormatStoredUtc(LastExecutionTime);
@@ -83,249 +109,62 @@ public sealed partial class ViewerDataService
     public const int BaselineLookbackDays = 7;
 
     /// <summary>
-    /// The Query-Store regressions read — the Dashboard's <c>report.query_store_regressions(@start,@end)</c>
-    /// inline TVF ported to Postgres against Darling's <c>query_store_stats</c> store. Two windowed CTEs over
-    /// the SAME base table: BASELINE = the fixed <see cref="BaselineLookbackDays"/>-day window ending at the
-    /// window start; RECENT = the [start, end] window. Each averages the per-interval µs metrics to ms (reads
-    /// stay raw pages), SUMs execution_count,
-    /// and COUNTs DISTINCT plan_id; the outer projection joins them per (database, query_id), computes the
-    /// duration / CPU / IO regression percents, the execution-count-weighted <c>additional_duration_ms</c>
+    /// The statement text of both forms (#5506): the arms (<see cref="QueryStoreRegressionBaseline.RawArmsSql"/> or
+    /// <see cref="QueryStoreRegressionBaseline.WideArmsSql"/>), the aggregates, and <see cref="QueryStoreRegressionBaseline.SuffixSql"/>,
+    /// bound to this read's parameters: $1 server_id, $2 window start (baseline is &lt; $2), $3 window end, $4 database filter
+    /// (text[]), $5 baseline start (window start minus <see cref="BaselineLookbackDays"/>), $6 the baseline days read from the
+    /// daily totals (date[]), $7 and $8 the live half's <c>first_execution_time</c> bounds.
+    /// </summary>
+    internal static string BuildQueryStoreRegressionsSql(bool wide, bool useDailyTotals) =>
+        QueryStoreRegressionBaseline.Bind(
+            (wide ? QueryStoreRegressionBaseline.WideArmsSql : QueryStoreRegressionBaseline.RawArmsSql)
+            + "\n" + QueryStoreRegressionBaseline.AggregatesSql(useDailyTotals) + "\n" + QueryStoreRegressionBaseline.SuffixSql,
+            "$5", "$6", "$7", "$8", "50");
+
+    /// <summary>
+    /// The Query-Store regressions read — the Dashboard's <c>report.query_store_regressions(@start,@end)</c> inline TVF
+    /// ported to Postgres against Darling's Query Store tables, and twin of the MCP tool's read
+    /// (<c>DarlingQueryStoreRegressionReader</c>; the SQL is shared through <see cref="QueryStoreRegressionBaseline"/>).
+    /// BASELINE = the fixed <see cref="BaselineLookbackDays"/>-day window ending at the window start; RECENT = the
+    /// [start, end] window. Both sides are WEIGHTED per-execution averages in ms, the summed cost divided by the summed
+    /// executions (#5506; before it the baseline was an average of the interval averages), over Regular executions, and the
+    /// baseline's closed days come from <c>collect.plan_regression_daily</c> (#5448) with the days at its edges read live
+    /// (<see cref="QueryStoreRegressionBaseline"/> shows that no interval is counted twice or dropped at the seams). The outer
+    /// projection joins them per (database, query_id), computes the duration and CPU regression percents, the
+    /// execution-count-weighted <c>additional_duration_ms</c>
     /// (extra total time = per-exec delta × recent exec count), and a DURATION-driven severity band, keeping
-    /// only rows whose CPU regressed > 25% (the TVF's single-metric gate), ranked by additional_duration_ms
-    /// and capped at the TVF's TOP (50).
+    /// rows whose Regular CPU regressed > 25% (the TVF's single-metric gate) or whose Aborted or Exception runs per hour at
+    /// least doubled (#5506), ranked by additional_duration_ms (failure-only rows after the cost rows, within a share of the
+    /// cap) and capped at the TVF's TOP (50). Logical reads are not part of it (#5506).
     ///
     /// <para>Faithful adaptations to Darling's store (all reported, none silently changed):
-    /// (1) The Dashboard TVF windows on <c>server_last_execution_time</c>; Darling windows the baseline/recent
-    /// split on <c>collection_time</c> (naive UTC) — the column EVERY other Darling Query Store read windows
-    /// on, and the frame the toolbar's [start,end] bounds are in (Darling's <c>last_execution_time</c> is the
-    /// server's LOCAL wall clock, so windowing on it against UTC bounds would be a timezone bug).
+    /// (1) The Dashboard TVF windows on <c>server_last_execution_time</c>; Darling splits the baseline from the recent window
+    /// on the interval's <c>last_execution_time</c> (naive UTC; the day of it is what the daily totals row by) and bounds the
+    /// rows read by <c>collection_time</c>, the frame the toolbar's [start,end] bounds are in.
     /// (2) The recent query-text sample comes from <c>collect.query_store_text</c> (#2150), falling back to
     /// <c>MAX(query_text)</c> on the fact rows for history collected before that table existed — either way
     /// Darling's text is already decompressed, where the TVF <c>DECOMPRESS()</c>es a compressed
     /// <c>query_sql_text</c>.
-    /// (3) The stale INTENT comment on the Dashboard's C# caller (bounded/mirrored baseline, weighted averages,
-    /// multi-metric, absolute minimums) does NOT match what the TVF actually runs — this ports the ACTUAL TVF
-    /// (plain AVG, CPU-only > 25% gate, no minimums), which is what the Dashboard grid shows, with the baseline
-    /// bounded per #4217 (see below) since the TVF's own unbounded baseline is not worth reproducing faithfully.</para>
-    ///
-    /// <para>$1 server_id, $2 window start (baseline is &lt; $2), $3 window end, $4 database filter (text[]),
-    /// $5 baseline start (window start minus <see cref="BaselineLookbackDays"/>).</para>
+    /// (3) The stale INTENT comment on the Dashboard's C# caller does NOT match what the TVF actually runs; this ports the
+    /// ACTUAL gate (CPU-only > 25%, no minimums), with the baseline bounded per #4217.</para>
     ///
     /// <para>Since #5809 this raw form is the fallback: <see cref="QueryStoreRegressionsTableSql"/> serves wherever the
     /// interval table's gate allows.</para>
     /// </summary>
-    public const string QueryStoreRegressionsSql = QueryStoreRegressionsRawPrefix + "\n" + QueryStoreRegressionsSuffix;
+    public static readonly string QueryStoreRegressionsSql = BuildQueryStoreRegressionsSql(wide: false, useDailyTotals: true);
 
-    /// <summary>The raw read's two deduping arms (#1841). <see cref="QueryStoreRegressionsTableSql"/> replaces only these.</summary>
-    private const string QueryStoreRegressionsRawPrefix = """
-        WITH deduped_baseline AS (
-            /* LOAD-BEARING (correctness, not just perf) — #1841. The rows are CUMULATIVE per-interval
-               snapshots and the collector re-fetches the OPEN interval every cycle, so the SAME interval
-               (same first_execution_time) is stored repeatedly with a growing execution_count. Keep the
-               LATEST snapshot per interval before aggregating.
+    private static readonly string s_rawLiveSql = BuildQueryStoreRegressionsSql(wide: false, useDailyTotals: false);
 
-               This read is especially exposed: the baseline arm spans <see cref="BaselineLookbackDays"/> days
-               (collection_time >= $5 AND < $2 — #4217; before that fix it was UNBOUNDED, collection_time < $2
-               with no lower bound, potentially months) while the recent arm is a short window, so the two arms
-               have systematically different re-collection density per interval. Un-deduped, that alone moves
-               the AVG(avg_*) values the regression percent is computed from, and the > 25% CPU gate —
-               manufacturing and hiding regressions in a direction that has nothing to do with the query.
-               It also multiplies exec_count, which feeds additional_duration_ms, the sort key. */
-            SELECT
-                database_name,
-                query_id,
-                plan_id,
-                execution_count,
-                avg_duration_us,
-                avg_cpu_time_us,
-                avg_logical_io_reads,
-                ROW_NUMBER() OVER
-                (
-                    PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
-                    ORDER BY collection_time DESC, execution_count DESC
-                ) AS rn
-            FROM query_store_stats
-            WHERE server_id = $1
-            AND   collection_time >= $5
-            AND   collection_time < $2
-            AND   ($4::text[] IS NULL OR database_name = ANY($4))
-        ),
-        deduped_recent AS (
-            SELECT
-                database_name,
-                query_id,
-                plan_id,
-                query_text,
-                execution_count,
-                avg_duration_us,
-                avg_cpu_time_us,
-                avg_logical_io_reads,
-                last_execution_time,
-                ROW_NUMBER() OVER
-                (
-                    PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
-                    ORDER BY collection_time DESC, execution_count DESC
-                ) AS rn
-            FROM query_store_stats
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-            AND   ($4::text[] IS NULL OR database_name = ANY($4))
-        ),
-        """;
+    private static readonly string s_wideLiveSql = BuildQueryStoreRegressionsSql(wide: true, useDailyTotals: false);
 
     /// <summary>
-    /// Everything after the two arms, shared by <see cref="QueryStoreRegressionsSql"/> and
-    /// <see cref="QueryStoreRegressionsTableSql"/> so the aggregation, the gate and the ranking cannot drift between them.
+    /// The regression read over <c>query_store_interval_wide</c> (#5809), with the baseline's closed days from the daily
+    /// totals (#5506); the same statement the MCP read runs (<c>DarlingQueryStoreRegressionReader.QueryStoreRegressionsTableSql</c>)
+    /// with this read's parameter numbers. The table holds ONE row per interval (its latest snapshot), so no dedupe runs; $5 is
+    /// the gate's clamp (<see cref="QueryStoreIntervalWide.ClampedStart"/>). An interval is on one side of the window start
+    /// only (<see cref="QueryStoreRegressionBaseline"/>).
     /// </summary>
-    private const string QueryStoreRegressionsSuffix = """
-        baseline_performance AS (
-            SELECT
-                database_name,
-                query_id,
-                AVG(CAST(avg_duration_us AS double precision)) / 1000.0 AS avg_duration_ms,
-                AVG(CAST(avg_cpu_time_us AS double precision)) / 1000.0 AS avg_cpu_time_ms,
-                AVG(CAST(avg_logical_io_reads AS double precision)) AS avg_logical_io_reads,
-                CAST(SUM(execution_count) AS bigint) AS exec_count,
-                CAST(COUNT(DISTINCT plan_id) AS integer) AS plan_count
-            FROM deduped_baseline
-            WHERE rn = 1
-            GROUP BY database_name, query_id
-        ),
-        recent_performance AS (
-            SELECT
-                database_name,
-                query_id,
-                MAX(query_text) AS query_text_sample,
-                AVG(CAST(avg_duration_us AS double precision)) / 1000.0 AS avg_duration_ms,
-                AVG(CAST(avg_cpu_time_us AS double precision)) / 1000.0 AS avg_cpu_time_ms,
-                AVG(CAST(avg_logical_io_reads AS double precision)) AS avg_logical_io_reads,
-                CAST(SUM(execution_count) AS bigint) AS exec_count,
-                CAST(COUNT(DISTINCT plan_id) AS integer) AS plan_count,
-                MAX(last_execution_time) AS last_execution_time
-            FROM deduped_recent
-            WHERE rn = 1
-            GROUP BY database_name, query_id
-        )
-        SELECT
-            r.database_name,
-            r.query_id,
-            b.avg_duration_ms AS baseline_duration_ms,
-            r.avg_duration_ms AS recent_duration_ms,
-            (r.avg_duration_ms - b.avg_duration_ms) * 100.0 / NULLIF(b.avg_duration_ms, 0) AS duration_regression_percent,
-            b.avg_cpu_time_ms AS baseline_cpu_ms,
-            r.avg_cpu_time_ms AS recent_cpu_ms,
-            (r.avg_cpu_time_ms - b.avg_cpu_time_ms) * 100.0 / NULLIF(b.avg_cpu_time_ms, 0) AS cpu_regression_percent,
-            b.avg_logical_io_reads AS baseline_reads,
-            r.avg_logical_io_reads AS recent_reads,
-            (r.avg_logical_io_reads - b.avg_logical_io_reads) * 100.0 / NULLIF(b.avg_logical_io_reads, 0) AS io_regression_percent,
-            (r.avg_duration_ms - b.avg_duration_ms) * r.exec_count AS additional_duration_ms,
-            b.exec_count AS baseline_exec_count,
-            r.exec_count AS recent_exec_count,
-            b.plan_count AS baseline_plan_count,
-            r.plan_count AS recent_plan_count,
-            CASE
-                WHEN (r.avg_duration_ms - b.avg_duration_ms) * 100.0 / NULLIF(b.avg_duration_ms, 0) > 100 THEN 'CRITICAL'
-                WHEN (r.avg_duration_ms - b.avg_duration_ms) * 100.0 / NULLIF(b.avg_duration_ms, 0) > 50 THEN 'HIGH'
-                WHEN (r.avg_duration_ms - b.avg_duration_ms) * 100.0 / NULLIF(b.avg_duration_ms, 0) > 25 THEN 'MEDIUM'
-                ELSE 'LOW'
-            END AS severity,
-            /* #2150: text comes from collect.query_store_text now, and this projection's grain is exactly
-               that table's key, so it resolves here with a keyed join rather than inside the aggregate.
-               The MAX(query_text) sample below it stays as the fallback: it is where text lived before the
-               cutover, and it is what keeps the regression grid readable for existing history. */
-            COALESCE(x.query_sql_text, r.query_text_sample) AS query_text_sample,
-            r.last_execution_time
-        FROM recent_performance AS r
-        JOIN baseline_performance AS b
-          ON  b.database_name = r.database_name
-          AND b.query_id = r.query_id
-        LEFT JOIN query_store_text AS x
-          ON  x.server_id = $1
-          AND x.database_name = r.database_name
-          AND x.query_id = r.query_id
-        WHERE (r.avg_cpu_time_ms - b.avg_cpu_time_ms) * 100.0 / NULLIF(b.avg_cpu_time_ms, 0) > 25
-        ORDER BY additional_duration_ms DESC
-        LIMIT 50
-        """;
-
-    /// <summary>The table read's two arms (#5809), in place of <see cref="QueryStoreRegressionsRawPrefix"/>. Declared
-    /// ABOVE <see cref="QueryStoreRegressionsTableSql"/> on purpose: static field initializers run in textual order, so a
-    /// prefix declared below it was still null when the field read it, and the table SQL began at
-    /// <c>baseline_performance</c> and failed with 42601 on every call.</summary>
-    private static readonly string QueryStoreRegressionsTablePrefix = $$"""
-        WITH deduped_baseline AS (
-            SELECT
-                database_name,
-                query_id,
-                plan_id,
-                execution_count,
-                avg_duration_us,
-                avg_cpu_time_us,
-                avg_logical_io_reads,
-                1 AS rn
-            FROM query_store_interval_wide
-            WHERE server_id = $1
-            AND   collection_time >= $5
-            AND   collection_time < $2
-            AND   first_execution_time >= $5 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
-            AND   first_execution_time <= $2 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
-            AND   ($4::text[] IS NULL OR database_name = ANY($4))
-        ),
-        deduped_recent AS (
-            SELECT
-                database_name,
-                query_id,
-                plan_id,
-                query_text,
-                execution_count,
-                avg_duration_us,
-                avg_cpu_time_us,
-                avg_logical_io_reads,
-                last_execution_time,
-                1 AS rn
-            FROM query_store_interval_wide
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time >= $5
-            AND   collection_time <= $3
-            AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
-            AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
-            AND   ($4::text[] IS NULL OR database_name = ANY($4))
-        ),
-        """;
-
-    /// <summary>
-    /// The regression read over <c>query_store_interval_wide</c> (#5809): <see cref="QueryStoreRegressionsSql"/> with its
-    /// two deduping arms replaced by reads of the table, which already holds ONE row per interval identity (the raw arms'
-    /// <c>PARTITION BY</c> key, <c>execution_type_desc</c> included), that interval's latest snapshot, kept as raw is
-    /// written. Same parameters; $5 (the baseline start) is the gate's clamp (<see cref="QueryStoreIntervalWide.ClampedStart"/>,
-    /// <c>max(baseline start, raw's chunk floor)</c>), so the table never reaches below what raw itself still holds.
-    ///
-    /// <para><b>Why not <c>query_store_interval_latest</c>.</b> That table keeps Regular executions only, and the raw arms
-    /// count every outcome (Aborted and Exception too). The wide table keeps every outcome, so the averages and
-    /// exec counts are the same function of the same intervals.</para>
-    ///
-    /// <para><b>Bounds.</b> Each arm keeps the raw arm's own <c>collection_time</c> window (the semantic one) and adds the
-    /// #5533 <c>first_execution_time</c> range, both ends: from the arm's start minus
-    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/> (#4605: no row of the arm has an older first execution) to
-    /// its end plus <see cref="QueryStoreIntervalWide.FirstExecUpperSlackSql"/>. That range is what
-    /// <c>ix_query_store_interval_wide_server_first_exec</c> scans, so each arm reads its own days of the server's rows
-    /// and no sort runs to dedupe them. The recent arm also takes <c>collection_time &gt;= $5</c>, which only matters when
-    /// raw's floor is inside the recent window: raw then reads the recent arm from its floor too.</para>
-    ///
-    /// <para><b>The one edge where the two reads differ.</b> An interval collected on both sides of the window start (its
-    /// first snapshots before $2, its latest after) is counted by raw in BOTH arms, the partial snapshot in the baseline and
-    /// the latest in the recent window. The table holds only the latest, so it counts that interval in the recent arm alone.
-    /// That is at most one interval per plan (the one open at $2), its partial counts blended into a 7-day baseline, and the
-    /// table form is the one that does not count the same executions on both sides. The window END is exact: the gate reads
-    /// raw for an end before the table's <c>applied_through</c> (its clause 4), where a latest snapshot could sit past it.</para>
-    ///
-    /// <para><c>1 AS rn</c> keeps <see cref="QueryStoreRegressionsSuffix"/>'s <c>WHERE rn = 1</c> true for every row:
-    /// the table's row IS the raw arm's <c>rn = 1</c> row. A static readonly because the interval literals are derived
-    /// from TimeSpans; <c>$$"""</c> keeps <c>$1</c> literal.</para>
-    /// </summary>
-    public static readonly string QueryStoreRegressionsTableSql = QueryStoreRegressionsTablePrefix + "\n" + QueryStoreRegressionsSuffix;
+    public static readonly string QueryStoreRegressionsTableSql = BuildQueryStoreRegressionsSql(wide: true, useDailyTotals: true);
 
     /// <summary>
     /// The start of the baseline window of the regressions read whose recent window starts at <paramref name="startUtc"/>:
@@ -379,9 +218,20 @@ public sealed partial class ViewerDataService
             }
         }
 
-        await using var command = _dataSource.CreateCommand(QueryStoreRegressionsSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        AddQueryStoreRegressionsParameters(command, serverId, startUtc, endUtc, databaseNames, baselineStartUtc);
+        /* #5506: raw too reads the baseline's closed days from the daily totals, so it runs in the same kind of snapshot
+           transaction as the table form: the built days it names and the live rows it reads are one view of the store. */
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
+        await using (var readOnly = new NpgsqlCommand("SET TRANSACTION READ ONLY", connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds })
+        {
+            await readOnly.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        var plan = await QueryStoreRegressionBaseline.ResolveAsync(
+            connection, transaction, serverId, baselineStartUtc, startUtc, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, null, cancellationToken,
+            clampToRawFloor: true);
+        await using var command = new NpgsqlCommand(plan.BuiltDayCount > 0 ? QueryStoreRegressionsSql : s_rawLiveSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
+        AddQueryStoreRegressionsParameters(command, serverId, startUtc, endUtc, databaseNames, baselineStartUtc, plan);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         return await ReadQueryStoreRegressionRowsAsync(reader, cancellationToken);
     }
@@ -415,8 +265,10 @@ public sealed partial class ViewerDataService
                 return null;
             }
 
-            await using var command = new NpgsqlCommand(QueryStoreRegressionsTableSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
-            AddQueryStoreRegressionsParameters(command, serverId, startUtc, endUtc, databaseNames, plan.ClampedStart);
+            var baselinePlan = await QueryStoreRegressionBaseline.ResolveAsync(
+                connection, transaction, serverId, plan.ClampedStart, startUtc, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, null, cancellationToken);
+            await using var command = new NpgsqlCommand(baselinePlan.BuiltDayCount > 0 ? QueryStoreRegressionsTableSql : s_wideLiveSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
+            AddQueryStoreRegressionsParameters(command, serverId, startUtc, endUtc, databaseNames, plan.ClampedStart, baselinePlan);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             return await ReadQueryStoreRegressionRowsAsync(reader, cancellationToken);
         }
@@ -427,17 +279,25 @@ public sealed partial class ViewerDataService
         }
     }
 
-    /// <summary>The five parameters both forms of the read take: $1 server_id, $2 window start, $3 window end, $4 database
-    /// filter, $5 baseline start.</summary>
+    /// <summary>The eight parameters both forms of the read take: $1 server_id, $2 window start, $3 window end, $4 database
+    /// filter, $5 baseline start, $6 the baseline days read from the daily totals (#5506), $7 the end of the live half's low
+    /// <c>first_execution_time</c> range, $8 the start of its high range.</summary>
     private static void AddQueryStoreRegressionsParameters(
-        NpgsqlCommand command, int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames, DateTime baselineStartUtc)
+        NpgsqlCommand command, int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames, DateTime baselineStartUtc,
+        QueryStoreRegressionBaseline.Plan plan)
     {
         AddServerWindowParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(baselineStartUtc, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Date, Value = plan.RunDays });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.LowEnd, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.HighStart, DateTimeKind.Unspecified) });
     }
 
-    /// <summary>Reads the rows of either form of the read: both project the same <see cref="QueryStoreRegressionsSuffix"/>.</summary>
+    private static double? NullableMs(NpgsqlDataReader reader, int ordinal) =>
+        reader.IsDBNull(ordinal) ? null : Convert.ToDouble(reader.GetValue(ordinal));
+
+    /// <summary>Reads the rows of either form of the read: both project the same <see cref="QueryStoreRegressionBaseline.SuffixSql"/>.</summary>
     private static async Task<List<ViewerQueryStoreRegressionRow>> ReadQueryStoreRegressionRowsAsync(NpgsqlDataReader reader, CancellationToken cancellationToken)
     {
         var rows = new List<ViewerQueryStoreRegressionRow>();
@@ -453,17 +313,33 @@ public sealed partial class ViewerDataService
                 BaselineCpuMs = reader.IsDBNull(5) ? 0 : Convert.ToDouble(reader.GetValue(5)),
                 RecentCpuMs = reader.IsDBNull(6) ? 0 : Convert.ToDouble(reader.GetValue(6)),
                 CpuRegressionPercent = reader.IsDBNull(7) ? 0 : Convert.ToDouble(reader.GetValue(7)),
-                BaselineReads = reader.IsDBNull(8) ? 0 : Convert.ToDouble(reader.GetValue(8)),
-                RecentReads = reader.IsDBNull(9) ? 0 : Convert.ToDouble(reader.GetValue(9)),
-                IoRegressionPercent = reader.IsDBNull(10) ? 0 : Convert.ToDouble(reader.GetValue(10)),
-                AdditionalDurationMs = reader.IsDBNull(11) ? 0 : Convert.ToDouble(reader.GetValue(11)),
-                BaselineExecCount = reader.IsDBNull(12) ? 0 : reader.GetInt64(12),
-                RecentExecCount = reader.IsDBNull(13) ? 0 : reader.GetInt64(13),
-                BaselinePlanCount = reader.IsDBNull(14) ? 0 : reader.GetInt32(14),
-                RecentPlanCount = reader.IsDBNull(15) ? 0 : reader.GetInt32(15),
-                Severity = reader.IsDBNull(16) ? "" : reader.GetString(16),
-                QueryTextSample = reader.IsDBNull(17) ? "" : reader.GetString(17),
-                LastExecutionTime = reader.IsDBNull(18) ? null : reader.GetDateTime(18),
+                AdditionalDurationMs = reader.IsDBNull(8) ? 0 : Convert.ToDouble(reader.GetValue(8)),
+                BaselineExecCount = reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
+                RecentExecCount = reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
+                BaselinePlanCount = reader.IsDBNull(11) ? 0 : reader.GetInt32(11),
+                RecentPlanCount = reader.IsDBNull(12) ? 0 : reader.GetInt32(12),
+                Severity = reader.IsDBNull(13) ? "" : reader.GetString(13),
+                QueryTextSample = reader.IsDBNull(14) ? "" : reader.GetString(14),
+                LastExecutionTime = reader.IsDBNull(15) ? null : reader.GetDateTime(15),
+                RegressionReason = reader.IsDBNull(16) ? "" : reader.GetString(16),
+                BaselineAbortedCount = reader.IsDBNull(17) ? 0 : reader.GetInt64(17),
+                RecentAbortedCount = reader.IsDBNull(18) ? 0 : reader.GetInt64(18),
+                BaselineAbortedCpuMs = NullableMs(reader, 19),
+                RecentAbortedCpuMs = NullableMs(reader, 20),
+                BaselineAbortedDurationMs = NullableMs(reader, 21),
+                RecentAbortedDurationMs = NullableMs(reader, 22),
+                BaselineExceptionCount = reader.IsDBNull(23) ? 0 : reader.GetInt64(23),
+                RecentExceptionCount = reader.IsDBNull(24) ? 0 : reader.GetInt64(24),
+                BaselineExceptionCpuMs = NullableMs(reader, 25),
+                RecentExceptionCpuMs = NullableMs(reader, 26),
+                BaselineExceptionDurationMs = NullableMs(reader, 27),
+                RecentExceptionDurationMs = NullableMs(reader, 28),
+                BaselineRegularPerHour = NullableMs(reader, 29),
+                RecentRegularPerHour = NullableMs(reader, 30),
+                BaselineAbortedPerHour = NullableMs(reader, 31),
+                RecentAbortedPerHour = NullableMs(reader, 32),
+                BaselineExceptionPerHour = NullableMs(reader, 33),
+                RecentExceptionPerHour = NullableMs(reader, 34),
             });
         }
 

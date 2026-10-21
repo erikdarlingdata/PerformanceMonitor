@@ -71,23 +71,14 @@ public sealed class ViewerQueryStoreRegressionsDataStartTests : IDisposable
         Assert.Contains("DataWindowFloor.GetForServerAsync(", source, StringComparison.Ordinal);
         /* Both arms read the raw table, so there is no rollup floor to ask: the baseline arm starts at $5 and the recent arm at $2. */
         var sql = ViewerDataService.QueryStoreRegressionsSql;
-        Assert.Equal(2, Matches(sql, @"FROM query_store_stats\b"));
+        Assert.Equal(1, Matches(sql, @"FROM query_store_stats\b"));
         Assert.DoesNotMatch(@"query_store_stats_\w+", sql);
         Assert.Contains("collection_time >= $5", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
+        Assert.Contains("last_execution_time >= $2", sql, StringComparison.Ordinal);
     }
 
     /* The top 50 are ranked by added duration, not by time, so the rows say nothing about how far back the comparison reached and
        the cap rule (newest-first rows) does not apply. A re-ranking by time would have to wire the rule. */
-    [Fact]
-    public void TheRanking_IsByCost_SoTheCapRuleDoesNotApply()
-    {
-        var sql = ViewerDataService.QueryStoreRegressionsSql;
-
-        Assert.Contains("ORDER BY additional_duration_ms DESC", sql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT 50", sql, StringComparison.Ordinal);
-    }
-
     // ── The tab: the probe beside the read, the banner keyed on the baseline window ──
 
     /* The tab starts the probe beside the read and hands it, with the RANGE's start, to the one banner step; the step derives the

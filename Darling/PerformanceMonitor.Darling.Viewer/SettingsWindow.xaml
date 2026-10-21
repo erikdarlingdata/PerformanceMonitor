@@ -107,6 +107,18 @@
                                 <TextBlock Text="Collector memory bounds. The text budget caps how much query and plan text one database ships per collection pass (4-256, default 64); a smaller budget means shorter statements on the monitored server and slower history catch-up, never lost data — lower it when the fleet is a network hop away. Sweeps is how many servers collect at once (1-16, default 4); raise it when a large fleet queues behind collection on a host with headroom. Peak memory is roughly the two multiplied."
                                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                            TextWrapping="Wrap" Margin="0,4,0,0"/>
+                                <Grid Margin="0,8,0,0">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="70"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock x:Name="QueryStoreFetchTopNLabel" Grid.Column="0" Text="Query Store fetch top N (per database-hour):" VerticalAlignment="Center"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=QueryStoreFetchTopNLabel}" x:Name="QueryStoreFetchTopNTextBox" Grid.Column="1" Margin="8,0,0,0"/>
+                                </Grid>
+                                <TextBlock Text="Query text and plan XML are fetched for each database-hour's top N plans on CPU, duration, physical reads, writes, memory grant, tempdb and executions (0-100000, default 100), plus forced plans and plans the engine's plan correction names. A plan outside the top N keeps its runtime statistics, shows as not collected, and is fetched by a later run if it ranks then. 0 fetches every new plan. Takes effect on the next collection cycle, no restart."
+                                           FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
+                                           TextWrapping="Wrap" Margin="0,4,0,0"/>
                                 <TextBlock Text="Fill Query Store history gaps (outages, newly added or freshly restored databases) in bounded background slices. Disable to stop a heavy catch-up — for example after restoring a large database onto a monitored server — live collection is unaffected; re-enabling resumes where it left off."
                                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                            TextWrapping="Wrap" Margin="24,2,0,0"/>

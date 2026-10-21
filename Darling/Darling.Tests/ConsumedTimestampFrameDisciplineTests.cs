@@ -1080,7 +1080,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             .ToDictionary(m => "StoredEventCopies." + m.Groups[1].Value + "(", m => m.Groups[2].Value, StringComparer.Ordinal));
 
     /// <summary>
-    /// Row-type files carry no SQL, so the table comes from the enclosing type instead. Three entries, each
+    /// Row-type files carry no SQL, so the table comes from the enclosing type instead. Four entries, each
     /// asserted present in the file it names by
     /// <see cref="RowTypeTables_AreDeclaredAgainstTypesThatExist"/>. This exists because
     /// <c>ViewerHistoryRows.cs</c> holds all three history row types side by side and the frame differs
@@ -1091,12 +1091,17 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         ("ViewerQueryStatsHistoryRow", "query_stats"),
         ("ViewerProcedureStatsHistoryRow", "procedure_stats"),
         ("ViewerQueryStoreHistoryRow", "query_store_stats"),
+        /* #5506: the regressions row's SQL moved to Storage (QueryStoreRegressionBaseline), so its file names no table.
+           last_execution_time is query_store_stats' on the raw arm, and the same value copied into the wide table on the
+           wide arm: naive UTC either way. */
+        ("ViewerQueryStoreRegressionRow", "query_store_stats"),
     ];
 
     [Fact]
     public void RowTypeTables_AreDeclaredAgainstTypesThatExist()
     {
-        var rows = File.ReadAllText(RepoPath("Darling/PerformanceMonitor.Darling.Viewer/ViewerHistoryRows.cs"));
+        var rows = File.ReadAllText(RepoPath("Darling/PerformanceMonitor.Darling.Viewer/ViewerHistoryRows.cs"))
+            + File.ReadAllText(RepoPath("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.QueryStoreRegressions.cs"));
         var tables = TimestampColumns().Select(c => c.Table).ToHashSet(StringComparer.Ordinal);
 
         foreach (var (rowType, table) in RowTypeTables)

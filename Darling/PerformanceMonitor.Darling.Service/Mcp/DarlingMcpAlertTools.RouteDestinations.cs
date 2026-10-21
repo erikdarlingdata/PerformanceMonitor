@@ -51,6 +51,20 @@ public sealed partial class DarlingMcpAlertTools
         IReadOnlyList<string> Fields, IReadOnlyDictionary<string, string> Now, IReadOnlyDictionary<string, string> Previous, string? PreviousRecipients = null);
 
     /// <summary>
+    /// The sealer a route write uses: the Viewer's, which refuses a value that cannot be stored (too long, a lone surrogate) with its words,
+    /// as invalid, and the sentence to refuse with when the ring cannot seal. The MCP route tools and the web dashboard's route writes (#6264)
+    /// both take it here, so the two cannot seal a destination differently.
+    /// </summary>
+    internal static (Func<string, PasswordBinding, string>? Seal, string? Refusal) RouteSealer(IPasswordKeyRing ring)
+    {
+        ArgumentNullException.ThrowIfNull(ring);
+        Func<string, PasswordBinding, string>? seal = ring.Status.CanSeal
+            ? (text, binding) => NotificationRouteWriter.SealValue(text, binding, (plain, bound) => ring.Seal(plain, bound))
+            : null;
+        return (seal, ring.Status.CanSeal ? null : ring.Status.Reason ?? NotificationRouteWriter.NoKeyText);
+    }
+
+    /// <summary>
     /// Seals and stores the destinations in <paramref name="request"/> on route <paramref name="routeId"/>, on the caller's open
     /// transaction (a create runs it in the transaction that made the route, so a refusal leaves no route behind). Throws
     /// <see cref="NotificationRouteRefusedException"/> for a value that cannot be stored; a database refusal propagates as a
@@ -66,11 +80,7 @@ public sealed partial class DarlingMcpAlertTools
         ArgumentNullException.ThrowIfNull(proxies);
         ArgumentNullException.ThrowIfNull(ring);
 
-        /* The Viewer's sealer: a value that cannot be stored (too long, a lone surrogate) is refused with its words, as invalid. */
-        Func<string, PasswordBinding, string>? seal = ring.Status.CanSeal
-            ? (text, binding) => NotificationRouteWriter.SealValue(text, binding, (plain, bound) => ring.Seal(plain, bound))
-            : null;
-        var refusal = ring.Status.CanSeal ? null : ring.Status.Reason ?? NotificationRouteWriter.NoKeyText;
+        var (seal, refusal) = RouteSealer(ring);
         var columns = new List<string>();
         var values = new string[5];
 

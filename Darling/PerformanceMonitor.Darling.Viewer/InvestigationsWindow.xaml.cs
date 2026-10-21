@@ -528,9 +528,17 @@ public partial class InvestigationsWindow : Window
 
         try
         {
-            await _dataService.SaveInvestigationProfileAsync(scope!.ServerId, scope.TagId, ProfileTextBox.Text, _login);
+            /* The version this window showed (#6274): a profile saved by someone else since is refused, not overwritten. */
+            var shown = _profiles.FirstOrDefault(p => p.ScopeServerId == scope!.ServerId && p.ScopeTagId == scope.TagId);
+            await _dataService.SaveInvestigationProfileAsync(scope!.ServerId, scope.TagId, ProfileTextBox.Text, _login, shown?.ModifiedAtUtc);
             ShowStatus(string.IsNullOrWhiteSpace(ProfileTextBox.Text) ? "Profile removed." : "Profile saved.");
             await LoadProfilesAsync();
+        }
+        catch (PerformanceMonitor.Darling.Storage.InvestigationProfileConflictException ex)
+        {
+            /* Show what is saved now, so the next save carries its version. */
+            await LoadProfilesAsync();
+            ShowStatus(ex.Message);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

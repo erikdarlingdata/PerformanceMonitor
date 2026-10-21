@@ -68,6 +68,7 @@ public sealed class StoreConfigViewPropagationTests
         "PlanContentRetentionDays",
         "PlanXmlCompression",
         "QueryStoreBackfillEnabled",
+        "QueryStoreFetchTopN",
         "QueryStoreTextBudgetMb",
     };
 

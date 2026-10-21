@@ -151,6 +151,7 @@ public sealed class DarlingMcpPlanTools
             var xml = read?.PlanXml;
             if (string.IsNullOrEmpty(xml))
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_store", cancellationToken)
+                    ?? await QueryStoreNotCollectedAsync(postgres, resolved.ServerId, database_name, query_id, plan_id, cancellationToken)
                     ?? McpHelpers.Status(
                         "unavailable",
                         $"No stored Query Store plan found for query_id {query_id} in database '{database_name}'{PlanSuffix(plan_id)}. The plan may not have been collected yet, the database's Query Store may be off or its capture mode may exclude this query, or the plan has been purged.");
@@ -168,6 +169,17 @@ public sealed class DarlingMcpPlanTools
         {
             return McpHelpers.FormatError("analyze_query_store_plan", ex);
         }
+    }
+
+    /// <summary>
+    /// #6211: a Query Store plan that is not stored although its runtime statistics are: say it was not collected, and why (not in its
+    /// database-hour's top N), as a <c>not_collected</c> answer. <c>null</c> when nothing was seen at all, so the caller's own answer stands.
+    /// </summary>
+    internal static async Task<string?> QueryStoreNotCollectedAsync(
+        NpgsqlDataSource postgres, int serverId, string databaseName, long queryId, long? planId, CancellationToken cancellationToken)
+    {
+        var reason = await DarlingStoredPlanReader.QueryStoreNotCollectedReasonAsync(postgres, serverId, databaseName, queryId, planId, "plan XML", cancellationToken);
+        return reason is null ? null : McpHelpers.Status("not_collected", reason);
     }
 
     [McpServerTool(Name = "analyze_plan_xml"), Description(
@@ -256,6 +268,7 @@ public sealed class DarlingMcpPlanTools
                 postgres, resolved.ServerId, database_name, query_id, plan_id, maxOutputChars: PlanXmlOutputChars, cancellationToken: cancellationToken);
             if (string.IsNullOrEmpty(xml))
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_store", cancellationToken)
+                    ?? await QueryStoreNotCollectedAsync(postgres, resolved.ServerId, database_name, query_id, plan_id, cancellationToken)
                     ?? McpHelpers.Status(
                         "unavailable",
                         $"No stored Query Store plan found for query_id {query_id} in database '{database_name}'{PlanSuffix(plan_id)}.");
@@ -470,6 +483,17 @@ public sealed class DarlingMcpPlanTools
                     DarlingReproScript.KindQueryStore => await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_store", cancellationToken),
                     _ => await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_snapshots", cancellationToken),
                 };
+                /* #6211: a Query Store query whose statistics are stored but whose text was not fetched (not in its database-hour's top N). */
+                if (notCollected is null && kind == DarlingReproScript.KindQueryStore)
+                {
+                    var reason = await DarlingStoredPlanReader.QueryStoreNotCollectedReasonAsync(
+                        postgres, resolved.ServerId, database_name!, query_id!.Value, plan_id, "statement text", cancellationToken);
+                    if (reason is not null)
+                    {
+                        notCollected = McpHelpers.Status("not_collected", reason);
+                    }
+                }
+
                 return notCollected
                     ?? McpHelpers.Status("unavailable", $"No stored query text found for this {kind} key, so no repro script can be built.");
             }

@@ -1743,7 +1743,7 @@
                             </Grid.RowDefinitions>
                             <TextBlock Grid.Row="0" Margin="8,4,0,4" FontSize="11"
                                        Foreground="{DynamicResource ForegroundMutedBrush}"
-                                       Text="Queries whose Query Store performance regressed — recent-window averages vs. the baseline captured before the window, kept when CPU regressed more than 25%, ranked by total added duration. Double-click a row for its execution history."/>
+                                       Text="Queries whose Query Store performance regressed — recent-window averages vs. the baseline captured before the window, kept when Regular CPU regressed more than 25% (cost compares Regular runs only), or when timeouts (Aborted runs) or errors (Exception runs) per hour at least doubled (Why). The Aborted and Exception counts, CPU and duration per execution sit beside the Regular figures, ranked by total added duration. Double-click a row for its execution history."/>
                             <!-- "Showing since <start>" when this server's Query Store history starts after the BASELINE window does: the read
                                  compares the range with the 7 days before it, so the notice keys on that earlier window (#4966). -->
                             <TextBlock Grid.Row="1" x:Name="QueryStoreRegressionsTruncationBanner" Visibility="Collapsed"
@@ -1767,6 +1767,9 @@
                                     </DataGridTemplateColumn>
                                     <DataGridTextColumn Binding="{Binding Severity}" Width="80">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Severity" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Severity" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding RegressionReason}" Width="110">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RegressionReason" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Why" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding DatabaseName}" Width="120">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
@@ -1807,14 +1810,59 @@
                                     <DataGridTextColumn Binding="{Binding RecentCpuMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentCpuMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent CPU (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding IoRegressionPercent, StringFormat='{}{0:N2}%'}" ElementStyle="{StaticResource NumericCell}" Width="90">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="IoRegressionPercent" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="I/O &#x0394;%" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding BaselineAbortedCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="100">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselineAbortedCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Baseline Timeouts" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding BaselineReads, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="100">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselineReads" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Base Reads (pages)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding RecentAbortedCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="100">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentAbortedCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent Timeouts" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding RecentReads, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="100">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentReads" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent Reads (pages)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding BaselineAbortedCpuMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="130">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselineAbortedCpuMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Baseline Timeouts CPU (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding RecentAbortedCpuMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="130">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentAbortedCpuMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent Timeouts CPU (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding BaselineAbortedDurationMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="130">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselineAbortedDurationMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Baseline Timeouts Dur (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding RecentAbortedDurationMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="130">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentAbortedDurationMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent Timeouts Dur (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding BaselineAbortedPerHour, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselineAbortedPerHour" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Baseline Timeouts/hr" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding RecentAbortedPerHour, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentAbortedPerHour" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent Timeouts/hr" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding BaselineExceptionCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="100">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselineExceptionCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Baseline Errors" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding RecentExceptionCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="100">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentExceptionCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent Errors" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding BaselineExceptionCpuMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="130">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselineExceptionCpuMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Baseline Errors CPU (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding RecentExceptionCpuMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="130">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentExceptionCpuMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent Errors CPU (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding BaselineExceptionDurationMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="130">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselineExceptionDurationMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Baseline Errors Dur (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding RecentExceptionDurationMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="130">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentExceptionDurationMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent Errors Dur (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding BaselineExceptionPerHour, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselineExceptionPerHour" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Baseline Errors/hr" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding RecentExceptionPerHour, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentExceptionPerHour" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent Errors/hr" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding BaselineRegularPerHour, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BaselineRegularPerHour" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Baseline Execs/hr" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding RecentRegularPerHour, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RecentRegularPerHour" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Recent Execs/hr" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
