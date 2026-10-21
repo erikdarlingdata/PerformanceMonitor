@@ -64,14 +64,12 @@ public sealed partial class ViewerDataService
 
     public const string NotificationRouteUpdateSql = NotificationRouteWriter.UpdateSql;
 
-    public const string NotificationRouteSetEnabledSql =
-        "UPDATE config_notification_routes SET enabled = $2, modified_at = (now() AT TIME ZONE 'UTC') WHERE route_id = $1";
+    public const string NotificationRouteSetEnabledSql = NotificationRouteWriter.SetEnabledSql;
 
     /// <summary>The column has no foreign key (V193), so a delete clears the references to the deleted route first (#6036).</summary>
-    public const string NotificationRouteClearFallbackSql =
-        "UPDATE config_notification_routes SET fallback_route_id = NULL, modified_at = (now() AT TIME ZONE 'UTC') WHERE fallback_route_id = $1";
+    public const string NotificationRouteClearFallbackSql = NotificationRouteWriter.ClearFallbackSql;
 
-    public const string NotificationRouteDeleteSql = "DELETE FROM config_notification_routes WHERE route_id = $1";
+    public const string NotificationRouteDeleteSql = NotificationRouteWriter.DeleteSql;
 
     /// <summary>Every route, in resolution order. A read-only seat gets the secret-free projection.</summary>
     public async Task<IReadOnlyList<NotificationRouteRow>> GetNotificationRoutesAsync(CancellationToken cancellationToken = default)
@@ -142,10 +140,18 @@ public sealed partial class ViewerDataService
     /// Saves a route with its webhook destinations sealed (#5366) and returns its <c>route_id</c>. The save itself is
     /// <see cref="NotificationRouteWriter.SaveAsync"/>, the one copy the MCP route tools share (#6231). <paramref name="stored"/> is the
     /// row as read, for the values a blank box keeps; <paramref name="parent"/> is the settings row, which holds each channel's proxy.
+    /// #6274: the stored row's <c>ModifiedAtUtc</c> is the version this save expects (a route saved elsewhere since is refused, not
+    /// overwritten), and <paramref name="login"/> is the person, whose change to the route's agent level, limits, scope or match is journaled.
     /// </summary>
+    public Task<int> SaveNotificationRouteSealedAsync(
+        NotificationRouteRow typed, NotificationRouteRow? stored, NotificationRow parent, ViewerPasswordSealer? sealer,
+        string? refusal, CancellationToken cancellationToken = default) =>
+        SaveNotificationRouteSealedAsync(typed, stored, parent, sealer, refusal, null, cancellationToken);
+
+    /// <summary>The save with the person who makes it (#6274): see the overload above.</summary>
     public async Task<int> SaveNotificationRouteSealedAsync(
         NotificationRouteRow typed, NotificationRouteRow? stored, NotificationRow parent, ViewerPasswordSealer? sealer,
-        string? refusal, CancellationToken cancellationToken = default)
+        string? refusal, string? login, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(typed);
         ArgumentNullException.ThrowIfNull(parent);
@@ -167,7 +173,7 @@ public sealed partial class ViewerDataService
             return await NotificationRouteWriter.SaveAsync(
                 _dataSource, typed.ToDraft(), stored?.ToDraft(),
                 new WebhookProxies(parent.TeamsProxy, parent.SlackProxy, parent.GenericProxy, parent.PagerDutyProxy),
-                seal, refusal, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+                seal, refusal, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken, login);
         }
         catch (NotificationRouteRefusedException ex) when (ex.Kind == NotificationRouteRefusalKind.Value)
         {
@@ -187,38 +193,48 @@ public sealed partial class ViewerDataService
         }
     }
 
-    public async Task SetNotificationRouteEnabledAsync(int routeId, bool enabled, CancellationToken cancellationToken = default)
-    {
-        await using var command = _dataSource.CreateCommand(NotificationRouteSetEnabledSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });
-        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = enabled });
-        await ExecuteWriteAsync(command, cancellationToken);
-    }
+    public Task SetNotificationRouteEnabledAsync(int routeId, bool enabled, CancellationToken cancellationToken = default) =>
+        SetNotificationRouteEnabledAsync(routeId, enabled, null, cancellationToken);
 
-    /// <summary>Clears every other route's fallback reference to the route (the column has no foreign key), then deletes it,
-    /// in one transaction (#6036).</summary>
-    public async Task DeleteNotificationRouteAsync(int routeId, CancellationToken cancellationToken = default)
+    /// <summary>Turns a route on or off. #6274: <paramref name="login"/> is the person; turning a route that has an agent level on or
+    /// off writes a <c>route_agent_changed</c> journal row in the same transaction (a disabled Off route no longer stops the lookup).</summary>
+    public async Task SetNotificationRouteEnabledAsync(int routeId, bool enabled, string? login, CancellationToken cancellationToken = default)
     {
         try
         {
-            await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
-            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-            await using (var clear = new NpgsqlCommand(NotificationRouteClearFallbackSql, connection, transaction))
-            {
-                clear.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-                clear.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });
-                await clear.ExecuteNonQueryAsync(cancellationToken);
-            }
+            await NotificationRouteWriter.SetEnabledAsync(
+                _dataSource, routeId, enabled, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken, login);
+        }
+        catch (NotificationRouteRefusedException ex)
+        {
+            throw new ArgumentException(ex.Message, nameof(login));
+        }
+        catch (PostgresException ex) when (ex.SqlState == InsufficientPrivilegeSqlState)
+        {
+            throw new ViewerReadOnlyException(ex);
+        }
+        catch (PostgresException ex) when (ex.SqlState is UndefinedColumnSqlState or UndefinedTableSqlState)
+        {
+            throw new ViewerSchemaSkewException(ex);
+        }
+    }
 
-            await using (var delete = new NpgsqlCommand(NotificationRouteDeleteSql, connection, transaction))
-            {
-                delete.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-                delete.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });
-                await delete.ExecuteNonQueryAsync(cancellationToken);
-            }
+    public Task DeleteNotificationRouteAsync(int routeId, CancellationToken cancellationToken = default) =>
+        DeleteNotificationRouteAsync(routeId, null, cancellationToken);
 
-            await transaction.CommitAsync(cancellationToken);
+    /// <summary>Clears every other route's fallback reference to the route (the column has no foreign key), then deletes it,
+    /// in one transaction (#6036). #6274: <paramref name="login"/> is the person; deleting a route that had an agent level writes a
+    /// <c>route_agent_changed</c> journal row in the same transaction.</summary>
+    public async Task DeleteNotificationRouteAsync(int routeId, string? login, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await NotificationRouteWriter.DeleteAsync(
+                _dataSource, routeId, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken, login);
+        }
+        catch (NotificationRouteRefusedException ex)
+        {
+            throw new ArgumentException(ex.Message, nameof(login));
         }
         catch (PostgresException ex) when (ex.SqlState == InsufficientPrivilegeSqlState)
         {
@@ -470,6 +486,7 @@ public sealed class NotificationRouteRow
         AgentExpiryMinutes = AgentExpiryMinutes,
         SendResolutions = SendResolutions,
         FallbackRouteId = FallbackRouteId,
+        ModifiedAtUtc = ModifiedAtUtc == default ? null : ModifiedAtUtc,
     };
 
     public NotificationRouteRow Clone() => new()

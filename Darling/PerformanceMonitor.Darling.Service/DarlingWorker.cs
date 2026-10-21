@@ -3405,7 +3405,9 @@ LIMIT 1";
                 runtime.Config.Database,
                 LiveAlertTargets(_registryState.Read()?.Servers)),
             /* #4961: this install's id, made at start before any worker runs. */
-            installId: () => _installId);
+            installId: () => _installId,
+            /* #6211: live provider like its siblings, so a store change to query_store_fetch_top_n takes effect on the next cycle, no restart. */
+            queryStoreFetchTopN: () => StoreConfigProvider.ClampQueryStoreFetchTopN(config.QueryStoreFetchTopN));
         _runner = runner;
         var servers = new List<ServerLoopState>();
         /* #1581 cold-start stagger: capture ONE startup instant so every initial server's first-sweep offset is

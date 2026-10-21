@@ -144,7 +144,7 @@ public sealed class ViewerControlPlaneMigration
                 await dataService.UpdateServiceFlagsAsync(
                     storeService.CapturePlans, _appSettings.McpEnabled, _appSettings.McpPort,
                     _appSettings.WebEnabled, _appSettings.WebPort, storeService.QueryStoreBackfillEnabled,
-                    storeService.QueryStoreTextBudgetMb, storeService.MaxConcurrentSweeps, cancellationToken);
+                    storeService.QueryStoreTextBudgetMb, storeService.MaxConcurrentSweeps, storeService.QueryStoreFetchTopN, cancellationToken);
                 imported++;
             }
         }

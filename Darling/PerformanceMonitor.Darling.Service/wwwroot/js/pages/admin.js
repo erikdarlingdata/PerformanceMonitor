@@ -24,10 +24,11 @@
    it reaches a row. */
 
 import { VIZ } from "../panels.js";
-import { el, mount, loadingStrip, errorStrip, emptyStrip, noticeStrip, readTool, apiGet, apiWrite, onSessionExpired, localizeIsoText } from "../util.js";
+import { el, mount, loadingStrip, errorStrip, emptyStrip, noticeStrip, readTool, apiGet, apiGetFleet, apiWrite, onSessionExpired, localizeIsoText } from "../util.js";
 import { getSession } from "../views-api.js";
 import { writeNote, startPractice, writeAccess, SIGN_IN_SENTENCE, NOTE_MAX_LENGTH, NOTE_MAX_DAYS, NOTE_DEFAULT_DAYS } from "../investigation-writes.js";
 import { buildAgentChanges, resetAgentChangesStatus } from "./admin-agent-changes.js";
+import { buildProfiles, readAgentSetupAccess, routeColumns, routeEditorNodes, routeListOnlyNodes, routeUseText } from "./admin-agent-setup.js";
 
 export const SERVER_COLUMNS = [
   { key: "display_name", label: "Display Name" },
@@ -670,6 +671,7 @@ const TABS = [
   { id: "pending", label: "Pending Notes" },
   { id: "overrides", label: "Threshold Overrides" },
   { id: "agent-changes", label: "Agent changes" },
+  { id: "profiles", label: "Environment Profiles" },
 ];
 
 /* The tab last shown, so a repaint with a bare #/admin returns to it. */
@@ -1186,8 +1188,8 @@ async function submitEdit() {
 }
 
 const ROUTES_NOTE =
-  "Read only. Destinations (webhook URLs, keys) are never reported by the service; only the names of the channels a " +
-  "route sets are shown. Add, edit and test stay in the desktop Settings window.";
+  "Destinations (webhook URLs, keys) are never reported by the service; only the names of the channels a " +
+  "route sets are shown. Testing a destination stays in the desktop Settings window.";
 
 /* #5998: the signing status of the generic webhook, in sentences. GET /api/webhook-signing answers presence and dates only (never a
    key): whether a key is set, whether a rotation is in its window and when it ends, and when the last rotation began. The store
@@ -1210,23 +1212,56 @@ export function signingStatusLines(data) {
 }
 
 async function buildRoutes(body, generation) {
-  const [res, signing] = await Promise.all([readTool("get_notification_routes", {}), apiGet("/api/webhook-signing")]);
+  const [res, signing, session] = await Promise.all([readTool("get_notification_routes", {}), apiGet("/api/webhook-signing"), getSession()]);
   if (generation !== renderGeneration) return;
   const bad = failure(res);
   if (bad) return mount(body, bad);
-  const rows = routeRows(res.data);
+  /* #6264: the agent channel is edited here as in the Viewer; the seat edits only when the session may write AND the store login holds the grants. */
+  const access = await readAgentSetupAccess(session);
+  if (generation !== renderGeneration) return;
+  const sourceRoutes = Array.isArray(res.data && res.data.routes) ? res.data.routes : [];
+  const rows = routeRows(res.data).map((row, i) => ({ ...row, agent_use: routeUseText(sourceRoutes[i]) }));
+  const scopes = access.routes ? await readScopes() : { servers: [], tags: [] };
+  if (generation !== renderGeneration) return;
+  const options = {
+    canEdit: access.routes,
+    routes: sourceRoutes,
+    servers: scopes.servers,
+    tags: scopes.tags,
+    repaint: () => (shownTab === "routes" && shownBody ? startBuilder("routes", shownBody, ++renderGeneration) : undefined),
+  };
   /* A failed signing read leaves the strip out; the routes below are the page. */
   const signingNodes = signing && signing.kind === "data" ? signingStatusLines(signing.data).map((t) => noticeStrip(t)) : [];
   mount(body, [
+    ...(access.routes ? routeEditorNodes(options) : routeListOnlyNodes(access.message)),
     noticeStrip(ROUTES_NOTE),
     ...signingNodes,
     VIZ.table({ routes: rows }, {
       rowsKey: "routes",
-      columns: ROUTE_COLUMNS,
+      columns: routeColumns(ROUTE_COLUMNS, options),
       emptyText: "No routes. Every alert goes to every channel configured in Settings.",
     }),
   ]);
 }
+
+/** The servers and tags the scope pickers offer, from the fleet read: [{id, name}]. */
+async function readScopes() {
+  const res = await apiGetFleet();
+  const d = res && res.kind !== "error" ? res.data || {} : {};
+  return {
+    servers: (Array.isArray(d.cards) ? d.cards : []).filter((c) => Number.isInteger(c.server_id)).map((c) => ({ id: c.server_id, name: c.display_name || "server " + c.server_id })),
+    tags: (Array.isArray(d.tags) ? d.tags : []).filter((t) => Number.isInteger(t.id)).map((t) => ({ id: t.id, name: t.name || "tag " + t.id })),
+  };
+}
+
+/* Environment Profiles (#6264) lives in admin-agent-setup.js; it gets this file's helpers and repaints through startBuilder. */
+const buildProfilesTab = (body, generation) => buildProfiles(body, generation, {
+  getSession,
+  failure,
+  readScopes,
+  isCurrent: (g) => g === renderGeneration,
+  repaint: () => (shownTab === "profiles" && shownBody ? startBuilder("profiles", shownBody, ++renderGeneration) : undefined),
+});
 
 const SETTINGS_NOTE =
   "Read only. Delivery credentials (SMTP, webhooks) are not reported by this read. The data-collection flags " +
@@ -1937,7 +1972,7 @@ const agentChangesContext = {
 };
 const buildAgentChangesTab = (body, generation) => buildAgentChanges(body, generation, agentChangesContext);
 
-const BUILDERS = { servers: buildServers, routes: buildRoutes, settings: buildSettings, feedback: buildFeedback, practice: buildPractice, pending: buildPending, overrides: buildOverrides, "agent-changes": buildAgentChangesTab };
+const BUILDERS = { servers: buildServers, routes: buildRoutes, settings: buildSettings, feedback: buildFeedback, practice: buildPractice, pending: buildPending, overrides: buildOverrides, "agent-changes": buildAgentChangesTab, profiles: buildProfilesTab };
 
 /* Run a tab's builder. A builder that throws leaves an error strip: in the Servers tab's table area when its boxes are on the
    page (the form above it is never replaced), else in the body. */

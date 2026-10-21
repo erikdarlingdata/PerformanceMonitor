@@ -593,6 +593,8 @@ public sealed class ViewerSigningKeyLiveTests
             var kept = stored.Clone();
             kept.GenericUrl = stored.GenericUrl;
             await viewer.SaveNotificationRouteSealedAsync(kept, stored, parent, null, null, ct);
+            /* The save above is a newer version of the route (#6274): the next screen reads it again, as the Viewer's does after a save. */
+            stored = (await viewer.GetNotificationRoutesAsync(ct)).Single(r => r.RouteId == routeId);
             var changed = stored.Clone();
             changed.GenericUrl = "https://another.test/hook-not-real";
             var refused = await Assert.ThrowsAsync<ViewerPasswordRefusedException>(

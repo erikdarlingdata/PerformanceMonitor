@@ -197,7 +197,8 @@ public partial class ViewerServerTab
                 HidePlanLoading();
                 MessageBox.Show(
                     "No execution plan was captured for this row. The plan may not have been collected yet, " +
-                    "or it aged out of the store's retention window.",
+                    "or it aged out of the store's retention window. A Query Store plan outside its database-hour's top N " +
+                    "(Settings, Query Store fetch top N) is not fetched until a later run ranks it.",
                     "No Plan Available",
                     MessageBoxButton.OK,
                     MessageBoxImage.Information);

@@ -2082,7 +2082,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_custom_views_personal_name ON config.custom
 ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS starts_at_utc timestamp;";
 
     /// <summary>
-    /// V209 (#6281, part of #5632): the MCP tag writes may not change which servers an agent route covers. A tag-scoped route covers
+    /// V209 (#6211): <c>config.config_service.query_store_fetch_top_n</c>, how many plans per database-hour and metric the Query Store collector
+    /// fetches the text and plan XML of. Default 100 (the measured knee: about 86% of new plans' CPU for about a third of the fetches). 0 or less
+    /// means every new plan, the behaviour before this rung. Read live each cycle, so a change needs no restart. One catalog-only <c>ADD COLUMN</c>
+    /// with a constant default; no backfill, no GRANT (the roles' table-level SELECT covers a new column; the Viewer's settings save writes it as the admin role, whose
+    /// table-level UPDATE on the config schema covers it, while the viewer role holds only <c>UPDATE (config_version, updated_at)</c> on this table) and no trigger (the config_version trigger fires on any row update).
+    /// </summary>
+    private const string V209Sql = @"
+ALTER TABLE config.config_service ADD COLUMN IF NOT EXISTS query_store_fetch_top_n integer NOT NULL DEFAULT 100;";
+
+    /// <summary>
+    /// V210 (#6281, part of #5632): the MCP tag writes may not change which servers an agent route covers. A tag-scoped route covers
     /// every registered server mapped to its tag or to any descendant of it (<c>NotificationRouteScopeExpander</c>), and
     /// <c>update_notification_route</c> refuses over MCP to change an agent route's scope, so the tag tools, which write
     /// <c>config.server_tags</c> and <c>config.server_tag_map</c>, could not be left to change the same set.
@@ -2102,7 +2112,7 @@ ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS starts_at_utc time
     /// hash), so <c>remove_server</c> over MCP is refused for a server mapped under an agent route's tag. A rename, a colour or a
     /// sort-order change does not touch coverage and is not looked at. No new column, no backfill, no grant.</para>
     /// </summary>
-    private const string V209Sql = @"
+    private const string V210Sql = @"
 CREATE OR REPLACE FUNCTION config.agent_route_tag_guard()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -2564,7 +2574,8 @@ $rung$;";
         new Migration(206, "collector-enabled-inherit", V206Sql),
         new Migration(207, "change-watches", ChangeWatchStore.V207Sql),
         new Migration(208, "mute-rule-starts-at", V208Sql),
-        new Migration(209, "mcp-agent-route-tag-guard", V209Sql),
+        new Migration(209, "query-store-fetch-top-n", V209Sql),
+        new Migration(210, "mcp-agent-route-tag-guard", V210Sql),
     };
 
     /// <summary>

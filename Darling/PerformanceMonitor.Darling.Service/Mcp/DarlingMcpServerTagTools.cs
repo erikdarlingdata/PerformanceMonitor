@@ -710,7 +710,7 @@ public sealed class DarlingMcpServerTagTools
 
     // -------------------------------------------------------------- results
 
-    /// <summary>The SQLSTATE the store's guard on these writes raises (V209, #6281) when a tag write would change which servers an
+    /// <summary>The SQLSTATE the store's guard on these writes raises (V210, #6281) when a tag write would change which servers an
     /// agent route covers. The message names the route.</summary>
     private const string AgentRouteSqlState = "DL403";
 

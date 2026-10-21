@@ -381,6 +381,11 @@ public sealed class DarlingCollectorRunner
        the runner. Lite has no equivalent and keeps the collector's compile-time constant. */
     private readonly Func<int> _textBudgetMb;
 
+    /* #6211: plans per database-hour and metric whose text and plan XML the query_store fetch pulls (config_service.query_store_fetch_top_n,
+       V209). Provider-read at each fetch, so a store change takes effect on the next cycle with no restart. Zero or less, which is also what a
+       caller that passes no provider gets, fetches every new plan: the behaviour before the setting. */
+    private readonly Func<int> _queryStoreFetchTopN;
+
     /* Feeds the procedure_stats plan-capture cadence (#2862) — how many collection cycles pass between
        plan renders for that ONE collector. Provider-read for the same reason as the knobs above: the
        value is re-read on every cycle, so whichever source ends up feeding it is honored on the NEXT
@@ -999,8 +1004,9 @@ public sealed class DarlingCollectorRunner
     /// every cycle and therefore the pre-#2862 collector. Every existing caller and test keeps the
     /// collector it already had without naming the knob.
     /// </param>
-    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null, Func<int>? procedureStatsPlanCycleInterval = null, Func<string, int, IReadOnlyList<string>>? databaseScope = null, PgLogHashKey? logHashKey = null, QueryStoreWriteFence? queryStoreWriteFence = null, Func<ServerRuntime, IReadOnlyList<string>>? separatelyMonitoredDatabases = null, Func<string?>? installId = null, Func<bool>? queryStatsDeferredPlanFetch = null, Func<string?>? procedureStatsDeferredPlanFetch = null)
+    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null, Func<int>? procedureStatsPlanCycleInterval = null, Func<string, int, IReadOnlyList<string>>? databaseScope = null, PgLogHashKey? logHashKey = null, QueryStoreWriteFence? queryStoreWriteFence = null, Func<ServerRuntime, IReadOnlyList<string>>? separatelyMonitoredDatabases = null, Func<string?>? installId = null, Func<bool>? queryStatsDeferredPlanFetch = null, Func<string?>? procedureStatsDeferredPlanFetch = null, Func<int>? queryStoreFetchTopN = null)
     {
+        _queryStoreFetchTopN = queryStoreFetchTopN ?? (() => 0);
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         QueryTagSightings = new QueryTagSightingBuffer(postgres, logger);
         _queryStoreWriteFence = queryStoreWriteFence;
@@ -5692,7 +5698,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
     /// one — the probe compares against whatever the engine reported, and null only means the payload row
     /// predated the hash column.</para>
     /// </summary>
-    private static IReadOnlyList<(long PlanId, string? PlanHash)> ExtractPlanReferences<TRow>(List<TRow> batch)
+    private static IReadOnlyList<(long PlanId, string? PlanHash)> ExtractPlanReferences<TRow>(List<TRow> batch, HashSet<long>? onlyPlanIds = null)
     {
         if (batch is not List<QueryStoreCollector.Row> rows || rows.Count == 0)
         {
@@ -5702,7 +5708,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
         var seen = new Dictionary<long, string?>();
         foreach (var row in rows)
         {
-            if (row.PlanId <= 0)
+            if (row.PlanId <= 0 || (onlyPlanIds is not null && !onlyPlanIds.Contains(row.PlanId)))
             {
                 continue;
             }
@@ -5724,7 +5730,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
     }
 
     /// <summary>Text twin of <see cref="ExtractPlanReferences"/>, keyed by query_id with query_hash.</summary>
-    private static IReadOnlyList<(long QueryId, string? QueryHash)> ExtractTextReferences<TRow>(List<TRow> batch)
+    private static IReadOnlyList<(long QueryId, string? QueryHash)> ExtractTextReferences<TRow>(List<TRow> batch, HashSet<long>? onlyQueryIds = null)
     {
         if (batch is not List<QueryStoreCollector.Row> rows || rows.Count == 0)
         {
@@ -5734,7 +5740,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
         var seen = new Dictionary<long, string?>();
         foreach (var row in rows)
         {
-            if (row.QueryId <= 0)
+            if (row.QueryId <= 0 || (onlyQueryIds is not null && !onlyQueryIds.Contains(row.QueryId)))
             {
                 continue;
             }
@@ -5889,6 +5895,13 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
            from ever reaching the fetch. The provider's engine is the same gate in production (the
            SQL Server provider is the only one that reports SqlServer, and its commands are the
            SqlCommands the SqlConnection overload built), and it is a fact a fake can state. */
+        /* #6211: which of this database's plans (and their queries) are worth a fetch this run. Null = every plan, the behaviour before the
+           setting (the setting at 0, a batch that is not query_store rows, or a store read that failed: a fault here must cost fetches, never
+           the forced plans). Ranked over the rows already read, so it adds nothing to the monitored server. */
+        var fetchSelection = ((context.CapturePlanXml || context.FetchQueryTextSeparately) && targetProvider.Engine == CollectorTargetEngine.SqlServer)
+            ? await SelectQueryStoreFetchAsync(storeConnection, server, databaseName, context, batch, cancellationToken)
+            : null;
+
         if (context.CapturePlanXml && targetProvider.Engine == CollectorTargetEngine.SqlServer)
         {
             /* #2312 investigation: timed so the log split can say whether the invariant
@@ -5904,7 +5917,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
             try
             {
                 await FetchAndStorePlansAsync(targetProvider, targetConnection, storeConnection,
-                    server, databaseName, collectorName, context, commandTimeoutSeconds, ExtractPlanReferences(batch), cancellationToken);
+                    server, databaseName, collectorName, context, commandTimeoutSeconds, ExtractPlanReferences(batch), fetchSelection?.PlanIds, cancellationToken);
             }
             finally
             {
@@ -5929,13 +5942,230 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
             try
             {
                 await FetchAndStoreQueryTextAsync(targetProvider, targetConnection, storeConnection,
-                    server, databaseName, collectorName, context, commandTimeoutSeconds, ExtractTextReferences(batch), cancellationToken);
+                    server, databaseName, collectorName, context, commandTimeoutSeconds, ExtractTextReferences(batch), fetchSelection?.QueryIds, cancellationToken);
             }
             finally
             {
                 context.PerItemTextFetchMs = textFetchWatch.ElapsedMilliseconds;
             }
         }
+    }
+
+    /// <summary>The always-fetch look-back (#6211): the newest forced-plans capture and the plan-correction rows within this window name plans that are fetched whatever their rank.</summary>
+    private static readonly TimeSpan s_alwaysFetchLookBack = TimeSpan.FromDays(1);
+
+    /// <summary>
+    /// #6211: the plans of one database's <c>query_store</c> batch that are worth a text and plan fetch this run, or <c>null</c> for "all of them".
+    ///
+    /// <para>The ranking itself is <see cref="QueryStoreFetchSelection"/>: the top N per database-hour on seven metrics, in the service, over the
+    /// rows already read (no statement on the monitored server, so nothing here touches a <c>sys.query_store_*</c> view). This method adds the two
+    /// store-side always-fetch sets: the queries with a forced plan in the newest forced-plans capture (#6221 judges a force by the stored XML of
+    /// the query's other plans, so every plan of such a query is kept) and the plans the plan-correction collector names (the regressed plan and
+    /// the last good plan: the only "regressed" signal Darling collects). A plan that does not rank is still "not stored" to the next run, so it
+    /// is fetched then if it ranks; nothing is carried for it, so the candidate list cannot grow with the unranked.</para>
+    ///
+    /// <para>Fails open: a store read that throws returns <c>null</c> and the run fetches everything, because skipping a forced plan on a fault
+    /// is worse than one expensive run.</para>
+    /// </summary>
+    private async Task<QueryStoreFetchSelection.Selection?> SelectQueryStoreFetchAsync<TRow>(
+        NpgsqlConnection storeConnection,
+        ServerRuntime server,
+        string databaseName,
+        CollectorContext context,
+        List<TRow> batch,
+        CancellationToken cancellationToken)
+    {
+        var topN = StoreConfigProvider.ClampQueryStoreFetchTopN(_queryStoreFetchTopN());
+        if (topN <= 0 || batch is not List<QueryStoreCollector.Row> rows || rows.Count == 0)
+        {
+            return null;
+        }
+
+        try
+        {
+            if (!await RestoreBorrowedStoreConnectionAsync(storeConnection, server, databaseName))
+            {
+                return null;
+            }
+
+            var since = DateTime.SpecifyKind(context.CollectionTime - s_alwaysFetchLookBack, DateTimeKind.Unspecified);
+            var alwaysQueries = new HashSet<long>();
+            using (var forced = new NpgsqlCommand(@"
+SELECT DISTINCT query_id
+FROM collect.query_store_forced_plans
+WHERE server_id = $1
+AND   database_name = $2
+AND   plan_id IS NOT NULL
+AND   query_id IS NOT NULL
+AND   collection_time = (SELECT MAX(m.collection_time)
+                         FROM collect.query_store_forced_plans AS m
+                         WHERE m.server_id = $1
+                         AND   m.database_name = $2
+                         AND   m.collection_time >= $3)", storeConnection))
+            {
+                forced.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+                forced.Parameters.Add(new NpgsqlParameter<int> { TypedValue = server.ServerId });
+                forced.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName });
+                forced.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = since });
+                await using var reader = await forced.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    alwaysQueries.Add(reader.GetInt64(0));
+                }
+            }
+
+            var alwaysPlans = new HashSet<long>();
+            using (var correction = new NpgsqlCommand(@"
+SELECT regressed_plan_id, last_good_plan_id
+FROM collect.plan_correction
+WHERE server_id = $1
+AND   database_name = $2
+AND   collection_time >= $3", storeConnection))
+            {
+                correction.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+                correction.Parameters.Add(new NpgsqlParameter<int> { TypedValue = server.ServerId });
+                correction.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName });
+                correction.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = since });
+                await using var reader = await correction.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    if (!reader.IsDBNull(0)) alwaysPlans.Add(reader.GetInt64(0));
+                    if (!reader.IsDBNull(1)) alwaysPlans.Add(reader.GetInt64(1));
+                }
+            }
+
+            var (stored, _) = await ReadStoredHourRowsAsync(storeConnection, server.ServerId, databaseName, context.CollectionTime, rows, cancellationToken);
+
+            var selection = QueryStoreFetchSelection.Select(rows, topN, alwaysPlans, alwaysQueries, stored);
+            _logger?.LogDebug(
+                "  [{Server}] query_store [{Database}] fetch top {TopN}: {Selected} of {Considered} plan(s) selected ({Ranked} by rank, the rest forced or named by plan correction)",
+                server.Config.DisplayName, databaseName, topN, selection.PlanIds.Count, selection.ConsideredPlans, selection.RankedPlans);
+            return selection;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogWarning(ex,
+                "query_store fetch top-N selection on '{Server}' database [{Database}] could not read the forced or plan-correction plans; fetching every new plan this run.",
+                server.Config.DisplayName, databaseName);
+            return null;
+        }
+    }
+
+    /// <summary>#6211: the stored-hour read from the wide table: one bounded range (server, database, interval ids, partition-pruning floor on <c>first_execution_time</c>).</summary>
+    internal const string StoredHourWideSql = @"
+SELECT plan_id, query_id, runtime_stats_interval_id, execution_type_desc, replica_role, execution_count, avg_cpu_time_us, avg_duration_us,
+       avg_physical_io_reads, avg_logical_io_writes, max_query_max_used_memory, max_tempdb_space_used
+FROM collect.query_store_interval_wide
+WHERE server_id = $1
+AND   database_name = $2
+AND   first_execution_time >= $3
+AND   runtime_stats_interval_id = ANY($4)";
+
+    /// <summary>
+    /// #6211: the hour's rows earlier runs already stored, so the rank is over the whole database-hour (see <see cref="QueryStoreFetchSelection"/>):
+    /// one row per (plan, interval, execution type, replica), the newest snapshot, for the intervals this batch names.
+    ///
+    /// <para><b>Wide table first.</b> This runs every cycle for every server. Raw <c>query_store_stats</c> holds several cumulative snapshots per
+    /// interval, so reading it needs a DISTINCT ON sort over all of them. <c>collect.query_store_interval_wide</c> (V145) already holds exactly the
+    /// latest snapshot per interval identity, every outcome, with the same columns, and is partitioned by day on <c>first_execution_time</c>
+    /// (the interval's own start at the earliest, never before it: <see cref="QueryStoreIntervalWide.IntervalStartSlack"/>). So the read is
+    /// one bounded range of the table: <c>server_id</c>, the database, the interval ids, and a <c>first_execution_time</c> floor that prunes
+    /// the partitions.</para>
+    ///
+    /// <para><b>Raw only where the wide table cannot answer</b> (its coverage gate): when this server has no coverage row, the row's
+    /// <c>filled_since</c> is later than the oldest interval start in the batch (the table was not yet filled for that hour, so right after
+    /// an install the first hour reads raw, which is small then), or the table has a pending batch (an apply that failed). Then the answer is
+    /// the raw read this method used first. The gate is conservative: a wide table that lags only leaves a competitor out of the rank, so the
+    /// batch plans rank higher and the selection takes more plans, never fewer.</para>
+    ///
+    /// <para>Rows with no <c>runtime_stats_interval_id</c> (collected before the column existed) are not read here and rank as one batch
+    /// (<see cref="QueryStoreFetchSelection"/>), which also selects more, never less.</para>
+    /// </summary>
+    internal static async Task<(List<QueryStoreCollector.Row> Rows, bool UsedWideTable)> ReadStoredHourRowsAsync(
+        NpgsqlConnection storeConnection,
+        int serverId,
+        string databaseName,
+        DateTime collectionTime,
+        List<QueryStoreCollector.Row> rows,
+        CancellationToken cancellationToken)
+    {
+        var stored = new List<QueryStoreCollector.Row>();
+        var intervalIds = rows.Where(r => r.RuntimeStatsIntervalId is not null).Select(r => r.RuntimeStatsIntervalId!.Value).Distinct().ToArray();
+        if (intervalIds.Length == 0)
+        {
+            return (stored, false);
+        }
+
+        var starts = rows.Where(r => r.IntervalStartTimeUtc is not null).Select(r => r.IntervalStartTimeUtc!.Value).ToList();
+        var floor = DateTime.SpecifyKind(starts.Count > 0 ? starts.Min() : collectionTime - s_alwaysFetchLookBack, DateTimeKind.Unspecified);
+
+        bool wideCovers;
+        using (var gate = new NpgsqlCommand(@"
+SELECT EXISTS
+(
+    SELECT 1
+    FROM collect.query_store_interval_wide_coverage AS c
+    WHERE c.server_id = $1
+    AND   c.filled_since <= $2
+)
+AND NOT EXISTS
+(
+    SELECT 1
+    FROM collect.query_store_interval_wide_pending AS p
+    WHERE p.server_id = $1
+);", storeConnection))
+        {
+            gate.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+            gate.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            gate.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = floor });
+            wideCovers = (bool)(await gate.ExecuteScalarAsync(cancellationToken))!;
+        }
+
+        string sql = wideCovers
+            ? StoredHourWideSql
+            : @"
+SELECT DISTINCT ON (plan_id, runtime_stats_interval_id, execution_type_desc, replica_role)
+       plan_id, query_id, runtime_stats_interval_id, execution_type_desc, replica_role, execution_count, avg_cpu_time_us, avg_duration_us,
+       avg_physical_io_reads, avg_logical_io_writes, max_query_max_used_memory, max_tempdb_space_used
+FROM query_store_stats
+WHERE server_id = $1
+AND   database_name = $2
+AND   collection_time >= $3
+AND   runtime_stats_interval_id = ANY($4)
+ORDER BY plan_id, runtime_stats_interval_id, execution_type_desc, replica_role, collection_time DESC";
+
+        /* Bounded below by the oldest interval start in the batch. The wide table's partition key is first_execution_time, which is at or after
+           the interval's start (the slack below is the documented margin for a clock edge); raw is bounded on collection_time, which is at or
+           after the interval's start too. */
+        var lower = wideCovers ? floor - QueryStoreIntervalWide.IntervalStartSlack : floor;
+        using var hour = new NpgsqlCommand(sql, storeConnection);
+        hour.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+        hour.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        hour.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName });
+        hour.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = lower });
+        hour.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint, Value = intervalIds });
+        await using var reader = await hour.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            stored.Add(new QueryStoreCollector.Row
+            {
+                DatabaseName = databaseName,
+                PlanId = reader.GetInt64(0),
+                QueryId = reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
+                RuntimeStatsIntervalId = reader.GetInt64(2),
+                ExecutionTypeDesc = reader.IsDBNull(3) ? null : reader.GetString(3),
+                ReplicaRole = reader.IsDBNull(4) ? null : reader.GetString(4),
+                ExecutionCount = reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
+                AvgCpuTimeUs = reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
+                AvgDurationUs = reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
+                AvgPhysicalIoReads = reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
+                AvgLogicalIoWrites = reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
+                MaxQueryMaxUsedMemory = reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
+                MaxTempdbSpaceUsed = reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
+            });
+        }
+
+        return (stored, wideCovers);
     }
 
     /// <summary>
@@ -6026,6 +6256,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
         CollectorContext context,
         int itemTimeout,
         IReadOnlyList<(long PlanId, string? PlanHash)> references,
+        HashSet<long>? fetchOnlyPlanIds,
         CancellationToken cancellationToken)
     {
         /* Hoisted out of the try (#2776) so the catch can advance this database's backoff counter — the
@@ -6200,7 +6431,13 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
                     {
                         if (!verdict.Resolved || verdict.HashStale)
                         {
-                            missing.Add(verdict.Id);
+                            /* #6211: every reference was touched and probed above (that is the only last_seen refresh a stored plan has),
+                               but only the selected ones are added to what is fetched (the debt already owed is in `missing` from the start). A plan that did not rank is not stored
+                               and not carried: it is fetched on a later run if it ranks then. */
+                            if (fetchOnlyPlanIds is null || fetchOnlyPlanIds.Contains(verdict.Id))
+                            {
+                                missing.Add(verdict.Id);
+                            }
                         }
                         else
                         {
@@ -6553,6 +6790,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
         CollectorContext context,
         int itemTimeout,
         IReadOnlyList<(long QueryId, string? QueryHash)> references,
+        HashSet<long>? fetchOnlyQueryIds,
         CancellationToken cancellationToken)
     {
         /* Hoisted out of the try (#2776), same reason as the plan side: the catch advances the backoff.
@@ -6682,7 +6920,12 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
                     {
                         if (!verdict.Resolved || verdict.HashStale)
                         {
-                            missing.Add(verdict.Id);
+                            /* #6211: text twin of the plan side: all references are touched and probed, only the selected queries
+                               are added to what is fetched (carried debt is in `missing` already). */
+                            if (fetchOnlyQueryIds is null || fetchOnlyQueryIds.Contains(verdict.Id))
+                            {
+                                missing.Add(verdict.Id);
+                            }
                         }
                         else
                         {

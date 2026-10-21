@@ -65,7 +65,7 @@ public static class DarlingStoreConnection
     }
 
     /// <summary>The setting an MCP write transaction carries (#6281), and the value it carries. The store's guard on the tag writes
-    /// (V209) refuses a session by this marker as well as by the <c>mcp</c> login, so an MCP that connects as the store's owner, or
+    /// (V210) refuses a session by this marker as well as by the <c>mcp</c> login, so an MCP that connects as the store's owner, or
     /// as another login, is held to the same rule. It is set per transaction, never as a connection startup option: PgBouncer and
     /// RDS Proxy refuse an <c>options</c> startup parameter (#6143), and a pooler set to ignore it would drop the marker silently.</summary>
     public const string McpSurfaceSetting = "darling.surface";

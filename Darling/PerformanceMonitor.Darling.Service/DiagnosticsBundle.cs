@@ -85,6 +85,7 @@ internal static class DiagnosticsBundle
     {
         "DarlingConfig.QueryStoreBackfillEnabled",
         "DarlingConfig.QueryStoreTextBudgetMb",
+        "DarlingConfig.QueryStoreFetchTopN",
         "DarlingConfig.PlanContentRetentionDays",
         "DarlingConfig.ComposeStatementTimeoutSeconds",
         "DarlingConfig.PlanXmlCompression",

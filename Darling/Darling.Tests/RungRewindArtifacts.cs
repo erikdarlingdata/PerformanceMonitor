@@ -462,9 +462,15 @@ ALTER TABLE IF EXISTS config.investigation_requests
             @"
 ALTER TABLE IF EXISTS config.config_mute_rules DROP COLUMN IF EXISTS starts_at_utc;"),
 
-        // /// V209 (#6281): the guard on the MCP tag writes. The trigger on the map is the probe's newest sentinel. The rewind drops both
-        // triggers and the function, so a re-run of V209 builds them again. Safe on a store that never had them.
-        new(209, "hasAgentRouteTagGuard",
+        // V209 (#6211): the Query Store fetch top-N setting. The column is the probe's newest sentinel. The rewind drops it, so a re-run of V209
+        // adds it again at its default. Safe on a store that never had it.
+        new(209, "hasQueryStoreFetchTopN",
+            @"
+ALTER TABLE IF EXISTS config.config_service DROP COLUMN IF EXISTS query_store_fetch_top_n;"),
+
+        // /// V210 (#6281): the guard on the MCP tag writes. The trigger on the map is the probe's newest sentinel. The rewind drops both
+        // triggers and the function, so a re-run of V210 builds them again. Safe on a store that never had them.
+        new(210, "hasAgentRouteTagGuard",
             @"
 DROP TRIGGER IF EXISTS trg_agent_route_tag_guard ON config.server_tag_map;
 DROP TRIGGER IF EXISTS trg_agent_route_tag_guard ON config.server_tags;
