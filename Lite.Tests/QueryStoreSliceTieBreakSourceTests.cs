@@ -132,8 +132,9 @@ public sealed class QueryStoreSliceTieBreakSourceTests
            bump both in the same commit. */
         var declared = Regex.Match(darlingSource, @"Assert\.Equal\((?<total>\d+), total\);");
         Assert.True(declared.Success, "Darling's guard no longer declares a total dedup-site count.");
-        /* 18 -> 19 with #5631, mirroring Darling's guard (the eighth plan-regression array_agg: avg_rowcount). */
-        Assert.Equal(19, int.Parse(declared.Groups["total"].Value, System.Globalization.CultureInfo.InvariantCulture));
+        /* 18 -> 19 with #5631, mirroring Darling's guard (the eighth plan-regression array_agg: avg_rowcount).
+           19 -> 18 with #5506, mirroring Darling's guard (the viewer's two regressions dedups became one shared window in Storage). */
+        Assert.Equal(18, int.Parse(declared.Groups["total"].Value, System.Globalization.CultureInfo.InvariantCulture));
 
         /* And it must still enumerate its files rather than globbing, for the same reason this one does. */
         Assert.Contains("DedupSites", darlingSource, StringComparison.Ordinal);
