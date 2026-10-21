@@ -188,7 +188,12 @@ public class DeadlocksTelemetryCursorTests
             Assert.True(serverLand > serverWrite, $"{host} must land staged item state after the server-scoped write");
 
             /* Enumerated path: the drop is in readItem, the landing is in onItemComplete, never in readItem. */
-            var readItem = source.IndexOf("readItem: async (item, ct) =>", StringComparison.Ordinal);
+            var readItem = source.IndexOf("async Task<List<TRow>> ReadQueryStoreItemAsync(", StringComparison.Ordinal);
+            if (readItem < 0)
+            {
+                readItem = source.IndexOf("readItem: async (item, ct) =>", StringComparison.Ordinal);
+            }
+
             var complete = source.IndexOf("onItemComplete: (item, batchCount", readItem, StringComparison.Ordinal);
             Assert.True(readItem > 0 && complete > readItem, $"{host}: enumerated hooks not found");
             var itemDrop = source.IndexOf("context.DropStagedItemState();", readItem, StringComparison.Ordinal);
