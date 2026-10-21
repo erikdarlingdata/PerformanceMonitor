@@ -19,18 +19,19 @@ using PerformanceMonitor.Common;
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
 /// <summary>
-/// Over MCP, what a server registration connects to is kept apart from what routes cover (#6281): a notification route
-/// with an agent setting covers servers by id, tag or fleet-wide, so a second registration of a machine a first one
-/// already names (another database or read-only intent, which hash to a new id) would sit outside the first one's tags
-/// and routes. <c>add_servers</c> over MCP therefore refuses an entry whose target (engine, host and port) another
-/// registration, removed ones included, already holds under a different storage name. The same storage name is not
-/// refused here: it is the existing duplicate answer, or the re-use of a removed registration's own id.
+/// Over MCP, a registration that a person scoped a route to is kept where it connects (#6281): a notification route with an
+/// agent setting scoped to a server id, or to a tag, covers that registration, so a second registration of the same machine
+/// (another database or read-only intent, which hash to a new id) would sit outside the route. <c>add_servers</c> over MCP
+/// therefore refuses an entry whose machine (engine, host and port) is held, under a different storage name, by a
+/// registration (removed ones included) that has such a scoped route. Without one the entry is added as before. A route with
+/// no scope applies to every server, so it never counts. The same storage name is not refused here: it is the existing
+/// duplicate answer, or the re-use of a removed registration's own id.
 /// </summary>
 public sealed partial class DarlingMcpServerAdminTools
 {
     /// <summary>A registration an add is compared with: a live definition (host, engine and port known) or a removed one
     /// (<c>collect.servers</c> keeps only its storage name).</summary>
-    internal sealed record RegisteredTarget(string StorageKey, string? Host, string? Engine, int Port, string Label, bool Removed);
+    internal sealed record RegisteredTarget(int ServerId, string StorageKey, string? Host, string? Engine, int Port, string Label, bool Removed);
 
     /// <summary>The engine and port part of a storage name: <c>:pg:5432</c>, <c>:pg</c>, <c>:5432</c> or empty.</summary>
     private static string TargetSuffixOf(MonitoredServer server)
@@ -77,8 +78,11 @@ public sealed partial class DarlingMcpServerAdminTools
             : !EngineSuffixPattern.IsMatch(name);
     }
 
-    /// <summary>The refusal for an entry whose machine another registration already holds, or null.</summary>
-    internal static string? TargetHeldRefusal(IReadOnlyList<RegisteredTarget> held, ParsedServerEntry entry)
+    /// <summary>The refusal for an entry whose machine another registration holds while a route with an agent setting is
+    /// scoped to that registration, or null. <paramref name="scopedRoute"/> is the shared lookup edit_server uses.</summary>
+    internal static async Task<string?> TargetHeldRefusalAsync(
+        IReadOnlyList<RegisteredTarget> held, ParsedServerEntry entry,
+        Func<int, CancellationToken, Task<int?>> scopedRoute, CancellationToken cancellationToken)
     {
         foreach (var other in held)
         {
@@ -87,9 +91,14 @@ public sealed partial class DarlingMcpServerAdminTools
                 continue;
             }
 
+            if (await scopedRoute(other.ServerId, cancellationToken) is not { } routeId)
+            {
+                continue;
+            }
+
             return $"Not added: {entry.ProbeConfig.Host} is already registered as '{other.Label}'"
                 + (other.Removed ? " (a removed registration)" : "")
-                + ". Over MCP a machine has one registration, because the notification routes and tags that cover a server are tied to it. "
+                + $", and route {routeId} (an agent setting) is scoped to it, so a second registration of the machine would sit outside that route. "
                 + "Register another database or intent in the Viewer or on the web dashboard.";
         }
 
@@ -97,10 +106,10 @@ public sealed partial class DarlingMcpServerAdminTools
     }
 
     private const string RegisteredTargetsSql =
-        "SELECT host, database, read_only_intent, engine, port, name FROM config_monitored_servers";
+        "SELECT host, database, read_only_intent, engine, port, name, server_id FROM config_monitored_servers";
 
     private const string RemovedRegistrationsSql =
-        "SELECT server_name, display_name FROM collect.servers WHERE server_id NOT IN (SELECT server_id FROM config_monitored_servers)";
+        "SELECT server_name, display_name, server_id FROM collect.servers WHERE server_id NOT IN (SELECT server_id FROM config_monitored_servers)";
 
     private static async Task<List<RegisteredTarget>> LoadRegisteredTargetsAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
     {
@@ -116,7 +125,7 @@ public sealed partial class DarlingMcpServerAdminTools
                 var port = reader.IsDBNull(4) ? 0 : reader.GetInt32(4);
                 var key = StorageKeyOf(reader);
                 var label = reader.IsDBNull(5) || string.IsNullOrWhiteSpace(reader.GetString(5)) ? key : reader.GetString(5);
-                targets.Add(new RegisteredTarget(key, host, engine, port, label, false));
+                targets.Add(new RegisteredTarget(reader.GetInt32(6), key, host, engine, port, label, false));
             }
         }
 
@@ -128,7 +137,7 @@ public sealed partial class DarlingMcpServerAdminTools
             {
                 var name = reader.GetString(0);
                 var label = reader.IsDBNull(1) || string.IsNullOrWhiteSpace(reader.GetString(1)) ? name : reader.GetString(1);
-                targets.Add(new RegisteredTarget(name, null, null, 0, label, true));
+                targets.Add(new RegisteredTarget(reader.GetInt32(2), name, null, null, 0, label, true));
             }
         }
 
