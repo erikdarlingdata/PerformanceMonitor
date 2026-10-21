@@ -97,6 +97,7 @@ public static class DarlingWebEndpoints
     internal static readonly IReadOnlySet<string> WebOnlyReadNames = new HashSet<string>(StringComparer.Ordinal)
     {
         "get_alert_details",
+        "get_overview_baselines",
         "get_block_chain",
     };
 
@@ -7615,13 +7616,16 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_perfmon_trend"] = R(CatTrends, "One perfmon counter over time (requires counter_name).", PReqText("counter_name"), PServer(), PHours(24), PAsOf(), PInt("bucket_minutes")),
             /* #3653 item 17: the four reads below disclose the WINDOW floor as window_truncated (beside
                effective_start / effective_hours_back) — not the page dialect's truncated, which they never had. */
-            ["get_procedure_duration_trend"] = R(CatTrends, "Stored-procedure elapsed ms/sec + executions/sec over time; window_truncated says the tier did not hold the whole window.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes"), PDatabases()),
+            ["get_procedure_duration_trend"] = R(CatTrends, "Stored-procedure elapsed ms/sec + executions/sec over time, or one procedure's with procedure_name (its full_name from the Top Procedures grid, plus one database_name); window_truncated says the tier did not hold the whole window.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes"), PDatabases(), PText("procedure_name")),
             ["get_query_duration_trend"] = R(CatTrends, "Query elapsed ms/sec + executions/sec over time (per-interval rates, not percentiles); window_truncated says the tier did not hold the whole window.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes"), PDatabases()),
             ["get_query_store_duration_trend"] = R(CatTrends, "Query Store duration ms/sec + executions/sec over time; window_truncated says the tier did not hold the whole window.", PServer(), PHours(24), PAsOf(), PDatabases()),
             ["get_query_trend"] = R(CatTrends, "One query's metrics over time (requires query_hash + database_name); window_truncated says the tier did not hold the whole window.", PReqText("query_hash"), PReqText("database_name"), PServer(), PHours(24), PAsOf()),
 
             /* ── health / overview (DarlingMcpHealthTools / DarlingMcpFleetTools) ── */
             ["get_server_summary"] = R(CatOverview, "A one-shot health summary for a server.", PServer()),
+            /* #6291: a web-only read (no MCP tool behind it, see WebOnlyReadNames): the four baselines (CPU, waits per second, I/O latency, blocking)
+               at the window start that the Overview strips draw their bands and anomaly markers from. Keyed by the window start the page draws. */
+            ["get_overview_baselines"] = R(CatOverview, "The four baselines the Overview strips draw their band and anomaly markers from (CPU, waits per second, I/O latency, blocking): each bucket's mean and effective standard deviation at the window start, null where there is not enough history.", PServer(), PReqText("window_start")),
             ["get_daily_summary"] = R(CatOverview, "The daily health summary (optionally for a specific date).", PServer(), PText("summary_date")),
             ["get_daily_summary_range"] = R(CatOverview, "One daily health summary per collected day over a span of days - the Performance Calendar's month grid.", PServer(), PInt("days_back", 30), PAsOf()),
             ["get_fleet_overview"] = R(CatOverview, "The banded cross-server fleet roll-up.", PHours(DefaultFleetHours), PTextDefault("detail", "summary"), PBool("worst_only", false), PText("band")),
@@ -8745,7 +8749,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 : MissingParam("counter_name"),
             ["get_procedure_duration_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
                 ? (DatabaseNames(c) is { } databases
-                    ? DarlingMcpTrendTools.GetProcedureDurationTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, databases, TrendBudget.Chart, cancellationToken: c.RequestAborted)
+                    ? DarlingMcpTrendTools.GetProcedureDurationTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, databases, TrendBudget.Chart, Str(c, "procedure_name"), c.RequestAborted)
                     : DatabaseNamesRefusal(c))
                 : UnparseableParam("bucket_minutes"),
             ["get_query_duration_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
@@ -8764,6 +8768,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             /* ── health / overview ── */
             ["get_server_summary"] = (c, pg, an) => DarlingMcpHealthTools.GetServerSummary(pg, Server(c), registryState, logger, c.RequestAborted),
+            /* #6291: the web-only Overview baselines read. A key that is present but unreadable is refused, never defaulted. */
+            ["get_overview_baselines"] = (c, pg, an) => !RequireText(c, "window_start", out var baselineWindowStart)
+                ? MissingParam("window_start")
+                : DarlingWebOverviewBaselines.GetOverviewBaselines(pg, an, Server(c), baselineWindowStart, c.RequestAborted),
             ["get_daily_summary"] = (c, pg, an) => DarlingMcpHealthTools.GetDailySummary(pg, Server(c), Str(c, "summary_date"), registryState, logger, c.RequestAborted),
             ["get_daily_summary_range"] = (c, pg, an) => DarlingMcpHealthTools.GetDailySummaryRange(pg, Server(c), QueryInt(c, "days_back", null, 30), AsOf(c), registryState, logger, c.RequestAborted),
             ["get_fleet_overview"] = (c, pg, an) => DarlingMcpFleetTools.GetFleetOverview(pg, Hours(c, DefaultFleetHours), Str(c, "detail") ?? "summary", QueryBool(c, "worst_only", false), Str(c, "band"), registryState: registryState, logger: logger, cancellationToken: c.RequestAborted),

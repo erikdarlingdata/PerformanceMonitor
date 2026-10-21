@@ -44,6 +44,7 @@ import { renderPanel, emptyHeadline, setPanelSignal, getPanelSignal, VIZ, worstF
 import { memoryGrantChartPanels } from "./memory-grant-charts.js";
 import { activeQueriesSnapshotSlot, SNAPSHOT_ROW_CAP, SNAPSHOT_LIST_CAP } from "./active-snapshots.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../charts.js";
+import { statsHistoryColumn } from "./stats-history.js";
 import { multiPicker, mergeSeriesRows } from "../multi-picker.js";
 import { pgPlanColumn } from "./pg-plan-viewer.js";
 import { READ_FIELDS } from "../read-fields.js";
@@ -62,6 +63,7 @@ import { systemEventsChartSpecs } from "./system-events-charts.js";
 import { comparePick, compareControl, compareCard, COMPARE_TOP } from "./top-compare.js";
 import { SQL_TAB_REACH, POSTGRES_TAB_REACH, withTabReach } from "./server-tab-reach.js";
 import { bloatVerdict, droppabilityVerdict, costFigure, lastScanNoteWord, fillfactorNoteWord, toastNoteWord, indexSkipWord } from "../pg-grid-text.js";
+import { fillOverviewStrips } from "./overview-strips.js";
 
 /* ─────────────────────────── shared cell renderers ─────────────────────────── */
 
@@ -625,7 +627,7 @@ function topQueriesCard(server, ctx, ranking, picker, w = ctx, onRow = null) {
     const parts = [
       VIZ.table(res.data, {
         rowsKey: "queries",
-        columns: [...TOP_QUERY_COLUMNS, planColumn(server)],
+        columns: [...TOP_QUERY_COLUMNS, planColumn(server), statsHistoryColumn("queries", server, ctx.hours)],
         groups: TOP_QUERY_GROUPS.groups,
         defaultGroups: TOP_QUERY_GROUPS.defaultGroups,
         ...(onRow ? { onRow } : {}),
@@ -1176,6 +1178,13 @@ function rankedSlicer(kind, cmp) {
   };
 }
 
+/** #6291: the Overview's five stacked strips (CPU, waits, blocking and deadlocks, buffer pool, file I/O latency): see overview-strips.js. */
+function overviewStripsPanel(server, ctx) {
+  const { panel, body } = panelShell("Overview timeline", ctx.label, 2, "get_file_io_trend");
+  fillOverviewStrips(body, server, ctx);
+  return panel;
+}
+
 /**
  * What a File I/O Latency line is, for the subtitle (#5244 PR5): exactly one chosen database draws one line per file ("per
  * file"); every database, or two or more, draw one line per database and file type. It follows the same rule as the route
@@ -1465,34 +1474,10 @@ export const SERVER_TABS = [
     build: (server, ctx) => [
       stat("Overview", "get_server_summary", { server }, OVERVIEW_STATS, SNAPSHOT, 2),
       stat("Server Properties", "get_server_properties", { server }, PROPERTY_STATS, SNAPSHOT, 2),
-      line("CPU Utilization", "get_cpu_utilization", { server, hours: ctx.hours }, "samples", "sample_time", CPU_SERIES, {
-        subtitle: ctx.label,
-        format: "pct",
-        unit: "%",
-        emptyText: "No CPU samples in this window.",
-      }),
-      line("Memory", "get_memory_trend", { server, hours: ctx.hours }, "trend", "time", MEMORY_SERIES, {
-        subtitle: ctx.label,
-        format: "mb",
-        emptyText: "No memory samples in this window.",
-      }),
-      line("Blocked process report trend", "get_blocking_trend", { server, hours: ctx.hours }, "trend", "time", BLOCKING_REPORT_SERIES, {
-        subtitle: ctx.label,
-        format: "int",
-        unit: "reports",
-        atTimeItem: "blocking",
-        sourceKey: "source",
-        bySource: BLOCKING_BY_SOURCE,
-        emptyText: "No blocked process reports in this window — an empty trend here means none were captured, not that nothing was collected.",
-      }),
-      line("Deadlocks", "get_deadlock_trend", { server, hours: ctx.hours }, "trend", "time", COUNT_SERIES, {
-        subtitle: ctx.label,
-        format: "int",
-        atTimeItem: "deadlocks",
-        emptyText: DEADLOCKS_EMPTY_TEXT,
-        emptyWins: true,
-      }),
-      fileIoPanel(server, ctx),
+      /* #6291: the desktop Overview's five stacked strips on one time axis and one crosshair. The CPU, Memory, Blocked process
+         report and Deadlocks charts that sat here live on the CPU, Memory, Blocking and Deadlocks tabs (and the File I/O tab
+         keeps both latency charts), so nothing is unreachable; the strips replace the four separate Overview charts and the File I/O panel. */
+      overviewStripsPanel(server, ctx),
       table(
         "Analysis Findings",
         "get_analysis_findings",
@@ -1569,7 +1554,7 @@ export const SERVER_TABS = [
           "get_top_queries_by_cpu",
           rankedParams(windowParams({ server, hours: w.hours, top: 20, detail: "full" }, w), ranking, "queries"),
           "queries",
-          [...TOP_QUERY_COLUMNS, planColumn(server)],
+          [...TOP_QUERY_COLUMNS, planColumn(server), statsHistoryColumn("queries", server, ctx.hours)],
           w.label,
           "No query stats in this window. Delta-based collection needs at least two cycles (~30 minutes) before it reports non-zero values.",
           2,
@@ -1590,7 +1575,7 @@ export const SERVER_TABS = [
           "get_top_procedures_by_cpu",
           rankedParams(windowParams({ server, hours: w.hours, top: 20, detail: "full" }, w), ranking, "procedures"),
           "procedures",
-          [...TOP_PROC_COLUMNS, procedurePlanColumn(server)],
+          [...TOP_PROC_COLUMNS, procedurePlanColumn(server), statsHistoryColumn("procedures", server, ctx.hours)],
           w.label,
           "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes).",
           2,
@@ -1997,7 +1982,7 @@ export const SERVER_TABS = [
           "get_top_procedures_by_cpu",
           rankedParams(windowParams({ server, hours: w.hours, top: 20, detail: "full" }, w), ranking, "procedures"),
           "procedures",
-          [...TOP_PROC_COLUMNS, procedurePlanColumn(server)],
+          [...TOP_PROC_COLUMNS, procedurePlanColumn(server), statsHistoryColumn("procedures", server, ctx.hours)],
           w.label,
           "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes).",
           2,
