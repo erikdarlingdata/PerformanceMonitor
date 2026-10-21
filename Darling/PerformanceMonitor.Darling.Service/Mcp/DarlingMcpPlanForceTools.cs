@@ -869,6 +869,12 @@ public sealed class DarlingMcpPlanForceTools
             {
                 var answer = await DecideAndRunAsync(session, owner, logger, confirm, shownStatement, ct);
                 await session.CommitAsync(ct);
+                /* The server took the undo and the store's insert or commit failed (#5632, step 13): the session recorded it late, or could not. The
+                   answer says so; it is never an error for a change that was made. */
+                if (answer.Status == PlanUndoAnswer.Undone && session.JournalMissing)
+                    return answer with { Message = answer.Message + " The change was made on the server, but the store could not record it. The agent changes list may still offer it for undo." };
+                if (answer.Status == PlanUndoAnswer.Undone && session.RecordedLate)
+                    return answer with { Message = answer.Message + " The store recorded it late." };
                 return answer;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -953,8 +959,21 @@ public sealed class DarlingMcpPlanForceTools
             return new PlanUndoAnswer(written.Outcome == RemediationOutcome.Refused ? PlanUndoAnswer.RefusedStatus : PlanUndoAnswer.Failed, written.Reason, written.Message, statement, stateNode);
         }
 
-        var after = await executor.ReadPlanStateAsync(stepPermit, facts.QueryId, step.PlanId, ct);
-        var afterNode = after.State is null ? null : JsonSerializer.SerializeToNode(after.State);
+        /* The executor says the server accepted the write: from here a store failure is recorded late, never lost (#5632, step 13). */
+        session.MarkServerChanged(statement, stateNode, step.RestoredAs);
+
+        /* The read after the write is a warning when it fails, not an error for a change that was made. */
+        JsonNode? afterNode = null;
+        try
+        {
+            var after = await executor.ReadPlanStateAsync(stepPermit, facts.QueryId, step.PlanId, ct);
+            afterNode = after.State is null ? null : JsonSerializer.SerializeToNode(after.State);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning("The state read after undoing plan change {CalledId} failed: {Message}", facts.CalledId, ex.Message);
+        }
+
         await session.JournalUndoneAsync(statement, stateNode, afterNode, step.RestoredAs, ct);
         return new PlanUndoAnswer(PlanUndoAnswer.Undone, null, step.DoneWords, statement, stateNode, afterNode, step.RestoredAs, facts.CalledId, session.Actor);
     }
