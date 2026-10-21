@@ -210,7 +210,7 @@ public sealed partial class DarlingMcpServerAdminTools
                An EDIT keeps its own id, so moving to a removed registration's key is not re-use. A live registration under the
                same key is the duplicate gates' answer. */
             if (other.ServerId == exceptServerId
-                || (!forEdit && ServerIdHelper.GetDeterministicHashCode(entry.StorageKey) == other.ServerId))
+                || (!forEdit && ServerIdOf(entry) == other.ServerId))
             {
                 continue;
             }
