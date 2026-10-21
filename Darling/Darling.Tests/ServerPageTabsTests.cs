@@ -883,7 +883,7 @@ public sealed class ServerPageTabsTests
     ///
     /// <para>Plan analysis, cached-plan retrieval and actual-plan re-execution all need either
     /// a plan renderer or a command back to the monitored server, and this read-only seat has neither. The same
-    /// goes for the block-chain view and the interactive deadlock graph. A reader told to open the desktop viewer
+    /// goes for the interactive deadlock graph (the block-chain tree is on the page since #6292). A reader told to open the desktop viewer
     /// is better served than one given a web page that looks like plan analysis and is not — so the absence is
     /// stated where they go looking for it, not left as a page that simply lacks the feature.</para>
     /// </summary>
@@ -894,7 +894,6 @@ public sealed class ServerPageTabsTests
 
         Assert.Contains("are in the desktop viewer, not on this page", js, StringComparison.Ordinal);
         Assert.Contains("Plan analysis, cached-plan retrieval", js, StringComparison.Ordinal);
-        Assert.Contains("block-chain view", js, StringComparison.Ordinal);
 
         /* The note renders — a `note` field with no renderer is the same silence in a different place. */
         Assert.Contains("const strip = noticeStrip(note);", js, StringComparison.Ordinal);
