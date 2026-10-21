@@ -94,7 +94,7 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
             "ft.StartTime >= CONVERT(datetime, COALESCE(@cutoff_time, DATEADD(HOUR, -24, SYSDATETIME())))",
             text, StringComparison.Ordinal);
         Assert.Contains("SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED", text, StringComparison.Ordinal);
-        Assert.Contains("OPTION(RECOMPILE)", text, StringComparison.Ordinal);
+        Assert.Contains("OPTION(RECOMPILE, MAXDOP 1)", text, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -514,11 +514,11 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
     {
         var text = Lf(DefaultTraceEventsCollector.Instance.BuildQuery(MakeContext()).Text);
 
-        /* A SECOND result set, after the payload's OPTION(RECOMPILE). It cannot be a payload column: the
+        /* A SECOND result set, after the payload's OPTION(RECOMPILE, MAXDOP 1). It cannot be a payload column: the
            cycles that most need the path recorded are the ones that collect ZERO rows (a server whose
            trace churns through 20 MB files without producing curated events), and a row-derived path
            would never notice those rollovers — leaving the collector in the expensive fallback forever. */
-        Assert.Contains("OPTION(RECOMPILE);\n\nSELECT /* PerformanceMonitorLite */\n    current_trace_path = @current_trace_path,\n    current_trace_start = @current_trace_start;", text, StringComparison.Ordinal);
+        Assert.Contains("OPTION(RECOMPILE, MAXDOP 1);\n\nSELECT /* PerformanceMonitorLite */\n    current_trace_path = @current_trace_path,\n    current_trace_start = @current_trace_start;", text, StringComparison.Ordinal);
         Assert.DoesNotContain("current_trace_path = ft.", text, StringComparison.Ordinal);
         Assert.DoesNotContain("trace_path", string.Join(",", DefaultTraceEventsCollector.Instance.PayloadColumns.Select(c => c.Name)), StringComparison.Ordinal);
     }

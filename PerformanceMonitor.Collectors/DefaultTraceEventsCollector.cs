@@ -258,7 +258,18 @@ public sealed class DefaultTraceEventsCollector : CollectorDefinitionBase<Defaul
        sys.traces stays in the FROM: its is_default/status predicate is what keeps fn_trace_gettable from
        being invoked at all on a server whose default trace is off, and max_files still comes from it.
        READ UNCOMMITTED like every collector; OPTION(RECOMPILE) because the cutoff selectivity varies
-       wildly between the all-history first run and the tiny steady-state windows. */
+       wildly between the all-history first run and the tiny steady-state windows.
+
+       NO ORDER BY, and MAXDOP 1 (#6304). fn_trace_gettable carries no row-count statistics: the optimizer
+       guesses 80,000 rows of ~2 KB each, so an ORDER BY became a Sort asking for a 57-75 MB memory grant to
+       return the dozens of rows the trace really holds (MaxUsedMemory 2 MB). On a server whose workspace
+       memory is smaller than that (the 1 GB test VMs: the query workspace was 85 MB) the request queued on
+       RESOURCE_SEMAPHORE at 15 ms of CPU until the host's 60 s command timeout, and the cycle failed with
+       "Execution Timeout Expired" and no rows. Whether the grant was available at that moment decided the
+       whole run, which is why runs were either fast or 60 s. Without the Sort the grant is the hash join's
+       1.5 MB, and the rows come back in file order; ReadAsync puts them newest-first on the host, which has
+       the memory. Serial because one trace read has nothing to spread across threads and a parallel plan
+       adds exchange buffers to the request. */
     /* Parsed once — the template is re-formatted every collection cycle (CA1863). */
     private static readonly System.Text.CompositeFormat QueryTemplateFormat =
         System.Text.CompositeFormat.Parse(QueryTemplate);
@@ -404,9 +415,7 @@ AND
         )
     )
 )
-ORDER BY
-    ft.StartTime DESC
-OPTION(RECOMPILE);
+OPTION(RECOMPILE, MAXDOP 1);
 
 SELECT /* PerformanceMonitorLite */
     current_trace_path = @current_trace_path,
@@ -609,6 +618,11 @@ SELECT /* PerformanceMonitorLite */
                 traceStart = reader.GetDateTime(1);
             }
         }
+
+        /* Newest first, as the query's ORDER BY ft.StartTime DESC used to deliver. The server no longer sorts: that
+           Sort asked for a memory grant a small server could not give, and the cycle timed out waiting for it (#6304).
+           The host sorts the rows it already holds. A stable sort, so events of one tick stay in file order. */
+        rows = rows.OrderByDescending(static row => row.EventTime).ToList();
 
         RecordTraceSequence(rows, traceStart, context);
         return DropStoredWatermarkTickRows(rows, context);
