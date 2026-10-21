@@ -516,7 +516,7 @@ public sealed class AlertReadRetrySeamTests
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToList();
 
-        Assert.Equal(14, seamNames.Count);
+        Assert.Equal(15, seamNames.Count);
         Assert.Equal(seamNames.Count, seamNames.Distinct(StringComparer.Ordinal).Count());
 
         var engine = RepoFile.ReadRepoFile("PerformanceMonitor.Alerting", "AlertEngine.cs");
