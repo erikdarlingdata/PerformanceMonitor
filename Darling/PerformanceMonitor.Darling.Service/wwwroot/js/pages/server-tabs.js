@@ -54,12 +54,13 @@ import { blockChainColumn } from "./block-chain.js";
 import { deadlockGraphCell, processRowsInDatabases } from "./deadlock-graph.js";
 import { activePlanColumns, blockingPlanColumns, deadlockPlanColumn, planColumn, procedurePlanColumn, queryStorePlanColumn } from "./plan-viewer.js";
 import { queryStoreHistoryColumn } from "./query-store-history.js";
-import { fillOverviewStrips } from "./overview-strips.js";
+import { queryHeatmapCard } from "./query-heatmap.js";
 import { dailyHealthCalendar } from "./daily-calendar.js";
 import { systemEventsChartSpecs } from "./system-events-charts.js";
 import { comparePick, compareControl, compareCard, COMPARE_TOP } from "./top-compare.js";
 import { SQL_TAB_REACH, POSTGRES_TAB_REACH, withTabReach } from "./server-tab-reach.js";
 import { bloatVerdict, droppabilityVerdict, costFigure, lastScanNoteWord, fillfactorNoteWord, toastNoteWord, indexSkipWord } from "../pg-grid-text.js";
+import { fillOverviewStrips } from "./overview-strips.js";
 
 /* ─────────────────────────── shared cell renderers ─────────────────────────── */
 
@@ -1672,7 +1673,7 @@ export const SERVER_TABS = [
   {
     id: "queries",
     label: "Queries",
-    note: "Plan analysis, the query heatmap, cached-plan retrieval and actual-plan re-execution are in the desktop viewer, not on this page.",
+    note: "Plan analysis, cached-plan retrieval and actual-plan re-execution are in the desktop viewer, not on this page.",
     noteInfo: "They need a plan renderer and a connection back to the monitored server. This page only shows collected data.",
     build: (server, ctx) => [
       activeQueriesPanel(server, ctx),
@@ -1845,23 +1846,18 @@ export const SERVER_TABS = [
             "The Query Store memory clerk was not among the top 25 clerks over 1 MB in any capture in this window, so this is a rank, not a zero.",
         },
       ]),
-      /* #2484: the Query Heatmap tab. The interactive plot stays desktop-only by design -- there is no
-         heatmap viz in this page's vocabulary and inventing a fifth one is not what the issue asked for --
-         but the READ is portable, and a bucketed table is the same answer: one row per (time bin x
-         magnitude bucket) cell. Bins are the viewer's own 5 minutes (the read's default, left unset here on
-         purpose) so this table and the desktop draw the same picture for the same server and window.
-         Built with table(), not an object literal: mount() stringifies anything it cannot consume, so a
-         literal renders as [object Object] and never fetches the read at all. */
-      table(
-        "Query Heatmap",
-        "get_query_heatmap",
-        { server, hours: ctx.hours, limit: 500 },
-        "cells",
-        QUERY_HEATMAP_COLUMNS,
-        ctx.label,
-        "No query executed in this window. Query stats are collected every cycle whether or not anything " +
-          "ran, so the read distinguishes a server nobody collected from one that was simply idle."
-      ),
+      /* #2484, #6293: the Query Heatmap, drawn as the Viewer draws it: a colour grid of query counts by time and
+         magnitude bucket, with a metric picker and a "Show as table" switch to the table of the same cells (the
+         earlier #2484 design kept the plot desktop-only; that is overruled). The card is in pages/query-heatmap.js. */
+      queryHeatmapCard({
+        server,
+        hours: ctx.hours,
+        label: ctx.label,
+        columns: QUERY_HEATMAP_COLUMNS,
+        emptyText:
+          "No query executed in this window. Query stats are collected every cycle whether or not anything " +
+          "ran, so the read distinguishes a server nobody collected from one that was simply idle.",
+      }),
       tagFilteredCard("longqueries", (picker) =>
         table(
           "Long Query Completions",

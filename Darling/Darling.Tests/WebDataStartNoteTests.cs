@@ -377,9 +377,22 @@ public sealed class WebDataStartNoteTests
         Assert.DoesNotContain(read, WebDataStartNote.TableByRead.Keys);
 
         var tabs = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js").ReplaceLineEndings("\n");
-        var open = tabs.IndexOf("table(\n        \"" + title + "\",\n        \"" + read + "\",", StringComparison.Ordinal);
-        Assert.True(open >= 0, read + " is no longer a table() panel on a server tab");
-        var call = tabs[open..tabs.IndexOf("\n      ),", open, StringComparison.Ordinal)];
+        string call;
+        if (read == "get_query_heatmap")
+        {
+            /* #6293: the heatmap is a card of its own (pages/query-heatmap.js) that keeps `viz: "table"`, so windowFloorStrip still draws the note above its grid. */
+            var heat = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "query-heatmap.js").ReplaceLineEndings("\n");
+            var start = heat.IndexOf("renderPanel({", StringComparison.Ordinal);
+            Assert.True(start >= 0 && heat.IndexOf("read: \"" + read + "\"", start, StringComparison.Ordinal) > 0, read + " is no longer a panel on a server tab");
+            call = heat[start..heat.IndexOf("});", start, StringComparison.Ordinal)];
+            Assert.Contains("viz: \"table\"", call, StringComparison.Ordinal);
+        }
+        else
+        {
+            var open = tabs.IndexOf("table(\n        \"" + title + "\",\n        \"" + read + "\",", StringComparison.Ordinal);
+            Assert.True(open >= 0, read + " is no longer a table() panel on a server tab");
+            call = tabs[open..tabs.IndexOf("\n      ),", open, StringComparison.Ordinal)];
+        }
         Assert.DoesNotContain("truncation_note", call, StringComparison.Ordinal);
 
         var note = DarlingMcpWindowNotice.Build(
