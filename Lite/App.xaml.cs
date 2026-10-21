@@ -234,6 +234,10 @@ public partial class App : Application
     public static bool AlertClientTimeoutsEnabled { get; set; }
     public static int AlertClientTimeoutsWarningPerMinute { get; set; } = PerformanceMonitor.Alerting.AttentionEvaluator.DefaultWarningPerMinute;
     public static int AlertClientTimeoutsCriticalPerMinute { get; set; } = PerformanceMonitor.Alerting.AttentionEvaluator.DefaultCriticalPerMinute;
+    /* #5736: the two bars above are FLOORS. The bar in force for a server is the higher of its floor and the multiple times the server's own
+       baseline (the p99.9 of its 3-minute average attention rate over the last 7 days). The pair is clamped on read by AttentionBaselineMath.ClampMultiples. */
+    public static int AlertClientTimeoutsWarningMultiple { get; set; } = PerformanceMonitor.Alerting.AttentionBaselineMath.DefaultWarningMultiple;
+    public static int AlertClientTimeoutsCriticalMultiple { get; set; } = PerformanceMonitor.Alerting.AttentionBaselineMath.DefaultCriticalMultiple;
     public static bool AlertLongRunningQueryEnabled { get; set; } = true;
     public static int AlertLongRunningQueryThresholdMinutes { get; set; } = 30;
     public static int AlertLongRunningQueryMaxResults { get; set; } = 5;
@@ -1385,6 +1389,8 @@ public partial class App : Application
             if (read.TryGetProperty("alert_client_timeouts_enabled", out v)) AlertClientTimeoutsEnabled = v.Bool(AlertClientTimeoutsEnabled);
             if (read.TryGetProperty("alert_client_timeouts_warning_per_minute", out v)) AlertClientTimeoutsWarningPerMinute = v.WholeNumber(AlertClientTimeoutsWarningPerMinute, 1, int.MaxValue);
             if (read.TryGetProperty("alert_client_timeouts_critical_per_minute", out v)) AlertClientTimeoutsCriticalPerMinute = v.WholeNumber(AlertClientTimeoutsCriticalPerMinute, 1, int.MaxValue);
+            if (read.TryGetProperty("alert_client_timeouts_warning_multiple", out v)) AlertClientTimeoutsWarningMultiple = v.WholeNumber(AlertClientTimeoutsWarningMultiple, 1, int.MaxValue);
+            if (read.TryGetProperty("alert_client_timeouts_critical_multiple", out v)) AlertClientTimeoutsCriticalMultiple = v.WholeNumber(AlertClientTimeoutsCriticalMultiple, 1, int.MaxValue);
             if (read.TryGetProperty("alert_long_running_query_enabled", out v)) AlertLongRunningQueryEnabled = v.Bool(AlertLongRunningQueryEnabled);
             if (read.TryGetProperty("alert_long_running_query_threshold_minutes", out v)) AlertLongRunningQueryThresholdMinutes = v.WholeNumber(AlertLongRunningQueryThresholdMinutes);
             if (read.TryGetProperty("alert_long_running_query_max_results", out v)) AlertLongRunningQueryMaxResults = v.WholeNumber(AlertLongRunningQueryMaxResults, 1, 1000);
