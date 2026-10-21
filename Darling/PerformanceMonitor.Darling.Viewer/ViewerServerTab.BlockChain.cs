@@ -94,7 +94,7 @@ public partial class ViewerServerTab
                 var reconstruction = BlockingChainReconstructor.Reconstruct(
                     rows, maxDepth: 50, maxPairs: 5000, stepBudget: 100_000, scopeByMonitorLoop: true);
                 return BlockingChainViewerProjection.BuildModelForSession(
-                    reconstruction, monitorLoop, spid, ecid);
+                    reconstruction, monitorLoop, spid, ecid, ViewerTimeHelper.ForServerClockDisplay);
             });
 
             if (model == null)

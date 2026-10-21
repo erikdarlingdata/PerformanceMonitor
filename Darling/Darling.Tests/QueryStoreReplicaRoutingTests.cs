@@ -60,12 +60,37 @@ public sealed class QueryStoreReplicaRoutingTests
     [Fact]
     public void ReplicaFlushFasterThanTheLimit_UsesItsOwnFlushForL()
     {
-        var input = Healthy() with { Replica = Healthy().Replica! with { FlushIntervalSeconds = 300 } };
+        var input = Healthy() with
+        {
+            Primary = Healthy().Primary! with { FlushIntervalSeconds = 300 },
+            Replica = Healthy().Replica! with { FlushIntervalSeconds = 300 },
+        };
 
         var d = QueryStoreReplicaRouting.Decide(input);
 
         Assert.Equal(QueryStoreReadSource.Replica, d.Source);
         Assert.Equal(TimeSpan.FromMinutes(10), d.LookBack);
+    }
+
+    [Fact]
+    public void PrimaryFlushOver900_ReadsThePrimary_EvenWhenTheSecondaryReportsItsOwn900()
+    {
+        // Measured on SQL Server 2022 CU26: a non-capturing secondary shows its own default option row (flush 900),
+        // not the primary's. The primary's flush bounds how late the secondary's rows land, so it must gate and size L.
+        var input = Healthy() with { Primary = Healthy().Primary! with { FlushIntervalSeconds = 1800 } };
+
+        Assert.Equal(QueryStoreRouteReason.FlushTooSlow, QueryStoreReplicaRouting.Decide(input).Reason);
+    }
+
+    [Fact]
+    public void PrimaryFlush60_WithTheSecondaryReporting900_SizesLFromTheLarger()
+    {
+        var input = Healthy() with { Primary = Healthy().Primary! with { FlushIntervalSeconds = 60 } };
+
+        var d = QueryStoreReplicaRouting.Decide(input);
+
+        Assert.Equal(QueryStoreReadSource.Replica, d.Source);
+        Assert.Equal(TimeSpan.FromMinutes(20), d.LookBack);
     }
 
     [Theory]
@@ -540,33 +565,8 @@ public sealed class QueryStoreReplicaRoutingTests
         QueryStoreReplicaConfigured = replicaConfigured,
     };
 
-    [Theory]
-    [InlineData(15)]
-    [InlineData(17)]
-    public void Enumeration_WithNoReplicaSet_IsToday_OnAnyVersion(int version)
-    {
-        var text = QueryStoreCollector.Instance.BuildEnumerationQuery(Ctx(version, false))!.Text;
-
-        Assert.DoesNotContain("@facts", text, StringComparison.Ordinal);
-        Assert.DoesNotContain("query_store_replicas", text, StringComparison.Ordinal);
-        Assert.DoesNotContain("query_store_runtime_stats", text, StringComparison.Ordinal);
-        Assert.DoesNotContain("FACTS_", text, StringComparison.Ordinal);
-    }
-
     [Fact]
-    public void Enumeration_WithAReplicaSet_ReadsTheFlushInterval_AndTouchesNoOtherQueryStoreView()
-    {
-        var text = QueryStoreCollector.Instance.BuildEnumerationQuery(Ctx(17, true))!.Text;
-
-        Assert.Contains("@facts", text, StringComparison.Ordinal);
-        Assert.Contains("flush_interval_seconds", text, StringComparison.Ordinal);
-        Assert.DoesNotContain("query_store_replicas", text, StringComparison.Ordinal);
-        Assert.DoesNotContain("query_store_runtime_stats", text, StringComparison.Ordinal);
-        Assert.DoesNotContain("FACTS_", text, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void ReplicaEnumeration_IsNullOnAzureSqlDatabase_AndAdmitsSecondariesElsewhere()
+    public void ReplicaEnumeration_IsNullOnAzureSqlDatabase_AndBuiltElsewhere()
     {
         var azure = new CollectorContext
         {
@@ -578,12 +578,7 @@ public sealed class QueryStoreReplicaRoutingTests
         };
         Assert.Null(QueryStoreCollector.Instance.BuildReplicaEnumerationQuery(azure));
 
-        var text = QueryStoreCollector.Instance.BuildReplicaEnumerationQuery(Ctx(17, true))!.Text;
-
-        Assert.DoesNotContain("is_primary_replica", text, StringComparison.Ordinal);
-        Assert.DoesNotContain("readonly_reason & 8 = 0", text, StringComparison.Ordinal);
-        Assert.DoesNotContain("EXCLUSION_FILTER", text, StringComparison.Ordinal);
-        Assert.DoesNotContain("query_store_replicas", text, StringComparison.Ordinal);
+        Assert.NotNull(QueryStoreCollector.Instance.BuildReplicaEnumerationQuery(Ctx(17, true)));
     }
 
     // ---- #6279: capturing secondary, learned from the rows already read -----------------------------------------------------

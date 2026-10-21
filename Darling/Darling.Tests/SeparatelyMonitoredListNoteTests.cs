@@ -60,7 +60,8 @@ public sealed class SeparatelyMonitoredListNoteTests
         {
             var at = js.IndexOf("\"" + read + "\",", StringComparison.Ordinal);
             Assert.True(at > 0, read);
-            var end = js.IndexOf("),", at, StringComparison.Ordinal);
+            /* The call ends at its own closing parenthesis on a line of its own; a column list inside it may hold "), " (#6292). */
+            var end = js.IndexOf("\n      )", at, StringComparison.Ordinal);
             Assert.Contains("\"separately_monitored_note\"", js.Substring(at, end - at), StringComparison.Ordinal);
         }
         Assert.Contains("WebSqlTextPreviewLength, registryState, logger, c.RequestAborted)", web, StringComparison.Ordinal);
