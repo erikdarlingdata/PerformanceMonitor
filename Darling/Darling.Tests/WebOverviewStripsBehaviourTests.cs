@@ -150,4 +150,78 @@ public sealed class WebOverviewStripsBehaviourTests
         Assert.Equal("No blocking or deadlocks in this window.", r.GetProperty("blocking").GetProperty("text").GetString());
         Assert.Equal(1, r.GetProperty("memoryLines").GetInt32());
     }
+
+    /// <summary>
+    /// The Viewer's baseline rule on the web (#6291): a flat band of mean +- 2 effective sigma, a marker on a point above the band AND
+    /// at or above the lane's floor (CPU 10, waits 100, I/O 2) or below the band, markers on the SQL CPU line only, a band and no
+    /// markers on blocking, and none at all for a lane the store has too little history for, which says so instead.
+    /// </summary>
+    [Fact]
+    public void TheBaselineBandAndMarkers_FollowTheViewersRule_AndALaneWithoutHistoryDrawsNeither()
+    {
+        var r = Run("baselines");
+
+        var full = r.GetProperty("full");
+        var cpuBand = full.GetProperty("cpu").GetProperty("band")[0];
+        Assert.Equal(10, cpuBand.GetProperty("lower").GetDouble());
+        Assert.Equal(30, cpuBand.GetProperty("upper").GetDouble());
+        Assert.Equal(20, cpuBand.GetProperty("mean").GetDouble());
+        Assert.Equal(100, full.GetProperty("waits").GetProperty("band")[0].GetProperty("lower").GetDouble());
+        Assert.Equal(140, full.GetProperty("waits").GetProperty("band")[0].GetProperty("upper").GetDouble());
+
+        /* CPU's SQL line is 10 + minute for 0..30 and 45..60; above 30 is minutes 21..30 and 45..60. Total CPU is never marked. */
+        var cpuMarked = r.GetProperty("cpuMarkedValues").EnumerateArray().Select(e => e.GetDouble()).ToArray();
+        Assert.Equal(Enumerable.Range(21, 10).Concat(Enumerable.Range(45, 16)).Select(m => 10.0 + m).ToArray(), cpuMarked);
+        /* Waits are 100 + 10 * i for i 0..12; above 140 is 150..220. */
+        Assert.Equal(Enumerable.Range(5, 8).Select(i => 100.0 + 10 * i).ToArray(),
+            r.GetProperty("waitMarkedValues").EnumerateArray().Select(e => e.GetDouble()).ToArray());
+        /* The weighted I/O latency is 3 ms, above a 1.4 ms band and over the 2 ms floor, at all five buckets. */
+        Assert.Equal(5, r.GetProperty("ioMarkerCount").GetInt32());
+        Assert.Equal(JsonValueKind.Null, full.GetProperty("blocking").GetProperty("markers").ValueKind);
+        Assert.Equal(JsonValueKind.Array, full.GetProperty("blocking").GetProperty("band").ValueKind);
+        Assert.Equal(JsonValueKind.Null, full.GetProperty("memory").GetProperty("band").ValueKind);
+
+        /* 1.5 ms is over the band but under the 2 ms floor: unmarked. 2.5 is marked, and 0.1 is under the band: marked at any value. */
+        Assert.Equal(new[] { 2.5, 0.1 }, r.GetProperty("floorMarkedValues").EnumerateArray().Select(e => e.GetDouble()).ToArray());
+        Assert.Equal(0, r.GetProperty("clampedLower").GetDouble());
+
+        var partial = r.GetProperty("partial");
+        Assert.Equal(JsonValueKind.Null, partial.GetProperty("waits").GetProperty("band").ValueKind);
+        Assert.Equal(JsonValueKind.Null, partial.GetProperty("waits").GetProperty("markers").ValueKind);
+        Assert.Equal("No baseline yet: not enough history.", partial.GetProperty("waits").GetProperty("note").GetString());
+        Assert.Equal(JsonValueKind.Array, partial.GetProperty("cpu").GetProperty("band").ValueKind);
+
+        /* A bucket with no samples, or no dispersion, is no baseline: never a band at 0. */
+        foreach (var lane in new[] { "cpu", "waits" })
+        {
+            Assert.Equal(JsonValueKind.Null, r.GetProperty("flat").GetProperty(lane).GetProperty("band").ValueKind);
+            Assert.Equal("No baseline yet: not enough history.", r.GetProperty("flat").GetProperty(lane).GetProperty("note").GetString());
+        }
+
+        foreach (var lane in new[] { "cpu", "waits", "io", "blocking" })
+        {
+            Assert.Equal(JsonValueKind.Null, r.GetProperty("emptyRead").GetProperty(lane).GetProperty("band").ValueKind);
+            Assert.Equal("No baseline yet: not enough history.", r.GetProperty("emptyRead").GetProperty(lane).GetProperty("note").GetString());
+            Assert.Equal("Baseline unavailable.", r.GetProperty("failedRead").GetProperty(lane).GetProperty("note").GetString());
+        }
+
+        /* A database filter narrows the I/O and blocking lines but not the server-wide baseline: those two draw no band. CPU and waits keep theirs. */
+        var filtered = r.GetProperty("filtered");
+        Assert.Equal(JsonValueKind.Null, filtered.GetProperty("io").GetProperty("band").ValueKind);
+        Assert.Equal(JsonValueKind.Null, filtered.GetProperty("blocking").GetProperty("band").ValueKind);
+        Assert.Contains("database filter", filtered.GetProperty("io").GetProperty("note").GetString());
+        Assert.Equal(JsonValueKind.Array, filtered.GetProperty("cpu").GetProperty("band").ValueKind);
+
+        var drawn = r.GetProperty("drawn");
+        Assert.Equal(1, drawn.GetProperty("cpu").GetProperty("band").GetInt32());
+        Assert.Equal(1, drawn.GetProperty("cpu").GetProperty("mean").GetInt32());
+        Assert.Equal(26, drawn.GetProperty("cpu").GetProperty("dots").GetInt32());
+        Assert.Equal(0, drawn.GetProperty("waits").GetProperty("band").GetInt32());
+        Assert.Equal(0, drawn.GetProperty("waits").GetProperty("dots").GetInt32());
+        Assert.Equal(new[] { "No baseline yet: not enough history." },
+            drawn.GetProperty("waits").GetProperty("note").EnumerateArray().Select(e => e.GetString()).ToArray());
+        Assert.Equal(1, drawn.GetProperty("blocking").GetProperty("band").GetInt32());
+        Assert.Equal(0, drawn.GetProperty("blocking").GetProperty("dots").GetInt32());
+        Assert.Equal(0, drawn.GetProperty("memory").GetProperty("band").GetInt32());
+    }
 }

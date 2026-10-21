@@ -665,6 +665,8 @@ td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
 .chart .overview-strips .strip-none { fill: var(--dim); font-size: 11px; }
 .chart .overview-strips .strip-band { fill: rgba(46, 174, 241, 0.14); }
 .chart .overview-strips .strip-anomaly { fill: #ef5350; stroke: var(--bg-dark); stroke-width: 1; }
+.chart .overview-strips .strip-band-mean { stroke: rgba(46, 174, 241, 0.5); stroke-width: 1; stroke-dasharray: 4 3; }
+.chart .overview-strips .strip-baseline-note { fill: var(--dim); font-size: 10px; }
 
 .chart-legend {
   display: flex;

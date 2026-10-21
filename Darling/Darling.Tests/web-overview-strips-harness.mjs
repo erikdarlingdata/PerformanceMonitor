@@ -1,7 +1,7 @@
 /* Runs the web viewer's shipped pages/overview-strips.js (the Overview's five stacked strips, #6291) against a stand-in DOM and
    prints what one scenario drew as one line of JSON. WebOverviewStripsBehaviourTests starts it as
        node web-overview-strips-harness.mjs <path to wwwroot/js> <scenario>
-   Scenarios: crosshair, zoom, empty. */
+   Scenarios: crosshair, zoom, empty, baselines. */
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -120,6 +120,60 @@ if (scenario === "crosshair") {
   out.waitPointsZoomed = find(wait, (n) => n.tag === "polyline")[0].attrs.points.split(" ").length;
   out.axisLabels = find(z.node, (n) => n.tag === "text" && /^\d\d:\d\d$/.test(n.textContent)).map((n) => n.textContent);
   out.stripsDrawnZoomed = find(z.node, (n) => n.attrs["data-strip"]).length;
+} else if (scenario === "baselines") {
+  const window = { windowStart: T0, windowEnd: T0 + 60 * MIN };
+  const baseline = (cpu, waits, io, blocking) => ({ kind: "data", data: { baselines: { cpu, waits, io, blocking } } });
+  const b = (mean, sd) => ({ mean, effective_std_dev: sd, sample_count: 40, tier: "Full" });
+  const fresh = () => strips.buildStrips(reads);
+  const byKey = (list, key) => list.find((s) => s.key === key);
+  const summary = (list) => Object.fromEntries(list.map((s) => [s.key, {
+    band: s.band ? s.band.map((x) => ({ lower: x.lower, upper: x.upper, mean: x.mean })) : null,
+    markers: s.markers ? s.markers.length : null,
+    note: s.baselineNote,
+  }]));
+
+  /* The Viewer's rule: a band of mean +- 2 effective sigma over the window; a marker above the band AND at or above the floor, or below it. */
+  const a = strips.applyBaselines(fresh(), baseline(b(20, 5), b(120, 10), b(1, 0.2), b(0.1, 0.3)), window, {});
+  out.full = summary(a);
+  out.cpuMarkedValues = byKey(a, "cpu").markers.map((m) => m.v);
+  out.waitMarkedValues = byKey(a, "waits").markers.map((m) => m.v);
+  out.ioMarkerCount = byKey(a, "io").markers.length;
+
+  /* The floor: 1.5 ms is above a 0.7 ms band but under the 2 ms floor, so only 2.5 ms is marked; a point under the band is marked at any value. */
+  const lone = [{ key: "io", series: [{ points: [{ t: 1, v: 1.5 }, { t: 2, v: 2.5 }, { t: 3, v: 0.1 }] }] }];
+  strips.applyBaselines(lone, baseline(null, null, b(0.5, 0.1), null), window, {});
+  out.floorMarkedValues = lone[0].markers.map((m) => m.v);
+
+  /* The band's lower edge is clamped at 0, never negative. */
+  const low = [{ key: "waits", series: [{ points: [{ t: 1, v: 5 }] }] }];
+  strips.applyBaselines(low, baseline(null, b(3, 2), null, null), window, {});
+  out.clampedLower = low[0].band[0].lower;
+
+  /* Not enough history for one lane: that strip has NO band and NO markers and says so; the others still draw. */
+  const partial = strips.applyBaselines(fresh(), baseline(b(20, 5), null, b(1, 0.2), b(0.1, 0.3)), window, {});
+  out.partial = summary(partial);
+
+  /* A zero or empty-history bucket is no baseline either (never a band at 0). */
+  const flat = strips.applyBaselines(fresh(), baseline({ mean: 0, effective_std_dev: 0, sample_count: 0 }, b(120, 0), null, null), window, {});
+  out.flat = summary(flat);
+
+  /* The read said "empty" (no history anywhere) or failed: no bands, a note each, and the lines are untouched. */
+  out.emptyRead = summary(strips.applyBaselines(fresh(), { kind: "empty", message: "x" }, window, {}));
+  out.failedRead = summary(strips.applyBaselines(fresh(), { kind: "error", message: "boom" }, window, {}));
+
+  /* A database filter narrows the I/O and blocking reads, whose baseline is server-wide: neither is drawn against a filtered line. */
+  out.filtered = summary(strips.applyBaselines(fresh(), baseline(b(20, 5), b(120, 10), b(1, 0.2), b(0.1, 0.3)), window, { databaseFiltered: true }));
+
+  /* Drawn: the band, its dashed mean, one dot per marker, and the note for the lane without a baseline. */
+  const drawn = strips.drawStrips(partial, domain, 1000, null);
+  const g = (key) => find(drawn.node, (n) => n.attrs["data-strip"] === key)[0];
+  const count = (key, cls) => find(g(key), (n) => n.attrs.class === cls).length;
+  out.drawn = {
+    cpu: { band: count("cpu", "strip-band"), mean: count("cpu", "strip-band-mean"), dots: count("cpu", "strip-anomaly") },
+    waits: { band: count("waits", "strip-band"), dots: count("waits", "strip-anomaly"), note: find(g("waits"), (n) => n.attrs.class === "strip-baseline-note").map((n) => n.textContent) },
+    blocking: { band: count("blocking", "strip-band"), dots: count("blocking", "strip-anomaly") },
+    memory: { band: count("memory", "strip-band") },
+  };
 } else if (scenario === "empty") {
   const none = {
     cpu: { kind: "empty", message: "No CPU samples in this window." },

@@ -19,7 +19,7 @@
  * only arithmetic here is the one the desktop does too: the file I/O strip is the read latency of every file at a bucket,
  * weighted by that file's reads. Times are the reads' UTC stamps. A strip with no samples says so; it is never a zero line.
  */
-import { el, mount, parseUtc, windowFromHours, readToolWithinKeptHistory, keptWindowStrip, emptyStrip, readErrorStrip } from "../util.js";
+import { el, mount, parseUtc, windowFromHours, readTool, readToolWithinKeptHistory, getActiveDatabaseFilter, keptWindowStrip, emptyStrip, readErrorStrip } from "../util.js";
 import { chartZoomScope } from "../charts.js";
 import { gapThresholdMs, splitAtGaps } from "../chart-gaps.js";
 
@@ -164,6 +164,44 @@ export function buildStrips(reads) {
   return [cpu, waits, blocking, memory, io];
 }
 
+/** Below this a point above the band is not called anomalous (the Viewer's floors: "1% CPU above 0.5% baseline" is not news on an idle server). */
+const ANOMALY_FLOOR = { cpu: 10, waits: 100, io: 2 };
+/** The strips whose baseline is server-wide while the strip's own read can follow the page's database filter. */
+const DATABASE_SCOPED = new Set(["io", "blocking"]);
+
+/**
+ * The Viewer's baseline band and anomaly markers (CorrelatedTimelineLanesControl), from get_overview_baselines. `res` is the read's
+ * reply as readTool returns it (`{ kind, data, message }`); its `data.baselines` holds `{ mean, effective_std_dev, sample_count }` per
+ * lane or null where the store has too little history. A strip gets a flat band, mean +- 2 effective sigma (lower clamped at 0), over
+ * the whole window, and a marker on every point above the band at or above the lane's floor (CPU 10, waits 100, I/O 2) or below it.
+ * Markers sit on the SQL CPU line only; blocking gets a band and no markers. A lane with no usable baseline gets NO band and NO
+ * markers and a `baselineNote` that says why, never a band at 0. `opts.databaseFiltered` is true when the page's database filter
+ * narrows the I/O and blocking reads: their baseline is server-wide, so it is not drawn against a filtered line.
+ */
+export function applyBaselines(strips, res, window, opts) {
+  const baselines = res && res.kind === "data" && res.data && res.data.baselines ? res.data.baselines : null;
+  const reason = !res ? "" : res.kind === "error" ? "Baseline unavailable." : "No baseline yet: not enough history.";
+  for (const s of strips) {
+    s.band = undefined;
+    s.markers = undefined;
+    s.baselineNote = null;
+    if (!s.series.some((ser) => ser.points.length)) continue; /* nothing drawn: the strip's own note says so */
+    if (opts && opts.databaseFiltered && DATABASE_SCOPED.has(s.key)) { s.baselineNote = "Baseline is server-wide: not drawn for a database filter."; continue; }
+    if (!(s.key in ANOMALY_FLOOR) && s.key !== "blocking") continue; /* the buffer pool has no baseline */
+    const b = baselines ? baselines[s.key] : null;
+    if (!b || !(b.sample_count > 0) || !(b.effective_std_dev > 0)) { if (reason) s.baselineNote = reason; continue; }
+    const upper = b.mean + 2 * b.effective_std_dev;
+    const lower = Math.max(0, b.mean - 2 * b.effective_std_dev);
+    s.band = [{ from: window ? window.windowStart : 0, to: window ? window.windowEnd : Number.MAX_SAFE_INTEGER, lower, upper, mean: b.mean }];
+    if (s.key in ANOMALY_FLOOR) {
+      const floor = ANOMALY_FLOOR[s.key];
+      const line = s.series[0]; /* SQL CPU, the lane's wait time, the weighted read latency */
+      s.markers = line.points.filter((p) => (p.v > upper && p.v >= floor) || p.v < lower).map((p) => ({ t: p.t, v: p.v }));
+    }
+  }
+  return strips;
+}
+
 /**
  * One server-wide read latency per bucket from get_file_io_trend's per-file rows: each row's average weighted by its reads, as the
  * desktop's lane does (a file with few reads must not pull the line as hard as a busy one). The read already folds files past
@@ -274,7 +312,17 @@ export function drawStrips(strips, domain, width, onZoom) {
     for (const b of s.band || []) {
       const x1 = Math.max(plotL, x(b.from));
       const x2 = Math.min(plotR, x(b.to));
-      if (x2 > x1) g.appendChild(svg("rect", { class: "strip-band", x: x1, y: y(Math.min(b.upper, yMax)), width: x2 - x1, height: Math.max(1, y(Math.max(b.lower, yMin)) - y(Math.min(b.upper, yMax))) }));
+      if (x2 > x1) {
+        g.appendChild(svg("rect", { class: "strip-band", x: x1, y: y(Math.min(b.upper, yMax)), width: x2 - x1, height: Math.max(1, y(Math.max(b.lower, yMin)) - y(Math.min(b.upper, yMax))) }));
+        /* The Viewer's dashed mean line, when the mean sits inside the strip's scale. */
+        if (b.mean != null && b.mean >= yMin && b.mean <= yMax) g.appendChild(svg("line", { class: "strip-band-mean", x1, x2, y1: y(b.mean), y2: y(b.mean) }));
+      }
+    }
+    /* A strip with data but no band says why, in its header: never a band at 0. */
+    if (s.baselineNote && hasData) {
+      const bn = svg("text", { class: "strip-baseline-note", x: plotR, y: top + 12, "text-anchor": "end" });
+      bn.textContent = s.baselineNote;
+      g.appendChild(bn);
     }
 
     if (!hasData) {
@@ -417,8 +465,14 @@ const READS = [
  */
 export function fillOverviewStrips(body, server, ctx) {
   (async () => {
-    const results = await Promise.all(READS.map(([, tool, extra]) =>
-      readToolWithinKeptHistory(tool, { server, hours: ctx.hours, ...extra }, ctx && ctx.signal).catch((e) => ({ kind: "error", message: String((e && e.message) || e) }))));
+    const asked = windowFromHours(ctx.hours);
+    const baselineStart = new Date(asked ? asked.windowStart : Date.now() - ctx.hours * 3600000).toISOString();
+    const [results, baselineRes] = await Promise.all([
+      Promise.all(READS.map(([, tool, extra]) =>
+        readToolWithinKeptHistory(tool, { server, hours: ctx.hours, ...extra }, ctx && ctx.signal).catch((e) => ({ kind: "error", message: String((e && e.message) || e) })))),
+      /* The Viewer's four baselines at the window start, from the one web-only read; a failure costs the bands, never the lines. */
+      readTool("get_overview_baselines", { server, window_start: baselineStart }, ctx && ctx.signal).catch((e) => ({ kind: "error", message: String((e && e.message) || e) })),
+    ]);
     const reads = {};
     READS.forEach(([key], i) => { reads[key] = results[i]; });
     const strips = buildStrips(reads);
@@ -429,6 +483,8 @@ export function fillOverviewStrips(body, server, ctx) {
 
     const kept = results.map((r) => r.keptHours).filter(Boolean);
     const window = windowFromHours(kept.length ? Math.min(...kept) : ctx.hours);
+    const dbFilter = getActiveDatabaseFilter();
+    applyBaselines(strips, baselineRes, window, { databaseFiltered: !!(dbFilter && dbFilter.server === server) });
     const id = "overview-strips|" + server;
     const scope = chartZoomScope(ctx.hours);
     const host = el("div", { class: "chart overview-strips-host" });
