@@ -222,10 +222,17 @@ export function chartNoteText(data, kind) {
   const width = bucketWidthText(data);
   if (!width) return null;
   if (width === "is one collection") return "Each point is one collection.";
-  if (kind === "level") return "Each point " + width + " and is the average of the samples in it.";
-  const sentence = "Each point " + width + ".";
-  return kind === "summed" ? sentence + " A bucket the window cuts short holds smaller counts; rates are true rates over the time the bucket covers." : sentence;
+  const sentence = (kind === "level" ? "Each point " + width + " and is the average of the samples in it." : "Each point " + width + ".") +
+    (kind === "summed" ? " A bucket the window cuts short holds smaller counts; rates are true rates over the time the bucket covers." : "");
+  return data.source === "hourly" ? sentence + " " + HOURLY_TRAIL_TEXT : sentence;
 }
+
+/**
+ * What a read served from the hourly rollup owes its reader: the series trails the clock by up to two hours, because the
+ * current hour is never materialized and the one before it lands on the next refresh (DurationTrendRouting, #6359). Said when
+ * the read's own `source` field is "hourly", never from the note's text; without it the empty right edge reads as missing data.
+ */
+const HOURLY_TRAIL_TEXT = "The newest hour or two is not in this chart yet: hourly totals are added after each hour ends.";
 
 /** The note line under a chart for a trend read (see chartNoteText), or null when the read states no width. */
 export function chartNote(data, kind) {

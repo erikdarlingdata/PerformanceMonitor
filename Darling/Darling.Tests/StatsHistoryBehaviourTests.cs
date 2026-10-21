@@ -134,6 +134,21 @@ public sealed class StatsHistoryBehaviourTests
     }
 
     [Fact]
+    public void AHourlyTierRead_SaysTheNewestHoursAreNotInTheChartYet_AndARawTierReadDoesNot()
+    {
+        // #6359: the hourly rollup never holds the current hour and gets the previous one on the next refresh, so the chart's
+        // right edge is empty for up to two hours. The panel says so from the read's `source` field, never from its note text.
+        const string trail = "The newest hour or two is not in this chart yet: hourly totals are added after each hour ends.";
+        var r = Run("hourlyTierTrail");
+        Assert.Equal(
+            new[] { "Each point covers 1 hour. A bucket the window cuts short holds smaller counts; rates are true rates over the time the bucket covers. " + trail },
+            r.GetProperty("hourly").EnumerateArray().Select(s => s.GetString()));
+        Assert.Equal(
+            new[] { "Each point covers 5 minutes. A bucket the window cuts short holds smaller counts; rates are true rates over the time the bucket covers." },
+            r.GetProperty("raw").EnumerateArray().Select(s => s.GetString()));
+    }
+
+    [Fact]
     public void AtPast5Minutes_HistoryReadsTheWindowTheGridRankedOver_AndSaysItIsWider()
     {
         // #6359: the grid ranks over the whole hour; the row's History used to be cut to the 5 picked minutes and said nothing was recorded.

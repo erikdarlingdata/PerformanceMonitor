@@ -153,6 +153,18 @@ const scenarios = {
     const util = await import(pathToFileURL(scratch + "/util.js").href);
     out.widths = [util.bucketWidthText?.({ bucket_minutes: 1 }), util.bucketWidthText?.({ bucket_minutes: 10 }), util.bucketWidthText?.({ bucket_minutes: 60 }), util.bucketWidthText?.({ bucket_minutes: 360 }), util.bucketWidthText?.({ bucket_minutes: 1440 }), util.bucketWidthText?.({ bucket: "per-collection", bucket_minutes: null }), util.bucketWidthText?.({})];
   },
+  /* #6359: a read served from the hourly rollup trails the clock by up to two hours, and the panel says so from the read's own `source` field. */
+  async hourlyTierTrail() {
+    const notices = async (kind, row, payload) => {
+      respond(payload);
+      const cell = mod.statsHistoryColumn(kind, "srv-a", 24).render(row);
+      cell.byText("History").click();
+      await flush();
+      return cell.all((n) => n.className === "strip notice").map((n) => n.textContent);
+    };
+    out.hourly = await notices("procedures", procRow, { ...procTrend(), bucket: "1 hour", bucket_minutes: 60, source: "hourly" });
+    out.raw = await notices("queries", queryRow, { hours_back: 24, trend: [{ collection_time: "2026-03-04T05:00:00", avg_cpu_ms: 40 }], bucket: "5 minutes", bucket_minutes: 5, source: "raw" });
+  },
   /* #6359: "Past 5 minutes" is read over the whole hour the grid ranked over. The row's History must not be cut to the 5 minutes. */
   async fiveMinuteRange() {
     const util = await import(pathToFileURL(scratch + "/util.js").href);
