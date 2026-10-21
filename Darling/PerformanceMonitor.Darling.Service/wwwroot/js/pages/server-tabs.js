@@ -3613,13 +3613,18 @@ const TOP_PROC_GROUPS = {
    same finding as one that went from 1 s to 4 s, and the percent alone cannot tell them apart. Extra
    duration is the ranking key and the column that says whether the regression matters at all. */
 /* Stays local: this page's column set differs from the catalog entry's. */
-const QUERY_STORE_REGRESSION_GROUPS = { groups: ["CPU", "Executions and plans"], defaultGroups: [] };
+/* #5506: Aborted (timeouts, cancels) and Exception (errors) runs sit beside the Regular cost, as two more groups. Their
+   count and the reason the row is listed stay in the always-visible columns, so a timeout row is never hidden. */
+const QUERY_STORE_REGRESSION_GROUPS = { groups: ["CPU", "Executions and plans", "Timeouts (Aborted)", "Errors (Exception)"], defaultGroups: [] };
 
 const QUERY_STORE_REGRESSION_COLUMNS = [
   { key: "severity", label: "Severity" },
+  { key: "regression_reason", label: "Why" },
   { key: "database_name", label: "Database" },
   { key: "query_text", label: "Query", valueList: false, render: (r) => codeDisclosure(r.query_text) },
   { key: "query_id", label: "Query ID", format: "int" },
+  { key: "recent_aborted_count", label: "Recent Timeouts", format: "int" },
+  { key: "recent_exception_count", label: "Recent Errors", format: "int" },
   { key: "additional_duration_ms", label: "Extra Duration", format: "ms" },
   { key: "duration_regression_percent", label: "Duration +%", format: "num1" },
   { key: "baseline_duration_ms", label: "Baseline Duration", format: "ms" },
@@ -3633,6 +3638,24 @@ const QUERY_STORE_REGRESSION_COLUMNS = [
      while gaining a plan is usually a plan-choice problem, not a data one. */
   { key: "baseline_plan_count", label: "Baseline Plans", group: "Executions and plans", format: "int" },
   { key: "recent_plan_count", label: "Recent Plans", group: "Executions and plans", format: "int" },
+  { key: "baseline_aborted_count", label: "Baseline Timeouts Execs", group: "Timeouts (Aborted)", format: "int" },
+  { key: "recent_aborted_count", label: "Recent Timeouts Execs", group: "Timeouts (Aborted)", format: "int" },
+  { key: "baseline_aborted_cpu_ms", label: "Baseline Timeouts CPU", group: "Timeouts (Aborted)", format: "ms" },
+  { key: "recent_aborted_cpu_ms", label: "Recent Timeouts CPU", group: "Timeouts (Aborted)", format: "ms" },
+  { key: "baseline_aborted_duration_ms", label: "Baseline Timeouts Duration", group: "Timeouts (Aborted)", format: "ms" },
+  { key: "recent_aborted_duration_ms", label: "Recent Timeouts Duration", group: "Timeouts (Aborted)", format: "ms" },
+  { key: "baseline_aborted_per_hour", label: "Baseline Timeouts Per Hour", group: "Timeouts (Aborted)", format: "num1" },
+  { key: "recent_aborted_per_hour", label: "Recent Timeouts Per Hour", group: "Timeouts (Aborted)", format: "num1" },
+  { key: "baseline_exception_count", label: "Baseline Errors Execs", group: "Errors (Exception)", format: "int" },
+  { key: "recent_exception_count", label: "Recent Errors Execs", group: "Errors (Exception)", format: "int" },
+  { key: "baseline_exception_cpu_ms", label: "Baseline Errors CPU", group: "Errors (Exception)", format: "ms" },
+  { key: "recent_exception_cpu_ms", label: "Recent Errors CPU", group: "Errors (Exception)", format: "ms" },
+  { key: "baseline_exception_duration_ms", label: "Baseline Errors Duration", group: "Errors (Exception)", format: "ms" },
+  { key: "recent_exception_duration_ms", label: "Recent Errors Duration", group: "Errors (Exception)", format: "ms" },
+  { key: "baseline_exception_per_hour", label: "Baseline Errors Per Hour", group: "Errors (Exception)", format: "num1" },
+  { key: "recent_exception_per_hour", label: "Recent Errors Per Hour", group: "Errors (Exception)", format: "num1" },
+  { key: "baseline_regular_per_hour", label: "Baseline Execs/Hour", group: "Executions and plans", format: "num1" },
+  { key: "recent_regular_per_hour", label: "Recent Execs/Hour", group: "Executions and plans", format: "num1" },
   { key: "last_execution_time", label: "Last Exec", format: "time" },
 ];
 

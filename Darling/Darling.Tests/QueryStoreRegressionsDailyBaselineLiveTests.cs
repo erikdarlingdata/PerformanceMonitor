@@ -43,7 +43,10 @@ public sealed class QueryStoreRegressionsDailyBaselineLiveTests
 
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
-    private static async Task SeedAsync(NpgsqlDataSource postgres, DateTime day0, DateTime start, CancellationToken ct)
+    /// <summary>The re-collected interval of the extra fixture (query 41): its identity, so the second snapshot upserts the first.</summary>
+    private const long RecollectedIntervalId = 7900;
+
+    private static async Task SeedAsync(NpgsqlDataSource postgres, DateTime day0, DateTime start, CancellationToken ct, bool extra = false)
     {
         var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
         var context = new CollectorContext { ServerId = ServerId, ServerName = "qsdaily-host", CollectionTime = DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc), Deltas = new CollectorDeltaCalculator() };
@@ -60,9 +63,13 @@ public sealed class QueryStoreRegressionsDailyBaselineLiveTests
         long intervalId = 7000;
         /* One interval, written once, last execution 30 minutes after its first. Its day, for the daily totals and for the
            read's split, is the day of that last execution. */
-        async Task IntervalAsync(DateTime first, long queryId, long planId, long executions, long cpuUs)
+        async Task IntervalAsync(DateTime first, long queryId, long planId, long executions, long cpuUs, long? reuseIntervalId = null, int lastMinutes = 30)
         {
-            intervalId++;
+            if (reuseIntervalId is null)
+            {
+                intervalId++;
+            }
+
             var row = new QueryStoreCollector.Row
             {
                 DatabaseName = Db,
@@ -70,7 +77,7 @@ public sealed class QueryStoreRegressionsDailyBaselineLiveTests
                 PlanId = planId,
                 ExecutionTypeDesc = "Regular",
                 FirstExecutionTime = first,
-                LastExecutionTime = first.AddMinutes(30),
+                LastExecutionTime = first.AddMinutes(lastMinutes),
                 QueryHash = "0x" + queryId.ToString("X8", CultureInfo.InvariantCulture),
                 QueryPlanHash = "0x" + planId.ToString("X8", CultureInfo.InvariantCulture),
                 QueryText = "SELECT " + queryId.ToString(CultureInfo.InvariantCulture),
@@ -79,10 +86,10 @@ public sealed class QueryStoreRegressionsDailyBaselineLiveTests
                 AvgDurationUs = cpuUs * 2,
                 IsForcedPlan = false,
                 ForceFailureCount = 0,
-                RuntimeStatsIntervalId = intervalId,
+                RuntimeStatsIntervalId = reuseIntervalId ?? intervalId,
                 IntervalStartTimeUtc = first,
             };
-            await runner.WriteBackfillBatchAsync(QueryStoreCollector.Instance, [row], server, first.AddMinutes(40), context, ct);
+            await runner.WriteBackfillBatchAsync(QueryStoreCollector.Instance, [row], server, first.AddMinutes(lastMinutes + 10), context, ct);
         }
 
         /* The table's floor: an interval before the baseline, outside both arms, so the gate's #5541 edge holds. */
@@ -102,6 +109,58 @@ public sealed class QueryStoreRegressionsDailyBaselineLiveTests
         {
             await IntervalAsync(day0.AddHours(hours), 20, 201, 8, 3_000);
         }
+
+        if (extra)
+        {
+            /* Query 40, two plans in the baseline: plan 401 on D-6 (a built day) and plan 402 just before the window start (read
+               live), one plan recently. Its CPU triples recently, so it is listed. */
+            await IntervalAsync(day0.AddDays(2).AddHours(11), 40, 401, 20, 1_000);
+            await IntervalAsync(start.AddMinutes(-50), 40, 402, 20, 1_000);
+            await IntervalAsync(start.AddHours(3), 40, 401, 20, 3_000);
+
+            /* Query 41, an interval re-collected with a growing count after the day was built, and its last execution crossing
+               midnight: first D-5 23:00, first snapshot last D-5 23:30 with 10 executions; the second (written after the build,
+               see RecollectAsync) last D-4 00:30 with 25. */
+            await IntervalAsync(day0.AddDays(3).AddHours(23), 41, 411, 10, 1_000, RecollectedIntervalId);
+            await IntervalAsync(start.AddHours(4), 41, 411, 10, 5_000);
+        }
+    }
+
+    /// <summary>The second snapshot of query 41's interval: the same identity, a larger count, a last execution after midnight.</summary>
+    private static async Task RecollectAsync(NpgsqlDataSource postgres, DateTime day0, CancellationToken ct)
+    {
+        var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
+        var context = new CollectorContext { ServerId = ServerId, ServerName = "qsdaily-host", CollectionTime = DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc), Deltas = new CollectorDeltaCalculator() };
+        var server = new ServerRuntime
+        {
+            Config = new MonitoredServer { Name = "qsdaily", Host = "qsdaily-host" },
+            ConnectionString = "Server=qsdaily-host",
+            Target = new CollectorTargetInfo { SqlMajorVersion = 16 },
+            StorageName = "qsdaily-host",
+            ServerId = ServerId,
+            EngineEdition = 3,
+        };
+        var first = day0.AddDays(3).AddHours(23);
+        var row = new QueryStoreCollector.Row
+        {
+            DatabaseName = Db,
+            QueryId = 41,
+            PlanId = 411,
+            ExecutionTypeDesc = "Regular",
+            FirstExecutionTime = first,
+            LastExecutionTime = first.AddMinutes(90),
+            QueryHash = "0x" + 41.ToString("X8", CultureInfo.InvariantCulture),
+            QueryPlanHash = "0x" + 411.ToString("X8", CultureInfo.InvariantCulture),
+            QueryText = "SELECT 41",
+            ExecutionCount = 25,
+            AvgCpuTimeUs = 1_000,
+            AvgDurationUs = 2_000,
+            IsForcedPlan = false,
+            ForceFailureCount = 0,
+            RuntimeStatsIntervalId = RecollectedIntervalId,
+            IntervalStartTimeUtc = first,
+        };
+        await runner.WriteBackfillBatchAsync(QueryStoreCollector.Instance, [row], server, first.AddMinutes(100), context, ct);
     }
 
     private static string Describe(DarlingQueryStoreRegressionReader.RegressionRow r) => string.Join("|",
@@ -252,5 +311,158 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         Assert.NotEqual(reference, poisoned);
         /* The executions did not move, only the cost the poisoned day carried. */
         Assert.Equal(143L, long.Parse(poisoned[0].Split('|')[7], CultureInfo.InvariantCulture));
+    }
+
+    /// <summary>A store with the window's rows seeded and the daily totals built (the fixture of the first test, optionally with
+    /// the extra queries), ready for a read. The scratch database is the caller's to dispose.</summary>
+    private sealed class Fixture : IAsyncDisposable
+    {
+        public required ScratchPostgres Scratch { get; init; }
+        public required NpgsqlConnection Connection { get; init; }
+        public required NpgsqlDataSource Postgres { get; init; }
+        public required DateTime Today { get; init; }
+        public required DateTime Start { get; init; }
+        public required DateTime End { get; init; }
+        public required DateTime BaselineStart { get; init; }
+
+        public async ValueTask DisposeAsync()
+        {
+            await Postgres.DisposeAsync();
+            await Connection.DisposeAsync();
+            await Scratch.DisposeAsync();
+        }
+    }
+
+    private static async Task<Fixture> BuildFixtureAsync(bool extra, bool timescale, CancellationToken ct)
+    {
+        var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        if (timescale)
+        {
+            Assert.True(await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct), "TimescaleDB must be available for the raw floor test");
+            await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        }
+
+        var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        await QueryStoreIntervalWideBelowFloorLiveTests.ExecAsync(connection, @"
+INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date)
+VALUES (@server_id, 'qsdaily', 'qsdaily', TRUE, 16, now(), now())
+ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
+        var today = LiveClock.Now().Date;
+        var start = today.AddDays(-1).AddHours(6);
+        var baselineStart = start.AddDays(-DarlingQueryStoreRegressionReader.BaselineLookbackDays);
+        await SeedAsync(postgres, today.AddDays(-8), start, ct, extra);
+        var end = LiveClock.Now();
+        end = end.AddTicks(-(end.Ticks % TimeSpan.TicksPerSecond)).AddSeconds(1);
+        await QueryStoreIntervalWideBelowFloorLiveTests.SeedQueryStoreLogAsync(connection, ServerId, baselineStart.AddDays(-5), end, null, null, ct);
+        await QueryStoreIntervalWideBelowFloorLiveTests.ForceFilledSinceAsync(connection, baselineStart.AddDays(-3), ct);
+        await ExecAsync(connection, $"UPDATE collect.query_store_interval_latest_coverage SET filled_since = TIMESTAMP '{baselineStart.AddDays(-3):yyyy-MM-dd HH:mm:ss}' WHERE server_id = {ServerId}", ct);
+        var built = await PlanRegressionDaily.RunTickAsync(postgres, LiveClock.Now(), NullLogger.Instance, ct);
+        Assert.True(built.Built > 0, "the builder built no day");
+        return new Fixture { Scratch = scratch, Connection = connection, Postgres = postgres, Today = today, Start = start, End = end, BaselineStart = baselineStart };
+    }
+
+    private static async Task<List<string>> AllLiveAsync(Fixture f, CancellationToken ct) =>
+        await RunAsync(f.Connection, DarlingQueryStoreRegressionReader.BuildSql(wide: true, useDailyTotals: false), f.Start, f.End, f.BaselineStart, QueryStoreRegressionBaseline.AllLive(f.Start), ct);
+
+    private static async Task<List<string>> ServedRowsAsync(Fixture f, CancellationToken ct) =>
+        (await DarlingQueryStoreRegressionReader.ReadQueryStoreRegressionsAsync(f.Postgres, ServerId, f.Start, f.End, DatabaseFilter.One(Db), 50, f.BaselineStart, ct)).Rows.Select(Describe).ToList();
+
+    /// <summary>
+    /// Review of #6260 (F1, #5506): a day reads valid when its build saw every late row, but a late batch whose apply into
+    /// <c>query_store_interval_latest</c> failed is pending, and its trigger bump rolled back with the failed apply. The wide
+    /// table holds those executions, the totals do not. With a pending batch for the server no built day is used, the way
+    /// PLAN_REGRESSION gates its own built days.
+    /// </summary>
+    [Fact]
+    public async Task WithAPendingLatestBatchForTheServer_NoBuiltDayIsUsed()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #5506 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var f = await BuildFixtureAsync(extra: false, timescale: false, ct);
+        var reference = await AllLiveAsync(f, ct);
+        Assert.Single(reference);
+
+        /* The built days would be used, and a poisoned total shows it. */
+        var plan = await ResolveAsync(f.Postgres, f.BaselineStart, f.Start, ct);
+        Assert.NotEmpty(plan.RunDays);
+        var day = plan.RunDays[^1];
+        await ExecAsync(f.Connection, $"UPDATE collect.plan_regression_daily SET cpu_us_sum = cpu_us_sum * 5 WHERE server_id = {ServerId} AND day = DATE '{day:yyyy-MM-dd}'", ct);
+        Assert.NotEqual(reference, await ServedRowsAsync(f, ct));
+
+        /* A pending batch for the server: the baseline is read live, the poisoned total is not read, the answer is the all-live one. */
+        await ExecAsync(f.Connection, $"INSERT INTO collect.query_store_interval_latest_pending (server_id, collection_time, database_name, recorded_at, failure) VALUES ({ServerId}, TIMESTAMP '{f.Start:yyyy-MM-dd HH:mm:ss}', '{Db}', TIMESTAMP '{f.Start:yyyy-MM-dd HH:mm:ss}', 'x')", ct);
+        plan = await ResolveAsync(f.Postgres, f.BaselineStart, f.Start, ct);
+        Assert.Empty(plan.RunDays);
+        Assert.Equal(reference, await ServedRowsAsync(f, ct));
+    }
+
+    /// <summary>
+    /// Review of #6260 (F2, #5506): the raw arm's live rows start at raw's oldest chunk, and the tool's <c>effective_start</c>
+    /// says nothing older was read. A whole valid day below that floor must not come from the totals. With the clamp the run
+    /// days all start at or after the floor; without it (the wide arm's call) the older days are taken.
+    /// </summary>
+    [Fact]
+    public async Task OnTheRawArm_DaysBelowTheRawChunkFloor_AreNotTakenFromTheTotals()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #5506 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var f = await BuildFixtureAsync(extra: false, timescale: true, ct);
+
+        /* Raw loses its oldest chunks: the floor now sits inside the baseline, at about D-3. */
+        await ExecAsync(f.Connection, $"SELECT drop_chunks('collect.query_store_stats', older_than => TIMESTAMP '{f.Today.AddDays(-3):yyyy-MM-dd HH:mm:ss}')", ct);
+        var rawFloor = (DateTime)(await ScalarAsync(f.Connection,
+            "SELECT MIN(ch.range_start) AT TIME ZONE 'UTC' FROM timescaledb_information.chunks AS ch WHERE ch.hypertable_schema = 'collect' AND ch.hypertable_name = 'query_store_stats'", ct))!;
+        Assert.True(rawFloor > f.BaselineStart.AddDays(2), "the floor must sit inside the baseline for this test to mean anything");
+
+        async Task<QueryStoreRegressionBaseline.Plan> PlanAsync(bool clamp)
+        {
+            await using var connection = await f.Postgres.OpenConnectionAsync(ct);
+            await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, ct);
+            return await QueryStoreRegressionBaseline.ResolveAsync(connection, transaction, ServerId, f.BaselineStart, f.Start, 60, null, ct, clampToRawFloor: clamp);
+        }
+
+        var unclamped = await PlanAsync(clamp: false);
+        Assert.Contains(DateOnly.FromDateTime(f.Today.AddDays(-7)), unclamped.RunDays);
+
+        var clamped = await PlanAsync(clamp: true);
+        Assert.NotEmpty(clamped.RunDays);
+        Assert.All(clamped.RunDays, day => Assert.True(day.ToDateTime(TimeOnly.MinValue) >= rawFloor, $"{day} is below the raw floor {rawFloor:o}"));
+        Assert.DoesNotContain(DateOnly.FromDateTime(f.Today.AddDays(-7)), clamped.RunDays);
+    }
+
+    /// <summary>
+    /// A query with more than one plan in the baseline (one on a built day, one read live) counts both, and an interval
+    /// re-collected with a growing count whose last execution crossed midnight after the build is counted once, in the day of
+    /// its latest snapshot, whatever the totals held for it. Both equal the all-live read of the same window.
+    /// </summary>
+    [Fact]
+    public async Task MorePlansAcrossTheBuiltAndLiveParts_AndAnIntervalRecollectedAcrossMidnight_MatchTheAllLiveRead()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #5506 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var f = await BuildFixtureAsync(extra: true, timescale: false, ct);
+        await RecollectAsync(f.Postgres, f.Today.AddDays(-8), ct);
+
+        var reference = await AllLiveAsync(f, ct);
+        var served = await ServedRowsAsync(f, ct);
+        Assert.Equal(reference, served);
+
+        string[] Row(List<string> rows, long queryId) => rows.Single(r => r.StartsWith(Db + "|" + queryId.ToString(CultureInfo.InvariantCulture) + "|", StringComparison.Ordinal)).Split('|');
+
+        /* Query 40: plan 401 on a built day and plan 402 live give 2 plans in the baseline and 1 recent. Describe fields:
+           7 baseline executions, 9 plans. */
+        var q40 = Row(served, 40);
+        Assert.Equal("40", q40[1]);
+        Assert.Equal(40L, long.Parse(q40[7], CultureInfo.InvariantCulture));
+        Assert.Equal(2, int.Parse(q40[9], CultureInfo.InvariantCulture));
+        Assert.Equal(1, int.Parse(q40[10], CultureInfo.InvariantCulture));
+
+        /* Query 41: the interval counts 25 executions, once. */
+        var q41 = Row(served, 41);
+        Assert.Equal(25L, long.Parse(q41[7], CultureInfo.InvariantCulture));
+        Assert.Equal(10L, long.Parse(q41[8], CultureInfo.InvariantCulture));
     }
 }

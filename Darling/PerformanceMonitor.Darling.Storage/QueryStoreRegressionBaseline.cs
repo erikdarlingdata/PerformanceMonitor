@@ -45,9 +45,49 @@ namespace PerformanceMonitor.Darling.Storage;
 /// executions: a baseline that kept Aborted and Exception runs on some days and not others would not add up, and a recent window
 /// that kept them against a baseline that did not would flag every query that times out at a steady rate.
 /// <c>get_query_store_aborts</c> reports the others.</para>
+///
+/// <para><b>Aborted and Exception runs beside the cost (#5506, Erik 2026-10-21).</b> Counting only Regular runs hides what a
+/// timeout or an error does: one 30 s timeout among 1,000 fast runs barely moves an average, and blending them in would hide
+/// it the same way. So the read reports THREE groups per query, baseline and recent, side by side: Regular (the cost the gate
+/// compares), Aborted (timeouts, cancels) and Exception (errors), each with an execution count and CPU and duration per
+/// execution (weighted by execution count, NULL when the count is 0), and a count per hour for each, because the recent window
+/// and the baseline differ in length. The Aborted and Exception rows are read live from the wide table (or the raw table) for
+/// both sides; the daily totals hold none. A query is flagged for COST (Regular CPU up more than <see cref="CostGatePercent"/>%),
+/// for TIMEOUTS or ERRORS (that group's per-hour rate in the recent window at least <see cref="FailureRateMultiple"/> times the
+/// baseline's, or any at all where the baseline had none, with at least <see cref="FailureMinRecentRuns"/> such runs in the
+/// recent window), or for several; <c>regression_reason</c> says which.</para>
 /// </summary>
 public static class QueryStoreRegressionBaseline
 {
+    /// <summary>The cost gate (#5506 keeps today's): a query qualifies for <c>cost</c> when its Regular CPU per execution is
+    /// more than this percent above its baseline.</summary>
+    public const int CostGatePercent = 25;
+
+    /// <summary>A rise in timeouts or errors qualifies when the recent per-hour rate is at least this many times the baseline's
+    /// (#5506). A nonzero recent rate where the baseline had none qualifies whatever the multiple.</summary>
+    public const int FailureRateMultiple = 2;
+
+    /// <summary>A rise in timeouts or errors needs at least this many such runs in the recent window (#5506), so one stray
+    /// timeout on a quiet query does not flag it.</summary>
+    public const int FailureMinRecentRuns = 3;
+
+    /// <summary>A timeouts-only or errors-only row is HIGH when its rate is at least this many times the baseline's (or the
+    /// baseline had none), MEDIUM otherwise (#5506). Cost rows keep the duration bands; a failure row never gets CRITICAL,
+    /// which stays the band of a duration more than doubled.</summary>
+    public const int FailureHighMultiple = 5;
+
+    /// <summary>Rows with no cost rise (timeouts or errors only) may take at most this share of the row cap, as
+    /// <c>cap / FailureShareDivisor</c>, so a flood of error rows cannot push every cost row past the cap (#5506). Cost rows
+    /// take the rest, and either side takes what the other leaves free.</summary>
+    public const int FailureShareDivisor = 3;
+
+    /// <summary>The partial index predicate and the read's predicate for the rows that are not Regular (#5506). The same text
+    /// in both places, so the planner can match the read to the background partial index
+    /// (<see cref="QueryStoreBackgroundIndexes.WideNonRegularFirstExec"/>). Without the index the read still answers, just
+    /// slower. Hand-kept in step with that spec's <c>IndexDefinition</c>; the live test builds the index and checks the plan
+    /// uses it.</summary>
+    public const string NonRegularPredicate = "execution_type_desc <> 'Regular'";
+
     /// <summary>
     /// What <see cref="ResolveAsync"/> decided: the run days to read from the daily totals, and the two bounds of the live
     /// half's <c>first_execution_time</c> ranges. <see cref="LowEnd"/>: the live low range is
@@ -74,19 +114,61 @@ public static class QueryStoreRegressionBaseline
     /// beside a stale one is read live. The read runs inside the caller's transaction, under a savepoint it always rolls back
     /// to, so a store without the table (or a failed statement) costs the speedup and leaves the transaction usable; the
     /// answer is then the all-live plan.
+    ///
+    /// <para><b>Two gates the built days need (#5506, the review of #6260).</b> (1) <b>Pending.</b> A day reads valid
+    /// (<c>built_seq = late_seq</c>) even when a late batch for it failed its apply into <c>query_store_interval_latest</c> and
+    /// went pending (the trigger bump rolls back with the failed apply), while the wide table already holds those executions.
+    /// So the totals would undercount. PLAN_REGRESSION takes built days only after <c>QueryStoreIntervalLatest.ReadsTableAsync</c>
+    /// says there is no pending batch (<c>ReadSourceInputsSql</c>); this read asks the same question first, and with any pending
+    /// batch for the server it reads every day live. (2) <b>The raw floor.</b> On the raw arm
+    /// (<paramref name="clampToRawFloor"/>) the live rows start where raw's oldest chunk does, and the tool's
+    /// <c>effective_start</c> says so; a whole day below that floor must not come from the totals, or the baseline would hold
+    /// days the notice says were not read. The start is raised to the floor (the same <c>query_store_stats</c> chunk catalog
+    /// <c>RawChunkFloorSql</c> reads). The wide arm already passes the gate's clamped start.</para>
     /// </summary>
     public static async Task<Plan> ResolveAsync(
         NpgsqlConnection connection, NpgsqlTransaction transaction, int serverId, DateTime baselineStart, DateTime windowStart,
-        int commandTimeoutSeconds, ILogger? logger, CancellationToken cancellationToken)
+        int commandTimeoutSeconds, ILogger? logger, CancellationToken cancellationToken, bool clampToRawFloor = false)
     {
         const string savepoint = "qs_regression_built_days";
         List<PlanRegressionDaily.BuiltDay> built;
         await transaction.SaveAsync(savepoint, cancellationToken);
         try
         {
+            bool hasPending;
+            bool hasTimescale;
+            await using (var inputs = new NpgsqlCommand(QueryStoreIntervalLatest.ReadSourceInputsSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds })
+            {
+                inputs.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer, Value = serverId });
+                await using var reader = await inputs.ExecuteReaderAsync(cancellationToken);
+                await reader.ReadAsync(cancellationToken);
+                hasPending = reader.GetBoolean(1);
+                hasTimescale = reader.GetBoolean(2);
+            }
+
+            if (hasPending)
+            {
+                logger?.LogDebug("#5506 regressions read: server {ServerId} has a pending interval_latest batch, so its baseline is read live", serverId);
+                return AllLive(windowStart);
+            }
+
+            if (clampToRawFloor && hasTimescale)
+            {
+                await using var floors = new NpgsqlCommand(QueryStoreIntervalLatest.RawChunkFloorSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds };
+                if (await floors.ExecuteScalarAsync(cancellationToken) is DateTime rawFloor && rawFloor > baselineStart)
+                {
+                    baselineStart = rawFloor;
+                }
+            }
+
             built = await QueryStoreIntervalLatest.ReadBuiltDaysAsync(
                 connection, transaction, serverId, baselineStart.Date, commandTimeoutSeconds, logger,
                 ex => ex is OperationCanceledException, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(ex, "#5506 regressions read: the built-days gate failed for server {ServerId}; reading the baseline live", serverId);
+            return AllLive(windowStart);
         }
         finally
         {
@@ -148,10 +230,14 @@ public static class QueryStoreRegressionBaseline
     public const string LowEndToken = "@@LOW";
     public const string HighStartToken = "@@HIGH";
 
+    /// <summary>The row cap: <c>$5</c> in the MCP read (a parameter), the literal 50 in the viewer's (#5506).</summary>
+    public const string LimitToken = "@@LIMIT";
+
     /// <summary>The statement with its tokens bound to the twin's parameter numbers, for example <c>$6</c>, <c>$7</c>,
     /// <c>$8</c>, <c>$9</c>.</summary>
-    public static string Bind(string sql, string baselineStart, string runDays, string lowEnd, string highStart) =>
-        sql.Replace(BaselineStartToken, baselineStart, StringComparison.Ordinal)
+    public static string Bind(string sql, string baselineStart, string runDays, string lowEnd, string highStart, string limit) =>
+        sql.Replace(LimitToken, limit, StringComparison.Ordinal)
+           .Replace(BaselineStartToken, baselineStart, StringComparison.Ordinal)
            .Replace(RunDaysToken, "(" + runDays + "::date[])", StringComparison.Ordinal)
            .Replace(LowEndToken, "(" + lowEnd + "::timestamp)", StringComparison.Ordinal)
            .Replace(HighStartToken, "(" + highStart + "::timestamp)", StringComparison.Ordinal);
@@ -169,12 +255,14 @@ public static class QueryStoreRegressionBaseline
             /* LOAD-BEARING (correctness, not just perf) - #1841. The rows are CUMULATIVE per-interval snapshots and the
                collector re-fetches the OPEN interval every cycle, so the SAME interval is stored repeatedly with a growing
                execution_count. Keep the LATEST snapshot per interval, once, over the whole span, so an interval that crosses
-               the window start is the latest snapshot's alone. Regular executions only (#5506): the daily totals hold no
-               other kind, and a baseline that counted Aborted runs on some days and not on others would not add up. */
+               the window start is the latest snapshot's alone. Every outcome is deduped here (#5506); the Regular cost arms
+               below keep Regular only, because the daily totals hold no other kind, and the Aborted and Exception rows
+               are their own arm (nonregular_rows). */
             SELECT
                 database_name,
                 query_id,
                 plan_id,
+                execution_type_desc,
                 query_text,
                 execution_count,
                 avg_duration_us,
@@ -189,13 +277,13 @@ public static class QueryStoreRegressionBaseline
             WHERE server_id = $1
             AND   collection_time >= @@B
             AND   collection_time <= $3
-            AND   execution_type_desc = 'Regular'
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
         ),
         deduped_baseline AS (
             SELECT database_name, query_id, plan_id, execution_count, avg_duration_us, avg_cpu_time_us, 1 AS rn
             FROM latest
             WHERE rn = 1
+            AND   execution_type_desc = 'Regular'
             AND   last_execution_time >= @@B
             AND   last_execution_time < $2
             AND   NOT (CAST(last_execution_time AS date) = ANY(@@DAYS))
@@ -204,7 +292,18 @@ public static class QueryStoreRegressionBaseline
             SELECT database_name, query_id, plan_id, query_text, execution_count, avg_duration_us, avg_cpu_time_us, last_execution_time, 1 AS rn
             FROM latest
             WHERE rn = 1
+            AND   execution_type_desc = 'Regular'
             AND   last_execution_time >= $2
+        ),
+        nonregular_rows AS (
+            /* #5506: the Aborted and Exception rows, the same dedupe, both sides in one set. is_recent splits them at the
+               window start by the interval's last_execution_time, the line the Regular arms use. */
+            SELECT database_name, query_id, execution_type_desc, execution_count, avg_duration_us, avg_cpu_time_us, last_execution_time,
+                   (last_execution_time >= $2) AS is_recent
+            FROM latest
+            WHERE rn = 1
+            AND   execution_type_desc <> 'Regular'
+            AND   last_execution_time >= @@B
         ),
         """;
 
@@ -251,6 +350,22 @@ public static class QueryStoreRegressionBaseline
             AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
             AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
             AND   last_execution_time >= $2
+            AND   ($4::text[] IS NULL OR database_name = ANY($4))
+        ),
+        nonregular_rows AS (
+            /* #5506: the Aborted and Exception rows of the baseline and the recent window, read live in one scan. The predicate
+               is the partial background index's own (NonRegularPredicate), so on a store that has built it the scan reads only
+               those rows; on one that has not, it reads what the Regular arms read, just slower. The daily totals hold no
+               such row. is_recent splits at the window start by last_execution_time, as the Regular arms do. */
+            SELECT database_name, query_id, execution_type_desc, execution_count, avg_duration_us, avg_cpu_time_us, last_execution_time,
+                   (last_execution_time >= $2) AS is_recent
+            FROM query_store_interval_wide
+            WHERE server_id = $1
+            AND   {{NonRegularPredicate}}
+            AND   first_execution_time >= @@B - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
+            AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
+            AND   last_execution_time >= @@B
+            AND   (last_execution_time < $2 OR collection_time <= $3)
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
         ),
         """;
@@ -323,6 +438,221 @@ public static class QueryStoreRegressionBaseline
             FROM deduped_recent
             WHERE rn = 1
             GROUP BY database_name, query_id
+        ),
+        failure_performance AS (
+            /* #5506: Aborted (timeouts, cancels) and Exception (errors) per query, baseline and recent side by side: the run
+               count, and the summed cost the per-execution figures divide (weighted by execution count). */
+            SELECT
+                database_name,
+                query_id,
+                CAST(COALESCE(SUM(execution_count) FILTER (WHERE NOT is_recent AND execution_type_desc = 'Aborted'), 0) AS bigint) AS base_aborted_execs,
+                CAST(SUM(CAST(avg_cpu_time_us AS numeric) * execution_count) FILTER (WHERE NOT is_recent AND execution_type_desc = 'Aborted') AS double precision) AS base_aborted_cpu_us,
+                CAST(SUM(CAST(avg_duration_us AS numeric) * execution_count) FILTER (WHERE NOT is_recent AND execution_type_desc = 'Aborted') AS double precision) AS base_aborted_dur_us,
+                CAST(COALESCE(SUM(execution_count) FILTER (WHERE is_recent AND execution_type_desc = 'Aborted'), 0) AS bigint) AS recent_aborted_execs,
+                CAST(SUM(CAST(avg_cpu_time_us AS numeric) * execution_count) FILTER (WHERE is_recent AND execution_type_desc = 'Aborted') AS double precision) AS recent_aborted_cpu_us,
+                CAST(SUM(CAST(avg_duration_us AS numeric) * execution_count) FILTER (WHERE is_recent AND execution_type_desc = 'Aborted') AS double precision) AS recent_aborted_dur_us,
+                CAST(COALESCE(SUM(execution_count) FILTER (WHERE NOT is_recent AND execution_type_desc = 'Exception'), 0) AS bigint) AS base_exception_execs,
+                CAST(SUM(CAST(avg_cpu_time_us AS numeric) * execution_count) FILTER (WHERE NOT is_recent AND execution_type_desc = 'Exception') AS double precision) AS base_exception_cpu_us,
+                CAST(SUM(CAST(avg_duration_us AS numeric) * execution_count) FILTER (WHERE NOT is_recent AND execution_type_desc = 'Exception') AS double precision) AS base_exception_dur_us,
+                CAST(COALESCE(SUM(execution_count) FILTER (WHERE is_recent AND execution_type_desc = 'Exception'), 0) AS bigint) AS recent_exception_execs,
+                CAST(SUM(CAST(avg_cpu_time_us AS numeric) * execution_count) FILTER (WHERE is_recent AND execution_type_desc = 'Exception') AS double precision) AS recent_exception_cpu_us,
+                CAST(SUM(CAST(avg_duration_us AS numeric) * execution_count) FILTER (WHERE is_recent AND execution_type_desc = 'Exception') AS double precision) AS recent_exception_dur_us,
+                MAX(last_execution_time) FILTER (WHERE is_recent) AS recent_last_time
+            FROM nonregular_rows
+            GROUP BY database_name, query_id
         )
+        """;
+
+    /// <summary>
+    /// The projection, the flags, the ranking and the cap of both twins (#5506), after the aggregates. Bound with
+    /// <see cref="Bind"/>: <c>@@LIMIT</c> is the row cap. A query is a candidate when it has recent Regular runs, or recent
+    /// Aborted or Exception runs reaching <see cref="FailureMinRecentRuns"/>; <c>is_cost</c> is Regular CPU up more than
+    /// <see cref="CostGatePercent"/>%, <c>is_timeouts</c> and <c>is_errors</c> are that group's recent per-hour rate at least
+    /// <see cref="FailureRateMultiple"/> times the baseline's (any at all where the baseline had none) with at least
+    /// <see cref="FailureMinRecentRuns"/> recent runs. The per-hour rates divide by each window's own length (the baseline
+    /// window is [baseline start, window start), the recent window [window start, window end]).
+    ///
+    /// <para><b>Severity.</b> A cost row keeps the duration bands (CRITICAL over 100%, HIGH over 50%, MEDIUM over 25%, else LOW).
+    /// A failure row is HIGH when its rate is at least <see cref="FailureHighMultiple"/> times the baseline's or the baseline
+    /// had none, else MEDIUM; a row with both takes the higher band. A failure never reads CRITICAL: that stays the band of a
+    /// query whose duration more than doubled, so a timeout flood cannot outrank the worst cost regressions.</para>
+    ///
+    /// <para><b>The cap.</b> Cost rows (including rows that also have a failure reason) are ranked by added duration, failure-only
+    /// rows by their recent failed runs. Failure-only rows take at most <c>cap / <see cref="FailureShareDivisor"/></c> slots
+    /// (rounded down), more only when there are fewer cost rows than the rest of the cap; cost rows take every other slot. So a flood of
+    /// error rows cannot push the cost rows past the cap, and a store with no cost regression still shows its failures. Cost rows
+    /// come first in the output.</para>
+    /// </summary>
+    public static readonly string SuffixSql = $$"""
+        ,
+        windows AS (
+            SELECT
+                CAST(EXTRACT(EPOCH FROM (CAST($2 AS timestamp) - CAST(@@B AS timestamp))) / 3600.0 AS double precision) AS base_hours,
+                CAST(EXTRACT(EPOCH FROM (CAST($3 AS timestamp) - CAST($2 AS timestamp))) / 3600.0 AS double precision) AS recent_hours
+        ),
+        candidate_keys AS (
+            SELECT database_name, query_id FROM recent_performance
+            UNION
+            SELECT database_name, query_id FROM failure_performance
+            WHERE recent_aborted_execs >= {{FailureMinRecentRuns}} OR recent_exception_execs >= {{FailureMinRecentRuns}}
+        ),
+        joined AS (
+            SELECT
+                k.database_name,
+                k.query_id,
+                b.avg_duration_ms AS base_dur_ms,
+                r.avg_duration_ms AS recent_dur_ms,
+                b.avg_cpu_time_ms AS base_cpu_ms,
+                r.avg_cpu_time_ms AS recent_cpu_ms,
+                COALESCE(b.exec_count, 0) AS base_execs,
+                COALESCE(r.exec_count, 0) AS recent_execs,
+                COALESCE(b.plan_count, 0) AS base_plans,
+                COALESCE(r.plan_count, 0) AS recent_plans,
+                r.query_text_sample,
+                COALESCE(r.last_execution_time, f.recent_last_time) AS last_execution_time,
+                COALESCE(f.base_aborted_execs, 0) AS base_aborted_execs,
+                COALESCE(f.recent_aborted_execs, 0) AS recent_aborted_execs,
+                f.base_aborted_cpu_us,
+                f.recent_aborted_cpu_us,
+                f.base_aborted_dur_us,
+                f.recent_aborted_dur_us,
+                COALESCE(f.base_exception_execs, 0) AS base_exception_execs,
+                COALESCE(f.recent_exception_execs, 0) AS recent_exception_execs,
+                f.base_exception_cpu_us,
+                f.recent_exception_cpu_us,
+                f.base_exception_dur_us,
+                f.recent_exception_dur_us,
+                w.base_hours,
+                w.recent_hours
+            FROM candidate_keys AS k
+            LEFT JOIN recent_performance AS r ON r.database_name = k.database_name AND r.query_id = k.query_id
+            LEFT JOIN baseline_performance AS b ON b.database_name = k.database_name AND b.query_id = k.query_id
+            LEFT JOIN failure_performance AS f ON f.database_name = k.database_name AND f.query_id = k.query_id
+            CROSS JOIN windows AS w
+        ),
+        flagged AS (
+            SELECT
+                j.*,
+                (j.recent_dur_ms - j.base_dur_ms) * 100.0 / NULLIF(j.base_dur_ms, 0) AS duration_regression_percent,
+                (j.recent_cpu_ms - j.base_cpu_ms) * 100.0 / NULLIF(j.base_cpu_ms, 0) AS cpu_regression_percent,
+                COALESCE((j.recent_cpu_ms - j.base_cpu_ms) * 100.0 / NULLIF(j.base_cpu_ms, 0) > {{CostGatePercent}}, false) AS is_cost,
+                COALESCE(j.recent_aborted_execs >= {{FailureMinRecentRuns}}
+                    AND (j.base_aborted_execs = 0
+                         OR (j.recent_aborted_execs / NULLIF(j.recent_hours, 0)) >= {{FailureRateMultiple}} * (j.base_aborted_execs / NULLIF(j.base_hours, 0))), false) AS is_timeouts,
+                COALESCE(j.recent_exception_execs >= {{FailureMinRecentRuns}}
+                    AND (j.base_exception_execs = 0
+                         OR (j.recent_exception_execs / NULLIF(j.recent_hours, 0)) >= {{FailureRateMultiple}} * (j.base_exception_execs / NULLIF(j.base_hours, 0))), false) AS is_errors
+            FROM joined AS j
+        ),
+        qualified AS (
+            SELECT
+                f.*,
+                CASE
+                    WHEN NOT f.is_cost THEN 0
+                    WHEN f.duration_regression_percent > 100 THEN 4
+                    WHEN f.duration_regression_percent > 50 THEN 3
+                    WHEN f.duration_regression_percent > 25 THEN 2
+                    ELSE 1
+                END AS cost_rank,
+                GREATEST(
+                    CASE WHEN NOT f.is_timeouts THEN 0
+                         WHEN f.base_aborted_execs = 0
+                              OR (f.recent_aborted_execs / NULLIF(f.recent_hours, 0)) >= {{FailureHighMultiple}} * (f.base_aborted_execs / NULLIF(f.base_hours, 0)) THEN 3
+                         ELSE 2 END,
+                    CASE WHEN NOT f.is_errors THEN 0
+                         WHEN f.base_exception_execs = 0
+                              OR (f.recent_exception_execs / NULLIF(f.recent_hours, 0)) >= {{FailureHighMultiple}} * (f.base_exception_execs / NULLIF(f.base_hours, 0)) THEN 3
+                         ELSE 2 END) AS failure_rank,
+                (f.recent_dur_ms - f.base_dur_ms) * f.recent_execs AS additional_duration_ms
+            FROM flagged AS f
+            WHERE f.is_cost OR f.is_timeouts OR f.is_errors
+        ),
+        ranked AS (
+            SELECT
+                q.*,
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY q.is_cost
+                    ORDER BY CASE WHEN q.is_cost THEN COALESCE(q.additional_duration_ms, 0) ELSE q.recent_aborted_execs + q.recent_exception_execs END DESC,
+                             q.database_name, q.query_id
+                ) AS class_rn,
+                COUNT(*) FILTER (WHERE q.is_cost) OVER () AS cost_total,
+                COUNT(*) FILTER (WHERE NOT q.is_cost) OVER () AS failure_total,
+                COUNT(*) OVER () AS total_count
+            FROM qualified AS q
+        ),
+        slots AS (
+            /* Failure-only rows: their share of the cap, or more when the cost rows leave slots free. Cost rows take the rest. */
+            SELECT
+                GREATEST(LEAST(MAX(failure_total), CAST(@@LIMIT AS integer) / {{FailureShareDivisor}}),
+                         LEAST(MAX(failure_total), CAST(@@LIMIT AS integer) - MAX(cost_total))) AS failure_slots
+            FROM ranked
+        )
+        SELECT
+            r.database_name,
+            r.query_id,
+            r.base_dur_ms AS baseline_duration_ms,
+            r.recent_dur_ms AS recent_duration_ms,
+            r.duration_regression_percent,
+            r.base_cpu_ms AS baseline_cpu_ms,
+            r.recent_cpu_ms AS recent_cpu_ms,
+            r.cpu_regression_percent,
+            COALESCE(r.additional_duration_ms, 0) AS additional_duration_ms,
+            r.base_execs AS baseline_exec_count,
+            r.recent_execs AS recent_exec_count,
+            r.base_plans AS baseline_plan_count,
+            r.recent_plans AS recent_plan_count,
+            CASE GREATEST(r.cost_rank, r.failure_rank)
+                WHEN 4 THEN 'CRITICAL'
+                WHEN 3 THEN 'HIGH'
+                WHEN 2 THEN 'MEDIUM'
+                ELSE 'LOW'
+            END AS severity,
+            /* #2150: text comes from collect.query_store_text now, and this projection's grain is exactly
+               that table's key, so it resolves here with a keyed join rather than inside the aggregate.
+               The MAX(query_text) sample stays as the fallback: it is where text lived before the
+               cutover, and it is what keeps the regression rows readable for existing history. */
+            COALESCE(x.query_sql_text, r.query_text_sample) AS query_text_sample,
+            r.last_execution_time,
+            /* #5506: why the row is here: cost, timeouts, errors, or a combination in that order, comma separated. */
+            array_to_string(ARRAY_REMOVE(ARRAY[
+                CASE WHEN r.is_cost THEN 'cost' END,
+                CASE WHEN r.is_timeouts THEN 'timeouts' END,
+                CASE WHEN r.is_errors THEN 'errors' END], NULL), ',') AS regression_reason,
+            r.base_aborted_execs AS base_aborted_count,
+            r.recent_aborted_execs AS recent_aborted_count,
+            r.base_aborted_cpu_us / NULLIF(r.base_aborted_execs, 0) / 1000.0 AS base_aborted_cpu_ms,
+            r.recent_aborted_cpu_us / NULLIF(r.recent_aborted_execs, 0) / 1000.0 AS recent_aborted_cpu_ms,
+            r.base_aborted_dur_us / NULLIF(r.base_aborted_execs, 0) / 1000.0 AS base_aborted_dur_ms,
+            r.recent_aborted_dur_us / NULLIF(r.recent_aborted_execs, 0) / 1000.0 AS recent_aborted_dur_ms,
+            r.base_exception_execs AS base_exception_count,
+            r.recent_exception_execs AS recent_exception_count,
+            r.base_exception_cpu_us / NULLIF(r.base_exception_execs, 0) / 1000.0 AS base_exception_cpu_ms,
+            r.recent_exception_cpu_us / NULLIF(r.recent_exception_execs, 0) / 1000.0 AS recent_exception_cpu_ms,
+            r.base_exception_dur_us / NULLIF(r.base_exception_execs, 0) / 1000.0 AS base_exception_dur_ms,
+            r.recent_exception_dur_us / NULLIF(r.recent_exception_execs, 0) / 1000.0 AS recent_exception_dur_ms,
+            /* Executions per hour, so the baseline (7 days) and the recent window (hours_back) compare in one unit. */
+            r.base_execs / NULLIF(r.base_hours, 0) AS baseline_regular_per_hour,
+            r.recent_execs / NULLIF(r.recent_hours, 0) AS recent_regular_per_hour,
+            r.base_aborted_execs / NULLIF(r.base_hours, 0) AS baseline_aborted_per_hour,
+            r.recent_aborted_execs / NULLIF(r.recent_hours, 0) AS recent_aborted_per_hour,
+            r.base_exception_execs / NULLIF(r.base_hours, 0) AS baseline_exception_per_hour,
+            r.recent_exception_execs / NULLIF(r.recent_hours, 0) AS recent_exception_per_hour,
+            /* #6128: the rows that passed the flags, before the cap. */
+            r.total_count
+        FROM ranked AS r
+        CROSS JOIN slots AS s
+        LEFT JOIN query_store_text AS x
+          ON  x.server_id = $1
+          AND x.database_name = r.database_name
+          AND x.query_id = r.query_id
+        WHERE (r.is_cost AND r.class_rn <= CAST(@@LIMIT AS integer) - s.failure_slots)
+        OR    (NOT r.is_cost AND r.class_rn <= s.failure_slots)
+        ORDER BY r.is_cost DESC,
+                 CASE WHEN r.is_cost THEN COALESCE(r.additional_duration_ms, 0) END DESC,
+                 r.recent_aborted_execs + r.recent_exception_execs DESC,
+                 r.database_name,
+                 r.query_id
+        LIMIT @@LIMIT
         """;
 }

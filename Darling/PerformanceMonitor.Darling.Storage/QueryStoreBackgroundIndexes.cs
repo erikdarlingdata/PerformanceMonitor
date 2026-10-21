@@ -72,6 +72,9 @@ public static class QueryStoreBackgroundIndexes
     /// <summary>Name of the btree that lets the per-day plan regression build range-scan <c>first_execution_time</c> on the latest table (#5507).</summary>
     public const string LatestServerFirstExecIndexName = "collect.ix_query_store_interval_latest_server_first_exec";
 
+    /// <summary>Name of the partial btree over the wide table's non-Regular rows (#5506).</summary>
+    public const string WideNonRegularFirstExecIndexName = "collect.ix_query_store_interval_wide_nonregular_first_exec";
+
     /// <summary>Name of the btree that lets the one-query history read seek its query on the wide table (#5807).</summary>
     public const string WideDatabaseQueryFirstExecIndexName = "collect.ix_query_store_interval_wide_db_query_first_exec";
 
@@ -141,6 +144,35 @@ public static class QueryStoreBackgroundIndexes
         + "ON collect.query_store_interval_wide (server_id, first_execution_time);",
         "DROP INDEX CONCURRENTLY IF EXISTS collect.ix_query_store_interval_wide_server_first_exec;",
         IndexDefinition: "(server_id, first_execution_time)");
+
+    /// <summary>
+    /// A PARTIAL btree on <c>collect.query_store_interval_wide (server_id, first_execution_time) WHERE execution_type_desc &lt;&gt;
+    /// 'Regular'</c> (#5506), built per partition by the partitioned path.
+    ///
+    /// <para><b>Why.</b> The Query Store regressions read reports Aborted and Exception runs beside the Regular cost, for the
+    /// 7-day baseline and the recent window (<see cref="QueryStoreRegressionBaseline.WideArmsSql"/>, its
+    /// <c>nonregular_rows</c> arm). Those rows are a small share of the table, but without this index the arm walks every row
+    /// the server has in the window to find them. With it the arm is one range over only those rows, so adding the
+    /// side-by-side groups costs the baseline almost nothing. The read's predicate is
+    /// <see cref="QueryStoreRegressionBaseline.NonRegularPredicate"/>, the index's own text, so the planner can match them.</para>
+    ///
+    /// <para><b>No INCLUDE list, on purpose.</b> The read also needs <c>execution_count</c>, <c>avg_cpu_time_us</c>,
+    /// <c>avg_duration_us</c> and <c>last_execution_time</c>, but the upsert's DO UPDATE rewrites every one of them, and a
+    /// column in an index's key, INCLUDE list or predicate makes every update of that row non-HOT, whatever the predicate
+    /// says (the #4250 class; <c>QueryStoreIntervalWideBrinIndexLiveTests</c> censuses every spec in <see cref="All"/> for
+    /// it). The index holds only identity columns (<c>server_id</c>, <c>first_execution_time</c>, and
+    /// <c>execution_type_desc</c> in the predicate), so the upsert stays HOT. The few non-Regular rows the range finds are
+    /// then read from the heap.</para>
+    ///
+    /// <para><b>Until it is built</b> the read still answers, just more slowly: the statement names no index.</para>
+    /// </summary>
+    public static readonly IndexSpec WideNonRegularFirstExec = new(
+        WideNonRegularFirstExecIndexName,
+        "collect.query_store_interval_wide",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_query_store_interval_wide_nonregular_first_exec "
+        + "ON collect.query_store_interval_wide (server_id, first_execution_time) WHERE " + QueryStoreRegressionBaseline.NonRegularPredicate + ";",
+        "DROP INDEX CONCURRENTLY IF EXISTS collect.ix_query_store_interval_wide_nonregular_first_exec;",
+        IndexDefinition: "(server_id, first_execution_time) WHERE " + QueryStoreRegressionBaseline.NonRegularPredicate);
 
     /// <summary>
     /// A btree on <c>collect.query_store_interval_latest (server_id, first_execution_time)</c> (#5507), built
@@ -265,6 +297,7 @@ public static class QueryStoreBackgroundIndexes
         QueryStoreIntervalWideBrinIndex.Spec,
         WideServerFirstExec,
         LatestServerFirstExec,
+        WideNonRegularFirstExec,
         WideDatabaseQueryFirstExec,
         LatestDatabaseQueryFirstExec,
         StatementTextServerLastSeen,
