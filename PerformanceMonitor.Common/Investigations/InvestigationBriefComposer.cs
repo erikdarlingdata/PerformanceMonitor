@@ -712,6 +712,11 @@ public sealed class InvestigationBriefComposer
         return node;
     }
 
+    /// <summary>What <c>streak_days</c> counts (#6261), said on each recurrence entry because the brief has no other field legend.
+    /// A fixed string: nothing to mask.</summary>
+    internal const string StreakNote =
+        "streak_days: days in a row before the first alert, back from the day before it, with a fire in the window; muted fires count.";
+
     /// <summary>A metric's recurrence (#6000). Structured fields only (a metric name, counts, dates): nothing to mask.</summary>
     private static JsonObject RecurrenceNode(InvestigationAlertRecurrence r) => new()
     {
@@ -721,6 +726,10 @@ public sealed class InvestigationBriefComposer
         ["days"] = InvestigationAlertRecurrence.Days,
         ["fired"] = r.Fired,
         ["muted"] = r.Muted,
+        /* #6261: the streak, from the same rows. At most days; true below means it filled the look-back, so it is a floor. */
+        ["streak_days"] = r.StreakDays,
+        ["streak_at_least_days_window"] = r.StreakAtLeastDaysWindow,
+        ["streak_note"] = StreakNote,
         ["fired_dates"] = new JsonArray(r.FiredDates.Select(d => (JsonNode?)d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)).ToArray()),
         ["muted_dates"] = new JsonArray(r.MutedDates.Select(d => (JsonNode?)d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)).ToArray()),
     };
