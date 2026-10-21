@@ -1727,6 +1727,15 @@ GRANT UPDATE ({McpMonitoredServerUpdateColumns})
 --     probe rung + ladder fixture + version-pin tests for no gain.
 {BuildCustomAlertResolveFunctionSql(config)}
 GRANT EXECUTE ON FUNCTION {config}.record_custom_alert_resolution(integer, text, text, text) TO {viewer}, {mcp};
+-- #6334: the known-pattern entries' writes. The web editor (viewer) and the Viewer (admin) write config.config_known_patterns only
+--     through these three functions; no role holds a direct INSERT/UPDATE/DELETE on the table, and mcp gets neither the functions nor a write
+--     (no MCP tool writes an entry: they are operator-written context). Owned by the store owner, pinned search_path, no dynamic SQL; created and
+--     REVOKEd from PUBLIC by the shared builder. The reads need no grant: the schema-wide SELECT covers the table. The beacon trigger runs as
+--     the function's owner, so no config_service grant is needed either. NOT a versioned migration, for the same reason as the edit function.
+{BuildKnownPatternFunctionsSql(config)}
+GRANT EXECUTE ON FUNCTION {config}.insert_known_pattern({InsertKnownPatternSignature}) TO {admin}, {viewer};
+GRANT EXECUTE ON FUNCTION {config}.update_known_pattern({UpdateKnownPatternSignature}) TO {admin}, {viewer};
+GRANT EXECUTE ON FUNCTION {config}.delete_known_pattern(bigint) TO {admin}, {viewer};
 -- #5240: the edit write. The web edit route (viewer) and the MCP edit_server tool (mcp) call
 --     {config}.edit_monitored_server for their one UPDATE of a config_monitored_servers row. It locks the row, checks
 --     the expected modified_at, and refuses a change of host or port that keeps the stored secret on a SQL or
@@ -2387,6 +2396,80 @@ FROM (
     /// <summary>Whether the store holds the external alert source registry yet (#5654), read before <see cref="AlertSourceGroupExtrasSql"/>.</summary>
     internal static readonly string AlertSourceRegistryProbeSql =
         $"SELECT pg_catalog.to_regclass('{PgSchemaGenerator.ConfigSchema}.external_alert_source') IS NOT NULL";
+
+    /// <summary>The argument types of <c>config.insert_known_pattern</c> (#6334), in order. The one place the signature is spelled for the GRANT.</summary>
+    internal const string InsertKnownPatternSignature = "integer, text, time, text, integer, text, text, timestamp";
+
+    /// <summary>The argument types of <c>config.update_known_pattern</c> (#6334), in order.</summary>
+    internal const string UpdateKnownPatternSignature = "bigint, integer, text, time, text, integer, text, timestamp";
+
+    /// <summary>
+    /// The <c>SECURITY DEFINER</c> functions (#6334) that are the writes of the known-pattern entries
+    /// (<c>config.config_known_patterns</c>): <c>insert_known_pattern</c>, <c>update_known_pattern</c> and <c>delete_known_pattern</c>. The
+    /// web editor (viewer) and the Viewer (admin) call them; the table itself carries NO direct write grant for any reader role, and the
+    /// MCP role (mcp) gets neither the functions nor a write, because entries are operator-written context and no MCP tool writes them.
+    /// Returns the <c>CREATE OR REPLACE FUNCTION</c> statements plus the <c>REVOKE ALL ... FROM PUBLIC</c> of each (a new function is
+    /// EXECUTE-able by PUBLIC); the caller adds the <c>GRANT EXECUTE</c>. Because the body runs as the owner, the table's
+    /// <c>config_version</c> trigger bumps the beacon as the owner, so the caller needs no grant on <c>config_service</c>. Pinned
+    /// <c>search_path</c>, fixed statements, no dynamic SQL; the table's CHECKs hold the note to 1-500 characters and the window to 0-720
+    /// minutes whatever the caller sends. Same builder for the managed batch, the script's text and the live tests, so none drifts.
+    /// </summary>
+    internal static string BuildKnownPatternFunctionsSql(string config) => $@"
+CREATE OR REPLACE FUNCTION {config}.insert_known_pattern(
+   p_server_id integer,
+   p_metric_name text,
+   p_time_of_day time,
+   p_time_zone text,
+   p_window_minutes integer,
+   p_note text,
+   p_created_by text,
+   p_expires_at_utc timestamp)
+RETURNS bigint
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+   INSERT INTO {config}.config_known_patterns
+      (server_id, metric_name, time_of_day, time_zone, window_minutes, note, created_by, expires_at_utc)
+   VALUES
+      (p_server_id, p_metric_name, p_time_of_day, p_time_zone, p_window_minutes, p_note, p_created_by, p_expires_at_utc)
+   RETURNING id;
+$fn$;
+REVOKE ALL ON FUNCTION {config}.insert_known_pattern({InsertKnownPatternSignature}) FROM PUBLIC;
+CREATE OR REPLACE FUNCTION {config}.update_known_pattern(
+   p_id bigint,
+   p_server_id integer,
+   p_metric_name text,
+   p_time_of_day time,
+   p_time_zone text,
+   p_window_minutes integer,
+   p_note text,
+   p_expires_at_utc timestamp)
+RETURNS boolean
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+   WITH changed AS (
+      UPDATE {config}.config_known_patterns
+         SET server_id = p_server_id, metric_name = p_metric_name, time_of_day = p_time_of_day, time_zone = p_time_zone,
+             window_minutes = p_window_minutes, note = p_note, expires_at_utc = p_expires_at_utc
+       WHERE id = p_id
+      RETURNING 1)
+   SELECT EXISTS (SELECT 1 FROM changed);
+$fn$;
+REVOKE ALL ON FUNCTION {config}.update_known_pattern({UpdateKnownPatternSignature}) FROM PUBLIC;
+CREATE OR REPLACE FUNCTION {config}.delete_known_pattern(p_id bigint)
+RETURNS boolean
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+   WITH gone AS (
+      DELETE FROM {config}.config_known_patterns WHERE id = p_id RETURNING 1)
+   SELECT EXISTS (SELECT 1 FROM gone);
+$fn$;
+REVOKE ALL ON FUNCTION {config}.delete_known_pattern(bigint) FROM PUBLIC;";
 
     /// <summary>
     /// The <c>SECURITY DEFINER</c> function (#3334) that lets the least-privilege viewer/mcp roles write the ONE

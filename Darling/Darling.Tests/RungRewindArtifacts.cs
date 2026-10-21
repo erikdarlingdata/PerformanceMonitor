@@ -485,6 +485,11 @@ ALTER TABLE IF EXISTS config.config_alert_settings DROP COLUMN IF EXISTS client_
         new(212, "hasServerMachineIdentity",
             @"
 ALTER TABLE IF EXISTS collect.servers DROP COLUMN IF EXISTS machine_identity;"),
+        // V214 (#6334): the known-pattern entries. The table is the probe's newest sentinel. The rewind drops it (and its trigger with it), so a re-run
+        // of V214 builds both again. Safe on a store that never had it.
+        new(214, "hasKnownPatterns",
+            @"
+DROP TABLE IF EXISTS config.config_known_patterns;"),
     ];
 
     /// <summary>
