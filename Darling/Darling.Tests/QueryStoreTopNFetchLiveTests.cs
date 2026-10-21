@@ -98,7 +98,13 @@ public sealed class QueryStoreTopNFetchLiveTests
             "SELECT TOP (1) query_text_id FROM sys.query_store_query_text WHERE query_sql_text LIKE N'/*pm6211 ' + @tag + N'*/%';", null, ct, tag);
         var queryId = await ScalarAsync(database, "SELECT TOP (1) query_id FROM sys.query_store_query WHERE query_text_id = @k;", textId, ct);
         var planId = await ScalarAsync(database, "SELECT TOP (1) plan_id FROM sys.query_store_plan WHERE query_id = @k ORDER BY plan_id;", queryId, ct);
-        Assert.True(queryId is not null && planId is not null, $"Query Store holds no plan for {tag}");
+        if (queryId is null || planId is null)
+        {
+            var texts = await ScalarAsync(database, "SELECT COUNT_BIG(*) FROM sys.query_store_query_text WHERE query_sql_text LIKE N'%pm6211%';", null, ct);
+            var state = await ScalarAsync(database, "SELECT actual_state FROM sys.database_query_store_options;", null, ct);
+            Assert.Fail($"Query Store holds no plan for {tag}: text id {textId}, query id {queryId}, plan id {planId}; {texts} pm6211 texts, actual_state {state}");
+        }
+
         return (queryId!.Value, planId!.Value);
     }
 
