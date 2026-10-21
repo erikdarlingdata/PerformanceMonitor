@@ -2192,6 +2192,20 @@ CREATE TRIGGER trg_agent_route_tag_guard
 ALTER TABLE config.server_tags ENABLE ALWAYS TRIGGER trg_agent_route_tag_guard;";
 
     /// <summary>
+    /// V211 (#5736): the two multiples of the relative Client Timeouts bars, on the singleton <c>config_alert_settings</c> row beside the two
+    /// bars they scale. Warning is max(<c>client_timeouts_warning_per_minute</c>, <c>client_timeouts_warning_multiple</c> x the server's baseline) and
+    /// Critical is the same with the Critical pair, the baseline being the server's own p99.9 of its 3-minute average attention rate over the last 7 days.
+    /// The two existing columns keep their names and become the FLOORS (their defaults, 10 and 60, are unchanged). Two <c>integer NOT NULL</c> columns with
+    /// constant defaults (3 and 10), catalog-only, no backfill, no GRANT (the roles hold table-level privileges on the config schema) and no trigger (the
+    /// statement-level <c>trg_bump_alert_settings</c> already bumps <c>config_version</c> on any write here). The baseline itself needs no storage: the
+    /// service computes it from <c>collection_log</c> and <c>attention_events</c> and keeps it in memory for a day.
+    /// </summary>
+    private const string V211Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS client_timeouts_warning_multiple integer NOT NULL DEFAULT 3,
+    ADD COLUMN IF NOT EXISTS client_timeouts_critical_multiple integer NOT NULL DEFAULT 10;";
+
+    /// <summary>
     /// V196 (#5632, step 5): Level 3 and the per-server action switches. <b>Nothing here turns an action on.</b>
     ///
     /// <para><b>Levels.</b> <c>ck_config_notification_routes_agent</c> now allows <c>agent_level</c> NULL and 0 to 3, and
@@ -2576,6 +2590,7 @@ $rung$;";
         new Migration(208, "mute-rule-starts-at", V208Sql),
         new Migration(209, "query-store-fetch-top-n", V209Sql),
         new Migration(210, "mcp-agent-route-tag-guard", V210Sql),
+        new Migration(211, "client-timeouts-relative-bars", V211Sql),
     };
 
     /// <summary>

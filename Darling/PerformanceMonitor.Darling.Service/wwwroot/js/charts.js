@@ -17,6 +17,7 @@
  */
 
 import { el, mount, parseUtc, axisTime, emptyStrip, setQueryWaitFilter, waitIsLinked } from "./util.js";
+import { focusSnapshotAt } from "./snapshot-pick.js";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -1414,6 +1415,8 @@ export async function openServerTabAt(server, tMs, item, { beforeRoute = null, s
         return err;
       }
     }
+    /* #6302: Active Queries opens on the snapshot nearest the moment (it is a picker over the window's snapshots now). */
+    if (g.tab === "queries" && Number.isFinite(tMs)) focusSnapshotAt(server, tMs);
     if (typeof beforeRoute === "function") beforeRoute();
     /* Bring the item's own grid into view once the router has built the tab. The router's hashchange listener was
        added first (app.js), and for a server already on screen renderServer paints the tab synchronously, so the new

@@ -132,10 +132,12 @@ public sealed class DarlingMcpSessionTools
         [Description("Return each row's full query text instead of a 400-character preview. Default false.")] bool full_text = false,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description(QueryTagReadJoin.TagParameterDescription)] string? tag = null,
+        [Description("One snapshot's rows: a collection_time exactly as this tool returned it. hours_back/as_of are then ignored. Not with snapshots_only.")] string? collection_time = null,
+        [Description("Return the snapshot times (newest first, with row counts) instead of rows; limit caps them. Default false.")] bool snapshots_only = false,
         ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
         GetActiveQueries(postgres, server_name, hours_back, database_name, blocking_only, wait_type, limit,
-            full_text ? null : QueryTextPreviewLength, as_of, logger, cancellationToken, tag);
+            full_text ? null : QueryTextPreviewLength, as_of, logger, cancellationToken, tag, collection_time, snapshots_only);
 
     /// <summary>
     /// get_active_queries under an explicit query-text preview length (#4198 lane W2): the MCP tool above
@@ -149,10 +151,11 @@ public sealed class DarlingMcpSessionTools
     #pragma warning disable CA1068 // #5984: tag trails the token on purpose; putting it before would shift every positional caller
     internal static Task<string> GetActiveQueries(
         NpgsqlDataSource postgres, string? server_name, int hours_back, string? database_name, bool blocking_only, string? waitType,
-        int limit, int? queryTextPreviewLength, string? as_of, ILogger? logger = null, CancellationToken cancellationToken = default, string? tag = null) =>
+        int limit, int? queryTextPreviewLength, string? as_of, ILogger? logger = null, CancellationToken cancellationToken = default, string? tag = null,
+        string? collectionTime = null, bool snapshotsOnly = false) =>
     #pragma warning restore CA1068
         GetActiveQueries(postgres, server_name, hours_back, DatabaseFilter.One(database_name), blocking_only, waitType,
-            limit, queryTextPreviewLength, as_of, logger, cancellationToken, tag);
+            limit, queryTextPreviewLength, as_of, logger, cancellationToken, tag, collectionTime, snapshotsOnly);
 
     /// <summary>
     /// The same read over a SET of databases (#5245). The MCP tool and the web mirror pass <see cref="DatabaseFilter.One"/> of
@@ -163,7 +166,8 @@ public sealed class DarlingMcpSessionTools
     #pragma warning disable CA1068 // #5984: tag trails the token on purpose; putting it before would shift every positional caller
     internal static async Task<string> GetActiveQueries(
         NpgsqlDataSource postgres, string? server_name, int hours_back, DatabaseFilter databases, bool blocking_only, string? waitType,
-        int limit, int? queryTextPreviewLength, string? as_of, ILogger? logger = null, CancellationToken cancellationToken = default, string? tag = null)
+        int limit, int? queryTextPreviewLength, string? as_of, ILogger? logger = null, CancellationToken cancellationToken = default, string? tag = null,
+        string? collectionTime = null, bool snapshotsOnly = false)
     {
     #pragma warning restore CA1068
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -173,6 +177,17 @@ public sealed class DarlingMcpSessionTools
         if (validation != null) return validation;
         validation = McpHelpers.ValidateTop(limit);
         if (validation != null) return validation;
+
+        /* #6302: one snapshot's rows, or the list of snapshots. A blank collection_time is none, as a blank wait_type is. */
+        DateTime? snapshotAt = null;
+        if (!string.IsNullOrWhiteSpace(collectionTime))
+        {
+            if (!DarlingMcpPlanTools.TryParseCollectionTime(collectionTime.Trim(), out var parsedAt))
+                return McpHelpers.Refusal("collection_time", "Expected the collection_time exactly as get_active_queries returned it (ISO 8601, UTC).");
+            if (snapshotsOnly)
+                return McpHelpers.Refusal("snapshots_only", "collection_time reads one snapshot's rows and snapshots_only lists the snapshots: send one of them.");
+            snapshotAt = parsedAt;
+        }
 
         try
         {
@@ -194,13 +209,26 @@ public sealed class DarlingMcpSessionTools
                row past the cap so truncation is OBSERVED on the filtered population rather than inferred from
                the page. total_snapshots is the SQL's COUNT(*) OVER () of that same population — the number
                used to be rows.Count of an unfiltered window read, a different population from the rows. */
+            if (snapshotsOnly)
+                return await SnapshotListAsync(postgres, resolved, hours_back, now, limit, databases, blocking_only, waitFilter, tagFilter, filter, cancellationToken);
+
+            /* #6302: one snapshot is the window [instant, instant]: collection_time is stored to the microsecond and the string it
+               was read as carries that, so the equality holds, and every filter still rides the same statement. */
             var page = await DarlingSessionReader.GetActiveQueriesAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, databases, blocking_only, waitFilter, tagFilter, cancellationToken);
+                postgres, resolved.ServerId, snapshotAt ?? now.AddHours(-hours_back), snapshotAt ?? now, limit + 1, databases, blocking_only, waitFilter, tagFilter, cancellationToken);
             var rows = page.Rows;
+
+            if (snapshotAt != null && rows.Count == 0)
+                return McpHelpers.Status(
+                    "empty",
+                    $"No active query rows on {resolved.ServerName} at collection_time {snapshotAt.Value:o}"
+                    + (!databases.IsAll || blocking_only || waitFilter != null ? " matched " + DescribeActiveQueryFilters(databases, blocking_only, waitFilter) : "")
+                    + ". Read the snapshot times with snapshots_only.");
 
             /* #4966: where the store's coverage of the window starts, in the three keys every window-floor tool writes. An answer
                with rows over a window of 90 minutes or less needs no probe; an empty one is always probed. */
-            var windowStart = now.AddHours(-hours_back);
+            /* A snapshot read has no window of its own to cover (hours_back is ignored), so it asks for no coverage note. */
+            var windowStart = snapshotAt != null ? now : now.AddHours(-hours_back);
             var notice = await DarlingMcpWindowNotice.ReadAsync(
                 () => DarlingMcpWindowNotice.Probe(postgres, "query_snapshots", resolved.ServerName, windowStart, now, cancellationToken),
                 windowStart, now, "query_snapshots", emptyAnswer: rows.Count == 0, logger: logger, cancellationToken: cancellationToken);
@@ -308,6 +336,7 @@ public sealed class DarlingMcpSessionTools
                 appliedFilters["tag"] = sessionTagName;
             }
 
+            if (snapshotAt != null) node["collection_time"] = collectionTime!.Trim();
             if (!notice.WindowTruncated)
             {
                 node.Remove("effective_start");
@@ -336,6 +365,43 @@ public sealed class DarlingMcpSessionTools
         {
             return McpHelpers.FormatError("get_active_queries", ex);
         }
+    }
+
+    /// <summary>
+    /// get_active_queries with snapshots_only (#6302): the distinct capture instants in the window, newest first, each with the rows it
+    /// holds under the filters. The row read's cap is on rows, so its page cannot name every snapshot a window holds; this is the
+    /// list a picker is built from. <paramref name="limit"/> caps the snapshots, asked for one past so truncation is observed.
+    /// </summary>
+    private static async Task<string> SnapshotListAsync(
+        NpgsqlDataSource postgres, (int ServerId, string ServerName, string DisplayName) resolved, int hoursBack, DateTime now, int limit, DatabaseFilter databases,
+        bool blockingOnly, string? waitFilter, QueryTagFilter? tags, string? databaseEcho, CancellationToken cancellationToken)
+    {
+        var page = await DarlingSessionReader.GetActiveQuerySnapshotsAsync(
+            postgres, resolved.ServerId, now.AddHours(-hoursBack), now, limit + 1, databases, blockingOnly, waitFilter, tags, cancellationToken);
+        if (page.Snapshots.Count == 0)
+        {
+            if (!databases.IsAll || blockingOnly || waitFilter != null)
+                return McpHelpers.Status(
+                    "empty",
+                    $"No active query snapshots on {resolved.ServerName} in the last {hoursBack} hour(s) matched "
+                    + DescribeActiveQueryFilters(databases, blockingOnly, waitFilter) + ".");
+            return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_snapshots", cancellationToken)
+                ?? McpHelpers.Status("empty", "No active query snapshots found in the requested time range.");
+        }
+
+        var truncated = page.Snapshots.Count > limit;
+        var shown = truncated ? page.Snapshots.GetRange(0, limit) : page.Snapshots;
+        return JsonSerializer.Serialize(new
+        {
+            server = resolved.ServerName,
+            hours_back = hoursBack,
+            filters_applied = new { database_name = databaseEcho, blocking_only = blockingOnly, wait_type = waitFilter },
+            /* The filtered population's snapshot count, from the same statement as the list. */
+            total_snapshot_times = page.SnapshotCount,
+            truncated,
+            order = "collection_time_desc",
+            snapshots = shown.Select(x => new { collection_time = x.CollectionTime.ToString("o"), row_count = x.RowCount }).ToList()
+        }, McpHelpers.JsonOptions);
     }
 
     /// <summary>

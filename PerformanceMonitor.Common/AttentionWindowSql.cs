@@ -71,6 +71,46 @@ AND   status = '{SuccessStatus}'
 ORDER BY collection_time DESC
 """;
 
+    /// <summary>
+    /// The per-minute buckets the Client Timeouts baseline is made of (#5736): one row per calendar minute in which the attention collector
+    /// had a SUCCESSFUL run, with the sum of that minute's <c>count</c> rows (zero when the run counted nothing). Columns: minute (timestamp),
+    /// attentions (bigint), oldest first. <c>$1</c> = server_id, <c>$2</c> = the inclusive naive-UTC start, <c>$3</c> = the exclusive end.
+    /// It is the bucket definition of <c>tools/attention-rate-measure.sql</c> (Darling and Lite twins): a minute with no successful run is no
+    /// bucket, a count row in such a minute is not read, the sample rows are never the total. Both reads lean on the existing
+    /// <c>(server_id, collection_time)</c> indexes of <c>collection_log</c> and <c>attention_events</c>, so the 7-day read is a bounded range scan
+    /// of this one server.
+    /// </summary>
+    public static string BaselineMinutes(string logRelation, string eventsRelation) => $"""
+WITH runs AS (
+    SELECT date_trunc('minute', collection_time) AS minute
+    FROM {logRelation}
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time < $3
+    AND   collector_name = '{CollectorName}'
+    AND   status = '{SuccessStatus}'
+    GROUP BY date_trunc('minute', collection_time)
+),
+counts AS (
+    SELECT
+        date_trunc('minute', collection_time) AS minute,
+        CAST(SUM(attention_count) AS BIGINT) AS attentions
+    FROM {eventsRelation}
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time < $3
+    AND   event_kind = '{KindCount}'
+    GROUP BY date_trunc('minute', collection_time)
+)
+SELECT
+    r.minute,
+    CAST(COALESCE(c.attentions, 0) AS BIGINT) AS attentions
+FROM runs AS r
+LEFT JOIN counts AS c
+    ON c.minute = r.minute
+ORDER BY r.minute
+""";
+
     /// <summary>The count rows, summed per collection_time. Column 0 = collection_time, 1 = attentions (bigint).</summary>
     public static string Counts(string eventsRelation, bool bounded = false) => $"""
 SELECT

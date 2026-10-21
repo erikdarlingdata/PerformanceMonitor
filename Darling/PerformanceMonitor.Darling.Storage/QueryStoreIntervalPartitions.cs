@@ -532,6 +532,14 @@ SELECT COALESCE
 
     private static bool IsLockTimeout(Exception ex) => ex is PostgresException pg && pg.SqlState == PostgresErrorCodes.LockNotAvailable;
 
+    /* #6317: with TimescaleDB loaded a DDL step that waits on a lock can deadlock (40P01) with another session's DDL on the same
+       parent, where plain PostgreSQL would only queue. The deadlock detector aborts one session: if it is this one, the step
+       rolled back and nothing is lost, exactly as after a lock timeout, so both end as RetryLater and the next pass retries. */
+    private static bool IsLockContention(Exception ex) =>
+        IsLockTimeout(ex) || (ex is PostgresException pg && pg.SqlState == PostgresErrorCodes.DeadlockDetected);
+
+    private static string LockReason(Exception ex) => IsLockTimeout(ex) ? "lock timeout" : "deadlock";
+
     private static NpgsqlCommand Command(NpgsqlConnection connection, string sql, int timeoutSeconds, NpgsqlTransaction? transaction = null) =>
         new(sql, connection, transaction) { CommandTimeout = timeoutSeconds };
 
@@ -797,19 +805,19 @@ SELECT COALESCE
                     table.Parent, s, reArm ? "re-armed" : "armed");
                 return new StepResult(StepOutcome.Done, $"{(reArm ? "re-armed" : "armed")} at {Literal(s)}", 1);
             }
-            catch (PostgresException ex) when (IsLockTimeout(ex))
+            catch (PostgresException ex) when (IsLockContention(ex))
             {
                 if (attempt >= retries)
                 {
                     logger.LogWarning(
-                        "Query Store interval table {Table}: arming the legacy bound hit a lock timeout {Attempts} time(s); the next pass retries.",
-                        table.Parent, attempt + 1);
-                    return new StepResult(StepOutcome.RetryLater, "lock timeout");
+                        "Query Store interval table {Table}: arming the legacy bound hit a {Reason} {Attempts} time(s); the next pass retries.",
+                        table.Parent, LockReason(ex), attempt + 1);
+                    return new StepResult(StepOutcome.RetryLater, LockReason(ex));
                 }
 
                 logger.LogInformation(
-                    "Query Store interval table {Table}: arming the legacy bound hit a lock timeout; retrying in {Seconds:F0}s.",
-                    table.Parent, retryDelay.TotalSeconds);
+                    "Query Store interval table {Table}: arming the legacy bound hit a {Reason}; retrying in {Seconds:F0}s.",
+                    table.Parent, LockReason(ex), retryDelay.TotalSeconds);
                 await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(false);
             }
         }
@@ -939,11 +947,11 @@ SELECT COALESCE
             await ExecuteAsync(connection, ValidateSql(table), ValidateTimeoutSeconds, transaction, cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         }
-        catch (PostgresException ex) when (IsLockTimeout(ex))
+        catch (PostgresException ex) when (IsLockContention(ex))
         {
             logger.LogWarning(
-                "Query Store interval table {Table}: validating the legacy bound hit a lock timeout; the background loop retries it.", table.Parent);
-            return new StepResult(StepOutcome.RetryLater, "lock timeout");
+                "Query Store interval table {Table}: validating the legacy bound hit a {Reason}; the background loop retries it.", table.Parent, LockReason(ex));
+            return new StepResult(StepOutcome.RetryLater, LockReason(ex));
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.CheckViolation)
         {
@@ -985,7 +993,7 @@ SELECT COALESCE
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             dropped = true;
         }
-        catch (PostgresException ex) when (IsLockTimeout(ex))
+        catch (PostgresException ex) when (IsLockContention(ex))
         {
             /* Left armed; the next pass drops it. */
         }
@@ -1111,11 +1119,11 @@ SELECT COALESCE
                 table.Parent, table.Legacy, s, days.Count);
             return new StepResult(StepOutcome.Done, $"promoted at {Literal(s)}", days.Count);
         }
-        catch (PostgresException ex) when (IsLockTimeout(ex))
+        catch (PostgresException ex) when (IsLockContention(ex))
         {
             logger.LogWarning(
-                "Query Store interval table {Table}: promotion hit a lock timeout and rolled back; it is tried again.", table.Parent);
-            return new StepResult(StepOutcome.RetryLater, "lock timeout");
+                "Query Store interval table {Table}: promotion hit a {Reason} and rolled back; it is tried again.", table.Parent, LockReason(ex));
+            return new StepResult(StepOutcome.RetryLater, LockReason(ex));
         }
     }
 
@@ -1146,11 +1154,11 @@ SELECT COALESCE
                 .ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         }
-        catch (PostgresException ex) when (IsLockTimeout(ex))
+        catch (PostgresException ex) when (IsLockContention(ex))
         {
             logger.LogInformation(
-                "Query Store interval table {Table}: analyzing the parent hit a lock timeout; the next background pass retries.", table.Parent);
-            return new StepResult(StepOutcome.RetryLater, "lock timeout");
+                "Query Store interval table {Table}: analyzing the parent hit a {Reason}; the next background pass retries.", table.Parent, LockReason(ex));
+            return new StepResult(StepOutcome.RetryLater, LockReason(ex));
         }
 
         logger.LogInformation(
@@ -1344,12 +1352,12 @@ SELECT COALESCE
                         table.Parent, drained, day, name, DaysAhead);
                 }
             }
-            catch (PostgresException ex) when (IsLockTimeout(ex))
+            catch (PostgresException ex) when (IsLockContention(ex))
             {
                 logger.LogWarning(
-                    "Query Store interval table {Table}: creating {Partition} hit a lock timeout and rolled back; the next pass retries.",
-                    table.Parent, name);
-                return new StepResult(StepOutcome.RetryLater, "lock timeout", created);
+                    "Query Store interval table {Table}: creating {Partition} hit a {Reason} and rolled back; the next pass retries.",
+                    table.Parent, name, LockReason(ex));
+                return new StepResult(StepOutcome.RetryLater, LockReason(ex), created);
             }
         }
 
@@ -1382,7 +1390,7 @@ SELECT COALESCE
     /// Retention for the partitions: drops every bounded partition whose upper bound is at or before
     /// <c>utcNow - HorizonDays</c> (a whole expired day, and the legacy table once S is at or before the cutoff), oldest
     /// first, each in its own transaction under a 5 s lock timeout. A day that straddles the cutoff is kept until the whole
-    /// day has expired. A lock timeout stops the pass with <see cref="StepOutcome.RetryLater"/> (not an error); the rest
+    /// day has expired. A lock timeout, or a deadlock with another session (#6317), stops the pass with <see cref="StepOutcome.RetryLater"/> (not an error); the rest
     /// waits for the next pass. Only after promotion. Count is the partitions dropped.
     /// </summary>
     public static async Task<StepResult> DropExpiredAsync(
@@ -1409,12 +1417,13 @@ SELECT COALESCE
                     "Query Store interval table {Table}: dropped expired partition {Partition} (upper bound {Upper:O}).",
                     table.Parent, partition.Name, partition.Upper);
             }
-            catch (PostgresException ex) when (IsLockTimeout(ex))
+            catch (PostgresException ex) when (IsLockContention(ex))
             {
+                /* #6317: the DROP is aborted as the deadlock victim under TimescaleDB when another session drops the same partition. */
                 logger.LogInformation(
-                    "Query Store interval table {Table}: dropping {Partition} hit a lock timeout; the next pass retries.",
-                    table.Parent, partition.Name);
-                return new StepResult(StepOutcome.RetryLater, "lock timeout", dropped);
+                    "Query Store interval table {Table}: dropping {Partition} hit a {Reason}; the next pass retries.",
+                    table.Parent, partition.Name, LockReason(ex));
+                return new StepResult(StepOutcome.RetryLater, LockReason(ex), dropped);
             }
         }
 

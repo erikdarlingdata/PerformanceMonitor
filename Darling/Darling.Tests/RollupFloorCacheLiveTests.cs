@@ -270,6 +270,9 @@ public sealed class RollupFloorCacheLiveTests
         /* Drop the database and build it again under the same name, laid out identically but with its oldest five
            hours removed: the same chunk and hypertable names, a later floor. */
         await RecreateDatabaseAsync(BaseConnectionString!, store.DatabaseName, ct);
+        /* The first incarnation had TimescaleDB from CreateAsync (#6317), before its migrations ran; the second gets it the same way, so the
+           hypertable ids, and so the chunk names, come out identical. */
+        Assert.True(await LiveTimescaleProbe.TryEnableAsync(store.ConnectionString, ct), "TimescaleDB must be available on CI for the live #4957 floor cache tests");
         await PopulateStoreAsync(store.ConnectionString, SeedStart(now), now, deleteRawBefore: SeedStart(now).AddHours(5), oneDayChunks: false, ct);
         var truthAfter = await TruthAsync(store.ConnectionString, ct);
         Assert.True(truthAfter > truthBefore, "the recreated store's floor must be later, or a stale floor would go unnoticed");

@@ -185,6 +185,11 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
         AttentionEvaluator.ClampBars(_config.Alerts.ClientTimeoutsWarningPerMinute, _config.Alerts.ClientTimeoutsCriticalPerMinute).Warning;
     public int ClientTimeoutsCriticalPerMinute =>
         AttentionEvaluator.ClampBars(_config.Alerts.ClientTimeoutsWarningPerMinute, _config.Alerts.ClientTimeoutsCriticalPerMinute).Critical;
+    /* #5736: the two multiples of the relative bars, clamped the way the floors are (each at least 1, Critical never below Warning). */
+    public int ClientTimeoutsWarningMultiple =>
+        AttentionBaselineMath.ClampMultiples(_config.Alerts.ClientTimeoutsWarningMultiple, _config.Alerts.ClientTimeoutsCriticalMultiple).Warning;
+    public int ClientTimeoutsCriticalMultiple =>
+        AttentionBaselineMath.ClampMultiples(_config.Alerts.ClientTimeoutsWarningMultiple, _config.Alerts.ClientTimeoutsCriticalMultiple).Critical;
     public int LongRunningQueryThresholdMinutes => _config.Alerts.LongRunningQueryThresholdMinutes;
     public int TempDbSpaceThresholdPercent => _config.Alerts.TempDbSpaceThresholdPercent;
     public int LowDiskThresholdPercent => Math.Clamp(_config.Alerts.LowDiskThresholdPercent, 0, 100);

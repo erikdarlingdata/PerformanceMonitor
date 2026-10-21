@@ -154,6 +154,14 @@ public sealed class InvestigationFeedbackExportLimitsLiveTests
                 /* The aborted request ends in a cancellation, which is the point. */
             }
 
+            /* The client sees the abort before the server's handler has unwound and closed its delete-on-close handle, so the file goes
+               a moment after the client call returns (#6317: slower under the TimescaleDB store). It must still go: wait for it, bounded. */
+            var goneBy = DateTime.UtcNow.AddSeconds(15);
+            while (Left(folder).Length > 0 && DateTime.UtcNow < goneBy)
+            {
+                await Task.Delay(50, ct);
+            }
+
             Assert.Empty(Left(folder));
 
             /* A refusal: a case the credential-statement check cannot pass refuses the whole download. */
