@@ -14,11 +14,12 @@
 
 import { el, mount, axisTime, localTime } from "../util.js";
 import { renderPanel, gridTable, getPanelSignal, setPanelSignal } from "../panels.js";
-import { openServerTabAt, CHART_MENU_LABELS } from "../charts.js";
 import { HEATMAP_METRICS, HEATMAP_SHADES, heatmapBinMinutes, buildHeatmap, heatmapDrillMs, heatmapCellText } from "./query-heatmap-model.js";
 
 /* The picks, at module scope so the 60 s rebuild of the tab (a new card every time) keeps them. `view` is null until the reader chooses;
    until then a phone-width window opens on the table. */
+/* The chart menu's own item text (charts.js CHART_MENU_LABELS.atQueries), so the two read the same. */
+const AT_QUERIES_LABEL = "Show Active Queries at This Time";
 const pick = { metric: HEATMAP_METRICS[0].value, view: null };
 
 function narrowScreen() {
@@ -46,7 +47,7 @@ export function renderHeatmapBody(data, opts) {
   ]);
 
   const detailText = el("span", { class: "qh-detail-text", text: "Hover a cell for its values; click one to open Active Queries at that time." });
-  const openButton = el("button", { type: "button", class: "btn qh-open", text: CHART_MENU_LABELS.atQueries });
+  const openButton = el("button", { type: "button", class: "btn qh-open", text: AT_QUERIES_LABEL });
   openButton.hidden = true;
   const detail = el("div", { class: "qh-detail", "aria-live": "polite" }, [detailText, openButton]);
 
@@ -63,7 +64,8 @@ export function renderHeatmapBody(data, opts) {
       openButton.hidden = !selected;
     };
     openButton.addEventListener("click", () => {
-      if (selected) void openServerTabAt(opts.server, heatmapDrillMs(grid, selected.g.ms), "queries");
+      /* charts.js is loaded on the click, as charts.js itself loads pages/server.js: the tabs build without it until a reader asks for a moment. */
+      if (selected) void import("../charts.js").then((m) => m.openServerTabAt(opts.server, heatmapDrillMs(grid, selected.g.ms), "queries"));
     });
 
     const table = el("table", {
