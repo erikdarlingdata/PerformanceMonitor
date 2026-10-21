@@ -42,12 +42,12 @@ public sealed class ClientTimeoutsRelativeBarsLiveTests
     }
 
     /// <summary>One successful run a minute from <paramref name="days"/> days ago to now, and a count row 2 seconds after each run:
-    /// <paramref name="normal"/> attentions a minute until 6 minutes ago, <paramref name="recent"/> after it.</summary>
+    /// <paramref name="normal"/> attentions a minute until 4 minutes ago, <paramref name="recent"/> after it. The spike must stay under 0.1% of the 7-day windows, or it lifts the baseline it is measured against.</summary>
     private static async Task SeedAsync(NpgsqlConnection connection, DateTime now, double days, int normal, int recent, CancellationToken ct)
     {
         var from = DateTime.SpecifyKind(now.AddMinutes(-(int)(days * 1440)), DateTimeKind.Unspecified);
         var to = DateTime.SpecifyKind(now, DateTimeKind.Unspecified);
-        var recentFrom = DateTime.SpecifyKind(now.AddMinutes(-6), DateTimeKind.Unspecified);
+        var recentFrom = DateTime.SpecifyKind(now.AddMinutes(-4), DateTimeKind.Unspecified);
         var id = ServerId.ToString(CultureInfo.InvariantCulture);
         await using var log = new NpgsqlCommand(
             $@"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status)
@@ -153,7 +153,7 @@ public sealed class ClientTimeoutsRelativeBarsLiveTests
     [Fact]
     public async Task ABusyServer_DoesNotFireAtItsNormalRate()
     {
-        await RunAsync(2, normal: 150, recent: 150, async (postgres, now) =>
+        await RunAsync(7, normal: 150, recent: 150, async (postgres, now) =>
         {
             var (h, fired) = await EvaluateAsync(postgres, now);
             Assert.Null(fired);
@@ -164,7 +164,7 @@ public sealed class ClientTimeoutsRelativeBarsLiveTests
     [Fact]
     public async Task ABusyServer_FiresWarningAboveThreeTimesItsBaseline_AndSaysWhy()
     {
-        await RunAsync(2, normal: 150, recent: 600, async (postgres, now) =>
+        await RunAsync(7, normal: 150, recent: 600, async (postgres, now) =>
         {
             var (_, fired) = await EvaluateAsync(postgres, now);
             Assert.NotNull(fired);
@@ -178,7 +178,7 @@ public sealed class ClientTimeoutsRelativeBarsLiveTests
     [Fact]
     public async Task ABusyServer_JustUnderThreeTimesItsBaseline_DoesNotFire()
     {
-        await RunAsync(2, normal: 150, recent: 440, async (postgres, now) =>
+        await RunAsync(7, normal: 150, recent: 440, async (postgres, now) =>
         {
             var (_, fired) = await EvaluateAsync(postgres, now);
             Assert.Null(fired);
@@ -188,7 +188,7 @@ public sealed class ClientTimeoutsRelativeBarsLiveTests
     [Fact]
     public async Task ABusyServer_FiresCriticalAboveTenTimesItsBaseline()
     {
-        await RunAsync(2, normal: 150, recent: 1600, async (postgres, now) =>
+        await RunAsync(7, normal: 150, recent: 1600, async (postgres, now) =>
         {
             var (_, fired) = await EvaluateAsync(postgres, now);
             Assert.NotNull(fired);
@@ -201,7 +201,7 @@ public sealed class ClientTimeoutsRelativeBarsLiveTests
     [Fact]
     public async Task ABusyServer_BetweenTheTwoBars_IsWarningNotCritical()
     {
-        await RunAsync(2, normal: 150, recent: 1400, async (postgres, now) =>
+        await RunAsync(7, normal: 150, recent: 1400, async (postgres, now) =>
         {
             var (_, fired) = await EvaluateAsync(postgres, now);
             Assert.Equal(AlertSeverityLevel.Warning, fired!.Severity);
@@ -211,14 +211,14 @@ public sealed class ClientTimeoutsRelativeBarsLiveTests
     [Fact]
     public async Task AQuietServer_FiresOverTheFloorOfTen_AndCriticalOverTheFloorOfSixty()
     {
-        await RunAsync(2, normal: 2, recent: 20, async (postgres, now) =>
+        await RunAsync(7, normal: 2, recent: 20, async (postgres, now) =>
         {
             var (_, fired) = await EvaluateAsync(postgres, now);
             Assert.Equal(AlertSeverityLevel.Warning, fired!.Severity);
             Assert.Equal("10 per minute", fired.ThresholdValue);
             Assert.Contains("floor", fired.ShortMessage, StringComparison.Ordinal);
         });
-        await RunAsync(2, normal: 2, recent: 70, async (postgres, now) =>
+        await RunAsync(7, normal: 2, recent: 70, async (postgres, now) =>
         {
             var (_, fired) = await EvaluateAsync(postgres, now);
             Assert.Equal(AlertSeverityLevel.Critical, fired!.Severity);
@@ -229,7 +229,7 @@ public sealed class ClientTimeoutsRelativeBarsLiveTests
     [Fact]
     public async Task AQuietServer_UnderTheFloor_DoesNotFire()
     {
-        await RunAsync(2, normal: 2, recent: 8, async (postgres, now) =>
+        await RunAsync(7, normal: 2, recent: 8, async (postgres, now) =>
         {
             var (_, fired) = await EvaluateAsync(postgres, now);
             Assert.Null(fired);
