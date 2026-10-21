@@ -4430,7 +4430,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
                     if (definition.EmitsProbeFailures)
                     {
                         var probes = await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(reader, itemToken);
-                        collectionNote = probes.Note;
+                        collectionNote = EnumeratedCollectorDriver.MergeNotes(collectionNote, probes.Note);
                         LogEnumerationProbeFailures(definition, server, probes.ProbeFailures);
                     }
 
@@ -4660,9 +4660,8 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
            delivers, and that baseline has to come from the same column on ordinary rows. Storing it only on
            failures would reproduce exactly the cross-referencing this change exists to remove.
 
-           Kept ABOVE the return rather than inside the argument list: DarlingEmptyEnumerationNoteTests pins
-           this call's arguments as one whitespace-collapsed run, so a comment between them breaks a pin
-           whose actual job is to catch a DROPPED argument. */
+           Kept ABOVE the return rather than inside the argument list, so the call reads as one run. The note
+           reaching it is covered by DarlingRunnerCollectionNoteLiveTests, which drives RunAsync (#6356). */
         /* #3099: merged rather than assigned, and read HERE — one place, after every write on all three
            dispatch paths — because the count is a per-cycle total and the fan-out paths write once per
            item. Merging keeps a re-attempt from displacing the probe-failure or partial-database note it

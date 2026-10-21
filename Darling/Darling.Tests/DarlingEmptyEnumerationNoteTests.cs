@@ -79,45 +79,6 @@ public sealed class DarlingEmptyEnumerationNoteTests
     }
 
     [Fact]
-    public void Runner_Carries_The_Note_Onto_The_Success_Return_Too()
-    {
-        /* The partial case: items WERE enumerated but some of their probes failed, so the run collects
-           normally and returns through the success path at the bottom of the method — which built a
-           note-less result until #1837's contract. Without this the probe summary would reach the store
-           only when the enumeration came back completely empty. */
-        var source = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs"));
-
-        Assert.Contains("collectionNote = enumeration.Note;", source);
-
-        /* The success return gained the fan-out rollup at #2472, the server-scoped phase split at #2851 and
-           the summed per-database fetch split at #2860, and this pin moved with each of them rather than
-           being loosened to a substring. Naming the whole argument list is the point: it is what makes an
-           argument DROPPED from this call — the note included — fail here instead of silently reaching the
-           store as a null.
-
-           #3161 added the definition-supplied Measurements as a REQUIRED parameter, so a site that drops it
-           now fails to COMPILE rather than failing here — but the argument's POSITION and the fact that the
-           success return is the one site passing the live `context.Measurements` rather than
-           CollectorContext.NoMeasurements are still only pinned here.
-
-           #2851 wrapped the call across lines, which broke the single-line literal this used to be. Collapsing
-           runs of whitespace before matching makes the pin survive REFORMATTING while still failing on a
-           dropped argument, which is the property it exists for — the previous form conflated the two, so a
-           pure line-wrap failed it exactly as loudly as a real regression would have. */
-        var collapsed = Regex.Replace(source, @"\s+", " ");
-
-        Assert.Contains(
-            "return new CollectorRunResult( rowsWritten, sqlMs, storageMs, context.Measurements, "
-            + "collectionNote, fanout.Result, " +
-            "ServerPhasesMeasured: serverPhasesMeasured, ServerOpenMs: context.ServerScopeOpenMs, " +
-            "ServerDrainMs: context.ServerScopeDrainMs, ServerWatermarkMs: serverWatermarkMs, " +
-            "ServerRowsRead: context.ServerScopeRowsRead, ServerBytesRead: context.ServerScopeBytesRead, " +
-            "ServerLastReadMs: context.ServerScopeLastReadMs, TargetSessionId: context.TargetSessionId, " +
-            "FetchPhases: fetchPhases.Result, ReadSource: queryStoreReadSource);",
-            collapsed);
-    }
-
-    [Fact]
     public void Worker_Passes_The_Note_To_The_Collection_Log_Write()
     {
         /* The note reaches error_message through LogCollectionAsync's message parameter, on the write for
