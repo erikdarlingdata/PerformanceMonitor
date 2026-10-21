@@ -43,4 +43,15 @@ public sealed class LiteTcpDataSourceTests
             "localhost", "app", false, SqlConnectionEncryptOption.Mandatory, false, false);
         Assert.Equal("localhost", local.DataSource);
     }
+
+    /// <summary>#6365: Lite's collection connection also stops SqlClient following a mirroring partner the server reports.</summary>
+    [Fact]
+    public void CollectionConnection_StopsSqlClientFollowingAServerReportedFailoverPartner()
+    {
+        var server = new ServerConnection { ServerName = "sql01", AuthenticationType = AuthenticationTypes.SqlServer };
+        _ = server.BuildConnectionString("u", "p");
+
+        Assert.True(System.AppContext.TryGetSwitch(ServerHostSetting.IgnoreServerProvidedFailoverPartnerSwitch, out var on));
+        Assert.True(on);
+    }
 }

@@ -121,6 +121,18 @@ public static class ServerHostSetting
         return $"The host '{shown}' is not accepted: it {why}. Use the server's name or address, as name, name,port or name\\instance.";
     }
 
+    /// <summary>The Microsoft.Data.SqlClient AppContext switch that stops it following a mirroring partner the server names (#6365).</summary>
+    public const string IgnoreServerProvidedFailoverPartnerSwitch = "Switch.Microsoft.Data.SqlClient.IgnoreServerProvidedFailoverPartner";
+
+    /* A server in a database mirroring session tells SqlClient its partner's name, and SqlClient remembers it per connection
+       pool and connects to it when the principal stops answering, even with no Failover Partner in the connection string. That
+       name does not go through TcpDataSource, so it has no tcp: prefix and falls back from TCP to a named pipe over SMB with
+       the process's Windows credentials (#6365; measured on 7.1.1: a fake principal reporting 192.0.2.1, then connect with the
+       principal down, opened 1433 and 445 on 192.0.2.1). We never set a Failover Partner, so the switch costs nothing.
+       SqlClient reads the switch once and caches it, so it is set here, before the first TcpDataSource call in the process
+       (every connection to a monitored server takes its Data Source from there). */
+    static ServerHostSetting() => AppContext.SetSwitch(IgnoreServerProvidedFailoverPartnerSwitch, true);
+
     /// <summary>
     /// The Data Source to hand SqlClient for a connection to a MONITORED SQL Server (#6352): the host with <c>tcp:</c>
     /// in front, so the connection is TCP and never falls back to a named pipe.

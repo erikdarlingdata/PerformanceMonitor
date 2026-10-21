@@ -158,4 +158,33 @@ public sealed class ServerHostTcpDataSourceTests
         var parsed = new SqlConnectionStringBuilder(DarlingServerConnector.ResolveConnectionString(server!));
         Assert.Equal("tcp:evil.example", parsed.DataSource);
     }
+
+    /// <summary>
+    /// #6365: a server in a mirroring session reports its partner, and SqlClient connects to that name when the principal
+    /// stops answering, with no Failover Partner in the connection string and no tcp: prefix (measured on 7.1.1 with a fake
+    /// principal: 1433, then 445 on the reported host). Building a monitored connection string sets the switch that stops it.
+    /// </summary>
+    [Fact]
+    public void BuildingAMonitoredDataSource_StopsSqlClientFollowingAServerReportedFailoverPartner()
+    {
+        _ = ServerHostSetting.TcpDataSource("sql01");
+
+        Assert.True(AppContext.TryGetSwitch(ServerHostSetting.IgnoreServerProvidedFailoverPartnerSwitch, out var on));
+        Assert.True(on);
+    }
+
+    /// <summary>
+    /// SqlClient reads the switch by name, so a rename in a newer SqlClient would turn it into a silent no-op.
+    /// This fails then, at the upgrade, instead of in the field.
+    /// </summary>
+    [Fact]
+    public void TheSwitchNameIsTheOneThePinnedSqlClientReads()
+    {
+        var type = typeof(SqlConnection).Assembly.GetType("Microsoft.Data.SqlClient.LocalAppContextSwitches");
+        Assert.NotNull(type);
+        var field = type!.GetField("IgnoreServerProvidedFailoverPartnerString",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        Assert.NotNull(field);
+        Assert.Equal(ServerHostSetting.IgnoreServerProvidedFailoverPartnerSwitch, field!.GetRawConstantValue());
+    }
 }
