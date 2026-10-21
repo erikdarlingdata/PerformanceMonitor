@@ -587,7 +587,7 @@ WHERE server_id = $1";
         }
 
         /* #6352: a changed host is held to the add rule; a row saved before it keeps its host and stays editable. */
-        ThrowIfHostRefused(row, stored.Host);
+        ThrowIfHostRefused(row, stored.Host, stored.Engine);
 
         var incoming = ViewerPasswordSealer.IdentityOf(row);
         var connectionChanged = ServerConnectionIdentity.Differ(incoming, stored);
@@ -631,11 +631,19 @@ WHERE server_id = $1";
     /// before it tests or saves, and the upsert calls it again under its transaction. The add (<see cref="AddMonitoredServerAsync"/>)
     /// is not checked here: the import of an older registry goes through it, and an existing registration is not blocked.
     /// </summary>
-    public static string? HostRefusal(MonitoredServerRow row, string? storedHost)
+    public static string? HostRefusal(MonitoredServerRow row, string? storedHost, string? storedEngine = null)
     {
         ArgumentNullException.ThrowIfNull(row);
+        /* A stored PostgreSQL row was never held to the SQL Server host rule, so it has no stored SQL Server host to keep:
+           when the save turns it into a SQL Server row (the upsert writes engine = EXCLUDED.engine) its host is checked. */
+        if (storedHost is not null && new MonitoredServerRow { Engine = storedEngine ?? "" }.IsPostgres)
+        {
+            storedHost = null;
+        }
+
+        /* Ordinal, no trim: a stored "<U+00A0>np:x" is not a pipe and "np:x" is, so they are not the same host. */
         if (row.IsPostgres
-            || (storedHost is not null && string.Equals(row.Host?.Trim(), storedHost.Trim(), StringComparison.Ordinal)))
+            || (storedHost is not null && string.Equals(row.Host, storedHost, StringComparison.Ordinal)))
         {
             return null;
         }
@@ -643,9 +651,9 @@ WHERE server_id = $1";
         return ServerHostSetting.Refusal(row.Host);
     }
 
-    private static void ThrowIfHostRefused(MonitoredServerRow row, string? storedHost)
+    private static void ThrowIfHostRefused(MonitoredServerRow row, string? storedHost, string? storedEngine = null)
     {
-        if (HostRefusal(row, storedHost) is { } refusal)
+        if (HostRefusal(row, storedHost, storedEngine) is { } refusal)
         {
             throw new MonitoredServerHostRefusedException(refusal);
         }

@@ -35,6 +35,10 @@ public partial class AddServerDialog : Window
     /// </summary>
     public ServerConnection? AddedServer { get; private set; }
 
+    /// <summary>#6352: the host the edited server had when the dialog opened. Save changes the live list object before it
+    /// calls the manager, so the manager's own stored copy cannot tell a changed host from an unchanged one.</summary>
+    private string? _originalHost;
+
     public AddServerDialog(ServerManager serverManager, ProfileManager profileManager)
     {
         InitializeComponent();
@@ -68,6 +72,7 @@ public partial class AddServerDialog : Window
         : this(serverManager, profileManager)
     {
         Title = "Edit SQL Server";
+        _originalHost = existing.ServerName;
         ServerNameBox.Text = existing.ServerName;
         DisplayNameBox.Text = existing.DisplayName;
         EnabledCheckBox.IsChecked = existing.IsEnabled;
@@ -542,7 +547,7 @@ public partial class AddServerDialog : Window
     /// <summary>#6352: the refusal for the host in the box, or null. A server being edited keeps the host it was saved
     /// with, so only a NEW or CHANGED host is held to the rule (see <see cref="ServerManager.HostRefusal"/>).</summary>
     private string? HostBoxRefusal() =>
-        ServerManager.HostRefusal(ServerNameBox.Text, Title == "Edit SQL Server" ? AddedServer?.ServerName : null);
+        ServerManager.HostRefusal(ServerNameBox.Text, Title == "Edit SQL Server" ? _originalHost : null);
 
     private async void TestButton_Click(object sender, RoutedEventArgs e)
     {
@@ -804,12 +809,12 @@ public partial class AddServerDialog : Window
                     AddedServer.AzureClientId = null;
                     AddedServer.AzureTenantId = null;
                     AddedServer.ManagedIdentityClientId = null;
-                    _serverManager.UpdateServer(AddedServer, null, null);
+                    _serverManager.UpdateServer(AddedServer, null, null, _originalHost);
                     _serverManager.CredentialService.DeleteCredential(AddedServer.Id);
                 }
                 else
                 {
-                    _serverManager.UpdateServer(AddedServer, username, password);
+                    _serverManager.UpdateServer(AddedServer, username, password, _originalHost);
                 }
             }
             else

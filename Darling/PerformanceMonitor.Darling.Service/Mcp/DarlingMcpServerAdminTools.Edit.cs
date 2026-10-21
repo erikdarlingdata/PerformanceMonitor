@@ -959,7 +959,9 @@ LIMIT 1";
         var username = c.HasUsername ? c.Username : (authSwitched ? null : row.Username);
         var name = c.DisplayName is null ? row.Name : (c.DisplayName.Length == 0 ? host : c.DisplayName);
 
-        var isPostgres = !string.Equals(row.Engine, EngineSqlServer, StringComparison.OrdinalIgnoreCase);
+        /* The engine is read through the one parser the collectors use (#6352): a darling.json seed stores the engine as
+           written, and anything the parser does not recognise ("mssql") is a SQL Server row, so the host rule applies to it. */
+        var isPostgres = PerformanceMonitor.Collectors.MonitoredEngineKind.ParseConfiguredEngine(row.Engine) == PerformanceMonitor.Collectors.CollectorTargetEngine.PostgreSql;
         /* #6352: a CHANGED host is held to the add rule (no named-pipe, admin or path-style host). A host sent
            unchanged is not, so a row saved before the rule can still be edited in its other fields. */
         if (!isPostgres && c.Host is not null && !string.Equals(c.Host, row.Host, StringComparison.Ordinal)

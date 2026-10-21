@@ -261,6 +261,40 @@ public sealed class ServerEditPasswordRuleViewerTests
         Assert.Equal(("np:legacy.example.test", StoredBlob, "Mandatory"), await StoredAsync(rig, ct));
     }
 
+    /// <summary>#6352: the upsert writes <c>engine = EXCLUDED.engine</c>, so a stored PostgreSQL row that holds a host the
+    /// SQL Server rule refuses must have it checked when the save turns the row into a SQL Server one. Two saves got
+    /// through before: {postgres, "np:x"} then {sqlserver, "np:x"}.</summary>
+    [Fact]
+    public async Task APostgresRowSavedWithAPipeHost_IsRefused_WhenTheSaveTurnsItIntoASqlServerRow()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync("sql", StoredBlob, ct);
+        var viewer = new ViewerDataService(rig.Scratch.ConnectionString);
+        await using var _ = viewer;
+        var asPostgres = Row("sql", "np:attacker.example.test", NewBlob);
+        asPostgres.Engine = MonitoredServerRow.EnginePostgres;
+        await viewer.UpsertMonitoredServerAsync(asPostgres, ct);
+
+        var asSqlServer = Row("sql", "np:attacker.example.test", NewBlob);
+        asSqlServer.Engine = MonitoredServerRow.EngineSqlServer;
+        await Assert.ThrowsAsync<MonitoredServerHostRefusedException>(() => viewer.UpsertMonitoredServerAsync(asSqlServer, ct));
+
+        await using var command = rig.Owner.CreateCommand("SELECT engine FROM config_monitored_servers WHERE server_id = $1");
+        command.Parameters.AddWithValue(ServerId);
+        Assert.Equal(MonitoredServerRow.EnginePostgres, (string?)await command.ExecuteScalarAsync(ct));
+    }
+
+    [Fact]
+    public void AStoredHostThatDiffersOnlyByWhitespace_IsNotTheSameHost_AndAStoredPostgresRowHasNoSqlServerHostToKeep()
+    {
+        var pipe = new MonitoredServerRow { Host = "np:attacker" };
+        Assert.NotNull(ViewerDataService.HostRefusal(pipe, "\u00A0np:attacker"));
+        Assert.NotNull(ViewerDataService.HostRefusal(pipe, " np:attacker"));
+        Assert.Null(ViewerDataService.HostRefusal(pipe, "np:attacker", MonitoredServerRow.EngineSqlServer));
+        Assert.NotNull(ViewerDataService.HostRefusal(pipe, "np:attacker", MonitoredServerRow.EnginePostgres));
+        Assert.NotNull(ViewerDataService.HostRefusal(pipe, "np:attacker", "aurora"));
+    }
+
     [Fact]
     public void TheViewerDialogsRule_AcceptsAnUnchangedHost_AndRefusesANewOrChangedOne()
     {

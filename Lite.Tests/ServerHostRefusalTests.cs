@@ -114,4 +114,55 @@ public sealed class ServerHostRefusalTests : IDisposable
         Assert.Equal((1, 1, 0), (imported, skipped, collided));
         Assert.Equal("sql02", manager.GetAllServers().Single().ServerName);
     }
+
+    [Fact]
+    public void UpdateServer_RefusesAPipeHost_WhenTheLiveListObjectWasChangedBeforeTheCall_ByComparingWithTheHostTheEditBeganWith()
+    {
+        // The edit dialog changes the object the manager holds, then calls UpdateServer with that same object, so the
+        // stored copy already holds the new host and the two compare equal. The dialog passes the host it opened with.
+        var manager = new ServerManager(_configDir);
+        var saved = new ServerConnection { ServerName = "sql01", DisplayName = "x" };
+        manager.AddServer(saved);
+        var live = manager.GetAllServers().Single();
+        var openedWith = live.ServerName;
+
+        live.ServerName = "np:attacker.example";
+
+        Assert.Throws<InvalidOperationException>(() => manager.UpdateServer(live, null, null, openedWith));
+    }
+
+    [Fact]
+    public void UpdateServer_LetsAnUnchangedLegacyPipeHostThrough_WhenThePreviousHostIsPassed()
+    {
+        var legacy = new ServerConnection { ServerName = "np:legacy01", DisplayName = "legacy" };
+        File.WriteAllText(Path.Combine(_configDir, "servers.json"),
+            JsonSerializer.Serialize(new { Servers = new[] { legacy } }));
+        var manager = new ServerManager(_configDir);
+        var live = manager.GetAllServers().Single();
+
+        live.DisplayName = "renamed";
+        manager.UpdateServer(live, null, null, "np:legacy01");
+
+        Assert.Equal("renamed", manager.GetAllServers().Single().DisplayName);
+    }
+
+    [Theory]
+    [InlineData("np:attacker", "\u00A0np:attacker")]
+    [InlineData("np:attacker", " np:attacker")]
+    [InlineData("np:attacker", "np:attacker ")]
+    public void AHostThatDiffersOnlyByWhitespaceFromTheSavedOne_IsNotTheSameHost(string newHost, string savedHost)
+    {
+        // A stored "<U+00A0>np:x" is not a pipe and "np:x" is: an edit to it is a changed host, so it is checked.
+        Assert.NotNull(ServerManager.HostRefusal(newHost, savedHost));
+    }
+
+    [Fact]
+    public void ARefusedHostWithLineBreaks_IsNotEchoedWithThem_SoAnImportCannotForgeALogLine()
+    {
+        var refusal = ServerManager.HostRefusal("np:a\r\n2026-01-01 INFO forged", null);
+
+        Assert.NotNull(refusal);
+        Assert.DoesNotContain('\r', refusal);
+        Assert.DoesNotContain('\n', refusal);
+    }
 }

@@ -136,7 +136,7 @@ public sealed class ViewerImportServerIdCollisionTests
         var window = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "MainWindow.ServerManagement.cs");
 
         Assert.Contains(
-            "(pushedToStore, collidedInStore) = await ViewerServerMigration.ImportFromStoreAsync(",
+            "(pushedToStore, collidedInStore) = storeImport;",
             window,
             StringComparison.Ordinal);
         Assert.Contains("if (collidedInStore > 0)", window, StringComparison.Ordinal);

@@ -643,7 +643,7 @@ public partial class AddServerDialog : Window
         /* #6352: a SQL Server host SqlClient would read as a named pipe or an admin connection is refused before the row is
            built, so Test and Save both stop here. An edit that keeps its host is not held to it; the same rule the
            data service's upsert applies under its transaction. */
-        if (!isPostgres && ViewerDataService.HostRefusal(new MonitoredServerRow { Host = host }, _existing?.Host) is { } hostRefusal)
+        if (!isPostgres && ViewerDataService.HostRefusal(new MonitoredServerRow { Host = host }, _existing?.Host, _existing?.Engine) is { } hostRefusal)
         {
             error = hostRefusal;
             return null;

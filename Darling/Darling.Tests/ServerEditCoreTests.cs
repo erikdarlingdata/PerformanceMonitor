@@ -835,4 +835,26 @@ public sealed class ServerEditCoreTests : IDisposable
         Assert.Equal("updated", answer["status"]!.GetValue<string>());
         Assert.Equal(1, store.Writes);
     }
+
+    [Fact]
+    public async Task AnEditThatMovesAnUnrecognisedEngineRowToAPipeHost_IsRefused_BecauseThatRowIsSqlServer()
+    {
+        // A darling.json seed stores the engine as written; "mssql" is read as SQL Server everywhere else.
+        var store = new FakeStore { Row = SqlRow(engine: "mssql") };
+
+        var answer = JsonNode.Parse(await Run(store, new JsonObject { ["host"] = "np:attacker.example.test", ["password"] = Secret }.ToJsonString()))!;
+
+        Assert.Equal("invalid", answer["status"]!.GetValue<string>());
+        Assert.Contains("is not accepted", answer["message"]!.GetValue<string>(), StringComparison.Ordinal);
+        Assert.Equal(0, store.Writes);
+    }
+
+    [Fact]
+    public void AnUnrecognisedEngineRow_IsNotHeldToThePostgreSqlSqlAuthRule()
+    {
+        var (plan, error) = Plan(SqlRow(auth: "integrated", engine: "mssql"), "{\"display_name\":\"renamed\"}");
+
+        Assert.Null(error);
+        Assert.NotNull(plan);
+    }
 }

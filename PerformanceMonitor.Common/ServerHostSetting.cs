@@ -50,22 +50,40 @@ public static class ServerHostSetting
         var text = host.Trim();
         var rest = text;
 
-        /* tcp: is allowed, but only in front of a host the rule would accept on its own: "tcp:np:host" and
-           "tcp:\\host" are not made safe by the harmless word in front. */
-        while (rest.StartsWith("tcp:", StringComparison.OrdinalIgnoreCase))
+        /* tcp: is allowed, but only in front of a host the rule would accept on its own: "tcp:np:x" and
+           "tcp:\host" are not made safe by the harmless word in front. SqlClient trims the protocol word before it
+           compares it, so "tcp :np:x" and "TCP<tab>:np:x" are the same thing and "np :host" is a named pipe: the
+           word before the colon is trimmed (all Unicode whitespace, U+00A0 and U+3000 included) before it is read. */
+        while (true)
         {
-            rest = rest["tcp:".Length..].TrimStart();
+            var tcpColon = rest.IndexOf(':');
+            if (tcpColon > 0 && rest[..tcpColon].Trim().Equals("tcp", StringComparison.OrdinalIgnoreCase))
+            {
+                rest = rest[(tcpColon + 1)..].TrimStart();
+                continue;
+            }
+
+            break;
         }
 
-        if (rest.Length > 0 && (rest[0] == '\\' || rest[0] == '/'))
+        if (rest.Length == 0)
+        {
+            return Message(text, "has no host after the tcp: prefix");
+        }
+
+        if (rest[0] == '\\' || rest[0] == '/')
         {
             return Message(text, "starts with a slash, which SqlClient reads as a network path (a named pipe)");
         }
 
         var colon = rest.IndexOf(':');
-        if (colon > 0 && IsAllLetters(rest.AsSpan(0, colon)) && !IPAddress.TryParse(rest, out _))
+        if (colon > 0)
         {
-            return Message(text, $"starts with a protocol prefix ({rest[..(colon + 1)]}), which can send the connection over a named pipe or the dedicated admin connection; only tcp: is accepted");
+            var prefix = rest[..colon].Trim();
+            if (prefix.Length > 0 && IsAllLetters(prefix) && !IPAddress.TryParse(rest, out _))
+            {
+                return Message(text, $"starts with a protocol prefix ({prefix}:), which can send the connection over a named pipe or the dedicated admin connection; only tcp: is accepted");
+            }
         }
 
         return null;
@@ -84,9 +102,22 @@ public static class ServerHostSetting
         return true;
     }
 
+    private static bool IsBidiControl(char c) =>
+        c == '\u061C' || c == '\u200E' || c == '\u200F' || (c >= '\u202A' && c <= '\u202E') || (c >= '\u2066' && c <= '\u2069');
+
     private static string Message(string host, string why)
     {
-        var shown = host.Length > MaxEchoLength ? host[..MaxEchoLength] + "..." : host;
+        /* The host is echoed into log lines and error text: control characters (CR/LF would forge a log line) and
+           bidi overrides (they reorder what a person reads) are shown as '?' (#6352). */
+        var clean = string.Create(host.Length, host, static (span, src) =>
+        {
+            for (var i = 0; i < src.Length; i++)
+            {
+                var c = src[i];
+                span[i] = (char.IsControl(c) && c != '\t') || IsBidiControl(c) || c == '\u2028' || c == '\u2029' ? '?' : c;
+            }
+        });
+        var shown = clean.Length > MaxEchoLength ? clean[..MaxEchoLength] + "..." : clean;
         return $"The host '{shown}' is not accepted: it {why}. Use the server's name or address, as name, name,port or name\\instance.";
     }
 }

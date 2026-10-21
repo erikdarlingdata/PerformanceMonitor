@@ -72,12 +72,40 @@ public sealed class ServerHostSettingTests
     [InlineData("//sql01/pipe/sql/query")]
     [InlineData("/sql01")]
     [InlineData("  \\\\sql01")]
+    // SqlClient trims the word before the colon, so a space, tab or Unicode space in front of it does not hide the prefix.
+    [InlineData("np :attacker.example")]
+    [InlineData(" NP\t: h")]
+    [InlineData("admin :h")]
+    [InlineData("lpc :h")]
+    [InlineData("np\u3000:h")]
+    [InlineData("np\u00A0:h")]
+    [InlineData("tcp :np:x")]
+    [InlineData("TCP\t:np:x")]
+    [InlineData("tcp\u00A0:np:x")]
+    [InlineData("tcp: np :x")]
+    // Nothing after tcp: is no host at all.
+    [InlineData("tcp:")]
+    [InlineData("TCP : ")]
+    [InlineData("tcp:tcp:")]
     public void ANamedPipeOrAdminOrPathHost_IsRefused_NamingTheValueAndTheReason(string host)
     {
         var refusal = ServerHostSetting.Refusal(host);
 
         Assert.NotNull(refusal);
         Assert.Contains("The host '" + host.Trim() + "' is not accepted", refusal, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ARefusalMessage_DoesNotEchoControlOrBidiCharacters_SoAHostCannotForgeALogLine()
+    {
+        var refusal = ServerHostSetting.Refusal("np:a\r\n2026-01-01 INFO forged\u202Eevil\u2028x");
+
+        Assert.NotNull(refusal);
+        Assert.DoesNotContain('\r', refusal);
+        Assert.DoesNotContain('\n', refusal);
+        Assert.DoesNotContain('\u202E', refusal);
+        Assert.DoesNotContain('\u2028', refusal);
+        Assert.Contains("The host 'np:a??2026-01-01 INFO forged?evil?x' is not accepted", refusal, StringComparison.Ordinal);
     }
 
     [Theory]
