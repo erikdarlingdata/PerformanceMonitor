@@ -38,6 +38,7 @@ public partial class AddServerDialog : Window
     /// <summary>#6352: the host the edited server had when the dialog opened. Save changes the live list object before it
     /// calls the manager, so the manager's own stored copy cannot tell a changed host from an unchanged one.</summary>
     private string? _originalHost;
+    private string? _originalReplica;
 
     public AddServerDialog(ServerManager serverManager, ProfileManager profileManager)
     {
@@ -73,6 +74,7 @@ public partial class AddServerDialog : Window
     {
         Title = "Edit SQL Server";
         _originalHost = existing.ServerName;
+        _originalReplica = existing.QueryStoreReplica ?? "";
         ServerNameBox.Text = existing.ServerName;
         DisplayNameBox.Text = existing.DisplayName;
         EnabledCheckBox.IsChecked = existing.IsEnabled;
@@ -596,6 +598,11 @@ public partial class AddServerDialog : Window
     private string? HostBoxRefusal() =>
         ServerManager.HostRefusal(ServerNameBox.Text, Title == "Edit SQL Server" ? _originalHost : null);
 
+    /// <summary>#6254: the refusal for the Query Store replica in the box, or null. A server being edited keeps the replica it was
+    /// saved with, so only a NEW or CHANGED replica is held to the host rule (see <see cref="ServerManager.ReplicaRefusal"/>).</summary>
+    private string? ReplicaBoxRefusal() =>
+        ServerManager.ReplicaRefusal(QueryStoreReplicaBox.Text, Title == "Edit SQL Server" ? _originalReplica : null);
+
     private async void TestButton_Click(object sender, RoutedEventArgs e)
     {
         if (string.IsNullOrEmpty(ServerNameBox.Text.Trim()))
@@ -608,6 +615,13 @@ public partial class AddServerDialog : Window
         if (HostBoxRefusal() is { } testHostRefusal)
         {
             StatusText.Text = testHostRefusal;
+            return;
+        }
+
+        /* #6254: the replica is a second host Lite connects to with this server's credentials, held to the same rule. */
+        if (ReplicaBoxRefusal() is { } testReplicaRefusal)
+        {
+            StatusText.Text = testReplicaRefusal;
             return;
         }
 
@@ -681,6 +695,12 @@ public partial class AddServerDialog : Window
         if (HostBoxRefusal() is { } hostRefusal)
         {
             StatusText.Text = hostRefusal;
+            return;
+        }
+
+        if (ReplicaBoxRefusal() is { } replicaRefusal)
+        {
+            StatusText.Text = replicaRefusal;
             return;
         }
 

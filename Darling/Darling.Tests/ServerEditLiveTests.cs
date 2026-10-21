@@ -970,7 +970,7 @@ public sealed class ServerEditLiveTests : IDisposable
             Assert.Equal("rep-free-listener.example.test",
                 await ScalarAsync<string>(rig.Owner, "SELECT query_store_replica FROM config_monitored_servers WHERE host = 'rep-new-2.example.test'", ct));
 
-            foreach (var replica in new[] { "np:\\\\attacker\\pipe\\sql\\query", "lpc:attacker", "admin:attacker", "\\\\attacker\\share" })
+            foreach (var replica in new[] { "np:\\\\attacker\\pipe\\sql\\query", "lpc:attacker", "admin:attacker", "tcp:tcp:attacker", "\\\\attacker\\share" })
             {
                 var json = "[{\"host\":\"rep-new-3.example.test\",\"query_store_replica\":" + JsonValue.Create(replica)!.ToJsonString() + "}]";
                 var refused = await AddAsync(json);
@@ -1025,6 +1025,14 @@ public sealed class ServerEditLiveTests : IDisposable
                 policy: DarlingMcpAddServersPolicy.Default));
             Assert.Equal("refused", own["status"]!.GetValue<string>());
             Assert.Equal("alpha-r3.example.test", await ScalarAsync<string>(rig.Owner, "SELECT host FROM config_monitored_servers WHERE server_id = 7413", ct));
+
+            /* #6254 (security round 3, L1): a replica-only edit moves the connection too, so a route set up on the registration during its
+               test is seen by the write's own check, and the replica is not saved. */
+            await SeedServerAsync(rig.Owner, 7415, "alpha-r5", "alpha-r5.example.test", "integrated", null, null, ct);
+            var replicaOnly = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "alpha-r5", "{\"query_store_replica\":\"alpha-r5-listener.example.test\"}", RoutedDuringProbe(7415), TestKeyRings.Healthy, null, ct,
+                policy: DarlingMcpAddServersPolicy.Default));
+            Assert.Equal("refused", replicaOnly["status"]!.GetValue<string>());
+            Assert.Equal("", await ScalarAsync<string>(rig.Owner, "SELECT coalesce(query_store_replica, '') FROM config_monitored_servers WHERE server_id = 7415", ct));
 
             /* An add of another database of a machine that gets a route during the test. */
             await SeedServerAsync(rig.Owner, 7414, "alpha-r4", "alpha-r4.example.test", "integrated", null, null, ct);

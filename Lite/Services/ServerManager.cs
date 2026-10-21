@@ -36,6 +36,10 @@ public class ServerManager
        object: the edit dialog changes the live list object before it calls UpdateServer, so the live object's host cannot
        say what the saved one was. Guarded by _serversLock. */
     private readonly Dictionary<string, string> _savedHosts = new();
+
+    /* #6254: the Query Store replica each server had when it was last loaded or saved, as _savedHosts does for the host: an edit that
+       keeps its replica is not held to the replica rule, so a server saved before the rule stays editable. */
+    private readonly Dictionary<string, string> _savedReplicas = new();
     private readonly ConcurrentDictionary<string, ServerConnectionStatus> _connectionStatuses;
 
     /// <summary>
@@ -305,6 +309,28 @@ public class ServerManager
             : ServerHostSetting.Refusal(newHost);
 
     /// <summary>
+    /// #6254: null when <paramref name="newReplica"/> may be saved as a server's Query Store replica, otherwise the sentence to
+    /// refuse with. The replica becomes the Data Source of a connection Lite opens with the server's own credentials, so it is held
+    /// to the host rule (<see cref="HostRefusal"/>): a new server's replica and a changed one are, an edit that keeps the replica it
+    /// has is not (<paramref name="existingReplica"/> null means there is none to keep). A blank replica means none and is not refused.
+    /// </summary>
+    public static string? ReplicaRefusal(string? newReplica, string? existingReplica)
+    {
+        var replica = newReplica?.Trim();
+        if (string.IsNullOrEmpty(replica))
+        {
+            return null;
+        }
+
+        if (existingReplica is not null && string.Equals(replica, existingReplica.Trim(), StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        return ServerHostSetting.Refusal(replica) is { } why ? "Query Store replica: " + why : null;
+    }
+
+    /// <summary>
     /// Adds a new server to the list.
     /// </summary>
     public void AddServer(ServerConnection server, string? username = null, string? password = null)
@@ -312,6 +338,11 @@ public class ServerManager
         if (HostRefusal(server.ServerName, null) is { } hostRefusal)
         {
             throw new InvalidOperationException(hostRefusal);
+        }
+
+        if (ReplicaRefusal(server.QueryStoreReplica, null) is { } replicaRefusal)
+        {
+            throw new InvalidOperationException(replicaRefusal);
         }
 
         lock (_serversLock)
@@ -332,6 +363,7 @@ public class ServerManager
             _servers.Add(server);
             SaveServers();
             _savedHosts[server.Id] = server.ServerName;
+            _savedReplicas[server.Id] = server.QueryStoreReplica ?? "";
             NotificationRouteCache.Invalidate();
         }
 
@@ -390,6 +422,12 @@ public class ServerManager
                 throw new InvalidOperationException(hostRefusal);
             }
 
+            /* #6254: the same for the Query Store replica: a changed one is held to the rule, a kept one is not. */
+            if (ReplicaRefusal(server.QueryStoreReplica, _savedReplicas.GetValueOrDefault(server.Id)) is { } replicaRefusal)
+            {
+                throw new InvalidOperationException(replicaRefusal);
+            }
+
             /* #4789: an edit that changes the derived id (the name, database or read-only intent) is refused when
                another server already holds the new one, before the list, servers.json or the credential store is
                touched. An edit that keeps its id is not: a pair saved before this check existed stays editable. */
@@ -403,6 +441,7 @@ public class ServerManager
             _servers[index] = server;
             SaveServers();
             _savedHosts[server.Id] = server.ServerName;
+            _savedReplicas[server.Id] = server.QueryStoreReplica ?? "";
             NotificationRouteCache.Invalidate();
         }
 
@@ -490,6 +529,7 @@ public class ServerManager
             {
                 _servers.Remove(server);
                 _savedHosts.Remove(id);
+                _savedReplicas.Remove(id);
                 SaveServers();
                 NotificationRouteCache.Invalidate();
             }
@@ -857,6 +897,7 @@ public class ServerManager
             {
                 _connectionStatuses[server.Id] = new ServerConnectionStatus { ServerId = server.Id };
                 _savedHosts[server.Id] = server.ServerName;
+                _savedReplicas[server.Id] = server.QueryStoreReplica ?? "";
             }
 
             _logger?.LogInformation("Loaded {Count} servers from configuration", _servers.Count);
@@ -879,6 +920,7 @@ public class ServerManager
                     {
                         _connectionStatuses[server.Id] = new ServerConnectionStatus { ServerId = server.Id };
                         _savedHosts[server.Id] = server.ServerName;
+                        _savedReplicas[server.Id] = server.QueryStoreReplica ?? "";
                     }
                     _logger?.LogInformation("Restored {Count} servers from backup file", _servers.Count);
                     return;
@@ -937,6 +979,15 @@ public class ServerManager
                     continue;
                 }
 
+                /* #6254: the same for the Query Store replica, which the import would otherwise take from any servers.json: a Windows
+                   login would then be sent to the replica the file names. */
+                if (ReplicaRefusal(server.QueryStoreReplica, null) is { } replicaRefusalOnImport)
+                {
+                    skipped++;
+                    _logger?.LogWarning("Import Settings did not import server '{DisplayName}': {Refusal}", NameForMessage(server), replicaRefusalOnImport);
+                    continue;
+                }
+
                 var existing = _servers.FirstOrDefault(s => IsSameServerIgnoringCase(s, server));
 
                 if (existing != null)
@@ -976,6 +1027,7 @@ public class ServerManager
                 // Add with original GUID so Credential Manager entries still work
                 _servers.Add(server);
                 _savedHosts[server.Id] = server.ServerName;
+                _savedReplicas[server.Id] = server.QueryStoreReplica ?? "";
                 _connectionStatuses[server.Id] = new ServerConnectionStatus { ServerId = server.Id };
                 imported++;
             }

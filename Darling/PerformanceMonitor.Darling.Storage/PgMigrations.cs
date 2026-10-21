@@ -2088,6 +2088,9 @@ ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS starts_at_utc time
     /// with a constant default; no backfill, no GRANT (the roles' table-level SELECT covers a new column; the Viewer's settings save writes it as the admin role, whose
     /// table-level UPDATE on the config schema covers it, while the viewer role holds only <c>UPDATE (config_version, updated_at)</c> on this table) and no trigger (the config_version trigger fires on any row update).
     /// </summary>
+    private const string V209Sql = @"
+ALTER TABLE config.config_service ADD COLUMN IF NOT EXISTS query_store_fetch_top_n integer NOT NULL DEFAULT 100;";
+
     /// <summary>
     /// V213 (#6254): two nullable text columns. <c>config.config_monitored_servers.query_store_replica</c> is the host (or listener
     /// name) Query Store is read from instead of the server itself; NULL, the default for every existing row, keeps today's behaviour.
@@ -2103,9 +2106,6 @@ ALTER TABLE collect.collection_log ADD COLUMN IF NOT EXISTS read_source text;
    of the log (the MCP tools, the web page, the Viewer) would never see read_source without this. Appending is the one alteration
    CREATE OR REPLACE VIEW permits, which is exactly what an ADD COLUMN produces. */
 CREATE OR REPLACE VIEW collect.v_collection_log AS SELECT * FROM collect.collection_log;";
-
-    private const string V209Sql = @"
-ALTER TABLE config.config_service ADD COLUMN IF NOT EXISTS query_store_fetch_top_n integer NOT NULL DEFAULT 100;";
 
     /// <summary>
     /// V210 (#6281, part of #5632): the MCP tag writes may not change which servers an agent route covers. A tag-scoped route covers

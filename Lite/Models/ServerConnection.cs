@@ -458,7 +458,7 @@ public class ServerConnection : INotifyPropertyChanged
     {
         var builder = new SqlConnectionStringBuilder(primaryConnectionString)
         {
-            DataSource = replica.Trim(),
+            DataSource = ServerHostSetting.TcpDataSource(replica.Trim()),
             ApplicationIntent = ApplicationIntent.ReadOnly
         };
         return builder.ConnectionString;

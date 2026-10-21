@@ -129,7 +129,7 @@ public static class MonitoredServerConnection
         var password = DarlingSecrets.ResolveReplicaPassword(server, ring);
         var builder = new SqlConnectionStringBuilder(BuildConnectionString(server, password))
         {
-            DataSource = replica,
+            DataSource = PerformanceMonitor.Common.ServerHostSetting.TcpDataSource(replica),
             ApplicationIntent = ApplicationIntent.ReadOnly,
         };
 

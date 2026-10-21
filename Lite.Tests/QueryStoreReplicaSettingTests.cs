@@ -48,7 +48,7 @@ public sealed class QueryStoreReplicaConnectionStringTests
         var replica = new SqlConnectionStringBuilder(server.BuildQueryStoreReplicaConnectionString("monitor", "p@ss")!);
         var primary = new SqlConnectionStringBuilder(server.BuildConnectionString("monitor", "p@ss"));
 
-        Assert.Equal("replica.example.com", replica.DataSource);
+        Assert.Equal("tcp:replica.example.com", replica.DataSource);
         Assert.Equal(ApplicationIntent.ReadOnly, replica.ApplicationIntent);
         Assert.Equal(ApplicationIntent.ReadWrite, primary.ApplicationIntent);
         Assert.Equal("monitor", replica.UserID);
@@ -63,13 +63,13 @@ public sealed class QueryStoreReplicaConnectionStringTests
     }
 
     [Fact]
-    public void AHostAndPort_AndASurroundingBlank_ReachTheDataSourceAsTyped()
+    public void AHostAndPort_AndASurroundingBlank_ReachTheDataSourceTrimmedAndOverTcp()
     {
         var server = SqlAuthServer("  replica.example.com,14331 ");
 
         var replica = new SqlConnectionStringBuilder(server.BuildQueryStoreReplicaConnectionString("monitor", "pw")!);
 
-        Assert.Equal("replica.example.com,14331", replica.DataSource);
+        Assert.Equal("tcp:replica.example.com,14331", replica.DataSource);
     }
 
     [Theory]
@@ -97,7 +97,7 @@ public sealed class QueryStoreReplicaConnectionStringTests
         var replica = new SqlConnectionStringBuilder(
             ServerConnection.ResolveQueryStoreReplicaConnectionString(server, new CredentialService(), profileLookup: null)!);
 
-        Assert.Equal("listener.example.com", replica.DataSource);
+        Assert.Equal("tcp:listener.example.com", replica.DataSource);
         Assert.True(replica.IntegratedSecurity);
         Assert.Equal(ApplicationIntent.ReadOnly, replica.ApplicationIntent);
     }

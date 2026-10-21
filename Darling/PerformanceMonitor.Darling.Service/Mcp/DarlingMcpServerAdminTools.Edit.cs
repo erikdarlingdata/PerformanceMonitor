@@ -480,7 +480,7 @@ LIMIT 1";
         /* The same two checks again inside the write's transaction, under the identity lock: a route set up during the probe is seen
            before the row changes. */
         HeldCheck? heldCheck = !enforceHeld ? null : async (connection, transaction, token) =>
-            plan.AddressChanged && await ScopedAgentRouteAsync(connection, transaction, serverId, token) is { } routeNow
+            plan.MovesConnection && await ScopedAgentRouteAsync(connection, transaction, serverId, token) is { } routeNow
                 ? CoveredServerEditText(routeNow)
                 : await TargetHeldRefusalInTransactionAsync(connection, transaction, heldEntry, serverId, token, forEdit: true, probedIdentity: probedIdentity, textMatch: plan.AddressChanged, postgresIdentityUnread: identityUnread, checkReplica: plan.ReplicaChanged);
         var write = await store.WriteAsync(serverId, row.ModifiedAt, sets, plan.AddressChanged ? plan.NewStorageKey : null, actualStorageKey, heldCheck, cancellationToken);

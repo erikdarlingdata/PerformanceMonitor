@@ -10,6 +10,7 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 using Xunit;
@@ -106,6 +107,103 @@ public sealed class ServerHostRefusalTests : IDisposable
             },
         }));
         var targetDir = Path.Combine(_configDir, "target");
+        Directory.CreateDirectory(targetDir);
+        var manager = new ServerManager(targetDir);
+
+        var (imported, skipped, collided) = manager.ImportServersFromFile(source);
+
+        Assert.Equal((1, 1, 0), (imported, skipped, collided));
+        Assert.Equal("sql02", manager.GetAllServers().Single().ServerName);
+    }
+
+    /* #6254 (security round 3, L3): the Query Store replica is a second host Lite connects to with the server's own credentials,
+       so a Windows login would go over SMB to a replica of np:\\attacker\pipe\sql\query. It is held to the host rule. */
+    [Theory]
+    [InlineData("np:\\\\attacker\\pipe\\sql\\query")]
+    [InlineData("np :attacker")]
+    [InlineData("np\t:attacker")]
+    [InlineData("lpc:attacker")]
+    [InlineData("\\\\attacker\\share")]
+    [InlineData("tcp:np:attacker")]
+    public void AddServer_RefusesAPipeOrPathReplica_AndSavesNothing(string replica)
+    {
+        var manager = new ServerManager(_configDir);
+
+        var refused = Assert.Throws<InvalidOperationException>(
+            () => manager.AddServer(new ServerConnection { ServerName = "sql01", DisplayName = "x", QueryStoreReplica = replica }));
+
+        Assert.Contains("Query Store replica", refused.Message, StringComparison.Ordinal);
+        Assert.Empty(manager.GetAllServers());
+    }
+
+    [Fact]
+    public void AddServer_StillAcceptsAPlainTcpPrefixedOrEmptyReplica()
+    {
+        var manager = new ServerManager(_configDir);
+
+        var replicas = new[] { "replica01,14331", "ag-listener", "tcp:replica02", "[fe80::1]", "", "  ", null };
+        for (var i = 0; i < replicas.Length; i++)
+        {
+            manager.AddServer(new ServerConnection { ServerName = "sql0" + i, DisplayName = "x" + i, QueryStoreReplica = replicas[i] });
+        }
+
+        Assert.Equal(7, manager.GetAllServers().Count);
+    }
+
+    [Fact]
+    public void UpdateServer_RefusesMovingTheReplicaToAPipe_OnTheLiveObjectToo_AndKeepsTheSavedReplica()
+    {
+        var manager = new ServerManager(_configDir);
+        var saved = new ServerConnection { ServerName = "sql01", DisplayName = "x", QueryStoreReplica = "replica01" };
+        manager.AddServer(saved);
+
+        var moved = new ServerConnection { Id = saved.Id, ServerName = "sql01", DisplayName = "x", QueryStoreReplica = "np:attacker" };
+        Assert.Throws<InvalidOperationException>(() => manager.UpdateServer(moved));
+
+        /* The edit dialog changes the manager's own object before it calls UpdateServer. */
+        var live = manager.GetAllServers().Single();
+        live.QueryStoreReplica = "np:attacker";
+        Assert.Throws<InvalidOperationException>(() => manager.UpdateServer(live));
+
+        /* A server with no replica is held to the rule when one is first set. */
+        var plain = new ServerConnection { ServerName = "sql02", DisplayName = "y" };
+        manager.AddServer(plain);
+        var set = new ServerConnection { Id = plain.Id, ServerName = "sql02", DisplayName = "y", QueryStoreReplica = "admin:attacker" };
+        Assert.Throws<InvalidOperationException>(() => manager.UpdateServer(set));
+    }
+
+    [Fact]
+    public void AServerSavedWithAPipeReplica_StaysEditable_WhileItsReplicaIsLeftAlone()
+    {
+        var legacy = new ServerConnection { ServerName = "sql01", DisplayName = "legacy", QueryStoreReplica = "np:legacy01" };
+        File.WriteAllText(Path.Combine(_configDir, "servers.json"),
+            JsonSerializer.Serialize(new { Servers = new[] { legacy } }));
+        var manager = new ServerManager(_configDir);
+        var live = manager.GetAllServers().Single();
+
+        live.DisplayName = "renamed";
+        manager.UpdateServer(live);
+        Assert.Equal("renamed", manager.GetAllServers().Single().DisplayName);
+
+        live.QueryStoreReplica = "np:other";
+        Assert.Throws<InvalidOperationException>(() => manager.UpdateServer(live));
+        Assert.Null(ServerManager.ReplicaRefusal("np:legacy01", "np:legacy01"));
+        Assert.NotNull(ServerManager.ReplicaRefusal("np:legacy01", null));
+    }
+
+    [Fact]
+    public void ImportServersFromFile_SkipsAnEntryWhosePipeReplicaWouldGetTheWindowsLogin_AndImportsThePlainOne()
+    {
+        var source = Path.Combine(_configDir, "import-replica.json");
+        File.WriteAllText(source, JsonSerializer.Serialize(new
+        {
+            Servers = new[]
+            {
+                new ServerConnection { ServerName = "sql01", DisplayName = "pipe", AuthenticationType = AuthenticationTypes.Windows, QueryStoreReplica = "np:\\\\attacker\\pipe\\sql\\query" },
+                new ServerConnection { ServerName = "sql02", DisplayName = "plain", AuthenticationType = AuthenticationTypes.Windows, QueryStoreReplica = "replica02" },
+            },
+        }));
+        var targetDir = Path.Combine(_configDir, "target-replica");
         Directory.CreateDirectory(targetDir);
         var manager = new ServerManager(targetDir);
 
