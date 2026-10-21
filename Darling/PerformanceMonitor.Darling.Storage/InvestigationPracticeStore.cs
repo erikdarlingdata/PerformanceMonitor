@@ -211,6 +211,11 @@ ORDER BY rp.submitted_at DESC, p.request_id";
     public async Task<InvestigationPracticeResult> OpenAsync(Guid sourceRequestId, string actor, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(actor);
+        if (InvestigationPersonWrites.ValidateActor(actor) is { } actorError)
+        {
+            throw new ArgumentException(actorError, nameof(actor));
+        }
+
         var now = DateTime.SpecifyKind(_utcNow(), DateTimeKind.Utc);
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);

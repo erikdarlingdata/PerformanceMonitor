@@ -58,7 +58,7 @@ public sealed class DarlingWebSignInHardeningTests
 
     private static async Task<TestServer> BuildServer(
         bool networkMode, IReadOnlyList<IPNetwork>? trustedProxies = null, DarlingWebOidcClient? oidcClient = null,
-        string? publicBaseUrlHost = "monitor.example.com", bool sendHsts = false, SettableClock? clock = null)
+        string? publicBaseUrlHost = "monitor.example.com", bool sendHsts = false, SettableClock? clock = null, string? mcpToken = null)
     {
         clock ??= new SettableClock();
         var builder = WebApplication.CreateBuilder();
@@ -88,7 +88,8 @@ public sealed class DarlingWebSignInHardeningTests
             publicBaseUrlHost: publicBaseUrlHost,
             trustedProxies: trustedProxies,
             sendHsts: sendHsts,
-            utcNow: clock.Now);
+            utcNow: clock.Now,
+            mcpToken: mcpToken);
 
         await app.StartAsync();
         return app.GetTestServer();
@@ -424,6 +425,34 @@ public sealed class DarlingWebSignInHardeningTests
 
         Assert.Equal(StatusCodes.Status302Found, ctx.Response.StatusCode);
         Assert.True(ctx.Response.Headers.SetCookie.Count > 0);
+    }
+
+    /* #6265 round 2: a web token with the MCP token's value signs nobody in (an MCP agent holds that value). The login page is still
+       served, and a different MCP token changes nothing. */
+    [Fact]
+    public async Task AWebTokenEqualToTheMcpToken_IsRefusedForSignIn_WithTheSetADifferentTokenSentence()
+    {
+        using var server = await BuildServer(networkMode: true, mcpToken: Token);
+        var refused = await DarlingWebHostGateLiveTests.PostSignIn(server, ListenIp, InCidrRemote, Token);
+
+        Assert.Equal(StatusCodes.Status403Forbidden, refused.Response.StatusCode);
+        Assert.Equal(0, refused.Response.Headers.SetCookie.Count);
+        
+        var text = await new System.IO.StreamReader(refused.Response.Body).ReadToEndAsync();
+        Assert.Contains("Set a different web token", text, StringComparison.Ordinal);
+
+        var page = await Get(server, "/auth/login", ListenIp, InCidrRemote);
+        Assert.Equal(StatusCodes.Status200OK, page.Response.StatusCode);
+    }
+
+    [Fact]
+    public async Task AWebTokenThatDiffersFromTheMcpToken_StillSignsIn()
+    {
+        using var server = await BuildServer(networkMode: true, mcpToken: "a-different-mcp-token-value");
+        var ok = await DarlingWebHostGateLiveTests.PostSignIn(server, ListenIp, InCidrRemote, Token);
+
+        Assert.Equal(StatusCodes.Status302Found, ok.Response.StatusCode);
+        Assert.True(ok.Response.Headers.SetCookie.Count > 0);
     }
 
     /* ---------------- a proxy that rewrites Host, forwarded hosts, IDN names ---------------- */

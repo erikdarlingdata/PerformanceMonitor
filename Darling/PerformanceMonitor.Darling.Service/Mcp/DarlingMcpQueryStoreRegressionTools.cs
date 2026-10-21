@@ -46,7 +46,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
     /// </summary>
     private const int QueryTextPreviewLength = 240;
 
-    [McpServerTool(Name = "get_query_store_regressions"), Description("Finds queries whose Query Store performance got WORSE: recent window (hours_back, ending at as_of) vs a fixed 7-day baseline before it (see baseline_start/baseline_end). get_query_store_top ranks EXPENSIVE, this ranks CHANGED. Gated: average CPU regressed over 25%. duration_regression_percent, io_regression_percent and severity are null, not 0%, when their baseline is 0. additional_duration_ms is the ranking key. empty: no regression, or nothing yet in the baseline window. unavailable: no baseline exists yet. not_collected: this server's engine cannot run Query Store. <<GUIDE>> Finds queries whose Query Store performance got WORSE, by comparing each (database, query_id) group's averages inside a recent window against its baseline - a FIXED 7-day lookback ending at that window's start (#4195; before this it was every capture EVER collected before the window, so its cost tracked how much history the store still retained rather than the window asked for, and the comparison period silently grew on a server with more retention). baseline_start and baseline_end report exactly which period was compared - a regression against something older than the baseline lookback is not caught; a store retaining less than that is unaffected. Returns baseline vs recent duration, CPU and logical reads with the regression percent for each, the execution-count-weighted extra duration (the ranking key: a 5 ms regression executed a million times outranks a 5-second one executed twice), the plan counts on both sides, and a duration-driven severity band. get_query_store_top answers what is EXPENSIVE; the most expensive query is usually the one that always was. This answers what CHANGED. Rows are kept only where average CPU regressed by more than 25%. A regression percent whose BASELINE side is 0 has no denominator and is returned as null, with the reason under undefined_percents - never as 0, which would read as no change when the truth is the largest possible one; compare the two absolute figures instead. The ranking key is the absolute, execution-weighted duration delta, which exists whether or not a ratio does, so a null percent never sorts as 0. severity is banded from the duration percent and is null when that percent is. Reads the per-interval table when it holds the whole baseline and window, and the raw tier otherwise; history_source says which served.")]
+    [McpServerTool(Name = "get_query_store_regressions"), Description("Finds queries whose Query Store performance got WORSE: recent window (hours_back) vs a fixed 7-day baseline before it. get_query_store_top ranks EXPENSIVE, this ranks CHANGED. Gated: average CPU regressed over 25%. duration_regression_percent, io_regression_percent (Lite only) and severity are null, not 0%, when their baseline is 0. additional_duration_ms is the ranking key. Darling also flags timeouts and errors. empty: no regression, or nothing yet in the baseline window. unavailable: no baseline exists yet. not_collected: this server's engine cannot run Query Store. <<GUIDE>> Finds queries whose Query Store performance got WORSE, by comparing each (database, query_id) group's per-execution cost inside a recent window against its baseline - a FIXED 7-day lookback ending at that window's start (#4195; before this it was every capture EVER collected before the window, so its cost tracked how much history the store still retained rather than the window asked for, and the comparison period silently grew on a server with more retention). baseline_start and baseline_end report exactly which period was compared - a regression against something older than the baseline lookback is not caught; a store retaining less than that is unaffected. Returns baseline vs recent duration and CPU with the regression percent for each (logical reads are not reported, #5506), and beside them the Aborted (timeouts, cancels) and Exception (errors) runs of the same query: for each group the run count, the CPU and duration per execution, and the count per hour, for the baseline and the recent window (the two differ in length, so compare the per-hour figures), the execution-count-weighted extra duration (the ranking key: a 5 ms regression executed a million times outranks a 5-second one executed twice), the plan counts on both sides, and a duration-driven severity band. get_query_store_top answers what is EXPENSIVE; the most expensive query is usually the one that always was. This answers what CHANGED. Rows are kept where Regular average CPU regressed by more than 25% (regression_reason cost), or where the Aborted rate per hour (timeouts) or the Exception rate per hour (errors) in the recent window is at least twice the baseline's, or nonzero where the baseline had none, with at least 3 such runs in the recent window - so a query whose timeouts rose is listed even if its Regular CPU fell, and one 30 s timeout among a thousand fast runs, which barely moves an average, is not hidden. regression_reason is cost, timeouts, errors or a comma-separated combination. Failure-only rows are listed after the cost rows and take at most a third of the limit (more only if cost rows leave room), so a flood of errors cannot push the cost rows out; their severity is HIGH when the rate is at least five times the baseline's (or the baseline had none) and MEDIUM otherwise, never CRITICAL. Cost compares Regular runs only: the daily totals hold no other kind, and blending Aborted runs in would hide them. The Aborted and Exception figures are read live from the per-interval table (or the raw tier), not from the daily totals. A regression percent whose BASELINE side is 0 has no denominator and is returned as null, with the reason under undefined_percents - never as 0, which would read as no change when the truth is the largest possible one; compare the two absolute figures instead. The ranking key is the absolute, execution-weighted duration delta, which exists whether or not a ratio does, so a null percent never sorts as 0. severity is banded from the duration percent and is null when that percent is. Both sides are WEIGHTED per execution (the summed cost divided by the summed executions, so a busy interval counts for what it ran; before #5506 the baseline was an average of the interval averages, which is not the true cost per execution), over Regular executions only, and the baseline's closed days come from the per-day totals the analysis engine keeps (collect.plan_regression_daily), with the days at its edges read live, so a call no longer re-reads a week of Query Store rows. Reads the per-interval table when it holds the whole baseline and window, and the raw tier otherwise; history_source says which served.")]
     public static Task<string> GetQueryStoreRegressions(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -142,45 +142,12 @@ public sealed class DarlingMcpQueryStoreRegressionTools
                 baseline_start = baselineStart.ToString("o"),
                 baseline_end = start.ToString("o"),
                 baseline_is = $"Query Store captures from baseline_start to recent_window_start ({DarlingQueryStoreRegressionReader.BaselineLookbackDays} days)",
-                gate = "average CPU regressed by more than 25%",
+                gate = "Regular average CPU regressed by more than 25% (cost), or the recent Aborted (timeouts) or Exception (errors) rate per hour is at least twice the baseline's (or nonzero where the baseline had none) with at least 3 such runs",
                 /* #6128: every regression that passed the gate, whatever limit asked for; returned_count is this page. */
                 regression_count = Math.Max(rows[0].TotalCount, rows.Count),
                 returned_count = shown.Count(),
                 truncated,
-                regressions = shown.Select(r => new
-                {
-                    database_name = r.DatabaseName,
-                    query_id = r.QueryId,
-                    /* Banded from the duration percent by the TVF's CASE, whose ELSE is 'LOW' — which for a
-                       row with NO duration ratio is a verdict about a number that does not exist. Null there
-                       (#3541 A12); the SQL's band is kept verbatim for the viewer it is shared with. */
-                    severity = r.DurationRegressionPercent is null ? null : r.Severity,
-                    baseline_duration_ms = Round(r.BaselineDurationMs),
-                    recent_duration_ms = Round(r.RecentDurationMs),
-                    duration_regression_percent = Round(r.DurationRegressionPercent),
-                    baseline_cpu_ms = Round(r.BaselineCpuMs),
-                    recent_cpu_ms = Round(r.RecentCpuMs),
-                    cpu_regression_percent = Round(r.CpuRegressionPercent),
-                    baseline_reads = Round(r.BaselineReads),
-                    recent_reads = Round(r.RecentReads),
-                    io_regression_percent = Round(r.IoRegressionPercent),
-                    /* Null percents, and why (#3541 A12): a 0 baseline has no ratio, and the reader used to
-                       publish that as 0 — "no change" — for the row that changed the most. */
-                    undefined_percents = UndefinedPercentNotes(r),
-                    /* The ranking key, and the one number that says whether this regression MATTERS: a
-                       5 ms regression executed a million times outranks a 5-second one executed twice. It is
-                       an absolute delta, so it exists for every row and a null ratio never sorts as 0. */
-                    additional_duration_ms = Round(r.AdditionalDurationMs),
-                    baseline_exec_count = r.BaselineExecCount,
-                    recent_exec_count = r.RecentExecCount,
-                    /* A plan count that moved between the two sides is the first thing to check: a query
-                       that regressed while gaining a plan is usually a plan-choice problem, not a data one. */
-                    baseline_plan_count = r.BaselinePlanCount,
-                    recent_plan_count = r.RecentPlanCount,
-                    last_execution_time = r.LastExecutionTime?.ToString("o"),
-                    query_text = full_text ? r.QueryTextSample : McpHelpers.TruncateStatement(r.QueryTextSample, QueryTextPreviewLength),
-                    query_text_truncated = !full_text && r.QueryTextSample.Length > QueryTextPreviewLength,
-                }),
+                regressions = shown.Select(r => RegressionRowJson(r, full_text)),
             }, McpHelpers.JsonOptions);
 
             /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). */
@@ -204,8 +171,74 @@ public sealed class DarlingMcpQueryStoreRegressionTools
 
     private static double? Round(double? value) => value is null ? null : Math.Round(value.Value, 2);
 
+    /// <summary>One regression row. The Regular figures are always there. Each of the Aborted and Exception groups always carries its
+    /// counts, so a 0 reads as none; its CPU and duration per execution are left out of a side with no runs (there is no figure to
+    /// show), and its runs per hour only on a row whose reason names it, where they are the figure the reason was judged on (#5506).</summary>
+    private static Dictionary<string, object?> RegressionRowJson(DarlingQueryStoreRegressionReader.RegressionRow r, bool full_text)
+    {
+        var row = new Dictionary<string, object?>
+        {
+                ["database_name"] = r.DatabaseName,
+                ["query_id"] = r.QueryId,
+                /* Banded from the duration percent by the TVF's CASE, whose ELSE is 'LOW' — which for a
+                   row with NO duration ratio is a verdict about a number that does not exist. Null there
+                   (#3541 A12); the SQL's band is kept verbatim for the viewer it is shared with. */
+                ["severity"] = r.DurationRegressionPercent is null && r.RegressionReason == "cost" ? null : r.Severity,
+                /* #5506: why the row is listed: cost, timeouts, errors or a comma-separated combination. */
+                ["regression_reason"] = r.RegressionReason,
+                ["baseline_duration_ms"] = Round(r.BaselineDurationMs),
+                ["recent_duration_ms"] = Round(r.RecentDurationMs),
+                ["duration_regression_percent"] = Round(r.DurationRegressionPercent),
+                ["baseline_cpu_ms"] = Round(r.BaselineCpuMs),
+                ["recent_cpu_ms"] = Round(r.RecentCpuMs),
+                ["cpu_regression_percent"] = Round(r.CpuRegressionPercent),
+                /* Null percents, and why (#3541 A12): a 0 baseline has no ratio, and the reader used to
+                   publish that as 0 — "no change" — for the row that changed the most. */
+                ["undefined_percents"] = UndefinedPercentNotes(r),
+                /* The ranking key, and the one number that says whether this regression MATTERS: a
+                   5 ms regression executed a million times outranks a 5-second one executed twice. It is
+                   an absolute delta, so it exists for every row and a null ratio never sorts as 0. */
+                ["additional_duration_ms"] = Round(r.AdditionalDurationMs),
+                ["baseline_exec_count"] = r.BaselineExecCount,
+                ["recent_exec_count"] = r.RecentExecCount,
+                /* A plan count that moved between the two sides is the first thing to check: a query
+                   that regressed while gaining a plan is usually a plan-choice problem, not a data one. */
+                ["baseline_plan_count"] = r.BaselinePlanCount,
+                ["recent_plan_count"] = r.RecentPlanCount,
+            ["baseline_regular_per_hour"] = Round(r.BaselineRegularPerHour),
+            ["recent_regular_per_hour"] = Round(r.RecentRegularPerHour),
+        };
+        AddGroup(row, "aborted", r.Aborted, r.RegressionReason.Contains("timeouts", StringComparison.Ordinal));
+        AddGroup(row, "exception", r.Exception, r.RegressionReason.Contains("errors", StringComparison.Ordinal));
+        row["last_execution_time"] = r.LastExecutionTime?.ToString("o");
+        row["query_text"] = full_text ? r.QueryTextSample : McpHelpers.TruncateStatement(r.QueryTextSample, QueryTextPreviewLength);
+        row["query_text_truncated"] = !full_text && r.QueryTextSample.Length > QueryTextPreviewLength;
+        return row;
+    }
+
+    private static void AddGroup(Dictionary<string, object?> row, string name, DarlingQueryStoreRegressionReader.RunGroup? g, bool reasonNamesIt)
+    {
+        row["baseline_" + name + "_count"] = g?.BaselineCount ?? 0;
+        row["recent_" + name + "_count"] = g?.RecentCount ?? 0;
+        if ((g?.BaselineCount ?? 0) > 0)
+        {
+            row["baseline_" + name + "_cpu_ms"] = Round(g!.BaselineCpuMs);
+            row["baseline_" + name + "_duration_ms"] = Round(g.BaselineDurationMs);
+        }
+        if ((g?.RecentCount ?? 0) > 0)
+        {
+            row["recent_" + name + "_cpu_ms"] = Round(g!.RecentCpuMs);
+            row["recent_" + name + "_duration_ms"] = Round(g.RecentDurationMs);
+        }
+        if (reasonNamesIt)
+        {
+            row["baseline_" + name + "_per_hour"] = Round(g?.BaselinePerHour);
+            row["recent_" + name + "_per_hour"] = Round(g?.RecentPerHour);
+        }
+    }
+
     /// <summary>
-    /// Which of a row's three regression percents are undefined, and why (#3541 A12, contract rule 5). Each
+    /// Which of a row's two regression percents are undefined, and why (#3541 A12, contract rule 5). Each
     /// percent divides through <c>NULLIF(baseline, 0)</c>, so a NULL means the baseline side was 0 — there is
     /// no denominator, not no change — and the caller is pointed at the absolute pair it can still compare.
     /// Null when every percent is defined, so the common row carries no noise. Lite's twin builds the same
@@ -214,13 +247,21 @@ public sealed class DarlingMcpQueryStoreRegressionTools
     private static List<string>? UndefinedPercentNotes(DarlingQueryStoreRegressionReader.RegressionRow r)
     {
         List<string>? notes = null;
+        /* #5506: a row listed only for timeouts or errors can have no Regular runs on one side, so there is no cost comparison:
+           say so once instead of calling a missing side a zero baseline. */
+        if (r.BaselineExecCount == 0 || r.RecentExecCount == 0)
+        {
+            return r.DurationRegressionPercent is null || r.CpuRegressionPercent is null
+                ? new List<string> { "duration_regression_percent and cpu_regression_percent are null: there are no Regular runs in the " + (r.BaselineExecCount == 0 ? "baseline" : "recent") + " window, so this row has no cost comparison; it is listed for regression_reason." }
+                : null;
+        }
+
         void Note(string field, string baseline, string recent)
             => (notes ??= new List<string>()).Add(
                 $"{field} is null: no_baseline — {baseline} is 0, so the ratio has no denominator; this is NOT 0% change. Compare {baseline} to {recent} directly.");
 
         if (r.DurationRegressionPercent is null) Note("duration_regression_percent", "baseline_duration_ms", "recent_duration_ms");
         if (r.CpuRegressionPercent is null) Note("cpu_regression_percent", "baseline_cpu_ms", "recent_cpu_ms");
-        if (r.IoRegressionPercent is null) Note("io_regression_percent", "baseline_reads", "recent_reads");
         return notes;
     }
 

@@ -36,22 +36,19 @@ namespace PerformanceMonitor.Darling.Viewer;
 public sealed partial class ViewerDataService
 {
     /// <summary>The longest note a person may write; the V184 CHECK's bound.</summary>
-    public const int InvestigationNoteMaxLength = 2000;
+    public const int InvestigationNoteMaxLength = InvestigationPersonWrites.NoteMaxLength;
 
     /// <summary>The longest environment profile; the V184 CHECK's bound.</summary>
     public const int InvestigationProfileMaxLength = 4000;
 
     /// <summary>The longest close reason the viewer accepts.</summary>
-    public const int InvestigationCloseReasonMaxLength = 500;
+    public const int InvestigationCloseReasonMaxLength = InvestigationPersonWrites.CloseReasonMaxLength;
 
     /// <summary>A written note's default lifetime in days (decision h).</summary>
-    public const int InvestigationNoteDefaultDays = 90;
+    public const int InvestigationNoteDefaultDays = InvestigationPersonWrites.NoteDefaultDays;
 
     /// <summary>A written note's longest lifetime in days (decision h).</summary>
-    public const int InvestigationNoteMaxDays = 365;
-
-    /// <summary>The states a person may close: a request still in play, or reported and reviewed.</summary>
-    private const string ClosableStates = "('open', 'claimed', 'reported')";
+    public const int InvestigationNoteMaxDays = InvestigationPersonWrites.NoteMaxDays;
 
     /// <summary>The first store version whose requests table has <c>practice_of</c> (V191, #5918).</summary>
     public const int PracticeStoreSchemaVersion = 191;
@@ -131,26 +128,10 @@ SELECT profile_id, scope_server_id, scope_tag_id, profile_text, modified_at, mod
 FROM config.agent_environment_profiles
 ORDER BY (scope_server_id IS NULL AND scope_tag_id IS NULL) DESC, scope_server_id NULLS LAST, scope_tag_id NULLS LAST";
 
-    /// <summary>Closes a request still in play or reported. $1 request, $2 actor, $3 reason. RETURNING the server for the
-    /// journal row; no row when the request is gone, already closed or expired.</summary>
-    public const string InvestigationCloseSql = @"
-UPDATE config.investigation_requests
-SET state = 'closed', closed_at = now(), closed_by = $2, closed_reason = $3
-WHERE request_id = $1 AND state IN " + ClosableStates + @"
-RETURNING server_id";
-
     /// <summary>The journal row a person's action writes. $1 request (or NULL), $2 server, $3 event, $4 actor, $5 reason.</summary>
     public const string InvestigationJournalInsertSql = @"
 INSERT INTO config.investigation_journal (request_id, server_id, event, actor, reason)
 VALUES ($1, $2, $3, $4, $5)";
-
-    /// <summary>A note a person writes: approved as written, by its author. $1 server (or NULL for the fleet), $2 metric
-    /// (or NULL), $3 text, $4 author, $5 lifetime in days.</summary>
-    public const string InvestigationNoteInsertSql = @"
-INSERT INTO config.investigation_notes
-    (server_id, metric_name, note_text, author, state, expires_at, decided_at, decided_by)
-VALUES ($1, $2, $3, $4, 'approved', now() + make_interval(days => $5), now(), $4)
-RETURNING note_id";
 
     /// <summary>Writes the one profile of a scope. $1 server, $2 tag (both NULL = fleet), $3 text, $4 actor.</summary>
     public const string InvestigationProfileUpsertSql = @"
@@ -165,7 +146,7 @@ DELETE FROM config.agent_environment_profiles
 WHERE coalesce(scope_server_id, 0) = coalesce($1::integer, 0) AND coalesce(scope_tag_id, 0) = coalesce($2::integer, 0)";
 
     /// <summary>The journal actor for a person: <c>person:&lt;login&gt;</c>, as the V184 journal records people.</summary>
-    public static string InvestigationPersonActor(string login) => "person:" + login.Trim();
+    public static string InvestigationPersonActor(string login) => InvestigationPersonWrites.PersonActor(login);
 
     /// <summary>The requests, newest first. <paramref name="state"/> is one of the five states, or null for all.</summary>
     public async Task<IReadOnlyList<InvestigationRequestViewRow>> GetInvestigationRequestsAsync(
@@ -359,24 +340,20 @@ WHERE coalesce(scope_server_id, 0) = coalesce($1::integer, 0) AND coalesce(scope
             throw new ArgumentException(reasonError, nameof(reason));
         }
 
-        var actor = InvestigationPersonActor(login);
-        return await InTransactionAsync(async (connection, transaction) =>
+        /* #6265: the close statement, its journal row and the clock are the storage store's, the one the web route shares. */
+        try
         {
-            await using var close = new NpgsqlCommand(InvestigationCloseSql, connection, transaction);
-            close.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-            close.Parameters.Add(new NpgsqlParameter<Guid> { TypedValue = requestId });
-            close.Parameters.Add(new NpgsqlParameter<string> { TypedValue = actor });
-            close.Parameters.Add(new NpgsqlParameter<string> { TypedValue = reason.Trim() });
-            var serverId = await close.ExecuteScalarAsync(cancellationToken);
-            if (serverId is null or DBNull)
-            {
-                return false;
-            }
-
-            await JournalAsync(connection, transaction, requestId, Convert.ToInt32(serverId, CultureInfo.InvariantCulture),
-                "closed", actor, reason.Trim(), cancellationToken);
-            return true;
-        }, cancellationToken);
+            return await new InvestigationRequestStore(_dataSource, ViewerCommandDeadlines.CurrentInteractiveReadSeconds)
+                .CloseRequestAsync(requestId, InvestigationPersonActor(login), reason, cancellationToken);
+        }
+        catch (PostgresException ex) when (ex.SqlState == InsufficientPrivilegeSqlState)
+        {
+            throw new ViewerReadOnlyException(ex);
+        }
+        catch (PostgresException ex) when (ex.SqlState is UndefinedColumnSqlState or UndefinedTableSqlState)
+        {
+            throw new ViewerSchemaSkewException(ex);
+        }
     }
 
     /// <summary>
@@ -392,7 +369,7 @@ WHERE coalesce(scope_server_id, 0) = coalesce($1::integer, 0) AND coalesce(scope
             throw new ArgumentException(error, nameof(login));
         }
 
-        /* #5903: the decide statement, its journal row, the clock and the decided_by rule (1 to 128 characters) are the storage
+        /* #5903: the decide statement, its journal row, the clock and the person guard are the storage
            store's, the one the web routes and Lite's twin share; the Viewer only adds its two translations. */
         var actor = InvestigationPersonActor(login);
         try
@@ -418,28 +395,25 @@ WHERE coalesce(scope_server_id, 0) = coalesce($1::integer, 0) AND coalesce(scope
         int? serverId, string? metricName, string noteText, string login, int days = InvestigationNoteDefaultDays,
         CancellationToken cancellationToken = default)
     {
-        var error = ValidateInvestigationLogin(login) ?? ValidateInvestigationNote(noteText, days);
+        var error = ValidateInvestigationLogin(login) ?? ValidateInvestigationNote(noteText, days, metricName);
         if (error is not null)
         {
             throw new ArgumentException(error, nameof(noteText));
         }
 
-        var actor = InvestigationPersonActor(login);
-        var metric = string.IsNullOrWhiteSpace(metricName) ? null : metricName.Trim();
-        return await InTransactionAsync(async (connection, transaction) =>
+        try
         {
-            await using var insert = new NpgsqlCommand(InvestigationNoteInsertSql, connection, transaction);
-            insert.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-            AddNullableInt(insert, serverId);
-            AddNullableText(insert, metric);
-            insert.Parameters.Add(new NpgsqlParameter<string> { TypedValue = noteText.Trim() });
-            insert.Parameters.Add(new NpgsqlParameter<string> { TypedValue = actor });
-            insert.Parameters.Add(new NpgsqlParameter<int> { TypedValue = days });
-            var noteId = Convert.ToInt64(await insert.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
-            await JournalAsync(connection, transaction, null, serverId, "note_written", actor,
-                "note " + noteId.ToString(CultureInfo.InvariantCulture), cancellationToken);
-            return noteId;
-        }, cancellationToken);
+            return await new InvestigationRequestStore(_dataSource, ViewerCommandDeadlines.CurrentInteractiveReadSeconds)
+                .WriteNoteAsync(serverId, metricName, noteText, InvestigationPersonActor(login), days, cancellationToken);
+        }
+        catch (PostgresException ex) when (ex.SqlState == InsufficientPrivilegeSqlState)
+        {
+            throw new ViewerReadOnlyException(ex);
+        }
+        catch (PostgresException ex) when (ex.SqlState is UndefinedColumnSqlState or UndefinedTableSqlState)
+        {
+            throw new ViewerSchemaSkewException(ex);
+        }
     }
 
     /// <summary>
@@ -582,27 +556,14 @@ WHERE coalesce(scope_server_id, 0) = coalesce($1::integer, 0) AND coalesce(scope
         }
     }
 
-    /// <summary>The login the actor names: not blank, at most 128 characters.</summary>
-    public static string? ValidateInvestigationLogin(string? login) =>
-        string.IsNullOrWhiteSpace(login) ? "The viewer could not tell who you are, so it cannot record the change."
-        : login.Trim().Length > 128 ? "The login is longer than 128 characters."
-        : null;
+    /// <summary>The login the actor names: not blank, and the undo path's person shape (1 to 256 characters: letters, digits, single spaces, a few punctuation marks).</summary>
+    public static string? ValidateInvestigationLogin(string? login) => InvestigationPersonWrites.ValidateLogin(login);
 
     /// <summary>A close reason: not blank, at most 500 characters.</summary>
-    public static string? ValidateInvestigationCloseReason(string? reason) =>
-        string.IsNullOrWhiteSpace(reason) ? "Enter a reason for closing the request."
-        : reason.Trim().Length > InvestigationCloseReasonMaxLength
-            ? string.Create(CultureInfo.InvariantCulture, $"The reason must be {InvestigationCloseReasonMaxLength} characters or fewer.")
-        : null;
+    public static string? ValidateInvestigationCloseReason(string? reason) => InvestigationPersonWrites.ValidateCloseReason(reason);
 
     /// <summary>A note: not blank, at most 2,000 characters, kept 1 to 365 days (the V184 CHECK's twin, said in words).</summary>
-    public static string? ValidateInvestigationNote(string? noteText, int days) =>
-        string.IsNullOrWhiteSpace(noteText) ? "Enter the note's text."
-        : noteText.Trim().Length > InvestigationNoteMaxLength
-            ? string.Create(CultureInfo.InvariantCulture, $"A note must be {InvestigationNoteMaxLength:N0} characters or fewer.")
-        : days < 1 || days > InvestigationNoteMaxDays
-            ? string.Create(CultureInfo.InvariantCulture, $"A note is kept from 1 to {InvestigationNoteMaxDays} days.")
-        : null;
+    public static string? ValidateInvestigationNote(string? noteText, int days, string? metricName = null) => InvestigationPersonWrites.ValidateNote(noteText, days, metricName);
 
     /// <summary>A profile: one scope at most (fleet, a server or a tag), at most 4,000 characters.</summary>
     public static string? ValidateInvestigationProfile(int? scopeServerId, int? scopeTagId, string? profileText) =>

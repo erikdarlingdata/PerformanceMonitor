@@ -212,6 +212,7 @@ public sealed class QueryStoreBackgroundIndexesTests
                 QueryStoreIntervalWideBrinIndex.IndexName,
                 QueryStoreBackgroundIndexes.WideServerFirstExecIndexName,
                 QueryStoreBackgroundIndexes.LatestServerFirstExecIndexName,
+                QueryStoreBackgroundIndexes.WideNonRegularFirstExecIndexName,
                 QueryStoreBackgroundIndexes.WideDatabaseQueryFirstExecIndexName,
                 QueryStoreBackgroundIndexes.LatestDatabaseQueryFirstExecIndexName,
                 QueryStoreBackgroundIndexes.StatementTextServerLastSeenIndexName,

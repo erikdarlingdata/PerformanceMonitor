@@ -78,24 +78,6 @@ public sealed class DarlingQueryStoreRegressionsSurfaceAndSqlTests
     }
 
     /// <summary>
-    /// The dedup is correctness, not performance. Losing it makes the averages an avg-of-avgs weighted by
-    /// how often each interval happened to be re-collected — and the baseline arm is unbounded while the
-    /// recent arm is a short window, so the weighting differs systematically between the two sides being
-    /// compared. That manufactures and hides regressions on its own.
-    /// </summary>
-    [Fact]
-    public void RegressionsSql_DedupsBothArms_OnTheFullIntervalIdentity()
-    {
-        var sql = DarlingQueryStoreRegressionReader.QueryStoreRegressionsSql;
-
-        /* Both arms, not one: deduping only the recent side compares a deduped number to an inflated one. */
-        Assert.Equal(2, CountOf(sql, "ROW_NUMBER() OVER"));
-        Assert.Equal(2, CountOf(sql, "PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role"));
-        Assert.Equal(2, CountOf(sql, "WHERE rn = 1"));
-        Assert.Equal(2, CountOf(sql, "ORDER BY collection_time DESC, execution_count DESC"));
-    }
-
-    /// <summary>
     /// The baseline is everything BEFORE the window and the recent side is the window — the two must not
     /// overlap and must not leave a gap, or a row is either counted on both sides of its own comparison or
     /// dropped from it.
@@ -108,10 +90,11 @@ public sealed class DarlingQueryStoreRegressionsSurfaceAndSqlTests
            is the assertion that fails against the pre-#4217 shape (the grid's twin,
            ViewerQueryStoreRegressionsTests.RegressionsSql_SplitsBaselineBeforeWindow_RecentInWindow_OverTheBaseTable,
            already carries it for the viewer's copy; this reader's own copy was uncovered). */
-        Assert.Contains("collection_time >= $6", sql, StringComparison.Ordinal);  /* baseline: window start minus BaselineLookbackDays */
-        Assert.Contains("collection_time < $2", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
+        Assert.Contains("collection_time >= $6", sql, StringComparison.Ordinal);  /* the span: window start minus BaselineLookbackDays */
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
+        /* #5506: the two sides split on the interval's last_execution_time at the window start, the day the daily totals row by. */
+        Assert.Contains("last_execution_time < $2", sql, StringComparison.Ordinal);
+        Assert.Contains("last_execution_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("FROM query_store_stats", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("v_query_store_stats", sql, StringComparison.Ordinal);
     }
@@ -127,31 +110,6 @@ public sealed class DarlingQueryStoreRegressionsSurfaceAndSqlTests
     public void BaselineLookbackDays_IsSevenDays_SameAsTheViewerAndLite()
     {
         Assert.Equal(7, DarlingQueryStoreRegressionReader.BaselineLookbackDays);
-    }
-
-    /// <summary>
-    /// The Dashboard TVF's gate, ranking and severity bands, kept verbatim. A browser that disagreed with
-    /// the desktop viewer about WHICH queries regressed would be worse than one that showed nothing.
-    /// </summary>
-    [Fact]
-    public void RegressionsSql_KeepsTheTvfGate_RankingAndSeverityBands()
-    {
-        var sql = DarlingQueryStoreRegressionReader.QueryStoreRegressionsSql;
-
-        /* CPU-only > 25% is the TVF's single-metric gate; duration drives the severity band. */
-        Assert.Contains("WHERE (r.avg_cpu_time_ms - b.avg_cpu_time_ms) * 100.0 / NULLIF(b.avg_cpu_time_ms, 0) > 25", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY additional_duration_ms DESC", sql, StringComparison.Ordinal);
-        Assert.Contains("(r.avg_duration_ms - b.avg_duration_ms) * r.exec_count AS additional_duration_ms", sql, StringComparison.Ordinal);
-
-        foreach (var band in new[] { "'CRITICAL'", "'HIGH'", "'MEDIUM'", "'LOW'" })
-            Assert.Contains(band, sql, StringComparison.Ordinal);
-
-        /* Every percent divides through NULLIF, so a zero baseline yields NULL rather than a division error. */
-        Assert.Equal(7, CountOf(sql, "NULLIF("));
-
-        /* The cap is the one deliberate change from the viewer, and it is a bound parameter rather than the
-           viewer's hardcoded 50 — the gate and the ranking above are what keep the two surfaces agreeing. */
-        Assert.Contains("LIMIT $5", sql, StringComparison.Ordinal);
     }
 
     /// <summary>

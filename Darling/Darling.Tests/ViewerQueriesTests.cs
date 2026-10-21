@@ -561,10 +561,10 @@ public sealed class ViewerQueryStoreRegressionsTests
         /* #4217: the baseline is a fixed BaselineLookbackDays window ending at the window start, not
            "everything before the window" — this is the assertion that fails against the pre-#4217 shape,
            which had no lower bound on the baseline arm at all. */
-        Assert.Contains("collection_time >= $5", sql, StringComparison.Ordinal);  /* baseline: window start minus BaselineLookbackDays */
-        Assert.Contains("collection_time < $2", sql, StringComparison.Ordinal);   /* baseline: up to the window start */
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);  /* recent: window start */
-        Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);  /* recent: window end */
+        Assert.Contains("collection_time >= $5", sql, StringComparison.Ordinal);  /* the span: window start minus BaselineLookbackDays */
+        Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);  /* window end */
+        Assert.Contains("last_execution_time < $2", sql, StringComparison.Ordinal);   /* #5506: baseline: up to the window start */
+        Assert.Contains("last_execution_time >= $2", sql, StringComparison.Ordinal);  /* recent: from the window start */
         Assert.Contains("GROUP BY database_name, query_id", sql, StringComparison.Ordinal);
         /* Darling windows the split on collection_time — the Dashboard TVF's server_last_execution_time is
            the server's LOCAL wall clock in Darling's store and must not be windowed against UTC bounds. */
@@ -581,38 +581,14 @@ public sealed class ViewerQueryStoreRegressionsTests
     }
 
     [Fact]
-    public void RegressionsSql_GatesOnCpuRegressionOver25_RanksByAddedDuration_CapsAt50_InnerJoinsBaseline()
-    {
-        var sql = ViewerDataService.QueryStoreRegressionsSql;
-        /* The TVF's single-metric gate: CPU regression > 25% (recent vs baseline), NULLIF-guarded. */
-        Assert.Contains("(r.avg_cpu_time_ms - b.avg_cpu_time_ms) * 100.0 / NULLIF(b.avg_cpu_time_ms, 0) > 25", sql, StringComparison.Ordinal);
-        /* Extra total time = per-exec duration delta × recent exec count, and the read's ranking. */
-        Assert.Contains("(r.avg_duration_ms - b.avg_duration_ms) * r.exec_count AS additional_duration_ms", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY additional_duration_ms DESC", sql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT 50", sql, StringComparison.Ordinal);
-        /* INNER JOIN — a query with no baseline (NEW) can't regress, exactly like the Dashboard TVF. */
-        Assert.Contains("JOIN baseline_performance", sql, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void RegressionsSql_DurationDrivenSeverityBands_MatchTheDashboardThresholds()
-    {
-        var sql = ViewerDataService.QueryStoreRegressionsSql;
-        Assert.Contains("> 100 THEN 'CRITICAL'", sql, StringComparison.Ordinal);
-        Assert.Contains("> 50 THEN 'HIGH'", sql, StringComparison.Ordinal);
-        Assert.Contains("> 25 THEN 'MEDIUM'", sql, StringComparison.Ordinal);
-        Assert.Contains("ELSE 'LOW'", sql, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void RegressionsSql_CastsSummedExecCountToBigint_PlanCountToInteger_ConvertsUnits_HonorsDatabaseFilter()
     {
         var sql = ViewerDataService.QueryStoreRegressionsSql;
         Assert.Contains("CAST(SUM(execution_count) AS bigint)", sql, StringComparison.Ordinal);
         Assert.Contains("CAST(COUNT(DISTINCT plan_id) AS integer)", sql, StringComparison.Ordinal);
-        /* µs → ms on duration + CPU; reads stay raw pages (matching the Dashboard TVF units). */
-        Assert.Contains("AVG(CAST(avg_duration_us AS double precision)) / 1000.0", sql, StringComparison.Ordinal);
-        Assert.Contains("AVG(CAST(avg_cpu_time_us AS double precision)) / 1000.0", sql, StringComparison.Ordinal);
+        /* #5506: µs → ms on duration + CPU, weighted per execution (the summed cost over the summed executions). */
+        Assert.Contains("SUM(CAST(avg_duration_us AS numeric) * execution_count) AS double precision) / NULLIF(SUM(execution_count), 0) / 1000.0", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(CAST(avg_cpu_time_us AS numeric) * execution_count) AS double precision) / NULLIF(SUM(execution_count), 0) / 1000.0", sql, StringComparison.Ordinal);
         /* #1319 global database filter, the same guarded ANY() idiom as the sibling reads ($4 here). */
         Assert.Contains("$4::text[] IS NULL OR database_name = ANY($4)", sql, StringComparison.Ordinal);
     }

@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Text;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
@@ -777,13 +778,89 @@ ORDER BY journal_id DESC LIMIT 1",
         await command.ExecuteScalarAsync(cancellationToken);
     }
 
-    /// <summary>The journal actor for a person's undo or switch: <c>person:&lt;login&gt;</c>, the login trimmed and held to the identity shape.</summary>
-    public static string PersonActor(string login)
+    /// <summary>The longest person name, in UTF-16 units, once trimmed and normalised. The journal's <c>actor</c> and every other column a
+    /// <c>person:</c> actor is written to are unbounded <c>text</c> with no length CHECK, so this is the only bound; a web sign-in name
+    /// (an email or an Auth0 subject) can run past 200 characters.</summary>
+    public const int LoginMaxLength = 256;
+
+    /// <summary>The punctuation a person's name may hold besides letters and digits: an email's local part, a Windows
+    /// <c>DOMAIN\user</c>, an Auth0 <c>provider|id</c>. Quotes, brackets, angle brackets, commas and semicolons stay out.</summary>
+    private const string LoginPunctuation = ".:_-@\\!#$%&'*+/=?^`{|}~";
+
+    /// <summary>The sentence that says what a person's name may hold. Never carries the name itself.</summary>
+    public const string LoginRefusal =
+        "The name must be 1 to 256 characters: letters (accents allowed), digits, single spaces between other characters, and . _ : - @ \\ ! # $ % & ' * + / = ? ^ ` { | } ~. Quotes, brackets, commas, semicolons, control and invisible characters are not allowed.";
+
+    /// <summary>A name trimmed and put in Unicode normal form C, so one name has one spelling in the journal. Null reads as empty.</summary>
+    public static string NormalizeLogin(string? login)
     {
         var trimmed = (login ?? "").Trim();
-        if (trimmed.Length is 0 or > 64 || trimmed.Any(c => !(char.IsAsciiLetterOrDigit(c) || c is '.' or '_' or ':' or '-' or '@' or '\\')))
-            throw new ArgumentException("The login must be 1 to 64 letters, digits or . _ : - @ \\.", nameof(login));
-        return "person:" + trimmed;
+        try
+        {
+            return trimmed.Normalize(NormalizationForm.FormC);
+        }
+        catch (ArgumentException)
+        {
+            return trimmed;
+        }
+    }
+
+    /// <summary>True when <paramref name="normalized"/> (already trimmed and in form C) is 1 to <see cref="LoginMaxLength"/> UTF-16 units, each
+    /// an ASCII letter or digit, one of the punctuation marks above, a single space between two other characters, a non-ASCII letter in the
+    /// Basic Multilingual Plane (not one of the four that draw nothing), or one of at most two combining marks right after a letter.
+    /// Control and format characters (bidi, zero-width), other space characters and surrogates are refused.</summary>
+    public static bool IsValidLogin(string normalized)
+    {
+        if (normalized.Length is 0 or > LoginMaxLength)
+            return false;
+
+        var marks = 0;
+        for (var i = 0; i < normalized.Length; i++)
+        {
+            var c = normalized[i];
+            if (c == ' ')
+            {
+                if (i == 0 || i == normalized.Length - 1 || normalized[i - 1] == ' ' || normalized[i + 1] == ' ')
+                    return false;
+                marks = 0;
+                continue;
+            }
+
+            if (char.IsAsciiLetterOrDigit(c) || LoginPunctuation.Contains(c))
+            {
+                marks = 0;
+                continue;
+            }
+
+            if (c < 0x80)
+                return false;
+
+            var category = char.GetUnicodeCategory(c);
+            if (category is UnicodeCategory.NonSpacingMark or UnicodeCategory.SpacingCombiningMark)
+            {
+                var invisible = c is '\u034F' or '\u17B4' or '\u17B5' || c is >= '\u180B' and <= '\u180D' || c is >= '\uFE00' and <= '\uFE0F';
+                /* The letter this run of marks hangs on sits `marks` units back (marks counts this one). */
+                if (invisible || ++marks > 2 || i - marks < 0 || !char.IsLetter(normalized[i - marks]))
+                    return false;
+                continue;
+            }
+
+            marks = 0;
+            if (!char.IsLetter(c) || c is '\u115F' or '\u1160' or '\u3164' or '\uFFA0')
+                return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>The journal actor for a person's undo or switch: <c>person:&lt;login&gt;</c>, the login trimmed, normalised and held to the
+    /// identity shape of <see cref="IsValidLogin"/>.</summary>
+    public static string PersonActor(string login)
+    {
+        var normalized = NormalizeLogin(login);
+        if (!IsValidLogin(normalized))
+            throw new ArgumentException(LoginRefusal, nameof(login));
+        return "person:" + normalized;
     }
 
     private NpgsqlCommand Command(NpgsqlConnection connection, NpgsqlTransaction? transaction, string sql, params NpgsqlParameter[] parameters)

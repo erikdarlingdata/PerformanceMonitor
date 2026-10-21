@@ -57,8 +57,25 @@ public sealed class ViewerInvestigationsValidationTests
     {
         Assert.Equal("person:erik", ViewerDataService.InvestigationPersonActor(" erik "));
         Assert.NotNull(ViewerDataService.ValidateInvestigationLogin(" "));
-        Assert.NotNull(ViewerDataService.ValidateInvestigationLogin(new string('l', 129)));
+        Assert.NotNull(ViewerDataService.ValidateInvestigationLogin(new string('l', 257)));
+        Assert.Null(ViewerDataService.ValidateInvestigationLogin(new string('l', 256)));
         Assert.Null(ViewerDataService.ValidateInvestigationLogin("erik"));
+    }
+
+    /// <summary>The Viewer's login is the Windows user name (<c>Environment.UserName</c>, no domain), which can hold a space or an accented
+    /// letter. The Viewer's write accepts it, in normal form C, and refuses the characters that would pass for another person's name.</summary>
+    [Fact]
+    public void TheViewersLogin_MayHoldASpaceOrAnAccent_ButNotAnInvisibleOrBidiCharacter()
+    {
+        Assert.Equal("person:John Smith", ViewerDataService.InvestigationPersonActor(" John Smith "));
+        Assert.Equal("person:Jos\u00E9", ViewerDataService.InvestigationPersonActor("Jose\u0301"));
+        Assert.Null(ViewerDataService.ValidateInvestigationLogin("John Smith"));
+        Assert.Null(ViewerDataService.ValidateInvestigationLogin("Jose\u0301"));
+        Assert.Null(ViewerDataService.ValidateInvestigationLogin("CORP\\jsmith"));
+        foreach (var refused in new[] { "John  Smith", "erik\u200B", "erik\u202E", "erik\uFEFF", "erik\u3164", "erik<x>", "erik;x", "erik\tsmith" })
+        {
+            Assert.NotNull(ViewerDataService.ValidateInvestigationLogin(refused));
+        }
     }
 
     /// <summary>Each write refuses bad input with the same words before it opens a connection: the store here listens on
