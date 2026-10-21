@@ -197,7 +197,94 @@ public sealed class DiagnosticsBundleAliasHardeningTests
     [InlineData("sales", "open SalesReport now")]
     [InlineData("sales", "open the sales_report.csv")]
     [InlineData("prod", "path C:\\backups\\prod\\full.bak")]
+    [InlineData("sales", "see oldSalesReport now")]
+    [InlineData("prod", "job SQLProd ran")]
+    [InlineData("sqlprod", "file SQLPRODbackup.bak")]
+    [InlineData("sqlprod", "tables SQLPRODdb")]
+    [InlineData("sqlprod", "job DBAsqlprod done")]
     public void AnIdentifierShapedLeftover_IsStillReplaced(string name, string input)
+    {
+        var a = new BundleAliaser();
+        a.AddName(AliasKind.Server, name);
+
+        var (leaks, text) = a.Finish(OneValue(input), DiagnosticsBundle.WriteOptions);
+        Assert.Empty(leaks);
+        Assert.DoesNotContain(name, Message(text!), StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("server-", Message(text!), StringComparison.Ordinal);
+    }
+
+    /* A name that holds a digit or punctuation is never an ordinary word, so a letter beside it does not protect it. */
+    [Theory]
+    [InlineData("alpha-sql-01", "mainalpha-sql-01")]
+    [InlineData("alpha-sql-01", "job Xalpha-sql-01 failed")]
+    [InlineData("alpha-sql-01", "job alpha-sql-01x failed")]
+    [InlineData("svc_sql", "run as svc_sqlx now")]
+    [InlineData("sqlprod01", "see mysqlprod01 and BKPsqlprod01")]
+    [InlineData("alpha-sql-01", "host%3Dalpha-sql-01")]
+    [InlineData("example.internal", "to wwwexample.internal failed")]
+    public void ANameWithADigitOrPunctuation_IsReplaced_WhateverLetterTouchesIt(string name, string input)
+    {
+        var a = new BundleAliaser();
+        a.AddName(AliasKind.Server, name);
+
+        var (leaks, text) = a.Finish(OneValue(input), DiagnosticsBundle.WriteOptions);
+        Assert.Empty(leaks);
+        Assert.DoesNotContain(name, Message(text!), StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("server-", Message(text!), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ADomainLogin_WithALetterGluedToItsAccountPart_IsReplacedInBothHalves()
+    {
+        var a = new BundleAliaser();
+        a.AddName(AliasKind.Login, "CORP\\svc_sql");
+
+        var (leaks, text) = a.Finish(OneValue("user CORP\\svc_sqlx"), DiagnosticsBundle.WriteOptions);
+        Assert.Empty(leaks);
+        Assert.DoesNotContain("svc_sql", Message(text!), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("CORP", Message(text!), StringComparison.OrdinalIgnoreCase);
+    }
+
+    /* The last character of an escape sequence is a letter, but it belongs to the escape, not to a word before the name. */
+    [Theory]
+    [InlineData("sqlprod01", "{\"m\":\"line one\\nsqlprod01 is down\"}")]
+    [InlineData("salesdw", "{\"m\":\"x\\nsalesdw\\nbackup\"}")]
+    [InlineData("sqlprod", "body: \"a\\tsqlprod\"")]
+    [InlineData("sqlprod", "{\"m\":\"err\\r\\nsqlprod down\"}")]
+    [InlineData("sqlprod", "{\"m\":\"to \\u003Csqlprod\\u003E\"}")]
+    [InlineData("sqlprod", "{\"m\":\"a\\u002Bsqlprod\"}")]
+    [InlineData("sqlprod", "GET /cb?cs=Server%3Dsqlprod%3BX")]
+    [InlineData("sales", "GET /cb?cs=Database%3Dsales%3B")]
+    public void ANameRightAfterAnEscapeSequence_IsReplaced(string name, string input)
+    {
+        var a = new BundleAliaser();
+        a.AddName(AliasKind.Server, name);
+
+        var (leaks, text) = a.Finish(OneValue(input), DiagnosticsBundle.WriteOptions);
+        Assert.Empty(leaks);
+        Assert.DoesNotContain(name, Message(text!), StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("server-", Message(text!), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AnEscapedAccountSeparator_InAUrl_ReplacesBothHalvesOfTheLogin()
+    {
+        var a = new BundleAliaser();
+        a.AddName(AliasKind.Login, "CORP\\jsmith");
+
+        var (leaks, text) = a.Finish(OneValue("user=CORP%5Cjsmith&x=1"), DiagnosticsBundle.WriteOptions);
+        Assert.Empty(leaks);
+        Assert.DoesNotContain("jsmith", Message(text!), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("CORP", Message(text!), StringComparison.OrdinalIgnoreCase);
+    }
+
+    /* The main pass counts only ASCII letters, digits and _ as word characters; a letter of another script is a boundary. */
+    [Theory]
+    [InlineData("sqlprod", "数据库sqlprod_01数据")]
+    [InlineData("sales", "库Sales2024")]
+    [InlineData("sqlprod", "אבגsqlprod_01")]
+    [InlineData("sqlprod", "ésqlprod_full.bak")]
+    public void ANameBesideANonAsciiLetter_IsReplaced(string name, string input)
     {
         var a = new BundleAliaser();
         a.AddName(AliasKind.Server, name);
@@ -255,8 +342,9 @@ public sealed class DiagnosticsBundleAliasHardeningTests
         Assert.NotEmpty(keyLeaks);
         Assert.Null(keyText);
 
-        /* The serialized bytes hold the apostrophe as an escape; the name after it is still standalone. */
-        var escaped = new JsonObject { ["sections"] = new JsonObject { ["x"] = new JsonObject { ["'apps' node"] = 1 } } };
+        /* The bundle's encoder does not escape an apostrophe, but it does escape a tab: the serialized key reads
+           x\tapps node, and the t that ends the escape is not part of a word that runs into the name. */
+        var escaped = new JsonObject { ["sections"] = new JsonObject { ["x"] = new JsonObject { ["x\tapps node"] = 1 } } };
         var (escapedLeaks, escapedText) = a.Finish(escaped, DiagnosticsBundle.WriteOptions);
         Assert.NotEmpty(escapedLeaks);
         Assert.Null(escapedText);

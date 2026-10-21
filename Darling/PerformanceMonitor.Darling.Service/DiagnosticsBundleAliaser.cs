@@ -891,7 +891,7 @@ internal sealed class BundleAliaser
         /* Alias text the generator minted (domain-1, host-3) is output, not information, so a real name such as "main"
            or "host" must not match inside it. The product's own keys are masked the same way (see MaskProductKeys). */
         var maskedValues = MaskAliasText(unescaped, minted);
-        var maskedBytes = MaskAliasText(MaskJsonEscapes(MaskProductKeys(serialized)), minted);
+        var maskedBytes = MaskAliasText(MaskProductKeys(serialized), minted);
         foreach (var token in _aliasByToken.Keys)
         {
             if (!Verifiable(token) || TokenIsAliasText(token, minted))
@@ -933,23 +933,16 @@ internal sealed class BundleAliaser
     private static string MaskAliasText(string text, HashSet<string> minted) =>
         s_aliasShape.Replace(text, m => minted.Contains(m.Value) ? new string('\u0001', m.Length) : m.Value);
 
-    private static readonly Regex s_jsonEscape = new(@"\\(?:u[0-9A-Fa-f]{4}|[""\\/bfnrt])", RegexOptions.CultureInvariant, TimeSpan.FromSeconds(5));
-
-    /// <summary>
-    /// Blanks each JSON escape sequence (<c>\u0027</c>, <c>\n</c>, <c>\\</c>) in serialized text, so the letter after the
-    /// backslash is not mistaken for part of a word that runs into the name which follows it.
-    /// </summary>
-    private static string MaskJsonEscapes(string serialized) =>
-        s_jsonEscape.Replace(serialized, m => new string('\u0001', m.Length));
-
     /// <summary>
     /// True when the match of <paramref name="length"/> characters at <paramref name="at"/> in <paramref name="text"/>
-    /// is a whole sub-token of the identifier it sits in, on both edges. An edge is a boundary unless the name's own
-    /// edge character and its neighbour are both letters in one ordinary run. Two letters still split a run at a
-    /// camelCase transition: a lower-case letter then an upper-case one (<c>Sales|Report</c>), or an upper-case run
-    /// whose next letter starts an Upper+lower word (<c>SQLPROD|Backup</c>). A digit, <c>_</c>, <c>-</c>, <c>.</c>, a
-    /// path separator, whitespace and the ends of the text are always boundaries. The judgement reads the actual
-    /// characters; the name itself is matched case-insensitively. <c>wholesales</c> holds <c>sales</c>,
+    /// is a whole sub-token of the identifier it sits in. A match that holds anything but letters (a digit, <c>-</c>,
+    /// <c>_</c>, <c>.</c>, a path separator) is always a sub-token: no ordinary word looks like that. A match of
+    /// letters only is a sub-token when both edges are boundaries, and an edge is a boundary unless the name's own edge
+    /// character and its neighbour are both ASCII letters in one ordinary run, the same <c>[A-Za-z0-9_]</c> alphabet the
+    /// main pass uses. Letters still split a run at a case change (<c>Sales|Report</c>, <c>SQLPROD|Backup</c>,
+    /// <c>SQLPROD|backup</c>, <c>DBA|sqlprod</c>) and after an escape sequence (<c>\n</c>, <c>\u003C</c>, <c>%3D</c>), whose
+    /// last character is a letter that belongs to the escape, not to the word. Whitespace and the ends of the text are
+    /// always boundaries. The name itself is matched case-insensitively. <c>wholesales</c> holds <c>sales</c>,
     /// <c>database</c> holds <c>data</c> and <c>administrator</c> holds <c>admin</c> inside plain letter runs, so none
     /// of them is a hit; <c>prod01</c>, <c>SQLPROD_Full.bak</c> and <c>SalesReport</c> are (#6256).
     /// </summary>
@@ -961,31 +954,71 @@ internal sealed class BundleAliaser
             return false;
         }
 
-        if (at > 0 && char.IsLetter(text[at - 1]) && char.IsLetter(text[at]))
+        for (var k = at; k < end; k++)
         {
-            var prev = text[at - 1];
-            var first = text[at];
-            var camel = (char.IsLower(prev) && char.IsUpper(first))
-                || (char.IsUpper(prev) && char.IsUpper(first) && at + 1 < text.Length && char.IsLower(text[at + 1]));
-            if (!camel)
+            if (!char.IsAsciiLetter(text[k]))
             {
-                return false;
+                return true;
             }
         }
 
-        if (end < text.Length && char.IsLetter(text[end - 1]) && char.IsLetter(text[end]))
+        return StartIsBoundary(text, at) && EndIsBoundary(text, end);
+    }
+
+    /// <summary>True when the characters before <paramref name="at"/> end a JSON (<c>\n</c>, <c>\u003C</c>) or URL (<c>%3D</c>) escape.</summary>
+    private static bool EndsEscape(string text, int at)
+    {
+        if (at >= 2 && text[at - 2] == '\\' && "nrtbf".Contains(text[at - 1]))
         {
-            var last = text[end - 1];
-            var next = text[end];
-            var camel = (char.IsLower(last) && char.IsUpper(next))
-                || (char.IsUpper(last) && char.IsUpper(next) && end + 1 < text.Length && char.IsLower(text[end + 1]));
-            if (!camel)
-            {
-                return false;
-            }
+            return true;
         }
 
-        return true;
+        if (at >= 3 && text[at - 3] == '%' && char.IsAsciiHexDigit(text[at - 2]) && char.IsAsciiHexDigit(text[at - 1]))
+        {
+            return true;
+        }
+
+        return at >= 6 && text[at - 6] == '\\' && text[at - 5] == 'u'
+            && char.IsAsciiHexDigit(text[at - 4]) && char.IsAsciiHexDigit(text[at - 3])
+            && char.IsAsciiHexDigit(text[at - 2]) && char.IsAsciiHexDigit(text[at - 1]);
+    }
+
+    private static bool StartIsBoundary(string text, int at)
+    {
+        if (at == 0)
+        {
+            return true;
+        }
+
+        var prev = text[at - 1];
+        var first = text[at];
+        if (!char.IsAsciiLetter(prev) || !char.IsAsciiLetter(first) || EndsEscape(text, at))
+        {
+            return true;
+        }
+
+        return (char.IsAsciiLetterLower(prev) && char.IsAsciiLetterUpper(first))
+            || (char.IsAsciiLetterUpper(prev) && char.IsAsciiLetterUpper(first) && at + 1 < text.Length && char.IsAsciiLetterLower(text[at + 1]))
+            || (char.IsAsciiLetterUpper(prev) && char.IsAsciiLetterLower(first) && at >= 2 && char.IsAsciiLetterUpper(text[at - 2]));
+    }
+
+    private static bool EndIsBoundary(string text, int end)
+    {
+        if (end >= text.Length)
+        {
+            return true;
+        }
+
+        var last = text[end - 1];
+        var next = text[end];
+        if (!char.IsAsciiLetter(last) || !char.IsAsciiLetter(next))
+        {
+            return true;
+        }
+
+        return (char.IsAsciiLetterLower(last) && char.IsAsciiLetterUpper(next))
+            || (char.IsAsciiLetterUpper(last) && char.IsAsciiLetterUpper(next) && end + 1 < text.Length && char.IsAsciiLetterLower(text[end + 1]))
+            || (char.IsAsciiLetterUpper(last) && char.IsAsciiLetterLower(next) && end >= 2 && char.IsAsciiLetterUpper(text[end - 2]));
     }
 
     /// <summary>True when <paramref name="token"/> occurs in <paramref name="text"/> (case-insensitive) as a whole sub-token (see <see cref="EdgeIsSubTokenBoundary"/>).</summary>

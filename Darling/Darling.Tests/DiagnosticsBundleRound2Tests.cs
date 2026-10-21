@@ -70,6 +70,7 @@ public sealed class DiagnosticsBundleRound2Tests
         Assert.Contains("server-1", text, StringComparison.Ordinal);
         Assert.DoesNotContain("dodb", text, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("doDB", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("alpha-sql-01", text, StringComparison.OrdinalIgnoreCase);
     }
 
     /* ── a monitored name used as a whole key is renamed, never exempted ── */
