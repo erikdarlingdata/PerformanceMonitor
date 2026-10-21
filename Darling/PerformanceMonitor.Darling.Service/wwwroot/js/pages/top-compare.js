@@ -253,7 +253,9 @@ export function compareCard(o) {
   const { panel, body } = o.shell(o.title, o.subtitle, 2, KINDS[o.kind].read, null, o.picker);
   const holder = el("div", { style: "grid-column: 1 / -1" }, [panel]);
   (async () => {
-    const asOf = comparisonAsOf(o.pick, windowEndMs(o.server));
+    /* #6301: a narrowed window names its own end (`endMs`); otherwise the page's window ends where windowEndMs says. */
+    const windowEnd = Number.isFinite(o.endMs) ? o.endMs : windowEndMs(o.server);
+    const asOf = comparisonAsOf(o.pick, windowEnd);
     const [currentRes, baselineRes] = await Promise.all([
       readToolWithinKeptHistory(KINDS[o.kind].read, o.params, o.signal),
       readToolWithinKeptHistory(KINDS[o.kind].read, { ...o.params, as_of: asOf }, o.signal),
@@ -264,7 +266,7 @@ export function compareCard(o) {
       mount(holder, [noticeStrip(plan.notice), o.plain()]);
       return;
     }
-    const end = windowEndMs(o.server) - compareShiftMs(o.pick);
+    const end = windowEnd - compareShiftMs(o.pick);
     const hours = Number(o.params.hours) || 0;
     const grid = o.viz.table({ rows: plan.rows }, { rowsKey: "rows", columns: deltaColumns(o.kind), emptyText: NO_COMPARISON_DATA + "." });
     mount(body, [

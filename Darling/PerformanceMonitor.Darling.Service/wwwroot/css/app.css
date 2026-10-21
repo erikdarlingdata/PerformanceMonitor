@@ -1568,3 +1568,36 @@ pre.code {
 .daycal-reasons { margin: 0.2rem 0 0.4rem 1.1rem; padding: 0; }
 .daycal-metrics { overflow-wrap: anywhere; }
 .daycal-drills { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.5rem; }
+
+/* Time-range slicer (#6301, time-slicer.js): a strip of activity over the page range with a draggable selection, over the Top Queries and Top
+   Procedures cards. Colours are the theme tokens only, so it follows the chart palette. The strip is a fluid SVG under a div track, so it
+   shrinks with the panel (390 px) and the selection is positioned in percent. */
+.slicer-panel { padding: 0.5rem 0.75rem; }
+.slicer { display: flex; flex-direction: column; gap: 0.3rem; min-width: 0; }
+.slicer-head { display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem 0.75rem; font-size: 0.78rem; }
+.slicer-title { font-weight: 600; color: var(--fg); }
+.slicer-readout { color: var(--muted); flex: 1 1 12rem; min-width: 0; overflow-wrap: anywhere; }
+.slicer-overlay-note { color: var(--warn); font-size: 0.74rem; overflow-wrap: anywhere; }
+.slicer-reset { padding: 0.1rem 0.6rem; font-size: 0.74rem; }
+.slicer-track { position: relative; height: 56px; background: var(--bg-dark); border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: crosshair; touch-action: none; user-select: none; overflow: hidden; }
+.slicer-svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; pointer-events: none; }
+.slicer-line { fill: none; stroke: var(--accent); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.slicer-area { fill: var(--accent); fill-opacity: 0.18; stroke: none; }
+.slicer-overlay { fill: none; stroke: var(--warn); stroke-width: 1.5; stroke-dasharray: 5 3; vector-effect: non-scaling-stroke; }
+.slicer-shade { position: absolute; top: 0; bottom: 0; background: var(--bg-dark); opacity: 0.7; pointer-events: none; }
+.slicer-shade-l { left: 0; }
+.slicer-shade-r { right: 0; }
+.slicer-sel { position: absolute; top: 0; bottom: 0; border-left: 1px solid var(--accent); border-right: 1px solid var(--accent); background: rgba(46, 174, 241, 0.1); cursor: grab; }
+.slicer-sel:focus-visible, .slicer-handle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.slicer-handle { position: absolute; top: 0; bottom: 0; width: 14px; cursor: ew-resize; background: var(--accent); opacity: 0.55; }
+.slicer-handle:hover, .slicer-handle:focus-visible { opacity: 0.9; }
+.slicer-handle-start { left: -1px; border-radius: var(--radius-sm) 0 0 var(--radius-sm); }
+.slicer-handle-end { right: -1px; border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
+.slicer-axis { display: flex; justify-content: space-between; gap: 0.5rem; font-size: 0.7rem; color: var(--muted); }
+@media (max-width: 768px) {
+  .slicer-handle { width: 22px; } /* a finger needs a wider edge to grab */
+  .slicer-axis { flex-direction: column; gap: 0; }
+}
+/* A grid row picked to overlay its timeline on the slicer. */
+table.data tr.row-selected td { background: rgba(255, 213, 79, 0.12); }
+table.data tr[aria-pressed]:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }

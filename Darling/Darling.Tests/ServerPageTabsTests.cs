@@ -940,7 +940,7 @@ public sealed class ServerPageTabsTests
            on an empty envelope; unrelated to this guard, and the throw below still fires without an emptyText). */
         Assert.Contains(
             "function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, "
-            + "noteKey = null, moreNoteKeys = null, columnGroups = null, control = null, dbScope = null, extensionMissingLine = null, emptyWins = false)",
+            + "noteKey = null, moreNoteKeys = null, columnGroups = null, control = null, dbScope = null, extensionMissingLine = null, emptyWins = false, onRow = null)",
             js,
             StringComparison.Ordinal);
         Assert.Contains(

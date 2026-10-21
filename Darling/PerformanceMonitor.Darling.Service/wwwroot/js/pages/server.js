@@ -215,7 +215,9 @@ export function rangeContext(nowMs = Date.now()) {
       const times = localTime(new Date(range.startMs).toISOString()) + " to " + (range.live ? "now" : localTime(new Date(range.endMs).toISOString()));
       const picked = custom.spec.kind === "relative" || custom.spec.kind === "calendar" ? specName(custom.spec).toLowerCase() : "custom";
       const named = cut ? "last " + reachText(reach) + " of " + picked : picked;
-      return { hours: w.hours, label: named + ": " + times + rounded, custom: true };
+      /* #6301: the exact pair and a key that changes when the range does, for the time slicer on the Top Queries and Top Procedures cards. */
+      const endMs = range.live ? nowMs : range.endMs;
+      return { hours: w.hours, label: named + ": " + times + rounded, custom: true, startMs: range.startMs, endMs, rangeKey: "custom:" + (range.live ? "live:" + (endMs - range.startMs) : range.startMs + "-" + range.endMs) };
     }
   }
   setActiveRange(null);
@@ -228,7 +230,7 @@ export function rangeContext(nowMs = Date.now()) {
     const unresolved = resolveSpec(custom.spec, nowMs, browserZone());
     if (!unresolved.ok) return { hours: opt.hours, label: specName(custom.spec).toLowerCase() + " cannot be read yet (" + unresolved.error.message + "); showing " + opt.label };
   }
-  return { hours: opt.hours, label: opt.label };
+  return { hours: opt.hours, label: opt.label, startMs: nowMs - opt.hours * HOUR_MS, endMs: nowMs, rangeKey: "preset:" + opt.hours };
 }
 
 /** The sentence for a range the reader picked that is longer than the tab on screen reads, or null when the tab takes all of it. The

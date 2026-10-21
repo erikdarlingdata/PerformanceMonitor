@@ -49,6 +49,7 @@ import { READ_FIELDS } from "../read-fields.js";
 import { analysisFindingsTab } from "./analysis-findings.js";
 import { findingTitle, severityLabel } from "./analysis-findings.js";
 import { collectorRunBar, runNowColumns } from "./collector-run.js";
+import { timeSlicer, windowOf, rangeKeyOf, getSlice, setSlice, onSliceChange, effectiveContext, windowParams } from "../time-slicer.js";
 import { downloadText } from "../grid-tools.js";
 import { blockChainColumn } from "./block-chain.js";
 import { deadlockGraphCell, processRowsInDatabases } from "./deadlock-graph.js";
@@ -596,14 +597,16 @@ function perfmonRows(counters) {
  * null reads as the blank it is instead of flattening a chart to a zero nobody measured.
  */
 export function topQueriesPanel(server, ctx) {
-  return rankedCard("queries", (ranking, picker) => topQueriesCard(server, ctx, ranking, picker), { server, ctx });
+  return rankedCard("queries", (ranking, picker, w, onRow) => topQueriesCard(server, ctx, ranking, picker, w, onRow), { server, ctx });
 }
 
 /* One draw of the card for one ranking (#5226): rankedCard draws it again on a pick, so the title and the rows follow the choice. */
-function topQueriesCard(server, ctx, ranking, picker) {
+/* `ctx` is the page range (the per-query trend below reads it whole); `w` is the window the grid reads, the page range or, while the time slicer
+   holds a selection (#6301), that selection; `onRow` is the slicer's overlay-on-select. */
+function topQueriesCard(server, ctx, ranking, picker, w = ctx, onRow = null) {
   const { panel, body } = panelShell(
     "Top Queries by " + topRankingLabel(ranking),
-    ctx.label + ", with a per-collection trend for the query you pick",
+    w.label + ", with a per-collection trend for the query you pick",
     2,
     "get_top_queries_by_cpu",
     null,
@@ -612,7 +615,7 @@ function topQueriesCard(server, ctx, ranking, picker) {
   (async () => {
     const res = await readToolWithinKeptHistory(
       "get_top_queries_by_cpu",
-      rankedParams({ server, hours: ctx.hours, top: 20, detail: "full" }, ranking, "queries")
+      rankedParams(windowParams({ server, hours: w.hours, top: 20, detail: "full" }, w), ranking, "queries")
     );
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message)]);
@@ -624,6 +627,7 @@ function topQueriesCard(server, ctx, ranking, picker) {
         columns: [...TOP_QUERY_COLUMNS, planColumn(server)],
         groups: TOP_QUERY_GROUPS.groups,
         defaultGroups: TOP_QUERY_GROUPS.defaultGroups,
+        ...(onRow ? { onRow } : {}),
         emptyText:
           "No query stats in this window. Delta-based collection needs at least two cycles (~30 minutes) " +
           "before it reports non-zero values.",
@@ -888,10 +892,11 @@ function tagColumn() {
 /* #6300: the Compare picker's delta card for a grid (top-compare.js). `cmp` is { server, ctx }; the read is the grid's own, asked for
    the top COMPARE_TOP rows, once for the page's window and once with `as_of` shifted. `plain()` draws the grid as it is with Compare off. */
 function compareDrawn(kind, cmp, ranking, title, picker, signal, plain) {
-  const base = { server: cmp.server, hours: cmp.ctx.hours, top: COMPARE_TOP };
+  const base = windowParams({ server: cmp.server, hours: cmp.ctx.hours, top: COMPARE_TOP }, cmp.ctx);
   return compareCard({
     kind,
     server: cmp.server,
+    endMs: cmp.ctx.narrowed ? cmp.ctx.endMs : undefined,
     pick: comparePick.value,
     title,
     subtitle: cmp.ctx.label,
@@ -914,13 +919,20 @@ function compareDrawn(kind, cmp, ranking, title, picker, signal, plain) {
 }
 
 /**
- * A Top Queries or Top Procedures card (`kind` "queries" or "procedures") with its ranking selector. `build(ranking, picker)` draws the card
- * for the current pick and puts `picker` under its title; a pick stores the choice at module scope and draws the card again, so the title
- * ("Top Queries by Duration") and the rows follow it. Each draw aborts the one before it, as the Collection Log slot does.
+ * A Top Queries or Top Procedures card (`kind` "queries" or "procedures") with its ranking selector, under a time slicer (#6301).
+ * `build(ranking, picker, w, onRow)` draws the card for the current pick and puts `picker` under its title; `w` is the window the grid reads
+ * (the page range, or the slicer's selection while one is held) and `onRow` the row pick that overlays that row's timeline on the slicer
+ * (queries only: the web has no per-procedure trend read, so a procedure row has no timeline to overlay). A pick stores the choice at module
+ * scope and draws the card again, so the title ("Top Queries by Duration") and the rows follow it. Each draw aborts the one before it, as the
+ * Collection Log slot does. A slicer release stores the narrowed window at page scope (time-slicer.js) and every card on screen for the
+ * server draws its grid again for it; the strip itself is not redrawn, so a sort pick or a slice never reads the strip's activity again.
  */
 function rankedCard(kind, build, cmp = null) {
   const slot = el("div", {}, []);
   slot.style.display = "contents";
+  const gridSlot = el("div", {}, []);
+  gridSlot.style.display = "contents";
+  const slicer = cmp ? rankedSlicer(kind, cmp) : null;
   let drawing = null;
   const draw = () => {
     if (drawing) drawing.abort();
@@ -929,6 +941,7 @@ function rankedCard(kind, build, cmp = null) {
     const outer = getPanelSignal();
     if (outer) outer.addEventListener("abort", () => mine.abort(), { once: true });
     const ranking = topRankingPick[kind];
+    const w = cmp ? effectiveContext(cmp.server, cmp.ctx) : null;
     const picker = el("div", { class: "picker-row" }, [
       pickerControl(
         "Rank by",
@@ -943,15 +956,126 @@ function rankedCard(kind, build, cmp = null) {
       ...(cmp ? [compareControl(draw, slot)] : []),
     ]);
     setPanelSignal(mine.signal);
+    const onRow = slicer ? slicer.onRow(ranking) : null;
     const card =
       cmp && comparePick.value !== "off"
-        ? compareDrawn(kind, cmp, ranking, (kind === "queries" ? "Top Queries by " : "Top Procedures by ") + topRankingLabel(ranking), picker, mine.signal, () => build(ranking, picker))
-        : build(ranking, picker);
+        ? compareDrawn(kind, { server: cmp.server, ctx: w }, ranking, (kind === "queries" ? "Top Queries by " : "Top Procedures by ") + topRankingLabel(ranking), picker, mine.signal, () => build(ranking, picker, w, onRow))
+        : build(ranking, picker, w, onRow);
     setPanelSignal(outer);
-    mount(slot, [card]);
+    mount(gridSlot, [card]);
   };
+  if (slicer && slicer.node) {
+    const off = onSliceChange((server) => {
+      if (slot.isConnected === false) return off();
+      if (server !== cmp.server) return;
+      slicer.follow();
+      draw();
+    });
+    mount(slot, [el("div", { class: "panel card span-2 slicer-panel" }, [slicer.node]), gridSlot]);
+  } else {
+    mount(slot, [gridSlot]);
+  }
   draw();
   return slot;
+}
+
+/* ─────────── #6301: the time slicer over the Top Queries and Top Procedures cards ─────────── */
+
+/* The slicer's pick of a query row, one per server and list at MODULE scope so the 60 s rebuild (a new card every time) keeps the overlay on the same row. */
+const overlayPicks = new Map();
+
+/* The get_query_trend column the overlay plots for a ranking: the metric the grid is ranked by where the trend carries it. The trend has no
+   reads column, so a Reads ranking plots the average CPU, and the note on the strip names the column. */
+const OVERLAY_METRICS = {
+  cpu: { key: "avg_cpu_ms", label: "avg CPU ms" },
+  duration: { key: "avg_elapsed_ms", label: "avg elapsed ms" },
+  executions: { key: "execution_count", label: "executions" },
+  reads: { key: "avg_cpu_ms", label: "avg CPU ms" },
+};
+
+/**
+ * The slicer for one ranked card: the strip charts the server's duration trend over the page range (get_query_duration_trend, or
+ * get_procedure_duration_trend), a release narrows the page's window, and selecting a Top Queries row overlays that query's own trend
+ * (get_query_trend, over the page range, the read the per-query picker below the grid uses).
+ */
+function rankedSlicer(kind, cmp) {
+  const { server, ctx } = cmp;
+  const win = windowOf(ctx);
+  const rangeKey = rangeKeyOf(ctx);
+  const queries = kind === "queries";
+  const slicer = timeSlicer({
+    win,
+    selection: getSlice(server, rangeKey),
+    title: queries ? "Query duration" : "Procedure duration",
+    onCommit: (sel) => setSlice(server, rangeKey, sel),
+  });
+  if (!slicer.node) return null;
+  const signal = getPanelSignal();
+  readToolWithinKeptHistory(queries ? "get_query_duration_trend" : "get_procedure_duration_trend", { server, hours: ctx.hours }, signal).then((res) => {
+    if (res.kind !== "data" || !res.data) return;
+    const rows = Array.isArray(res.data.trend) ? res.data.trend : [];
+    slicer.setPoints(rows.map((r) => ({ t: (parseUtc(r.time) || { getTime: () => NaN }).getTime(), v: Number(r.value) })));
+  });
+
+  const pickKey = server + "|" + kind;
+  let selectedRow = null;
+  let ranking = topRankingPick[kind];
+  let loading = 0;
+  const overlayOf = async (row) => {
+    const mine = ++loading;
+    const metric = OVERLAY_METRICS[ranking] || OVERLAY_METRICS.cpu;
+    const trend = await readToolWithinKeptHistory("get_query_trend", { server, query_hash: row.query_hash, database_name: row.database_name, hours: ctx.hours }, signal);
+    if (mine !== loading || trend.kind !== "data" || !trend.data) return;
+    const points = (Array.isArray(trend.data.trend) ? trend.data.trend : []).map((r) => ({ t: (parseUtc(r.collection_time) || { getTime: () => NaN }).getTime(), v: Number(r[metric.key]) }));
+    slicer.setOverlay(points, row.database_name + " · " + truncate(row.query_text || "(no statement text captured)", 40) + " (" + metric.label + ")");
+  };
+  const mark = (tr, on) => {
+    tr.className = on ? (tr.className + " row-selected").trim() : tr.className.split(" ").filter((c) => c !== "row-selected").join(" ");
+    tr.setAttribute("aria-pressed", on ? "true" : "false");
+  };
+  return {
+    node: slicer.node,
+    /* Another card narrowed the page: take its selection without committing it again. */
+    follow: () => slicer.setSelection(getSlice(server, rangeKey)),
+    onRow: (rankedBy) => {
+      ranking = rankedBy;
+      if (!queries) return null;
+      /* A draw starts with no overlay: it comes back below for the picked query when that query is still among the rows. */
+      selectedRow = null;
+      loading++;
+      slicer.clearOverlay();
+      return (row, tr) => {
+        /* get_query_trend keys on both values, so a row carrying neither is not offered, as in the per-query picker. */
+        if (!row || !row.query_hash || !row.database_name) return;
+        const key = row.database_name + "|" + row.query_hash;
+        tr.style.cursor = "pointer";
+        tr.setAttribute("title", "Overlay this query's timeline on the time slicer");
+        makeActivatable(tr, (e) => {
+          if (e && e.type === "click" && selectionInside(tr)) return;
+          if (overlayPicks.get(pickKey) === key) {
+            overlayPicks.delete(pickKey);
+            selectedRow = null;
+            mark(tr, false);
+            loading++;
+            slicer.clearOverlay();
+            return;
+          }
+          overlayPicks.set(pickKey, key);
+          for (const other of tr.parentNode ? tr.parentNode.children : []) if (other !== tr) mark(other, false);
+          selectedRow = row;
+          mark(tr, true);
+          overlayOf(row);
+        });
+        tr.setAttribute("aria-pressed", "false");
+        /* A redraw (a sort, a narrowing, the 60 s rebuild) puts the pick back on the same query when it is still in the grid. */
+        if (overlayPicks.get(pickKey) === key) {
+          selectedRow = row;
+          mark(tr, true);
+          overlayOf(row);
+        }
+      };
+    },
+  };
 }
 
 /**
@@ -1154,11 +1278,12 @@ function pivot(rows, { xKey, seriesKey, valueKey }, maxSeries = 8) {
  * and its process rows follow the database filter.
  * `control` (#5226) is a node drawn under the title, before the rows: the ranking selector on the Top Queries and Top Procedures cards.
  */
-function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, noteKey = null, moreNoteKeys = null, columnGroups = null, control = null, dbScope = null, extensionMissingLine = null, emptyWins = false) {
+function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, noteKey = null, moreNoteKeys = null, columnGroups = null, control = null, dbScope = null, extensionMissingLine = null, emptyWins = false, onRow = null) {
   if (!emptyText) throw new Error("table(" + title + "): a table panel must explain its own empty state.");
   const desc = { title, subtitle, read, params, viz: "table", rowsKey, columns, emptyText, moreNoteKeys, span, noteKey, dbScope, extensionMissingLine, emptyWins };
   if (columnGroups) Object.assign(desc, { groups: columnGroups.groups, defaultGroups: columnGroups.defaultGroups });
   if (control) desc.control = control;
+  if (onRow) desc.onRow = onRow;
   return renderPanel(desc);
 }
 
@@ -1340,31 +1465,35 @@ export const SERVER_TABS = [
       /* #4231: `noteKey` (#3278) carries `truncation_note` — raw query_stats/procedure_stats are dropped at
          4 days once the rollups are armed, and a window asking further back than that silently served less
          than it asked for. Null when the floor did not bite, the same as every other noteKey panel. */
-      rankedCard("queries", (ranking, picker) =>
+      rankedCard("queries", (ranking, picker, w, onRow) =>
         table(
           "Top Queries by " + topRankingLabel(ranking),
           "get_top_queries_by_cpu",
-          rankedParams({ server, hours: ctx.hours, top: 20, detail: "full" }, ranking, "queries"),
+          rankedParams(windowParams({ server, hours: w.hours, top: 20, detail: "full" }, w), ranking, "queries"),
           "queries",
           [...TOP_QUERY_COLUMNS, planColumn(server)],
-          ctx.label,
+          w.label,
           "No query stats in this window. Delta-based collection needs at least two cycles (~30 minutes) before it reports non-zero values.",
           2,
           "truncation_note",
           null,
           TOP_QUERY_GROUPS,
-          picker
+          picker,
+          null,
+          null,
+          false,
+          onRow
         ),
         { server, ctx }
       ),
-      rankedCard("procedures", (ranking, picker) =>
+      rankedCard("procedures", (ranking, picker, w) =>
         table(
           "Top Procedures by " + topRankingLabel(ranking),
           "get_top_procedures_by_cpu",
-          rankedParams({ server, hours: ctx.hours, top: 20, detail: "full" }, ranking, "procedures"),
+          rankedParams(windowParams({ server, hours: w.hours, top: 20, detail: "full" }, w), ranking, "procedures"),
           "procedures",
           [...TOP_PROC_COLUMNS, procedurePlanColumn(server)],
-          ctx.label,
+          w.label,
           "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes).",
           2,
           "truncation_note",
@@ -1757,14 +1886,14 @@ export const SERVER_TABS = [
          mean two fetches of get_top_queries_by_cpu for one page's worth of the same twenty rows. */
       topQueriesPanel(server, ctx),
       /* #4231: same `truncation_note` disclosure as the CPU tab's plain tables. */
-      rankedCard("procedures", (ranking, picker) =>
+      rankedCard("procedures", (ranking, picker, w) =>
         table(
           "Top Procedures by " + topRankingLabel(ranking),
           "get_top_procedures_by_cpu",
-          rankedParams({ server, hours: ctx.hours, top: 20, detail: "full" }, ranking, "procedures"),
+          rankedParams(windowParams({ server, hours: w.hours, top: 20, detail: "full" }, w), ranking, "procedures"),
           "procedures",
           [...TOP_PROC_COLUMNS, procedurePlanColumn(server)],
-          ctx.label,
+          w.label,
           "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes).",
           2,
           "truncation_note",
