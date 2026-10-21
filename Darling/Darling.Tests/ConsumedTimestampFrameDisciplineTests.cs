@@ -1363,7 +1363,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         ("Lite/Mcp/McpHealthParserTools.cs", "event_time", 9),
         ("Lite/Mcp/McpLongQueryTools.cs", "event_time", 1),
         ("Lite/Mcp/McpMemoryTools.cs", "sample_time", 1),
-        ("Lite/Mcp/McpQueryTools.cs", "last_execution_time", 2),
+        ("Lite/Mcp/McpQueryTools.cs", "last_execution_time", 1),
     ];
 
     /// <summary>Payload field names that carry a ServerLocal frame: the ServerLocal census columns, plus
