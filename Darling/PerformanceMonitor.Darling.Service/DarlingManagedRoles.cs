@@ -196,7 +196,7 @@ public static class DarlingManagedRoles
                 "remediation_username",
                 /* V203 (#6170): the hypothetical-index login's LOGIN NAME. Non-secret on the same reasoning as `remediation_username`. */
                 "hypothetical_index_username",
-                /* V211 (#6254): the Query Store replica HOST. Non-secret on the same reasoning as `host` above, which is already readable. */
+                /* V212 (#6254): the Query Store replica HOST. Non-secret on the same reasoning as `host` above, which is already readable. */
                 "query_store_replica",
                 /* V169 (#5452): the AWS role Darling assumes for an RDS or Aurora target, and whether an external
                    ID is stored with it. Non-secret: an account id is an identifier, not a credential, and the
@@ -3380,7 +3380,7 @@ BEGIN
       OR NEW.trust_server_certificate IS DISTINCT FROM OLD.trust_server_certificate
       OR NEW.multi_subnet_failover IS DISTINCT FROM OLD.multi_subnet_failover
       -- The Query Store replica (#6254) is a host the stored password would be sent to. Read through to_jsonb, blank as none, so this
-      -- function also runs on a store below V211 that does not have the column yet.
+      -- function also runs on a store below V212 that does not have the column yet.
       OR COALESCE(NULLIF(btrim(to_jsonb(NEW) ->> 'query_store_replica'), ''), '') IS DISTINCT FROM COALESCE(NULLIF(btrim(to_jsonb(OLD) ->> 'query_store_replica'), ''), '');
 
    -- A remediation secret that is kept goes with the login name it was stored for: that name is as much a part of how

@@ -48,6 +48,8 @@ public sealed class AlertEngineTests
         public bool ClientTimeoutsEnabled { get; set; }
         public int ClientTimeoutsWarningPerMinute { get; set; } = 10;
         public int ClientTimeoutsCriticalPerMinute { get; set; } = 60;
+        public int ClientTimeoutsWarningMultiple { get; set; } = 3;
+        public int ClientTimeoutsCriticalMultiple { get; set; } = 10;
         public bool LongRunningQueryEnabled { get; set; }
         public bool TempDbSpaceEnabled { get; set; }
         public bool LowDiskEnabled { get; set; }
@@ -168,6 +170,24 @@ public sealed class AlertEngineTests
         public int AttentionLookbackMinutesAsked;
 
         public int AttentionReads;
+
+        /* #5736: the baseline the engine asks for once a day per server, and how many times it was asked. */
+        public AttentionBaseline? AttentionBaseline { get; set; }
+
+        public int AttentionBaselineReads;
+
+        public bool AttentionBaselineThrows { get; set; }
+
+        public Task<AttentionBaseline?> GetAttentionBaselineAsync(string serverKey, DateTime nowUtc, CancellationToken cancellationToken = default)
+        {
+            AttentionBaselineReads++;
+            if (AttentionBaselineThrows)
+            {
+                throw new InvalidOperationException("baseline read failed");
+            }
+
+            return Task.FromResult(AttentionBaseline);
+        }
 
         public Task<AttentionWindow> GetAttentionWindowAsync(string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default)
 
@@ -4732,6 +4752,8 @@ public sealed class AlertEngineTests
         public Task<List<PoisonWaitAccumulation>> GetPoisonWaitAccumulationAsync(string serverKey, int windowMinutes, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
         public Task<AttentionWindow> GetAttentionWindowAsync(string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("store down");
+        public Task<AttentionBaseline?> GetAttentionBaselineAsync(string serverKey, DateTime nowUtc, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
         
         public Task<IReadOnlyList<RunnableQueueSample>> GetRunnableQueueSamplesAsync(string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default) =>

@@ -187,7 +187,7 @@ export const GROUP_FIELDS = {
   health_bands: ["deadlock_warn_per_hour", "deadlock_critical_per_hour"],
   poison_wait: ["enabled", "threshold_ms"],
   runnable_queue: ["enabled", "warning_per_scheduler", "critical_per_scheduler"],
-  client_timeouts: ["enabled", "warning_per_minute", "critical_per_minute"],
+  client_timeouts: ["enabled", "warning_per_minute", "critical_per_minute", "warning_multiple", "critical_multiple"],
   long_running_query: ["enabled", "threshold_minutes", "max_results", "exclude_sp_server_diagnostics", "exclude_wait_for",
     "exclude_backups", "exclude_misc_waits", "exclude_cdc", "excluded_program_name_prefixes", "excluded_logins"],
   tempdb_space: ["enabled", "threshold_percent"],
@@ -1985,16 +1985,16 @@ const agentChangesContext = {
 };
 const buildAgentChangesTab = (body, generation) => buildAgentChanges(body, generation, agentChangesContext);
 
-/* Server actions (#6269) lives in its own file too, with the same helpers. */
-const serverActionsContext = {
-  ...agentChangesContext,
-  repaint: () => {
-    if (shownTab === "server-actions" && shownBody) return startBuilder("server-actions", shownBody, ++renderGeneration);
-    return null;
-  },
-};
-const buildServerActionsTab = (body, generation) => buildServerActions(body, generation, serverActionsContext);
-
+/* Server actions (#6269) lives in its own file too, with the same helpers. */
+const serverActionsContext = {
+  ...agentChangesContext,
+  repaint: () => {
+    if (shownTab === "server-actions" && shownBody) return startBuilder("server-actions", shownBody, ++renderGeneration);
+    return null;
+  },
+};
+const buildServerActionsTab = (body, generation) => buildServerActions(body, generation, serverActionsContext);
+
 const BUILDERS = { servers: buildServers, routes: buildRoutes, settings: buildSettings, feedback: buildFeedback, practice: buildPractice, pending: buildPending, overrides: buildOverrides, "agent-changes": buildAgentChangesTab, profiles: buildProfilesTab, "server-actions": buildServerActionsTab };
 
 /* Run a tab's builder. A builder that throws leaves an error strip: in the Servers tab's table area when its boxes are on the

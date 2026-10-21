@@ -160,6 +160,8 @@ LIMIT $4";
        brief states another. What is not history: the first alert's own row and anything at or after it, and any fire in the
        WindowMinutes minutes before it (this incident's own rise); a fire about 24 hours earlier still counts. A metric with no
        rows still comes back (day NULL), so the brief says zero.
+       #6261: k is the whole day number the fire counts toward (1 = 24 hours before the anchor), the streak's unit, as in Darling's
+       read (the reason, and why a date can come on two rows, is there).
        Both investigation_request_alerts.alert_time and config_alert_log.alert_time are naive UTC, so the clock arithmetic rides
        no session time zone. The history is read through v_config_alert_log: ordinary archival moves rows older than
        ArchiveService.HotDataDays (7) days, the edge of this window, to Parquet. A resolution row (#6057) is written to the same
@@ -170,13 +172,14 @@ WITH anchor AS (
 ), m AS (
     SELECT DISTINCT metric_name FROM investigation_request_alerts WHERE request_id = $1
 )
-SELECT m.metric_name, a.t, f.day, f.muted, f.n
+SELECT m.metric_name, a.t, f.day, f.muted, f.n, f.k
 FROM m
 CROSS JOIN anchor AS a
 LEFT JOIN LATERAL (
-    SELECT strftime(CAST(h.alert_time AS DATE), '%Y-%m-%d') AS day, h.muted, count(*) AS n
+    SELECT strftime(CAST(h.alert_time AS DATE), '%Y-%m-%d') AS day, h.muted, h.k, count(*) AS n
     FROM (
         SELECT cal.alert_time, cal.muted,
+               CAST(round((epoch_us(a.t) - epoch_us(cal.alert_time)) / 86400000000.0) AS INTEGER) AS k,
                ((epoch_us(cal.alert_time) - epoch_us(a.t)) % 86400000000 + 86400000000) % 86400000000 AS d
         FROM v_config_alert_log AS cal
         WHERE cal.server_id = $2
@@ -185,7 +188,7 @@ LEFT JOIN LATERAL (
           AND cal.alert_time < a.t - INTERVAL " + InvestigationAlertRecurrence.WindowMinutes + @" MINUTE
     ) AS h
     WHERE least(h.d, 86400000000 - h.d) <= " + (InvestigationAlertRecurrence.WindowMinutes * 60 * 1000000L) + @"
-    GROUP BY 1, 2
+    GROUP BY 1, 2, 3
 ) AS f ON true
 ORDER BY m.metric_name, f.day DESC";
 
@@ -366,12 +369,14 @@ ORDER BY m.metric_name, f.day DESC";
         int fired = 0, muted = 0;
         var firedDates = new List<DateOnly>();
         var mutedDates = new List<DateOnly>();
+        var daysAgo = new List<int>();
         void Flush()
         {
             if (metric is not null)
-                result.Add(new InvestigationAlertRecurrence(metric, around, fired, muted, firedDates, mutedDates));
+                result.Add(new InvestigationAlertRecurrence(metric, around, fired, muted, firedDates, mutedDates, daysAgo));
             firedDates = new List<DateOnly>();
             mutedDates = new List<DateOnly>();
+            daysAgo = new List<int>();
             fired = 0;
             muted = 0;
         }
@@ -390,7 +395,18 @@ ORDER BY m.metric_name, f.day DESC";
             if (reader.IsDBNull(2)) continue;
             var count = (int)reader.GetInt64(4);
             var date = DateOnly.ParseExact(reader.GetString(2), "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
-            if (reader.GetBoolean(3)) { muted += count; mutedDates.Add(date); } else { fired += count; firedDates.Add(date); }
+            if (reader.GetBoolean(3))
+            {
+                muted += count;
+                if (!mutedDates.Contains(date)) mutedDates.Add(date);
+            }
+            else
+            {
+                fired += count;
+                if (!firedDates.Contains(date)) firedDates.Add(date);
+            }
+
+            daysAgo.Add(reader.GetInt32(5));
         }
 
         Flush();

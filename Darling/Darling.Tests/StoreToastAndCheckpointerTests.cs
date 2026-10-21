@@ -1456,6 +1456,8 @@ public sealed class StoreToastAndCheckpointerTests
         public bool ClientTimeoutsEnabled { get; set; }
         public int ClientTimeoutsWarningPerMinute { get; set; } = 10;
         public int ClientTimeoutsCriticalPerMinute { get; set; } = 60;
+        public int ClientTimeoutsWarningMultiple { get; set; } = 3;
+        public int ClientTimeoutsCriticalMultiple { get; set; } = 10;
         public bool LongRunningQueryEnabled { get; set; }
         public bool TempDbSpaceEnabled { get; set; }
         public bool LowDiskEnabled { get; set; }

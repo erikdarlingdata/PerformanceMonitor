@@ -133,6 +133,14 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
         return await Task.Run(() => _dataService.GetAttentionWindowAsync(serverId, lookbackMinutes), cancellationToken);
     }
 
+    /// <summary>#5736: the server's Client Timeouts baseline, delegated like every other member.</summary>
+    public async Task<AttentionBaseline?> GetAttentionBaselineAsync(
+        string serverKey, DateTime nowUtc, CancellationToken cancellationToken = default)
+    {
+        var serverId = ParseServerKey(serverKey);
+        return await Task.Run(() => _dataService.GetAttentionBaselineAsync(serverId, nowUtc), cancellationToken);
+    }
+
     public async Task<LongRunningQueryReadResult> GetLongRunningQueriesAsync(
         string serverKey,
         int thresholdMinutes,

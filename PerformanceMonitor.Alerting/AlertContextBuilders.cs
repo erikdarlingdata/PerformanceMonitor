@@ -773,6 +773,11 @@ public static class AlertContextBuilders
                 $"estimated from {finding.SampledEvents:N0} sampled events: {finding.JudgedCount / finding.CoveredMinutes:N1} per minute is not muted")));
         }
 
+        if (finding.Bars is not null)
+        {
+            reading.Fields.Add(("Bar", AttentionEvaluator.BarSentence(finding)));
+        }
+
         items.Add(reading);
 
         /* 2. The top statements (the statement filter judges each sample text before it is cut), the sampled events a statement

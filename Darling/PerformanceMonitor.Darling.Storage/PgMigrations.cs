@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -2089,13 +2089,13 @@ ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS starts_at_utc time
     /// table-level UPDATE on the config schema covers it, while the viewer role holds only <c>UPDATE (config_version, updated_at)</c> on this table) and no trigger (the config_version trigger fires on any row update).
     /// </summary>
     /// <summary>
-    /// V211 (#6254): two nullable text columns. <c>config.config_monitored_servers.query_store_replica</c> is the host (or listener
+    /// V212 (#6254): two nullable text columns. <c>config.config_monitored_servers.query_store_replica</c> is the host (or listener
     /// name) Query Store is read from instead of the server itself; NULL, the default for every existing row, keeps today's behaviour.
     /// <c>collect.collection_log.read_source</c> says which host a collection read came from; NULL on every existing row. Neither has a
     /// default and neither needs a backfill, so each <c>ADD COLUMN</c> is catalog-only. An older build ignores both columns and reads
     /// every row as it did before, so there is no rollback line. Idempotent.
     /// </summary>
-    private const string V211Sql = @"
+    private const string V212Sql = @"
 ALTER TABLE config.config_monitored_servers ADD COLUMN IF NOT EXISTS query_store_replica text;
 ALTER TABLE collect.collection_log ADD COLUMN IF NOT EXISTS read_source text;
 
@@ -2206,6 +2206,20 @@ CREATE TRIGGER trg_agent_route_tag_guard
     BEFORE UPDATE OR DELETE ON config.server_tags
     FOR EACH ROW EXECUTE FUNCTION config.agent_route_tag_guard();
 ALTER TABLE config.server_tags ENABLE ALWAYS TRIGGER trg_agent_route_tag_guard;";
+
+    /// <summary>
+    /// V211 (#5736): the two multiples of the relative Client Timeouts bars, on the singleton <c>config_alert_settings</c> row beside the two
+    /// bars they scale. Warning is max(<c>client_timeouts_warning_per_minute</c>, <c>client_timeouts_warning_multiple</c> x the server's baseline) and
+    /// Critical is the same with the Critical pair, the baseline being the server's own p99.9 of its 3-minute average attention rate over the last 7 days.
+    /// The two existing columns keep their names and become the FLOORS (their defaults, 10 and 60, are unchanged). Two <c>integer NOT NULL</c> columns with
+    /// constant defaults (3 and 10), catalog-only, no backfill, no GRANT (the roles hold table-level privileges on the config schema) and no trigger (the
+    /// statement-level <c>trg_bump_alert_settings</c> already bumps <c>config_version</c> on any write here). The baseline itself needs no storage: the
+    /// service computes it from <c>collection_log</c> and <c>attention_events</c> and keeps it in memory for a day.
+    /// </summary>
+    private const string V211Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS client_timeouts_warning_multiple integer NOT NULL DEFAULT 3,
+    ADD COLUMN IF NOT EXISTS client_timeouts_critical_multiple integer NOT NULL DEFAULT 10;";
 
     /// <summary>
     /// V196 (#5632, step 5): Level 3 and the per-server action switches. <b>Nothing here turns an action on.</b>
@@ -2592,7 +2606,8 @@ $rung$;";
         new Migration(208, "mute-rule-starts-at", V208Sql),
         new Migration(209, "query-store-fetch-top-n", V209Sql),
         new Migration(210, "mcp-agent-route-tag-guard", V210Sql),
-        new Migration(211, "query-store-replica", V211Sql),
+        new Migration(211, "client-timeouts-relative-bars", V211Sql),
+        new Migration(212, "query-store-replica", V212Sql),
     };
 
     /// <summary>
