@@ -250,13 +250,17 @@ WHERE server_id = ANY($1)";
 
     private readonly NpgsqlDataSource _dataSource;
     private readonly int _commandTimeoutSeconds;
+    private readonly bool _markMcpSurface;
 
     /// <summary>Builds the store over a data source whose search_path reaches the <c>config</c> schema.
-    /// <paramref name="commandTimeoutSeconds"/> is applied to every command.</summary>
-    public ServerTagStore(NpgsqlDataSource dataSource, int commandTimeoutSeconds)
+    /// <paramref name="commandTimeoutSeconds"/> is applied to every command. <paramref name="markMcpSurface"/> is set only by the
+    /// MCP tools (#6281): every write then runs in a transaction that first sets the session marker the store's tag guard reads
+    /// (<see cref="DarlingStoreConnection.MarkMcpSurfaceAsync"/>). The Viewer and the web leave it off and carry no marker.</summary>
+    public ServerTagStore(NpgsqlDataSource dataSource, int commandTimeoutSeconds, bool markMcpSurface = false)
     {
         _dataSource = dataSource ?? throw new ArgumentNullException(nameof(dataSource));
         _commandTimeoutSeconds = commandTimeoutSeconds;
+        _markMcpSurface = markMcpSurface;
     }
 
     /// <inheritdoc />
@@ -476,10 +480,16 @@ WHERE server_id = ANY($1)";
     /// <inheritdoc />
     public async Task ClearForServerAsync(int serverId, CancellationToken ct = default)
     {
-        await using var command = _dataSource.CreateCommand(ClearForServerSql);
-        command.CommandTimeout = _commandTimeoutSeconds;
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        await command.ExecuteNonQueryAsync(ct);
+        await using var connection = await _dataSource.OpenConnectionAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+        await MarkIfMcpAsync(connection, transaction, ct);
+        await using (var command = Command(ClearForServerSql, connection, transaction))
+        {
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            await command.ExecuteNonQueryAsync(ct);
+        }
+
+        await transaction.CommitAsync(ct);
     }
 
     private async Task<IReadOnlyList<int>> ChangeAssignmentsAsync(string sql, int tagId, IReadOnlyList<int> serverIds, CancellationToken ct)
@@ -490,17 +500,24 @@ WHERE server_id = ANY($1)";
             return changed;
         }
 
-        await using var command = _dataSource.CreateCommand(sql);
-        command.CommandTimeout = _commandTimeoutSeconds;
+        /* An explicit transaction, so the MCP marker (transaction-local) is set in the same transaction as the write. */
+        await using var connection = await _dataSource.OpenConnectionAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+        await MarkIfMcpAsync(connection, transaction, ct);
+        await using var command = Command(sql, connection, transaction);
         command.Parameters.Add(new NpgsqlParameter<int[]> { TypedValue = serverIds.ToArray() });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = tagId });
         try
         {
-            await using var reader = await command.ExecuteReaderAsync(ct);
-            while (await reader.ReadAsync(ct))
+            await using (var reader = await command.ExecuteReaderAsync(ct))
             {
-                changed.Add(reader.GetInt32(0));
+                while (await reader.ReadAsync(ct))
+                {
+                    changed.Add(reader.GetInt32(0));
+                }
             }
+
+            await transaction.CommitAsync(ct);
         }
         catch (PostgresException ex) when (ex.SqlState == ForeignKeyViolationSqlState && sql == AssignSql)
         {
@@ -520,7 +537,13 @@ WHERE server_id = ANY($1)";
         await using var command = Command(AcquireTreeLockSql, connection, transaction);
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = TreeLockKey });
         await command.ExecuteNonQueryAsync(ct);
+        await MarkIfMcpAsync(connection, transaction, ct);
     }
+
+    /// <summary>Sets the MCP marker in this transaction when the store was built for the MCP tools (#6281). Called before the
+    /// transaction's first write on every path.</summary>
+    private Task MarkIfMcpAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, CancellationToken ct) =>
+        _markMcpSurface ? DarlingStoreConnection.MarkMcpSurfaceAsync(connection, transaction, _commandTimeoutSeconds, ct) : Task.CompletedTask;
 
     private async Task<List<ServerTagRow>> ReadTagsCoreAsync(NpgsqlConnection connection, NpgsqlTransaction? transaction, CancellationToken ct)
     {

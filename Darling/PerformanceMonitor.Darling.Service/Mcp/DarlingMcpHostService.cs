@@ -692,12 +692,12 @@ public sealed class DarlingMcpHostService : BackgroundService
                connection string built by DarlingManagedPostgres already carries McpApplicationName, but a
                CONFIGURED (postgres.mcpConnectionString) or owner-fallback login never runs through that
                builder — set-if-absent here so every path this string can take still names the surface. */
-            /* #6281: the session marker the store's tag guard reads, forced (not set-if-absent) on every path this string can take,
-               so an MCP that connects as the owner (no mcpConnectionString) or as another login is held to the same rule as the mcp login. */
+            /* #6281: no marker rides on this connection. The store's tag guard reads a per-transaction setting that each MCP tag write
+               sets itself (DarlingStoreConnection.MarkMcpSurfaceAsync), because PgBouncer and RDS Proxy refuse a startup "options" parameter
+               and a pooler set to ignore it would drop the marker without a word. */
             var postgres = NpgsqlDataSource.Create(
-                DarlingStoreConnection.WithMcpSurfaceMarker(
-                    DarlingStoreConnection.PinSessionTimeZoneUtc(
-                        DarlingStoreConnection.WithApplicationName(storeConnectionString, DarlingManagedPostgres.McpApplicationName))));
+                DarlingStoreConnection.PinSessionTimeZoneUtc(
+                    DarlingStoreConnection.WithApplicationName(storeConnectionString, DarlingManagedPostgres.McpApplicationName)));
             _appDataSource = postgres;
 
             /* #6263: investigations served, but no route opens a request. A hint, never a refusal: the operator may add the

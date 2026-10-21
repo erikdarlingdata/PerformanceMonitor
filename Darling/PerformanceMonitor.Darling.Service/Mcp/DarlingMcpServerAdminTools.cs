@@ -499,6 +499,9 @@ public sealed partial class DarlingMcpServerAdminTools
             await using (var connection = await postgres.OpenConnectionAsync())
             await using (var transaction = await connection.BeginTransactionAsync())
             {
+                /* #6281: the marker the store's tag guard reads, set first so it covers the tag-row clearing below in this transaction. */
+                await DarlingStoreConnection.MarkMcpSurfaceAsync(connection, transaction, McpCommandDeadlines.ReadSeconds);
+
                 /* Two-arg on the store connection with the transaction ASSIGNED, and the SQL hoisted to a local:
                    the shape McpReadCommandTimeoutTests recognises as a store command (see the same note in
                    DarlingMcpAlertTools); the three-arg form is the monitored-target shape. */

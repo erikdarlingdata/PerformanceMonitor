@@ -66,7 +66,7 @@ public sealed class DarlingMcpServerTagTools
         [Description("The parent tag id (from get_fleet_overview tags); omit for a root tag.")] int? parent_id = null,
         [Description("The colour as #RRGGBB; omit for the palette colour.")] string? colour = null,
         CancellationToken cancellationToken = default) =>
-        CreateServerTagCore(new ServerTagStore(postgres, WriteCommandSeconds), name, parent_id, colour, cancellationToken);
+        CreateServerTagCore(McpStore(postgres), name, parent_id, colour, cancellationToken);
 
     [McpServerTool(Name = "update_server_tag"), Description(
         "PARTIAL edit of a fleet server tag: send only name, colour or parent_id in changes_json; an explicit null clears colour or moves the tag to the root. A move carries the subtree and its assignments, is refused on a cycle or past four levels, and changes which servers rules scoped to old or new ancestors cover: affected_rules names them. To reorder among siblings send {\"move\":\"up\"} or {\"move\":\"down\"} alone (edge = unchanged). Returns updated, unchanged, or invalid/conflict/not_found with nothing written.")]
@@ -75,7 +75,7 @@ public sealed class DarlingMcpServerTagTools
         [Description("The tag id (from get_fleet_overview tags).")] int tag_id,
         [Description("A JSON object with ONLY the fields to change: name, colour, parent_id (e.g. {\"name\":\"East\"}). An explicit null clears colour or moves the tag to the root. Or the single field move, \"up\" or \"down\", to reorder the tag among its siblings.")] string changes_json,
         CancellationToken cancellationToken = default) =>
-        UpdateServerTagCore(new ServerTagStore(postgres, WriteCommandSeconds), tag_id, changes_json, cancellationToken);
+        UpdateServerTagCore(McpStore(postgres), tag_id, changes_json, cancellationToken);
 
     [McpServerTool(Name = "delete_server_tag"), Description(
         "Deletes a fleet server tag AND its whole subtree of child tags and their server assignments; servers and collected data are untouched. Permanent. If a custom alert rule is scoped to the tag or a descendant, that rule would match no server: the call answers confirm_required naming those rules and deletes nothing; repeat with confirm=true to proceed. Rules scoped to an ancestor are reported as losing servers. Returns deleted with the removed tag ids and assignment count.")]
@@ -84,7 +84,7 @@ public sealed class DarlingMcpServerTagTools
         [Description("The tag id (from get_fleet_overview tags).")] int tag_id,
         [Description("True to proceed when custom alert rules are scoped to the subtree; default false.")] bool confirm = false,
         CancellationToken cancellationToken = default) =>
-        DeleteServerTagCore(new ServerTagStore(postgres, WriteCommandSeconds), tag_id, confirm, cancellationToken);
+        DeleteServerTagCore(McpStore(postgres), tag_id, confirm, cancellationToken);
 
     [McpServerTool(Name = "assign_server_tag"), Description(
         "Assigns one fleet server tag to one or more servers (server_ids from get_fleet_overview) in one write; servers already carrying it are a no-op. Every server_id must be a monitored server or nothing is written. Custom alert rules scoped to the tag or an ancestor start covering the added servers: affected_rules names them. Returns assigned with added and already-assigned ids, unchanged, not_found or invalid.")]
@@ -93,7 +93,7 @@ public sealed class DarlingMcpServerTagTools
         [Description("The tag id (from get_fleet_overview tags).")] int tag_id,
         [Description("1-1000 server ids (from get_fleet_overview); duplicates are ignored.")] int[] server_ids,
         CancellationToken cancellationToken = default) =>
-        AssignServerTagCore(new ServerTagStore(postgres, WriteCommandSeconds), tag_id, server_ids, cancellationToken);
+        AssignServerTagCore(McpStore(postgres), tag_id, server_ids, cancellationToken);
 
     [McpServerTool(Name = "unassign_server_tag"), Description(
         "Removes one fleet server tag from one or more servers (server_ids) in one write; servers not carrying it are a no-op. Custom alert rules scoped to the tag or an ancestor stop covering a removed server unless another tag under the rule's scope still holds it: affected_rules names each rule and the servers it loses. No confirm step; assign again to undo. Returns unassigned, unchanged, not_found or invalid.")]
@@ -102,7 +102,12 @@ public sealed class DarlingMcpServerTagTools
         [Description("The tag id (from get_fleet_overview tags).")] int tag_id,
         [Description("1-1000 server ids (from get_fleet_overview); duplicates are ignored.")] int[] server_ids,
         CancellationToken cancellationToken = default) =>
-        UnassignServerTagCore(new ServerTagStore(postgres, WriteCommandSeconds), tag_id, server_ids, cancellationToken);
+        UnassignServerTagCore(McpStore(postgres), tag_id, server_ids, cancellationToken);
+
+    /// <summary>The store every tag tool writes through. <c>markMcpSurface</c> makes each write transaction set the session marker
+    /// the store's agent-route tag guard reads (#6281), so the guard holds for an MCP that connects as the store's owner and
+    /// through a pooler that drops startup options. The Viewer and the web build their own store without it.</summary>
+    private static ServerTagStore McpStore(NpgsqlDataSource postgres) => new(postgres, WriteCommandSeconds, markMcpSurface: true);
 
     // ---------------------------------------------------------------- cores
 

@@ -13,6 +13,7 @@ using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -40,7 +41,6 @@ public sealed class DarlingMcpAgentRouteTagGuardLiveTests
         public required NpgsqlDataSource Owner { get; init; }
         public required NpgsqlDataSource Mcp { get; init; }
         public required NpgsqlDataSource Viewer { get; init; }
-        public required NpgsqlDataSource McpAsOwner { get; init; }
         public string OwnerConnectionString { get; init; } = "";
         public required List<string> MadeRoles { get; init; }
         public required int Root { get; init; }
@@ -59,7 +59,6 @@ public sealed class DarlingMcpAgentRouteTagGuardLiveTests
         {
             await Mcp.DisposeAsync();
             await Viewer.DisposeAsync();
-            await McpAsOwner.DisposeAsync();
             await Owner.DisposeAsync();
             await Scratch.DisposeAsync();
             if (MadeRoles.Count > 0)
@@ -176,7 +175,6 @@ VALUES (7, 'alpha-sql-01', 'alpha-sql-01', TRUE, 16, now() AT TIME ZONE 'UTC', n
                 Owner = owner,
                 Mcp = LoginAs(connectionString, "mcp"),
                 Viewer = LoginAs(connectionString, "viewer"),
-                McpAsOwner = NpgsqlDataSource.Create(DarlingStoreConnection.WithMcpSurfaceMarker(connectionString)),
                 OwnerConnectionString = connectionString,
                 MadeRoles = made,
                 BaseConnectionString = baseConnectionString!,
@@ -379,21 +377,70 @@ VALUES (7, 'alpha-sql-01', 'alpha-sql-01', TRUE, 16, now() AT TIME ZONE 'UTC', n
         Assert.Equal("assigned", (string?)Parse(await DarlingMcpServerTagTools.AssignServerTagCore(f.McpStore, f.Free, new[] { 9 }, ct))["status"]);
     }
 
+    /* postgres.mcpConnectionString unset: the MCP host connects with the store's own login. Each test below hands the OWNER's data
+       source to a real MCP tool, so the only thing that can refuse the write is the marker the tool's transaction sets itself
+       (session_user is the owner, not mcp, and the connection string carries no Options). */
+
     [Fact]
-    public async Task AnMcpSessionThatConnectsAsTheOwner_IsHeldToTheRule_WhenItCarriesTheMarker_AndAViewerSessionAsTheOwnerIsNot()
+    public async Task AssignServerTag_AsTheOwner_IsRefusedUnderAnAgentRoute_AndWritesNothing()
+    {
+        await using var f = (await OpenAsync())!;
+
+        AssertRefused(await DarlingMcpServerTagTools.AssignServerTag(f.Owner, f.Grand, new[] { 7 }, TestContext.Current.CancellationToken), f.AgentRoute);
+        Assert.Equal(0, await CountAsync(f.Owner, "SELECT count(*) FROM config.server_tag_map"));
+        Assert.Equal("assigned", (string?)Parse(await DarlingMcpServerTagTools.AssignServerTag(f.Owner, f.Free, new[] { 7 }, TestContext.Current.CancellationToken))["status"]);
+    }
+
+    [Fact]
+    public async Task UnassignServerTag_AsTheOwner_IsRefusedUnderAnAgentRoute_AndKeepsTheRow()
+    {
+        await using var f = (await OpenAsync())!;
+        await ExecAsync(f.Owner, $"INSERT INTO config.server_tag_map (server_id, tag_id) VALUES (7, {f.Grand})");
+
+        AssertRefused(await DarlingMcpServerTagTools.UnassignServerTag(f.Owner, f.Grand, new[] { 7 }, TestContext.Current.CancellationToken), f.AgentRoute);
+        Assert.Equal(1, await CountAsync(f.Owner, $"SELECT count(*) FROM config.server_tag_map WHERE server_id = 7 AND tag_id = {f.Grand}"));
+    }
+
+    [Fact]
+    public async Task UpdateServerTag_AsTheOwner_RefusesAReparentOutOfAnAgentRoute_ButARenameWorks()
     {
         await using var f = (await OpenAsync())!;
         var ct = TestContext.Current.CancellationToken;
 
-        /* postgres.mcpConnectionString unset: the MCP host connects with the store's own login, but with the marker the host puts on
-           its connections. */
-        var asOwner = new ServerTagStore(f.McpAsOwner, 30);
-        AssertRefused(await DarlingMcpServerTagTools.AssignServerTagCore(asOwner, f.Grand, new[] { 7 }, ct), f.AgentRoute);
-        AssertRefused(await DarlingMcpServerTagTools.DeleteServerTagCore(asOwner, f.Root, true, ct), f.AgentRoute);
-        Assert.Equal(0, await CountAsync(f.Owner, "SELECT count(*) FROM config.server_tag_map"));
-        Assert.Equal(6, await CountAsync(f.Owner, "SELECT count(*) FROM config.server_tags"));
+        AssertRefused(await DarlingMcpServerTagTools.UpdateServerTag(f.Owner, f.Grand, $"{{\"parent_id\":{f.Plain}}}", ct), f.AgentRoute);
+        Assert.Equal(1, await CountAsync(f.Owner, $"SELECT count(*) FROM config.server_tags WHERE id = {f.Grand} AND parent_id = {f.Child}"));
+        Assert.Equal("updated", (string?)Parse(await DarlingMcpServerTagTools.UpdateServerTag(f.Owner, f.Grand, "{\"name\":\"Grand2\"}", ct))["status"]);
+    }
 
-        /* The same login with no marker (the Viewer, the web and the service connect like this) edits the same tags. */
+    [Fact]
+    public async Task DeleteServerTag_AsTheOwner_IsRefusedOnAnAgentRoutesTag_AndKeepsTheTree()
+    {
+        await using var f = (await OpenAsync())!;
+
+        AssertRefused(await DarlingMcpServerTagTools.DeleteServerTag(f.Owner, f.Root, true, TestContext.Current.CancellationToken), f.AgentRoute);
+        Assert.Equal(6, await CountAsync(f.Owner, "SELECT count(*) FROM config.server_tags"));
+    }
+
+    [Fact]
+    public async Task RemoveServer_AsTheOwner_IsRefusedForAServerUnderAnAgentRoute_AndKeepsTheServerAndItsTags()
+    {
+        await using var f = (await OpenAsync())!;
+        await ExecAsync(f.Owner, $"INSERT INTO config.server_tag_map (server_id, tag_id) VALUES (8, {f.Grand})");
+
+        var refused = Parse(await DarlingMcpServerAdminTools.RemoveServer(f.Owner, "alpha-sql-02"));
+        Assert.Equal("refused", (string?)refused["status"]);
+        Assert.Contains($"Route {f.AgentRoute} ", (string?)refused["message"], StringComparison.Ordinal);
+        Assert.Equal(1, await CountAsync(f.Owner, "SELECT count(*) FROM config.config_monitored_servers WHERE server_id = 8"));
+        Assert.Equal(1, await CountAsync(f.Owner, "SELECT count(*) FROM config.server_tag_map WHERE server_id = 8"));
+    }
+
+    [Fact]
+    public async Task AViewerSessionAsTheOwner_StillEditsAnAgentRoutesTags()
+    {
+        await using var f = (await OpenAsync())!;
+        var ct = TestContext.Current.CancellationToken;
+
+        /* The Viewer and the web build the store without the marker; the same login edits the same tags. */
         var viewerAsOwner = new ServerTagStore(f.Owner, 30);
         Assert.Equal(new[] { 7 }, (await viewerAsOwner.AssignAsync(f.Grand, new[] { 7 }, ct)).ToArray());
         Assert.Equal(new[] { 7 }, (await viewerAsOwner.UnassignAsync(f.Grand, new[] { 7 }, ct)).ToArray());
@@ -403,17 +450,22 @@ VALUES (7, 'alpha-sql-01', 'alpha-sql-01', TRUE, 16, now() AT TIME ZONE 'UTC', n
     }
 
     [Fact]
-    public async Task TheMcpMarker_IsForced_AndKeepsAnOptionsValueTheStringAlreadyHad()
+    public async Task TheMcpDataSource_SendsNoStartupOptions_AndTheMarkerIsGoneOnceTheWriteCommits()
     {
         await using var f = (await OpenAsync())!;
-        var baseString = new NpgsqlConnectionStringBuilder(f.OwnerConnectionString) { Options = "-c work_mem=8MB -c darling.surface=viewer" }.ConnectionString;
+        var ct = TestContext.Current.CancellationToken;
 
-        await using var source = NpgsqlDataSource.Create(DarlingStoreConnection.WithMcpSurfaceMarker(baseString));
-        Assert.Equal("mcp", await TextAsync(source, "SELECT current_setting('darling.surface', true)"));
-        Assert.Equal("8MB", await TextAsync(source, "SHOW work_mem"));
+        var connectionString = DarlingStoreConnection.PinSessionTimeZoneUtc(
+            DarlingStoreConnection.WithApplicationName(f.OwnerConnectionString, DarlingManagedPostgres.McpApplicationName));
+        var builder = new NpgsqlConnectionStringBuilder(connectionString);
+        Assert.True(string.IsNullOrEmpty(builder.Options), $"the MCP store connection string must not carry Options, got '{builder.Options}'");
+        Assert.DoesNotContain("darling.surface", connectionString, StringComparison.Ordinal);
 
-        /* Nothing else sets it: a connection built without the helper has no marker. */
-        Assert.Equal("", await TextAsync(f.Owner, "SELECT coalesce(current_setting('darling.surface', true), '')"));
+        /* One physical connection, reused: a marker set for the session (not the transaction) would still be there after the write. */
+        builder.MaxPoolSize = 1;
+        await using var source = NpgsqlDataSource.Create(builder.ConnectionString);
+        Assert.Equal("assigned", (string?)Parse(await DarlingMcpServerTagTools.AssignServerTag(source, f.Free, new[] { 7 }, ct))["status"]);
+        Assert.Equal("", await TextAsync(source, "SELECT coalesce(current_setting('darling.surface', true), '')"));
     }
 
     private static async Task<string> TextAsync(NpgsqlDataSource source, string sql)

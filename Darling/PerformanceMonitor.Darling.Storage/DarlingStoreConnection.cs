@@ -10,6 +10,8 @@ using System;
 using System.ComponentModel;
 using System.Linq;
 using System.Reflection;
+using System.Threading;
+using System.Threading.Tasks;
 using Npgsql;
 
 namespace PerformanceMonitor.Darling.Storage;
@@ -62,28 +64,32 @@ public static class DarlingStoreConnection
         return connectionString + ";Timezone=UTC";
     }
 
-    /// <summary>The session setting the MCP host puts on its store connections (#6281), and the value it carries. The store's guard
-    /// on the tag writes (V209) refuses an MCP session by this marker as well as by the <c>mcp</c> login, so an MCP that connects as
-    /// the store's owner, or as another login, is held to the same rule.</summary>
+    /// <summary>The setting an MCP write transaction carries (#6281), and the value it carries. The store's guard on the tag writes
+    /// (V209) refuses a session by this marker as well as by the <c>mcp</c> login, so an MCP that connects as the store's owner, or
+    /// as another login, is held to the same rule. It is set per transaction, never as a connection startup option: PgBouncer and
+    /// RDS Proxy refuse an <c>options</c> startup parameter (#6143), and a pooler set to ignore it would drop the marker silently.</summary>
     public const string McpSurfaceSetting = "darling.surface";
 
-    /// <summary>The value of <see cref="McpSurfaceSetting"/> on an MCP connection.</summary>
+    /// <summary>The value of <see cref="McpSurfaceSetting"/> in an MCP write transaction.</summary>
     public const string McpSurfaceValue = "mcp";
 
+    /// <summary>Sets <see cref="McpSurfaceSetting"/> for the rest of the current transaction only (<c>is_local</c> = true), so it
+    /// survives a pooler and is gone at commit or rollback. $1 setting, $2 value.</summary>
+    public const string McpSurfaceMarkerSql = "SELECT pg_catalog.set_config($1, $2, true)";
+
     /// <summary>
-    /// Forces <c>-c darling.surface=mcp</c> into the connection's startup <c>Options</c> (#6281), keeping any <c>Options</c> the
-    /// caller already set and putting the marker LAST, so it wins over a <c>darling.surface</c> the caller's own string names
-    /// (Postgres applies <c>-c</c> options in order). Appended as a quoted <c>Options</c> keyword, like
-    /// <see cref="PinSessionTimeZoneUtc"/>, so every other keyword survives byte for byte. Only the MCP host calls it: the
-    /// service, the Viewer and the web must not carry the marker.
+    /// Marks the open transaction as an MCP write (#6281). Run it FIRST in every MCP transaction that can write
+    /// <c>config.server_tags</c> or <c>config.server_tag_map</c>, before the write. Only MCP callers use it: the service, the Viewer
+    /// and the web must not carry the marker.
     /// </summary>
-    public static string WithMcpSurfaceMarker(string connectionString)
+    public static async Task MarkMcpSurfaceAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, int commandTimeoutSeconds, CancellationToken ct = default)
     {
-        var existing = new NpgsqlConnectionStringBuilder(connectionString).Options;
-        var options = string.IsNullOrWhiteSpace(existing)
-            ? $"-c {McpSurfaceSetting}={McpSurfaceValue}"
-            : $"{existing.Trim()} -c {McpSurfaceSetting}={McpSurfaceValue}";
-        return connectionString + ";Options=\"" + options.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(transaction);
+        await using var command = new NpgsqlCommand(McpSurfaceMarkerSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds };
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = McpSurfaceSetting });
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = McpSurfaceValue });
+        await command.ExecuteNonQueryAsync(ct);
     }
 
     /// <summary>
