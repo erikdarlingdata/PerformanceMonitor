@@ -79,7 +79,7 @@ public sealed class DarlingMcpKnownPatternTools
 
             return JsonSerializer.Serialize(new
             {
-                total_count = list.Count,
+                entries_returned = list.Count,
                 note_is = NoteFraming,
                 known_patterns = list.Select(e => new
                 {
