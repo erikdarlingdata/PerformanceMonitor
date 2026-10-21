@@ -149,6 +149,10 @@ public sealed class StoreConfigProvider
                 await WarnAboutFileVersusStoreAsync(connection, config, cancellationToken);
             }
 
+            /* #6262: the one setting darling.json still owns after the seed. It has its own failure scope, so a refusal there
+               never stops the service row below from being seeded. */
+            await SyncRemediationLoginsAsync(connection, config, cancellationToken);
+
             /* LAST — its presence marks the seed complete (the reload gate keys on config_version). */
             if (await CountAsync(connection, "config_service", cancellationToken) == 0)
             {
@@ -161,6 +165,114 @@ public sealed class StoreConfigProvider
                 "Could not seed the config store from darling.json — running on the file config; the store will seed on a later start: {Message}",
                 ex.Message);
         }
+    }
+
+    /// <summary>One change <see cref="PlanRemediationSync"/> found: the registry row to write, what it becomes, and the verb for the log.</summary>
+    internal sealed record RemediationSyncChange(int ServerId, string Name, string? Username, string? Secret, string Action, string Note);
+
+    /// <summary>
+    /// #6262: darling.json is the only writer of a server's remediation login (the web, the viewer and edit_server cannot set it, so
+    /// the credential stays on the Darling host), yet the seed reads it only for a NEW row. On every start each file entry's two keys
+    /// become that registered server's slot: both present sets or replaces it, both absent clears it, one alone is written as it is
+    /// (the service already treats half a login as unarmed). A server that is not in the file is never touched. Runs on the store
+    /// owner's connection, the one the seed uses. Logs one line per change that names the server and the slot's shape, never the
+    /// login or the secret. A failure is warned and the start goes on.
+    /// </summary>
+    internal async Task SyncRemediationLoginsAsync(NpgsqlConnection connection, DarlingConfig config, CancellationToken ct)
+    {
+        try
+        {
+            var stored = new List<(int Id, string Name, string? Username, string? Secret)>();
+            using (var read = new NpgsqlCommand(
+                "SELECT server_id, name, remediation_username, remediation_encrypted_password FROM config_monitored_servers",
+                connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds })
+            await using (var reader = await read.ExecuteReaderAsync(ct))
+            {
+                while (await reader.ReadAsync(ct))
+                {
+                    stored.Add((reader.GetInt32(0), reader.IsDBNull(1) ? "" : reader.GetString(1),
+                        reader.IsDBNull(2) ? null : reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetString(3)));
+                }
+            }
+
+            foreach (var change in PlanRemediationSync(config.Servers, stored))
+            {
+                using var write = new NpgsqlCommand(
+                    "UPDATE config_monitored_servers SET remediation_username = $2, remediation_encrypted_password = $3, modified_at = $4 WHERE server_id = $1",
+                    connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
+                write.Parameters.AddWithValue(change.ServerId);
+                AddNullableText(write, change.Username);
+                AddNullableText(write, change.Secret);
+                write.Parameters.AddWithValue(Naive(DateTime.UtcNow));
+                if (await write.ExecuteNonQueryAsync(ct) > 0)
+                {
+                    _logger?.LogInformation(
+                        "Remediation login for server '{Server}' {Action} from darling.json (secret: {Shape}).{Note}",
+                        change.Name, change.Action, DarlingSecrets.RemediationSlotShape(change.Secret), change.Note);
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogWarning(
+                "Could not sync the remediation logins from darling.json to the registry; the registry keeps what it has: {Message}",
+                ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// The pure half of <see cref="SyncRemediationLoginsAsync"/>. A file entry is paired with a registered server by id, else by name,
+    /// as <see cref="DescribeSettingDrift"/> pairs them: an id or name that is ambiguous in the file or the registry is not guessed at.
+    /// Blank text is no value. A pair whose slot already equals the file's is not listed.
+    /// </summary>
+    internal static IReadOnlyList<RemediationSyncChange> PlanRemediationSync(
+        IEnumerable<MonitoredServer>? fileServers,
+        IReadOnlyList<(int Id, string Name, string? Username, string? Secret)> stored)
+    {
+        var changes = new List<RemediationSyncChange>();
+        var file = (fileServers ?? Enumerable.Empty<MonitoredServer>()).Where(s => s is not null).ToList();
+        var fileIdCounts = file.GroupBy(s => s.ServerId).ToDictionary(g => g.Key, g => g.Count());
+        var fileNameCounts = CountNames(file.Select(s => s.DisplayName));
+        var storeNameCounts = CountNames(stored.Select(s => s.Name));
+        var touched = new HashSet<int>();
+
+        foreach (var entry in file)
+        {
+            var match = default((int Id, string Name, string? Username, string? Secret));
+            var found = false;
+            if (fileIdCounts[entry.ServerId] == 1 && stored.Any(s => s.Id == entry.ServerId))
+            {
+                match = stored.First(s => s.Id == entry.ServerId);
+                found = true;
+            }
+            else if (Count(storeNameCounts, entry.DisplayName) == 1 && Count(fileNameCounts, entry.DisplayName) == 1)
+            {
+                match = stored.First(s => string.Equals(s.Name, entry.DisplayName, StringComparison.OrdinalIgnoreCase));
+                found = true;
+            }
+
+            if (!found || !touched.Add(match.Id))
+            {
+                continue;
+            }
+
+            var user = string.IsNullOrWhiteSpace(entry.RemediationUsername) ? null : entry.RemediationUsername;
+            var secret = string.IsNullOrWhiteSpace(entry.RemediationEncryptedPassword) ? null : entry.RemediationEncryptedPassword;
+            var heldUser = string.IsNullOrWhiteSpace(match.Username) ? null : match.Username;
+            var heldSecret = string.IsNullOrWhiteSpace(match.Secret) ? null : match.Secret;
+            if (string.Equals(user, heldUser, StringComparison.Ordinal) && string.Equals(secret, heldSecret, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var action = user is null && secret is null ? "cleared" : heldUser is null && heldSecret is null ? "set" : "changed";
+            var note = user is null || secret is null
+                ? " It is unarmed: darling.json has only one of remediationUsername and remediationEncryptedPassword."
+                : "";
+            changes.Add(new RemediationSyncChange(match.Id, match.Name, user, secret, action, note));
+        }
+
+        return changes;
     }
 
     /// <summary>

@@ -2595,16 +2595,19 @@ public sealed class MonitoredServer
     /// <para><b>Settable from the file</b>, unlike <see cref="PlanForceBotEnabled"/> — and the difference is
     /// deliberate. That flag is an ARM STATE, so a file knob would be a silent no-op on a seeded box
     /// (#2254). This is a CREDENTIAL, and the container/compose deploy has no viewer to type one into; the
-    /// <c>env:</c>/<c>file:</c> reference path is the only way to arm a Linux install at all. It is still
-    /// only read at seed time like every other credential field here.</para>
+    /// <c>env:</c>/<c>file:</c> reference path is the only way to arm a Linux install at all. Unlike every other
+    /// per-server field here it is NOT only a seed value (#6262): the file is the only writer of this slot, so
+    /// <c>StoreConfigProvider.SyncRemediationLoginsAsync</c> applies it to the registered server on every start.</para>
     /// </summary>
     [JsonPropertyName("remediationUsername")]
     public string? RemediationUsername { get; set; }
 
     /// <summary>
-    /// The remediation credential's DPAPI-LocalMachine blob, base64 — produced by the same
-    /// <c>--encrypt-password</c> as <see cref="EncryptedPassword"/>, and resolvable as an
-    /// <c>env:</c>/<c>file:</c> reference by the same <c>DarlingSecretSource</c>. There is deliberately no
+    /// The remediation credential's secret: an <c>env:</c>/<c>file:</c> reference (resolved by the same
+    /// <c>DarlingSecretSource</c>) or a DPAPI-LocalMachine blob, base64, produced by the same
+    /// <c>--encrypt-password</c> as <see cref="EncryptedPassword"/>. Only a reference works for every action (#6262):
+    /// a blob opens for operator remediation (#2138), but the agent server actions (plan force, plan eviction, session
+    /// kill) accept only a reference and <c>--validate-config</c> and the service warn about a blob. There is deliberately no
     /// plaintext sibling of this one (no counterpart to <see cref="Password"/>): the dev-convenience
     /// plaintext slot exists because a wrong monitoring password fails a read, and a wrong remediation
     /// password fails a write to a production server.

@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Runtime.Versioning;
 using System.Security.Cryptography;
 using System.Text;
@@ -316,6 +317,40 @@ public static class DarlingSecrets
     /// </summary>
     internal static bool DeclaresSecretText(string? stored) =>
         !string.IsNullOrWhiteSpace(stored) && !PasswordSeal.IsSealed(stored);
+
+    /// <summary>
+    /// #6262: one warning per darling.json server whose remediation secret is a stored value (a DPAPI blob or a sealed value) and not
+    /// an <c>env:</c> or <c>file:</c> reference, and which has both halves (an unarmed entry has nothing an action could refuse). The
+    /// operator remediation of #2138 opens such a value through <see cref="ResolveRemediationPassword(MonitoredServer, IPasswordKeyRing?)"/>,
+    /// but the gate for agent server actions (plan force, eviction, kill) classifies the slot by prefix and refuses anything else, so
+    /// the entry would arm one path and silently refuse the other. Names the server and the shape, never the value.
+    /// </summary>
+    internal static IReadOnlyList<string> RemediationSecretWarnings(IEnumerable<MonitoredServer>? servers)
+    {
+        var warnings = new List<string>();
+        foreach (var server in servers ?? Array.Empty<MonitoredServer>())
+        {
+            if (server is null || !server.HasRemediationCredential || DarlingSecretSource.IsReference(server.RemediationEncryptedPassword))
+            {
+                continue;
+            }
+
+            warnings.Add(
+                $"Server '{server.DisplayName}': remediationEncryptedPassword is a {RemediationSlotShape(server.RemediationEncryptedPassword)}, not an env: or file: reference. "
+                + "Operator remediation can still open it, but agent server actions (plan force, plan eviction and session kill) refuse it. "
+                + "Use an env:NAME or file:/path reference to let agents run them.");
+        }
+
+        return warnings;
+    }
+
+    /// <summary>The shape of a remediation slot for a log line or a warning: env, file, sealed or DPAPI (anything else stored), or none. Never the value.</summary>
+    internal static string RemediationSlotShape(string? stored) =>
+        string.IsNullOrWhiteSpace(stored) ? "none"
+        : stored.StartsWith("env:", StringComparison.Ordinal) ? "env reference"
+        : stored.StartsWith("file:", StringComparison.Ordinal) ? "file reference"
+        : PasswordSeal.IsSealed(stored) ? "sealed value"
+        : "DPAPI blob";
 
     /// <summary>True for stored text that is neither blank, a reference, nor a sealed value: the old DPAPI format.</summary>
     internal static bool IsLegacyDpapi(string? stored) =>

@@ -149,8 +149,11 @@
       // to force-only with a named reason rather than silently. The service PROBES for it with a
       // read-only has_perms_by_name check instead of guessing per platform, and Azure SQL Database has
       // no DBCC FREEPROCCACHE at all, which no grant changes.
-      // Same blob format as encryptedPassword (--encrypt-password on THIS machine, or an env:/file:
-      // reference). There is deliberately no plaintext variant of this one.
+      // An env:NAME or file:/path reference works everywhere. A DPAPI blob (--encrypt-password on THIS
+      // machine, same format as encryptedPassword) still works for operator remediation, but agent server
+      // actions (plan force, eviction, kill) refuse it: use a reference for those. There is deliberately
+      // no plaintext variant of this one. Both keys are re-read on every start and replace the registered
+      // server's login; remove both to clear it. A server that is not in this file is never touched.
       "remediationUsername": "",
       "remediationEncryptedPassword": "",
       // OPTIONAL, PostgreSQL targets only (#6170). The login the "Test an index" check runs under. The check never runs
