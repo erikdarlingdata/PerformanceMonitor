@@ -2599,7 +2599,11 @@ public sealed class MonitoredServer
     /// per-server field here it is NOT only a seed value (#6262): when BOTH keys are present,
     /// <c>StoreConfigProvider.SyncRemediationLoginsAsync</c> sets or replaces the registered server's login on every start, only on the
     /// server that pairs with this entry and connects the same way. Absent keys never clear it, and one key alone changes nothing (it is
-    /// logged): removing the keys disarms nothing, so turn a server's actions off with its action switches. Services that share one
+    /// logged): removing the keys disarms nothing. To stop agent actions on a server, turn off its action switches, or turn off agent
+    /// changes service-wide; the switches cover agent actions only, not operator remediation from the Viewer. To remove a server's
+    /// remediation login entirely, so neither agents nor operators can use it, take both keys out of the file and run, as the store owner,
+    /// <c>UPDATE config_monitored_servers SET remediation_username = NULL, remediation_encrypted_password = NULL,
+    /// modified_at = now() AT TIME ZONE 'UTC' WHERE name = 'alpha-sql-01'</c>. Services that share one
     /// store should declare the same logins, because each copies its own file on start.</para>
     /// </summary>
     [JsonPropertyName("remediationUsername")]

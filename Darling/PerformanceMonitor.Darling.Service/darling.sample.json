@@ -140,8 +140,8 @@
       "encryptMode": "Mandatory",
       // OPTIONAL second credential, for #2138 operator-initiated remediation only. The monitoring
       // credential above stays READ-ONLY forever and is never used for a write; a remediation action
-      // travels on this identity or it does not travel. Omit both keys (the default) and this server
-      // simply has no remediation surface -- there is nothing to disable and nothing to explain.
+      // travels on this identity or it does not travel. Omit both keys (the default) and a server you add
+      // has no remediation login. On a server that is already registered, omitting them changes nothing.
       // Both halves are required; one alone counts as unarmed and the service says so at connect.
       // Least privilege: ALTER on each database you intend to force a plan in, and -- only if you want
       // evict-first -- ALTER SERVER STATE, which is what targeted DBCC FREEPROCCACHE(plan_handle) needs.
@@ -154,8 +154,12 @@
       // actions (plan force, eviction, kill) refuse it: use a reference for those. There is deliberately
       // no plaintext variant of this one. When BOTH keys are set they are re-read on every start and replace the
       // registered server's login, but only on the server that pairs with this entry and connects the same way. Removing
-      // the keys, or setting only one, leaves the server's login as it is: it disarms nothing (turn a server's actions
-      // off with its action switches). A server that is not in this file is never touched. Services that share one store
+      // the keys, or setting only one, leaves the server's login as it is: it disarms nothing. To stop agent actions on
+      // a server, turn off its action switches, or turn off agent changes service-wide (the switches cover agent actions only,
+      // not operator remediation from the Viewer). To remove a server's remediation login entirely, so neither agents nor
+      // operators can use it, take both keys out of this file and run, as the store owner: UPDATE config_monitored_servers
+      // SET remediation_username = NULL, remediation_encrypted_password = NULL, modified_at = now() AT TIME ZONE 'UTC'
+      // WHERE name = 'alpha-sql-01';  A server that is not in this file is never touched. Services that share one store
       // should declare the same logins, because each copies its own file when it starts.
       "remediationUsername": "",
       "remediationEncryptedPassword": "",
