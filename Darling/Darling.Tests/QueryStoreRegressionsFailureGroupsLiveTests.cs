@@ -397,7 +397,8 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         Assert.Equal("timeouts", q10.GetProperty("regression_reason").GetString());
         Assert.Equal(4, q10.GetProperty("recent_aborted_count").GetInt64());
         Assert.Equal(0, q10.GetProperty("baseline_aborted_count").GetInt64());
-        Assert.Equal(System.Text.Json.JsonValueKind.Null, JsonValueKind(q10, "baseline_aborted_cpu_ms"));
+        /* A side with no runs has no per-execution figure, so the field is left out. */
+        Assert.False(q10.TryGetProperty("baseline_aborted_cpu_ms", out _));
         Assert.Equal(600.0, q10.GetProperty("recent_aborted_cpu_ms").GetDouble(), 2);
         Assert.False(q10.TryGetProperty("baseline_reads", out _));
         Assert.Contains("timeouts", doc.RootElement.GetProperty("gate").GetString(), StringComparison.Ordinal);

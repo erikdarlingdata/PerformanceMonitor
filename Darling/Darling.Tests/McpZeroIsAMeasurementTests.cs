@@ -187,10 +187,11 @@ public sealed class McpZeroIsAMeasurementTests
     [InlineData(LiteMcp + "/McpQueryTools.cs")]
     public void TheRegressionTool_SaysWhyAPercentIsNull_AndDoesNotBandAMissingRatio(string file)
     {
-        var body = Strip(ToolBody(ReadRepoFile(file.Split('/')), "get_query_store_regressions"));
-        Assert.Contains("undefined_percents = UndefinedPercentNotes(r)", body, StringComparison.Ordinal);
+        /* Darling builds the row in a helper beside the tool method, so read the whole file. */
+        var body = Strip(ReadRepoFile(file.Split('/')));
+        Assert.Matches(@"undefined_percents""?\]? = UndefinedPercentNotes\(r\)", body);
         /* Darling also lists failure-only rows, which have no duration ratio but do carry a severity; only a cost-only row with no ratio is unbanded. */
-        Assert.Matches(@"severity = r\.DurationRegressionPercent is null( && r\.RegressionReason == ""cost"")? \? null : r\.Severity", body);
+        Assert.Matches(@"severity""?\]? = r\.DurationRegressionPercent is null( && r\.RegressionReason == ""cost"")? \? null : r\.Severity", body);
 
         /* #3898 D3 re-point: the head (DescriptionOf) now carries this guardrail in its own leaner words -
            "duration_regression_percent and severity are null, not 0%, when their baseline is 0"
