@@ -250,6 +250,7 @@ public sealed class DarlingMcpPlanForceTools
             /* 6: the write, journaled. */
             PlanForceState? after = null;
             var afterNotRead = false;
+            RemediationResult? unknown = null;
             var changed = new ServerChangeSignal();
             try
             {
@@ -266,6 +267,14 @@ public sealed class DarlingMcpPlanForceTools
                         /* The executor says the server accepted the write: from here the store's journal never says failed (#5632, step 13). */
                         if (written.Wrote)
                             changed.MarkServerChanged();
+                        if (written.Outcome == RemediationOutcome.Unknown)
+                        {
+                            /* The write was sent and its reply was lost, or the call was cancelled while it ran: neither done nor failed (#5632), as for a kill. */
+                            changed.MarkOutcomeUnknown();
+                            unknown = written;
+                            return null;
+                        }
+
                         if (written.Outcome != RemediationOutcome.Done || !written.Wrote)
                             throw new PlanForceWriteException(written.Message, Answer(written.Outcome == RemediationOutcome.Refused ? "refused" : "failed",
                                 written.Reason, written.Message, new { dry_run = false, statement, before = beforeState }));
@@ -287,6 +296,8 @@ public sealed class DarlingMcpPlanForceTools
                 var result = await store.RunAgentActionAsync(new AgentActionCall(tool, kind, action!, target), hooks, ct);
                 if (result.Refusal is { } refused)
                     return DarlingAgentActionGate.RefusalAnswer(refused);
+                if (result.OutcomeUnknown && unknown is not null)
+                    return Answer("outcome_unknown", null, unknown.Message, new { dry_run = false, statement, before = beforeState, journal_id = result.CalledId });
                 return WithWarnings(Answer("done", null,
                     $"Plan {plan_id} was {(force ? "forced" : "unforced")} for query {query_id} in {beforeState.Database}. Check with get_forced_plans.",
                     new { dry_run = false, statement, before = beforeState, after, undo = AgentPlanUndoBuilder.For(force, resolved.ServerName, beforeState.Database, query_id, plan_id, beforeState.ForcedPlan?.PlanId, beforeState.ForcedPlan?.ForcingType), journal_id = result.CalledId }),
@@ -885,6 +896,10 @@ public sealed class DarlingMcpPlanForceTools
         }
     }
 
+    /// <summary>What a person is told when an undo's write was sent and its reply was lost (#5632): our own words, never the server's.</summary>
+    internal const string UndoOutcomeUnknownWords =
+        "The undo was sent to the server, but its reply was lost, so the plan may or may not have changed. Nothing was recorded as undone. Check the plan's current state in Query Store before you try again; the change stays on the list, and a second try reads the server first.";
+
     private static async Task<PlanUndoAnswer> DecideAndRunAsync(AgentChangeUndo.PlanUndoSession session, NpgsqlDataSource? owner, ILogger logger,
         bool confirm, string? shownStatement, CancellationToken ct)
     {
@@ -953,6 +968,15 @@ public sealed class DarlingMcpPlanForceTools
         var written = step.Force
             ? await executor.ForcePlanAsync(stepPermit, facts.QueryId, step.PlanId, dryRun: false, ct)
             : await executor.UnforcePlanAsync(stepPermit, facts.QueryId, step.PlanId, dryRun: false, ct);
+        if (written.Outcome == RemediationOutcome.Unknown)
+        {
+            /* The write was sent and its reply was lost, or the call was cancelled while it ran (#5632): the plan may have changed. Nothing is
+               journaled: not undone (the server did not confirm it) and not refused (it was not). The change stays offered for undo, and the
+               server-state check on the next try decides whether the undo still applies. */
+            logger.LogWarning("The undo of plan change {CalledId} was sent, but its outcome is unknown: {Message}", facts.CalledId, written.Message);
+            return new PlanUndoAnswer(PlanUndoAnswer.OutcomeUnknown, RemediationResult.Reasons.OutcomeUnknown, UndoOutcomeUnknownWords, statement, stateNode);
+        }
+
         if (written.Outcome != RemediationOutcome.Done || !written.Wrote)
         {
             await session.RecordRefusalAsync(written.Reason ?? "write_failed", ct);
@@ -960,7 +984,7 @@ public sealed class DarlingMcpPlanForceTools
         }
 
         /* The executor says the server accepted the write: from here a store failure is recorded late, never lost (#5632, step 13). */
-        session.MarkServerChanged(statement, stateNode, step.RestoredAs);
+        await session.MarkServerChangedAsync(statement, stateNode, step.RestoredAs);
 
         /* The read after the write is a warning when it fails, not an error for a change that was made. */
         JsonNode? afterNode = null;
