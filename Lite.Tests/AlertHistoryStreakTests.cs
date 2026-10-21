@@ -67,6 +67,10 @@ public sealed class AlertHistoryStreakTests : IDisposable
             await _helper.InsertLiveAlertAsync(connection, At(3), 1, "srv", Metric, muted: true);
             await _helper.InsertLiveAlertAsync(connection, At(5).AddHours(12), 1, "srv", Metric);
             await _helper.InsertLiveAlertAsync(connection, At(1).AddMinutes(5), 1, "srv", Metric + " Resolved");
+            /* A 23:50 alert: its day-1 fire is the 00:10 of its own date; a count by calendar date finds no streak. */
+            await _helper.InsertLiveAlertAsync(connection, today.AddDays(-1).AddHours(23).AddMinutes(50), 1, "srv", "Midnight");
+            await _helper.InsertLiveAlertAsync(connection, today.AddDays(-1).AddMinutes(10), 1, "srv", "Midnight");
+            await _helper.InsertLiveAlertAsync(connection, today.AddDays(-2).AddMinutes(10), 1, "srv", "Midnight", muted: true);
         }
 
         var service = new LocalDataService(_initializer);
@@ -89,6 +93,7 @@ public sealed class AlertHistoryStreakTests : IDisposable
         Assert.Equal(0, Streak(At(4)));
         Assert.Equal(0, Streak(At(6)));
         Assert.False(Row(At(1), Metric).GetProperty("streak_at_least_days_window").GetBoolean());
+        Assert.Equal(2, Row(today.AddDays(-1).AddHours(23).AddMinutes(50), "Midnight").GetProperty("streak_days").GetInt32());
         Assert.Equal(JsonValueKind.Null, Row(At(1).AddMinutes(5), Metric + " Resolved").GetProperty("streak_days").ValueKind);
 
         /* The page is bounded by limit, the streak is not. */

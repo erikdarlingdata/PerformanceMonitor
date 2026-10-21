@@ -67,6 +67,13 @@ VALUES ($1, $2, $3, $4, 45, 30, $5, 'email', NULL, $6, FALSE, NULL, NULL)",
         await InsertAsync(connection, At(5).AddHours(12), Metric, muted: false, ct);  // the gap day, at another time of day
         await InsertAsync(connection, At(1).AddMinutes(5), Metric + " Resolved", muted: false, ct);
 
+        /* A 23:50 alert: its day-1 fire is the 00:10 of its own date, day 2 the 00:10 before. A count by calendar date puts the
+           first on the alert's own date and finds no streak. */
+        var late = today.AddDays(-1).AddHours(23).AddMinutes(50);
+        await InsertAsync(connection, late, "Midnight", muted: false, ct);
+        await InsertAsync(connection, today.AddDays(-1).AddMinutes(10), "Midnight", muted: false, ct);
+        await InsertAsync(connection, today.AddDays(-2).AddMinutes(10), "Midnight", muted: true, ct);
+
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
 
         var plain = await DarlingMcpAlertTools.GetAlertHistory(dataSource, ServerName, 240, 50, metric_name: Metric);
@@ -94,6 +101,8 @@ VALUES ($1, $2, $3, $4, 45, 30, $5, 'email', NULL, $6, FALSE, NULL, NULL)",
         var narrow = JsonDocument.Parse(await DarlingMcpAlertTools.GetAlertHistory(
             dataSource, ServerName, 240, 1, metric_name: Metric, include_streak: true)).RootElement;
         var only = narrow.GetProperty("alerts").EnumerateArray().Single();
+        Assert.Equal(2, Row(late, "Midnight").GetProperty("streak_days").GetInt32());
+
         Assert.Equal(1, narrow.GetProperty("alerts").GetArrayLength());
         Assert.Equal(3, only.GetProperty("streak_days").GetInt32());
     }
