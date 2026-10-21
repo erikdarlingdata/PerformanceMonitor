@@ -315,6 +315,9 @@
             <TabItem Header="_Agent changes">
                 <local:AgentChangesTab x:Name="AgentChangesView"/>
             </TabItem>
+            <TabItem Header="Server a_ctions">
+                <local:ServerActionsTab x:Name="ServerActionsView"/>
+            </TabItem>
         </TabControl>
 
         <TextBlock x:Name="StatusText" Grid.Row="2" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="0,10,100,0"

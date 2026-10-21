@@ -27,6 +27,7 @@ import { VIZ } from "../panels.js";
 import { el, mount, loadingStrip, errorStrip, emptyStrip, noticeStrip, readTool, apiGet, apiWrite, onSessionExpired, localizeIsoText } from "../util.js";
 import { getSession } from "../views-api.js";
 import { buildAgentChanges, resetAgentChangesStatus } from "./admin-agent-changes.js";
+import { buildServerActions, resetServerActionsStatus } from "./admin-server-actions.js";
 
 export const SERVER_COLUMNS = [
   { key: "display_name", label: "Display Name" },
@@ -669,6 +670,7 @@ const TABS = [
   { id: "pending", label: "Pending Notes" },
   { id: "overrides", label: "Threshold Overrides" },
   { id: "agent-changes", label: "Agent changes" },
+  { id: "server-actions", label: "Server actions" },
 ];
 
 /* The tab last shown, so a repaint with a bare #/admin returns to it. */
@@ -1824,7 +1826,17 @@ const agentChangesContext = {
 };
 const buildAgentChangesTab = (body, generation) => buildAgentChanges(body, generation, agentChangesContext);
 
-const BUILDERS = { servers: buildServers, routes: buildRoutes, settings: buildSettings, feedback: buildFeedback, practice: buildPractice, pending: buildPending, overrides: buildOverrides, "agent-changes": buildAgentChangesTab };
+/* Server actions (#6269) lives in its own file too, with the same helpers. */
+const serverActionsContext = {
+  ...agentChangesContext,
+  repaint: () => {
+    if (shownTab === "server-actions" && shownBody) return startBuilder("server-actions", shownBody, ++renderGeneration);
+    return null;
+  },
+};
+const buildServerActionsTab = (body, generation) => buildServerActions(body, generation, serverActionsContext);
+
+const BUILDERS = { servers: buildServers, routes: buildRoutes, settings: buildSettings, feedback: buildFeedback, practice: buildPractice, pending: buildPending, overrides: buildOverrides, "agent-changes": buildAgentChangesTab, "server-actions": buildServerActionsTab };
 
 /* Run a tab's builder. A builder that throws leaves an error strip: in the Servers tab's table area when its boxes are on the
    page (the form above it is never replaced), else in the body. */
@@ -1870,6 +1882,7 @@ export function renderAdmin(main, tabId) {
     summary = null;
     notesStatus = null;
     resetAgentChangesStatus();
+    resetServerActionsStatus();
     notice = tab.id === "servers" ? held : null;
     if (tab.id === "servers") held = null;
   }
