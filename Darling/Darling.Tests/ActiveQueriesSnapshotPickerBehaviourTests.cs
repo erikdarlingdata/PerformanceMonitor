@@ -148,6 +148,8 @@ public sealed class ActiveQueriesSnapshotPickerBehaviourTests
     {
         var first = Run("wait").GetProperty("first");
 
-        Assert.Equal(new string?[] { "PAGEIOLATCH_SH", "PAGEIOLATCH_SH" }, Asks(first, "wait_type"));
+        /* The time slicer's strip (#6301) charts the whole window's snapshots, so it asks for the list with no wait: it is the one ask without
+           a wait_type, and the list and the grid are the two that carry it. */
+        Assert.Equal(new string?[] { "PAGEIOLATCH_SH", "PAGEIOLATCH_SH" }, Asks(first, "wait_type").Where(w => w is not null).ToArray());
     }
 }
