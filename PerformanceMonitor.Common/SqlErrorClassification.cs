@@ -145,4 +145,18 @@ public static class SqlErrorClassification
     /// </summary>
     public static bool ShouldFallBackToSingleDatabase(int errorNumber) =>
         SingleDatabaseFallbackErrorNumbers.Contains(errorNumber);
+
+    /// <summary>
+    /// True when the error means the connection to a database could not be made or kept, as opposed to a query that
+    /// ran and failed (#6312): a firewall rejection (40615), a database that is not available (40613, a paused
+    /// serverless database), a login or database the connection cannot open (18456, 4060), a refused or dropped
+    /// network connection and a timeout. Built from the two sets above, so it cannot disagree with them about what
+    /// "cannot reach" means.
+    ///
+    /// <para>A per-database fan-out uses it to pick which failure to report when several databases failed: the one
+    /// that says the server could not be reached outranks one that says a database has no XE session, because the
+    /// session is missing from a database that was never opened as readily as from one that was.</para>
+    /// </summary>
+    public static bool IsConnectionFailure(int errorNumber) =>
+        TransientErrorNumbers.Contains(errorNumber) || SingleDatabaseFallbackErrorNumbers.Contains(errorNumber);
 }

@@ -118,6 +118,10 @@ public sealed class AttentionCollector : CollectorDefinitionBase<AttentionCollec
     /// <summary>Azure SQL DB sessions are database-scoped, one per monitored database, like the deadlock and blocked-process ones.</summary>
     public override bool RunsPerDatabase(CollectorTargetInfo target) => target.IsAzureSqlDb;
 
+    /* #6312: the session is database-scoped on Azure SQL Database and master cannot host one, so the fan-out leaves
+       master out instead of counting its "XE session is not running" as a failed database every sweep. */
+    public override bool SkipsMasterDatabase => true;
+
     public override string? PerDatabaseWatermarkColumn => "database_name";
 
     public override IReadOnlyList<string> StateKeys { get; } = new[] { XeShredGate.StateKey, CountStateKey };
