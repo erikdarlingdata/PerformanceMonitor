@@ -6032,7 +6032,7 @@ AND   collection_time >= $3", storeConnection))
                 }
             }
 
-            var stored = await ReadStoredHourRowsAsync(storeConnection, server, databaseName, context, rows, cancellationToken);
+            var (stored, _) = await ReadStoredHourRowsAsync(storeConnection, server.ServerId, databaseName, context.CollectionTime, rows, cancellationToken);
 
             var selection = QueryStoreFetchSelection.Select(rows, topN, alwaysPlans, alwaysQueries, stored);
             _logger?.LogDebug(
@@ -6061,19 +6061,19 @@ AND   collection_time >= $3", storeConnection))
     /// the partitions.</para>
     ///
     /// <para><b>Raw only where the wide table cannot answer</b> (its coverage gate): when this server has no coverage row, the row's
-    /// <c>filled_since</c> is later than the oldest interval start in the batch (the table was not yet filled for that hour), or the table
-    /// has a pending batch (an apply that failed). Then the answer is the raw read this method used first. A wide table that lags, whether by
-    /// a batch the writer has not applied yet or a row the gate cannot see, only leaves a competitor out of the rank: the batch plans then
-    /// rank higher, so the selection takes more plans, never fewer.</para>
+    /// <c>filled_since</c> is later than the oldest interval start in the batch (the table was not yet filled for that hour, so right after
+    /// an install the first hour reads raw, which is small then), or the table has a pending batch (an apply that failed). Then the answer is
+    /// the raw read this method used first. The gate is conservative: a wide table that lags only leaves a competitor out of the rank, so the
+    /// batch plans rank higher and the selection takes more plans, never fewer.</para>
     ///
     /// <para>Rows with no <c>runtime_stats_interval_id</c> (collected before the column existed) are not read here and rank as one batch
     /// (<see cref="QueryStoreFetchSelection"/>), which also selects more, never less.</para>
     /// </summary>
-    private static async Task<List<QueryStoreCollector.Row>> ReadStoredHourRowsAsync(
+    internal static async Task<(List<QueryStoreCollector.Row> Rows, bool UsedWideTable)> ReadStoredHourRowsAsync(
         NpgsqlConnection storeConnection,
-        ServerRuntime server,
+        int serverId,
         string databaseName,
-        CollectorContext context,
+        DateTime collectionTime,
         List<QueryStoreCollector.Row> rows,
         CancellationToken cancellationToken)
     {
@@ -6081,11 +6081,11 @@ AND   collection_time >= $3", storeConnection))
         var intervalIds = rows.Where(r => r.RuntimeStatsIntervalId is not null).Select(r => r.RuntimeStatsIntervalId!.Value).Distinct().ToArray();
         if (intervalIds.Length == 0)
         {
-            return stored;
+            return (stored, false);
         }
 
         var starts = rows.Where(r => r.IntervalStartTimeUtc is not null).Select(r => r.IntervalStartTimeUtc!.Value).ToList();
-        var floor = DateTime.SpecifyKind(starts.Count > 0 ? starts.Min() : context.CollectionTime - s_alwaysFetchLookBack, DateTimeKind.Unspecified);
+        var floor = DateTime.SpecifyKind(starts.Count > 0 ? starts.Min() : collectionTime - s_alwaysFetchLookBack, DateTimeKind.Unspecified);
 
         bool wideCovers;
         using (var gate = new NpgsqlCommand(@"
@@ -6104,7 +6104,7 @@ AND NOT EXISTS
 );", storeConnection))
         {
             gate.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
-            gate.Parameters.Add(new NpgsqlParameter<int> { TypedValue = server.ServerId });
+            gate.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
             gate.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = floor });
             wideCovers = (bool)(await gate.ExecuteScalarAsync(cancellationToken))!;
         }
@@ -6135,7 +6135,7 @@ ORDER BY plan_id, runtime_stats_interval_id, execution_type_desc, replica_role, 
         var lower = wideCovers ? floor - QueryStoreIntervalWide.IntervalStartSlack : floor;
         using var hour = new NpgsqlCommand(sql, storeConnection);
         hour.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
-        hour.Parameters.Add(new NpgsqlParameter<int> { TypedValue = server.ServerId });
+        hour.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         hour.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName });
         hour.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = lower });
         hour.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint, Value = intervalIds });
@@ -6160,7 +6160,7 @@ ORDER BY plan_id, runtime_stats_interval_id, execution_type_desc, replica_role, 
             });
         }
 
-        return stored;
+        return (stored, wideCovers);
     }
 
     /// <summary>
