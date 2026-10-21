@@ -262,7 +262,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                 var deadlockData = deadlockTask.IsCompletedSuccessfully
                     ? deadlockTask.Result.Select(d => (d.Time.ToOADate(), (double)d.Count)).ToList()
                     : new List<(double, double)>();
-                UpdateBlockingLane(blockingData, deadlockData, blockingBaseline);
+                UpdateBlockingLane(blockingData, deadlockData, blockingBaseline, (windowEndUtc - windowStartUtc).TotalDays);
             }
 
             if (memoryTask.IsCompletedSuccessfully)
@@ -409,7 +409,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     }
 
     private void UpdateBlockingLane(List<(double Time, double Value)> blockingData,
-        List<(double Time, double Value)> deadlockData, BaselineBucket? baseline = null)
+        List<(double Time, double Value)> deadlockData, BaselineBucket? baseline = null, double windowSpanDays = 0)
     {
         ClearChart(BlockingChart);
         ApplyTheme(BlockingChart);
@@ -421,10 +421,12 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         var deadValues = deadlockData.Select(d => d.Value).ToArray();
 
         // First series clears any previous data
-        _crosshairManager?.SetLaneData(BlockingChart, blockTimes, blockValues, isEventBased: true);
+        _crosshairManager?.SetLaneData(BlockingChart, blockTimes, blockValues, isEventBased: true,
+            hoverToleranceDays: EventLaneGeometry.HoverToleranceDays(windowSpanDays));
         // Rename the auto-created series and add the second
         _crosshairManager?.AddLaneSeries(BlockingChart, "Deadlocks", "events",
-            deadTimes, deadValues, isEventBased: true);
+            deadTimes, deadValues, isEventBased: true,
+            hoverToleranceDays: EventLaneGeometry.HoverToleranceDays(windowSpanDays));
 
         if (blockingData.Count == 0 && deadlockData.Count == 0)
         {
@@ -432,7 +434,9 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             return;
         }
 
-        double barWidth = 30.0 / 86400.0;
+        /* #6284: a bar follows the window it is drawn in, and the hover reaches as far as the bar does. A fixed 30-second
+           bar is a sub-pixel sliver in a 24-hour window, and a hover that reached one minute read 0 over it. */
+        double barWidth = EventLaneGeometry.BarWidthDays(windowSpanDays);
         double maxCount = 0;
 
         // Blocking bars — red

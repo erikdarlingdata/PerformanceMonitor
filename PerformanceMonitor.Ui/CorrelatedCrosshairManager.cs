@@ -132,7 +132,7 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
     /// Sets a single data series for a lane (most lanes have one series).
     /// </summary>
     public void SetLaneData(ScottPlot.WPF.WpfPlot chart, double[] times, double[] values,
-        bool isEventBased = false)
+        bool isEventBased = false, double hoverToleranceDays = EventLaneGeometry.MinHoverToleranceDays)
     {
         var lane = _lanes.Find(l => l.Chart == chart);
         if (lane == null) return;
@@ -143,7 +143,8 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
             Name = lane.Label,
             Times = times,
             Values = values,
-            IsEventBased = isEventBased
+            IsEventBased = isEventBased,
+            HoverToleranceDays = hoverToleranceDays
         });
     }
 
@@ -152,7 +153,8 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
     /// Call SetLaneData first to clear, then AddLaneSeries for additional series.
     /// </summary>
     public void AddLaneSeries(ScottPlot.WPF.WpfPlot chart, string name, string unit,
-        double[] times, double[] values, bool isEventBased = false)
+        double[] times, double[] values, bool isEventBased = false,
+        double hoverToleranceDays = EventLaneGeometry.MinHoverToleranceDays)
     {
         var lane = _lanes.Find(l => l.Chart == chart);
         if (lane == null) return;
@@ -163,7 +165,8 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
             Unit = unit,
             Times = times,
             Values = values,
-            IsEventBased = isEventBased
+            IsEventBased = isEventBased,
+            HoverToleranceDays = hoverToleranceDays
         });
     }
 
@@ -349,39 +352,7 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
     }
 
     private static double? FindNearestValue(DataSeries series, double targetX)
-    {
-        if (series.Times == null || series.Values == null || series.Times.Length == 0)
-            return null;
-
-        var times = series.Times;
-        var values = series.Values;
-
-        int lo = 0, hi = times.Length - 1;
-        while (lo < hi)
-        {
-            int mid = (lo + hi) / 2;
-            if (times[mid] < targetX)
-                lo = mid + 1;
-            else
-                hi = mid;
-        }
-
-        int best = lo;
-        if (lo > 0 && Math.Abs(times[lo - 1] - targetX) < Math.Abs(times[lo] - targetX))
-            best = lo - 1;
-
-        double val = values[best];
-        if (double.IsNaN(val)) return null;
-
-        if (series.IsEventBased)
-        {
-            double oneMinute = 1.0 / 1440.0;
-            if (Math.Abs(times[best] - targetX) > oneMinute)
-                return 0;
-        }
-
-        return val;
-    }
+        => EventLaneGeometry.NearestValue(series.Times, series.Values, targetX, series.IsEventBased, series.HoverToleranceDays);
 
     private static readonly SolidColorBrush RedBrush = Frozen(0xFF, 0x52, 0x52);
     private static readonly SolidColorBrush GreenBrush = Frozen(0x69, 0xF0, 0x69);
@@ -477,6 +448,8 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
         public double[]? Times { get; set; }
         public double[]? Values { get; set; }
         public bool IsEventBased { get; set; }
+        /// <summary>How far from a bucket an event series still reads that bucket's count (#6284).</summary>
+        public double HoverToleranceDays { get; set; } = EventLaneGeometry.MinHoverToleranceDays;
     }
 
     private sealed class LaneInfo
