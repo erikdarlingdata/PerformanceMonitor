@@ -444,84 +444,209 @@ public sealed class ServerActionGateLiveTests
         });
     }
 
-    /* The write's levels come from rows the hook reads in the write's own transaction: a route's level, or the server's tag rows (a tag-scoped
-       route matches a server through them). A person's change to those rows that has not committed when the write reads them is waited for,
-       because the write holds them FOR SHARE; a plain read would see the committed old rows and write. */
-    private AgentActionHooks RowHooks(string levelSql, Func<CancellationToken, Task> inFlight) => new()
-    {
-        LoadLevels = async (connection, transaction, token) =>
-        {
-            await using var read = new NpgsqlCommand(levelSql, connection, transaction);
-            var level = Convert.ToInt32(await read.ExecuteScalarAsync(token), CultureInfo.InvariantCulture);
-            return (_, _) => level;
-        },
-        ReadBefore = async (_, _, token) =>
-        {
-            await inFlight(token);
-            return "{\"reason\":\"old\"}";
-        },
-        Write = (_, _, _) => { _writes++; return Task.FromResult<string?>("{\"reason\":\"new\"}"); },
-    };
-
-    /* A route or tag edit normally bumps the service row's version, and the write reads that row FOR SHARE, so it would wait for the edit anyway.
-       These edits do not bump (a direct edit with triggers off), so only the lock on the rows themselves makes the write wait. */
-    private const string NoVersionBump = "SET LOCAL session_replication_role = replica; ";
-
-    private static Func<CancellationToken, Task> UncommittedChange(NpgsqlDataSource source, string sql, Action<Task> keep) => async token =>
-    {
-        var writer = await source.OpenConnectionAsync(token);
-        var transaction = await writer.BeginTransactionAsync(token);
-        await using (var update = new NpgsqlCommand(sql, writer, transaction))
-        {
-            await update.ExecuteNonQueryAsync(token);
-        }
-
-        keep(Task.Run(async () =>
-        {
-            await Task.Delay(1000, CancellationToken.None);
-            await transaction.CommitAsync(CancellationToken.None);
-            await transaction.DisposeAsync();
-            await writer.DisposeAsync();
-        }, CancellationToken.None));
-    };
-
+    /* A person's route or tag edit made while a write is in its transaction waits for that write, and the next write reads it. The write does not
+       lock the route and tag rows: every writer of them fires the version-bump trigger, which UPDATEs the service row the write holds. */
     [Fact]
-    public async Task TheWrite_WaitsForARouteBeingLowered_ThenRefusesLevelThree_AndNothingReachesTheServer()
+    public async Task ARouteEditAndATagEdit_MadeDuringTheWrite_WaitForIt_ThenTheNextWriteSeesEach()
     {
         await RunAsync(async (store, connection, source, ct) =>
         {
             await ArmAsync(connection, switchOn: true, "svc", "env:X", ct);
             await ExecAsync(connection, "INSERT INTO config.config_notification_routes (route_id, metric_match, agent_level) OVERRIDING SYSTEM VALUE VALUES (4001, 'Blocking', 3)", ct);
+            await ExecAsync(connection, "INSERT INTO config.server_tags (id, name) OVERRIDING SYSTEM VALUE VALUES (9101, 'prod')", ct);
+            await ExecAsync(connection, "INSERT INTO config.server_tag_map (server_id, tag_id) VALUES (7, 9101)", ct);
             var (request, claim) = await OpenAndClaimAsync(store, 3);
-            Task? commit = null;
-            var hooks = RowHooks("SELECT agent_level FROM config.config_notification_routes WHERE route_id = 4001",
-                UncommittedChange(source, NoVersionBump + "UPDATE config.config_notification_routes SET agent_level = 2 WHERE route_id = 4001", t => commit = t));
-            var result = await store.RunAgentActionAsync(WriteCall(request, claim), hooks, ct);
-            await commit!;
-            Assert.Equal(AgentActionCodes.NotLevel3, result.Refusal?.Reason);
-            Assert.Equal(0, _writes);
-            Assert.Equal("action_called|action_failed", await EventsAsync(connection, request, ct));
+
+            /* The level the write reads: the route's own while the server holds its tag, 2 once it does not. */
+            AgentActionHooks Hooks(Func<CancellationToken, Task>? duringWrite) => new()
+            {
+                LoadLevels = async (c, t, token) =>
+                {
+                    await using var read = new NpgsqlCommand(
+                        "SELECT CASE WHEN EXISTS (SELECT 1 FROM config.server_tag_map WHERE server_id = 7) THEN agent_level ELSE 2 END FROM config.config_notification_routes WHERE route_id = 4001", c, t);
+                    var level = Convert.ToInt32(await read.ExecuteScalarAsync(token), CultureInfo.InvariantCulture);
+                    return (_, _) => level;
+                },
+                ReadBefore = (_, _, _) => Task.FromResult<string?>("{\"reason\":\"old\"}"),
+                Write = async (_, _, token) =>
+                {
+                    _writes++;
+                    if (duringWrite is not null)
+                        await duringWrite(token);
+                    return "{\"reason\":\"new\"}";
+                },
+            };
+
+            async Task EditDuringAWriteAsync(string editSql, string restoreSql)
+            {
+                Task? edit = null;
+                var during = await store.RunAgentActionAsync(WriteCall(request, claim), Hooks(async token =>
+                {
+                    /* The edit is the stores' own statement, started inside this write's transaction. Its version bump cannot get the service
+                       row until the write ends. */
+                    edit = EditAsync(source, editSql, ct);
+                    await Task.Delay(1500, token);
+                    Assert.False(edit.IsCompleted, "the edit finished while the write was still in its transaction");
+                }), ct);
+                Assert.True(during.Done, during.Refusal?.Message);
+                await edit!;
+
+                var next = await store.RunAgentActionAsync(WriteCall(request, claim), Hooks(null), ct);
+                Assert.Equal(AgentActionCodes.NotLevel3, next.Refusal?.Reason);
+                await ExecAsync(connection, restoreSql, ct);
+            }
+
+            await EditDuringAWriteAsync("UPDATE config.config_notification_routes SET agent_level = 2 WHERE route_id = 4001",
+                "UPDATE config.config_notification_routes SET agent_level = 3 WHERE route_id = 4001");
+            await EditDuringAWriteAsync("DELETE FROM config.server_tag_map WHERE server_id = 7",
+                "INSERT INTO config.server_tag_map (server_id, tag_id) VALUES (7, 9101)");
+            Assert.Equal(2, _writes);
         });
     }
 
+    /* A pause writes the service row too, on the command plane (5 seconds for its other writes). It waits for an agent change that holds the row
+       for longer than that, and then succeeds. */
     [Fact]
-    public async Task TheWrite_WaitsForAServerTagBeingRemoved_ThenRefusesLevelThree_AndNothingReachesTheServer()
+    public async Task APause_WaitsForAnAgentChangeHoldingTheServiceRow_PastTheCommandPlanesFiveSeconds_ThenSucceeds()
     {
         await RunAsync(async (store, connection, source, ct) =>
         {
             await ArmAsync(connection, switchOn: true, "svc", "env:X", ct);
-            await ExecAsync(connection, "INSERT INTO config.server_tags (id, name) OVERRIDING SYSTEM VALUE VALUES (9101, 'prod')", ct);
-            await ExecAsync(connection, "INSERT INTO config.server_tag_map (server_id, tag_id) VALUES (7, 9101)", ct);
+            await using var holder = await source.OpenConnectionAsync(ct);
+            await using var held = await holder.BeginTransactionAsync(ct);
+            await using (var lockRow = new NpgsqlCommand("SELECT 1 FROM config.config_service WHERE id = 1 FOR SHARE", holder, held))
+            {
+                await lockRow.ExecuteScalarAsync(ct);
+            }
+
+            var release = Task.Run(async () =>
+            {
+                await Task.Delay(6500, CancellationToken.None);
+                await held.CommitAsync(CancellationToken.None);
+            }, CancellationToken.None);
+            var plan = DarlingCommandExecutor.ResolvePlan(new ClaimedCommand(1, "pause", null, null, null));
+            await DarlingCommandExecutor.ExecuteStoreWriteAsync(source, plan, ct);
+            await release;
+            Assert.Equal("True", await ScalarAsync(connection, "SELECT paused FROM config.config_service WHERE id = 1", ct));
+        });
+    }
+
+    private static async Task EditAsync(NpgsqlDataSource source, string sql, CancellationToken ct)
+    {
+        await using var editor = await source.OpenConnectionAsync(ct);
+        await using var command = new NpgsqlCommand(sql, editor);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static AgentActionCall MuteCall(Guid request, Guid claim)
+    {
+        var call = Call(request, claim);
+        return new AgentActionCall("create_mute_rule", AgentChangeKinds.Mute, call.Action, call.Target);
+    }
+
+    /* Two Level 2 store writes at once (create_mute_rule twice): each writes a row whose version-bump trigger UPDATEs the service row. The write
+       reads that row for the whole transaction, so a share lock would leave both holding it and both waiting to update it (40P01). */
+    [Fact]
+    public async Task TwoStoreWritesAtOnce_QueueOnTheServiceRow_AndBothSucceed()
+    {
+        await RunAsync(async (store, connection, source, ct) =>
+        {
+            await ArmAsync(connection, switchOn: true, "svc", "env:X", ct);
             var (request, claim) = await OpenAndClaimAsync(store, 3);
-            Task? commit = null;
-            /* A tag-scoped Level 3 route reaches the server only while it holds the tag: the level is 3 with the tag row and 0 without. */
-            var hooks = RowHooks("SELECT CASE WHEN EXISTS (SELECT 1 FROM config.server_tag_map WHERE server_id = 7) THEN 3 ELSE 0 END",
-                UncommittedChange(source, NoVersionBump + "DELETE FROM config.server_tag_map WHERE server_id = 7", t => commit = t));
-            var result = await store.RunAgentActionAsync(WriteCall(request, claim), hooks, ct);
-            await commit!;
-            Assert.Equal(AgentActionCodes.NotLevel3, result.Refusal?.Reason);
-            Assert.Equal(0, _writes);
-            Assert.Equal("action_called|action_failed", await EventsAsync(connection, request, ct));
+            var reached = 0;
+            var bothReached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            AgentActionHooks Hooks(string key) => new()
+            {
+                LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, int?>>((_, _) => 3),
+                ReadBefore = (_, _, _) => Task.FromResult<string?>(null),
+                Write = async (c, t, token) =>
+                {
+                    /* Hold here until the other write is also in its transaction (or two seconds pass, when it is queued behind this one). */
+                    if (Interlocked.Increment(ref reached) == 2)
+                        bothReached.TrySetResult();
+                    await Task.WhenAny(bothReached.Task, Task.Delay(2000, token));
+                    await using var insert = new NpgsqlCommand(
+                        $"INSERT INTO config.config_threshold_overrides (server_id, threshold_key, value, set_by) VALUES (7, '{key}', 1, 'agent')", c, t);
+                    await insert.ExecuteNonQueryAsync(token);
+                    return "{}";
+                },
+            };
+
+            var a = store.RunAgentActionAsync(MuteCall(request, claim), Hooks("blocking.a"), ct);
+            var b = store.RunAgentActionAsync(MuteCall(request, claim), Hooks("blocking.b"), ct);
+            var results = await Task.WhenAll(a, b);
+            Assert.All(results, r => Assert.True(r.Done, r.Refusal?.Message));
+            Assert.Equal("2", await ScalarAsync(connection, "SELECT count(*) FROM config.config_threshold_overrides WHERE server_id = 7", ct));
+        });
+    }
+
+    /* A slow monitored server: the connect, the read and the write share one deadline, and its expiry is an unknown outcome (the called row
+       stands with no result), with an answer for the caller instead of a bare cancellation. */
+    [Fact]
+    public async Task TheRemoteWork_HasOneDeadline_AndItsExpiryIsAnUnknownOutcome()
+    {
+        await RunAsync(async (store, connection, source, ct) =>
+        {
+            await ArmAsync(connection, switchOn: true, "svc", "env:X", ct);
+            var (request, claim) = await OpenAndClaimAsync(store, 3);
+            var shortStore = new InvestigationRequestStore(source, 30, () => _now) { RemoteWorkDeadline = TimeSpan.FromMilliseconds(800) };
+            var signal = new ServerChangeSignal();
+            var hooks = new AgentActionHooks
+            {
+                ServerChange = signal,
+                LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, int?>>((_, _) => 3),
+                ReadBefore = (_, _, _) => Task.FromResult<string?>("{\"reason\":\"old\"}"),
+                Write = async (_, _, token) =>
+                {
+                    /* A server that never answers: the connect or the read waits on the token and nothing else. */
+                    await Task.Delay(Timeout.InfiniteTimeSpan, token);
+                    return null;
+                },
+            };
+            var run = shortStore.RunAgentActionAsync(WriteCall(request, claim), hooks, ct);
+            var finished = await Task.WhenAny(run, Task.Delay(TimeSpan.FromSeconds(20), ct));
+            Assert.Same(run, finished);
+            var ex = await Assert.ThrowsAsync<TimeoutException>(() => run);
+            Assert.Contains("unknown", ex.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.True(signal.OutcomeUnknown);
+            Assert.Equal("action_called", await EventsAsync(connection, request, ct));
+        });
+    }
+
+    /* The operator's off switch waits for an agent change in progress and then succeeds, though its own command timeout (the Viewer's is about
+       15 seconds; here one second) is shorter than the wait. */
+    [Fact]
+    public async Task TurningAgentChangesOff_WaitsForAWriteInProgress_ThenSucceeds()
+    {
+        await RunAsync(async (store, connection, source, ct) =>
+        {
+            await ArmAsync(connection, switchOn: true, "svc", "env:X", ct);
+            await ExecAsync(connection, "UPDATE config.config_service SET agent_actions_enabled = true", ct);
+            var (request, claim) = await OpenAndClaimAsync(store, 3);
+            var inTransaction = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var finishWrite = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var hooks = new AgentActionHooks
+            {
+                ServerChange = new ServerChangeSignal(),
+                LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, int?>>((_, _) => 3),
+                ReadBefore = (_, _, _) => Task.FromResult<string?>("{\"reason\":\"old\"}"),
+                Write = async (_, _, token) =>
+                {
+                    inTransaction.SetResult();
+                    await finishWrite.Task.WaitAsync(token);
+                    return "{\"reason\":\"new\"}";
+                },
+            };
+            var write = store.RunAgentActionAsync(WriteCall(request, claim), hooks, ct);
+            await inTransaction.Task;
+
+            var turnOff = new AgentChangeUndo(source, 1).SetEnabledAsync(false, "alice", ct);
+            await Task.Delay(2500, ct);
+            Assert.False(turnOff.IsCompleted, "the switch gave up (or went through) while the write was in its transaction");
+            finishWrite.SetResult();
+            await turnOff;
+            Assert.True((await write).Done);
+            Assert.Equal("False", await ScalarAsync(connection, "SELECT agent_actions_enabled FROM config.config_service WHERE id = 1", ct));
         });
     }
 

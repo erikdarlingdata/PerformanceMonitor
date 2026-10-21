@@ -154,6 +154,8 @@ public partial class AgentChangesTab : UserControl
         var turnOn = !_enabled;
         try
         {
+            /* The write waits for an agent change in progress to finish, up to a minute (#5632), so say so while it does. */
+            Status?.Invoke("Waiting for an agent change in progress to finish, if there is one...");
             await _dataService.SetAgentActionsEnabledAsync(turnOn, _login);
             Status?.Invoke(turnOn ? "Agent changes are on." : "Agent changes are off: the gate refuses every agent change as actions_off.");
             await LoadAsync();

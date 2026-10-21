@@ -118,15 +118,22 @@ public sealed partial class InvestigationRequestStore
     /// lock the row: it holds <c>UPDATE</c> on two columns of it.</summary>
     internal const string AgentActionsEnabledLockedSql = AgentActionsEnabledSql + " FOR SHARE";
 
-    /// <summary>Every route row, <c>FOR SHARE</c> for the write's transaction: a route lowered, disabled or deleted after the write's re-check
-    /// waits for the write. The <c>mcp</c> role may lock them: it holds <c>UPDATE</c> on two columns of the table.</summary>
-    internal const string RoutesLockSql = "SELECT 1 FROM config.config_notification_routes FOR SHARE";
+    /// <summary>The same read for a Level 2 store write (a mute, a threshold override). That write runs in this transaction, and its
+    /// <c>config_bump_version</c> trigger UPDATEs this row, so a share lock would make two such writes wait on each other (40P01). The
+    /// <c>FOR NO KEY UPDATE</c> lock lets them queue, and a person's switch write still waits for it (#5632).</summary>
+    internal const string AgentActionsEnabledStoreWriteLockedSql = AgentActionsEnabledSql + " FOR NO KEY UPDATE";
 
-    /// <summary>The tag tree and the server-to-tag rows a tag-scoped route is expanded from, <c>FOR SHARE</c> for the write's transaction (mcp holds
-    /// the UPDATE grant on both, so the lock needs no new grant).</summary>
-    internal const string TagsLockSql = "SELECT 1 FROM config.server_tags FOR SHARE";
+    /// <summary>The longest the gated remote work of one agent change may take: one deadline over the connect, the read and the write (#5632).
+    /// The gate holds the service row's lock and the server's switch lock until the work ends, so this is also the longest a person's switch
+    /// waits behind it. Its expiry is an unknown outcome: the called row stands with no result.</summary>
+    public const int AgentActionRemoteWorkSeconds = 30;
 
-    internal const string TagMapLockSql = "SELECT 1 FROM config.server_tag_map FOR SHARE";
+    /// <summary>The deadline a gated write's remote work gets; <see cref="AgentActionRemoteWorkSeconds"/> unless a test shortens it.</summary>
+    internal TimeSpan RemoteWorkDeadline { get; init; } = TimeSpan.FromSeconds(AgentActionRemoteWorkSeconds);
+
+    /// <summary>How long a person's off switch (and a pause) waits for an agent change in progress to finish: longer than
+    /// <see cref="AgentActionRemoteWorkSeconds"/>, so the off waits and then succeeds instead of giving up first (#5632).</summary>
+    public const int AgentOffSwitchWaitSeconds = 60;
 
     /// <summary>The request row the gate checks, held <c>FOR SHARE</c> for the gate's transaction (#5912), so a submit,
     /// release or claim (each takes the row <c>FOR UPDATE</c> or updates it) waits for the gate, and the gate for them.</summary>
@@ -272,7 +279,27 @@ RETURNING journal_id";
             }
 
             requestServerId = request!.ServerId;
-            after = await hooks.Write(connection, transaction, cancellationToken);
+            /* One deadline over the whole of the remote work (connect, read, write), because the locks above are held until it ends and a
+               person's off switch waits behind them (#5632). Its expiry reaches the tool as a cancelled token: a write that was sent reports
+               an unknown outcome, as for any cancel. Only a tool with a monitored server behind it has remote work to bound. */
+            using var remoteWork = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            if (signal is not null)
+                remoteWork.CancelAfter(RemoteWorkDeadline);
+            try
+            {
+                after = await hooks.Write(connection, transaction, remoteWork.Token);
+            }
+            catch (OperationCanceledException) when (signal is not null && remoteWork.IsCancellationRequested
+                && !cancellationToken.IsCancellationRequested && !signal.Changed)
+            {
+                /* The deadline ran out and the tool did not say where: it may have been in the connect or the read, or after the write was sent
+                   (the PostgreSQL executor lets a cancel go by). So the outcome is unknown, exactly as for a write whose reply was lost: the
+                   called row stands with no result, and the caller gets an answer instead of a bare cancellation. */
+                signal.MarkOutcomeUnknown();
+                throw new TimeoutException($"The monitored server did not finish within {AgentActionRemoteWorkSeconds} seconds. "
+                    + "Whether the change was made is unknown: check the server before trying again.");
+            }
+
             if (signal?.OutcomeUnknown == true && !signal.Changed)
             {
                 /* The write was sent and its reply was lost (#5632): no result row, so the called row reads "result unknown". The
@@ -391,9 +418,8 @@ RETURNING journal_id";
 
     /// <summary>
     /// The re-check in the write's own transaction (#5632): every condition the gate checked that a person can change in between, with the
-    /// rows read held <c>FOR SHARE</c> (or the advisory lock for the server's switch) until the write ends. A server action also needs Level 3
-    /// and this server's switch for its action, through the same code the gate runs. The locks are taken first and in one order, routes
-    /// before the service row, because a route write bumps the service row's version, so the other order could deadlock with it.
+    /// service row held <c>FOR SHARE</c> (<c>FOR NO KEY UPDATE</c> for a store write) and the advisory lock for the server's switch, until the write ends. A server action also needs Level 3
+    /// and this server's switch for its action, through the same code the gate runs.
     /// </summary>
     private async Task<AgentActionRefusal?> WriteTimeRefusalAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
         AgentActionRequest? request, AgentActionCall call, AgentActionHooks hooks, DateTime now, CancellationToken cancellationToken)
@@ -402,13 +428,11 @@ RETURNING journal_id";
         if (serverAction is not null)
             await ServerActionSwitchLock.AcquireSharedAsync(connection, transaction, call.Target.ServerId, serverAction,
                 _commandTimeoutSeconds, cancellationToken);
-        await ExecAsync(connection, transaction, RoutesLockSql, cancellationToken);
-        /* A tag-scoped route matches a server through the tag tree and the server's tag rows, so those are held too: a tag removed from the server
-           after the write began would otherwise change which route (and level) applies. Same order as the routes, before the service row. */
-        await ExecAsync(connection, transaction, TagsLockSql, cancellationToken);
-        await ExecAsync(connection, transaction, TagMapLockSql, cancellationToken);
-
-        if (await ActionsOffRefusalAsync(connection, transaction, lockRow: true, cancellationToken) is { } off)
+        /* The routes and the tags are not locked here: every writer of those rows (the route store, the tag store, the Viewer's edits, the role
+           provisioning script) fires the statement-level config_bump_version trigger, which UPDATEs the service row read below, so a change to
+           them waits for this write through that row, and the next write reads it. A change another transaction has made but not committed is
+           not seen here, and its trigger then waits for this write to end. */
+        if (await ActionsOffRefusalAsync(connection, transaction, lockRow: true, cancellationToken, storeWrite: serverAction is null) is { } off)
             return off;
 
         return serverAction is null
@@ -420,9 +444,10 @@ RETURNING journal_id";
     /// <summary>Check 2: the service's agent switch (<c>config_service.agent_actions_enabled</c>). Null when it is on. Read in the gate and again before the write
     /// (<paramref name="lockRow"/>: the write's read holds the row <c>FOR SHARE</c>).</summary>
     private async Task<AgentActionRefusal?> ActionsOffRefusalAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, bool lockRow,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, bool storeWrite = false)
     {
-        await using var command = Command(connection, transaction, lockRow ? AgentActionsEnabledLockedSql : AgentActionsEnabledSql);
+        await using var command = Command(connection, transaction,
+            !lockRow ? AgentActionsEnabledSql : storeWrite ? AgentActionsEnabledStoreWriteLockedSql : AgentActionsEnabledLockedSql);
         var enabled = await command.ExecuteScalarAsync(cancellationToken) is not bool on || on;
         return enabled ? null
             : new AgentActionRefusal(AgentActionCodes.ActionsOff,
