@@ -194,6 +194,13 @@ WHERE event = 'note_rejected' AND actor = 'person:tester' AND request_id = '{rej
             builder.Logging.ClearProviders();
             builder.Services.AddSingleton(webLogin);
             await using var app = builder.Build();
+            /* #6265: a decision is made by a signed-in admin. The shared token's seat (no subject) is stamped person:web. */
+            app.Use(async (http, next) =>
+            {
+                http.Items[PerformanceMonitor.Darling.Service.Hosting.DarlingWebSeat.HttpContextItemKey] =
+                    new PerformanceMonitor.Darling.Service.Hosting.DarlingWebSeat(null, true);
+                await next(http);
+            });
             DarlingWebEndpoints.MapAll(app, webLogin, new CollectorRuntimeState(), new CapturingTestLogger());
             await app.StartAsync(ct);
             using var server = app.GetTestServer();

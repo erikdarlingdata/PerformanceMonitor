@@ -28,7 +28,7 @@
 import { VIZ } from "../panels.js";
 import { READ_FIELDS } from "../read-fields.js";
 import { getSession } from "../views-api.js";
-import { canCloseState, closeRequest, CLOSE_REASON_MAX_LENGTH } from "../investigation-writes.js";
+import { canCloseState, closeRequest, writeAccess, SIGN_IN_SENTENCE, CLOSE_REASON_MAX_LENGTH } from "../investigation-writes.js";
 import { el, mount, loadingStrip, emptyStrip, noticeStrip, errorStrip, readErrorStrip, readTool, localTime, makeActivatable, rowsUnder } from "../util.js";
 
 /** The states the list read takes; an empty value is every state. */
@@ -119,8 +119,9 @@ function select(label, options, value, onPick) {
 
 /* #6265: the Close form of one request, drawn only for a seat that can make changes and a request that can still be closed. The
    service checks the reason and the state again; a refusal's sentence is shown as the service wrote it. */
-function closeForm(row, canEdit) {
-  if (!canEdit || !canCloseState(row.state)) return null;
+function closeForm(row, access) {
+  if (access === "no" || !canCloseState(row.state)) return null;
+  if (access === "sign-in") return section("Close this request", [el("div", { class: "muted", "data-close-sign-in": "1", text: SIGN_IN_SENTENCE })]);
   const reason = el("input", { type: "text", maxlength: String(CLOSE_REASON_MAX_LENGTH), "aria-label": "Reason for closing this request", "data-close-reason": "1", placeholder: "Why is this request being closed?" });
   const status = el("div", { class: "muted", role: "status", "data-close-status": "1" });
   const button = el("button", { type: "button", class: "btn", "data-close-request": row.request_id, text: "Close request" });
@@ -174,7 +175,7 @@ function reportBlock(rep) {
 }
 
 /* The pane under the list for one request, from its get_investigation_reports answer. */
-function detailPane(row, data, canEdit) {
+function detailPane(row, data, access) {
   const reports = reportRows(data, row.request_id);
   const journal = journalRows(data, row.request_id);
   const claimed = claimedAt(journal, row.request_id);
@@ -192,7 +193,7 @@ function detailPane(row, data, canEdit) {
     el("div", { class: "muted", text: facts }),
   ];
 
-  const closer = closeForm(row, canEdit);
+  const closer = closeForm(row, access);
   if (closer) parts.push(closer);
 
   if (reports.length) {
@@ -228,7 +229,7 @@ async function loadDetail(row) {
   if (res.kind === "error") return mount(slot, [readErrorStrip(res.message)]);
   if (res.kind === "empty") return mount(slot, [emptyStrip(res.message || "This request has no stored report or journal.")]);
   try {
-    mount(slot, detailPane(row, res.data || {}, session.can_edit === true));
+    mount(slot, detailPane(row, res.data || {}, writeAccess(session)));
   } catch (e) {
     mount(slot, [errorStrip("Could not draw this request: " + (e && e.message ? e.message : String(e)))]);
   }

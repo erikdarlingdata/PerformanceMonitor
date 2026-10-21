@@ -753,7 +753,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                existed). The page decides the Personal checkbox from it, and "My views" and read-only from each view's own `mine`. Neither the
                subject nor the key is returned: a name decides nothing, and a key is never shown. */
             var seat = DarlingWebSeat.FromContext(context);
-            return JsonNodeResult(new JsonObject { ["can_edit"] = seat.CanEdit, ["can_own"] = seat.OwnerKey is not null });
+            return JsonNodeResult(new JsonObject { ["can_edit"] = seat.CanEdit, ["can_own"] = seat.OwnerKey is not null, ["signed_in_admin"] = DarlingWebSeat.IsSignedInAdmin(context) });
         });
 
         /* The read catalog: input truth (read names + their WIRE query keys) the composer binds params from. */
@@ -1273,6 +1273,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
         app.MapPut("/api/investigation-notes/{id:long}/approve", async (HttpContext context, long id) =>
         {
+            if (!DarlingWebSeat.IsSignedInAdmin(context))
+            {
+                return SignInRequiredResult();
+            }
+
             if (!IsJsonContentType(context.Request.ContentType))
             {
                 return UnsupportedMediaTypeResult();
@@ -1280,6 +1285,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             var stopwatch = Stopwatch.StartNew();
             var decidedBy = NoteDecider(DarlingWebSeat.FromContext(context));
+            if (InvestigationPersonWrites.ValidateActor(decidedBy) is not null)
+            {
+                return ErrorResult(PersonWriteActorRefusal, StatusCodes.Status400BadRequest);
+            }
+
             if (InvestigationNoteRules.ValidateDecidedBy(decidedBy) is { } refused)
             {
                 return NoteDeciderRefusedResult(refused);
@@ -1308,6 +1318,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
         app.MapPut("/api/investigation-notes/{id:long}/reject", async (HttpContext context, long id) =>
         {
+            if (!DarlingWebSeat.IsSignedInAdmin(context))
+            {
+                return SignInRequiredResult();
+            }
+
             if (!IsJsonContentType(context.Request.ContentType))
             {
                 return UnsupportedMediaTypeResult();
@@ -1315,6 +1330,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             var stopwatch = Stopwatch.StartNew();
             var decidedBy = NoteDecider(DarlingWebSeat.FromContext(context));
+            if (InvestigationPersonWrites.ValidateActor(decidedBy) is not null)
+            {
+                return ErrorResult(PersonWriteActorRefusal, StatusCodes.Status400BadRequest);
+            }
+
             if (InvestigationNoteRules.ValidateDecidedBy(decidedBy) is { } refused)
             {
                 return NoteDeciderRefusedResult(refused);
@@ -1411,6 +1431,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     internal const string NoteDecisionRefusedMessage =
         "Deciding a note needs a store login with the admin role. Managed and compose stores connect the web dashboard as the viewer role, "
         + "which lists pending notes but cannot decide them: decide in the desktop Viewer, or (bring-your-own store) set postgres.webConnectionString to an admin login.";
+
+    /// <summary>The sentence a person-made investigation change answers with 403 when the request holds no signed-in admin seat (#6265):
+    /// a dashboard with no sign-in configured has no caller to name, so the change is made in the Viewer or after signing in.</summary>
+    internal const string InvestigationWriteSignInMessage = "Sign in to the web as an admin to make this change, or use the Viewer.";
+
+    /// <summary>The 403 answered to a change that needs a signed-in admin: <see cref="InvestigationWriteSignInMessage"/>, nothing written.</summary>
+    private static IResult SignInRequiredResult() => ErrorResult(InvestigationWriteSignInMessage, StatusCodes.Status403Forbidden);
 
     /// <summary>The 403 a refused note decision answers: the fixed <see cref="NoteDecisionRefusedMessage"/> sentence in the mute-rule error envelope.</summary>
     private static IResult NoteDecisionRefusedResult() =>
@@ -2756,7 +2783,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <see cref="InvestigationPracticeStore.OpenAsync"/>), so the states, the refusals and the journal rows are the same: <c>closed</c>,
     /// <c>note_written</c> and <c>opened</c>, each by <c>person:&lt;signed-in name&gt;</c>. Born gated as the other web writes are: <c>application/json</c>
     /// required, a read-only seat refused by the host's write gate, a store login without the admin role answered 403 with
-    /// <see cref="InvestigationWriteRefusedMessage"/>. An agent's token is an MCP token and is not a web sign-in, so it never reaches these routes.
+    /// <see cref="InvestigationWriteRefusedMessage"/>. Each route needs a signed-in admin
+    /// (<see cref="DarlingWebSeat.IsSignedInAdmin"/>): a dashboard with no sign-in configured has no caller to name, so it answers 403 with
+    /// <see cref="InvestigationWriteSignInMessage"/> and writes nothing. An agent's MCP token is not a web sign-in either.
     /// 400 for a value the rules refuse (in plain words), 404 for an unknown request or case, 409 for a request that cannot be closed or a case that
     /// cannot be replayed, a fixed-sentence 500 or 503 for any other store failure.
     /// </summary>
@@ -2768,6 +2797,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         app.MapPut("/api/investigation-requests/{requestId}/close", async (HttpContext context, string requestId) =>
         {
             const string route = "/api/investigation-requests/{requestId}/close";
+            if (!DarlingWebSeat.IsSignedInAdmin(context))
+            {
+                return SignInRequiredResult();
+            }
+
             if (!IsJsonContentType(context.Request.ContentType))
             {
                 return UnsupportedMediaTypeResult();
@@ -2821,6 +2855,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         app.MapPut("/api/investigation-notes", async (HttpContext context) =>
         {
             const string route = "/api/investigation-notes";
+            if (!DarlingWebSeat.IsSignedInAdmin(context))
+            {
+                return SignInRequiredResult();
+            }
+
             if (!IsJsonContentType(context.Request.ContentType))
             {
                 return UnsupportedMediaTypeResult();
@@ -2852,7 +2891,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 return ErrorResult("days must be a whole number.", StatusCodes.Status400BadRequest);
             }
 
-            if (InvestigationPersonWrites.ValidateNote(text, days) is { } noteRefusal)
+            if (InvestigationPersonWrites.ValidateNote(text, days, metric) is { } noteRefusal)
             {
                 return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = noteRefusal }, route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status400BadRequest);
             }
@@ -2888,6 +2927,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         app.MapPut("/api/investigation-practice-requests/{requestId}", async (HttpContext context, string requestId) =>
         {
             const string route = "/api/investigation-practice-requests/{requestId}";
+            if (!DarlingWebSeat.IsSignedInAdmin(context))
+            {
+                return SignInRequiredResult();
+            }
+
             if (!IsJsonContentType(context.Request.ContentType))
             {
                 return UnsupportedMediaTypeResult();
@@ -2933,11 +2977,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     }
 
     /// <summary>The journal actor of a person's investigation write: <c>person:&lt;signed-in name&gt;</c> (the seat's
-    /// <see cref="DarlingWebSeat.EditorPrincipal"/>), or null when the name is longer than the journal holds.</summary>
+    /// <see cref="DarlingWebSeat.EditorPrincipal"/>), or null when the built actor is not one the journal may hold: a name the undo path
+    /// refuses (invisible, format or bidi characters, whitespace, over 64 characters) or an actor longer than 128.</summary>
     private static string? PersonWriteActor(HttpContext context)
     {
-        var login = DarlingWebSeat.FromContext(context).EditorPrincipal;
-        return InvestigationPersonWrites.ValidateLogin(login) is null ? InvestigationPersonWrites.PersonActor(login) : null;
+        var actor = InvestigationPersonWrites.PersonActor(DarlingWebSeat.FromContext(context).EditorPrincipal);
+        return InvestigationPersonWrites.ValidateActor(actor) is null ? actor : null;
     }
 
     private const string PersonWriteActorRefusal = "The signed-in name cannot be recorded as the person who made this change.";
@@ -2959,10 +3004,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         {
             if (JsonNode.Parse(text) is JsonObject body)
             {
+                /* A JsonObject reads its properties lazily, so a duplicate key surfaces as an ArgumentException on first access, outside
+                   this try. Touch Count here so the duplicate is refused as a body that is not a JSON object, not an unhandled 500. */
+                _ = body.Count;
                 return (body, null);
             }
         }
-        catch (JsonException)
+        catch (Exception ex) when (ex is JsonException or ArgumentException)
         {
         }
 

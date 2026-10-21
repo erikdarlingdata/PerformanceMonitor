@@ -26,7 +26,7 @@
 import { VIZ } from "../panels.js";
 import { el, mount, loadingStrip, errorStrip, emptyStrip, noticeStrip, readTool, apiGet, apiWrite, onSessionExpired, localizeIsoText } from "../util.js";
 import { getSession } from "../views-api.js";
-import { writeNote, startPractice, NOTE_MAX_LENGTH, NOTE_MAX_DAYS, NOTE_DEFAULT_DAYS } from "../investigation-writes.js";
+import { writeNote, startPractice, writeAccess, SIGN_IN_SENTENCE, NOTE_MAX_LENGTH, NOTE_MAX_DAYS, NOTE_DEFAULT_DAYS } from "../investigation-writes.js";
 import { buildAgentChanges, resetAgentChangesStatus } from "./admin-agent-changes.js";
 
 export const SERVER_COLUMNS = [
@@ -1502,7 +1502,9 @@ async function buildPractice(body, generation) {
   const data = res.data || {};
   const agents = practiceRows(data.agents);
   const nodes = [noticeStrip(PRACTICE_NOTE)];
-  if (session.can_edit === true) {
+  const practiceAccess = writeAccess(session);
+  if (practiceAccess === "sign-in") nodes.push(noticeStrip(SIGN_IN_SENTENCE));
+  if (practiceAccess === "yes") {
     const feedback = await apiGet("/api/investigation-feedback");
     if (generation !== renderGeneration) return;
     nodes.push(practiceStartForm(feedback.kind === "data" ? judgedCases(feedback.data) : []));
@@ -1579,6 +1581,7 @@ export function noteDecisionOutcome(verb, noteId, res) {
   if (res.status === 404) return { message: "Note " + noteId + " was not changed. " + ((body && body.error) || NOTE_NOT_PENDING), isError: true, reread: true };
   /* The store refused the write for privilege: the web host's login is not the admin role. Its sentence says how to decide; the list stays. */
   if (res.status === 403 && body && typeof body.error === "string" && body.error.indexOf("Deciding a note needs") === 0) return { message: body.error, isError: true, reread: false };
+  if (res.status === 403 && body && body.error === SIGN_IN_SENTENCE) return { message: body.error, isError: true, reread: false };
   if (res.status === 403) return { message: "This sign-in is read-only, so it cannot " + verb + " notes.", isError: true, reread: false };
   const said = body && typeof body.error === "string" && body.error ? " " + body.error : "";
   return { message: "Note " + noteId + " was not " + past + ". The service answered " + res.status + "." + said, isError: true, reread: false };
@@ -1715,8 +1718,12 @@ async function buildPending(body, generation) {
   const bad = failure(res);
   if (bad) return mount(body, nodes.concat([bad]));
   const rows = pendingNoteRows(res.data);
-  const canEdit = session.can_edit === true;
+  /* #6265: Approve, Reject and Write a note are made as a named person, so they need a signed-in admin; a seat that can edit but is
+     not signed in sees the list and the sentence that says what to do. */
+  const access = writeAccess(session);
+  const canEdit = access === "yes";
   nodes.push(noticeStrip((canEdit ? NOTES_NOTE_EDITING : NOTES_NOTE_READ_ONLY) + NOTES_NOTE_EXPIRY));
+  if (access === "sign-in") nodes.push(noticeStrip(SIGN_IN_SENTENCE));
   if (canEdit) {
     const serverList = await apiGet("/api/admin/servers");
     if (generation !== renderGeneration) return;

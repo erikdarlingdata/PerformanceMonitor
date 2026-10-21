@@ -105,6 +105,7 @@ public sealed class AdminPendingNotesTests
     [InlineData("gone", 2, "7|8", "8", "Note 7 was not changed. That note is not pending: it was already decided, or it is gone.")]
     [InlineData("refused", 1, "7|8", "7|8", "Deciding a note needs a store login with the admin role.")]
     [InlineData("broken", 1, "7|8", "7|8", "Note 7 was not approved. The service answered 500. The store did not answer.")]
+    [InlineData("signin", 1, "7|8", "7|8", "Sign in to the web as an admin to make this change, or use the Viewer.")]
     public void TheDecideButton_ReadsTheListAgainOnlyWhenTheAnswerSaysItIsStale(
         string kind, int listReadsAfter, string rowsBefore, string rowsAfter, string status)
     {
@@ -116,6 +117,20 @@ public sealed class AdminPendingNotesTests
         Assert.Equal(rowsBefore, string.Join("|", result.GetProperty("rowsBefore").EnumerateArray().Select(w => w.GetString())));
         Assert.Equal(rowsAfter, string.Join("|", result.GetProperty("rowsAfter").EnumerateArray().Select(w => w.GetString())));
         Assert.Equal(new[] { status }, result.GetProperty("status").EnumerateArray().Select(w => w.GetString()).ToArray());
+    }
+
+    [Theory]
+    [InlineData("pending")]
+    [InlineData("practice")]
+    public void ASeatThatCanEditButIsNotSignedIn_SeesTheList_TheSignInSentence_AndNoWriteControls(string tab)
+    {
+        var page = AdminServerEditBehaviourTests.Run("signedout:" + tab);
+
+        Assert.True(page.GetProperty("sentence").GetBoolean());
+        Assert.Equal(0, page.GetProperty("approveButtons").GetInt32());
+        Assert.Equal(0, page.GetProperty("noteForm").GetInt32());
+        Assert.Equal(0, page.GetProperty("practiceForm").GetInt32());
+        Assert.Equal(0, page.GetProperty("writes").GetInt32());
     }
 
     [Fact]

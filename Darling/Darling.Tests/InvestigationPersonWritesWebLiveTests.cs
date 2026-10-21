@@ -21,6 +21,7 @@ using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Investigations;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -77,9 +78,11 @@ public sealed class InvestigationPersonWritesWebLiveTests
 
     /// <summary>Runs <paramref name="body"/> against the web routes with the web host's data source logging in as a role holding exactly
     /// what the managed <paramref name="managedRole"/> holds. The body gets the owner source, the request store and a sender
-    /// (method, path, content type, body text).</summary>
+    /// (method, path, content type, body text). <paramref name="signedInAs"/> is read on every request: the signed-in admin's name, or null
+    /// for a dashboard with no sign-in configured (no seat is stored, as the host does when no web token is set).</summary>
     private static async Task WithWebRoutesAsync(
         string managedRole,
+        Func<string?> signedInAs,
         Func<NpgsqlDataSource, InvestigationRequestStore, Func<string, string, string?, string?, Task<(int Status, JsonNode? Body)>>, CancellationToken, Task> body)
     {
         var baseConnectionString = ConnectionString;
@@ -125,6 +128,15 @@ public sealed class InvestigationPersonWritesWebLiveTests
             builder.Logging.ClearProviders();
             builder.Services.AddSingleton(webLogin);
             await using var app = builder.Build();
+            app.Use(async (http, next) =>
+            {
+                if (signedInAs() is { } name)
+                {
+                    http.Items[DarlingWebSeat.HttpContextItemKey] = new DarlingWebSeat(name, true);
+                }
+
+                await next(http);
+            });
             DarlingWebEndpoints.MapAll(app, webLogin, new CollectorRuntimeState(), new CapturingTestLogger());
             await app.StartAsync(ct);
             using var server = app.GetTestServer();
@@ -164,10 +176,15 @@ public sealed class InvestigationPersonWritesWebLiveTests
 
     private const string Json = "application/json";
 
+    /// <summary>A real signed-in name. The routes record exactly person:erik@example.com, never a constant and never anything the body says.</summary>
+    private const string Lee = "erik@example.com";
+
+    private const string SignInSentence = "Sign in to the web as an admin to make this change, or use the Viewer.";
+
     [Fact]
     public async Task CloseRoute_ClosesAnOpenAndAReportedRequest_RefusesTheRest_AndJournalsClosedByThePerson()
     {
-        await WithWebRoutesAsync("admin", async (owner, store, Send, ct) =>
+        await WithWebRoutesAsync("admin", () => Lee, async (owner, store, Send, ct) =>
         {
             var reported = await ReportedAsync(store, DateTime.UtcNow.AddHours(-3), null, ct);
             var open = await OpenAsync(store, DateTime.UtcNow.AddHours(-1), ct);
@@ -183,14 +200,14 @@ public sealed class InvestigationPersonWritesWebLiveTests
                 "{\"reason\":\"" + new string('r', 501) + "\"}")).Status);
             Assert.Equal("open", await ScalarAsync(owner, $"SELECT state FROM config.investigation_requests WHERE request_id = '{open}'", ct));
 
-            var closed = await Send("PUT", $"/api/investigation-requests/{open}/close", Json, "{\"reason\":\"  duplicate of the nightly batch  \"}");
+            var closed = await Send("PUT", $"/api/investigation-requests/{open}/close", Json, "{\"reason\":\"  duplicate of the nightly batch  \",\"closed_by\":\"x\",\"author\":\"agent:x\"}");
             Assert.Equal(200, closed.Status);
             Assert.Equal("closed", (string)closed.Body!["status"]!);
-            Assert.Equal("person:web", (string)closed.Body["closed_by"]!);
-            Assert.Equal("closed|person:web|duplicate of the nightly batch|true", await ScalarAsync(owner, $@"
+            Assert.Equal("person:erik@example.com", (string)closed.Body["closed_by"]!);
+            Assert.Equal("closed|person:erik@example.com|duplicate of the nightly batch|true", await ScalarAsync(owner, $@"
 SELECT state || '|' || closed_by || '|' || closed_reason || '|' || (closed_at IS NOT NULL)::text
 FROM config.investigation_requests WHERE request_id = '{open}'", ct));
-            Assert.Equal($"closed|person:web|duplicate of the nightly batch|{ServerId}", await ScalarAsync(owner, $@"
+            Assert.Equal($"closed|person:erik@example.com|duplicate of the nightly batch|{ServerId}", await ScalarAsync(owner, $@"
 SELECT event || '|' || actor || '|' || reason || '|' || server_id
 FROM config.investigation_journal WHERE request_id = '{open}' AND event = 'closed'", ct));
 
@@ -211,7 +228,7 @@ FROM config.investigation_journal WHERE request_id = '{open}' AND event = 'close
     [Fact]
     public async Task NoteRoute_WritesAnApprovedNoteThatReachesABrief_WhileAnAgentsProposedNoteDoesNotUntilApproved()
     {
-        await WithWebRoutesAsync("admin", async (owner, store, Send, ct) =>
+        await WithWebRoutesAsync("admin", () => Lee, async (owner, store, Send, ct) =>
         {
             /* An agent proposes a note with its report: it waits, and no brief carries it. */
             await ReportedAsync(store, DateTime.UtcNow.AddHours(-3), "agent proposal: pending until a person approves", ct);
@@ -231,16 +248,16 @@ FROM config.investigation_journal WHERE request_id = '{open}' AND event = 'close
 
             /* A person's note is approved as written, by its author, and the journal says so (no request). */
             var written = await Send("PUT", "/api/investigation-notes", Json,
-                "{\"note_text\":\"  the nightly load blocks for a minute  \",\"server_id\":" + ServerId + ",\"metric_name\":\" Blocking \",\"days\":30}");
+                "{\"note_text\":\"  the nightly load blocks for a minute  \",\"server_id\":" + ServerId + ",\"metric_name\":\" Blocking \",\"days\":30,\"author\":\"agent:x\",\"decided_by\":\"x\"}");
             Assert.Equal(200, written.Status);
             Assert.Equal("approved", (string)written.Body!["status"]!);
-            Assert.Equal("person:web", (string)written.Body["author"]!);
+            Assert.Equal("person:erik@example.com", (string)written.Body["author"]!);
             var noteId = (long)written.Body["note_id"]!;
-            Assert.Equal($"approved|person:web|person:web|the nightly load blocks for a minute|Blocking|{ServerId}|true", await ScalarAsync(owner, $@"
+            Assert.Equal($"approved|person:erik@example.com|person:erik@example.com|the nightly load blocks for a minute|Blocking|{ServerId}|true", await ScalarAsync(owner, $@"
 SELECT state || '|' || author || '|' || decided_by || '|' || note_text || '|' || metric_name || '|' || server_id
        || '|' || (expires_at BETWEEN now() + interval '29 days' AND now() + interval '31 days')::text
 FROM config.investigation_notes WHERE note_id = {noteId}", ct));
-            Assert.Equal($"person:web|note {noteId}|{ServerId}|", await ScalarAsync(owner, $@"
+            Assert.Equal($"person:erik@example.com|note {noteId}|{ServerId}|", await ScalarAsync(owner, $@"
 SELECT actor || '|' || reason || '|' || server_id || '|' || coalesce(request_id::text, '')
 FROM config.investigation_journal WHERE event = 'note_written'", ct));
 
@@ -251,13 +268,18 @@ FROM config.investigation_journal WHERE event = 'note_written'", ct));
 
             /* The approved note reaches a brief; the agent's pending proposal still does not. */
             var notes = (await reader.ReadAsync(next, ct))!.Notes;
-            Assert.Contains(notes, n => n.Text == "the nightly load blocks for a minute" && n.DecidedBy == "person:web");
+            Assert.Contains(notes, n => n.Text == "the nightly load blocks for a minute" && n.DecidedBy == "person:erik@example.com");
             Assert.DoesNotContain(notes, n => n.Text.StartsWith("agent proposal", StringComparison.Ordinal));
             Assert.Equal("pending", await ScalarAsync(owner, "SELECT state FROM config.investigation_notes WHERE author LIKE 'agent:%'", ct));
 
             /* Approving the proposal is the existing route, and only then does it reach the brief. */
             var pendingId = (long)(await Send("GET", "/api/investigation-notes/pending", null, "")).Body!["notes"]![0]!["note_id"]!;
-            Assert.Equal(200, (await Send("PUT", $"/api/investigation-notes/{pendingId}/approve", Json, "{}")).Status);
+            var approved = await Send("PUT", $"/api/investigation-notes/{pendingId}/approve", Json, "{}");
+            Assert.Equal(200, approved.Status);
+            Assert.Equal("person:erik@example.com", (string)approved.Body!["decided_by"]!);
+            Assert.Equal("person:erik@example.com", await ScalarAsync(owner, $"SELECT decided_by FROM config.investigation_notes WHERE note_id = {pendingId}", ct));
+            Assert.Equal("person:erik@example.com", await ScalarAsync(owner,
+                $"SELECT actor FROM config.investigation_journal WHERE event = 'note_approved'", ct));
             Assert.Contains((await reader.ReadAsync(next, ct))!.Notes, n => n.Text.StartsWith("agent proposal", StringComparison.Ordinal));
         });
     }
@@ -265,7 +287,7 @@ FROM config.investigation_journal WHERE event = 'note_written'", ct));
     [Fact]
     public async Task PracticeRoute_OpensAJudgedCase_RefusesTheRest_AndJournalsOpenedByThePerson()
     {
-        await WithWebRoutesAsync("admin", async (owner, store, Send, ct) =>
+        await WithWebRoutesAsync("admin", () => Lee, async (owner, store, Send, ct) =>
         {
             var judged = await ReportedAsync(store, DateTime.UtcNow.AddHours(-5), null, ct);
             var noFeedback = await ReportedAsync(store, DateTime.UtcNow.AddHours(-3), null, ct);
@@ -289,10 +311,10 @@ FROM config.investigation_journal WHERE event = 'note_written'", ct));
             var opened = await Send("PUT", $"/api/investigation-practice-requests/{judged}", Json, "{}");
             Assert.Equal(200, opened.Status);
             Assert.Equal("opened", (string)opened.Body!["status"]!);
-            Assert.Equal("person:web", (string)opened.Body["opened_by"]!);
+            Assert.Equal("person:erik@example.com", (string)opened.Body["opened_by"]!);
             var practiceId = Guid.Parse((string)opened.Body["request_id"]!);
             Assert.Equal($"{judged}", await ScalarAsync(owner, $"SELECT practice_of FROM config.investigation_requests WHERE request_id = '{practiceId}'", ct));
-            Assert.Equal("person:web", await ScalarAsync(owner, $"SELECT actor FROM config.investigation_journal WHERE request_id = '{practiceId}' AND event = 'opened'", ct));
+            Assert.Equal("person:erik@example.com", await ScalarAsync(owner, $"SELECT actor FROM config.investigation_journal WHERE request_id = '{practiceId}' AND event = 'opened'", ct));
 
             /* The same case again while its practice request is live, and a practice request itself: refused. */
             var live = await Send("PUT", $"/api/investigation-practice-requests/{judged}", Json, "{}");
@@ -306,7 +328,7 @@ FROM config.investigation_journal WHERE event = 'note_written'", ct));
     [Fact]
     public async Task AllThreeRoutes_AsTheManagedViewerRole_Answer403_AndChangeNothing()
     {
-        await WithWebRoutesAsync("viewer", async (owner, store, Send, ct) =>
+        await WithWebRoutesAsync("viewer", () => Lee, async (owner, store, Send, ct) =>
         {
             var judged = await ReportedAsync(store, DateTime.UtcNow.AddHours(-5), null, ct);
             var open = await OpenAsync(store, DateTime.UtcNow.AddHours(-1), ct);
@@ -330,6 +352,162 @@ FROM config.investigation_journal WHERE event = 'note_written'", ct));
             Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_notes", ct));
             Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_requests WHERE practice_of IS NOT NULL", ct));
             Assert.Equal(journalBefore, await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal", ct));
+        });
+    }
+
+    [Fact]
+    public async Task AllFiveWrites_WithNoSignedInAdmin_Answer403WithTheSignInSentence_AndWriteNothing()
+    {
+        await WithWebRoutesAsync("admin", () => null, async (owner, store, Send, ct) =>
+        {
+            var judged = await ReportedAsync(store, DateTime.UtcNow.AddHours(-5), "agent proposal: stays pending", ct);
+            var open = await OpenAsync(store, DateTime.UtcNow.AddHours(-1), ct);
+            await new InvestigationFeedbackStore(owner, 30).RecordAsync(new InvestigationFeedbackSubmission(judged, "right", null, null, null, "lee"), ct);
+            var pendingId = await ScalarAsync(owner, "SELECT note_id FROM config.investigation_notes WHERE state = 'pending'", ct);
+            var journalBefore = await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal", ct);
+            var requestsBefore = await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_requests", ct);
+
+            foreach (var (path, text) in new[]
+            {
+                ($"/api/investigation-requests/{open}/close", "{\"reason\":\"no sign-in\"}"),
+                ("/api/investigation-notes", "{\"note_text\":\"no sign-in\"}"),
+                ($"/api/investigation-practice-requests/{judged}", "{}"),
+                ($"/api/investigation-notes/{pendingId}/approve", "{}"),
+                ($"/api/investigation-notes/{pendingId}/reject", "{}"),
+            })
+            {
+                var answer = await Send("PUT", path, Json, text);
+                Assert.Equal(403, answer.Status);
+                Assert.Equal(SignInSentence, (string)answer.Body!["error"]!);
+            }
+
+            Assert.Equal("open", await ScalarAsync(owner, $"SELECT state FROM config.investigation_requests WHERE request_id = '{open}'", ct));
+            Assert.Equal("pending", await ScalarAsync(owner, $"SELECT state FROM config.investigation_notes WHERE note_id = {pendingId}", ct));
+            Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_notes", ct));
+            Assert.Equal(requestsBefore, await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_requests", ct));
+            Assert.Equal(journalBefore, await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal", ct));
+            Assert.False((bool)(await Send("GET", "/api/session", null, "")).Body!["signed_in_admin"]!);
+        });
+    }
+
+    [Fact]
+    public async Task AName_ThatCannotBeRecorded_Answers400_OnEveryWrite_AndWritesNothing()
+    {
+        string? current = Lee;
+        await WithWebRoutesAsync("admin", () => current, async (owner, store, Send, ct) =>
+        {
+            var judged = await ReportedAsync(store, DateTime.UtcNow.AddHours(-5), "agent proposal: stays pending", ct);
+            var open = await OpenAsync(store, DateTime.UtcNow.AddHours(-1), ct);
+            await new InvestigationFeedbackStore(owner, 30).RecordAsync(new InvestigationFeedbackSubmission(judged, "right", null, null, null, "lee"), ct);
+            var pendingId = await ScalarAsync(owner, "SELECT note_id FROM config.investigation_notes WHERE state = 'pending'", ct);
+            var journalBefore = await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal", ct);
+
+            /* Too long for the journal actor (person: + name over 128, and over the 64 a name may hold), and names with invisible,
+               format or bidi characters that would pass for another person's. */
+            foreach (var name in new[]
+            {
+                new string('a', 122), new string('a', 128), new string('a', 207),
+                "erik\u200B@example.com", "erik\u202E@example.com", "erik\u2066@example.com", "erik\uFEFF@example.com", "erik smith",
+            })
+            {
+                current = name;
+                foreach (var (path, text) in new[]
+                {
+                    ($"/api/investigation-requests/{open}/close", "{\"reason\":\"bad name\"}"),
+                    ("/api/investigation-notes", "{\"note_text\":\"bad name\"}"),
+                    ($"/api/investigation-practice-requests/{judged}", "{}"),
+                    ($"/api/investigation-notes/{pendingId}/approve", "{}"),
+                    ($"/api/investigation-notes/{pendingId}/reject", "{}"),
+                })
+                {
+                    var answer = await Send("PUT", path, Json, text);
+                    Assert.True(answer.Status == 400, $"{path} with a {name.Length}-character name answered {answer.Status}");
+                }
+            }
+
+            Assert.Equal("open", await ScalarAsync(owner, $"SELECT state FROM config.investigation_requests WHERE request_id = '{open}'", ct));
+            Assert.Equal("pending", await ScalarAsync(owner, $"SELECT state FROM config.investigation_notes WHERE note_id = {pendingId}", ct));
+            Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_notes", ct));
+            Assert.Equal(journalBefore, await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal", ct));
+
+            /* The longest name the shape holds is recorded in full. */
+            current = new string('a', 57) + "@x.com";
+            var closed = await Send("PUT", $"/api/investigation-requests/{open}/close", Json, "{\"reason\":\"long but fine\"}");
+            Assert.Equal(200, closed.Status);
+            Assert.Equal("person:" + current, (string)closed.Body!["closed_by"]!);
+        });
+    }
+
+    [Fact]
+    public async Task ABodyWithADuplicateKey_Answers400_AndAMetricNameOver128_IsRefused()
+    {
+        await WithWebRoutesAsync("admin", () => Lee, async (owner, store, Send, ct) =>
+        {
+            var open = await OpenAsync(store, DateTime.UtcNow.AddHours(-1), ct);
+            var close = await Send("PUT", $"/api/investigation-requests/{open}/close", Json, "{\"reason\":\"a\",\"reason\":\"b\"}");
+            Assert.Equal(400, close.Status);
+            Assert.Equal("The body must be a JSON object.", (string)close.Body!["error"]!);
+            Assert.Equal(400, (await Send("PUT", "/api/investigation-notes", Json, "{\"note_text\":\"a\",\"note_text\":\"b\"}")).Status);
+            Assert.Equal(400, (await Send("PUT", "/api/investigation-notes", Json, "{\"note_text\":\"a\",\"days\":5,\"days\":6}")).Status);
+            Assert.Equal("open", await ScalarAsync(owner, $"SELECT state FROM config.investigation_requests WHERE request_id = '{open}'", ct));
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_notes", ct));
+
+            var tooLong = await Send("PUT", "/api/investigation-notes", Json, "{\"note_text\":\"a\",\"metric_name\":\"" + new string('m', 129) + "\"}");
+            Assert.Equal(400, tooLong.Status);
+            Assert.Equal("The metric name must be 128 characters or fewer.", (string)tooLong.Body!["error"]!);
+            Assert.Equal(400, (await Send("PUT", "/api/investigation-notes", Json, "{\"note_text\":\"a\",\"metric_name\":\"a\\u0007b\"}")).Status);
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_notes", ct));
+            Assert.Equal(200, (await Send("PUT", "/api/investigation-notes", Json, "{\"note_text\":\"a\",\"metric_name\":\"" + new string('m', 128) + "\"}")).Status);
+        });
+    }
+
+    [Fact]
+    public async Task TheStorageWrites_RefuseAnActorThatIsNotAPerson_AndWriteNothing()
+    {
+        await WithWebRoutesAsync("admin", () => Lee, async (owner, store, Send, ct) =>
+        {
+            var open = await OpenAsync(store, DateTime.UtcNow.AddHours(-1), ct);
+            var journalBefore = await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal", ct);
+
+            foreach (var actor in new[] { "agent:x", "mcp:x", "service", "web", "person:", "person:erik\u200B", "Person:erik", " person:erik", "person: erik", "person:erik smith" })
+            {
+                await Assert.ThrowsAsync<ArgumentException>(() => store.CloseRequestAsync(open, actor, "reason", ct));
+                await Assert.ThrowsAsync<ArgumentException>(() => store.WriteNoteAsync(null, null, "an approved note", actor, 30, ct));
+            }
+
+            Assert.Equal("open", await ScalarAsync(owner, $"SELECT state FROM config.investigation_requests WHERE request_id = '{open}'", ct));
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_notes", ct));
+            Assert.Equal(journalBefore, await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal", ct));
+
+            /* A person's actor, built the one way, writes. */
+            var actorOk = InvestigationPersonWrites.PersonActor(Lee);
+            Assert.True(await store.CloseRequestAsync(open, actorOk, "reviewed", ct));
+            Assert.True(await store.WriteNoteAsync(null, null, "a person's note", actorOk, 30, ct) > 0);
+        });
+    }
+
+    [Fact]
+    public async Task ACloseAndANoteWrite_UseTheStoresClock_NotTheCallersClock()
+    {
+        await WithWebRoutesAsync("admin", () => Lee, async (owner, store, Send, ct) =>
+        {
+            var open = await OpenAsync(store, DateTime.UtcNow.AddHours(-1), ct);
+            /* A caller whose clock is 400 days slow (a desktop with a wrong date): the store's rows still carry the store's time. */
+            var skewed = new InvestigationRequestStore(owner, 30, () => DateTime.UtcNow.AddDays(-400));
+            var actor = InvestigationPersonWrites.PersonActor(Lee);
+            Assert.True(await skewed.CloseRequestAsync(open, actor, "closed from a desktop with a wrong clock", ct));
+            var noteId = await skewed.WriteNoteAsync(null, null, "written from a desktop with a wrong clock", actor, 30, ct);
+
+            Assert.Equal("true|true", await ScalarAsync(owner, $@"
+SELECT (abs(extract(epoch FROM now() - closed_at)) < 120)::text || '|' ||
+       (closed_at = (SELECT event_time FROM config.investigation_journal WHERE request_id = '{open}' AND event = 'closed'))::text
+FROM config.investigation_requests WHERE request_id = '{open}'", ct));
+            Assert.Equal("true|true|true|true", await ScalarAsync(owner, $@"
+SELECT (abs(extract(epoch FROM now() - created_at)) < 120)::text || '|' ||
+       (abs(extract(epoch FROM now() - decided_at)) < 120)::text || '|' ||
+       (expires_at BETWEEN now() + interval '29 days' AND now() + interval '31 days')::text || '|' ||
+       (created_at = (SELECT event_time FROM config.investigation_journal WHERE event = 'note_written'))::text
+FROM config.investigation_notes WHERE note_id = {noteId}", ct));
         });
     }
 }

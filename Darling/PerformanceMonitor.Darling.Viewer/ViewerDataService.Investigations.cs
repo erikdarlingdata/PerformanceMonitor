@@ -395,7 +395,7 @@ WHERE coalesce(scope_server_id, 0) = coalesce($1::integer, 0) AND coalesce(scope
         int? serverId, string? metricName, string noteText, string login, int days = InvestigationNoteDefaultDays,
         CancellationToken cancellationToken = default)
     {
-        var error = ValidateInvestigationLogin(login) ?? ValidateInvestigationNote(noteText, days);
+        var error = ValidateInvestigationLogin(login) ?? ValidateInvestigationNote(noteText, days, metricName);
         if (error is not null)
         {
             throw new ArgumentException(error, nameof(noteText));
@@ -556,14 +556,14 @@ WHERE coalesce(scope_server_id, 0) = coalesce($1::integer, 0) AND coalesce(scope
         }
     }
 
-    /// <summary>The login the actor names: not blank, at most 128 characters.</summary>
+    /// <summary>The login the actor names: not blank, 1 to 64 letters, digits or . _ : - @ \ (the undo path's shape).</summary>
     public static string? ValidateInvestigationLogin(string? login) => InvestigationPersonWrites.ValidateLogin(login);
 
     /// <summary>A close reason: not blank, at most 500 characters.</summary>
     public static string? ValidateInvestigationCloseReason(string? reason) => InvestigationPersonWrites.ValidateCloseReason(reason);
 
     /// <summary>A note: not blank, at most 2,000 characters, kept 1 to 365 days (the V184 CHECK's twin, said in words).</summary>
-    public static string? ValidateInvestigationNote(string? noteText, int days) => InvestigationPersonWrites.ValidateNote(noteText, days);
+    public static string? ValidateInvestigationNote(string? noteText, int days, string? metricName = null) => InvestigationPersonWrites.ValidateNote(noteText, days, metricName);
 
     /// <summary>A profile: one scope at most (fleet, a server or a tag), at most 4,000 characters.</summary>
     public static string? ValidateInvestigationProfile(int? scopeServerId, int? scopeTagId, string? profileText) =>

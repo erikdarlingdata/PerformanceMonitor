@@ -19,6 +19,17 @@ export const CLOSE_REASON_MAX_LENGTH = 500;
 export const NOTE_DEFAULT_DAYS = 90;
 export const NOTE_MAX_DAYS = 365;
 
+/** What the web says when a change needs a signed-in admin: a dashboard with no sign-in configured has no caller to name. The service
+    answers a change with the same sentence (403) and writes nothing. */
+export const SIGN_IN_SENTENCE = "Sign in to the web as an admin to make this change, or use the Viewer.";
+
+/** Whether this session may make the person-made investigation changes: "yes" for a signed-in admin, "sign-in" for a seat that can edit
+    but is not signed in (the pages list only and say so), "no" for a read-only seat. */
+export function writeAccess(session) {
+  if (!session || session.can_edit !== true) return "no";
+  return session.signed_in_admin === true ? "yes" : "sign-in";
+}
+
 /** The states a request can be closed from. */
 export function canCloseState(state) {
   return state === "open" || state === "claimed" || state === "reported";

@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
@@ -36,14 +37,50 @@ public static class InvestigationPersonWrites
     /// <summary>The longest journal actor (the same bound the note decision holds).</summary>
     public const int ActorMaxLength = 128;
 
-    /// <summary>The journal actor for a person: <c>person:&lt;login&gt;</c>, as the V184 journal records people.</summary>
-    public static string PersonActor(string login) => "person:" + login.Trim();
+    /// <summary>The longest metric name a note may carry.</summary>
+    public const int MetricNameMaxLength = 128;
 
-    /// <summary>The login the actor names: not blank, at most 128 characters.</summary>
-    public static string? ValidateLogin(string? login) =>
-        string.IsNullOrWhiteSpace(login) ? "The viewer could not tell who you are, so it cannot record the change."
-        : login.Trim().Length > ActorMaxLength ? "The login is longer than 128 characters."
-        : null;
+    /// <summary>The prefix every person's journal actor starts with.</summary>
+    public const string PersonActorPrefix = "person:";
+
+    /// <summary>The journal actor for a person: <c>person:&lt;login&gt;</c>, as the V184 journal records people. Shapes the name only;
+    /// <see cref="ValidateActor"/> says whether the result may be written.</summary>
+    public static string PersonActor(string login) => PersonActorPrefix + login.Trim();
+
+    /// <summary>The login the actor names: not blank, and the same shape the undo path holds a person's name to (1 to 64 letters, digits
+    /// or . _ : - @ \), which refuses control, format, bidi and zero-width characters, and whitespace, in a name.</summary>
+    public static string? ValidateLogin(string? login)
+    {
+        if (string.IsNullOrWhiteSpace(login))
+        {
+            return "The viewer could not tell who you are, so it cannot record the change.";
+        }
+
+        try
+        {
+            _ = AgentChangeUndo.PersonActor(login);
+        }
+        catch (ArgumentException)
+        {
+            return "The signed-in name must be 1 to 64 letters, digits or . _ : - @ \\ to be recorded as the person who made a change.";
+        }
+
+        return PersonActor(login).Length > ActorMaxLength ? "The login is longer than 128 characters." : null;
+    }
+
+    /// <summary>The storage guard: a <c>person:&lt;login&gt;</c> actor built by <see cref="PersonActor"/> from a valid login, and nothing
+    /// else, so no caller can write an approved note or a close as an agent or the service.</summary>
+    public static string? ValidateActor(string? actor)
+    {
+        const string notAPerson = "Only a person can make this change: the actor must be person:<login>.";
+        if (actor is null || !actor.StartsWith(PersonActorPrefix, StringComparison.Ordinal))
+        {
+            return notAPerson;
+        }
+
+        var login = actor[PersonActorPrefix.Length..];
+        return ValidateLogin(login) ?? (PersonActor(login) == actor ? null : notAPerson);
+    }
 
     /// <summary>A close reason: not blank, at most 500 characters.</summary>
     public static string? ValidateCloseReason(string? reason) =>
@@ -52,33 +89,37 @@ public static class InvestigationPersonWrites
             ? string.Create(CultureInfo.InvariantCulture, $"The reason must be {CloseReasonMaxLength} characters or fewer.")
         : null;
 
-    /// <summary>A note: not blank, at most 2,000 characters, kept 1 to 365 days (the V184 CHECK's twin, said in words).</summary>
-    public static string? ValidateNote(string? noteText, int days) =>
+    /// <summary>A note: not blank, at most 2,000 characters, kept 1 to 365 days (the V184 CHECK's twin, said in words), and a metric
+    /// name (when given) of at most 128 characters with no control characters.</summary>
+    public static string? ValidateNote(string? noteText, int days, string? metricName = null) =>
         string.IsNullOrWhiteSpace(noteText) ? "Enter the note's text."
         : noteText.Trim().Length > NoteMaxLength
             ? string.Create(CultureInfo.InvariantCulture, $"A note must be {NoteMaxLength:N0} characters or fewer.")
         : days < 1 || days > NoteMaxDays
             ? string.Create(CultureInfo.InvariantCulture, $"A note is kept from 1 to {NoteMaxDays} days.")
+        : metricName is not null && metricName.Trim().Length > MetricNameMaxLength
+            ? string.Create(CultureInfo.InvariantCulture, $"The metric name must be {MetricNameMaxLength} characters or fewer.")
+        : metricName is not null && metricName.Any(char.IsControl) ? "The metric name cannot hold control characters."
         : null;
 }
 
 public sealed partial class InvestigationRequestStore
 {
-    /// <summary>Closes a request still in play or reported. $1 request, $2 actor, $3 reason, $4 now. RETURNING the server for the
-    /// journal row; no row when the request is gone, already closed or expired.</summary>
+    /// <summary>Closes a request still in play or reported. $1 request, $2 actor, $3 reason. The store's own clock (now()), as the Viewer's close always
+    /// used, never the caller's. RETURNING the server and the time for the journal row; no row when the request is gone, already closed or expired.</summary>
     internal const string PersonCloseSql = @"
 UPDATE config.investigation_requests
-SET state = 'closed', closed_at = $4, closed_by = $2, closed_reason = $3
+SET state = 'closed', closed_at = now(), closed_by = $2, closed_reason = $3
 WHERE request_id = $1 AND state IN ('open', 'claimed', 'reported')
-RETURNING server_id";
+RETURNING server_id, closed_at";
 
     /// <summary>A note a person writes: approved as written, by its author. $1 server (or NULL for the fleet), $2 metric (or NULL),
-    /// $3 text, $4 author, $5 lifetime in days, $6 now.</summary>
+    /// $3 text, $4 author, $5 lifetime in days. Times are the store's clock (now()).</summary>
     internal const string PersonNoteInsertSql = @"
 INSERT INTO config.investigation_notes
     (server_id, metric_name, note_text, author, state, created_at, expires_at, decided_at, decided_by)
-VALUES ($1, $2, $3, $4, 'approved', $6, $6 + make_interval(days => $5), $6, $4)
-RETURNING note_id";
+VALUES ($1, $2, $3, $4, 'approved', now(), now() + make_interval(days => $5), now(), $4)
+RETURNING note_id, created_at";
 
     /// <summary>True when the registry holds the server. A note written for a server that is not registered would never reach a brief.</summary>
     public async Task<bool> ServerRegisteredAsync(int serverId, CancellationToken cancellationToken = default)
@@ -96,7 +137,7 @@ RETURNING note_id";
     /// </summary>
     public async Task<bool> CloseRequestAsync(Guid requestId, string actor, string reason, CancellationToken cancellationToken = default)
     {
-        if (InvestigationPersonWrites.ValidateLogin(actor) is { } actorError)
+        if (InvestigationPersonWrites.ValidateActor(actor) is { } actorError)
         {
             throw new ArgumentException(actorError, nameof(actor));
         }
@@ -106,23 +147,24 @@ RETURNING note_id";
             throw new ArgumentException(reasonError, nameof(reason));
         }
 
-        actor = actor.Trim();
         reason = reason.Trim();
-        var now = Now();
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-        object? serverId;
-        await using (var close = Command(connection, transaction, PersonCloseSql, P(requestId), P(actor), P(reason), P(now)))
+        int serverId;
+        DateTime now;
+        await using (var close = Command(connection, transaction, PersonCloseSql, P(requestId), P(actor), P(reason)))
+        await using (var reader = await close.ExecuteReaderAsync(cancellationToken))
         {
-            serverId = await close.ExecuteScalarAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                return false;
+            }
+
+            serverId = reader.GetInt32(0);
+            now = reader.GetFieldValue<DateTime>(1);
         }
 
-        if (serverId is null or DBNull)
-        {
-            return false;
-        }
-
-        await JournalAsync(connection, transaction, now, requestId, null, Convert.ToInt32(serverId, CultureInfo.InvariantCulture),
+        await JournalAsync(connection, transaction, now, requestId, null, serverId,
             "closed", actor, reason, null, null, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         return true;
@@ -137,23 +179,25 @@ RETURNING note_id";
         int? serverId, string? metricName, string noteText, string actor, int days = InvestigationPersonWrites.NoteDefaultDays,
         CancellationToken cancellationToken = default)
     {
-        var error = InvestigationPersonWrites.ValidateLogin(actor) ?? InvestigationPersonWrites.ValidateNote(noteText, days);
+        var error = InvestigationPersonWrites.ValidateActor(actor) ?? InvestigationPersonWrites.ValidateNote(noteText, days, metricName);
         if (error is not null)
         {
             throw new ArgumentException(error, nameof(noteText));
         }
 
-        actor = actor.Trim();
         var metric = string.IsNullOrWhiteSpace(metricName) ? null : metricName.Trim();
-        var now = Now();
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         long noteId;
+        DateTime now;
         await using (var insert = Command(connection, transaction, PersonNoteInsertSql,
             new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlDbType.Integer },
-            PNullable(metric), P(noteText.Trim()), P(actor), P(days), P(now)))
+            PNullable(metric), P(noteText.Trim()), P(actor), P(days)))
+        await using (var reader = await insert.ExecuteReaderAsync(cancellationToken))
         {
-            noteId = Convert.ToInt64(await insert.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
+            await reader.ReadAsync(cancellationToken);
+            noteId = reader.GetInt64(0);
+            now = reader.GetFieldValue<DateTime>(1);
         }
 
         await JournalAsync(connection, transaction, now, null, null, serverId, "note_written", actor,
