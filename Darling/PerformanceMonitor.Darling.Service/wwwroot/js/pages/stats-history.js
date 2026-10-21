@@ -20,7 +20,7 @@
  * An open panel is kept at module scope under its row's key, so the page's 60 s rebuild draws it again without a second read. The
  * entry remembers the window it was read for, and a rebuild under a different window reads it again. Every string is drawn as text.
  */
-import { el, readTool, windowFromHours, activeRangeStamp } from "../util.js";
+import { el, readTool, wholeWindowFromHours, widenedWindowNote, activeRangeStamp, chartNoteText } from "../util.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "../charts.js";
 import { dockPanelUnderRow, undockPanel } from "../plan-row.js";
 import { historyWindow } from "../time-slicer.js";
@@ -65,7 +65,9 @@ export function historyTarget(kind, row) {
 const keyOf = (kind, server, target) => [kind, server, target.database_name, target.procedure_name || target.query_hash].join("|");
 const stampOf = (w) => historyWindow(w).hours + "@" + activeRangeStamp() + historyWindow(w).stamp;
 /* The chart axis a read was made for: the narrowed window while the time slicer holds a selection (#6301), the preset's or custom range's otherwise. */
-const axisOf = (w) => historyWindow(w).axis || windowFromHours(historyWindow(w).hours);
+const axisOf = (w) => historyWindow(w).axis || wholeWindowFromHours(historyWindow(w).hours);
+/* The sentence a panel owes when the whole window it reads is wider than the range the reader picked (#6359); a narrowed window is the reader's own selection, so it owes none. */
+const widenedOf = (w) => (historyWindow(w).axis ? null : widenedWindowNote(historyWindow(w).hours));
 
 async function load(kind, key, server, target, w, stamp) {
   const { hours, extra } = historyWindow(w);
@@ -73,8 +75,8 @@ async function load(kind, key, server, target, w, stamp) {
   try {
     res =
       kind === "procedures"
-        ? await readTool("get_procedure_duration_trend", { server, hours, ...extra, ...target })
-        : await readTool("get_query_trend", { server, hours, ...extra, ...target });
+        ? await readTool("get_procedure_duration_trend", { server, hours, ...extra, ...target }, undefined, { wholeWindow: true })
+        : await readTool("get_query_trend", { server, hours, ...extra, ...target }, undefined, { wholeWindow: true });
   } catch (e) {
     res = { kind: "error", message: e && e.message ? e.message : String(e) };
   }
@@ -130,14 +132,23 @@ function panelFor(kind, key, state, hours, onMetric) {
   if (r.kind !== "data") return el("div", { class: "plan-panel stats-history" }, [strip(r.kind === "error" ? "error" : "empty", r.message)]);
   const d = r.data;
   const rows = Array.isArray(d.trend) ? d.trend : [];
-  if (!rows.length) return el("div", { class: "plan-panel stats-history" }, [strip("empty", "No history was recorded for this row in the window.")]);
+  if (!rows.length) {
+    return el("div", { class: "plan-panel stats-history" }, [
+      state.widened ? strip("notice", state.widened) : null,
+      strip("empty", "No history was recorded for this row in the window."),
+    ]);
+  }
   const notes = [];
+  if (state.widened) notes.push(state.widened);
   if (d.window_truncated) {
     notes.push(
       "History starts " + d.effective_hours_back + " hours back, not the " + d.hours_back + " the window asked for: earlier samples have aged out of the tier that answered."
     );
   }
-  if (d.aggregate_note) notes.push(d.aggregate_note);
+  /* #6359: the facts only. The read's own `aggregate_note` is written for an MCP caller ("pass bucket_minutes (1-1440) for
+     another width, or narrow hours_back"), advice a browser reader cannot act on, so the panel says what a point covers itself (util.js chartNoteText). */
+  const width = chartNoteText(d, "summed");
+  if (width) notes.push(width);
   const parts = [notes.length ? strip("notice", notes.join(" ")) : null];
   if (kind === "procedures") {
     const select = el("select", { class: "stats-history-metric", "aria-label": "Metric" }, PROCEDURE_METRICS.map((m) => el("option", { value: m.value, text: m.label })));
@@ -181,7 +192,7 @@ export function statsHistoryColumn(kind, server, w) {
             return;
           }
           const stamp = stampOf(w);
-          open.set(key, { phase: "loading", stamp, window: axisOf(w), metric: PROCEDURE_METRICS[0].value, redraw: draw });
+          open.set(key, { phase: "loading", stamp, window: axisOf(w), widened: widenedOf(w), metric: PROCEDURE_METRICS[0].value, redraw: draw });
           draw();
           load(kind, key, server, target, w, stamp);
         });
@@ -195,7 +206,7 @@ export function statsHistoryColumn(kind, server, w) {
       const kept = open.get(key);
       if (kept && kept.stamp !== stampOf(w)) {
         const stamp = stampOf(w);
-        open.set(key, { phase: "loading", stamp, window: axisOf(w), metric: kept.metric, redraw: draw });
+        open.set(key, { phase: "loading", stamp, window: axisOf(w), widened: widenedOf(w), metric: kept.metric, redraw: draw });
         load(kind, key, server, target, w, stamp);
       } else if (kept) kept.redraw = draw;
       draw();

@@ -275,6 +275,14 @@ public sealed class ViewerServerStore
                 continue;
             }
 
+            /* #6352: an imported entry is a new registration here: a host SqlClient would read as a named pipe or an admin
+               connection is not imported (counted as skipped). */
+            if (PerformanceMonitor.Common.ServerHostSetting.Refusal(entry.ServerName) is not null)
+            {
+                skipped++;
+                continue;
+            }
+
             if (FindSameServer(entry) is not null)
             {
                 skipped++;

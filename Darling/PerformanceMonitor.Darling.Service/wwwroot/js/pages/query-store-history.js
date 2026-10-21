@@ -17,7 +17,7 @@
  * was read for (hours and the custom range), and a rebuild under a different window reads it again. Every string is
  * drawn through el() as text.
  */
-import { el, readTool, fmtMs, localTime, windowFromHours, activeRangeStamp, windowNoteText } from "../util.js";
+import { el, readTool, fmtMs, localTime, wholeWindowFromHours, widenedWindowNote, activeRangeStamp, windowNoteText } from "../util.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "../charts.js";
 import { planSourceCell } from "./plan-viewer.js";
 import { dockPanelUnderRow, undockPanel } from "../plan-row.js";
@@ -41,7 +41,9 @@ const keyOf = (server, row) => [server, row.database_name, row.query_id, row.pla
 /* The window a read was made for: the preset hours and the page's custom range, so a changed window reads again. */
 const stampOf = (w) => historyWindow(w).hours + "@" + activeRangeStamp() + historyWindow(w).stamp;
 /* The chart axis a read was made for: the narrowed window while the time slicer holds a selection (#6301), the preset's or custom range's otherwise. */
-const axisOf = (w) => historyWindow(w).axis || windowFromHours(historyWindow(w).hours);
+const axisOf = (w) => historyWindow(w).axis || wholeWindowFromHours(historyWindow(w).hours);
+/* The sentence a panel owes when the whole window it reads is wider than the range the reader picked (#6359); a narrowed window is the reader's own selection, so it owes none. */
+const widenedOf = (w) => (historyWindow(w).axis ? null : widenedWindowNote(historyWindow(w).hours));
 
 /* A draw whose cell has left the page is dropped here instead of being drawn into detached DOM: every rebuild renders a
    fresh cell per row, and the old cell's draw would otherwise stay in the set for as long as the page lives (#5234).
@@ -110,7 +112,7 @@ async function load(key, server, row, w, stamp) {
       query_id: row.query_id,
       hours,
       ...extra,
-    });
+    }, undefined, { wholeWindow: true });
   } catch (e) {
     res = { kind: "error", message: e && e.message ? e.message : String(e) };
   }
@@ -130,7 +132,7 @@ function toggle(server, row, w) {
     return;
   }
   const stamp = stampOf(w);
-  openHistories.set(key, { phase: "loading", stamp, window: axisOf(w) });
+  openHistories.set(key, { phase: "loading", stamp, window: axisOf(w), widened: widenedOf(w) });
   redraw(key);
   return load(key, server, row, w, stamp);
 }
@@ -188,9 +190,10 @@ function panelFor(key, server, hours) {
   const state = openHistories.get(key);
   if (state.phase === "loading") return el("div", { class: "plan-panel qs-history" }, [el("div", { class: "strip loading", text: "Loading the query's history..." })]);
   const r = state.result;
+  const widened = state.widened ? el("div", { class: "strip notice", text: state.widened }) : null;
   if (r.kind !== "data") {
     const note = r.note ? el("div", { class: "strip notice", text: r.note }) : null;
-    return el("div", { class: "plan-panel qs-history" }, [note, el("div", { class: r.kind === "error" ? "strip error" : "strip empty", text: r.message })]);
+    return el("div", { class: "plan-panel qs-history" }, [widened, note, el("div", { class: r.kind === "error" ? "strip error" : "strip empty", text: r.message })]);
   }
   const d = r.data;
   const notice = d.window_truncated
@@ -201,7 +204,7 @@ function panelFor(key, server, hours) {
     : null;
   const plansCut = d.plans_truncated ? el("div", { class: "strip notice", text: "Only the " + d.plans.length + " plans with the most total duration are listed." }) : null;
   const cut = d.points_truncated ? el("div", { class: "strip notice", text: "The chart shows the newest " + d.points.length.toLocaleString("en-US") + " snapshots of the window; older ones are not drawn." }) : null;
-  return el("div", { class: "plan-panel qs-history" }, [notice, plansCut, cut, chartFor(key, d, hours, state.window), planTable(server, d, key)]);
+  return el("div", { class: "plan-panel qs-history" }, [widened, notice, plansCut, cut, chartFor(key, d, hours, state.window), planTable(server, d, key)]);
 }
 
 /**
@@ -224,7 +227,7 @@ export function queryStoreHistoryColumn(server, w) {
       const open = openHistories.get(key);
       if (open && open.stamp !== stampOf(w)) {
         const stamp = stampOf(w);
-        openHistories.set(key, { phase: "loading", stamp, window: axisOf(w) });
+        openHistories.set(key, { phase: "loading", stamp, window: axisOf(w), widened: widenedOf(w) });
         load(key, server, row, w, stamp);
       }
       const draw = () => {

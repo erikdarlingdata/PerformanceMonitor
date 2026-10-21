@@ -17,7 +17,7 @@
  * draws a line of zeros for time nobody sampled. The read's own empty or unavailable answer is that sentence.
  */
 
-import { el, readToolWithinKeptHistory, keptWindowStrip, mount, loadingStrip, readErrorStrip, emptyStrip, metricNote, windowFromHours, fmtInt, dbScopeChip } from "../util.js";
+import { el, readToolWithinKeptHistory, keptWindowStrip, mount, loadingStrip, readErrorStrip, emptyStrip, chartNote, chartNoteText, windowFromHours, fmtInt, dbScopeChip } from "../util.js";
 import { zoomableLineChart, chartZoomScope, CATEGORICAL_COLORS } from "../charts.js";
 import { emptyHeadline } from "../panels.js";
 
@@ -37,6 +37,13 @@ export const GRANT_ACTIVITY_METRICS = [
   { key: "timeout_error_count_delta", label: "Timeouts" },
   { key: "forced_grant_count_delta", label: "Forced Grants" },
 ];
+
+/** The activity chart's note: the width, then which series are averaged and which summed (#6359); null when the read states no width. */
+function mixedNote(data) {
+  const width = chartNoteText(data);
+  if (!width) return null;
+  return el("div", { class: "mp-metric-note", text: width === "Each point is one collection." ? width : width + " Grantees and waiters are averaged over the bucket; timeouts and forced grants are summed." });
+}
 
 /**
  * Shape the read's entries ({ collection_time, pool_id, ...metrics }) into one chart's points and series: a line per pool
@@ -123,7 +130,9 @@ export function memoryGrantChartPanels(server, ctx) {
           integerTicks: counts,
           ...windowFromHours(res.keptHours || ctx.hours),
         }, id + "|" + server, chartZoomScope(ctx.hours)),
-        typeof res.data.aggregate_note === "string" && res.data.aggregate_note ? metricNote(res.data.aggregate_note) : null,
+        /* #6359: said from the read's width fields, not the read's MCP-facing `aggregate_note`. The sizing chart is all levels
+           (each point the bucket's mean); the activity chart mixes two levels with two summed counts, so it says so. */
+        counts ? mixedNote(res.data) : chartNote(res.data, "level"),
       ]);
     }
   })();
