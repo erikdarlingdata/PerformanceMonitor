@@ -69,7 +69,7 @@ public static class QueryStoreRegressionBaseline
 
     /// <summary>A rise in timeouts or errors needs at least this many such runs in the recent window (#5506), so one stray
     /// timeout on a quiet query does not flag it.</summary>
-    public const int FailureMinRecentRuns = 5;
+    public const int FailureMinRecentRuns = 3;
 
     /// <summary>A timeouts-only or errors-only row is HIGH when its rate is at least this many times the baseline's (or the
     /// baseline had none), MEDIUM otherwise (#5506). Cost rows keep the duration bands; a failure row never gets CRITICAL,
