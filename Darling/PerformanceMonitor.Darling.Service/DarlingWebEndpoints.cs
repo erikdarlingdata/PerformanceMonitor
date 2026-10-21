@@ -9028,11 +9028,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// The bare <c>"Error during "</c> arm <see cref="ClassifyToolResponse"/> keeps for an un-migrated producer
     /// maps here too, for the same reason.</para>
     /// </summary>
-    internal static IResult ToHttpResult(string result, string route, ILogger logger, long elapsedMs, CancellationToken requestAborted)
+    internal static IResult ToHttpResult(string result, string route, ILogger logger, long elapsedMs, CancellationToken requestAborted,
+        SensitiveStatements.JudgeBudget? sweepBudget = null)
     {
         /* #4348: the statement filter's web sweep. It runs BEFORE ClassifyToolResponse, so the error sentence
            ServerErrorResult echoes is swept too, and a body it cannot read is never written. */
-        var swept = DarlingWebStatementSweep.Apply(result);
+        var swept = DarlingWebStatementSweep.Apply(result, sweepBudget);
         if (swept.Refused) return DarlingWebStatementSweep.Refusal(route, logger, elapsedMs, requestAborted);
         result = swept.Text;
 

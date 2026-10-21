@@ -573,7 +573,7 @@ public sealed class WebExceptionTextCensusTests
         var ex = new PostgresException("canceling statement due to statement timeout", "ERROR", "ERROR", "57014");
         var envelope = McpHelpers.FormatError("get_blocking", ex);
 
-        var result = DarlingWebEndpoints.ToHttpResult(envelope, "/api/read/get_blocking", logger, 77, System.Threading.CancellationToken.None);
+        var result = DarlingWebEndpoints.ToHttpResult(envelope, "/api/read/get_blocking", logger, 77, System.Threading.CancellationToken.None, CleanSweep());
 
         var json = ResultBody(result, out var statusCode);
         Assert.Equal(StatusCodes.Status503ServiceUnavailable, statusCode);
@@ -589,7 +589,7 @@ public sealed class WebExceptionTextCensusTests
         var ex = new InvalidOperationException("Host=store.internal;Port=5432 role \"app_rw\" failed");
         var envelope = McpHelpers.FormatError("get_object_locking", ex);
 
-        var result = DarlingWebEndpoints.ToHttpResult(envelope, "/api/read/get_object_locking", logger, 5, System.Threading.CancellationToken.None);
+        var result = DarlingWebEndpoints.ToHttpResult(envelope, "/api/read/get_object_locking", logger, 5, System.Threading.CancellationToken.None, CleanSweep());
 
         var json = ResultBody(result, out var statusCode);
         Assert.Equal(StatusCodes.Status500InternalServerError, statusCode);
@@ -610,7 +610,7 @@ public sealed class WebExceptionTextCensusTests
         var ex = new PostgresException("relation \"x\" does not exist", "ERROR", "ERROR", "42P01");
         var envelope = McpHelpers.FormatError("get_sweep_reports", ex);
 
-        var result = DarlingWebEndpoints.ToHttpResult(envelope, "/api/read/get_sweep_reports", logger, 9, System.Threading.CancellationToken.None);
+        var result = DarlingWebEndpoints.ToHttpResult(envelope, "/api/read/get_sweep_reports", logger, 9, System.Threading.CancellationToken.None, CleanSweep());
 
         var json = ResultBody(result, out var statusCode);
         Assert.Equal(StatusCodes.Status500InternalServerError, statusCode);
@@ -627,7 +627,7 @@ public sealed class WebExceptionTextCensusTests
         var logger = new CapturingTestLogger();
         var refusal = McpHelpers.Refusal("hours_back", "hours_back must be between 1 and 8760.");
 
-        var result = DarlingWebEndpoints.ToHttpResult(refusal, "/api/read/get_x", logger, 1, System.Threading.CancellationToken.None);
+        var result = DarlingWebEndpoints.ToHttpResult(refusal, "/api/read/get_x", logger, 1, System.Threading.CancellationToken.None, CleanSweep());
 
         ResultBody(result, out var statusCode);
         Assert.Equal(StatusCodes.Status400BadRequest, statusCode);
@@ -641,7 +641,7 @@ public sealed class WebExceptionTextCensusTests
         var logger = new CapturingTestLogger();
         var sentence = $"{DarlingServerResolver.RegistryReadFaultPrefix}Host=store.internal;Port=5432 role \"app_rw\" failed";
 
-        var result = DarlingWebEndpoints.ToHttpResult(sentence, "/api/triage", logger, 5, System.Threading.CancellationToken.None);
+        var result = DarlingWebEndpoints.ToHttpResult(sentence, "/api/triage", logger, 5, System.Threading.CancellationToken.None, CleanSweep());
 
         var json = ResultBody(result, out var statusCode);
         Assert.Equal(StatusCodes.Status500InternalServerError, statusCode);
@@ -656,7 +656,7 @@ public sealed class WebExceptionTextCensusTests
         var logger = new CapturingTestLogger();
         var sentence = $"{DarlingServerResolver.RegistryReadFaultPrefix}57014: canceling statement due to statement timeout";
 
-        var result = DarlingWebEndpoints.ToHttpResult(sentence, "/api/triage", logger, 5, System.Threading.CancellationToken.None);
+        var result = DarlingWebEndpoints.ToHttpResult(sentence, "/api/triage", logger, 5, System.Threading.CancellationToken.None, CleanSweep());
 
         var json = ResultBody(result, out var statusCode);
         Assert.Equal(StatusCodes.Status503ServiceUnavailable, statusCode);
@@ -939,6 +939,13 @@ public sealed class WebExceptionTextCensusTests
         Assert.Equal(0, logger.CountAtLevel(LogLevel.Error));
     }
 
+    /// <summary>#6341: ToHttpResult sweeps its text through the sensitive-statement filter's shared judge first, and that judge
+    /// fails closed on a wall-clock timeout (250 ms per match). On a CPU-starved run it timed out on these tests' plain sentences
+    /// and changed the text, so the status or the log count came out different (200, 400 or a different line count). The tests here
+    /// are about the status mapping and the log line, not the filter, so they hand in a budget over a judge that names nothing.</summary>
+    private static SensitiveStatements.JudgeBudget CleanSweep() =>
+        new(SensitiveStatements.ReadBudget, judge: static _ => SensitiveStatements.Verdict.Clean);
+
     /// <summary>Reads an <see cref="IResult"/> built by <c>Results.Json</c>/<c>Results.Text</c> the same way
     /// the pipeline would, via <see cref="DefaultHttpContext"/>'s response body.</summary>
     private static JsonDocument ResultBody(IResult result, out int statusCode)
@@ -1035,7 +1042,7 @@ public sealed class WebExceptionTextCensusLiveTests
                 result = McpHelpers.FormatError("test_tool", ex);
             }
 
-            return DarlingWebEndpoints.ToHttpResult(result, "/api/__test/tool-caught-timeout", logger, stopwatch.ElapsedMilliseconds, System.Threading.CancellationToken.None);
+            return DarlingWebEndpoints.ToHttpResult(result, "/api/__test/tool-caught-timeout", logger, stopwatch.ElapsedMilliseconds, System.Threading.CancellationToken.None, CleanSweep());
         });
 
         await app.StartAsync(ct);
