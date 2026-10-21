@@ -163,8 +163,8 @@ public sealed class McpZeroIsAMeasurementTests
 
         var lite = ReadRepoFile("Lite", "Services", "LocalDataService.QueryStoreRegressions.cs");
         Assert.DoesNotMatch(NullPercentCoerced, lite);
-        Assert.Equal(3, Regex.Matches(lite, @"RegressionPercent = reader\.IsDBNull\(\d+\) \? null ").Count);
-        Assert.Equal(3, Regex.Matches(lite, @"public double\? \w+RegressionPercent").Count);
+        Assert.Equal(2, Regex.Matches(lite, @"RegressionPercent = reader\.IsDBNull\(\d+\) \? null ").Count);
+        Assert.Equal(2, Regex.Matches(lite, @"public double\? \w+RegressionPercent").Count);
 
         /* Darling's reader is positional; the two percent columns are 4 and 7 (#5506: no reads percent). */
         var darling = ReadRepoFile(DarlingMcp.Split('/').Append("DarlingQueryStoreRegressionReader.cs").ToArray());
