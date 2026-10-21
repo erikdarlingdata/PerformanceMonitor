@@ -2463,23 +2463,7 @@ public sealed class AlertEngine
             if (AttentionEvaluator.ReachesFloor(reading, warningFloor))
             {
                 readClock.Restart();
-                try
-                {
-                    baseline = await GetAttentionBaselineAsync(key, now, ct);
-                }
-                catch (OperationCanceledException) when (ct.IsCancellationRequested)
-                {
-                    throw;
-                }
-                catch (Exception baselineFailure)
-                {
-                    /* The baseline could not be read. Grading on the floors alone would page a busy server all day, so this server is not
-                       graded this sweep, and the failure is counted under its own name. */
-                    _logger?.LogError("Failed to read the client timeouts baseline for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, baselineFailure.Message);
-                    _readFailures?.RecordReadFailure(key, "client timeouts baseline", readClock.ElapsedMilliseconds);
-                    return;
-                }
-
+                baseline = await GetAttentionBaselineAsync(key, now, ct);
                 readClock.Restart();
             }
 

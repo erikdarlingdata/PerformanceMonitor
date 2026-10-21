@@ -517,7 +517,10 @@ public sealed class AlertReadRetrySeamTests
             .ToList();
 
         Assert.Equal(15, seamNames.Count);
-        Assert.Equal(seamNames.Count, seamNames.Distinct(StringComparer.Ordinal).Count());
+        /* One name is shared on purpose (#5736): the Client Timeouts window read and its baseline read both fail into the engine's one
+           "client timeouts" catch arm, so both are counted under that name. Every other name stays one read. */
+        Assert.Equal(new[] { "client timeouts" },
+            seamNames.GroupBy(n => n, StringComparer.Ordinal).Where(g => g.Count() > 1).Select(g => g.Key).ToArray());
 
         var engine = RepoFile.ReadRepoFile("PerformanceMonitor.Alerting", "AlertEngine.cs");
         var engineNames = Regex.Matches(engine, @"RecordReadFailure\([^,]+,\s*""(?<name>[^""]+)""")

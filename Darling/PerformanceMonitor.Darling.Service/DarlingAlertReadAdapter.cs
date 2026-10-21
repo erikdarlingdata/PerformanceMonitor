@@ -952,7 +952,7 @@ ORDER BY collection_time DESC
         return ExecuteWithOneRetryAsync(
             ct => GetAttentionBaselineCoreAsync(serverKey, nowUtc, ct),
             serverKey,
-            "client timeouts baseline",
+            "client timeouts",
             cancellationToken);
     }
 
