@@ -113,6 +113,15 @@ public sealed partial class AgentChangeUndo
     /// <summary>The tool name a person's plan undo journals its refusals under.</summary>
     public const string PlanUndoTool = "undo_plan_change";
 
+    /// <summary>The late <c>action_undone</c> of a plan undo the server accepted (#5632, step 13): written only while the call has no <c>action_undone</c> yet.</summary>
+    private const string LateUndoneSql = @"
+INSERT INTO config.investigation_journal (event_time, request_id, server_id, event, actor, reason, detail)
+SELECT $1, $2, $3, 'action_undone', $4, NULL, $5::jsonb
+WHERE NOT EXISTS (
+    SELECT 1 FROM config.investigation_journal AS x
+    WHERE x.request_id IS NOT DISTINCT FROM $2 AND x.event = 'action_undone' AND x.detail->>'called_id' = $6)
+RETURNING journal_id";
+
     private const string PlanCalledSql = @"
 SELECT c.detail::text, c.request_id, c.server_id, c.event_time, r.server_name
 FROM config.investigation_journal AS c
@@ -213,6 +222,8 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
         private readonly NpgsqlConnection _connection;
         private readonly NpgsqlTransaction _transaction;
         private bool _done;
+        private bool _serverChanged;
+        private JsonObject? _detail;
 
         internal PlanUndoSession(AgentChangeUndo owner, NpgsqlConnection connection, NpgsqlTransaction transaction, PlanChangeFacts facts, string actor)
         {
@@ -266,11 +277,22 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
         }
 
         /// <summary>
-        /// Journals <c>action_undone</c> (#5632, step 9, rule 7) with the call's own <c>request_id</c> and <c>server_id</c> and <c>detail.called_id</c> as
-        /// a JSON number, the shape step 8's readers and the list match on. <paramref name="replaced"/> is the state read before the write,
-        /// <paramref name="restored"/> the state read after it.
+        /// The monitored server accepted the undo's write (#5632, step 13). From here the undo has happened whatever the store does, so a failed
+        /// <c>action_undone</c> insert or commit is recorded late on a fresh connection instead of being lost with the rolled-back transaction.
         /// </summary>
-        public async Task JournalUndoneAsync(string statement, JsonNode? replaced, JsonNode? restored, string? restoredAs, CancellationToken cancellationToken = default)
+        public void MarkServerChanged(string statement, JsonNode? replaced, string? restoredAs)
+        {
+            _serverChanged = true;
+            _detail = BuildDetail(statement, replaced, null, restoredAs);
+        }
+
+        /// <summary>True when the <c>action_undone</c> row was written late, on a fresh connection, after the store's own write or commit failed.</summary>
+        public bool RecordedLate { get; private set; }
+
+        /// <summary>True when the server accepted the undo and the store could not record it at all, not even late.</summary>
+        public bool JournalMissing { get; private set; }
+
+        private JsonObject BuildDetail(string statement, JsonNode? replaced, JsonNode? restored, string? restoredAs)
         {
             var detail = new JsonObject
             {
@@ -283,16 +305,85 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
             };
             if (restoredAs is not null)
                 detail["restored_as"] = restoredAs;
-            await _owner.JournalAsync(_connection, _transaction, "action_undone", Actor, Facts.RequestId, Facts.ServerId, detail.ToJsonString(), cancellationToken);
+            return detail;
         }
 
-        /// <summary>Commits what the session journaled and drops the lock.</summary>
+        /// <summary>
+        /// Journals <c>action_undone</c> (#5632, step 9, rule 7) with the call's own <c>request_id</c> and <c>server_id</c> and <c>detail.called_id</c> as
+        /// a JSON number, the shape step 8's readers and the list match on. <paramref name="replaced"/> is the state read before the write,
+        /// <paramref name="restored"/> the state read after it. After <see cref="MarkServerChanged"/> a failure of the insert is recorded late and
+        /// not thrown (a cancellation is thrown after the late row).
+        /// </summary>
+        public async Task JournalUndoneAsync(string statement, JsonNode? replaced, JsonNode? restored, string? restoredAs, CancellationToken cancellationToken = default)
+        {
+            _detail = BuildDetail(statement, replaced, restored, restoredAs);
+            try
+            {
+                await _owner.JournalAsync(_connection, _transaction, "action_undone", Actor, Facts.RequestId, Facts.ServerId, _detail.ToJsonString(), cancellationToken);
+            }
+            catch (Exception ex) when (_serverChanged)
+            {
+                await RecordLateAsync(ex.Message);
+                if (ex is OperationCanceledException)
+                    throw;
+            }
+        }
+
+        /// <summary>
+        /// Commits what the session journaled and drops the lock. After <see cref="MarkServerChanged"/> a failed commit records
+        /// <c>action_undone</c> late and does not throw, so the person is told the undo happened (a cancellation is thrown after the late row).
+        /// </summary>
         public async Task CommitAsync(CancellationToken cancellationToken = default)
         {
             if (_done)
                 return;
             _done = true;
-            await _transaction.CommitAsync(cancellationToken);
+            if (RecordedLate || JournalMissing)
+                return;
+            try
+            {
+                await _transaction.CommitAsync(cancellationToken);
+            }
+            catch (Exception ex) when (_serverChanged)
+            {
+                await RecordLateAsync(ex.Message);
+                if (ex is OperationCanceledException)
+                    throw;
+            }
+        }
+
+        /// <summary>
+        /// Writes <c>action_undone</c> with <c>recorded_late</c> on a fresh connection with no cancellation, at most
+        /// <see cref="InvestigationRequestStore.AgentActionLateAttempts"/> times, once per call (the insert skips a call that already has its row).
+        /// </summary>
+        private async Task RecordLateAsync(string storeError)
+        {
+            var detail = (_detail ?? new JsonObject { ["called_id"] = Facts.CalledId, ["kind"] = Facts.Kind, ["target"] = Facts.Target?.DeepClone() }).DeepClone().AsObject();
+            detail["recorded_late"] = true;
+            detail["error"] = storeError;
+            var text = detail.ToJsonString();
+            for (var attempt = 0; attempt < InvestigationRequestStore.AgentActionLateAttempts; attempt++)
+            {
+                try
+                {
+                    await using var connection = await _owner._dataSource.OpenConnectionAsync(CancellationToken.None);
+                    await using var command = _owner.Command(connection, null, LateUndoneSql,
+                        new NpgsqlParameter<DateTime> { TypedValue = _owner.Now(), NpgsqlDbType = NpgsqlDbType.TimestampTz },
+                        new NpgsqlParameter<Guid?> { TypedValue = Facts.RequestId, NpgsqlDbType = NpgsqlDbType.Uuid },
+                        new NpgsqlParameter<int?> { TypedValue = Facts.ServerId, NpgsqlDbType = NpgsqlDbType.Integer },
+                        PText(Actor), PText(text), PText(Facts.CalledId.ToString(CultureInfo.InvariantCulture)));
+                    /* No row back means the call already has its action_undone (the commit went through and the failure came after it). */
+                    await command.ExecuteScalarAsync(CancellationToken.None);
+                    RecordedLate = true;
+                    return;
+                }
+                catch (Exception)
+                {
+                    /* Try once more; a second failure leaves the change with no row, which the person is told. */
+                }
+            }
+
+            JournalMissing = true;
         }
 
         public async ValueTask DisposeAsync()

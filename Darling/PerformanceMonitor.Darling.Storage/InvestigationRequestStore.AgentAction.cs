@@ -174,17 +174,9 @@ RETURNING journal_id";
         await using (var connection = await _dataSource.OpenConnectionAsync(cancellationToken))
         await using (var transaction = await connection.BeginTransactionAsync(cancellationToken))
         {
-            bool enabled;
-            await using (var command = Command(connection, transaction, AgentActionsEnabledSql))
-            {
-                enabled = await command.ExecuteScalarAsync(cancellationToken) is not bool on || on;
-            }
-
             var request = await ReadAgentActionRequestAsync(connection, transaction, action.RequestId, cancellationToken);
-            var refusal = !enabled
-                ? new AgentActionRefusal(AgentActionCodes.ActionsOff,
-                    "Agent changes are turned off for this service (config_service.agent_actions_enabled). Report what you would change instead.")
-                : await LiveChecksAsync(connection, transaction, request, call, hooks, now, cancellationToken);
+            var refusal = await ActionsOffRefusalAsync(connection, transaction, cancellationToken)
+                ?? await LiveChecksAsync(connection, transaction, request, call, hooks, now, cancellationToken);
 
             AgentActionContext? context = null;
             if (refusal is null)
@@ -252,7 +244,9 @@ RETURNING journal_id";
             await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
             var request = await ReadAgentActionRequestAsync(connection, transaction, action.RequestId, cancellationToken);
-            var recheck = await LiveChecksAsync(connection, transaction, request, call, hooks, writeNow, cancellationToken, practice: false);
+            /* The switch is read again here (#5632): a person can turn agent changes off between the committed action_called row and the write. */
+            var recheck = await ActionsOffRefusalAsync(connection, transaction, cancellationToken)
+                ?? await LiveChecksAsync(connection, transaction, request, call, hooks, writeNow, cancellationToken, practice: false);
             if (recheck is not null)
             {
                 await JournalReturningAsync(connection, transaction, writeNow, action.RequestId, request?.ServerId,
@@ -378,6 +372,16 @@ RETURNING journal_id";
 
         await JournalRefusedAsync(connection, transaction, Now(), known, serverId, actor, tool, code, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
+    }
+
+    /// <summary>Check 2: the service's agent switch (<c>config_service.agent_actions_enabled</c>). Null when it is on. Read in the gate and again before the write.</summary>
+    private async Task<AgentActionRefusal?> ActionsOffRefusalAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, CancellationToken cancellationToken)
+    {
+        await using var command = Command(connection, transaction, AgentActionsEnabledSql);
+        var enabled = await command.ExecuteScalarAsync(cancellationToken) is not bool on || on;
+        return enabled ? null
+            : new AgentActionRefusal(AgentActionCodes.ActionsOff,
+                "Agent changes are turned off for this service (config_service.agent_actions_enabled). Report what you would change instead.");
     }
 
     /// <summary>Checks 3 to 6 (4 only in the gate's own transaction: practice is fixed at open).</summary>
