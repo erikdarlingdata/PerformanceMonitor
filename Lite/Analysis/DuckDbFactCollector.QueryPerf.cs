@@ -330,9 +330,9 @@ ORDER BY worker_ratio DESC";
                 {
                     failures = await ReadPlanRegressionFailuresAsync(connection, context);
                 }
-                catch (Exception failureEx) when (!AnalysisAbandon.IsExpected(failureEx, context.CancellationToken))
+                catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
                 {
-                    ReportCollectionFailure(failureEx, context);
+                    ReportCollectionFailure(ex, context);
                 }
 
                 using var cmd = connection.CreateCommand();

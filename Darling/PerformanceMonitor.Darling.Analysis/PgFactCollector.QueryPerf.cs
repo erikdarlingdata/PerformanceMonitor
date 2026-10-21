@@ -965,9 +965,9 @@ ORDER BY c.regression_factor DESC";
             {
                 failures = await ReadPlanRegressionFailuresAsync(connection, context, rawWindowStart, collectionBound);
             }
-            catch (Exception failureEx) when (!AnalysisShutdown.IsExpectedAbandon(failureEx, context.CancellationToken))
+            catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
             {
-                ReportCollectionFailure(failureEx, context);
+                ReportCollectionFailure(ex, context);
             }
 
             /* #5630: drop the queries whose two plans were not compiled for the same inputs, keep the worst 20 of the
