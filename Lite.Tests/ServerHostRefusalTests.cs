@@ -116,23 +116,22 @@ public sealed class ServerHostRefusalTests : IDisposable
     }
 
     [Fact]
-    public void UpdateServer_RefusesAPipeHost_WhenTheLiveListObjectWasChangedBeforeTheCall_ByComparingWithTheHostTheEditBeganWith()
+    public void UpdateServer_RefusesAPipeHost_WhenTheLiveListObjectWasChangedBeforeTheCall_WithNothingPassed()
     {
         // The edit dialog changes the object the manager holds, then calls UpdateServer with that same object, so the
-        // stored copy already holds the new host and the two compare equal. The dialog passes the host it opened with.
+        // live copy already holds the new host. The manager compares against its own copy of the last saved host.
         var manager = new ServerManager(_configDir);
         var saved = new ServerConnection { ServerName = "sql01", DisplayName = "x" };
         manager.AddServer(saved);
         var live = manager.GetAllServers().Single();
-        var openedWith = live.ServerName;
 
         live.ServerName = "np:attacker.example";
 
-        Assert.Throws<InvalidOperationException>(() => manager.UpdateServer(live, null, null, openedWith));
+        Assert.Throws<InvalidOperationException>(() => manager.UpdateServer(live));
     }
 
     [Fact]
-    public void UpdateServer_LetsAnUnchangedLegacyPipeHostThrough_WhenThePreviousHostIsPassed()
+    public void UpdateServer_LetsAnUnchangedLegacyPipeHostThrough_OnTheLiveObject()
     {
         var legacy = new ServerConnection { ServerName = "np:legacy01", DisplayName = "legacy" };
         File.WriteAllText(Path.Combine(_configDir, "servers.json"),
@@ -141,7 +140,7 @@ public sealed class ServerHostRefusalTests : IDisposable
         var live = manager.GetAllServers().Single();
 
         live.DisplayName = "renamed";
-        manager.UpdateServer(live, null, null, "np:legacy01");
+        manager.UpdateServer(live);
 
         Assert.Equal("renamed", manager.GetAllServers().Single().DisplayName);
     }

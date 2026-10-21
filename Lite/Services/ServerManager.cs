@@ -31,6 +31,11 @@ public class ServerManager
     private readonly ILogger<ServerManager>? _logger;
     private List<ServerConnection> _servers;
     private readonly object _serversLock = new();
+
+    /* #6352: the host each server had when it was last loaded or saved, by id. A copy of the string, not the live
+       object: the edit dialog changes the live list object before it calls UpdateServer, so the live object's host cannot
+       say what the saved one was. Guarded by _serversLock. */
+    private readonly Dictionary<string, string> _savedHosts = new();
     private readonly ConcurrentDictionary<string, ServerConnectionStatus> _connectionStatuses;
 
     /// <summary>
@@ -291,7 +296,7 @@ public class ServerManager
     /// SqlClient would read as a named pipe or an admin connection is refused for a NEW server
     /// (<paramref name="existingHost"/> null) and for an edit that CHANGES the host; an edit that keeps the host it has
     /// is not held to it, so a server saved before the rule stays editable and collected. Lite's add and edit dialogs
-    /// call this for the same answer <see cref="AddServer"/> and <see cref="UpdateServer(ServerConnection, string?, string?, string?)"/> give.
+    /// call this for the same answer <see cref="AddServer"/> and <see cref="UpdateServer"/> give.
     /// </summary>
     public static string? HostRefusal(string? newHost, string? existingHost) =>
         /* Ordinal, no trim: a stored "<U+00A0>np:x" is not a pipe and "np:x" is, so they are not the same host. */
@@ -326,6 +331,7 @@ public class ServerManager
 
             _servers.Add(server);
             SaveServers();
+            _savedHosts[server.Id] = server.ServerName;
             NotificationRouteCache.Invalidate();
         }
 
@@ -366,11 +372,9 @@ public class ServerManager
     /// <summary>
     /// Updates an existing server.
     /// </summary>
-    /// <param name="previousHost">The host the server had when the edit began. The edit dialog changes the live list
-    /// object before it calls this, so the stored copy already holds the new host and the two always compare equal
-    /// (#6352); the dialog passes the host it captured when it opened, and the check compares against that. Null compares
-    /// against the stored copy.</param>
-    public void UpdateServer(ServerConnection server, string? username = null, string? password = null, string? previousHost = null)
+    /// <remarks>#6352: the host check compares against the manager's own copy of the last saved host, never against the
+    /// live list object, which the edit dialog changes before it calls this. No caller has to remember an argument.</remarks>
+    public void UpdateServer(ServerConnection server, string? username = null, string? password = null)
     {
         lock (_serversLock)
         {
@@ -381,7 +385,7 @@ public class ServerManager
             }
 
             /* #6352: a changed host is held to the add rule; an unchanged one is not (existing rows keep working). */
-            if (HostRefusal(server.ServerName, previousHost ?? existing.ServerName) is { } hostRefusal)
+            if (HostRefusal(server.ServerName, _savedHosts.GetValueOrDefault(server.Id)) is { } hostRefusal)
             {
                 throw new InvalidOperationException(hostRefusal);
             }
@@ -398,6 +402,7 @@ public class ServerManager
             var index = _servers.IndexOf(existing);
             _servers[index] = server;
             SaveServers();
+            _savedHosts[server.Id] = server.ServerName;
             NotificationRouteCache.Invalidate();
         }
 
@@ -484,6 +489,7 @@ public class ServerManager
             if (server != null)
             {
                 _servers.Remove(server);
+                _savedHosts.Remove(id);
                 SaveServers();
                 NotificationRouteCache.Invalidate();
             }
@@ -850,6 +856,7 @@ public class ServerManager
             foreach (var server in _servers)
             {
                 _connectionStatuses[server.Id] = new ServerConnectionStatus { ServerId = server.Id };
+                _savedHosts[server.Id] = server.ServerName;
             }
 
             _logger?.LogInformation("Loaded {Count} servers from configuration", _servers.Count);
@@ -871,6 +878,7 @@ public class ServerManager
                     foreach (var server in _servers)
                     {
                         _connectionStatuses[server.Id] = new ServerConnectionStatus { ServerId = server.Id };
+                        _savedHosts[server.Id] = server.ServerName;
                     }
                     _logger?.LogInformation("Restored {Count} servers from backup file", _servers.Count);
                     return;
@@ -967,6 +975,7 @@ public class ServerManager
 
                 // Add with original GUID so Credential Manager entries still work
                 _servers.Add(server);
+                _savedHosts[server.Id] = server.ServerName;
                 _connectionStatuses[server.Id] = new ServerConnectionStatus { ServerId = server.Id };
                 imported++;
             }

@@ -67,6 +67,31 @@ public sealed class ServerHostTcpDataSourceTests
     public void LocalHost_IsLeftAsTyped(string host) =>
         Assert.Equal(host, ServerHostSetting.TcpDataSource(host));
 
+    [Theory]
+    [InlineData("(localdb)x", "tcp:(localdb)x")]
+    [InlineData("(localdb) \\x", "tcp:(localdb) \\x")]
+    [InlineData("(localdb)192.0.2.1", "tcp:(localdb)192.0.2.1")]
+    [InlineData("(localdb)", "tcp:(localdb)")]
+    [InlineData("localhost.attacker.example", "tcp:localhost.attacker.example")]
+    [InlineData("127.0.0.1.attacker.example", "tcp:127.0.0.1.attacker.example")]
+    [InlineData("127.0.0.10", "tcp:127.0.0.10")]
+    [InlineData("(local)x", "tcp:(local)x")]
+    [InlineData(".x", "tcp:.x")]
+    [InlineData("x.", "tcp:x.")]
+    [InlineData("xlocalhost", "tcp:xlocalhost")]
+    [InlineData("localhost2\\INST1", "tcp:localhost2\\INST1")]
+    public void LooksLikeALocalHost_ButIsNot_GetsTheTcpPrefix(string host, string expected) =>
+        Assert.Equal(expected, ServerHostSetting.TcpDataSource(host));
+
+    [Theory]
+    [InlineData("tcp :sql01")]
+    [InlineData("np :sql01")]
+    [InlineData("TCP\t:sql01")]
+    [InlineData("np\u00A0:sql01")]
+    [InlineData("np\u3000:sql01")]
+    public void ProtocolWordWithWhitespaceBeforeTheColon_IsLeftAsTyped(string host) =>
+        Assert.Equal(host, ServerHostSetting.TcpDataSource(host));
+
     [Fact]
     public void ThisMachinesOwnName_IsLeftAsTyped_InAnyCaseWithInstanceOrPort()
     {
@@ -77,6 +102,8 @@ public sealed class ServerHostTcpDataSourceTests
         Assert.Equal(name + ",1433", ServerHostSetting.TcpDataSource(name + ",1433"));
         /* Only this machine's own name: a longer name that merely starts with it is another host. */
         Assert.Equal("tcp:" + name + "2", ServerHostSetting.TcpDataSource(name + "2"));
+        Assert.Equal("tcp:x" + name, ServerHostSetting.TcpDataSource("x" + name));
+        Assert.Equal("tcp:" + name + ".attacker.example", ServerHostSetting.TcpDataSource(name + ".attacker.example"));
     }
 
     [Theory]

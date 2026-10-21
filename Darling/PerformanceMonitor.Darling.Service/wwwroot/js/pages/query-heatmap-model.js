@@ -9,12 +9,13 @@
 /* #6293: the Query Heatmap grid's logic, with no DOM and no imports so a Node scenario can run it: the metrics on offer, the bin
    width for a window, the cells laid out on a (magnitude row x time column) grid, and the shade for a count. query-heatmap.js draws it. */
 
-/* The Viewer's metric picker, minus Logical Reads (ruled out for the whole web, #6293). `value` is get_query_heatmap's `metric`. */
+/* The Viewer's metric picker, minus Logical Reads (ruled out for the whole web, #6293). `value` is get_query_heatmap's `metric`; `top` names
+   what the top row of the grid holds under that metric (#6353: the rows are the metric's magnitude bands, highest at the top). */
 export const HEATMAP_METRICS = [
-  { value: "duration", label: "Duration (ms)" },
-  { value: "cpu", label: "CPU (ms)" },
-  { value: "logical_writes", label: "Logical Writes" },
-  { value: "execution_count", label: "Execution Count" },
+  { value: "duration", label: "Duration (ms)", top: "the slowest queries" },
+  { value: "cpu", label: "CPU (ms)", top: "the queries using the most CPU" },
+  { value: "logical_writes", label: "Logical Writes", top: "the queries doing the most logical writes" },
+  { value: "execution_count", label: "Execution Count", top: "the most-executed queries" },
 ];
 
 /* The Viewer draws 5-minute columns. A 24 hour window at 5 minutes is 288 columns by up to 7 rows, past the 1000 cells one read

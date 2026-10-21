@@ -177,13 +177,14 @@ export function hasExecutions(kind, rows) {
 export function planComparison(kind, currentRes, baselineRes) {
   const k = KINDS[kind];
   const rowsOf = (res) => (res && res.kind === "data" && res.data && Array.isArray(res.data[k.rowsKey]) ? res.data[k.rowsKey] : []);
+  /* #6353: when the page's own window is the empty one (nothing there, or unread) its card already says so, and "no data for the
+     comparison window" would blame the wrong window, so the plain grid is drawn with no notice. */
+  const currentHasRows = !!currentRes && currentRes.kind === "data" && rowsOf(currentRes).length > 0;
   if (!baselineRes || baselineRes.kind !== "data" || !hasExecutions(kind, rowsOf(baselineRes))) {
     const why = baselineRes && baselineRes.kind === "error" ? ": " + (baselineRes.message || "the read failed") : "";
-    return { mode: "plain", notice: NO_COMPARISON_DATA + why + "." };
+    return { mode: "plain", notice: currentHasRows ? NO_COMPARISON_DATA + why + "." : null };
   }
-  if (!currentRes || currentRes.kind !== "data") {
-    return { mode: "plain", notice: NO_COMPARISON_DATA + ": this window has nothing to compare, or could not be read." };
-  }
+  if (!currentRes || currentRes.kind !== "data") return { mode: "plain", notice: null };
   return { mode: "delta", rows: compareRows(kind, rowsOf(currentRes), rowsOf(baselineRes)) };
 }
 
@@ -214,6 +215,7 @@ export function compareControl(draw, slot) {
 const pctCell = (key, sevKey) => ({
   key,
   label: null,
+  align: "right",
   sevKey,
   render: (r) => document.createTextNode(formatDelta(r[key])),
   sortValue: (r) => r[key],
@@ -247,7 +249,7 @@ function deltaColumns(kind) {
  * The card for a grid with Compare on. `o`: `kind`, `params` (the read's params for the current window, `top` already
  * COMPARE_TOP), `pick`, `server`, `title`, `subtitle`, `picker`, `signal`, `shell` (panelShell), `viz` (VIZ), and `plain()`, which
  * draws the grid as it is with Compare off. A read that fails, or an earlier window with nothing in it, puts the notice
- * above `plain()`'s grid.
+ * inside `plain()`'s card (none when the page's own window is the empty one).
  */
 export function compareCard(o) {
   const { panel, body } = o.shell(o.title, o.subtitle, 2, KINDS[o.kind].read, null, o.picker);
@@ -261,7 +263,22 @@ export function compareCard(o) {
     if (o.signal && o.signal.aborted) return;
     const plan = planComparison(o.kind, currentRes, baselineRes);
     if (plan.mode === "plain") {
-      mount(holder, [noticeStrip(plan.notice), o.plain()]);
+      const card = o.plain();
+      /* #6353: the notice sits INSIDE the card, between its heading and its body, not above it. The body is what the card's own read
+         replaces, so a sibling of it outlives that. A card with no body to find keeps the old place above it. */
+      const bodyOf = (n) => {
+        if (!n) return null;
+        if (typeof n.className === "string" && /\bpanel-body\b/.test(n.className)) return n;
+        for (const c of Array.from(n.children || [])) { const f = bodyOf(c); if (f) return f; }
+        return null;
+      };
+      const inner = plan.notice ? bodyOf(card) : null;
+      if (inner && inner.parentNode) {
+        inner.parentNode.insertBefore(noticeStrip(plan.notice), inner);
+        mount(holder, [card]);
+      } else {
+        mount(holder, plan.notice ? [noticeStrip(plan.notice), card] : [card]);
+      }
       return;
     }
     const end = windowEndMs(o.server) - compareShiftMs(o.pick);

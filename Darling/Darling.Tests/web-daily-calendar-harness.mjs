@@ -135,6 +135,28 @@ try {
     await settle();
     out.tableOct = tables[tables.length - 1];
     out.totalReads = reads.length; // October came back from the first fetch, not a second read
+  } else if (scenario === "future") {
+    /* #6353: a day after the calendar's today. The calendar's today is the read's to_date (the service's UTC day), so a browser clock
+       that is already on the next UTC day (nowMs) must not make the 22nd a "today" or a past day. */
+    const reads = [];
+    const read = async (tool, params) => { reads.push({ tool, params }); return { kind: "empty", status: "empty", message: "No data collected for SRV1 on " + params.summary_date + "." }; };
+    const initial = { to_date: "2026-10-21", days: [], days_missing: [] };
+    const root = cal.dailyHealthCalendar({ server: "SRV1", initial, read, nowMs: Date.parse("2026-10-22T00:30:00Z"), firstDow: 0, renderTable: () => new FakeNode("div"), openDay: async () => null });
+    await settle();
+    const dayCell = (iso) => root.every((n) => n.getAttribute("data-day") === iso)[0];
+    const click = (b) => { for (const fn of b.listeners.click || []) fn({}); };
+    const shape = (iso) => { const c = dayCell(iso); return { band: c.getAttribute("data-band"), word: c.children.map((x) => x.textContent).join("/"), tip: c.getAttribute("title") }; };
+    out.today = shape("2026-10-21");
+    out.tomorrow = shape("2026-10-22");
+    out.lastDay = shape("2026-10-31");
+    out.yesterday = shape("2026-10-20");
+    const readsBefore = reads.length;
+    click(dayCell("2026-10-25"));
+    await settle();
+    out.futureDetail = { text: root.textContent, bands: root.every((n) => /daycal-band/.test(n.className)).map((n) => n.className + "|" + n.textContent), readAsked: reads.length > readsBefore };
+    click(dayCell("2026-10-21"));
+    await settle();
+    out.todayDetail = { text: root.textContent, readAsked: reads.length > readsBefore && reads[reads.length - 1].tool === "get_daily_summary" };
   } else {
     throw new Error("unknown scenario " + scenario);
   }

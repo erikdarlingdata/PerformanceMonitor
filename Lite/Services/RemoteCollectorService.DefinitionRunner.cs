@@ -1056,7 +1056,7 @@ public partial class RemoteCollectorService
                     if (definition.EmitsProbeFailures)
                     {
                         var probes = await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(reader, itemToken);
-                        telemetry.HostNote = probes.Note;
+                        telemetry.HostNote = EnumeratedCollectorDriver.MergeNotes(telemetry.HostNote, probes.Note);
                         LogEnumerationProbeFailures(definition, server, probes.ProbeFailures);
                     }
                 }

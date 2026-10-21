@@ -481,6 +481,10 @@ DROP FUNCTION IF EXISTS config.agent_route_tag_guard();"),
         new(211, "hasClientTimeoutsMultiples",
             @"
 ALTER TABLE IF EXISTS config.config_alert_settings DROP COLUMN IF EXISTS client_timeouts_warning_multiple, DROP COLUMN IF EXISTS client_timeouts_critical_multiple;"),
+        // /// V212 (#6285): the machine identity on the server registry. The column is the probe's newest sentinel. Safe on a store that never had it.
+        new(212, "hasServerMachineIdentity",
+            @"
+ALTER TABLE IF EXISTS collect.servers DROP COLUMN IF EXISTS machine_identity;"),
     ];
 
     /// <summary>
