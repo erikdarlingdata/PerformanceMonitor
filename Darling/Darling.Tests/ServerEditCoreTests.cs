@@ -828,9 +828,9 @@ public sealed class ServerEditCoreTests : IDisposable
     [Fact]
     public async Task ARowSavedWithAPipeHostBeforeTheRule_StaysEditableWhileItsHostIsLeftAlone()
     {
-        var store = new FakeStore { Row = SqlRow(host: "np:legacy-01.example.test") };
+        var store = new FakeStore { Row = SqlRow(host: "np:legacy-host.example.test") };
 
-        var answer = JsonNode.Parse(await Run(store, "{\"host\":\"np:legacy-01.example.test\",\"display_name\":\"renamed\"}"))!;
+        var answer = JsonNode.Parse(await Run(store, "{\"host\":\"np:legacy-host.example.test\",\"display_name\":\"renamed\"}"))!;
 
         Assert.Equal("updated", answer["status"]!.GetValue<string>());
         Assert.Equal(1, store.Writes);
