@@ -1600,6 +1600,8 @@ public sealed class DarlingMcpHostService : BackgroundService
                buttons use. The mcp role queues through config.request_snapshot_now (fixed command type, collector names only),
                never a grant on the command queue. */
             .WithGeminiCompatibleTools<DarlingMcpCollectorRunTools>()
+            /* #6231: set_quiet_window / clear_quiet_window - a mute rule with only a server scope (or none) and an end, optionally a start. */
+            .WithGeminiCompatibleTools<DarlingMcpQuietWindowTools>()
             /* #6230: pause / resume collection, disable / enable one server, set a server's excluded databases and reload the config,
                with get_collection_state to read the result. Each runs the command plane's own plan (or the Viewer's shared exclusions
                write) as the mcp role; the role holds UPDATE on only the paused column of config_service for it. */

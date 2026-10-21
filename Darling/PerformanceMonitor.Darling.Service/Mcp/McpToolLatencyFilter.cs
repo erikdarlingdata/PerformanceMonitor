@@ -112,6 +112,8 @@ public sealed class McpToolLatencyFilter
             var caller = CallerOf(request);
             /* #6230/#6227: set for every tool, not just the composed panel: a write tool names its caller in its own log line (it takes no request of its own). */
             ReadCaller.SetAmbientMcpCaller(caller);
+            /* #6231: and the server-side identity of the call (the token's fingerprint), which a write tool logs ahead of the client's own name (ReadCaller.WriteIdentity). */
+            ReadCaller.SetAmbientMcpToken(TokenIdentityOf(request));
             if (string.Equals(toolName, SkippedToolName, StringComparison.Ordinal))
             {
                 ReadCaller.SetAmbientMcpCaller(caller);
@@ -148,13 +150,13 @@ public sealed class McpToolLatencyFilter
             }
             catch (Exception ex) when (ex is not OperationCanceledException && DarlingMcpWritePolicy.IsWrite(toolName))
             {
-                LogWriteCall(toolName, caller, "failed");
+                LogWriteCall(toolName, "failed");
                 throw;
             }
 
             if (DarlingMcpWritePolicy.IsWrite(toolName))
             {
-                LogWriteCall(toolName, caller, WriteOutcomeOf(answer));
+                LogWriteCall(toolName, WriteOutcomeOf(answer));
             }
 
             /* A successful write, or a successful unanchored analyze_server (it stores findings, D5), makes every cached
@@ -167,11 +169,12 @@ public sealed class McpToolLatencyFilter
             return answer;
         };
 
-    /// <summary>One Information line for every call of a write tool: the tool, the caller and the outcome, and never the arguments (a
-    /// write tool can take a webhook URL or a credential). A write tool that changes a collector schedule also logs what it changed,
-    /// from inside the tool.</summary>
-    private void LogWriteCall(string toolName, string caller, string outcome) =>
-        _logger?.LogInformation("MCP write tool {Tool} called by {Caller}: {Outcome}", toolName, caller, outcome);
+    /// <summary>One Information line for every call of a write tool: the tool, who called it and the outcome, and never the arguments (a
+    /// write tool can take a webhook URL or a credential). Who called is <see cref="ReadCaller.WriteIdentity"/>, the same text every write
+    /// tool's own log line carries: the token's fingerprint, then the name the client gave itself. A write tool that changes a collector
+    /// schedule also logs what it changed, from inside the tool.</summary>
+    private void LogWriteCall(string toolName, string outcome) =>
+        _logger?.LogInformation("MCP write tool {Tool} called by {Caller}: {Outcome}", toolName, ReadCaller.WriteIdentity(), outcome);
 
     /// <summary>The outcome word a write call logs, read from the answer the way <see cref="ClassifyResult"/> reads a read's: a write
     /// tool answers a refusal and a caught error as text, never as a thrown exception, so the error flag alone would call every one
@@ -449,6 +452,28 @@ public sealed class McpToolLatencyFilter
         return result.IsError == true ? ReadOutcome.Error : ReadOutcome.Ok;
     }
 
+    /// <summary>The arguments a slow-read record keeps for one MCP call. A write tool's arguments are the new values it
+    /// sets (URLs, rule text, notes), so only their names are kept and every value is the redaction marker; a read keeps
+    /// its values, which the slow-read log then redacts by key and sweeps for statements. Internal so a test can pin it.</summary>
+    internal static JsonObject? SlowReadArguments(string toolName, IDictionary<string, System.Text.Json.JsonElement>? supplied)
+    {
+        if (supplied is null)
+        {
+            return null;
+        }
+
+        var isWrite = DarlingMcpWritePolicy.IsWrite(toolName);
+        var arguments = new JsonObject();
+        foreach (var (key, value) in supplied)
+        {
+            arguments[key] = isWrite
+                ? JsonValue.Create(SecretTextGuard.RedactedMarker)
+                : JsonNode.Parse(value.GetRawText());
+        }
+
+        return arguments;
+    }
+
     /// <summary>Offers a slow or failed call to the slow-read record (#5097). The arguments are built only when the
     /// call qualifies, and nothing here can reach the request.</summary>
     private void OfferSlow(ReadScope scope, string toolName, ReadOutcome outcome, long elapsedMs,
@@ -462,14 +487,7 @@ public sealed class McpToolLatencyFilter
         JsonObject? arguments = null;
         try
         {
-            if (request.Params?.Arguments is { } supplied)
-            {
-                arguments = new JsonObject();
-                foreach (var (key, value) in supplied)
-                {
-                    arguments[key] = JsonNode.Parse(value.GetRawText());
-                }
-            }
+            arguments = SlowReadArguments(toolName, request.Params?.Arguments);
         }
         catch (Exception ex)
         {
@@ -506,6 +524,25 @@ public sealed class McpToolLatencyFilter
             types is not null && !string.IsNullOrEmpty(toolName) && types.TryGetDefault(toolName, key, out var value)
                 ? ReadWindowBand.DefaultText(value)
                 : null), toolName);
+
+    /// <summary>The server-side identity of the call (#6231): the bearer token the HTTP request carried, as a short fingerprint
+    /// (<see cref="ReadCaller.OfMcpToken"/>), never the token. The client's own name is not part of it. Never throws.</summary>
+    private string TokenIdentityOf(ModelContextProtocol.Server.RequestContext<CallToolRequestParams> request)
+    {
+        try
+        {
+            if (request.Services?.GetService(typeof(IHttpContextAccessor)) is IHttpContextAccessor accessor)
+            {
+                return ReadCaller.OfMcpToken(DarlingMcpHostService.ExtractBearerToken(accessor.HttpContext?.Request.Headers.Authorization.ToString()));
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "The token identity of MCP tool {Tool} was not read.", request.Params?.Name);
+        }
+
+        return "token unknown";
+    }
 
     /// <summary>The caller of the call (#5793): the client info the request's server holds (sent per request from protocol
     /// 2026-07-28; the stateless host has none for an older client's tool call), else the first product token of the HTTP

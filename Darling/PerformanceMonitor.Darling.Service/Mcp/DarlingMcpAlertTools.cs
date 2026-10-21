@@ -75,7 +75,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// but still cannot reach the <c>config_command</c> service-credential pivot or the carved secret columns.</para>
 /// </summary>
 [McpServerToolType]
-public sealed class DarlingMcpAlertTools
+public sealed partial class DarlingMcpAlertTools
 {
     [McpServerTool(Name = "get_alert_history"), Description("Gets alert history, NEWEST FIRST: each row FIRED; notification_type says whether it was DELIVERED, a separate question from DISMISSED (UI-acknowledged), excluded by default. THE PAGE IS BOUNDED BY limit, NOT hours_back: truncated says the window held more, and oldest/newest_returned_alert_time bound how far the page reached. An EMPTY page can mean no alerts fired, or that every alert here was dismissed: dismissed_excluded_count says which; include_dismissed = true returns them, labelled dismissed = true. A null send_error proves nothing about delivery.<<GUIDE>> Gets recent alert history from the alert log, NEWEST FIRST: what alerts fired, when, for which server, the current vs threshold value, whether email/webhook delivery succeeded, and whether the alert was muted. external_source names the external alert source an alert came from (null on every built-in and custom alert): it is the value a mute rule's external_source matches. hours_back reaches 2160 (90 days, the alert table's retention). Omit server_name to see the whole fleet (each row names its server); pass one to scope to a single server. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: alerts_returned is how many rows you got, truncated says the window held more than limit, and oldest_returned_alert_time / newest_returned_alert_time bound the page — under newest-first ordering the oldest stamp IS how far back this read reached, so on a noisy fleet a 24-hour request at the default limit may cover minutes. Raise limit or narrow hours_back when truncated is true; widening hours_back cannot help. BY DEFAULT THIS READ EXCLUDES DISMISSED ALERTS — rows an operator acknowledged in the Viewer's Alert History grid. Dismissal says nothing about whether the alert fired or mattered, so an incident reconstruction that ignores it can miss the very critical someone already looked at: dismissed_excluded says whether the filter applied and dismissed_excluded_count is how many rows in the window it removed, and include_dismissed = true returns them, each labelled dismissed = true. notification_type is the delivery disposition and is the ONLY field that says why a row did not deliver: 'email'/'webhook'/'email+webhook' delivered on that channel; 'throttled' means the delivery cooldown was still inside this alert's window so nothing was attempted (the throttle working, not a fault); 'folded' means a repeat was rolled onto another server's post for the same metric and is named there under 'Other Servers Affected', so it WAS reported; 'failed' means a channel was attempted and came back unsuccessful, with send_error carrying the first failing channel's text; 'unconfigured' means no email or webhook channel is set up; 'muted' means a mute rule suppressed it; 'digest' means the analysis finding was UNCORROBORATED (one fact in its chain, no matched co-fire check) and the corroboration gate routed it to the daily Analysis Singles Digest and the web/MCP surfaces instead of a paging channel — nothing was attempted, nothing was suppressed, and routing_reason on the row says which components decided; 'none' is a resolution row that sent nothing (resolutions off, or no delivered fire). A resolution that was sent, failed or muted carries those same values, and only it has resolution_sent_at (UTC, set when a channel delivered), resolution_channels (where it went, or would have gone when muted) and resolution_outcome ('sent', 'failed: <channels>', 'muted' or 'route deleted or disabled: <channels>'); all three are null on every other row. Do NOT split the not-delivered rows on send_error: it is null on 'throttled', 'folded' and 'digest' rows and on every row written before those values existed, so a null error is not evidence of a working cooldown. 'undelivered' is a retained legacy value that means throttled OR folded OR failed with nothing in the row to say which — count those rows separately rather than attributing them. severity is the row's tier — 'critical', 'warning', 'info' or 'resolution' — and severity_source says where it came from: 'fired' when the row persisted the tier the alert actually fired at (graded alerts such as Poison Wait, Volume Free Space and Database State fire Warning OR Critical by measurement), 'metric_name' when the row carries no tier and the metric's name is the only evidence (rows written before the tier was persisted, alerts whose severity is fixed per metric, and every resolution row). Do not infer a graded alert's tier from its name: a 'Poison Wait' row with severity 'warning' fired as a warning. route says WHERE the posts went: the alert's family (self-monitor / reports / agent-jobs / performance), the notification route that matched it (route_id null = the parent channels in Settings > Notifications answered everything) and each delivered channel with the route that supplied its destination — see get_notification_routes for the taxonomy and the routes. route is null on rows written before routing existed and on rows that never reached a delivery decision (throttled, folded, muted, unconfigured, digest, resolutions), so a null route is not evidence of a routing fault. routing is a DIFFERENT question from route: for an 'Analysis: …' finding it is the corroboration gate's decision one step UPSTREAM of the fan-out — 'page' when the finding earned a channel (two or more facts in its chain, or a matched co-fire check, or one of the two by-construction stories) and 'digest' when it was a lone uncorroborated fact — with routing_reason naming the components the gate read, so 'why didn't this page' is answered by the row. Both are null on every engine alert and on analysis rows written before the gate existed. To see what the digest carried, read the rows with notification_type 'digest' in the window: each is a persisted finding with its full detail_text and context, findable in get_analysis_findings by the story hash in its metric_name. Dismissal is an acknowledgement, not a verdict — a dismissed critical still fired — so set this when reconstructing an incident rather than triaging what is still open. Each row then carries dismissed so the two populations stay distinguishable. Optional metric_name and family narrow the page IN THE QUERY, ahead of limit (#6074): metric_name matches the stored alert name exactly, ignoring case; family is one of self-monitor, reports, agent-jobs, performance, external (get_notification_routes lists them) and covers every alert in that family, a recovery row included. An unknown family or a name with no alerts in the window answers empty and names the filter, so a mistyped filter is distinguishable from a quiet window.")]
     public static async Task<string> GetAlertHistory(
@@ -660,8 +660,8 @@ public sealed class DarlingMcpAlertTools
         "and agent_max_per_day; Darling only, Lite has no agent channel); it never changes a destination. " +
         "send_resolutions says whether the route's destinations also get the message that an alert has cleared: null " +
         "follows each channel's setting (get_alert_settings delivery.send_resolutions), true always sends it, false never does. " +
-        "Routes are authored in the Viewer's Settings window; here they can be disabled or deleted " +
-        "(set_notification_route_enabled / delete_notification_route).")]
+        "Routes are authored in the Viewer's Settings window or here (create_notification_route / update_notification_route); " +
+        "they can also be disabled or deleted (set_notification_route_enabled / delete_notification_route).")]
     public static async Task<string> GetNotificationRoutes(
         NpgsqlDataSource postgres,
         CancellationToken cancellationToken = default)
@@ -739,7 +739,7 @@ public sealed class DarlingMcpAlertTools
         "STORED, {status:\"unchanged\", route:{...}} when it already holds that value (a retry is safe and costs no " +
         "write), or {status:\"not_found\"}. The running service picks the change up on its next collection sweep, " +
         "when the write's config_version bump makes it reload its channel configuration. This tool cannot author or " +
-        "re-point a route: destinations are bearer secrets and are set only in the Viewer's Settings window.")]
+        "re-point a route: destinations are bearer secrets, set with create_notification_route / update_notification_route or in the Viewer's Settings window.")]
     public static async Task<string> SetNotificationRouteEnabled(
         NpgsqlDataSource postgres,
         [Description("The route_id to enable or disable (from get_notification_routes).")] int route_id,
@@ -831,8 +831,8 @@ public sealed class DarlingMcpAlertTools
         "Deletes a notification route by its route_id (from get_notification_routes). Permanent: the alerts it " +
         "matched fall to the next level (a family route, then the parent channels) on the next firing. Returns " +
         "{status:\"deleted\", route_id} or {status:\"not_found\"}. Prefer set_notification_route_enabled for a " +
-        "temporary change — a deleted route's destinations are gone and only the Viewer's Settings window can author " +
-        "them again. The running service stops honoring the route on its next collection sweep.")]
+        "temporary change — a deleted route's destinations are gone and are secrets that cannot be read back, so a new route " +
+        "(create_notification_route, or the Viewer's Settings window) needs them typed again. The running service stops honoring the route on its next collection sweep.")]
     public static async Task<string> DeleteNotificationRoute(
         NpgsqlDataSource postgres,
         [Description("The route_id to delete (from get_notification_routes).")] int route_id)
@@ -967,7 +967,7 @@ public sealed class DarlingMcpAlertTools
             return JsonSerializer.Serialize(new
             {
                 total_count = list.Count,
-                mute_rules = list.Select(BuildMuteRulePayload)
+                mute_rules = list.Select(r => BuildMuteRuleWithState(r, DateTime.UtcNow))
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -979,8 +979,18 @@ public sealed class DarlingMcpAlertTools
     /// <summary>The per-rule shape get_mute_rules returns AND create_mute_rule echoes back for the stored rule.</summary>
     /// <summary>The mute rule's wire shape, and the image the Level 2 mute tools journal: <see cref="MuteRuleImage"/> (#5917), one type for both.</summary>
     internal static MuteRuleImage BuildMuteRulePayload(MuteRule r) => new(
-        r.Id, r.Enabled, r.CreatedAtUtc.ToString("o"), r.ExpiresAtUtc?.ToString("o"), r.Reason, r.ServerName, r.ServerId, r.MetricName,
+        r.Id, r.Enabled, r.CreatedAtUtc.ToString("o"), r.ExpiresAtUtc?.ToString("o"), r.StartsAtUtc?.ToString("o"), r.Reason, r.ServerName, r.ServerId, r.MetricName,
         r.ExternalSource, r.DatabasePattern, r.QueryTextPattern, r.WaitTypePattern, r.JobNamePattern, r.ClientAppPattern, r.Summary);
+
+    /// <summary>The rule's wire shape plus its <c>state</c> as of <paramref name="nowUtc"/> (#6231): <c>active</c>, <c>upcoming</c> (its
+    /// <c>starts_at_utc</c> is ahead, so it mutes nothing yet), <c>expired</c> or <c>disabled</c>. The state is a reading of the clock, not
+    /// a stored column, so it is added to the read and never to the journal image.</summary>
+    internal static JsonObject BuildMuteRuleWithState(MuteRule r, DateTime nowUtc)
+    {
+        var node = (JsonObject)JsonSerializer.SerializeToNode(BuildMuteRulePayload(r), McpHelpers.JsonOptions)!;
+        node["state"] = r.StateAt(nowUtc);
+        return node;
+    }
 
     [McpServerTool(Name = "update_alert_settings"), Description(
         "PARTIAL update of the single global alert-settings row the service delivers on. Call " +
@@ -1225,7 +1235,7 @@ public sealed class DarlingMcpAlertTools
         "fields are case-insensitive substring matches. external_source (optional, lower case, e.g. nagios) limits " +
         "the rule to alerts that one external source raised through Darling's alert intake: it never mutes a " +
         "built-in alert or another source's alert, and a rule without it still mutes an external alert whose other " +
-        "fields match; a name that is not a valid source name is refused. expires_at is an optional ISO-8601 UTC timestamp after " +
+        "fields match; a name that is not a valid source name is refused. starts_at is an optional ISO-8601 UTC timestamp before which the rule is stored but mutes nothing (a window set ahead of planned work; it must be before expires_at, and for a window with no other scope use set_quiet_window); expires_at is an optional ISO-8601 UTC timestamp after " +
         "which the rule stops applying; omit it for a permanent rule. Returns the stored rule, including its " +
         "generated id (for delete_mute_rule). Repeating a call is safe: when an enabled, unexpired rule already " +
         "holds the same seven scope and pattern fields, the same external_source and the same expires_at, nothing is created and the answer is " +
@@ -1251,12 +1261,13 @@ public sealed class DarlingMcpAlertTools
         [Description("Optional external alert source name (lower case, e.g. 'nagios'): mute only that source's alerts. Omit for any source.")] string? external_source = null,
         [Description("Level 2 only: under mcp.allowInvestigations this change needs agent_action (request_id, claim_id, agent_id, reason, evidence); see the tool guide. Ignored when mcp.allowWrites is on.")] string? agent_action = null,
         DarlingAgentActionSeat? agentSeat = null,
-        ILogger? logger = null) =>
+        ILogger? logger = null,
+        [Description("Optional ISO-8601 UTC start (e.g. 2026-08-01T00:00:00Z): the rule is stored now but mutes nothing until this moment. Must be before expires_at. Omit for a rule that applies at once.")] string? starts_at = null) =>
         DarlingAgentActionSeat.IsGated(agentSeat)
             ? DarlingMcpAgentActions.CreateMuteAsync(agentSeat!, postgres, logger, agent_action, server_name, metric_name, database_pattern,
-                query_text_pattern, wait_type_pattern, job_name_pattern, reason, expires_at, server_id, client_app_pattern, external_source)
+                query_text_pattern, wait_type_pattern, job_name_pattern, reason, expires_at, server_id, client_app_pattern, external_source, starts_at)
             : CreateMuteRuleOver(new PgMuteRuleStore(postgres), server_name, metric_name, database_pattern, query_text_pattern,
-            wait_type_pattern, job_name_pattern, reason, expires_at, server_id, id => MonitoredServerDisplayNameAsync(postgres, id), client_app_pattern, external_source);
+            wait_type_pattern, job_name_pattern, reason, expires_at, server_id, id => MonitoredServerDisplayNameAsync(postgres, id), client_app_pattern, external_source, starts_at);
 
     /// <summary>The refusal for a <c>server_id</c> no registered server has: a rule keyed on it would mute
     /// nothing while reading as if it muted something.</summary>
@@ -1300,7 +1311,8 @@ public sealed class DarlingMcpAlertTools
         int? server_id = null,
         Func<int, Task<string?>>? serverNameLookup = null,
         string? client_app_pattern = null,
-        string? external_source = null)
+        string? external_source = null,
+        string? starts_at = null)
     {
         try
         {
@@ -1334,6 +1346,23 @@ public sealed class DarlingMcpAlertTools
                 expiresAtUtc = DateTime.SpecifyKind(parsed, DateTimeKind.Utc);
             }
 
+            DateTime? startsAtUtc = null;
+            if (!string.IsNullOrWhiteSpace(starts_at))
+            {
+                if (!DateTime.TryParse(starts_at, CultureInfo.InvariantCulture,
+                        DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var parsedStart))
+                {
+                    return Outcome("invalid", $"starts_at '{starts_at}' is not a valid ISO-8601 timestamp (e.g. 2026-08-01T00:00:00Z).");
+                }
+
+                startsAtUtc = DateTime.SpecifyKind(parsedStart, DateTimeKind.Utc);
+            }
+
+            if (startsAtUtc.HasValue && expiresAtUtc.HasValue && expiresAtUtc.Value <= startsAtUtc.Value)
+            {
+                return Outcome("invalid", $"expires_at ({expiresAtUtc.Value:o}) must be after starts_at ({startsAtUtc.Value:o}). Nothing was written.");
+            }
+
             /* A server_id keys the rule on the store id; it must be a monitored server's, or the rule would mute
                nothing and look like it muted something. server_name then only labels the rule, so an omitted
                one is filled from the registry. Without a server_id the rule is name-keyed, as it always was. */
@@ -1354,6 +1383,7 @@ public sealed class DarlingMcpAlertTools
                 Enabled = true,
                 CreatedAtUtc = DateTime.UtcNow,
                 ExpiresAtUtc = expiresAtUtc,
+                StartsAtUtc = startsAtUtc,
                 Reason = Trimmed(reason),
                 ServerName = Trimmed(server_name) ?? labelFromRegistry,
                 ServerId = server_id,
@@ -1440,6 +1470,11 @@ public sealed class DarlingMcpAlertTools
             foreach (var change in changes)
             {
                 change.Apply(rule);
+            }
+
+            if (WindowRefusal(rule) is { } coreWindowProblem)
+            {
+                return Outcome("invalid", coreWindowProblem);
             }
 
             /* The web route creates through here, so a server_id in its body is held to the create tool's rule:
@@ -1643,7 +1678,7 @@ public sealed class DarlingMcpAlertTools
         "{\"job_name_pattern\":null} stops constraining that dimension (external_source clears the same way: null " +
         "makes the rule stop being limited to one source, and a blank string is refused). Editable fields: server_name, server_id, " +
         "metric_name, external_source, database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, client_app_pattern, reason, " +
-        "expires_at_utc (create_mute_rule's expires_at spelling is accepted as a write-only alias; send only " +
+        "starts_at_utc (null clears it; it must stay before expires_at_utc), expires_at_utc (create_mute_rule's expires_at spelling is accepted as a write-only alias; send only " +
         "one). enabled is NOT editable here — use set_mute_rule_enabled, the dedicated reversible verb. USE THIS " +
         "rather than delete_mute_rule followed by create_mute_rule: a re-created rule is a NEW rule with a new " +
         "id and a new creation date, and the Stale Mute Rules self-alert ages a rule from its creation date — so " +
@@ -1752,6 +1787,11 @@ public sealed class DarlingMcpAlertTools
             foreach (var change in changes)
             {
                 change.Apply(merged);
+            }
+
+            if (WindowRefusal(merged) is { } windowProblem)
+            {
+                return Outcome("invalid", windowProblem);
             }
 
             if (merged.ServerId.HasValue && merged.ServerId != existing.ServerId
@@ -1924,11 +1964,34 @@ public sealed class DarlingMcpAlertTools
             }
         }
 
+        /* #6231: the optional start. null clears it (the rule applies from now on); the canonical field is starts_at_utc. */
+        void AddStart(string spelling, JsonNode? node)
+        {
+            if (error != null) return;
+            if (node is null)
+            {
+                changes.Add(new MuteRuleFieldChange("starts_at_utc", r => r.StartsAtUtc = null));
+            }
+            else if (node is JsonValue v && v.TryGetValue<string>(out var s)
+                && DateTime.TryParse(s, CultureInfo.InvariantCulture,
+                    DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var parsed))
+            {
+                var utc = DateTime.SpecifyKind(parsed, DateTimeKind.Utc);
+                changes.Add(new MuteRuleFieldChange("starts_at_utc", r => r.StartsAtUtc = utc));
+            }
+            else
+            {
+                error = $"'{spelling}' must be an ISO-8601 UTC timestamp (e.g. 2026-08-01T00:00:00Z), or null for a rule that applies from now.";
+            }
+        }
+
         foreach (var prop in body)
         {
             if (error != null) break;
             switch (prop.Key)
             {
+                case "starts_at_utc": AddStart("starts_at_utc", prop.Value); break;
+                case "starts_at": AddStart("starts_at", prop.Value); break;
                 case "server_name": AddText("server_name", prop.Value, (r, v) => r.ServerName = v); break;
                 case "server_id": AddInt("server_id", prop.Value, (r, v) => r.ServerId = v); break;
                 case "metric_name": AddText("metric_name", prop.Value, (r, v) => r.MetricName = v); break;
@@ -1968,11 +2031,19 @@ public sealed class DarlingMcpAlertTools
            tell the caller both applied. */
         if (error == null && changes.GroupBy(c => c.Field, StringComparer.Ordinal).Any(g => g.Count() > 1))
         {
-            error = "'expires_at' and 'expires_at_utc' are two names for the same field; send only one of them.";
+            error = "'expires_at' and 'expires_at_utc' are two names for the same field (and 'starts_at' and 'starts_at_utc' likewise); send only one of each pair.";
         }
 
         return (changes, error);
     }
+
+    /// <summary>The refusal for a rule whose end is not after its start (#6231), or null. A window that ends before it starts would
+    /// never apply and would read as if it did, so every write that can set either bound runs this on the rule it is about to
+    /// store. A rule with only one bound, or none, is never refused here.</summary>
+    internal static string? WindowRefusal(MuteRule rule) =>
+        rule.StartsAtUtc.HasValue && rule.ExpiresAtUtc.HasValue && rule.ExpiresAtUtc.Value <= rule.StartsAtUtc.Value
+            ? $"The end ({rule.ExpiresAtUtc.Value.ToString("o", CultureInfo.InvariantCulture)}) must be after the start ({rule.StartsAtUtc.Value.ToString("o", CultureInfo.InvariantCulture)}). Nothing was written."
+            : null;
 
     /// <summary>Whether two rules agree on every field update_mute_rule can move — the 'unchanged'
     /// comparison. ORDINAL on the text fields (see the core's doc for why a case-only edit counts);
@@ -1989,7 +2060,8 @@ public sealed class DarlingMcpAlertTools
         && string.Equals(a.JobNamePattern, b.JobNamePattern, StringComparison.Ordinal)
         && string.Equals(a.ClientAppPattern, b.ClientAppPattern, StringComparison.Ordinal)
         && string.Equals(a.Reason, b.Reason, StringComparison.Ordinal)
-        && a.ExpiresAtUtc == b.ExpiresAtUtc;
+        && a.ExpiresAtUtc == b.ExpiresAtUtc
+        && a.StartsAtUtc == b.StartsAtUtc;
 
     /// <summary>One rule by id, or null — an ordinal id match over the store's full read, which is the only
     /// read <see cref="IMuteRuleStore"/> offers.</summary>
@@ -2059,7 +2131,8 @@ public sealed class DarlingMcpAlertTools
         && string.Equals(a.WaitTypePattern, b.WaitTypePattern, StringComparison.Ordinal)
         && string.Equals(a.JobNamePattern, b.JobNamePattern, StringComparison.Ordinal)
         && string.Equals(a.ClientAppPattern, b.ClientAppPattern, StringComparison.Ordinal)
-        && SameExpiry(a.ExpiresAtUtc, b.ExpiresAtUtc);
+        && SameExpiry(a.ExpiresAtUtc, b.ExpiresAtUtc)
+        && SameExpiry(a.StartsAtUtc, b.StartsAtUtc);
 
     /// <summary>Two expiries are the same instant to the store's precision. Postgres keeps microseconds and a .NET
     /// tick is 100 ns, so an expiry sent with seven fractional digits comes back from the store truncated: compared

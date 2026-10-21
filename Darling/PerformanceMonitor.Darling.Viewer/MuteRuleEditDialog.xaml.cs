@@ -102,6 +102,15 @@ public partial class MuteRuleEditDialog : Window
         if (!string.IsNullOrEmpty(rule.MetricName))
             SelectMetric(rule.MetricName);
 
+        /* #6231: a rule that already has a start keeps it unless the operator picks another: the first entry stands for the stored
+           start, so an edit that never touches the combo cannot move or drop it. */
+        if (rule.StartsAtUtc is { } storedStart)
+        {
+            _keptStart = storedStart;
+            StartCombo.Items.Insert(0, new ComboBoxItem { Content = $"Keep: {storedStart.ToLocalTime():g}" });
+            StartCombo.SelectedIndex = 0;
+        }
+
         if (rule.ExpiresAtUtc == null)
         {
             ExpirationCombo.SelectedIndex = 3;
@@ -157,6 +166,13 @@ public partial class MuteRuleEditDialog : Window
             _ => null
         };
 
+        Rule.StartsAtUtc = StartFromSelection(StartCombo.SelectedIndex, _keptStart, DateTime.UtcNow);
+        if (WindowRefusal(Rule.StartsAtUtc, Rule.ExpiresAtUtc) is { } windowProblem)
+        {
+            MessageBox.Show(windowProblem, "Mute Rule", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
         if (Rule.ServerName == null && Rule.MetricName == null && Rule.DatabasePattern == null
             && Rule.QueryTextPattern == null && Rule.WaitTypePattern == null && Rule.JobNamePattern == null
             && Rule.ClientAppPattern == null)
@@ -169,6 +185,31 @@ public partial class MuteRuleEditDialog : Window
 
         DialogResult = true;
     }
+
+    /// <summary>The start the Starts combo stands for (#6231). When the rule being edited already had a start, entry 0 is "Keep" and
+    /// the entries after it are the four offsets; otherwise entry 0 is "Now" (no start) and the entries after it are the same four.</summary>
+    internal static DateTime? StartFromSelection(int selectedIndex, DateTime? keptStart, DateTime nowUtc)
+    {
+        var offset = keptStart.HasValue ? selectedIndex - 1 : selectedIndex;
+        if (keptStart.HasValue && selectedIndex == 0)
+            return keptStart;
+        return offset switch
+        {
+            1 => nowUtc.AddHours(1),
+            2 => nowUtc.AddHours(4),
+            3 => nowUtc.AddHours(12),
+            4 => nowUtc.AddHours(24),
+            _ => null
+        };
+    }
+
+    /// <summary>The refusal for an end that is not after the start, or null.</summary>
+    internal static string? WindowRefusal(DateTime? startsAtUtc, DateTime? expiresAtUtc) =>
+        startsAtUtc.HasValue && expiresAtUtc.HasValue && expiresAtUtc.Value <= startsAtUtc.Value
+            ? "The rule would end before it starts. Pick a later 'Expires After' or an earlier start."
+            : null;
+
+    private DateTime? _keptStart;
 
     private void Cancel_Click(object sender, RoutedEventArgs e) => DialogResult = false;
 

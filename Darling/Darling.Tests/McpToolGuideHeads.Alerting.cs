@@ -239,7 +239,7 @@ public sealed class McpToolGuideHeadsAlertingTests
         var routeTail = McpToolGuideTests.Served("set_notification_route_enabled").Tail!;
         Assert.Contains("the reversible form of", routeTail, StringComparison.Ordinal);
         Assert.Contains("The running service picks the change up on its next collection sweep", routeTail, StringComparison.Ordinal);
-        Assert.Contains("destinations are bearer secrets and are set only in the Viewer's Settings window", routeTail, StringComparison.Ordinal);
+        Assert.Contains("destinations are bearer secrets, set with create_notification_route / update_notification_route or in the Viewer's Settings window", routeTail, StringComparison.Ordinal);
 
         var createTail = McpToolGuideTests.Served("create_mute_rule").Tail!;
         Assert.Contains("the same rules get_mute_rules lists and the Viewer's Manage Mute Rules surface writes", createTail, StringComparison.Ordinal);

@@ -815,7 +815,8 @@ public sealed class DarlingManagedRolesTests
             new[] { "GRANT UPDATE (dismissed) ON config.config_alert_log TO viewer;" },
             System.Text.RegularExpressions.Regex.Matches(sql, @"GRANT [^;]*? ON config\.config_alert_log TO [^;]*viewer[^;]*;")
                 .Select(m => m.Value).ToArray());
-        Assert.DoesNotContain("ON config.config_alert_log TO mcp", sql, StringComparison.Ordinal);
+        /* What mcp may do on the history table is proved by behaviour, as the mcp role:
+           McpAlertAdminLiveTests.DismissAndRestore_RunAsTheMcpRole_SetOnlyTheDismissedColumn. */
         Assert.DoesNotContain("ON config_alert_log TO viewer", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("ON config_alert_log TO mcp", sql, StringComparison.Ordinal);
 

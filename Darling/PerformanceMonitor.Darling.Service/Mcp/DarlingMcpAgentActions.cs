@@ -183,12 +183,19 @@ internal static class DarlingMcpAgentActions
 
     /* ------------------------------------------------------------------ mute rules */
 
+    /// <summary>What an investigating agent is told when it sends a mute start (#6231): its mute applies at once.</summary>
+    internal const string StartsAtRefusal =
+        "starts_at is not available during an investigation: a mute made here applies at once, so a window set ahead of planned work is left to an operator. Nothing was written.";
+
     internal static async Task<string> CreateMuteAsync(DarlingAgentActionSeat seat, NpgsqlDataSource postgres, ILogger? logger,
         string? agentAction, string? server_name, string? metric_name, string? database_pattern, string? query_text_pattern,
         string? wait_type_pattern, string? job_name_pattern, string? reason, string? expires_at, int? server_id,
-        string? client_app_pattern, string? external_source, CancellationToken ct = default)
+        string? client_app_pattern, string? external_source, string? starts_at = null, CancellationToken ct = default)
     {
         const string tool = "create_mute_rule";
+        /* A start in the future would let a mute begin after the investigation's claim has ended, so an agent's mute applies at once. */
+        if (!string.IsNullOrWhiteSpace(starts_at))
+            return DarlingMcpAlertTools.Outcome("invalid", StartsAtRefusal);
         var parsed = InvestigationToolCore.ParseAgentAction(agentAction, out var action);
         if (parsed is null && (server_id is null || string.IsNullOrWhiteSpace(metric_name)))
             return await RefuseEarlyAsync(postgres, action!, tool, NeedsMetric, ct);
@@ -202,7 +209,7 @@ internal static class DarlingMcpAgentActions
                 var answer = await DarlingMcpAlertTools.CreateMuteRuleOver(new PgMuteRuleStore(connection, transaction), server_name, metric_name,
                     database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, WithSuffix(reason, action!), expires_at,
                     server_id, id => DarlingMcpAlertTools.MonitoredServerDisplayNameAsync(postgres, id), client_app_pattern,
-                    external_source);
+                    external_source, starts_at);
                 RequireSuccess(answer);
                 return answer;
             }, ct);
@@ -251,6 +258,9 @@ internal static class DarlingMcpAgentActions
         {
             body = null;
         }
+
+        if (body is not null && (body.ContainsKey("starts_at") || body.ContainsKey("starts_at_utc")))
+            return DarlingMcpAlertTools.Outcome("invalid", StartsAtRefusal);
 
         var (before, notFound) = await FindMuteAsync(postgres, rule_id);
         var parsed = InvestigationToolCore.ParseAgentAction(agentAction, out var action);

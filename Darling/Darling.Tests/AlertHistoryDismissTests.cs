@@ -109,13 +109,12 @@ public sealed class AlertHistoryDismissTests
     /* ═══════════════════════════ the grant text ═══════════════════════════ */
 
     [Fact]
-    public void ManagedProvisioning_GrantsViewerExactlyTheDismissedColumn_AndMcpNothing()
+    public void ManagedProvisioning_GrantsViewerExactlyTheDismissedColumn()
     {
         var sql = DarlingManagedRoles.BuildProvisioningSql(
             ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp, 15);
 
         Assert.Contains("GRANT UPDATE (dismissed) ON config.config_alert_log TO viewer;", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("config.config_alert_log TO mcp", sql, StringComparison.Ordinal);
 
         /* No table-level UPDATE, INSERT or DELETE on the alert log for viewer, in any spelling. */
         var tableLevel = Regex.Matches(

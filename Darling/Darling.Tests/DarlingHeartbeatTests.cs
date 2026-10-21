@@ -134,6 +134,26 @@ public sealed class DarlingHeartbeatTests
         Assert.DoesNotContain("BAD NAME", problem, StringComparison.Ordinal);
     }
 
+    /// <summary>#6231: a heartbeat URL that spells a link-local address is a stated problem, with fixed text and without the URL,
+    /// on the config check and on the tick, and never reads as fine.</summary>
+    [Theory]
+    [InlineData("http://169.254.169.254/latest/")]
+    [InlineData("http://169.254.169.254./latest/")]
+    [InlineData("https://[64:ff9b::a9fe:a9fe]/latest/")]
+    public async Task ALinkLocalLiteral_IsAFixedTextProblem_OnTheConfigCheckAndOnTheTick(string url)
+    {
+        var heartbeat = new HeartbeatConfig { Url = url + Token };
+
+        var problem = Assert.Single(HeartbeatConfig.Validate(heartbeat));
+        Assert.Contains(HeartbeatConfig.BlockedAddressProblem, problem, StringComparison.Ordinal);
+
+        var (uri, resolved) = await heartbeat.ResolveAsync(Ct);
+        Assert.Null(uri);
+        Assert.Equal(HeartbeatConfig.BlockedAddressProblem, resolved);
+        Assert.DoesNotContain(Token, resolved, StringComparison.Ordinal);
+        Assert.DoesNotContain("169.254.169.254", resolved, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Validate_ChecksOnlyTheShapeOfAReference_AndNeverResolvesIt()
     {

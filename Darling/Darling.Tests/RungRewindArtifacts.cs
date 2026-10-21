@@ -455,6 +455,12 @@ DROP TABLE IF EXISTS config.change_watches;
 DROP INDEX IF EXISTS collect.idx_query_store_forced_plans_markers;
 ALTER TABLE IF EXISTS config.investigation_requests
     DROP COLUMN IF EXISTS trigger_kind;"),
+
+        // /// V208 (#6231): the start time on the mute rules. The column is the probe's newest sentinel. The rewind drops it, so a re-run of V208
+        // adds it again. Safe on a store that never had it.
+        new(208, "hasMuteRuleStartsAt",
+            @"
+ALTER TABLE IF EXISTS config.config_mute_rules DROP COLUMN IF EXISTS starts_at_utc;"),
     ];
 
     /// <summary>

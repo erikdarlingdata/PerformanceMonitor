@@ -363,7 +363,7 @@ public sealed class DarlingMcpCollectorScheduleTools
     }
 
     /// <summary>One log line per schedule write: the tool, the collector, the scope, the value before and after, and the caller the
-    /// request filter worked out (<see cref="ReadCaller.AmbientMcpCaller"/>: the client name and version the connection sent). Written
+    /// request filter worked out (<see cref="ReadCaller.WriteIdentity"/>: the token's fingerprint, then the client name and version the connection sent). Written
     /// at Information, after the write, from the rows read before and after it, so the line says what the store held and not what was
     /// asked for.</summary>
     private static void LogWrite(
@@ -404,7 +404,7 @@ public sealed class DarlingMcpCollectorScheduleTools
 
         logger.LogInformation(
             "MCP schedule write {Tool}{Inherit}: collector {Collector}, scope {Scope}, before {Before}, after {After}, caller {Caller}",
-            edit.Tool, edit.Inherit ? " (inherit)" : string.Empty, collector, scope.Label, before, after, ReadCaller.AmbientMcpCaller ?? ReadCaller.Unknown);
+            edit.Tool, edit.Inherit ? " (inherit)" : string.Empty, collector, scope.Label, before, after, ReadCaller.WriteIdentity());
     }
 
     /// <summary>A server as a note names it: the storage name the server resolver accepts (the label, "Display (Storage)", is not

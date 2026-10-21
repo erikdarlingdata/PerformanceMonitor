@@ -59,6 +59,7 @@ public sealed record MuteRuleImage(
     [property: JsonPropertyName("enabled"), ImageColumn(ImageColumnType.Bool)] bool Enabled,
     [property: JsonPropertyName("created_at_utc"), ImageColumn(ImageColumnType.Time)] string? CreatedAtUtc,
     [property: JsonPropertyName("expires_at_utc"), ImageColumn(ImageColumnType.Time)] string? ExpiresAtUtc,
+    [property: JsonPropertyName("starts_at_utc"), ImageColumn(ImageColumnType.Time)] string? StartsAtUtc,
     [property: JsonPropertyName("reason"), ImageColumn(ImageColumnType.Text)] string? Reason,
     [property: JsonPropertyName("server_name"), ImageColumn(ImageColumnType.Text)] string? ServerName,
     [property: JsonPropertyName("server_id"), ImageColumn(ImageColumnType.Whole)] int? ServerId,
