@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # pre-push.sh: a local copy of the gates CI runs first on a pull request, in three stages. Run it from the worktree
 # root BEFORE EVERY PUSH (bash .github/scripts/pre-push.sh). It prints result lines only ([FAIL], Total:) and ends
-# with one GATE GREEN / GATE RED line. GATE GREEN means these three stages passed; CI decides the rest (#5833).
+# with one GATE GREEN / GATE RED / GATE STOP line. GATE GREEN means these three stages passed; CI decides the rest (#5833).
 #   1. Debug build of both test projects (Darling.Tests, Lite.Tests).
 #   2. The whole Stage=Guard trait of both suites with -failSkips: exactly CI's guard-tests job.
 #   3. The test classes this diff needs: the classes CI's test map selects (ci-select.py map-select over the newest
@@ -10,14 +10,9 @@
 #      diff, or the hunk's enclosing declaration, or an added file's type). Symbols are added in order of how many
 #      test files name them; once the union would pass the cap the rest are dropped and listed, since a symbol named
 #      by most of the suite is the suite (the laptop never runs a full suite: CI decides).
-#   When the selection is the whole suite (the map answers FULL because a keep-full file changed, as CI's would, or a
-#   project's selection is over PRE_PUSH_MAX_CLASSES) stage 3 is the SOURCE-READING STEP (#6336): the gate runs every class
-#   of every test file that reads the repository as text (test-map.py's TEXT_READ pattern), in both suites, with every
-#   DARLING_* and PG* variable unset for the run, so a live test finds no connection string and skips on its own and nothing
-#   can reach a PostgreSQL store or a SQL Server. Those are the tests that enforce a project rule on the source. The rest of
-#   the database-free suite is not run: it took 24 minutes on the Darling suite alone under load, so CI runs it. The step
-#   prints its seconds and how many tests it skipped for want of a database. Before this the gate stopped here with no test
-#   run and CI, about 40 minutes later, was the first to run them.
+#   CI's FULL answer from map-select (a keep-full file changed) counts as a whole-suite selection too (#6336): the gate
+#   ends in GATE STOP, as it does over PRE_PUSH_MAX_CLASSES. It used to fall back to the symbol set there and report GREEN
+#   on a few hundred classes while CI ran them all (#6309: 146 classes).
 #   Stage 2 already ran every Stage=Guard class, so stage 3 leaves them out: map-select gets --guard-stage-separate and
 #   the symbol set drops the classes of `-list classes/json -trait Stage=Guard` (#5894). A diff of documentation files
 #   only selects just the classes that read a changed document as text (CI's docs fast path runs no test for it) and
@@ -29,17 +24,14 @@
 # Flags: --dry-run (steps 1-2 skipped; step 3 lists the classes and each batch's class count and length, resolved
 # against an existing Debug build when there is one), --skip-build, --no-map (symbol set only).
 # Environment: PRE_PUSH_CAP (test-file cap of the symbol set, default 250); PRE_PUSH_MAX_CLASSES (the most classes of
-# one project run class by class, default 400: above it the selection is the whole suite and the source-reading step runs); PRE_PUSH_ARG_BUDGET
+# one project the laptop runs, default 400: above it the selection is the whole suite, a STOP); PRE_PUSH_ARG_BUDGET
 # (the characters of -class arguments per batch, default 30000, as CI's run-darling-pg-shard.ps1); PRE_PUSH_SELECTION
 # (a map-select selection JSON used instead of the nightly map, for replays and the script's tests); PRE_PUSH_CACHE
 # (test-map cache, default pre-push-cache in the repository's common .git directory, which every worktree shares and
 # git never commits).
-# Outcomes: GATE GREEN (exit 0): the build and the Guard stage passed, and either the selected classes passed or, on a
-# whole-suite selection, the source-reading classes passed. The GATE GREEN line says which ("guard stage and the
-# source-reading classes passed"): every other test is left to CI. GATE RED (exit 1): a build, a run or a class listing
-# failed, a test failed in any stage including the source-reading step, a suite has no source-reading class, or a run
-# reported Total: 0 (it matched nothing, which the runner does not count as a failure). There is no GATE STOP and no exit 3.
-# --dry-run on a whole-suite selection prints GATE DRY-RUN and exits 0, having run nothing.
+# Outcomes: GATE GREEN (exit 0). GATE RED (exit 1): a build, a run or a class listing failed, or a run reported
+# Total: 0 (it matched nothing, which the runner does not count as a failure). GATE STOP (exit 3): the selection is
+# the whole suite (over PRE_PUSH_MAX_CLASSES, or CI's map answers FULL), which the laptop never runs; the Guard stage still ran, and a red in it wins over the stop.
 # Live classes in the selection skip without a rig; the Skipped count is printed so you see it.
 set -uo pipefail
 DRY=0; BUILD=1; MAP=1; CAP=${PRE_PUSH_CAP:-250}; MAXC=${PRE_PUSH_MAX_CLASSES:-400}; BUDGET=${PRE_PUSH_ARG_BUDGET:-30000}
@@ -56,14 +48,10 @@ LITE=Lite.Tests/Lite.Tests.csproj
 TESTDIRS="Darling/Darling.Tests Lite.Tests"
 red=()
 
-# #6336: the names of the environment variables that point a test at a database or a monitored server. The whole-suite step
-# unsets them in the shell that runs the suite, so a live test finds no connection string and skips on its own.
-DB_ENV='^(DARLING_.*|PG[A-Z_]+)$'
-run_suite() { # run_suite <label> <what> <project> <args...>: prints result lines, records a red on failure. NODB=1 runs with no database settings
+run_suite() { # run_suite <label> <what> <project> <args...>: prints result lines, records a red on failure
   local label=$1 what=$2 proj=$3; shift 3
   local out="$SCRATCH/$label.log"
-  ( if [ "${NODB:-0}" = 1 ]; then for v in $(compgen -e | grep -E "$DB_ENV"); do unset "$v"; done; fi
-    dotnet run --project "$proj" -c Debug --no-build -- "$@" > "$out" 2>&1 )
+  dotnet run --project "$proj" -c Debug --no-build -- "$@" > "$out" 2>&1
   local rc=$?
   grep -E '\[FAIL\]|Total: ' "$out" | sed "s/^/  [$label] /" | cut -c1-200
   if [ $rc -ne 0 ]; then red+=("$label (exit $rc; log $out)"); return; fi
@@ -101,7 +89,7 @@ echo "diff: $(wc -l < "$SCRATCH/changed.txt" | tr -d ' ') changed files since me
 
 # Initialised empty: under set -u a declared but unassigned array is unbound, and an empty selection read as GATE RED.
 declare -A want_d=() want_l=()
-whole=0; whole_why=""   # 1 when the selection is the whole suite: CI's FULL answer, or over PRE_PUSH_MAX_CLASSES in one project
+full_why=""   # set when CI's map answers FULL for a suite (#6336)
 if [ $MAP -eq 1 ]; then
   # PRE_PUSH_SELECTION replaces the nightly map and map-select (a replay, or the script's own tests)
   mapfile=${PRE_PUSH_SELECTION:-}; ids=""
@@ -145,10 +133,10 @@ except Exception:
         while read -r c; do [ -n "$c" ] && { if [ $suite = darling ]; then want_d["$c"]=map; else want_l["$c"]=map; fi; }; done < <(tail -n +2 "$SCRATCH/keep-$suite.txt")
         echo "map: $(basename "$(dirname "$mapfile")"), $suite $(head -n1 "$SCRATCH/keep-$suite.txt")"
       elif head -n1 "$SCRATCH/keep-$suite.txt" | grep -q '^FULL'; then
-        # #6336: FULL is CI's own answer (a keep-full file changed): CI runs the whole suite, so the gate does too. It
-        # used to fall back to the symbol set here and report GREEN on a few hundred classes while CI ran them all.
-        whole=1; whole_why="$suite: $(head -n1 "$SCRATCH/keep-$suite.txt" | cut -c1-140)"
-        echo "map: $whole_why"
+        # #6336: FULL is CI's own answer (a keep-full file changed): CI runs the whole suite, so this is a whole-suite
+        # selection, a STOP. It used to fall through to the symbol set here and report GREEN on a few hundred classes.
+        full_why="${full_why:-$suite: $(head -n1 "$SCRATCH/keep-$suite.txt" | cut -c1-140)}"
+        echo "map: $suite $(head -n1 "$SCRATCH/keep-$suite.txt" | cut -c1-140); the whole suite"
       else
         echo "map: $suite $(head -n1 "$SCRATCH/keep-$suite.txt" | cut -c1-140); symbol set only"
       fi
@@ -257,42 +245,11 @@ elif [ $((miss_n[darling] + miss_n[lite])) -gt 0 ]; then
   echo "unlisted: darling ${miss_n[darling]}, lite ${miss_n[lite]} selected names are no test class of this build (e.g. $(cat "$SCRATCH/unlisted-darling.txt" "$SCRATCH/unlisted-lite.txt" | sort | head -n 5 | tr '\n' ' ' | cut -c1-160))"
 fi
 
-# #5868, #6336: a selection the size of the suite (CI's FULL answer, or over PRE_PUSH_MAX_CLASSES in one project) is not
-# run class by class. The gate runs the source-reading classes instead (the step below).
-if [ "${sel_n[darling]}" -gt "$MAXC" ] || [ "${sel_n[lite]}" -gt "$MAXC" ]; then
-  whole=1; whole_why="${whole_why:-selection is over PRE_PUSH_MAX_CLASSES=$MAXC classes in one project (darling ${sel_n[darling]}, lite ${sel_n[lite]})}"
-fi
-
-# #6336: on a whole-suite selection the classes run are the SOURCE READERS: the classes of every test file that reads the
-# repository as text (test-map.py's TEXT_READ pattern), minus the Guard classes stage 2 ran. They need no database and
-# are the tests that enforce a project rule on the source. The rest of the database-free suite took 24 minutes on the
-# Darling suite alone under load (and its timing tests fail under that load), so it is left to CI.
-if [ $whole -eq 1 ]; then
-  TEXT_READ='File\.ReadAll|RepoRoot|ReadAllText|ReadLines\(|ReadRepoFile|RepoFile'
-  grep -rlE --include='*.cs' --exclude-dir=bin --exclude-dir=obj "$TEXT_READ" $TESTDIRS 2>/dev/null | sort -u > "$SCRATCH/readers.txt"
-  xargs -d '\n' -s 28000 awk '
-      FNR == 1 { ns = "" }
-      /^namespace[ \t]+[A-Za-z0-9_.]+/ { ns = $2; sub(/[;{].*$/, "", ns) }
-      /^[ \t]*(public|internal)?[ \t]*((sealed|static|partial|abstract)[ \t]+)*class[ \t]+[A-Za-z0-9_]+/ {
-        for (i = 1; i <= NF; i++) if ($i == "class") { c = $(i + 1); sub(/[^A-Za-z0-9_].*$/, "", c); print FILENAME "\t" (ns == "" ? "" : ns ".") c; break }
-      }' < "$SCRATCH/readers.txt" 2>/dev/null | sort -u > "$SCRATCH/reader-classes.txt"
-  for suite in darling lite; do
-    case $suite in darling) dir="Darling/Darling.Tests/";; *) dir="Lite.Tests/";; esac
-    case $suite in darling) proj=$DARLING;; *) proj=$LITE;; esac
-    # a FULL answer selects no class name, so nothing listed this suite above: list it, and its Guard classes, now
-    if [ ! -s "$SCRATCH/listing-$suite.txt" ]; then
-      list_classes "$proj" "$SCRATCH/listing-$suite.txt" || red+=("classes-$suite class listing failed (log $SCRATCH/listing-$suite.txt.raw)")
-      list_classes "$proj" "$SCRATCH/guardlist-$suite.txt" -trait Stage=Guard || true
-    fi
-    awk -F'\t' -v d="$dir" 'index($1, d) == 1 { k = $2; sub(/.*[.+\/]/, "", k); print k }' "$SCRATCH/reader-classes.txt" | sort -u > "$SCRATCH/keys-$suite.txt"
-    awk 'NR == FNR { want[$0] = 1; next } { k = $0; sub(/.*[.+\/]/, "", k); if (k in want) print }' "$SCRATCH/keys-$suite.txt" "$SCRATCH/listing-$suite.txt" 2>/dev/null       | sort -u > "$SCRATCH/selected-$suite.pre"
-    if [ -s "$SCRATCH/guardlist-$suite.txt" ]; then grep -vxFf "$SCRATCH/guardlist-$suite.txt" "$SCRATCH/selected-$suite.pre" > "$SCRATCH/selected-$suite.txt" || true
-    else cp "$SCRATCH/selected-$suite.pre" "$SCRATCH/selected-$suite.txt"; fi
-    sel_n[$suite]=$(wc -l < "$SCRATCH/selected-$suite.txt" | tr -d ' ')
-  done
-  if [ "${sel_n[darling]}" -eq 0 ] || [ "${sel_n[lite]}" -eq 0 ]; then red+=("source readers: a suite has none, so the step would run nothing (listings in $SCRATCH)"); fi
-  echo "source readers: darling ${sel_n[darling]} classes, lite ${sel_n[lite]} classes (every class of a test file that reads the repository as text, Guard classes left out)"
-fi
+# #5868: the laptop never runs a full suite, so a selection the size of the suite is a STOP, never a GREEN.
+stop=0; stop_why=""
+if [ "${sel_n[darling]}" -gt "$MAXC" ] || [ "${sel_n[lite]}" -gt "$MAXC" ]; then stop=1; stop_why="over PRE_PUSH_MAX_CLASSES=$MAXC in one project"; fi
+# #6336: CI's FULL answer is the whole suite whatever size the symbol set is
+if [ -n "$full_why" ]; then stop=1; stop_why="CI's test map answers FULL ($full_why)"; fi
 
 # batches cut by the length of their -class arguments, under the command-line limit (32,767 characters on Windows)
 for suite in darling lite; do
@@ -320,32 +277,20 @@ run_batches() { # run_batches <suite> <project>: every batch of the suite, even 
   done
 }
 
+stopline="GATE STOP: selection is the whole suite (darling ${sel_n[darling]}, lite ${sel_n[lite]}): run the brief's classes; CI decides"
+if [ -n "$full_why" ]; then stopline="GATE STOP: selection is the whole suite (CI's map answers FULL): run the brief's classes; CI decides"; fi
 if [ $DRY -eq 1 ]; then
   sed 's/^/  darling: /' "$SCRATCH/selected-darling.txt"
   sed 's/^/  lite: /' "$SCRATCH/selected-lite.txt"
   run_batches darling "$DARLING"; run_batches lite "$LITE"
-  if [ $whole -eq 1 ]; then echo "GATE DRY-RUN: selection is the whole suite ($whole_why): a real run runs the source-reading classes; nothing built or run"; exit 0; fi
+  if [ $stop -eq 1 ]; then echo "$stopline ($stop_why; dry run, nothing built or run)"; exit 3; fi
   echo "GATE DRY-RUN: nothing built or run"; exit 0
 fi
-
-# the whole-suite step (#6336): the source-reading classes of both suites, in batches. NODB=1 unsets every
-# DARLING_* and PG* variable for it, so no test finds a connection string: a live test skips on its own (it asserts the
-# variable is set) and nothing can reach a PostgreSQL store or a SQL Server. The Guard stage ran above and is left out.
-if [ ${#red[@]} -eq 0 ] && [ $whole -eq 1 ]; then
-  echo "whole suite: $whole_why"
-  echo "database-free: the source-reading classes of both suites, no DARLING_* or PG* variable set for them"
-  t0=$(date +%s)
-  NODB=1 run_batches darling "$DARLING"; NODB=1 run_batches lite "$LITE"
-  secs_all=$(( $(date +%s) - t0 ))
-  skipped=$(cat "$SCRATCH"/classes-*.log 2>/dev/null | grep -oE 'Skipped: [0-9]+' | awk '{ n += $2 } END { print n + 0 }')
-  echo "database-free: ${secs_all}s in all; ${skipped:-0} tests skipped for want of a database (CI runs them)"
-elif [ ${#red[@]} -eq 0 ]; then
-  # a red Guard stage or listing already decides the gate
+# a red Guard stage or listing already decides the gate, and a STOP runs no selected class at all
+if [ ${#red[@]} -eq 0 ] && [ $stop -eq 0 ]; then
   run_batches darling "$DARLING"; run_batches lite "$LITE"
 fi
 
 if [ ${#red[@]} -gt 0 ]; then echo "GATE RED: ${red[*]}"; exit 1; fi
-if [ $whole -eq 1 ]; then
-  echo "GATE GREEN: guard stage and the source-reading classes passed (whole suite: $whole_why); every other test is left to CI (logs $SCRATCH)"; exit 0
-fi
+if [ $stop -eq 1 ]; then echo "$stopline ($stop_why; no selected class ran; logs $SCRATCH)"; exit 3; fi
 echo "GATE GREEN: guard stage of both suites and ${sel_n[darling]}+${sel_n[lite]} selected classes in $nbatch batches passed (logs $SCRATCH)"; exit 0
