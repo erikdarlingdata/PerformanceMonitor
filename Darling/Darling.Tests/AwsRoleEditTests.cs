@@ -177,17 +177,18 @@ public sealed class AwsRoleEditTests
     }
 
     [Fact]
-    public void TheFunctionCall_TakesSeventeenArguments_TheRoleAndIdLast()
+    public void TheFunctionCall_TakesEighteenArguments_TheRoleAndIdBeforeTheReplica()
     {
         var parameters = Edit.BuildEditFunctionParameters(41, Stamp,
         [
             new Edit.EditColumnValue("aws_role_arn", "aws_role_arn", NpgsqlDbType.Text, RoleA),
             new Edit.EditColumnValue("aws_external_id", "aws_external_id", NpgsqlDbType.Text, TypedId),
         ]);
-        Assert.Equal(17, parameters.Count);
-        Assert.Contains("$17)", Edit.EditFunctionSql, StringComparison.Ordinal);
+        Assert.Equal(18, parameters.Count);
+        Assert.Contains("$18)", Edit.EditFunctionSql, StringComparison.Ordinal);
         Assert.Equal(RoleA, parameters[15].Value);
         Assert.Equal(TypedId, parameters[16].Value);
+        Assert.Equal(DBNull.Value, parameters[17].Value); /* #6254: the replica is last, and null when the edit does not name it */
     }
 
     [Fact]
@@ -393,10 +394,10 @@ public sealed class AwsRoleEditTests
     }
 
     [Fact]
-    public void TheInsert_WritesTheRoleAndExternalId_AsTheLastTwoParameters()
+    public void TheInsert_WritesTheRoleAndExternalId_BeforeTheReplica()
     {
-        Assert.Contains("aws_role_arn, aws_external_id)", Edit.InsertServerSql, StringComparison.Ordinal);
-        Assert.Contains("$17, $18)", Edit.InsertServerSql, StringComparison.Ordinal);
+        Assert.Contains("aws_role_arn, aws_external_id, query_store_replica)", Edit.InsertServerSql, StringComparison.Ordinal);
+        Assert.Contains("$17, $18, $19)", Edit.InsertServerSql, StringComparison.Ordinal);
     }
 
     /* ---------------- the form's words ---------------- */

@@ -270,7 +270,7 @@ public sealed class ServerEditCoreTests : IDisposable
         };
 
         Assert.Empty(Edit.EditColumnOfField.Values.Intersect(forbidden));
-        Assert.Equal(14, Edit.EditColumnOfField.Count);
+        Assert.Equal(15, Edit.EditColumnOfField.Count);
     }
 
     [Fact]
@@ -284,7 +284,7 @@ public sealed class ServerEditCoreTests : IDisposable
                 new Edit.EditColumnValue("password", "encrypted_password", NpgsqlDbType.Text, "blob"),
             ]);
 
-        Assert.Equal(17, parameters.Count);
+        Assert.Equal(18, parameters.Count);
         Assert.Equal(["name", "encrypted_password"], (string[])parameters[2].Value!);
         Assert.Equal(token, (DateTime)parameters[1].Value!);
         Assert.Equal("x", parameters[3].Value);
@@ -294,6 +294,38 @@ public sealed class ServerEditCoreTests : IDisposable
         Assert.Equal(
             Edit.EditColumnOfField.Values.Order(StringComparer.Ordinal).ToArray(),
             Edit.EditFunctionColumns.Select(c => c.Column).Order(StringComparer.Ordinal).ToArray());
+    }
+
+    // #6254: the Query Store replica is a field of how the server is reached, so an edit that changes only it needs the password again.
+    [Fact]
+    public void AReplicaOnlyEdit_OfASqlServer_NeedsThePassword_AndWithOneSealsItForTheNewReplica()
+    {
+        var (refusedPlan, refusal) = Plan(SqlRow(), """{"query_store_replica":" replica-a,1433 "}""");
+        Assert.Null(refusedPlan);
+        Assert.Equal(Edit.EditPasswordNeededText, refusal);
+
+        var (plan, error) = Plan(SqlRow(), """{"query_store_replica":" replica-a,1433 ","password":"not-a-real-password"}""");
+        Assert.Null(error);
+        Assert.Equal("replica-a,1433", plan!.ProbeConfig!.QueryStoreReplica);
+        Assert.Equal("replica-a,1433", plan.Sets.Single(set => set.Column == "query_store_replica").Value);
+    }
+
+    [Fact]
+    public void ABlankReplica_RemovesIt_AnAbsentOneKeepsIt_AndAPostgresTargetRefusesOne()
+    {
+        var row = SqlRow() with { QueryStoreReplica = "replica-a" };
+
+        var (cleared, clearError) = Plan(row, """{"query_store_replica":"","password":"not-a-real-password"}""");
+        Assert.Null(clearError);
+        Assert.Null(cleared!.Sets.Single(set => set.Column == "query_store_replica").Value);
+
+        var (kept, keptError) = Plan(row, """{"display_name":"renamed"}""");
+        Assert.Null(keptError);
+        Assert.DoesNotContain(kept!.Sets, set => set.Column == "query_store_replica");
+        Assert.Equal("replica-a", kept.ProbeConfig!.QueryStoreReplica);
+
+        var (_, postgresError) = Plan(SqlRow(auth: "sql", engine: "postgres"), """{"query_store_replica":"replica-a","password":"not-a-real-password"}""");
+        Assert.Equal("query_store_replica is for SQL Server servers only.", postgresError);
     }
 
     [Fact]

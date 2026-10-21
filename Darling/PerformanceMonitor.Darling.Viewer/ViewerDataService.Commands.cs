@@ -410,4 +410,9 @@ public sealed class TestConnectServer
 
     [JsonPropertyName("multiSubnetFailover")]
     public bool MultiSubnetFailover { get; set; }
+
+    /// <summary>The Query Store replica (#6254): a field of the connection settings the password is sealed for, so the service
+    /// must see the same one to open it. Null when none.</summary>
+    [JsonPropertyName("queryStoreReplica")]
+    public string? QueryStoreReplica { get; set; }
 }

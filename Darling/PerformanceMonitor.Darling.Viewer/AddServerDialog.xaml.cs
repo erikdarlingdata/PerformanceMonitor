@@ -134,6 +134,7 @@ public partial class AddServerDialog : Window
         TrustCertCheckBox.IsChecked = existing.TrustServerCertificate;
         ReadOnlyIntentCheckBox.IsChecked = existing.ReadOnlyIntent;
         MultiSubnetFailoverCheckBox.IsChecked = existing.MultiSubnetFailover;
+        QueryStoreReplicaBox.Text = existing.QueryStoreReplica ?? "";
         MonthlyCostBox.Text = existing.MonthlyCostUsd.ToString(CultureInfo.InvariantCulture);
         /* #1236: prefill the per-server delivery override (null = "Use global setting"). */
         AlertDeliveryOverrideBox.SelectedIndex = existing.AlertDeliveryModeOverride switch
@@ -285,7 +286,7 @@ public partial class AddServerDialog : Window
         /* XAML parse order: this fires for the default-checked SQL Server radio while the later-declared
            panels are still null. The XAML defaults already ARE the SQL Server arm, so returning is correct. */
         if (PostgresOptionsPanel is null || InlineAuthRadios is null ||
-            ReadOnlyIntentCheckBox is null || MultiSubnetFailoverCheckBox is null)
+            ReadOnlyIntentCheckBox is null || MultiSubnetFailoverCheckBox is null || QueryStoreReplicaPanel is null)
         {
             return;
         }
@@ -298,6 +299,7 @@ public partial class AddServerDialog : Window
            concepts the PostgreSQL connection builder never reads. Hidden, not unchecked — see the summary. */
         ReadOnlyIntentCheckBox.Visibility = postgres ? Visibility.Collapsed : Visibility.Visible;
         MultiSubnetFailoverCheckBox.Visibility = postgres ? Visibility.Collapsed : Visibility.Visible;
+        QueryStoreReplicaPanel.Visibility = postgres ? Visibility.Collapsed : Visibility.Visible; /* #6254: Query Store is a SQL Server feature */
 
         WindowsAuthRadio.Visibility = postgres ? Visibility.Collapsed : Visibility.Visible;
         EntraMfaAuthRadio.Visibility = postgres ? Visibility.Collapsed : Visibility.Visible;
@@ -408,10 +410,15 @@ public partial class AddServerDialog : Window
         var database = string.IsNullOrWhiteSpace(DatabaseNameBox.Text) ? null : DatabaseNameBox.Text.Trim();
         var form = ServerConnectionIdentity.FromStoredColumns(
             ServerNameBox.Text.Trim(), port, _existing.Engine, database, ReadOnlyIntentCheckBox.IsChecked == true, auth, username,
-            GetSelectedEncryptMode(), TrustCertCheckBox.IsChecked == true, MultiSubnetFailoverCheckBox.IsChecked == true, null /* #6254: the Viewer reads and writes the Query Store replica in the darling-setting-ui part */);
+            GetSelectedEncryptMode(), TrustCertCheckBox.IsChecked == true, MultiSubnetFailoverCheckBox.IsChecked == true, FormQueryStoreReplica());
         var stored = ViewerPasswordSealer.IdentityOf(_existing);
         return ServerConnectionIdentity.Differ(form, stored);
     }
+
+    /// <summary>The Query Store replica the form holds, in the form it is stored and bound (#6254): trimmed, null when blank or
+    /// when the target is PostgreSQL (the box is hidden there, and a hidden value must not ride along).</summary>
+    private string? FormQueryStoreReplica() =>
+        PostgresEngineRadio.IsChecked == true ? null : QueryStoreReplicaSetting.Normalize(QueryStoreReplicaBox.Text);
 
     /// <summary>
     /// Resolves the chosen credential source into the store's (auth, username, encrypted blob), or a
@@ -739,6 +746,7 @@ public partial class AddServerDialog : Window
             TrustServerCertificate = TrustCertCheckBox.IsChecked == true,
             ReadOnlyIntent = readOnlyIntent,
             MultiSubnetFailover = MultiSubnetFailoverCheckBox.IsChecked == true,
+            QueryStoreReplica = FormQueryStoreReplica(),
             /* Preserve the excluded-databases (edited via the dedicated dialog), not lost on a plain save. */
             ExcludedDatabases = _existing?.ExcludedDatabases ?? new System.Collections.Generic.List<string>(),
             MonthlyCostUsd = monthlyCost,
@@ -966,6 +974,7 @@ public partial class AddServerDialog : Window
                 TrustServerCertificate = row.TrustServerCertificate,
                 EncryptMode = row.EncryptMode,
                 MultiSubnetFailover = row.MultiSubnetFailover,
+                QueryStoreReplica = row.QueryStoreReplica,
             };
 
             StatusText.Text = "Testing connection via the Darling service…";
