@@ -206,6 +206,10 @@ LIMIT $5";
        earlier fires of the same rise sit just before the anchor); a fire about 24 hours earlier still counts. One index seek per
        metric (idx_config_alert_log_time on server_id, metric_name, alert_time); the clock test filters inside the Days days. A
        metric with no rows still comes back (day NULL), so the brief says zero.
+       #6261: k is the whole day number the fire counts toward (1 = 24 hours before the anchor), the streak's unit
+       (InvestigationAlertStreak.DaysAgo is the same rule in C#). It is not the date: a 23:50 anchor's window holds a 00:10 fire
+       of the anchor's own date, and a 00:10 anchor's holds a 23:50 fire of the day before the one it counts toward. A date can
+       so hold two k values, and a (day, muted) two rows; the reader adds a date once.
        Types: config.investigation_request_alerts.alert_time is timestamptz and config_alert_log.alert_time is naive UTC, so the
        anchor is taken AT TIME ZONE 'UTC' (as AlertsSql does for the same pair): every comparison and the ::date are then naive
        UTC and none rides the session TimeZone. Past rows do not change, so this is read at compose time. $1 request, $2 server. */
@@ -215,11 +219,11 @@ WITH anchor AS (
 ), m AS (
     SELECT DISTINCT metric_name FROM config.investigation_request_alerts WHERE request_id = $1
 )
-SELECT m.metric_name, a.t, f.day, f.muted, f.n
+SELECT m.metric_name, a.t, f.day, f.muted, f.n, f.k
 FROM m
 CROSS JOIN anchor AS a
 LEFT JOIN LATERAL (
-    SELECT cal.alert_time::date AS day, cal.muted, count(*) AS n
+    SELECT cal.alert_time::date AS day, cal.muted, round(extract(epoch FROM a.t - cal.alert_time) / 86400)::int AS k, count(*) AS n
     FROM config_alert_log AS cal
     CROSS JOIN LATERAL (SELECT mod(mod(extract(epoch FROM cal.alert_time - a.t)::numeric, 86400) + 86400, 86400) AS d) AS o
     WHERE cal.server_id = $2
@@ -227,7 +231,7 @@ LEFT JOIN LATERAL (
       AND cal.alert_time >= a.t - interval '" + InvestigationAlertRecurrence.Days + @" days'
       AND cal.alert_time < a.t - interval '" + InvestigationAlertRecurrence.WindowMinutes + @" minutes'
       AND least(o.d, 86400 - o.d) <= " + (InvestigationAlertRecurrence.WindowMinutes * 60) + @"
-    GROUP BY cal.alert_time::date, cal.muted
+    GROUP BY cal.alert_time::date, cal.muted, 3
 ) AS f ON true
 ORDER BY m.metric_name, f.day DESC";
 
@@ -421,12 +425,14 @@ ORDER BY m.metric_name, f.day DESC";
             int fired = 0, muted = 0;
             var firedDates = new List<DateOnly>();
             var mutedDates = new List<DateOnly>();
+            var daysAgo = new List<int>();
             void Flush()
             {
                 if (metric is not null)
-                    recurrence.Add(new InvestigationAlertRecurrence(metric, around, fired, muted, firedDates, mutedDates));
+                    recurrence.Add(new InvestigationAlertRecurrence(metric, around, fired, muted, firedDates, mutedDates, daysAgo));
                 firedDates = new List<DateOnly>();
                 mutedDates = new List<DateOnly>();
+                daysAgo = new List<int>();
                 fired = 0;
                 muted = 0;
             }
@@ -444,8 +450,20 @@ ORDER BY m.metric_name, f.day DESC";
                 if (reader.IsDBNull(2)) continue;
                 var count = (int)reader.GetInt64(4);
                 var date = DateOnly.FromDateTime(reader.GetFieldValue<DateTime>(2));
-                /* Rows come newest day first, one per (day, muted), so each list is newest first with no repeat. */
-                if (reader.GetBoolean(3)) { muted += count; mutedDates.Add(date); } else { fired += count; firedDates.Add(date); }
+                /* Rows come newest day first, so each list is newest first. A date can come on two rows (#6261: one per day
+                   number k), so it is added once. */
+                if (reader.GetBoolean(3))
+                {
+                    muted += count;
+                    if (!mutedDates.Contains(date)) mutedDates.Add(date);
+                }
+                else
+                {
+                    fired += count;
+                    if (!firedDates.Contains(date)) firedDates.Add(date);
+                }
+
+                daysAgo.Add(reader.GetInt32(5));
             }
 
             Flush();

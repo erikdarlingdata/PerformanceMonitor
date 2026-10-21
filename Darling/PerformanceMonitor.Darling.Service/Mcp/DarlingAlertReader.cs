@@ -8,9 +8,12 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using NpgsqlTypes;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -207,6 +210,59 @@ AND   TRUE /* family */";
         }
 
         return rows;
+    }
+
+    /// <summary>#6261: every fire of the page's (server, metric) pairs in the span the page's streaks look at: $1 server ids, $2
+    /// metric names (parallel arrays, one entry per distinct pair), $3 window start (the oldest row's time minus
+    /// <see cref="InvestigationAlertRecurrence.Days"/> days), $4 window end (the newest row's time), naive UTC. Muted and dismissed
+    /// rows are in: they fired. Exact metric name, like the brief's recurrence read, so a resolution row ("X Resolved") never
+    /// matches a firing metric. The <c>(server_id, metric_name, alert_time)</c> index serves it, one seek per pair.</summary>
+    public const string AlertStreakFiresSql = @"
+SELECT a.server_id, a.metric_name, a.alert_time
+FROM unnest($1::int[], $2::text[]) AS p(server_id, metric_name)
+JOIN config_alert_log AS a ON a.server_id = p.server_id AND a.metric_name = p.metric_name
+WHERE a.alert_time >= $3
+AND   a.alert_time <= $4";
+
+    /// <summary>#6261: the streak of each row of <paramref name="page"/>, aligned with it, in one read for the whole page. Null on
+    /// a resolution row (a recovery is not a fire). See <see cref="InvestigationAlertStreak"/>.</summary>
+    public static async Task<int?[]> GetAlertStreaksAsync(
+        NpgsqlDataSource postgres, IReadOnlyList<AlertHistoryReadRow> page, CancellationToken cancellationToken = default)
+    {
+        var streaks = new int?[page.Count];
+        var firing = page.Where(r => !AlertMetricClassifier.IsResolution(r.MetricName)).ToList();
+        if (firing.Count == 0) return streaks;
+
+        var pairs = firing.Select(r => (r.ServerId, r.MetricName)).Distinct().ToList();
+        var since = firing.Min(r => r.AlertTime).AddDays(-InvestigationAlertRecurrence.Days);
+        var until = firing.Max(r => r.AlertTime);
+
+        var fires = new Dictionary<(int, string), List<DateTime>>();
+        await using var command = postgres.CreateCommand(AlertStreakFiresSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = pairs.Select(p => p.ServerId).ToArray() });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = pairs.Select(p => p.MetricName).ToArray() });
+        DarlingMcpReadParameters.AddTimestamp(command, since);
+        DarlingMcpReadParameters.AddTimestamp(command, until);
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var key = (reader.GetInt32(0), reader.GetString(1));
+                if (!fires.TryGetValue(key, out var list)) fires[key] = list = new List<DateTime>();
+                list.Add(reader.GetDateTime(2));
+            }
+        }
+
+        for (var i = 0; i < page.Count; i++)
+        {
+            if (AlertMetricClassifier.IsResolution(page[i].MetricName)) continue;
+            streaks[i] = fires.TryGetValue((page[i].ServerId, page[i].MetricName), out var list)
+                ? InvestigationAlertStreak.ForAlert(page[i].AlertTime, list)
+                : 0;
+        }
+
+        return streaks;
     }
 
     /// <summary>The stored context of ONE alert, by the page's own row identity (#5241): $1 server_id, $2 metric_name

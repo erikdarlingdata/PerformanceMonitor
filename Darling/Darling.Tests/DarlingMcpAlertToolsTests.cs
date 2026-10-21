@@ -104,7 +104,7 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     }
 
     [Theory]
-    [InlineData("get_alert_history", "server_name,hours_back,limit,as_of,include_dismissed,metric_name,family")]
+    [InlineData("get_alert_history", "server_name,hours_back,limit,as_of,include_dismissed,metric_name,family,include_streak")]
     [InlineData("get_mute_rules", "enabled_only")]
     [InlineData("update_alert_settings", "settings_json")]
     /* #5915: each mute write tool also takes the optional agent_action, last (Level 2: ignored under the writes arm). */
