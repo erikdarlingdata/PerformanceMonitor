@@ -480,49 +480,49 @@ public static class DurationTrendRouting
            and the rows are kept), which is the read #3897 ran before #5638; off, the text is unchanged. */
         var storedCte = withProcedureFilter
             ? $"""
-        stored AS
-        (
-            SELECT
-                collection_time,
-                {sums}
-                MAX(sample_interval_seconds) AS max_interval_seconds
-            FROM procedure_stats
-            WHERE server_id = $1
-            AND   collection_time >= $2 - INTERVAL '{maxGap} seconds'
-            AND   collection_time <= $3
-            GROUP BY collection_time
-        ),
+stored AS
+(
+    SELECT
+        collection_time,
+        {sums}
+        MAX(sample_interval_seconds) AS max_interval_seconds
+    FROM procedure_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2 - INTERVAL '{maxGap} seconds'
+    AND   collection_time <= $3
+    GROUP BY collection_time
+),
 """
             : $"""
-        totals_floor AS
-        (
-            SELECT COALESCE(MIN(collection_time), 'infinity'::timestamp) AS floor_time
-            FROM {ProcedureStatsTotals.Table}
-            WHERE server_id = $1
-        ),
-        stored AS
-        (
-            SELECT
-                collection_time,
-                {sums}
-                MAX(sample_interval_seconds) AS max_interval_seconds
-            FROM procedure_stats
-            WHERE server_id = $1
-            AND   collection_time >= $2 - INTERVAL '{maxGap} seconds'
-            AND   collection_time <= $3
-            AND   collection_time < (SELECT floor_time FROM totals_floor)
-            GROUP BY collection_time
-            UNION ALL
-            SELECT
-                collection_time,
-                {totalsSums}
-                MAX(max_sample_interval_seconds) AS max_interval_seconds
-            FROM {ProcedureStatsTotals.Table}
-            WHERE server_id = $1
-            AND   collection_time >= $2 - INTERVAL '{maxGap} seconds'
-            AND   collection_time <= $3
-            GROUP BY collection_time
-        ),
+totals_floor AS
+(
+    SELECT COALESCE(MIN(collection_time), 'infinity'::timestamp) AS floor_time
+    FROM {ProcedureStatsTotals.Table}
+    WHERE server_id = $1
+),
+stored AS
+(
+    SELECT
+        collection_time,
+        {sums}
+        MAX(sample_interval_seconds) AS max_interval_seconds
+    FROM procedure_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2 - INTERVAL '{maxGap} seconds'
+    AND   collection_time <= $3
+    AND   collection_time < (SELECT floor_time FROM totals_floor)
+    GROUP BY collection_time
+    UNION ALL
+    SELECT
+        collection_time,
+        {totalsSums}
+        MAX(max_sample_interval_seconds) AS max_interval_seconds
+    FROM {ProcedureStatsTotals.Table}
+    WHERE server_id = $1
+    AND   collection_time >= $2 - INTERVAL '{maxGap} seconds'
+    AND   collection_time <= $3
+    GROUP BY collection_time
+),
 """;
 
         return $"""
