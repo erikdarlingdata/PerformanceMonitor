@@ -60,8 +60,8 @@ const DATABASE_COLUMNS = [
   { key: "redo_queue_kb", label: "Redo queue (KB)", format: "int", align: "right" },
   { key: "log_send_rate_kb_sec", label: "Send rate (KB/s)", format: "int", align: "right" },
   { key: "redo_rate_kb_sec", label: "Redo rate (KB/s)", format: "int", align: "right" },
-  /* No align:"right" on the two custom-render columns — the shared cell() applies the numeric class only on the
-     format path, so asking for it here would right-align the header and leave the cell left. */
+  /* The two custom-render columns are left unaligned on purpose (they draw text such as "n/a" and a reason, not a bare number), so they
+     set no align:"right". Since #6353 cell() would right-align a render column that asked for it, header and cell alike. */
   { key: "secondary_lag_seconds", label: "Lag", render: lagCell },
   { key: "est_send_drain_minutes", label: "Est drain (min)", format: "num1", align: "right" },
   { key: "est_redo_completion_minutes", label: "Est redo (min)", format: "num1", align: "right" },

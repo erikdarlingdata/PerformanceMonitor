@@ -46,6 +46,7 @@ class FakeNode {
     return c;
   }
   removeChild(c) { this.children = this.children.filter((x) => x !== c); c.parent = null; }
+  insertBefore(c, ref) { if (c.parent) c.parent.children = c.parent.children.filter((x) => x !== c); c.parent = this; const i = this.children.indexOf(ref); if (i < 0) this.children.push(c); else this.children.splice(i, 0, c); return c; }
   addEventListener(t, fn) { (this.listeners[t] ||= []).push(fn); }
   fire(t, e = {}) { for (const fn of this.listeners[t] || []) fn({ preventDefault() {}, ...e }); }
 }
@@ -73,7 +74,20 @@ const NOTES = {
 
 const asks = [];
 const details = [];
-const answerFor = (name) => {
+/* #6353 Compare scenarios. `asOf` is true for the read of the earlier window. The page's own window and the earlier one are scripted per
+   scenario: "compareDelta" (both have rows), "compareCurrentEmpty" (neither has any: a server with no procedure stats), "compareBaselineEmpty"
+   (this window has rows, the earlier one has none). */
+const EMPTY_ENVELOPE = { status: "empty", message: "No rows in this window." };
+const compareAnswer = (name, asOf) => {
+  if (name !== "get_top_queries_by_cpu") return EMPTY_ENVELOPE;
+  if (scenario === "compareCurrentEmpty") return EMPTY_ENVELOPE;
+  if (scenario === "compareBaselineEmpty" && asOf) return EMPTY_ENVELOPE;
+  const q = (hash, execs, dur, cpu) => ({ query_hash: hash, database_name: "db1", query_text: "select " + hash, execution_count: execs, avg_elapsed_ms: dur, avg_cpu_ms: cpu, total_cpu_ms: cpu * execs });
+  return { server: "a", hours_back: 24, tier_used: "raw", window_truncated: false, truncation_note: null, retention_notice: null,
+    queries: asOf ? [q("0xA", 10, 100, 100), q("0xG", 5, 30, 10)] : [q("0xA", 10, 200, 10)] };
+};
+const answerFor = (name, asOf) => {
+  if (scenario.startsWith("compare")) return compareAnswer(name, asOf);
   if (name === "get_top_queries_by_cpu") {
     return {
       server: "a", hours_back: 168, tier_used: "raw", ...NOTES,
@@ -95,7 +109,7 @@ globalThis.fetch = async (url) => {
     asks.push(name + ":" + (u.searchParams.get("order_by") ?? "-"));
     details.push(name + ":" + (u.searchParams.get("detail") ?? "-"));
   }
-  return { status: 200, ok: true, text: async () => JSON.stringify(answerFor(name)) };
+  return { status: 200, ok: true, text: async () => JSON.stringify(answerFor(name, u.searchParams.has("as_of"))) };
 };
 process.on("unhandledRejection", () => {});
 
@@ -162,6 +176,30 @@ if (scenario === "columns") {
   cols.cards.queriesProcedures = shape(queriesTab, "Top Procedures by");
   cols.details = details;
   console.log(JSON.stringify(cols));
+  process.exit(0);
+}
+if (scenario.startsWith("compare")) {
+  const root = await draw("queries");
+  const select = all(root).find((n) => n.tag === "select" && n.attrs["aria-label"] === "Compare");
+  select.value = "yesterday";
+  select.fire("change");
+  await flush();
+  const card = cardOf(root, "Top Queries by");
+  const panelOf = (n) => { for (let p = n; p; p = p.parent) if (/\bpanel\b/.test(p.className || "")) return p; return null; };
+  const notice = all(root).filter((n) => n.tag === "div" && /\bstrip\b/.test(n.className) && /\bnotice\b/.test(n.className) && /comparison window/.test(n.textContent));
+  const body = card && all(card).find((n) => /\bpanel-body\b/.test(n.className));
+  const res = { card: !!card, notices: notice.map((n) => n.textContent), noticeInsideCard: notice.length > 0 && notice.every((n) => panelOf(n) === card) };
+  /* A notice inside the card is a sibling that comes before the body, not part of what the card's read replaces. */
+  res.noticeBeforeBody = notice.length > 0 && !!body && body.parent === card && card.children.indexOf(notice[0]) >= 0 && card.children.indexOf(notice[0]) < card.children.indexOf(body);
+  res.cardText = card ? card.textContent : null;
+  /* The delta cells: the three "Δ" columns, one cell each per row. */
+  const headers = card ? all(card).filter((n) => n.tag === "th") : [];
+  const deltaCols = headers.map((h, i) => [h.textContent, i]).filter(([t]) => /Δ/.test(t));
+  res.deltaHeaders = deltaCols.map(([t]) => t);
+  res.deltaHeaderClasses = headers.filter((h) => /Δ/.test(h.textContent)).map((h) => h.className);
+  const rows = card ? all(card).filter((n) => n.tag === "tr" && n.children.some((c) => c.tag === "td")) : [];
+  res.rows = rows.map((tr) => deltaCols.map(([, i]) => { const td = tr.children.filter((c) => c.tag === "td")[i]; return td ? { text: td.textContent, cls: td.className } : null; }));
+  console.log(JSON.stringify(res));
   process.exit(0);
 }
 const out = { cards: {} };
