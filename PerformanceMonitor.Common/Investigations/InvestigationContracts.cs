@@ -320,6 +320,15 @@ public static class ServerActionNames
     public const string EvictPlan = "evict_plan";
     public const string KillSession = "kill_session";
 
+    /// <summary>An action in plain words, the label both switch screens show in their tables and the answers to a change use (#6269).</summary>
+    public static string Label(string action) => action switch
+    {
+        ForcePlan => "Force or unforce plans",
+        EvictPlan => "Evict plans from the plan cache",
+        KillSession => "Kill sessions",
+        _ => action,
+    };
+
     /// <summary>Every server action, the table's CHECK list.</summary>
     public static readonly IReadOnlyList<string> All = new[] { ForcePlan, EvictPlan, KillSession };
 

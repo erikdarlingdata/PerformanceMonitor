@@ -1570,7 +1570,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     /* A plan undo writes to the monitored server, so it needs a signed-in admin, not just the web's store login (#6269). */
                     if (!DarlingWebSeat.IsSignedInAdmin(context))
                     {
-                        return SignedInAdminRequiredResult();
+                        return SignInRequiredResult();
                     }
 
                     if (!await changes.CanDecideAsync(context.RequestAborted))
@@ -3764,15 +3764,6 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         return ErrorResult(message, noMatch ? StatusCodes.Status404NotFound : StatusCodes.Status400BadRequest);
     }
 
-    /// <summary>The 403 a write that reaches a monitored server, or turns that on, answers when no admin is signed in to the dashboard (#6269). A
-    /// dashboard with no sign-in configured is loopback-only: any local process can reach it, so it never counts as an admin.</summary>
-    internal const string MonitoredServerWriteSeatMessage =
-        "Sign in to the dashboard as an admin to do this, or use the Viewer app. A dashboard with no sign-in configured only lists.";
-
-    /// <summary>The 403 of a write that needs a signed-in admin: the fixed <see cref="MonitoredServerWriteSeatMessage"/> sentence in the error envelope.</summary>
-    private static IResult SignedInAdminRequiredResult() =>
-        ErrorResult(MonitoredServerWriteSeatMessage, StatusCodes.Status403Forbidden);
-
     /// <summary>The 403 a refused switch change answers when the web signs in to the store as the viewer role (#6269).</summary>
     internal const string ServerActionRefusedMessage =
         "This dashboard signs in to the store as the viewer role, so it cannot change server action switches. "
@@ -3824,20 +3815,17 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     return ErrorResult("Send {\"enabled\": true} or {\"enabled\": false}.", StatusCodes.Status400BadRequest);
                 }
 
-                string actor;
-                try
-                {
-                    actor = AgentChangeUndo.PersonActor(NoteDecider(DarlingWebSeat.FromContext(context)));
-                }
-                catch (ArgumentException)
-                {
-                    return ErrorResult("The signed-in name cannot be recorded as the person who changed this switch.", StatusCodes.Status400BadRequest);
-                }
-
                 /* A signed-in admin comes first: the store login the web runs on says nothing about who is calling (#6269). */
                 if (!DarlingWebSeat.IsSignedInAdmin(context))
                 {
-                    return SignedInAdminRequiredResult();
+                    return SignInRequiredResult();
+                }
+
+                /* The same actor every web person write records: ONE person: prefix on the signed-in name (NoteDecider), held to the shared 256-unit name rule. */
+                var actor = NoteDecider(DarlingWebSeat.FromContext(context));
+                if (InvestigationPersonWrites.ValidateActor(actor) is not null)
+                {
+                    return ErrorResult("The signed-in name cannot be recorded as the person who changed this switch.", StatusCodes.Status400BadRequest);
                 }
 
                 /* The admin check comes before anything is read or written. */
@@ -3856,7 +3844,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 var result = await ServerActionSwitches.SetAsync(owner, id, action, enabled, actor, ServerActionSurfaces.Web, context.RequestAborted);
                 var status = result.Succeeded ? StatusCodes.Status200OK
                     : result.Code == "unknown_server" ? StatusCodes.Status404NotFound
-                    : result.Code == "not_for_engine" ? StatusCodes.Status409Conflict
+                    : result.Code is "not_for_engine" or "switch_busy" ? StatusCodes.Status409Conflict
                     : StatusCodes.Status400BadRequest;
                 return DarlingWebStatementSweep.JsonText(result.ToJson(), "/api/servers/{id}/actions/{action}", logger, stopwatch.ElapsedMilliseconds,
                     context.RequestAborted, status);

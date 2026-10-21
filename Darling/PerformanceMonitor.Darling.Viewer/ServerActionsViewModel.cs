@@ -25,8 +25,8 @@ public sealed partial class ViewerDataService
     /// <summary>The command type for a person's switch change (#6269); matches the service executor's <c>set_server_action</c> case.</summary>
     public const string CommandSetServerAction = "set_server_action";
 
-    /// <summary>The wait for a switch change's answer: one short write in the service.</summary>
-    public static readonly TimeSpan SetServerActionTimeout = TimeSpan.FromSeconds(30);
+    /// <summary>The wait for a switch change's answer: the service itself waits up to 60 s for an agent change in progress on that server, then answers (#6269).</summary>
+    public static readonly TimeSpan SetServerActionTimeout = TimeSpan.FromSeconds(75);
 
     /// <summary>Every monitored server with a state for each action (a server with no row reads off).</summary>
     public Task<IReadOnlyList<ServerActionSwitchRow>> ReadServerActionsAsync(CancellationToken cancellationToken = default) =>
@@ -125,7 +125,14 @@ public sealed class ServerActionViewRow
 
     public string StateDisplay => State.Enabled ? "ON" : "off";
 
-    public string ChangedBy => State.SetBy ?? "";
+    /// <summary>Who changed the switch, without the journal's <c>person:</c> prefix (an MCP caller keeps its own spelling).</summary>
+    public string ChangedBy => WithoutPersonPrefix(State.SetBy);
+
+    internal static string WithoutPersonPrefix(string? setBy)
+    {
+        const string prefix = InvestigationPersonWrites.PersonActorPrefix;
+        return setBy is null ? "" : setBy.StartsWith(prefix, StringComparison.Ordinal) && setBy.Length > prefix.Length ? setBy[prefix.Length..] : setBy;
+    }
 
     /// <summary>The change time, the sort key of the Changed column.</summary>
     public DateTime? ChangedAtUtc => State.UpdatedAtUtc;
@@ -137,13 +144,7 @@ public sealed class ServerActionViewRow
         servers.SelectMany(s => s.Actions.Where(a => a.Valid || a.Enabled).Select(a => new ServerActionViewRow(s, a))).ToList();
 
     /// <summary>An action in plain words.</summary>
-    public static string ActionLabel(string action) => action switch
-    {
-        ServerActionNames.ForcePlan => "Force or unforce plans",
-        ServerActionNames.EvictPlan => "Evict plans from the plan cache",
-        ServerActionNames.KillSession => "Kill sessions",
-        var other => other,
-    };
+    public static string ActionLabel(string action) => ServerActionNames.Label(action);
 
     private static string Lets(string action) => action switch
     {

@@ -24,8 +24,13 @@ export const SERVER_ACTION_COLUMNS = [
   { key: "state", label: "Switch" },
   { key: "set_by", label: "Changed by" },
   { key: "changed", label: "Changed", format: "time" },
-  { key: "note", label: "Note" },
+  { key: "note", label: "Note", wrap: true },
 ];
+
+/** The person a switch was changed by, without the journal's "person:" prefix; an agent or MCP caller keeps its own spelling. */
+export function serverActionChangedBy(setBy) {
+  return typeof setBy === "string" && setBy.startsWith("person:") && setBy.length > 7 ? setBy.slice(7) : setBy || null;
+}
 
 const ENGINE_CANNOT_RUN =
   "This server's engine can't run this action. Turn it off to clear it.";
@@ -83,7 +88,7 @@ export function serverActionRows(data) {
         note: a.valid === true ? "" : ENGINE_CANNOT_RUN,
         enabled: a.enabled === true,
         state: a.enabled === true ? "ON" : "off",
-        set_by: a.set_by || null,
+        set_by: serverActionChangedBy(a.set_by),
         changed: a.updated_at_utc || null,
       });
     }
@@ -118,14 +123,18 @@ export async function buildServerActions(body, generation, ctx) {
   const data = res.data || {};
   const canDecide = data.can_decide === true;
   nodes.push(noticeStrip(canDecide ? CAN_DECIDE : data.signed_in_admin === false ? NOT_SIGNED_IN : LIST_ONLY));
-  const columns = SERVER_ACTION_COLUMNS.concat(canDecide ? [{
+  /* The on/off control sits before Note, so it stays on screen at 1280 px beside a long note. */
+  const changeColumn = {
     key: "change", label: "Change", csv: false, copy: false,
     render: (row) => (row ? el("button", {
       class: "btn", type: "button", text: row.enabled ? "Turn off" : "Turn on...",
       "aria-label": (row.enabled ? "Turn off " : "Turn on ") + row.action + " on " + row.server_name,
       onClick: () => (row.enabled ? change(row, false, ctx) : ask(row, ctx)),
     }) : null),
-  }] : []);
+  };
+  const columns = canDecide
+    ? SERVER_ACTION_COLUMNS.filter((c) => c.key !== "note").concat([changeColumn], SERVER_ACTION_COLUMNS.filter((c) => c.key === "note"))
+    : SERVER_ACTION_COLUMNS;
   nodes.push(VIZ.table({ switches: serverActionRows(data) }, { rowsKey: "switches", columns, emptyText: "No server is registered." }));
   mount(body, nodes);
 }

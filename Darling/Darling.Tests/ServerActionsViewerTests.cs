@@ -66,11 +66,25 @@ public sealed class ServerActionsViewerTests
     {
         var rows = ServerActionViewRow.From(new[] { Server("sqlserver") });
         Assert.Equal("ON", rows[0].StateDisplay);
-        Assert.Equal("person:erik", rows[0].ChangedBy);
+        Assert.Equal("erik", rows[0].ChangedBy);
         Assert.NotEqual("", rows[0].ChangedDisplay);
         Assert.Equal("off", rows[1].StateDisplay);
         Assert.Equal("", rows[1].ChangedBy);
         Assert.Equal("", rows[1].ChangedDisplay);
+    }
+
+    [Theory]
+    [InlineData("person:erik@example.com", "erik@example.com")]
+    [InlineData("mcp:token-1 client", "mcp:token-1 client")]
+    [InlineData("person:", "person:")]
+    [InlineData(null, "")]
+    public void ChangedBy_DropsThePersonPrefix_AndKeepsAnyOtherCallersSpelling(string? setBy, string shown) =>
+        Assert.Equal(shown, ServerActionViewRow.WithoutPersonPrefix(setBy));
+
+    [Fact]
+    public void TheChangeWait_OutlastsTheServicesSixtySecondWaitForAnAgentChange()
+    {
+        Assert.True(ViewerDataService.SetServerActionTimeout > TimeSpan.FromSeconds(60));
     }
 
     [Fact]

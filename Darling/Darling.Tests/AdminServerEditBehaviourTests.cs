@@ -141,6 +141,29 @@ public sealed class AdminServerEditBehaviourTests
         Assert.Equal("", rows[2].GetProperty("note").GetString());
     }
 
+    // #6269: the Changed by cell shows the person's name without the journal's "person:" prefix; any other caller keeps its own spelling.
+    [Fact]
+    public void TheServerActionRows_ShowTheChangerWithoutThePersonPrefix_Pure()
+    {
+        var data = new
+        {
+            servers = new object[]
+            {
+                new { server_id = 1, server_name = "alpha-sql-01", engine = "sqlserver", engine_kind = "sqlserver", actions = new object[]
+                {
+                    new { action = "force_plan", valid = true, enabled = true, set_by = "person:erik@example.com" },
+                    new { action = "evict_plan", valid = true, enabled = true, set_by = "mcp:token-1 client" },
+                    new { action = "kill_session", valid = true, enabled = false },
+                } },
+            },
+        };
+        var rows = Pure("serverActionRows", data).EnumerateArray().ToArray();
+        Assert.Equal("erik@example.com", rows[0].GetProperty("set_by").GetString());
+        Assert.Equal("mcp:token-1 client", rows[1].GetProperty("set_by").GetString());
+        Assert.Equal(JsonValueKind.Null, rows[2].GetProperty("set_by").ValueKind);
+        Assert.Equal("Force or unforce plans", rows[0].GetProperty("action").GetString());
+    }
+
     // The form's values for one kind of server, shaped as editFormValues returns them (the engine rides along).
     private static JsonObject Base(string kind)
     {

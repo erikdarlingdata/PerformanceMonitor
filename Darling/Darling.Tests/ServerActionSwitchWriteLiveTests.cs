@@ -162,7 +162,7 @@ public sealed class ServerActionSwitchWriteLiveTests
             /* Refused: a name the journal's person rule refuses, a non-boolean, no action, no server, an unknown action, a wrong engine. */
             foreach (var (server, args, by) in new (int?, string, string)[]
             {
-                (SqlServerId, "{\"action\":\"force_plan\",\"enabled\":true}", "bad name with spaces"),
+                (SqlServerId, "{\"action\":\"force_plan\",\"enabled\":true}", "bad;name,with\"punctuation"),
                 (SqlServerId, "{\"action\":\"force_plan\",\"enabled\":\"yes\"}", "alice"),
                 (SqlServerId, "{\"enabled\":true}", "alice"),
                 (null, "{\"action\":\"force_plan\",\"enabled\":true}", "alice"),
@@ -309,12 +309,85 @@ public sealed class ServerActionSwitchWriteLiveTests
             {
                 var refused = await Send("PUT", "/api/servers/1/actions/kill_session", "application/json", payload);
                 Assert.Equal(403, refused.Status);
-                Assert.Equal(DarlingWebEndpoints.MonitoredServerWriteSeatMessage, (string)refused.Body!["error"]!);
+                Assert.Equal(DarlingWebEndpoints.InvestigationWriteSignInMessage, (string)refused.Body!["error"]!);
             }
 
             Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.config_server_actions", ct));
             Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal", ct));
         }, signedIn: false);
+    }
+
+    [Fact]
+    public async Task TheWebSwitch_StampsOnePersonPrefix_AndAnOidcNameOverFiftySevenCharactersIsRecorded_NotRefused()
+    {
+        var longName = string.Concat(Enumerable.Repeat("a", 60)) + "@example.com";
+        await WithWebAsync("admin", async (owner, _, Send, ct) =>
+        {
+            var on = await Send("PUT", "/api/servers/1/actions/force_plan", "application/json", "{\"enabled\":true}");
+            Assert.Equal(200, on.Status);
+            var actor = await ScalarAsync(owner, "SELECT actor FROM config.investigation_journal WHERE event = 'server_action_switched'", ct);
+            Assert.Equal("person:" + longName, actor);
+            Assert.Equal(actor, await ScalarAsync(owner, "SELECT set_by FROM config.config_server_actions WHERE server_id = 1 AND action = 'force_plan'", ct));
+        }, seat: new DarlingWebSeat(longName, true));
+
+        await WithWebAsync("admin", async (owner, _, Send, ct) =>
+        {
+            Assert.Equal(200, (await Send("PUT", "/api/servers/1/actions/kill_session", "application/json", "{\"enabled\":true}")).Status);
+            Assert.Equal("person:web", await ScalarAsync(owner, "SELECT actor FROM config.investigation_journal WHERE event = 'server_action_switched'", ct));
+        });
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ASwitchChange_WaitsForAnAgentWriteHoldingTheSharedLock_ThenSucceeds_OnAndOffAlike(bool turnOn)
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            if (!turnOn)
+            {
+                await ExecAsync(owner, "INSERT INTO config.config_server_actions (server_id, action, enabled, set_by) VALUES (1, 'force_plan', true, 'person:alice')", ct);
+            }
+
+            await using var agent = await owner.OpenConnectionAsync(ct);
+            await using var agentTransaction = await agent.BeginTransactionAsync(ct);
+            await ServerActionSwitchLock.AcquireSharedAsync(agent, agentTransaction, SqlServerId, "force_plan", 30, ct);
+
+            var change = Task.Run(() => ServerActionSwitches.SetAsync(owner, SqlServerId, "force_plan", turnOn, "person:bob", ServerActionSurfaces.Web, ct), ct);
+            Assert.NotSame(change, await Task.WhenAny(change, Task.Delay(TimeSpan.FromSeconds(2), ct)));
+            Assert.Equal(turnOn ? "0" : "1", await ScalarAsync(owner, "SELECT count(*) FROM config.config_server_actions WHERE enabled", ct));
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'server_action_switched'", ct));
+
+            await agentTransaction.CommitAsync(ct);
+            var result = await change.WaitAsync(TimeSpan.FromSeconds(30), ct);
+            Assert.Equal("set", result.Status);
+            Assert.Equal(turnOn ? "1" : "0", await ScalarAsync(owner, "SELECT count(*) FROM config.config_server_actions WHERE enabled", ct));
+            Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'server_action_switched'", ct));
+        });
+    }
+
+    [Fact]
+    public async Task ASwitchChange_ThatStillWaitsOnAnAgentWriteWhenItsWaitEnds_RefusesSwitchBusy_ChangingAndJournalingNothing()
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            await using var agent = await owner.OpenConnectionAsync(ct);
+            await using var agentTransaction = await agent.BeginTransactionAsync(ct);
+            await ServerActionSwitchLock.AcquireSharedAsync(agent, agentTransaction, SqlServerId, "force_plan", 30, ct);
+
+            var refused = await ServerActionSwitches.SetAsync(owner, SqlServerId, "force_plan", true, "person:bob", ServerActionSurfaces.Web, ct, lockWaitSeconds: 1);
+            Assert.False(refused.Succeeded);
+            Assert.Equal("switch_busy", refused.Code);
+            Assert.Equal(
+                "The switch was not changed: an agent change on this server was still running after 60 seconds. Try again in a minute.",
+                refused.Message);
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.config_server_actions", ct));
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal", ct));
+
+            /* The refused change left nothing held: once the agent write ends, the same change goes through. */
+            await agentTransaction.CommitAsync(ct);
+            Assert.Equal("set", (await ServerActionSwitches.SetAsync(owner, SqlServerId, "force_plan", true, "person:bob", ServerActionSurfaces.Web, ct, lockWaitSeconds: 5)).Status);
+        });
     }
 
     [Fact]
@@ -547,7 +620,7 @@ public sealed class ServerActionSwitchWriteLiveTests
         }
     }
 
-    private static async Task WithWebAsync(string managedRole, Func<NpgsqlDataSource, NpgsqlDataSource, Sender, CancellationToken, Task> body, bool signedIn = true)
+    private static async Task WithWebAsync(string managedRole, Func<NpgsqlDataSource, NpgsqlDataSource, Sender, CancellationToken, Task> body, bool signedIn = true, DarlingWebSeat? seat = null)
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the server action switch live tests.");
@@ -596,7 +669,7 @@ public sealed class ServerActionSwitchWriteLiveTests
                 /* What the sign-in middleware stores for a request that holds a valid session. A dashboard with no sign-in stores nothing (#6269). */
                 app.Use((context, next) =>
                 {
-                    context.Items[DarlingWebSeat.HttpContextItemKey] = DarlingWebSeat.SharedToken;
+                    context.Items[DarlingWebSeat.HttpContextItemKey] = seat ?? DarlingWebSeat.SharedToken;
                     return next(context);
                 });
             }

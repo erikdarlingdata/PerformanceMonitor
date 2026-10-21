@@ -95,9 +95,14 @@ ORDER BY s.name, s.server_id";
     /// Sets one server's switch for one action. <paramref name="actor"/> is the journal actor, already in the shape of its surface
     /// (<see cref="AgentChangeUndo.PersonActor"/> for a person); it is also stored as the row's <c>set_by</c>. Never throws for a refusal.
     /// A change to the state the switch already holds writes and journals nothing.
+    /// <para>The change takes the exclusive form of <see cref="ServerActionSwitchLock"/> first, for on and off alike, so it waits for an agent write
+    /// in flight on that (server, action) and a write that starts after it reads the committed switch. Every statement of the change waits at most
+    /// <paramref name="lockWaitSeconds"/> (60 s, the wait a switch-off already has); past that nothing is changed and the answer is
+    /// <c>switch_busy</c>.</para>
     /// </summary>
     public static async Task<ServerActionSwitchResult> SetAsync(
-        NpgsqlDataSource owner, int serverId, string? action, bool enabled, string actor, string surface, CancellationToken cancellationToken = default)
+        NpgsqlDataSource owner, int serverId, string? action, bool enabled, string actor, string surface, CancellationToken cancellationToken = default,
+        int lockWaitSeconds = InvestigationRequestStore.AgentOffSwitchWaitSeconds)
     {
         ArgumentNullException.ThrowIfNull(owner);
         if (string.IsNullOrWhiteSpace(actor))
@@ -111,10 +116,36 @@ ORDER BY s.name, s.server_id";
 
         await using var connection = await owner.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            return await SetInTransactionAsync(connection, transaction, serverId, name, enabled, actor, surface, lockWaitSeconds, cancellationToken);
+        }
+        catch (Exception ex) when (IsWaitTimeout(ex, cancellationToken))
+        {
+            /* The transaction is rolled back as it is disposed: the switch row and the journal are as they were. */
+            return Refused("switch_busy", SwitchBusyMessage, serverId, null, name);
+        }
+    }
+
+    /// <summary>The refusal a switch change answers when an agent change on the server was still running when the wait ended (#6269).</summary>
+    public const string SwitchBusyMessage =
+        "The switch was not changed: an agent change on this server was still running after 60 seconds. Try again in a minute.";
+
+    /* A command that ran past its CommandTimeout surfaces as an NpgsqlException over a TimeoutException, or as the server's own 57014 when its cancel
+       arrives first. The caller's own cancellation is neither: it stays a cancellation. */
+    private static bool IsWaitTimeout(Exception ex, CancellationToken cancellationToken) =>
+        !cancellationToken.IsCancellationRequested
+        && (ex is NpgsqlException { InnerException: TimeoutException } || ex is PostgresException { SqlState: PostgresErrorCodes.QueryCanceled });
+
+    private static async Task<ServerActionSwitchResult> SetInTransactionAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, int serverId, string name,
+        bool enabled, string actor, string surface, int lockWaitSeconds, CancellationToken cancellationToken)
+    {
+        /* First, for on and off, before any row is read or written: an agent write holds the shared form to the end of its own transaction. */
+        await ServerActionSwitchLock.AcquireExclusiveAsync(connection, transaction, serverId, name, lockWaitSeconds, cancellationToken);
 
         string? serverName = null;
         string? engine = null;
-        await using (var command = new NpgsqlCommand(ServerSql, connection, transaction) { Parameters = { new NpgsqlParameter<int> { TypedValue = serverId } } })
+        await using (var command = new NpgsqlCommand(ServerSql, connection, transaction) { CommandTimeout = lockWaitSeconds, Parameters = { new NpgsqlParameter<int> { TypedValue = serverId } } })
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
             if (await reader.ReadAsync(cancellationToken))
@@ -131,7 +162,7 @@ ORDER BY s.name, s.server_id";
         if (enabled && !ServerActionNames.IsValidForEngine(name, IsPostgres(engine)))
         {
             return Refused("not_for_engine",
-                $"{name} cannot run on {serverName}: it is a {(IsPostgres(engine) ? "PostgreSQL" : "SQL Server")} target. The switch was not changed.", serverId, serverName, name);
+                $"{ServerActionNames.Label(name)} cannot run on {serverName}: it is a {(IsPostgres(engine) ? "PostgreSQL" : "SQL Server")} target. The switch was not changed.", serverId, serverName, name);
         }
 
         /* No row is off, as the gate reads it. The row is locked so two changes in a row see each other's state. */
@@ -139,6 +170,7 @@ ORDER BY s.name, s.server_id";
         await using (var command = new NpgsqlCommand(
             "SELECT enabled FROM config.config_server_actions WHERE server_id = $1 AND action = $2 FOR UPDATE", connection, transaction)
         {
+            CommandTimeout = lockWaitSeconds,
             Parameters = { new NpgsqlParameter<int> { TypedValue = serverId }, new NpgsqlParameter<string> { TypedValue = name, NpgsqlDbType = NpgsqlDbType.Text } },
         })
         {
@@ -149,7 +181,7 @@ ORDER BY s.name, s.server_id";
         {
             await transaction.CommitAsync(cancellationToken);
             return new ServerActionSwitchResult(true, "unchanged", null,
-                $"{name} on {serverName} was already {(enabled ? "on" : "off")}. Nothing was changed.", serverId, serverName, name, before, enabled, null);
+                $"{ServerActionNames.Label(name)} on {serverName} was already {(enabled ? "on" : "off")}. Nothing was changed.", serverId, serverName, name, before, enabled, null);
         }
 
         await using (var command = new NpgsqlCommand(@"
@@ -158,6 +190,7 @@ VALUES ($1, $2, $3, $4, now())
 ON CONFLICT (server_id, action) DO UPDATE SET enabled = EXCLUDED.enabled, set_by = EXCLUDED.set_by, updated_at = EXCLUDED.updated_at",
             connection, transaction)
         {
+            CommandTimeout = lockWaitSeconds,
             Parameters =
             {
                 new NpgsqlParameter<int> { TypedValue = serverId },
@@ -181,6 +214,7 @@ ON CONFLICT (server_id, action) DO UPDATE SET enabled = EXCLUDED.enabled, set_by
         long journalId;
         await using (var command = new NpgsqlCommand(InvestigationRequestStore.AgentActionJournalSql, connection, transaction)
         {
+            CommandTimeout = lockWaitSeconds,
             Parameters =
             {
                 new NpgsqlParameter<DateTime> { TypedValue = DateTime.UtcNow, NpgsqlDbType = NpgsqlDbType.TimestampTz },
@@ -198,7 +232,7 @@ ON CONFLICT (server_id, action) DO UPDATE SET enabled = EXCLUDED.enabled, set_by
 
         await transaction.CommitAsync(cancellationToken);
         return new ServerActionSwitchResult(true, "set", null,
-            $"{name} on {serverName} is now {(enabled ? "on" : "off")} (it was {(before ? "on" : "off")}).", serverId, serverName, name, before, enabled, journalId);
+            $"{ServerActionNames.Label(name)} on {serverName} is now {(enabled ? "on" : "off")} (it was {(before ? "on" : "off")}).", serverId, serverName, name, before, enabled, journalId);
     }
 
     /// <summary>Every monitored server with a state for each action: a server with no row reads off. <see cref="ServerActionSwitchState.Valid"/> is false for an action the engine cannot run.</summary>

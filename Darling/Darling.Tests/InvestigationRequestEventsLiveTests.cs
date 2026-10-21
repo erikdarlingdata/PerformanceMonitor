@@ -569,6 +569,9 @@ public sealed class InvestigationRequestEventsLiveTests
             forged.Add(JournalRow(id, kind));
         }
 
+        /* Who changed a server action switch is the owner's alone (#6269): the managed trigger and the script's copy both refuse it from any other login. */
+        forged.Add(JournalRow(id, ServerActionSwitches.JournalEvent));
+
         /* A practice request's opened row with a reason that is not the exact sentence. */
         forged.Add(JournalRow(practiceId, InvestigationEvents.Opened, reason: "because I said so"));
         forged.Add(JournalRow(practiceId, InvestigationEvents.Opened, reason: "practice of " + Guid.NewGuid().ToString("D")));

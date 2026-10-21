@@ -19,7 +19,13 @@
                 <DataGridTextColumn Header="Switch" Binding="{Binding StateDisplay}" Width="70"/>
                 <DataGridTextColumn Header="Changed by" Binding="{Binding ChangedBy}" Width="170"/>
                 <DataGridTextColumn Header="Changed" Binding="{Binding ChangedDisplay}" Width="130" SortMemberPath="ChangedAtUtc"/>
-                <DataGridTextColumn Header="Note" Binding="{Binding Note}" Width="260"/>
+                <DataGridTextColumn Header="Note" Binding="{Binding Note}" Width="260">
+                    <DataGridTextColumn.ElementStyle>
+                        <Style TargetType="TextBlock">
+                            <Setter Property="TextWrapping" Value="Wrap"/>
+                        </Style>
+                    </DataGridTextColumn.ElementStyle>
+                </DataGridTextColumn>
             </DataGrid.Columns>
         </DataGrid>
         <StackPanel x:Name="SwitchPanel" Grid.Row="2" Orientation="Horizontal" Margin="0,8,0,0">
