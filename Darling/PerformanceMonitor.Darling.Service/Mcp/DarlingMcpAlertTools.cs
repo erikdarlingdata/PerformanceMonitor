@@ -737,7 +737,7 @@ public sealed partial class DarlingMcpAlertTools
         "the next level (a family route, then the parent channels) on the next firing — the reversible form of " +
         "'send this family to the parent channels for now'. Returns {status:\"updated\", route:{...}} with the route AS " +
         "STORED, {status:\"unchanged\", route:{...}} when it already holds that value (a retry is safe and costs no " +
-        "write), or {status:\"not_found\"}. The running service picks the change up on its next collection sweep, " +
+        "write), {status:\"refused\"} for an agent route, or for turning off a route with an Off agent setting (that is done in the Viewer or on the web dashboard; turning it on is allowed), or {status:\"not_found\"}. The running service picks the change up on its next collection sweep, " +
         "when the write's config_version bump makes it reload its channel configuration. This tool cannot author or " +
         "re-point a route: destinations are bearer secrets, set with create_notification_route / update_notification_route or in the Viewer's Settings window.")]
     public static async Task<string> SetNotificationRouteEnabled(
@@ -757,6 +757,11 @@ public sealed partial class DarlingMcpAlertTools
             if (AgentRouteRefusal(existing, "set_notification_route_enabled") is { } agentRefusal)
             {
                 return agentRefusal;
+            }
+
+            if (!enabled && OffRouteRefusal(existing, "set_notification_route_enabled") is { } offRefusal)
+            {
+                return offRefusal;
             }
 
             if (existing.Enabled == enabled)
@@ -830,7 +835,7 @@ public sealed partial class DarlingMcpAlertTools
     [McpServerTool(Name = "delete_notification_route"), Description(
         "Deletes a notification route by its route_id (from get_notification_routes). Permanent: the alerts it " +
         "matched fall to the next level (a family route, then the parent channels) on the next firing. Returns " +
-        "{status:\"deleted\", route_id} or {status:\"not_found\"}. Prefer set_notification_route_enabled for a " +
+        "{status:\"deleted\", route_id}, {status:\"refused\"} for an agent route or a route with an Off agent setting (deleted in the Viewer or on the web dashboard), or {status:\"not_found\"}. Prefer set_notification_route_enabled for a " +
         "temporary change — a deleted route's destinations are gone and are secrets that cannot be read back, so a new route " +
         "(create_notification_route, or the Viewer's Settings window) needs them typed again. The running service stops honoring the route on its next collection sweep.")]
     public static async Task<string> DeleteNotificationRoute(
@@ -844,6 +849,11 @@ public sealed partial class DarlingMcpAlertTools
             if (existing is not null && AgentRouteRefusal(existing, "delete_notification_route") is { } agentRefusal)
             {
                 return agentRefusal;
+            }
+
+            if (existing is not null && OffRouteRefusal(existing, "delete_notification_route") is { } offRefusal)
+            {
+                return offRefusal;
             }
 
             var deleted = await store.DeleteAsync(route_id);
@@ -921,7 +931,7 @@ public sealed partial class DarlingMcpAlertTools
     /// investigations, and the agent tools are served over this same listener, so it is changed only by a person in the
     /// Viewer's Settings window or the web dashboard's admin notification routes page. Null for any other route,
     /// including agent_level 0: that is the route's explicit Off (null inherits, 0 is off, 1 investigates), so it opens
-    /// no investigation and is an ordinary route to enable, disable or delete.
+    /// no investigation. It can be turned on over MCP; turning it off or deleting it is <see cref="OffRouteRefusal"/>'s (#6281).
     /// </summary>
     internal static string? AgentRouteRefusal(PgNotificationRouteStore.RouteSummary route, string tool) =>
         route.AgentLevel is null or < 1
@@ -929,6 +939,19 @@ public sealed partial class DarlingMcpAlertTools
             : Outcome("refused",
                 $"Route {route.RouteId} is an agent route (agent_level {route.AgentLevel}): {tool} does not change it over MCP. " +
                 "Change it in the Viewer's Settings window (Notifications, routes) or on the web dashboard's admin notification routes page.");
+
+    /// <summary>
+    /// The refusal for turning off or deleting a route with an explicit Off setting (agent_level 0, #6281). An Off route keeps
+    /// servers away from a broader agent route, so removing it from force widens what the agent route covers; a person does that
+    /// in the Viewer or on the web dashboard. Turning an Off route on, and its other settings, stay open over MCP. Null for a
+    /// route with no agent setting, and for an agent route (<see cref="AgentRouteRefusal"/> answers those first).
+    /// </summary>
+    internal static string? OffRouteRefusal(PgNotificationRouteStore.RouteSummary route, string tool) =>
+        route.AgentLevel is 0
+            ? Outcome("refused",
+                $"Route {route.RouteId} has an agent setting (Off): {tool} does not turn it off or delete it over MCP, because that widens which servers an agent route covers. " +
+                "Turn it off or delete it in the Viewer's Settings window (Notifications, routes) or on the web dashboard's admin notification routes page. Turning it on can still be done here.")
+            : null;
 
     [McpServerTool(Name = "get_mute_rules"), Description("Gets the configured alert mute rules. Mute rules suppress specific recurring alerts (by server, metric, database, query text, wait type, or job name) while still logging them — so an agent can tell a genuinely healthy-quiet server from one whose alerts are being suppressed.")]
     public static async Task<string> GetMuteRules(
