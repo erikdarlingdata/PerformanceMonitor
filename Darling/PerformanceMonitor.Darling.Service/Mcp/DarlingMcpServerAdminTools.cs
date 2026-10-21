@@ -306,8 +306,9 @@ public sealed partial class DarlingMcpServerAdminTools
                    name, or a name and its address, reach one machine that the host text above could not tell apart. A server
                    that reported no identity (or a registration with none collected) is held to the text match already made. */
                 var probedIdentity = MachineIdentityOf(probeResult.MachineIdentity, probeResult.EngineEdition);
-                if (policy is not null && held is not null && probedIdentity is not null
-                    && await TargetHeldRefusalAsync(held, entry, definitions.ScopedAgentRouteAsync, cancellationToken, probedIdentity: probedIdentity) is { } identityRefusal)
+                var identityUnread = PostgresIdentityUnread(probeResult, probedIdentity);
+                if (policy is not null && held is not null && (probedIdentity is not null || identityUnread)
+                    && await TargetHeldRefusalAsync(held, entry, definitions.ScopedAgentRouteAsync, cancellationToken, probedIdentity: probedIdentity, postgresIdentityUnread: identityUnread) is { } identityRefusal)
                 {
                     results.Add(new ServerResult(entry.Order, entry.DisplayName, AddStatus.Collides, identityRefusal));
                     continue;
@@ -343,7 +344,7 @@ public sealed partial class DarlingMcpServerAdminTools
                     var actualStorageKey = ActualStorageKeyOf(entry, probeResult.ConnectedDatabase);
                     string? heldInWrite = null;
                     HeldCheck? heldCheck = policy is null ? null : async (connection, transaction, token) =>
-                        heldInWrite = await TargetHeldRefusalInTransactionAsync(connection, transaction, entry, null, token, probedIdentity: probedIdentity);
+                        heldInWrite = await TargetHeldRefusalInTransactionAsync(connection, transaction, entry, null, token, probedIdentity: probedIdentity, postgresIdentityUnread: identityUnread);
                     var rowsWritten = await definitions.InsertAsync(entry, encryptedPassword, actualStorageKey, heldCheck, cancellationToken);
                     if (rowsWritten > 0)
                     {

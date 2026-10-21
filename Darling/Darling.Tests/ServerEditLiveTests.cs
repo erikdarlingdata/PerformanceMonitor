@@ -123,9 +123,16 @@ public sealed class ServerEditLiveTests : IDisposable
         return new Rig(scratch, owner, mcp, role);
     }
 
-    private static async Task DropRoleAsync(Rig rig, bool bodySucceeded) =>
-        await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, () =>
-            ExecAsync(rig.Owner, $"DROP OWNED BY {rig.Role}; DROP ROLE IF EXISTS {rig.Role};", CancellationToken.None));
+    /// <summary>Drops the rig's role, and any login role the test created itself (<paramref name="extraRoles"/>): a role is cluster-wide, so
+    /// one left behind outlives the scratch database (#6340 round 2, N5).</summary>
+    private static async Task DropRoleAsync(Rig rig, bool bodySucceeded, params string[] extraRoles) =>
+        await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, async () =>
+        {
+            foreach (var role in extraRoles.Append(rig.Role))
+            {
+                await ExecAsync(rig.Owner, $"DROP OWNED BY {role}; DROP ROLE IF EXISTS {role};", CancellationToken.None);
+            }
+        });
 
     private static async Task ExecAsync(NpgsqlDataSource source, string sql, CancellationToken ct)
     {
@@ -1197,6 +1204,56 @@ public sealed class ServerEditLiveTests : IDisposable
         }
     }
 
+    /// <summary>#6340 round 2 (N2): moving a registration to another address clears the machine identity its last connect stored, since that
+    /// value names the machine at the old address; an edit that leaves the address alone keeps it. The write is the function the edit calls,
+    /// so the Viewer and the web route get the same behaviour as the MCP tool.</summary>
+    [Fact]
+    public async Task AnEditThatMovesTheAddress_ClearsTheStoredIdentity_AndAnEditThatDoesNotMoveItKeepsIt()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        var ok = false;
+        try
+        {
+            await SeedServerAsync(rig.Owner, 7311, "alpha-311", "alpha-311.example.test", "integrated", null, null, ct);
+            await SeedIdentityAsync(rig.Owner, 7311, "alpha-311.example.test", "alpha-311", ct);
+
+            var cost = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "alpha-311", "{\"monthly_cost_usd\":99}", Reachable, TestKeyRings.Healthy, null, ct));
+            Assert.Equal("updated", cost["status"]!.GetValue<string>());
+            Assert.Equal("alpha-311", await ScalarAsync<string>(rig.Owner, "SELECT machine_identity FROM collect.servers WHERE server_id = 7311", ct));
+
+            var moved = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "alpha-311", "{\"host\":\"alpha-312.example.test\"}", Reachable, TestKeyRings.Healthy, null, ct));
+            Assert.Equal("updated", moved["status"]!.GetValue<string>());
+            Assert.Null(await ScalarAsync<string?>(rig.Owner, "SELECT machine_identity FROM collect.servers WHERE server_id = 7311", ct));
+            ok = true;
+        }
+        finally
+        {
+            await DropRoleAsync(rig, ok);
+        }
+    }
+
+    /// <summary>#6340 round 2 (N4): an Aurora cluster gives no machine identity, since nothing shows its <c>system_identifier</c> to be unique per
+    /// cluster; the same session on any other PostgreSQL reads one.</summary>
+    [Fact]
+    public async Task ThePostgresIdentityProbe_ReadsAnIdentity_ButNoneOnAnAuroraCluster()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        var ok = false;
+        try
+        {
+            await using var connection = await rig.Owner.OpenConnectionAsync(ct);
+            Assert.NotNull(await DarlingServerConnector.ProbePostgresIdentityAsync(connection, null, ct));
+            Assert.Null(await DarlingServerConnector.ProbePostgresIdentityAsync(connection, null, ct, isAurora: true));
+            ok = true;
+        }
+        finally
+        {
+            await DropRoleAsync(rig, ok);
+        }
+    }
+
     /// <summary>Registers <paramref name="config"/>'s server the way the service does on a connect: the real connect, then the registry write.
     /// Returns the runtime, and the identity the registry holds for it.</summary>
     private static async Task<(ServerRuntime Runtime, string? Stored)> ConnectAndRegisterAsync(Rig rig, MonitoredServer config, CancellationToken ct)
@@ -1214,11 +1271,12 @@ public sealed class ServerEditLiveTests : IDisposable
     /// route with an agent setting is scoped to the first registration. A role that may not call <c>pg_control_system()</c> connects all the
     /// same and stores none.</summary>
     [Fact]
-    public async Task ThroughTheRealConnect_APostgresClusterUnderASecondHostNameIsRefused_AndARoleThatCannotReadTheIdentityStoresNone()
+    public async Task ThroughTheRealConnect_APostgresClusterUnderASecondHostNameIsRefused_AndARoleThatCannotReadTheIdentityKeepsTheStoredOne()
     {
         var ct = TestContext.Current.CancellationToken;
         await using var rig = await OpenAsync(ct);
         var ok = false;
+        string? role = null;
         try
         {
             var admin = new NpgsqlConnectionStringBuilder(Environment.GetEnvironmentVariable("DARLING_TEST_PG")!);
@@ -1249,19 +1307,40 @@ public sealed class ServerEditLiveTests : IDisposable
             Assert.Contains("the server reports the same name for itself", row["detail"]!.GetValue<string>(), StringComparison.Ordinal);
             Assert.Equal(0, await ScalarAsync<int>(rig.Owner, "SELECT count(*)::int FROM config_monitored_servers WHERE host = 'localhost'", ct));
 
-            /* A role that may not call pg_control_system(): the connect works, the identity is stored as none. */
-            var role = "noctl_" + Guid.NewGuid().ToString("N")[..8];
+            /* A role that may not call pg_control_system(): the connect works and reads no identity. The registry keeps what the same
+               registration stored before, rather than writing NULL over it (#6340 round 2, N1): a swap of the login must not blank it. */
+            role = "noctl_" + Guid.NewGuid().ToString("N")[..8];
             await ExecAsync(rig.Owner, $"CREATE ROLE {role} LOGIN NOSUPERUSER", ct);
             await ExecAsync(rig.Owner, "REVOKE EXECUTE ON FUNCTION pg_catalog.pg_control_system() FROM PUBLIC", ct);
             var (blind, blindStored) = await ConnectAndRegisterAsync(rig, Target("127.0.0.1", role, "pg-6339-blind"), ct);
             Assert.Null(blind.MachineIdentity);
-            Assert.Null(blindStored);
+            Assert.Equal(expected, blindStored);
             Assert.True(blind.Target.PostgresMajorVersion > 0);
+
+            /* N1: over MCP, the same cluster under a second host name through that login reads no identity, and a covered PostgreSQL
+               registration holds one: refused (not matched by host text alone), and the message says what grant fixes it. */
+            var blindJson = System.Text.Json.JsonSerializer.Serialize(new[]
+            {
+                new { host = "localhost", engine = "postgres", port = admin.Port, database = rig.Scratch.DatabaseName, auth = "sql", username = role, password = "unused", encrypt_mode = "Optional" },
+            });
+            var blindAdd = Parse(await Edit.AddServersAsync(rig.Mcp, blindJson, RealProbe, ct, ring: TestKeyRings.Healthy, policy: DarlingMcpAddServersPolicy.Default))["results"]!.AsArray().Single()!;
+            Assert.Equal("collides", blindAdd["status"]!.GetValue<string>());
+            Assert.Contains("GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system()", blindAdd["detail"]!.GetValue<string>(), StringComparison.Ordinal);
+            Assert.Equal(0, await ScalarAsync<int>(rig.Owner, "SELECT count(*)::int FROM config_monitored_servers WHERE host = 'localhost'", ct));
+
+            /* The same for an edit that moves another registration to that address. */
+            await SeedServerAsync(rig.Owner, 7301, "pg-6340-mover", "198.51.100.9", "sql", role, "blob-7301", ct);
+            await ExecAsync(rig.Owner, $"UPDATE config_monitored_servers SET engine = 'postgres', port = {admin.Port}, database = '{rig.Scratch.DatabaseName}', encrypt_mode = 'Optional' WHERE server_id = 7301", ct);
+            var blindEdit = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "pg-6340-mover", "{\"host\":\"localhost\",\"password\":\"unused\"}", RealProbe, TestKeyRings.Healthy, null, ct,
+                policy: DarlingMcpAddServersPolicy.Default));
+            Assert.Equal("refused", blindEdit["status"]!.GetValue<string>());
+            Assert.Contains("pg_control_system()", blindEdit["message"]!.GetValue<string>(), StringComparison.Ordinal);
+            Assert.Equal("198.51.100.9", await ScalarAsync<string>(rig.Owner, "SELECT host FROM config_monitored_servers WHERE server_id = 7301", ct));
             ok = true;
         }
         finally
         {
-            await DropRoleAsync(rig, ok);
+            await DropRoleAsync(rig, ok, role is null ? Array.Empty<string>() : new[] { role });
         }
     }
 

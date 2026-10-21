@@ -621,7 +621,7 @@ SELECT
 
         /* #6339: which cluster this is, for the add and edit tools' same-machine check. After the facts the collectors depend on,
            and on its own statement, so a role that may not read it costs nothing but the identity. */
-        var machineIdentity = await ProbePostgresIdentityAsync(connection, logger, cancellationToken);
+        var machineIdentity = await ProbePostgresIdentityAsync(connection, logger, cancellationToken, isAurora);
 
         /* #3604: the wait-tier decision's second fact. Probed AFTER Aurora-ness and independently of it —
            an Aurora cluster cannot load the module, so the answer there is false by construction, but the
@@ -687,8 +687,16 @@ SELECT s.system_identifier::text AS system_identifier,
        pg_catalog.current_setting('port') AS port
 FROM pg_catalog.pg_control_system() AS s";
 
-    internal static async Task<string?> ProbePostgresIdentityAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken)
+    internal static async Task<string?> ProbePostgresIdentityAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken, bool isAurora = false)
     {
+        /* #6340 round 2 (N4): none on Aurora. No AWS documentation shows system_identifier to be unique per Aurora cluster (the control
+           file is virtual there, and one report has RDS instances sharing one), so a value that two clusters could share would only
+           make the add and edit tools refuse unrelated clusters. The host-text match decides there. */
+        if (isAurora)
+        {
+            return null;
+        }
+
         try
         {
             using var command = new NpgsqlCommand(PostgresIdentityQueryText, connection) { CommandTimeout = 30 };

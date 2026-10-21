@@ -12,6 +12,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
@@ -330,5 +331,57 @@ public sealed class McpMachineIdentityTests
         /* The role may not call pg_control_system(): nothing was stored, so another name goes through, and the same host text is still held. */
         Assert.Null(await PostgresAddRefusalAsync(HeldPostgres("db1", 5432, null), "10.2.3.4", 5432, "7699170741796808760:5432"));
         Assert.NotNull(await PostgresAddRefusalAsync(HeldPostgres("db1", 5432, null), "DB1", 5432, null));
+    }
+
+    /* ---------------- round 2 of the security review (N1): a PostgreSQL login that cannot read the identity ---------------- */
+
+    private static Core.ServerProbe PostgresReports(string? identity, bool aurora = false) => (_, _) => Task.FromResult(
+        new ConnectionProbeResult(true, 0, 0, null, false, false, false, false, null, Engine: CollectorTargetEngine.PostgreSql, PostgresMajorVersion: 16,
+            IsAurora: aurora, MachineIdentity: identity));
+
+    private static async Task<(string Status, string Detail)> AddPostgresAsync(Definitions definitions, string host, Core.ServerProbe probe)
+    {
+        var answer = JsonNode.Parse(await Core.AddServersAsync(definitions, JsonSerializer.Serialize(new[] { new { host, engine = "postgres", port = 5432, auth = "sql", username = "monitor", password = "unused", encrypt_mode = "Optional" } }), probe,
+            CancellationToken.None, ring: TestKeyRings.Healthy, policy: DarlingMcpAddServersPolicy.Default))!;
+        var row = answer["results"]!.AsArray()[0]!;
+        return (row["status"]!.GetValue<string>(), row["detail"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task APostgresProbeThatReadsNoIdentity_IsRefusedWhileACoveredPostgresRegistrationHoldsOne_AndTheMessageNamesTheGrant()
+    {
+        var definitions = new Definitions([HeldPostgres("db1.corp.example.test", 5432, "7699170741796808760:5432")]);
+
+        var (status, detail) = await AddPostgresAsync(definitions, "10.2.3.4", PostgresReports(null));
+
+        Assert.Equal("collides", status);
+        Assert.Contains("pg_control_system()", detail, StringComparison.Ordinal);
+        Assert.Contains("GRANT EXECUTE", detail, StringComparison.Ordinal);
+        Assert.Contains($"route {RouteId}", detail, StringComparison.Ordinal);
+        Assert.Empty(definitions.Inserted);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    public async Task APostgresProbeThatReadsNoIdentity_IsNotRefused_WhenNothingHeldHasOne_OrTheTargetIsAurora(bool aurora, bool heldHasIdentity)
+    {
+        /* No stored identity to be unsure about, or an Aurora cluster, which gives none by design: the text match decides, as before. */
+        var definitions = new Definitions([HeldPostgres("db1.corp.example.test", 5432, heldHasIdentity ? "7699170741796808760:5432" : null)]);
+
+        var (status, _) = await AddPostgresAsync(definitions, "10.2.3.4", PostgresReports(null, aurora));
+
+        Assert.Equal("added", status);
+        Assert.Equal(["10.2.3.4"], definitions.Inserted);
+    }
+
+    [Fact]
+    public async Task ASqlServerProbeThatReadsNoIdentity_IsNotHeldAgainstAPostgresRegistrationsIdentity()
+    {
+        var definitions = new Definitions([HeldPostgres("db1.corp.example.test", 5432, "7699170741796808760:5432")]);
+
+        var (status, _) = await AddAsync(definitions, "10.2.3.4", Reports(null));
+
+        Assert.Equal("added", status);
     }
 }

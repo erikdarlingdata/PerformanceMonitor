@@ -38,10 +38,13 @@ public static class DarlingObservability
        registration (same storage name, different engine) has to correct it. Internal so a pure test can pin
        the shape without a live store.
 
-       machine_identity (V212, #6285, #6339) is written on BOTH arms like engine_kind, and with NULL when the connect read none:
-       what the target reports for itself is a fact about the target, so a re-pointed registration (an address that now reaches
-       another machine) has to correct it, and an Azure SQL Database or a PostgreSQL role that may not call pg_control_system()
-       reports none. The registry is never purged and keeps a removed registration's row, so the identity outlives the registration. */
+       machine_identity (V212, #6285, #6339) is written on BOTH arms like engine_kind: what the target reports for itself is a fact
+       about the target, so a re-pointed registration (an address that now reaches another machine) has to correct it. A connect that
+       reads none (an Azure SQL Database, an Aurora cluster, or a PostgreSQL role that may not call pg_control_system()) keeps the
+       value already stored for the same name and engine rather than writing NULL over it (#6340 round 2, N1): a login swap must not
+       blank what vouches for the machine. An address change clears the stored value in config.edit_monitored_server, so a kept value
+       never belongs to another address. The registry is never purged and keeps a removed registration's row, so the identity outlives
+       the registration. */
     internal const string UpsertServerSql = @"
 INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, engine_kind, created_date, modified_date, monthly_cost_usd, postgres_major_version, machine_identity)
 VALUES ($1, $2, $3, TRUE, $4, $5, $6, $7, $7, $8, $9, $10)
@@ -54,7 +57,8 @@ ON CONFLICT (server_id) DO UPDATE SET
     modified_date = EXCLUDED.modified_date,
     monthly_cost_usd = EXCLUDED.monthly_cost_usd,
     postgres_major_version = EXCLUDED.postgres_major_version,
-    machine_identity = EXCLUDED.machine_identity;";
+    machine_identity = CASE WHEN EXCLUDED.machine_identity IS NULL AND servers.server_name = EXCLUDED.server_name AND servers.engine_kind = EXCLUDED.engine_kind
+                            THEN servers.machine_identity ELSE EXCLUDED.machine_identity END;";
 
     /* Mirror the DESIRED config (config.config_monitored_servers) onto the OBSERVED registry
        (collect.servers) for the two fields the viewer/FinOps read straight off collect.servers: is_enabled

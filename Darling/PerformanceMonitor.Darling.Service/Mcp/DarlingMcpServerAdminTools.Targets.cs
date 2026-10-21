@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Collectors;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -52,6 +53,16 @@ public sealed partial class DarlingMcpServerAdminTools
 
         return serverName.Trim().ToLowerInvariant();
     }
+
+    /// <summary>True for an identity the PostgreSQL probe makes (<c>system_identifier:port</c>). A SQL Server's name never holds a colon, so
+    /// the colon tells the two kinds apart without the registration's engine, which a removed registration no longer has.</summary>
+    internal static bool IsPostgresIdentity(string? identity) => identity is not null && identity.Contains(':', StringComparison.Ordinal);
+
+    /// <summary>#6340 round 2 (N1): true when a PostgreSQL target answered the probe but gave no identity, because the login may not call
+    /// <c>pg_control_system()</c>. An Aurora target gives none by design (the connect does not ask it), so the host-text match alone
+    /// decides there, and this is false for it.</summary>
+    internal static bool PostgresIdentityUnread(ConnectionProbeResult probe, string? probedIdentity) =>
+        probedIdentity is null && probe.Engine == CollectorTargetEngine.PostgreSql && !probe.IsAurora;
 
     /// <summary>True when the server the add or edit reached reports the same identity that was collected for <paramref name="held"/>.
     /// Either side having none is no match: such a registration is compared by its text alone.</summary>
@@ -170,7 +181,7 @@ public sealed partial class DarlingMcpServerAdminTools
     internal static async Task<string?> TargetHeldRefusalAsync(
         IReadOnlyList<RegisteredTarget> held, ParsedServerEntry entry,
         Func<int, CancellationToken, Task<int?>> scopedRoute, CancellationToken cancellationToken, int? exceptServerId = null, bool forEdit = false,
-        string? probedIdentity = null, bool textMatch = true)
+        string? probedIdentity = null, bool textMatch = true, bool postgresIdentityUnread = false)
     {
         if (exceptServerId is { } editedId && probedIdentity is not null
             && held.FirstOrDefault(t => t.ServerId == editedId)?.Identity == probedIdentity)
@@ -192,7 +203,12 @@ public sealed partial class DarlingMcpServerAdminTools
             }
 
             var sameText = textMatch && SameTarget(other, entry);
-            if (!sameText && !SameIdentity(other, probedIdentity))
+            var sameIdentity = SameIdentity(other, probedIdentity);
+            /* #6340 round 2 (N1): a PostgreSQL probe that read no identity (the login may not call pg_control_system()) cannot say
+               whether it reached the cluster a covered PostgreSQL registration holds under another name, so it is refused rather than
+               matched by host text alone. Only for an entry that moves an address (an add, or an edit of the address). */
+            var identityUnread = postgresIdentityUnread && textMatch && IsPostgresIdentity(other.Identity);
+            if (!sameText && !sameIdentity && !identityUnread)
             {
                 continue;
             }
@@ -200,6 +216,17 @@ public sealed partial class DarlingMcpServerAdminTools
             if (await scopedRoute(other.ServerId, cancellationToken) is not { } routeId)
             {
                 continue;
+            }
+
+            if (!sameText && !sameIdentity)
+            {
+                return (forEdit ? "Not saved: " : "Not added: ") + $"{entry.ProbeConfig.Host} cannot be checked against '{other.Label}'"
+                    + (other.Removed ? " (a removed registration)" : "")
+                    + $": the login this call connected with may not read the server's identity (pg_control_system()), and route {routeId} (an agent setting) "
+                    + "is scoped to that PostgreSQL registration, so "
+                    + (forEdit ? "this registration, moved there, " : "a second registration of the same cluster ")
+                    + "could sit outside that route. Use a login that may call pg_control_system() (PostgreSQL grants it to PUBLIC unless it was revoked: "
+                    + "GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO the login), or change this in the Viewer or on the web dashboard.";
             }
 
             return (forEdit ? "Not saved: " : "Not added: ") + $"{entry.ProbeConfig.Host} is already registered as '{other.Label}'"
@@ -293,10 +320,10 @@ public sealed partial class DarlingMcpServerAdminTools
     /// holds the machine. <paramref name="exceptServerId"/> is the registration an edit changes.</summary>
     internal static async Task<string?> TargetHeldRefusalInTransactionAsync(
         NpgsqlConnection connection, NpgsqlTransaction transaction, ParsedServerEntry entry, int? exceptServerId, CancellationToken cancellationToken, bool forEdit = false, string? probedIdentity = null,
-        bool textMatch = true)
+        bool textMatch = true, bool postgresIdentityUnread = false)
     {
         var held = await LoadRegisteredTargetsAsync(connection, transaction, cancellationToken);
         return await TargetHeldRefusalAsync(held, entry,
-            (serverId, token) => ScopedAgentRouteAsync(connection, transaction, serverId, token), cancellationToken, exceptServerId, forEdit, probedIdentity, textMatch);
+            (serverId, token) => ScopedAgentRouteAsync(connection, transaction, serverId, token), cancellationToken, exceptServerId, forEdit, probedIdentity, textMatch, postgresIdentityUnread);
     }
 }
