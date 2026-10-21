@@ -365,6 +365,44 @@ VALUES ($1, $2, $3, $4, 45, 30, $5, 'email', NULL, $6, FALSE, NULL, NULL)",
         Assert.Equal(2, lateRecurrence.StreakDays);
     }
 
+    /// <summary>
+    /// #6261: a 00:10 anchor counts a 23:50 fire two calendar dates back as day 1 (24 hours 20 minutes back) and the one before it
+    /// as day 2, so the streak is 2; a count by calendar date would number them 2 and 3 and find no run.
+    /// </summary>
+    [Fact]
+    public async Task TheStreak_OfA_0010Anchor_CountsA_2350FireTwoDatesBackAsDayOne()
+    {
+        var anchor = Now.Date.AddDays(-1).AddMinutes(10);
+        var requestId = Guid.NewGuid();
+        await InsertRequestAsync(requestId, anchor);
+        await InsertLinkAsync(1, requestId, anchor);
+        await InsertFireAsync(anchor.AddDays(-1).AddMinutes(-20));
+        await InsertFireAsync(anchor.AddDays(-2).AddMinutes(-20));
+
+        var reader = new DuckDbInvestigationBriefSourceReader(_initializer, () => Now);
+        var recurrence = (await reader.ReadAsync(requestId, TestContext.Current.CancellationToken))!.Recurrence!.Single();
+        Assert.Equal(2, recurrence.StreakDays);
+    }
+
+    /// <summary>
+    /// #6261: one calendar date holds two day numbers. For a 23:50 anchor, 23:50 on the date before is day 1 and 00:10 on that same
+    /// date is day 2 (47 hours 40 minutes back); a date difference would see one day and a streak of 1.
+    /// </summary>
+    [Fact]
+    public async Task TheStreak_OfA_2350Anchor_CanHoldTwoDayNumbersOnOneCalendarDate()
+    {
+        var anchor = Now.Date.AddDays(-3).AddHours(23).AddMinutes(50);
+        var requestId = Guid.NewGuid();
+        await InsertRequestAsync(requestId, anchor);
+        await InsertLinkAsync(1, requestId, anchor);
+        await InsertFireAsync(anchor.AddDays(-1));
+        await InsertFireAsync(anchor.Date.AddDays(-1).AddMinutes(10));
+
+        var reader = new DuckDbInvestigationBriefSourceReader(_initializer, () => Now);
+        var recurrence = (await reader.ReadAsync(requestId, TestContext.Current.CancellationToken))!.Recurrence!.Single();
+        Assert.Equal(2, recurrence.StreakDays);
+    }
+
     /// <summary>A fire on every one of the Days days says so as a floor, and a fire older than the look-back adds nothing.</summary>
     [Fact]
     public async Task TheStreak_NeverPassesTheLookBack_AndSaysItIsAtLeast()
