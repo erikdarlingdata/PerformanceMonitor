@@ -524,6 +524,13 @@ public partial class RemoteCollectorService
             written = WriteBatch(duckConnection, definition, rows, serverId, context.ServerName, ceilingUtc, context);
         }
 
+        /* #6254: backfill rows feed the ship guard, so a later look-back read that meets the same key with the same or an
+           older state drops it. Only a database the guard already tracks: a plain database never reads with a look-back. */
+        if (QueryStoreStateFor(serverId).Guard is { } shipGuard && shipGuard.HasDatabase(databaseName))
+        {
+            shipGuard.RecordShipped(databaseName, rows);
+        }
+
         var boundary = context.PerItemShippedBoundary;
         if (isHole)
         {

@@ -92,7 +92,8 @@ public partial class ServerTab : UserControl
                 var reconstruction = BlockingChainReconstructor.Reconstruct(
                     rows, maxDepth: 50, maxPairs: 5000, stepBudget: 100_000, scopeByMonitorLoop: true);
                 return BlockingChainViewerProjection.BuildModelForSession(
-                    reconstruction, monitorLoop, spid, ecid);
+                    reconstruction, monitorLoop, spid, ecid,
+                    t => ServerTimeHelper.ConvertForDisplay(t, ServerTimeHelper.CurrentDisplayMode));
             });
 
             if (model == null)

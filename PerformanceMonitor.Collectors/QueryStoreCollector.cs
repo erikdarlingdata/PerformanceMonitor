@@ -519,10 +519,10 @@ END;
         var text = OnPremDatabaseListQueryText
             .Replace("/*EXCLUSION_FILTER*/", exclusionClause, StringComparison.Ordinal);
 
-        /* #6254 / #6279: the per-database facts the routing and the look-back need (flush interval, capturing
-           secondary), read inside the probe loop that already visits every database. Off (the placeholders
-           vanish) unless the server has a replica set, or it is SQL Server 2022+ where a capturing secondary
-           can exist; the first two result sets keep their contract either way. */
+        /* #6254: the per-database flush interval the routing and the look-back need, read inside the probe loop
+           that already visits every database. Off (the placeholders vanish, today's text byte for byte) unless the
+           server has a replica set; the first two result sets keep their contract either way. A capturing
+           secondary (#6279) is not read here: the tracker detects it from the rows the payload read returns. */
         text = ApplyEnumerationFacts(text, context);
 
         return new CollectorQuery(text, exclusionParameters);
