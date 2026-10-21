@@ -118,6 +118,7 @@ public sealed class ServerEditLiveTests : IDisposable
         await ExecAsync(owner, DarlingManagedRoles.BuildEditMonitoredServerSeventeenWrapperSql("config"), ct);
         await ExecAsync(owner, DarlingManagedRoles.BuildEditMonitoredServerLegacyWrapperSql("config"), ct);
         await ExecAsync(owner, $"GRANT EXECUTE ON FUNCTION config.edit_monitored_server({DarlingManagedRoles.EditMonitoredServerSignature}) TO {role}", ct);
+        await ExecAsync(owner, $"GRANT EXECUTE ON FUNCTION config.edit_monitored_server({DarlingManagedRoles.EditMonitoredServerSeventeenSignature}) TO {role}", ct);
         await ExecAsync(owner, $"GRANT EXECUTE ON FUNCTION config.edit_monitored_server({DarlingManagedRoles.EditMonitoredServerLegacySignature}) TO {role}", ct);
         await ExecAsync(owner, "INSERT INTO config_service (id) VALUES (1) ON CONFLICT DO NOTHING", ct);
         var mcp = NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(ownerString) { Username = role, Password = RolePassword }.ConnectionString);
@@ -168,8 +169,8 @@ public sealed class ServerEditLiveTests : IDisposable
             reader.IsDBNull(2) ? null : reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetString(3),
             !reader.IsDBNull(4) && reader.GetBoolean(4), reader.IsDBNull(5) ? null : reader.GetString(5),
             reader.IsDBNull(6) ? null : reader.GetString(6), reader.IsDBNull(7) ? null : reader.GetString(7),
-            !reader.IsDBNull(8) && reader.GetBoolean(8), !reader.IsDBNull(9) && reader.GetBoolean(9), null);
-        return ring.Open(reader.GetString(10), PasswordBinding.ForServer(identity));
+            !reader.IsDBNull(8) && reader.GetBoolean(8), !reader.IsDBNull(9) && reader.GetBoolean(9), reader.IsDBNull(10) ? null : reader.GetString(10));
+        return ring.Open(reader.GetString(11), PasswordBinding.ForServer(identity));
     }
 
     [Fact]

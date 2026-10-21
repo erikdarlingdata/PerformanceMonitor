@@ -475,6 +475,18 @@ ALTER TABLE IF EXISTS config.config_service DROP COLUMN IF EXISTS query_store_fe
 DROP TRIGGER IF EXISTS trg_agent_route_tag_guard ON config.server_tag_map;
 DROP TRIGGER IF EXISTS trg_agent_route_tag_guard ON config.server_tags;
 DROP FUNCTION IF EXISTS config.agent_route_tag_guard();"),
+
+        // V211 (#6254): the Query Store replica setting. The config column is the probe's newest sentinel. The rewind drops both new columns;
+        // collect.v_collection_log freezes its column list at CREATE, so it is dropped first and made again over the table without read_source
+        // (the shape V210 left), and a re-run of V211 appends the column to it again. Safe on a store that never had them.
+        new(211, "hasQueryStoreReplica",
+            @"
+ALTER TABLE IF EXISTS config.config_monitored_servers DROP COLUMN IF EXISTS query_store_replica;
+DROP VIEW IF EXISTS collect.v_collection_log;
+ALTER TABLE IF EXISTS collect.collection_log DROP COLUMN IF EXISTS read_source;
+DO $$ BEGIN IF to_regclass('collect.collection_log') IS NOT NULL THEN
+  EXECUTE 'CREATE VIEW collect.v_collection_log AS SELECT * FROM collect.collection_log';
+END IF; END $$;"),
     ];
 
     /// <summary>

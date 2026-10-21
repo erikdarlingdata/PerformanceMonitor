@@ -137,6 +137,7 @@ public sealed class ServerAddViewerRoleLiveTests : IDisposable
             await ExecAsync(owner, DarlingManagedRoles.BuildEditMonitoredServerSeventeenWrapperSql("config"), ct);
             await ExecAsync(owner, DarlingManagedRoles.BuildEditMonitoredServerLegacyWrapperSql("config"), ct);
             await ExecAsync(owner, $"GRANT EXECUTE ON FUNCTION config.edit_monitored_server({DarlingManagedRoles.EditMonitoredServerSignature}) TO {roleName}", ct);
+            await ExecAsync(owner, $"GRANT EXECUTE ON FUNCTION config.edit_monitored_server({DarlingManagedRoles.EditMonitoredServerSeventeenSignature}) TO {roleName}", ct);
             await ExecAsync(owner, $"GRANT EXECUTE ON FUNCTION config.edit_monitored_server({DarlingManagedRoles.EditMonitoredServerLegacySignature}) TO {roleName}", ct);
         }
 
@@ -239,6 +240,7 @@ public sealed class ServerAddViewerRoleLiveTests : IDisposable
                 insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified) });
                 insert.Parameters.Add(new NpgsqlParameter<string> { TypedValue = "sqlserver" });
                 insert.Parameters.Add(new NpgsqlParameter<int> { TypedValue = 0 });
+                insert.Parameters.Add(new NpgsqlParameter { Value = DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
                 insert.Parameters.Add(new NpgsqlParameter { Value = DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
                 insert.Parameters.Add(new NpgsqlParameter { Value = DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
                 await insert.ExecuteNonQueryAsync(ct);
