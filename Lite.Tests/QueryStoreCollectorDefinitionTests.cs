@@ -1357,8 +1357,8 @@ public sealed class QueryStoreCollectorDefinitionTests
 
         /* LEFT JOIN, never INNER: an interval row that failed to resolve must cost this collector ONE
            column, not every runtime-stats row for that database. Same lesson as the replica join. */
-        Assert.Contains("LEFT JOIN sys.query_store_runtime_stats_interval AS qsrsi", body, StringComparison.Ordinal);
-        Assert.DoesNotContain("JOIN sys.query_store_runtime_stats_interval AS qsrsi\n  ON qsrsi", body.Replace("LEFT JOIN sys.query_store_runtime_stats_interval", "X", StringComparison.Ordinal), StringComparison.Ordinal);
+        Assert.Contains("LEFT JOIN #pm_qs_interval AS qsrsi", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("JOIN #pm_qs_interval AS qsrsi\n  ON qsrsi", body.Replace("LEFT JOIN #pm_qs_interval", "X", StringComparison.Ordinal), StringComparison.Ordinal);
     }
 
     [Fact]
