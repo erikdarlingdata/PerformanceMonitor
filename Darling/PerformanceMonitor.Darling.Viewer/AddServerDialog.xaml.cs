@@ -647,6 +647,15 @@ public partial class AddServerDialog : Window
 
         var isPostgres = PostgresEngineRadio.IsChecked == true;
 
+        /* #6352: a SQL Server host SqlClient would read as a named pipe or an admin connection is refused before the row is
+           built, so Test and Save both stop here. An edit that keeps its host is not held to it; the same rule the
+           data service's upsert applies under its transaction. */
+        if (!isPostgres && ViewerDataService.HostRefusal(new MonitoredServerRow { Host = host }, _existing?.Host, _existing?.Engine) is { } hostRefusal)
+        {
+            error = hostRefusal;
+            return null;
+        }
+
         /* #6254: the replica is a host the service connects to with its own credentials; a protocol prefix or a path is refused here
            and again where the row is written (ViewerDataService), so no other caller can store one. */
         if (!isPostgres && QueryStoreReplicaSetting.Refusal(QueryStoreReplicaBox.Text) is { } replicaRefusal)
@@ -923,6 +932,12 @@ public partial class AddServerDialog : Window
         {
             /* #5240: a change to how the server is reached saved without a newly entered password. The message says so, in the same
                words as the web and MCP edit; nothing was written. */
+            StatusText.Text = ex.Message;
+            SaveButton.IsEnabled = true;
+        }
+        catch (MonitoredServerHostRefusedException ex)
+        {
+            /* #6352: the upsert refused a named-pipe or admin host; the message says why and nothing was written. */
             StatusText.Text = ex.Message;
             SaveButton.IsEnabled = true;
         }

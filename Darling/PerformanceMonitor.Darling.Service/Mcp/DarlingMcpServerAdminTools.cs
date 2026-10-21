@@ -1030,6 +1030,14 @@ ORDER BY d.host, d.database";
             return (null, Invalid(engineError));
         }
 
+        /* #6352: a SQL Server host that SqlClient would read as a named pipe or an admin connection is refused before any
+           probe. The web add route and the command-line add run this same entry check. A PostgreSQL host is not read
+           that way (a leading slash there is a Unix socket directory), so it is not held to the rule. */
+        if (engine == EngineSqlServer && ServerHostSetting.Refusal(host) is { } hostRefusal)
+        {
+            return (null, Invalid(hostRefusal));
+        }
+
         /* The same rule DarlingConfig.Validate enforces for a file entry, enforced here so the two onboarding
            paths cannot disagree: PostgreSQL has no integrated-auth path, and defaulting auth to Windows means
            an entry that just says {"host": ..., "engine": "postgres"} would otherwise be accepted and then

@@ -35,6 +35,10 @@ public partial class AddServerDialog : Window
     /// </summary>
     public ServerConnection? AddedServer { get; private set; }
 
+    /// <summary>#6352: the host the edited server had when the dialog opened. Save changes the live list object before it
+    /// calls the manager, so the manager's own stored copy cannot tell a changed host from an unchanged one.</summary>
+    private string? _originalHost;
+
     public AddServerDialog(ServerManager serverManager, ProfileManager profileManager)
     {
         InitializeComponent();
@@ -68,6 +72,7 @@ public partial class AddServerDialog : Window
         : this(serverManager, profileManager)
     {
         Title = "Edit SQL Server";
+        _originalHost = existing.ServerName;
         ServerNameBox.Text = existing.ServerName;
         DisplayNameBox.Text = existing.DisplayName;
         EnabledCheckBox.IsChecked = existing.IsEnabled;
@@ -291,22 +296,42 @@ public partial class AddServerDialog : Window
         };
     }
 
-    private SqlConnectionStringBuilder BuildConnectionBuilder()
+    /// <summary>
+    /// The Test Connection builder before authentication is applied. The Data Source goes through
+    /// <see cref="ServerHostSetting.TcpDataSource"/>, as the collectors' own builder does, so the test does not fall back
+    /// to a named pipe over SMB with this process's Windows credentials (#6352).
+    /// </summary>
+    internal static SqlConnectionStringBuilder BuildBaseConnectionBuilder(
+        string serverName,
+        string databaseName,
+        bool trustServerCertificate,
+        SqlConnectionEncryptOption encrypt,
+        bool readOnlyIntent,
+        bool multiSubnetFailover)
     {
-        var dbName = DatabaseNameBox.Text.Trim();
-        var builder = new SqlConnectionStringBuilder
+        var dbName = databaseName.Trim();
+        return new SqlConnectionStringBuilder
         {
-            DataSource = ServerNameBox.Text.Trim(),
+            DataSource = ServerHostSetting.TcpDataSource(serverName.Trim()),
             InitialCatalog = string.IsNullOrEmpty(dbName) ? "master" : dbName,
             ApplicationName = "PerformanceMonitorLite",
             ConnectTimeout = 10,
-            TrustServerCertificate = TrustCertCheckBox.IsChecked == true,
-            Encrypt = ParseEncryptOption(GetSelectedEncryptMode()),
-            ApplicationIntent = ReadOnlyIntentCheckBox.IsChecked == true
-                ? ApplicationIntent.ReadOnly
-                : ApplicationIntent.ReadWrite,
-            MultiSubnetFailover = MultiSubnetFailoverCheckBox.IsChecked == true
+            TrustServerCertificate = trustServerCertificate,
+            Encrypt = encrypt,
+            ApplicationIntent = readOnlyIntent ? ApplicationIntent.ReadOnly : ApplicationIntent.ReadWrite,
+            MultiSubnetFailover = multiSubnetFailover
         };
+    }
+
+    private SqlConnectionStringBuilder BuildConnectionBuilder()
+    {
+        var builder = BuildBaseConnectionBuilder(
+            ServerNameBox.Text,
+            DatabaseNameBox.Text,
+            TrustCertCheckBox.IsChecked == true,
+            ParseEncryptOption(GetSelectedEncryptMode()),
+            ReadOnlyIntentCheckBox.IsChecked == true,
+            MultiSubnetFailoverCheckBox.IsChecked == true);
 
         // Credential-profile mode: apply the profile's auth via the SAME shared helper, sourcing every
         // field from the profile (its auth type + non-secret fields + secret from Credential Manager).
@@ -540,11 +565,23 @@ public partial class AddServerDialog : Window
             ambientFailure,
             string.IsNullOrEmpty(App.DataDirectory) ? null : System.IO.Path.Combine(App.DataDirectory, "logs"));
 
+    /// <summary>#6352: the refusal for the host in the box, or null. A server being edited keeps the host it was saved
+    /// with, so only a NEW or CHANGED host is held to the rule (see <see cref="ServerManager.HostRefusal"/>).</summary>
+    private string? HostBoxRefusal() =>
+        ServerManager.HostRefusal(ServerNameBox.Text, Title == "Edit SQL Server" ? _originalHost : null);
+
     private async void TestButton_Click(object sender, RoutedEventArgs e)
     {
         if (string.IsNullOrEmpty(ServerNameBox.Text.Trim()))
         {
             StatusText.Text = "Enter a server name first.";
+            return;
+        }
+
+        /* #6352: Test connects with the typed host, so a named-pipe or admin host is refused here too. */
+        if (HostBoxRefusal() is { } testHostRefusal)
+        {
+            StatusText.Text = testHostRefusal;
             return;
         }
 
@@ -595,6 +632,14 @@ public partial class AddServerDialog : Window
         if (string.IsNullOrEmpty(serverName))
         {
             StatusText.Text = "Server name is required.";
+            return;
+        }
+
+        /* #6352: refused before any connect or save: a host that SqlClient would read as a named pipe or an admin
+           connection (np:, lpc:, admin:, \host\pipe, //host). An edit that leaves the host as it was is not held to it. */
+        if (HostBoxRefusal() is { } hostRefusal)
+        {
+            StatusText.Text = hostRefusal;
             return;
         }
 

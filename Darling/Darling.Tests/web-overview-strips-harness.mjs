@@ -1,7 +1,7 @@
 /* Runs the web viewer's shipped pages/overview-strips.js (the Overview's five stacked strips, #6291) against a stand-in DOM and
    prints what one scenario drew as one line of JSON. WebOverviewStripsBehaviourTests starts it as
        node web-overview-strips-harness.mjs <path to wwwroot/js> <scenario>
-   Scenarios: crosshair, zoom, empty, baselines. */
+   Scenarios: crosshair, zoom, empty, baselines, firstload, localtime. */
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -9,6 +9,8 @@ import { pathToFileURL } from "node:url";
 
 const jsDir = process.argv[process.argv.length - 2];
 const scenario = process.argv[process.argv.length - 1];
+/* The axis and the readout are in the browser's local time (#6360): pin a zone that is not UTC, so a runner in UTC cannot pass by luck. */
+process.env.TZ = "America/New_York";
 
 class FakeNode {
   constructor(tag, text) {
@@ -17,14 +19,18 @@ class FakeNode {
     this.classList = { add() {}, remove() {}, toggle() {}, contains: () => false };
   }
   get firstChild() { return this.children[0] || null; }
-  appendChild(c) { this.children.push(c); return c; }
+  appendChild(c) { c.parent = this; this.children.push(c); return c; }
   removeChild(c) { const i = this.children.indexOf(c); if (i >= 0) this.children.splice(i, 1); return c; }
   setAttribute(n, v) { this.attrs[n] = String(v); }
   getAttribute(n) { return n in this.attrs ? this.attrs[n] : null; }
   addEventListener(t, l) { (this.listeners[t] = this.listeners[t] || []).push(l); }
   setPointerCapture() {}
   replaceChild(next, old) { const i = this.children.indexOf(old); if (i >= 0) this.children[i] = next; return old; }
-  getBoundingClientRect() { return { left: 0, top: 0, width: Number(this.attrs.width) || 1000, height: Number(this.attrs.height) || 300 }; }
+  getBoundingClientRect() {
+    /* The strips' host is 328 px wide (a phone) once it is in the page and has no width before: a browser lays out nothing that is not attached. */
+    if (this.className === "chart overview-strips-host") return { left: 0, top: 0, width: this.parent ? 328 : 0, height: 482 };
+    return { left: 0, top: 0, width: Number(this.attrs.width) || 1000, height: Number(this.attrs.height) || 300 };
+  }
   set textContent(v) { this.children = []; this.text = String(v); }
   get textContent() { return (this.text || "") + this.children.map((c) => c.textContent).join(""); }
 }
@@ -35,6 +41,9 @@ globalThis.document = {
   createTextNode: (text) => new FakeNode("#text", text),
 };
 globalThis.location = { hash: "#/server/A/overview" };
+globalThis.localStorage = { getItem: () => null, setItem() {}, removeItem() {} };
+const observers = [];
+globalThis.ResizeObserver = class { constructor(cb) { this.cb = cb; observers.push(this); } observe() {} disconnect() {} };
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "overview-strips-"));
 let strips;
@@ -118,7 +127,7 @@ if (scenario === "crosshair") {
   out.cpuPointsZoomed = find(cpu, (n) => n.tag === "polyline")[0].attrs.points.split(" ").length;
   const wait = find(z.node, (n) => n.attrs["data-strip"] === "waits")[0];
   out.waitPointsZoomed = find(wait, (n) => n.tag === "polyline")[0].attrs.points.split(" ").length;
-  out.axisLabels = find(z.node, (n) => n.tag === "text" && /^\d\d:\d\d$/.test(n.textContent)).map((n) => n.textContent);
+  out.axisLabels = find(z.node, (n) => n.tag === "text" && /^\d\d:\d\d/.test(n.textContent)).map((n) => n.textContent);
   out.stripsDrawnZoomed = find(z.node, (n) => n.attrs["data-strip"]).length;
 } else if (scenario === "baselines") {
   const window = { windowStart: T0, windowEnd: T0 + 60 * MIN };
@@ -174,6 +183,38 @@ if (scenario === "crosshair") {
     blocking: { band: count("blocking", "strip-band"), dots: count("blocking", "strip-anomaly") },
     memory: { band: count("memory", "strip-band") },
   };
+} else if (scenario === "localtime") {
+  /* 12:00-13:00 UTC on 1 January is 07:00-08:00 in New York: the axis and the crosshair readout read that, as the zoom chip does. */
+  const built = strips.buildStrips(reads);
+  const drawn = strips.drawStrips(built, domain, 1000, null);
+  out.axisLabels = find(drawn.node, (n) => n.tag === "text" && /^\d\d:\d\d/.test(n.textContent)).map((n) => n.textContent);
+  drawn.crosshairAt(T0 + 22 * MIN);
+  out.readout = readoutTexts(drawn.node).cpu;
+} else if (scenario === "firstload") {
+  /* A reload: the panel's host is built before it is in the page, so the first draw measures no width. Once it is attached and laid out
+     (328 px, a phone) the observer's first report must redraw the strips at that width, not leave the 1000 px default scaled down. */
+  const now = Date.now();
+  const sample = (m) => new Date(now - m * MIN).toISOString().slice(0, 19);
+  const bodies = {
+    get_cpu_utilization: { samples: Array.from({ length: 30 }, (_, i) => ({ sample_time: sample(i * 2), sql_server_cpu: 10 + i, other_process_cpu: 5 })) },
+    get_server_trend: { trend: Array.from({ length: 12 }, (_, i) => ({ time: sample(i * 5), wait_time_ms_per_second: 100 + i })) },
+    get_blocking_trend: { trend: [{ time: sample(20), count: 2 }] },
+    get_deadlock_trend: { trend: [] },
+    get_memory_trend: { trend: Array.from({ length: 6 }, (_, i) => ({ time: sample(i * 10), buffer_pool_mb: 2000 + i })) },
+    get_file_io_trend: { trend: Array.from({ length: 4 }, (_, i) => ({ time: sample(i * 15), database_name: "A", file_type: "ROWS", reads: 10, avg_read_latency_ms: 2 })) },
+  };
+  globalThis.fetch = async (url) => {
+    const tool = String(url).split("/api/read/")[1].split("?")[0];
+    return { status: 200, ok: true, text: async () => JSON.stringify(bodies[tool] || {}) };
+  };
+  const body = document.createElement("div");
+  strips.fillOverviewStrips(body, "A", { hours: 1, label: "1h", signal: null });
+  await new Promise((r) => setTimeout(r, 50));
+  const svgs = () => find(body, (n) => n.tag === "svg");
+  const sizes = () => svgs().map((n) => ({ width: n.attrs.width, viewBox: n.attrs.viewBox }));
+  out.afterFill = sizes();
+  observers.forEach((o) => o.cb([]));
+  out.afterObserver = sizes();
 } else if (scenario === "empty") {
   const none = {
     cpu: { kind: "empty", message: "No CPU samples in this window." },
