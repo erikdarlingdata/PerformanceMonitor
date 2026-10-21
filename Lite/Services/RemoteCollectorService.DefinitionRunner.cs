@@ -295,6 +295,17 @@ public partial class RemoteCollectorService
                listed: the note below speaks of user databases, and a list of master alone has none to blame it on
                (#4961). Other collectors read the list as it came. */
             var listedDatabaseCount = databases.Count;
+
+            /* #6312: an XE read (attention, blocked_process_report) is of a database-scoped session, which an
+               Azure SQL Database master cannot host. Reading it answered "XE session is not running" on every sweep and
+               counted master as a failed database, so a healthy server carried a failure note and a real failure hid
+               behind it. Left out and not counted as listed, like the long-query read below. Mirrors Darling. */
+            if (definition.SkipsMasterDatabase)
+            {
+                databases = AzureSweepScope.WithoutMaster(databases);
+                listedDatabaseCount = databases.Count;
+            }
+
             if (definition.SkipsSeparatelyMonitoredDatabases)
             {
                 databases = databases.FindAll(LongQueryTraceDatabases.CanHoldSession);
@@ -640,7 +651,9 @@ public partial class RemoteCollectorService
                        routine one-database miss. */
                     failed++;
                     failedDatabases.Add(databaseName);
-                    firstFailure ??= ex;
+                    /* #6312: a connection failure outranks the others, so an outage (a firewall rule, a paused database)
+                       is not reported as the missing XE session some other database answered first. */
+                    firstFailure = AzureSweepScope.PreferConnectionFailure(firstFailure, ex, SqlErrorNumbersOf);
 
                     /* #2111: the yield-to-live stamp + adaptive-shrink count for the Azure SQL DB
                        arm — query_store reaches THIS per-database loop there, not the enumeration
@@ -1181,6 +1194,24 @@ public partial class RemoteCollectorService
             _logger?.LogWarning(EnumeratedCollectorDriver.ProbeFailureOverflowLogTemplate,
                 definition.Name, server.DisplayName, probeFailures.Count, probeFailures.Count - shown, shown);
         }
+    }
+
+    /// <summary>
+    /// The SQL error numbers a failure carries: its own and those of the exceptions it wraps. The shared project has no
+    /// SqlClient, so each app reads them off its own exception (#6312).
+    /// </summary>
+    internal static List<int> SqlErrorNumbersOf(Exception? ex)
+    {
+        var numbers = new List<int>();
+        for (var current = ex; current is not null; current = current.InnerException)
+        {
+            if (current is SqlException sql)
+            {
+                numbers.AddRange(sql.Errors.Cast<SqlError>().Select(e => e.Number));
+            }
+        }
+
+        return numbers;
     }
 
     /// <summary>
