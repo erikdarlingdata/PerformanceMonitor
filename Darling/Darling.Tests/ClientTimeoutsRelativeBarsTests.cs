@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Notifications;
 using Xunit;
 
 namespace Darling.Tests;
