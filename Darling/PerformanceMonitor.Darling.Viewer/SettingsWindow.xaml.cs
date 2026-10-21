@@ -132,6 +132,7 @@ public partial class SettingsWindow : Window
         QueryStoreBackfillCheckBox.IsChecked = true;
         QueryStoreTextBudgetMbTextBox.Text = "64";
         MaxConcurrentSweepsTextBox.Text = "4";
+        QueryStoreFetchTopNTextBox.Text = "100";
 
         /* Manage Mute Rules writes the shared Postgres config; needs a live store connection. */
         ManageMuteRulesButton.IsEnabled = _dataService is not null;
@@ -180,6 +181,7 @@ public partial class SettingsWindow : Window
                 QueryStoreBackfillCheckBox.IsChecked = sections.Service.QueryStoreBackfillEnabled;
                 QueryStoreTextBudgetMbTextBox.Text = sections.Service.QueryStoreTextBudgetMb.ToString(CultureInfo.InvariantCulture);
                 MaxConcurrentSweepsTextBox.Text = sections.Service.MaxConcurrentSweeps.ToString(CultureInfo.InvariantCulture);
+                QueryStoreFetchTopNTextBox.Text = sections.Service.QueryStoreFetchTopN.ToString(CultureInfo.InvariantCulture);
                 McpEnabledCheckBox.IsChecked = sections.Service.McpEnabled;
                 McpPortTextBox.Text = sections.Service.McpPort.ToString(CultureInfo.InvariantCulture);
                 WebEnabledCheckBox.IsChecked = sections.Service.WebEnabled;
@@ -516,11 +518,12 @@ public partial class SettingsWindow : Window
     /// with a bad port keeps its last-known value and does not block the save).</summary>
     private bool TryReadServiceFlags(
         out bool capturePlans, out bool mcpEnabled, out int mcpPort, out bool webEnabled, out int webPort,
-        out int textBudgetMb, out int maxSweeps)
+        out int textBudgetMb, out int maxSweeps, out int fetchTopN)
     {
         capturePlans = CapturePlansCheckBox.IsChecked == true;
         textBudgetMb = 64;
         maxSweeps = 4;
+        fetchTopN = 100;
         mcpEnabled = McpEnabledCheckBox.IsChecked == true;
         mcpPort = _appSettings.McpPort;
         webEnabled = WebEnabledCheckBox.IsChecked == true;
@@ -577,6 +580,21 @@ public partial class SettingsWindow : Window
             SelectTabOf(MaxConcurrentSweepsTextBox);
             MessageBox.Show(
                 "Concurrent server sweeps must be between 1 and 16.",
+                "Validation", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return false;
+        }
+
+        /* #6211: plans per database-hour and metric whose text and plan the Query Store collector fetches. 0 means every new plan, so the floor
+           is 0; the service clamps on read as defense in depth. */
+        if (int.TryParse(QueryStoreFetchTopNTextBox.Text, out var parsedTopN) && parsedTopN is >= 0 and <= 100000)
+        {
+            fetchTopN = parsedTopN;
+        }
+        else
+        {
+            SelectTabOf(QueryStoreFetchTopNTextBox);
+            MessageBox.Show(
+                "Query Store fetch top N must be between 0 and 100000 (0 fetches every new plan).",
                 "Validation", MessageBoxButton.OK, MessageBoxImage.Warning);
             return false;
         }
@@ -2254,7 +2272,7 @@ public partial class SettingsWindow : Window
         var errors = new SettingsValidationErrors();
         var mcpValid = TryReadServiceFlags(
             out var capturePlans, out var mcpEnabled, out var mcpPort, out var webEnabled, out var webPort,
-            out var textBudgetMb, out var maxSweeps);
+            out var textBudgetMb, out var maxSweeps, out var fetchTopN);
         var alertRow = BuildAlertRowFromControls(errors);
         SaveViewerLocalAlertFields(errors);
         var notifyRow = BuildNotificationRowFromControls(errors);
@@ -2350,7 +2368,7 @@ public partial class SettingsWindow : Window
                 await _dataService.UpsertAlertSettingsAsync(alertRow);
                 await _dataService.UpsertNotificationCheckingSigningKeysAsync(notifyRow, (stored, ids) => SigningKeyRefusal(notifyRow, stored, ids));
                 await _dataService.UpdateServiceFlagsAsync(capturePlans, mcpEnabled, mcpPort, webEnabled, webPort,
-                    QueryStoreBackfillCheckBox.IsChecked == true, textBudgetMb, maxSweeps);
+                    QueryStoreBackfillCheckBox.IsChecked == true, textBudgetMb, maxSweeps, fetchTopN);
                 if (routeValuesNeedEnteringAgain)
                 {
                     /* The settings were saved; the routes' sealed values were bound to the old proxy (#5366). */

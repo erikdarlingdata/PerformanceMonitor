@@ -983,8 +983,8 @@ FROM config_monitored_servers", connection) { CommandTimeout = ServiceCommandDea
         /* config_version starts at 0; the four desired-state seed writes below bump it via the trigger,
            so the worker's post-seed baseline read reflects the seeded state and triggers no spurious reload. */
         using var command = new NpgsqlCommand(@"
-INSERT INTO config_service (id, paused, capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, plan_xml_compression, mcp_enabled, mcp_port, web_enabled, web_port, plan_content_retention_days, compose_statement_timeout_seconds, config_version, updated_at, updated_by)
-VALUES (1, FALSE, $1, $7, $8, $9, $10, $2, $3, $4, $5, $11, $12, 0, $6, 'seed')
+INSERT INTO config_service (id, paused, capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, plan_xml_compression, mcp_enabled, mcp_port, web_enabled, web_port, plan_content_retention_days, compose_statement_timeout_seconds, query_store_fetch_top_n, config_version, updated_at, updated_by)
+VALUES (1, FALSE, $1, $7, $8, $9, $10, $2, $3, $4, $5, $11, $12, $13, 0, $6, 'seed')
 ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         command.Parameters.AddWithValue(config.CapturePlans);
         command.Parameters.AddWithValue(config.Mcp.Enabled);
@@ -1002,6 +1002,7 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
         command.Parameters.AddWithValue(NormalizePlanXmlCompression(config.PlanXmlCompression));
         command.Parameters.AddWithValue(ClampPlanContentRetentionDays(config.PlanContentRetentionDays));
         command.Parameters.AddWithValue(ClampComposeStatementTimeoutSeconds(config.ComposeStatementTimeoutSeconds));
+        command.Parameters.AddWithValue(ClampQueryStoreFetchTopN(config.QueryStoreFetchTopN));
         await command.ExecuteNonQueryAsync(ct);
     }
 
@@ -1340,7 +1341,7 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
 
-            var (paused, capturePlans, backfillEnabled, textBudgetMb, maxSweeps, planXmlCompression, mcpEnabled, mcpPort, webEnabled, webPort, planContentRetentionDays, composeStatementTimeoutSeconds, configVersion) = await ReadServiceRowAsync(connection, cancellationToken);
+            var (paused, capturePlans, backfillEnabled, textBudgetMb, maxSweeps, planXmlCompression, mcpEnabled, mcpPort, webEnabled, webPort, planContentRetentionDays, composeStatementTimeoutSeconds, queryStoreFetchTopN, configVersion) = await ReadServiceRowAsync(connection, cancellationToken);
             var (alerts, analysis) = await ReadAlertSettingsAsync(connection, cancellationToken);
 
             /* #3712: analysis.uncorroboratedRoute is the FILE half of a two-source knob whose STORE half
@@ -1439,6 +1440,7 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
                 QueryStoreTextBudgetMb = textBudgetMb,
                 PlanContentRetentionDays = planContentRetentionDays,
                 ComposeStatementTimeoutSeconds = composeStatementTimeoutSeconds,
+                QueryStoreFetchTopN = queryStoreFetchTopN,
                 MaxConcurrentSweeps = maxSweeps,
                 PlanXmlCompression = planXmlCompression,
                 McpEnabled = mcpEnabled,
@@ -1509,6 +1511,13 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
     /* #2357: the compose statement_timeout bounds WORK -- a LIMIT bounds output, a group-by scans and sorts
        before it -- so it is clamped rather than trusted. A floor of 5s keeps the backstop meaningful; a
        ceiling of 600s keeps a hand-edited absurdity from turning "hard backstop" into "no backstop". */
+    /// <summary>
+    /// #6211: the Query Store fetch top-N, clamped on read like its siblings. Zero or less is the documented "fetch every new plan" value and is
+    /// kept as 0; anything above <see cref="QueryStoreFetchSelection.MaxTopN"/> reads as that ceiling.
+    /// </summary>
+    internal static int ClampQueryStoreFetchTopN(int value) =>
+        value <= 0 ? 0 : Math.Min(value, QueryStoreFetchSelection.MaxTopN);
+
     internal const int MinComposeStatementTimeoutSeconds = 5;
     internal const int MaxComposeStatementTimeoutSeconds = 600;
 
@@ -1522,18 +1531,18 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
     internal static string NormalizePlanXmlCompression(string? value) =>
         string.Equals(value?.Trim(), "none", StringComparison.OrdinalIgnoreCase) ? "none" : "gzip";
 
-    private static async Task<(bool Paused, bool CapturePlans, bool QueryStoreBackfillEnabled, int QueryStoreTextBudgetMb, int MaxConcurrentSweeps, string PlanXmlCompression, bool McpEnabled, int McpPort, bool WebEnabled, int WebPort, int PlanContentRetentionDays, int ComposeStatementTimeoutSeconds, long ConfigVersion)>
+    private static async Task<(bool Paused, bool CapturePlans, bool QueryStoreBackfillEnabled, int QueryStoreTextBudgetMb, int MaxConcurrentSweeps, string PlanXmlCompression, bool McpEnabled, int McpPort, bool WebEnabled, int WebPort, int PlanContentRetentionDays, int ComposeStatementTimeoutSeconds, int QueryStoreFetchTopN, long ConfigVersion)>
         ReadServiceRowAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         using var command = new NpgsqlCommand(
-            "SELECT paused, capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, plan_xml_compression, mcp_enabled, mcp_port, web_enabled, web_port, plan_content_retention_days, compose_statement_timeout_seconds, config_version FROM config_service WHERE id = 1", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
+            "SELECT paused, capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, plan_xml_compression, mcp_enabled, mcp_port, web_enabled, web_port, plan_content_retention_days, compose_statement_timeout_seconds, query_store_fetch_top_n, config_version FROM config_service WHERE id = 1", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
         {
             /* Row missing (unseeded) — treat as defaults; capture and backfill stay on, the memory
                knobs reproduce the pre-V59 compile-time constants (64 MB budget, 4-wide sweep), and
                plan content keeps the V75 default 21-day horizon. */
-            return (false, true, true, 64, 4, "gzip", false, 5152, false, 5153, 21, 15, 0);
+            return (false, true, true, 64, 4, "gzip", false, 5152, false, 5153, 21, 15, QueryStoreFetchSelection.DefaultTopN, 0);
         }
 
         return (reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2),
@@ -1542,7 +1551,7 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
             reader.GetBoolean(6), reader.GetInt32(7),
             reader.GetBoolean(8), reader.GetInt32(9),
             ClampPlanContentRetentionDays(reader.GetInt32(10)),
-            ClampComposeStatementTimeoutSeconds(reader.GetInt32(11)), reader.GetInt64(12));
+            ClampComposeStatementTimeoutSeconds(reader.GetInt32(11)), ClampQueryStoreFetchTopN(reader.GetInt32(12)), reader.GetInt64(13));
     }
 
     private static async Task<(AlertsConfig Alerts, AnalysisConfig Analysis)> ReadAlertSettingsAsync(NpgsqlConnection connection, CancellationToken ct)
@@ -2409,6 +2418,8 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
         config.QueryStoreBackfillEnabled = view.QueryStoreBackfillEnabled;
         config.QueryStoreTextBudgetMb = view.QueryStoreTextBudgetMb;
         config.PlanContentRetentionDays = view.PlanContentRetentionDays;
+        /* #6211: provider-read each cycle by the runner, so a store change reaches the next run without a restart. */
+        config.QueryStoreFetchTopN = view.QueryStoreFetchTopN;
         /* #2357's effective timeout is NOT taken from here: startup role provisioning reads
            config_service.compose_statement_timeout_seconds straight out of the store and bakes it into
            ALTER ROLE viewer/mcp SET statement_timeout, so a change reaches the live roles on the next
@@ -2749,6 +2760,12 @@ public sealed class StoreConfigView
     /// <summary>The V75 plan-content horizon (#2316): days a stored plan XML outlives its last sighting.
     /// 0 = disabled (the fact-coupled dimension horizon stands alone).</summary>
     public int PlanContentRetentionDays { get; init; } = 21;
+
+    /// <summary>
+    /// #6211: plans per database-hour and metric whose Query Store text and plan XML are fetched (config_service, V209), already clamped.
+    /// 0 = every new plan, the behaviour before the setting.
+    /// </summary>
+    public int QueryStoreFetchTopN { get; init; } = QueryStoreFetchSelection.DefaultTopN;
 
     /// <summary>
     /// The per-session <c>statement_timeout</c> for the viewer and mcp roles, in seconds (#2357). Read

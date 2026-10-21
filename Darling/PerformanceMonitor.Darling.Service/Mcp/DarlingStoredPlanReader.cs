@@ -335,6 +335,84 @@ internal static class DarlingStoredPlanReader
         """;
 
     /// <summary>
+    /// #6211: whether runtime statistics are stored for a Query Store (query_id, plan_id) in the last <see cref="UnpinnedLookbackDays"/> x 4 days: the
+    /// proof that a plan whose XML is missing was seen but not fetched, as opposed to never collected. $1 server_id, $2 database_name, $3 query_id,
+    /// $4 plan_id (NULL = any plan of the query), $5 the lower bound on collection_time.
+    /// </summary>
+    public const string QueryStoreStatsExistSql = """
+        SELECT 1
+        FROM query_store_stats
+        WHERE server_id = $1
+        AND   database_name = $2
+        AND   query_id = $3
+        AND   ($4::bigint IS NULL OR plan_id = $4)
+        AND   collection_time >= $5
+        LIMIT 1
+        """;
+
+    /// <summary>#6211: the live fetch top-N setting. Absent on a store below V209.</summary>
+    public const string QueryStoreFetchTopNSql = "SELECT query_store_fetch_top_n FROM config.config_service WHERE id = 1";
+
+    /// <summary>
+    /// #6211: the answer for a Query Store plan or text that is not stored although its runtime statistics are: it was not fetched because it
+    /// was not in its database-hour's top N plans (<c>query_store_fetch_top_n</c>) when the collector last ran, or its fetch is still waiting
+    /// on a run budget. Returns <c>null</c> when no statistics are stored either (the caller's own "no stored plan" answer stands: nothing was
+    /// seen), and when the read fails (a miss, not a wrong claim). The answer names the reason and the current setting, so a person can
+    /// raise it or read the plan from the monitored server instead of reading an empty value.
+    /// </summary>
+    public static async Task<string?> QueryStoreNotCollectedReasonAsync(
+        NpgsqlDataSource postgres, int serverId, string databaseName, long queryId, long? planId, string what, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var since = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-4 * UnpinnedLookbackDays), DateTimeKind.Unspecified);
+            await using (var exists = postgres.CreateCommand(QueryStoreStatsExistSql))
+            {
+                exists.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                exists.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+                exists.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName ?? "" });
+                exists.Parameters.Add(new NpgsqlParameter<long> { TypedValue = queryId });
+                exists.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = (object?)planId ?? DBNull.Value });
+                exists.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = since });
+                if (await exists.ExecuteScalarAsync(cancellationToken) is null)
+                {
+                    return null;
+                }
+            }
+
+            int? topN = null;
+            try
+            {
+                await using var setting = postgres.CreateCommand(QueryStoreFetchTopNSql);
+                setting.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                if (await setting.ExecuteScalarAsync(cancellationToken) is int value)
+                {
+                    topN = value;
+                }
+            }
+            catch (PostgresException)
+            {
+                /* A store below V209 has no setting: every new plan was fetched, so the reason below does not apply. */
+            }
+
+            var where = planId is long p ? $"query_id {queryId}, plan_id {p}" : $"query_id {queryId}";
+            if (topN is not int n || n <= 0)
+            {
+                return $"Runtime statistics are stored for {where} in database '{databaseName}', but its {what} has not been collected yet: the collector fetches "
+                    + "new plans in budgeted passes and this one is still waiting for a pass, or it was purged from the monitored server before it was fetched.";
+            }
+
+            return $"Runtime statistics are stored for {where} in database '{databaseName}', but its {what} was not collected: the plan was not in its "
+                + $"database-hour's top {n} plans on CPU, duration, physical reads, writes, memory grant, tempdb or executions, and it is not a forced plan "
+                + "or one plan correction names (setting query_store_fetch_top_n; 0 fetches every new plan). A later collection fetches it if it ranks then.";
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
     /// How far back the unpinned Query Store plan read looks before it gives up on the newest chunks.
     /// </summary>
     public const int UnpinnedLookbackDays = 7;

@@ -99,6 +99,16 @@ public sealed class DarlingConfig
     public int QueryStoreTextBudgetMb { get; set; } = 64;
 
     /// <summary>
+    /// #6211: how many plans per database-hour, on each of seven metrics (CPU, duration, physical reads, writes, memory grant, tempdb,
+    /// executions), the Query Store collector fetches the statement text and plan XML of. Forced plans, the other plans of a query with a
+    /// forced plan, and plans named by plan correction are fetched whatever their rank. The rest keep their runtime statistics and are fetched
+    /// by a later run if they rank then. Seeds <c>config_service.query_store_fetch_top_n</c> (V209) on a fresh store; the store wins after
+    /// that, and a change there reaches the next cycle with no restart. Default 100. 0 or less fetches every new plan (the behaviour before this).
+    /// </summary>
+    [JsonPropertyName("queryStoreFetchTopN")]
+    public int QueryStoreFetchTopN { get; set; } = 100;
+
+    /// <summary>
     /// #2316: how many days a stored plan XML outlives its last sighting before the dimension GC may
     /// take it — the bound the fact-coupled horizon cannot provide on a store younger than the fact
     /// retention (measured: 127 GB of parameter-sniffing plan churn in the dim's first 22 days, with

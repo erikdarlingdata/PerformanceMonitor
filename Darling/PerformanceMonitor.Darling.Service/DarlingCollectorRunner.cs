@@ -381,6 +381,11 @@ public sealed class DarlingCollectorRunner
        the runner. Lite has no equivalent and keeps the collector's compile-time constant. */
     private readonly Func<int> _textBudgetMb;
 
+    /* #6211: plans per database-hour and metric whose text and plan XML the query_store fetch pulls (config_service.query_store_fetch_top_n,
+       V209). Provider-read at each fetch, so a store change takes effect on the next cycle with no restart. Zero or less, which is also what a
+       caller that passes no provider gets, fetches every new plan: the behaviour before the setting. */
+    private readonly Func<int> _queryStoreFetchTopN;
+
     /* Feeds the procedure_stats plan-capture cadence (#2862) — how many collection cycles pass between
        plan renders for that ONE collector. Provider-read for the same reason as the knobs above: the
        value is re-read on every cycle, so whichever source ends up feeding it is honored on the NEXT
@@ -999,8 +1004,9 @@ public sealed class DarlingCollectorRunner
     /// every cycle and therefore the pre-#2862 collector. Every existing caller and test keeps the
     /// collector it already had without naming the knob.
     /// </param>
-    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null, Func<int>? procedureStatsPlanCycleInterval = null, Func<string, int, IReadOnlyList<string>>? databaseScope = null, PgLogHashKey? logHashKey = null, QueryStoreWriteFence? queryStoreWriteFence = null, Func<ServerRuntime, IReadOnlyList<string>>? separatelyMonitoredDatabases = null, Func<string?>? installId = null, Func<bool>? queryStatsDeferredPlanFetch = null, Func<string?>? procedureStatsDeferredPlanFetch = null)
+    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null, Func<int>? procedureStatsPlanCycleInterval = null, Func<string, int, IReadOnlyList<string>>? databaseScope = null, PgLogHashKey? logHashKey = null, QueryStoreWriteFence? queryStoreWriteFence = null, Func<ServerRuntime, IReadOnlyList<string>>? separatelyMonitoredDatabases = null, Func<string?>? installId = null, Func<bool>? queryStatsDeferredPlanFetch = null, Func<string?>? procedureStatsDeferredPlanFetch = null, Func<int>? queryStoreFetchTopN = null)
     {
+        _queryStoreFetchTopN = queryStoreFetchTopN ?? (() => 0);
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         QueryTagSightings = new QueryTagSightingBuffer(postgres, logger);
         _queryStoreWriteFence = queryStoreWriteFence;
@@ -5692,7 +5698,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
     /// one — the probe compares against whatever the engine reported, and null only means the payload row
     /// predated the hash column.</para>
     /// </summary>
-    private static IReadOnlyList<(long PlanId, string? PlanHash)> ExtractPlanReferences<TRow>(List<TRow> batch)
+    private static IReadOnlyList<(long PlanId, string? PlanHash)> ExtractPlanReferences<TRow>(List<TRow> batch, IReadOnlySet<long>? onlyPlanIds = null)
     {
         if (batch is not List<QueryStoreCollector.Row> rows || rows.Count == 0)
         {
@@ -5702,7 +5708,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
         var seen = new Dictionary<long, string?>();
         foreach (var row in rows)
         {
-            if (row.PlanId <= 0)
+            if (row.PlanId <= 0 || (onlyPlanIds is not null && !onlyPlanIds.Contains(row.PlanId)))
             {
                 continue;
             }
@@ -5724,7 +5730,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
     }
 
     /// <summary>Text twin of <see cref="ExtractPlanReferences"/>, keyed by query_id with query_hash.</summary>
-    private static IReadOnlyList<(long QueryId, string? QueryHash)> ExtractTextReferences<TRow>(List<TRow> batch)
+    private static IReadOnlyList<(long QueryId, string? QueryHash)> ExtractTextReferences<TRow>(List<TRow> batch, IReadOnlySet<long>? onlyQueryIds = null)
     {
         if (batch is not List<QueryStoreCollector.Row> rows || rows.Count == 0)
         {
@@ -5734,7 +5740,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
         var seen = new Dictionary<long, string?>();
         foreach (var row in rows)
         {
-            if (row.QueryId <= 0)
+            if (row.QueryId <= 0 || (onlyQueryIds is not null && !onlyQueryIds.Contains(row.QueryId)))
             {
                 continue;
             }
@@ -5889,6 +5895,11 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
            from ever reaching the fetch. The provider's engine is the same gate in production (the
            SQL Server provider is the only one that reports SqlServer, and its commands are the
            SqlCommands the SqlConnection overload built), and it is a fact a fake can state. */
+        /* #6211: which of this database's plans (and their queries) are worth a fetch this run. Null = every plan, the behaviour before the
+           setting (the setting at 0, a batch that is not query_store rows, or a store read that failed: a fault here must cost fetches, never
+           the forced plans). Ranked over the rows already read, so it adds nothing to the monitored server. */
+        var fetchSelection = await SelectQueryStoreFetchAsync(storeConnection, server, databaseName, context, batch, cancellationToken);
+
         if (context.CapturePlanXml && targetProvider.Engine == CollectorTargetEngine.SqlServer)
         {
             /* #2312 investigation: timed so the log split can say whether the invariant
@@ -5904,7 +5915,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
             try
             {
                 await FetchAndStorePlansAsync(targetProvider, targetConnection, storeConnection,
-                    server, databaseName, collectorName, context, commandTimeoutSeconds, ExtractPlanReferences(batch), cancellationToken);
+                    server, databaseName, collectorName, context, commandTimeoutSeconds, ExtractPlanReferences(batch, fetchSelection?.PlanIds), cancellationToken);
             }
             finally
             {
@@ -5929,12 +5940,110 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
             try
             {
                 await FetchAndStoreQueryTextAsync(targetProvider, targetConnection, storeConnection,
-                    server, databaseName, collectorName, context, commandTimeoutSeconds, ExtractTextReferences(batch), cancellationToken);
+                    server, databaseName, collectorName, context, commandTimeoutSeconds, ExtractTextReferences(batch, fetchSelection?.QueryIds), cancellationToken);
             }
             finally
             {
                 context.PerItemTextFetchMs = textFetchWatch.ElapsedMilliseconds;
             }
+        }
+    }
+
+    /// <summary>The always-fetch look-back (#6211): the newest forced-plans capture and the plan-correction rows within this window name plans that are fetched whatever their rank.</summary>
+    private static readonly TimeSpan s_alwaysFetchLookBack = TimeSpan.FromDays(1);
+
+    /// <summary>
+    /// #6211: the plans of one database's <c>query_store</c> batch that are worth a text and plan fetch this run, or <c>null</c> for "all of them".
+    ///
+    /// <para>The ranking itself is <see cref="QueryStoreFetchSelection"/>: the top N per database-hour on seven metrics, in the service, over the
+    /// rows already read (no statement on the monitored server, so nothing here touches a <c>sys.query_store_*</c> view). This method adds the two
+    /// store-side always-fetch sets: the queries with a forced plan in the newest forced-plans capture (#6221 judges a force by the stored XML of
+    /// the query's other plans, so every plan of such a query is kept) and the plans the plan-correction collector names (the regressed plan and
+    /// the last good plan: the only "regressed" signal Darling collects). A plan that does not rank is still "not stored" to the next run, so it
+    /// is fetched then if it ranks; nothing is carried for it, so the candidate list cannot grow with the unranked.</para>
+    ///
+    /// <para>Fails open: a store read that throws returns <c>null</c> and the run fetches everything, because skipping a forced plan on a fault
+    /// is worse than one expensive run.</para>
+    /// </summary>
+    private async Task<QueryStoreFetchSelection.Selection?> SelectQueryStoreFetchAsync<TRow>(
+        NpgsqlConnection storeConnection,
+        ServerRuntime server,
+        string databaseName,
+        CollectorContext context,
+        List<TRow> batch,
+        CancellationToken cancellationToken)
+    {
+        var topN = StoreConfigProvider.ClampQueryStoreFetchTopN(_queryStoreFetchTopN());
+        if (topN <= 0 || batch is not List<QueryStoreCollector.Row> rows || rows.Count == 0)
+        {
+            return null;
+        }
+
+        try
+        {
+            if (!await RestoreBorrowedStoreConnectionAsync(storeConnection, server, databaseName))
+            {
+                return null;
+            }
+
+            var since = DateTime.SpecifyKind(context.CollectionTime - s_alwaysFetchLookBack, DateTimeKind.Unspecified);
+            var alwaysQueries = new HashSet<long>();
+            using (var forced = new NpgsqlCommand(@"
+SELECT DISTINCT query_id
+FROM collect.query_store_forced_plans
+WHERE server_id = $1
+AND   database_name = $2
+AND   plan_id IS NOT NULL
+AND   query_id IS NOT NULL
+AND   collection_time = (SELECT MAX(m.collection_time)
+                         FROM collect.query_store_forced_plans AS m
+                         WHERE m.server_id = $1
+                         AND   m.database_name = $2
+                         AND   m.collection_time >= $3)", storeConnection))
+            {
+                forced.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+                forced.Parameters.Add(new NpgsqlParameter<int> { TypedValue = server.ServerId });
+                forced.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName });
+                forced.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = since });
+                await using var reader = await forced.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    alwaysQueries.Add(reader.GetInt64(0));
+                }
+            }
+
+            var alwaysPlans = new HashSet<long>();
+            using (var correction = new NpgsqlCommand(@"
+SELECT regressed_plan_id, last_good_plan_id
+FROM collect.plan_correction
+WHERE server_id = $1
+AND   database_name = $2
+AND   collection_time >= $3", storeConnection))
+            {
+                correction.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+                correction.Parameters.Add(new NpgsqlParameter<int> { TypedValue = server.ServerId });
+                correction.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName });
+                correction.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = since });
+                await using var reader = await correction.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    if (!reader.IsDBNull(0)) alwaysPlans.Add(reader.GetInt64(0));
+                    if (!reader.IsDBNull(1)) alwaysPlans.Add(reader.GetInt64(1));
+                }
+            }
+
+            var selection = QueryStoreFetchSelection.Select(rows, topN, alwaysPlans, alwaysQueries);
+            _logger?.LogDebug(
+                "  [{Server}] query_store [{Database}] fetch top {TopN}: {Selected} of {Considered} plan(s) selected ({Ranked} by rank, the rest forced or named by plan correction)",
+                server.Config.DisplayName, databaseName, topN, selection.PlanIds.Count, selection.ConsideredPlans, selection.RankedPlans);
+            return selection;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogWarning(ex,
+                "query_store fetch top-N selection on '{Server}' database [{Database}] could not read the forced or plan-correction plans; fetching every new plan this run.",
+                server.Config.DisplayName, databaseName);
+            return null;
         }
     }
 
