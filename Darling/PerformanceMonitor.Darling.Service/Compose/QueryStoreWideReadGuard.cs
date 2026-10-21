@@ -57,10 +57,11 @@ CROSS JOIN LATERAL
     ORDER BY d.day DESC
     LIMIT 1
 ) AS b
-WHERE ($1::text[] IS NULL OR s.server_name = ANY($1));";
+WHERE ($1::text[] IS NULL OR s.server_name = ANY($1))
+  AND ($2::integer[] IS NULL OR s.server_id <> ALL($2));";
 
     /// <summary>The rows one day of the servers in scope holds on the wide table, and how many servers that sums.</summary>
-    internal readonly record struct Estimate(long DailyRows, int Servers)
+    internal readonly record struct Estimate(long DailyRows, int Servers, long RawRows = 0)
     {
         /// <summary>The wide-table rows a read over the counted range is expected to take.</summary>
         public long RowsOver(DateTime countedStart, DateTime countedEnd) => RowsOver(countedStart, countedEnd, null);
@@ -76,26 +77,28 @@ WHERE ($1::text[] IS NULL OR s.server_name = ANY($1));";
             var days = Math.Max(0d, (countedEnd - countedStart).TotalDays);
             if (stampThrough is not { } through)
             {
-                return (long)Math.Ceiling(DailyRows * days);
+                return (long)Math.Ceiling(DailyRows * days) + RawRows;
             }
 
             var stampedDays = Math.Clamp((through - countedStart).TotalDays, 0d, days);
             var weighted = (days - stampedDays) + (stampedDays * ComposeLimits.StampRowWeight);
-            return (long)Math.Ceiling(DailyRows * weighted);
+            return (long)Math.Ceiling(DailyRows * weighted) + RawRows;
         }
     }
 
     /// <summary>
-    /// Reads the estimate for the servers in <paramref name="serverScope"/> (null or empty: the fleet). Returns null on any fault
-    /// other than cancellation, so a lookup that cannot answer never refuses a panel.
+    /// Reads the estimate for the servers in <paramref name="serverScope"/> (null or empty: the fleet), leaving out
+    /// <paramref name="excludedServerIds"/> (#6115: the servers a split panel reads raw, whose rows the wide read never takes).
+    /// Returns null on any fault other than cancellation, so a lookup that cannot answer never refuses a panel.
     /// </summary>
     internal static async Task<Estimate?> EstimateAsync(
-        NpgsqlDataSource postgres, IReadOnlyList<string>? serverScope, ILogger? logger, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, IReadOnlyList<string>? serverScope, ILogger? logger, CancellationToken cancellationToken,
+        IReadOnlyList<int>? excludedServerIds = null)
     {
         try
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-            return await ReadEstimateAsync(connection, PerServerRowsSql, serverScope, cancellationToken);
+            return await ReadEstimateAsync(connection, PerServerRowsSql, serverScope, excludedServerIds, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -149,7 +152,8 @@ CROSS JOIN LATERAL
 ) AS c
 WHERE b.daily_rows IS NOT NULL
   AND c.covered_days > 0
-  AND ($1::text[] IS NULL OR s.server_name = ANY($1));";
+  AND ($1::text[] IS NULL OR s.server_name = ANY($1))
+  AND ($5::integer[] IS NULL OR s.server_id = ANY($5));";
 
     /// <summary>
     /// The raw-route estimate (#5811): <paramref name="Rows"/> the counted range holds for the servers in scope, each counted only for
@@ -185,7 +189,7 @@ WHERE b.daily_rows IS NOT NULL
     /// </summary>
     internal static async Task<RawEstimate?> EstimateRawAsync(
         NpgsqlDataSource postgres, NpgsqlConnection? snapshotConnection, IReadOnlyList<string>? serverScope, string collector,
-        DateTime countedStart, DateTime countedEnd, ILogger? logger, CancellationToken cancellationToken)
+        DateTime countedStart, DateTime countedEnd, ILogger? logger, CancellationToken cancellationToken, IReadOnlyList<int>? onlyServerIds = null)
     {
         /* The savepoint is inside the try: a snapshot connection the store dropped since the snapshot's last statement (a restart, a
            failover, a pooler reset, idle_in_transaction_session_timeout) fails here, and that is a lookup that cannot answer, not a
@@ -195,11 +199,11 @@ WHERE b.daily_rows IS NOT NULL
             if (snapshotConnection is not null)
             {
                 await ExecuteAsync(snapshotConnection, RawEstimateSavepointSql, cancellationToken);
-                return await ReadRawEstimateAsync(snapshotConnection, serverScope, collector, countedStart, countedEnd, cancellationToken);
+                return await ReadRawEstimateAsync(snapshotConnection, serverScope, collector, countedStart, countedEnd, cancellationToken, onlyServerIds);
             }
 
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-            return await ReadRawEstimateAsync(connection, serverScope, collector, countedStart, countedEnd, cancellationToken);
+            return await ReadRawEstimateAsync(connection, serverScope, collector, countedStart, countedEnd, cancellationToken, onlyServerIds);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -259,10 +263,15 @@ WHERE b.daily_rows IS NOT NULL
 
     /// <summary>The Query Store estimate's reader: $1 the scoped names (or NULL).</summary>
     private static async Task<Estimate?> ReadEstimateAsync(
-        NpgsqlConnection connection, string sql, IReadOnlyList<string>? serverScope, CancellationToken cancellationToken)
+        NpgsqlConnection connection, string sql, IReadOnlyList<string>? serverScope, IReadOnlyList<int>? excludedServerIds, CancellationToken cancellationToken)
     {
         await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds };
         command.Parameters.Add(ScopeParameter(serverScope));
+        command.Parameters.Add(new NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer,
+            Value = excludedServerIds is { Count: > 0 } ? (object)excludedServerIds.ToArray() : DBNull.Value,
+        });
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
@@ -276,13 +285,18 @@ WHERE b.daily_rows IS NOT NULL
     /// <summary>The raw estimate's reader (#5811): $1 the scoped names (or NULL), $2 the collector, $3 and $4 the counted range.</summary>
     private static async Task<RawEstimate?> ReadRawEstimateAsync(
         NpgsqlConnection connection, IReadOnlyList<string>? serverScope, string collector, DateTime countedStart, DateTime countedEnd,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, IReadOnlyList<int>? onlyServerIds = null)
     {
         await using var command = new NpgsqlCommand(RawCollectorRowsSql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds };
         command.Parameters.Add(ScopeParameter(serverScope));
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = collector });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(countedStart, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(countedEnd, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer,
+            Value = onlyServerIds is { Count: > 0 } ? (object)onlyServerIds.ToArray() : DBNull.Value,
+        });
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
@@ -345,8 +359,31 @@ WHERE b.daily_rows IS NOT NULL
     internal static async Task<string?> CheckAsync(
         NpgsqlDataSource postgres, IReadOnlyList<string>? serverScope, DateTime countedStart, DateTime countedEnd,
         ILogger? logger, CancellationToken cancellationToken, long limit = ComposeLimits.MaxQueryStoreWideRows,
-        DateTime? stampThrough = null) =>
-        Refusal(await EstimateAsync(postgres, serverScope, logger, cancellationToken), countedStart, countedEnd, limit, stampThrough);
+        DateTime? stampThrough = null, IReadOnlyList<int>? excludedServerIds = null, DateTime? rawCountedStart = null) =>
+        Refusal(await EstimateSplitAsync(postgres, serverScope, countedEnd, logger, excludedServerIds, rawCountedStart ?? countedStart, cancellationToken), countedStart, countedEnd, limit, stampThrough);
+
+    /// <summary>The collector the Query Store raw half of a split panel is counted under in the collection log (#6115): the Query Store
+    /// collector's own name, whose <c>rows_collected</c> is what it stored into <c>collect.query_store_stats</c>.</summary>
+    internal const string QueryStoreRawCollector = "query_store";
+
+    /// <summary>
+    /// #6115: <see cref="EstimateAsync"/> for a split panel. The wide estimate leaves out <paramref name="rawServerIds"/> and the raw half's rows
+    /// for those servers over <paramref name="rawCountedStart"/>..<paramref name="countedEnd"/> ride in <see cref="Estimate.RawRows"/>. No raw
+    /// servers is the plain wide estimate. A raw count that cannot be read adds 0 (fail open).
+    /// </summary>
+    internal static async Task<Estimate?> EstimateSplitAsync(
+        NpgsqlDataSource postgres, IReadOnlyList<string>? serverScope, DateTime countedEnd, ILogger? logger,
+        IReadOnlyList<int>? rawServerIds, DateTime rawCountedStart, CancellationToken cancellationToken)
+    {
+        var wide = await EstimateAsync(postgres, serverScope, logger, cancellationToken, rawServerIds);
+        if (wide is not { } found || rawServerIds is not { Count: > 0 })
+        {
+            return wide;
+        }
+
+        var raw = await EstimateRawAsync(postgres, null, serverScope, QueryStoreRawCollector, rawCountedStart, countedEnd, logger, cancellationToken, rawServerIds);
+        return raw is { } rawFound ? found with { RawRows = rawFound.Rows } : found;
+    }
 
     /// <summary>
     /// The limit for a panel (#5582): <see cref="ComposeLimits.MaxQueryStoreWideRows"/> is the rows ONE scan of the wide table can read
