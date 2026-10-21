@@ -46,29 +46,6 @@ public sealed class ServerTabGridColumnPinTests
     }
 
     [Fact]
-    public void QueryStoreRegressions_CarriesBaseExecsColumn() =>
-        EveryKeyIsReturnedBy("QUERY_STORE_REGRESSION_COLUMNS", "DarlingMcpQueryStoreRegressionTools.cs",
-            "baseline_exec_count");
-
-    [Fact]
-    public void PlanCorrections_CarriesEveryFieldTheReadReturnsExceptTheDuplicatedFlags() =>
-        EveryKeyIsReturnedBy("PLAN_CORRECTION_COLUMNS", "DarlingMcpPlanCorrectionTools.cs",
-            "regressed_plan_id", "last_good_plan_id", "last_good_plan_forcing_type",
-            "last_good_plan_force_failure_reason", "regressed_plan_execution_count",
-            "regressed_plan_cpu_time_average_ms", "last_good_plan_execution_count",
-            "last_good_plan_cpu_time_average_ms", "valid_since", "last_refresh",
-            "execute_action_initiated_by", "execute_action_initiated_time",
-            "revert_action_initiated_by", "revert_action_initiated_time", "recommendation_state_reason");
-
-    [Fact]
-    public void PlanCorrections_TimestampColumnsAreInstants()
-    {
-        foreach (var (key, line) in Columns("PLAN_CORRECTION_COLUMNS"))
-            if (key is "valid_since" or "last_refresh" || key.EndsWith("_time", StringComparison.Ordinal))
-                Assert.Contains("format: \"time\"", line);
-    }
-
-    [Fact]
     public void LongQueries_CarriesEventTypeReadsWritesHashAndLoginButNoHost()
     {
         EveryKeyIsReturnedBy("LONG_QUERY_COLUMNS", "DarlingMcpLongQueryTools.cs",

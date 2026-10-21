@@ -147,60 +147,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
                 regression_count = Math.Max(rows[0].TotalCount, rows.Count),
                 returned_count = shown.Count(),
                 truncated,
-                regressions = shown.Select(r => new
-                {
-                    database_name = r.DatabaseName,
-                    query_id = r.QueryId,
-                    /* Banded from the duration percent by the TVF's CASE, whose ELSE is 'LOW' — which for a
-                       row with NO duration ratio is a verdict about a number that does not exist. Null there
-                       (#3541 A12); the SQL's band is kept verbatim for the viewer it is shared with. */
-                    severity = r.DurationRegressionPercent is null && r.RegressionReason == "cost" ? null : r.Severity,
-                    /* #5506: why the row is listed: cost, timeouts, errors or a comma-separated combination. */
-                    regression_reason = r.RegressionReason,
-                    baseline_duration_ms = Round(r.BaselineDurationMs),
-                    recent_duration_ms = Round(r.RecentDurationMs),
-                    duration_regression_percent = Round(r.DurationRegressionPercent),
-                    baseline_cpu_ms = Round(r.BaselineCpuMs),
-                    recent_cpu_ms = Round(r.RecentCpuMs),
-                    cpu_regression_percent = Round(r.CpuRegressionPercent),
-                    /* Null percents, and why (#3541 A12): a 0 baseline has no ratio, and the reader used to
-                       publish that as 0 — "no change" — for the row that changed the most. */
-                    undefined_percents = UndefinedPercentNotes(r),
-                    /* The ranking key, and the one number that says whether this regression MATTERS: a
-                       5 ms regression executed a million times outranks a 5-second one executed twice. It is
-                       an absolute delta, so it exists for every row and a null ratio never sorts as 0. */
-                    additional_duration_ms = Round(r.AdditionalDurationMs),
-                    baseline_exec_count = r.BaselineExecCount,
-                    recent_exec_count = r.RecentExecCount,
-                    /* A plan count that moved between the two sides is the first thing to check: a query
-                       that regressed while gaining a plan is usually a plan-choice problem, not a data one. */
-                    baseline_plan_count = r.BaselinePlanCount,
-                    recent_plan_count = r.RecentPlanCount,
-                    /* #5506: Regular runs per hour on each side (the two windows differ in length), then the Aborted
-                       (timeouts, cancels) and Exception (errors) groups: count, CPU and duration per execution (null when the
-                       count is 0) and count per hour, baseline and recent. */
-                    baseline_regular_per_hour = Round(r.BaselineRegularPerHour),
-                    recent_regular_per_hour = Round(r.RecentRegularPerHour),
-                    baseline_aborted_count = r.Aborted?.BaselineCount ?? 0,
-                    recent_aborted_count = r.Aborted?.RecentCount ?? 0,
-                    baseline_aborted_cpu_ms = Round(r.Aborted?.BaselineCpuMs),
-                    recent_aborted_cpu_ms = Round(r.Aborted?.RecentCpuMs),
-                    baseline_aborted_duration_ms = Round(r.Aborted?.BaselineDurationMs),
-                    recent_aborted_duration_ms = Round(r.Aborted?.RecentDurationMs),
-                    baseline_aborted_per_hour = Round(r.Aborted?.BaselinePerHour),
-                    recent_aborted_per_hour = Round(r.Aborted?.RecentPerHour),
-                    baseline_exception_count = r.Exception?.BaselineCount ?? 0,
-                    recent_exception_count = r.Exception?.RecentCount ?? 0,
-                    baseline_exception_cpu_ms = Round(r.Exception?.BaselineCpuMs),
-                    recent_exception_cpu_ms = Round(r.Exception?.RecentCpuMs),
-                    baseline_exception_duration_ms = Round(r.Exception?.BaselineDurationMs),
-                    recent_exception_duration_ms = Round(r.Exception?.RecentDurationMs),
-                    baseline_exception_per_hour = Round(r.Exception?.BaselinePerHour),
-                    recent_exception_per_hour = Round(r.Exception?.RecentPerHour),
-                    last_execution_time = r.LastExecutionTime?.ToString("o"),
-                    query_text = full_text ? r.QueryTextSample : McpHelpers.TruncateStatement(r.QueryTextSample, QueryTextPreviewLength),
-                    query_text_truncated = !full_text && r.QueryTextSample.Length > QueryTextPreviewLength,
-                }),
+                regressions = shown.Select(r => RegressionRowJson(r, full_text)),
             }, McpHelpers.JsonOptions);
 
             /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). */
@@ -223,6 +170,72 @@ public sealed class DarlingMcpQueryStoreRegressionTools
     private static double Round(double value) => Math.Round(value, 2);
 
     private static double? Round(double? value) => value is null ? null : Math.Round(value.Value, 2);
+
+    /// <summary>One regression row. The Regular figures are always there. Each of the Aborted and Exception groups always carries its
+    /// counts, so a 0 reads as none; its CPU and duration per execution are left out of a side with no runs (there is no figure to
+    /// show), and its runs per hour only on a row whose reason names it, where they are the figure the reason was judged on (#5506).</summary>
+    private static Dictionary<string, object?> RegressionRowJson(DarlingQueryStoreRegressionReader.RegressionRow r, bool full_text)
+    {
+        var row = new Dictionary<string, object?>
+        {
+                ["database_name"] = r.DatabaseName,
+                ["query_id"] = r.QueryId,
+                /* Banded from the duration percent by the TVF's CASE, whose ELSE is 'LOW' — which for a
+                   row with NO duration ratio is a verdict about a number that does not exist. Null there
+                   (#3541 A12); the SQL's band is kept verbatim for the viewer it is shared with. */
+                ["severity"] = r.DurationRegressionPercent is null && r.RegressionReason == "cost" ? null : r.Severity,
+                /* #5506: why the row is listed: cost, timeouts, errors or a comma-separated combination. */
+                ["regression_reason"] = r.RegressionReason,
+                ["baseline_duration_ms"] = Round(r.BaselineDurationMs),
+                ["recent_duration_ms"] = Round(r.RecentDurationMs),
+                ["duration_regression_percent"] = Round(r.DurationRegressionPercent),
+                ["baseline_cpu_ms"] = Round(r.BaselineCpuMs),
+                ["recent_cpu_ms"] = Round(r.RecentCpuMs),
+                ["cpu_regression_percent"] = Round(r.CpuRegressionPercent),
+                /* Null percents, and why (#3541 A12): a 0 baseline has no ratio, and the reader used to
+                   publish that as 0 — "no change" — for the row that changed the most. */
+                ["undefined_percents"] = UndefinedPercentNotes(r),
+                /* The ranking key, and the one number that says whether this regression MATTERS: a
+                   5 ms regression executed a million times outranks a 5-second one executed twice. It is
+                   an absolute delta, so it exists for every row and a null ratio never sorts as 0. */
+                ["additional_duration_ms"] = Round(r.AdditionalDurationMs),
+                ["baseline_exec_count"] = r.BaselineExecCount,
+                ["recent_exec_count"] = r.RecentExecCount,
+                /* A plan count that moved between the two sides is the first thing to check: a query
+                   that regressed while gaining a plan is usually a plan-choice problem, not a data one. */
+                ["baseline_plan_count"] = r.BaselinePlanCount,
+                ["recent_plan_count"] = r.RecentPlanCount,
+            ["baseline_regular_per_hour"] = Round(r.BaselineRegularPerHour),
+            ["recent_regular_per_hour"] = Round(r.RecentRegularPerHour),
+        };
+        AddGroup(row, "aborted", r.Aborted, r.RegressionReason.Contains("timeouts", StringComparison.Ordinal));
+        AddGroup(row, "exception", r.Exception, r.RegressionReason.Contains("errors", StringComparison.Ordinal));
+        row["last_execution_time"] = r.LastExecutionTime?.ToString("o");
+        row["query_text"] = full_text ? r.QueryTextSample : McpHelpers.TruncateStatement(r.QueryTextSample, QueryTextPreviewLength);
+        row["query_text_truncated"] = !full_text && r.QueryTextSample.Length > QueryTextPreviewLength;
+        return row;
+    }
+
+    private static void AddGroup(Dictionary<string, object?> row, string name, DarlingQueryStoreRegressionReader.RunGroup? g, bool reasonNamesIt)
+    {
+        row["baseline_" + name + "_count"] = g?.BaselineCount ?? 0;
+        row["recent_" + name + "_count"] = g?.RecentCount ?? 0;
+        if ((g?.BaselineCount ?? 0) > 0)
+        {
+            row["baseline_" + name + "_cpu_ms"] = Round(g!.BaselineCpuMs);
+            row["baseline_" + name + "_duration_ms"] = Round(g.BaselineDurationMs);
+        }
+        if ((g?.RecentCount ?? 0) > 0)
+        {
+            row["recent_" + name + "_cpu_ms"] = Round(g!.RecentCpuMs);
+            row["recent_" + name + "_duration_ms"] = Round(g.RecentDurationMs);
+        }
+        if (reasonNamesIt)
+        {
+            row["baseline_" + name + "_per_hour"] = Round(g?.BaselinePerHour);
+            row["recent_" + name + "_per_hour"] = Round(g?.RecentPerHour);
+        }
+    }
 
     /// <summary>
     /// Which of a row's two regression percents are undefined, and why (#3541 A12, contract rule 5). Each

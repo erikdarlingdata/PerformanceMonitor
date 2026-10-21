@@ -189,7 +189,8 @@ public sealed class McpZeroIsAMeasurementTests
     {
         var body = Strip(ToolBody(ReadRepoFile(file.Split('/')), "get_query_store_regressions"));
         Assert.Contains("undefined_percents = UndefinedPercentNotes(r)", body, StringComparison.Ordinal);
-        Assert.Contains("severity = r.DurationRegressionPercent is null ? null : r.Severity", body, StringComparison.Ordinal);
+        /* Darling also lists failure-only rows, which have no duration ratio but do carry a severity; only a cost-only row with no ratio is unbanded. */
+        Assert.Matches(@"severity = r\.DurationRegressionPercent is null( && r\.RegressionReason == ""cost"")? \? null : r\.Severity", body);
 
         /* #3898 D3 re-point: the head (DescriptionOf) now carries this guardrail in its own leaner words -
            "duration_regression_percent and severity are null, not 0%, when their baseline is 0"

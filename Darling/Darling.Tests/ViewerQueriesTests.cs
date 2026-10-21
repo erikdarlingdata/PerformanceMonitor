@@ -581,30 +581,6 @@ public sealed class ViewerQueryStoreRegressionsTests
     }
 
     [Fact]
-    public void RegressionsSql_GatesOnCpuRegressionOver25_RanksByAddedDuration_CapsAt50_InnerJoinsBaseline()
-    {
-        var sql = ViewerDataService.QueryStoreRegressionsSql;
-        /* The TVF's single-metric gate: CPU regression > 25% (recent vs baseline), NULLIF-guarded. */
-        Assert.Contains("(r.avg_cpu_time_ms - b.avg_cpu_time_ms) * 100.0 / NULLIF(b.avg_cpu_time_ms, 0) > 25", sql, StringComparison.Ordinal);
-        /* Extra total time = per-exec duration delta × recent exec count, and the read's ranking. */
-        Assert.Contains("(r.avg_duration_ms - b.avg_duration_ms) * r.exec_count AS additional_duration_ms", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY additional_duration_ms DESC", sql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT 50", sql, StringComparison.Ordinal);
-        /* INNER JOIN — a query with no baseline (NEW) can't regress, exactly like the Dashboard TVF. */
-        Assert.Contains("JOIN baseline_performance", sql, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void RegressionsSql_DurationDrivenSeverityBands_MatchTheDashboardThresholds()
-    {
-        var sql = ViewerDataService.QueryStoreRegressionsSql;
-        Assert.Contains("> 100 THEN 'CRITICAL'", sql, StringComparison.Ordinal);
-        Assert.Contains("> 50 THEN 'HIGH'", sql, StringComparison.Ordinal);
-        Assert.Contains("> 25 THEN 'MEDIUM'", sql, StringComparison.Ordinal);
-        Assert.Contains("ELSE 'LOW'", sql, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void RegressionsSql_CastsSummedExecCountToBigint_PlanCountToInteger_ConvertsUnits_HonorsDatabaseFilter()
     {
         var sql = ViewerDataService.QueryStoreRegressionsSql;

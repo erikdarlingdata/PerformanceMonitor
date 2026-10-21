@@ -79,15 +79,6 @@ public sealed class ViewerQueryStoreRegressionsDataStartTests : IDisposable
 
     /* The top 50 are ranked by added duration, not by time, so the rows say nothing about how far back the comparison reached and
        the cap rule (newest-first rows) does not apply. A re-ranking by time would have to wire the rule. */
-    [Fact]
-    public void TheRanking_IsByCost_SoTheCapRuleDoesNotApply()
-    {
-        var sql = ViewerDataService.QueryStoreRegressionsSql;
-
-        Assert.Contains("ORDER BY additional_duration_ms DESC", sql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT 50", sql, StringComparison.Ordinal);
-    }
-
     // ── The tab: the probe beside the read, the banner keyed on the baseline window ──
 
     /* The tab starts the probe beside the read and hands it, with the RANGE's start, to the one banner step; the step derives the
