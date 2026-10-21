@@ -40,6 +40,8 @@ public sealed class DarlingMcpAgentRouteTagGuardLiveTests
         public required NpgsqlDataSource Owner { get; init; }
         public required NpgsqlDataSource Mcp { get; init; }
         public required NpgsqlDataSource Viewer { get; init; }
+        public required NpgsqlDataSource McpAsOwner { get; init; }
+        public string OwnerConnectionString { get; init; } = "";
         public required List<string> MadeRoles { get; init; }
         public required int Root { get; init; }
         public required int Child { get; init; }
@@ -57,6 +59,7 @@ public sealed class DarlingMcpAgentRouteTagGuardLiveTests
         {
             await Mcp.DisposeAsync();
             await Viewer.DisposeAsync();
+            await McpAsOwner.DisposeAsync();
             await Owner.DisposeAsync();
             await Scratch.DisposeAsync();
             if (MadeRoles.Count > 0)
@@ -142,14 +145,15 @@ GRANT SELECT ON ALL TABLES IN SCHEMA config TO mcp, viewer;
 GRANT SELECT ON ALL TABLES IN SCHEMA collect TO mcp, viewer;
 REVOKE SELECT ON config.config_notification_routes FROM mcp;
 GRANT INSERT, UPDATE, DELETE ON config.server_tags, config.server_tag_map TO mcp, viewer;
-GRANT DELETE ON config.config_monitored_servers TO mcp;
+GRANT DELETE ON config.config_monitored_servers, config.query_tag_assignments, config.query_tag_rules, config.query_tag_map TO mcp;
 GRANT UPDATE (config_version, updated_at) ON config.config_service TO mcp, viewer;");
 
         await ExecAsync(owner, @"
 INSERT INTO config.config_monitored_servers (server_id, name, host) VALUES (7, 'alpha-sql-01', 'alpha-sql-01'), (8, 'alpha-sql-02', 'alpha-sql-02');
 INSERT INTO collect.servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date)
 VALUES (7, 'alpha-sql-01', 'alpha-sql-01', TRUE, 16, now() AT TIME ZONE 'UTC', now() AT TIME ZONE 'UTC'),
-       (8, 'alpha-sql-02', 'alpha-sql-02', TRUE, 16, now() AT TIME ZONE 'UTC', now() AT TIME ZONE 'UTC');");
+       (8, 'alpha-sql-02', 'alpha-sql-02', TRUE, 16, now() AT TIME ZONE 'UTC', now() AT TIME ZONE 'UTC'),
+       (9, 'alpha-sql-09', 'alpha-sql-09', TRUE, 16, now() AT TIME ZONE 'UTC', now() AT TIME ZONE 'UTC');");
 
         var store = new ServerTagStore(owner, 30);
         var root = ((ServerTagWriteResult.Ok)await store.CreateAsync("Root", null, null, ct)).Tag!.Id;
@@ -172,6 +176,8 @@ VALUES (7, 'alpha-sql-01', 'alpha-sql-01', TRUE, 16, now() AT TIME ZONE 'UTC', n
                 Owner = owner,
                 Mcp = LoginAs(connectionString, "mcp"),
                 Viewer = LoginAs(connectionString, "viewer"),
+                McpAsOwner = NpgsqlDataSource.Create(DarlingStoreConnection.WithMcpSurfaceMarker(connectionString)),
+                OwnerConnectionString = connectionString,
                 MadeRoles = made,
                 BaseConnectionString = baseConnectionString!,
                 Root = root, Child = child, Grand = grand, Plain = plain, PlainChild = plainChild, Free = free,
@@ -187,7 +193,7 @@ VALUES (7, 'alpha-sql-01', 'alpha-sql-01', TRUE, 16, now() AT TIME ZONE 'UTC', n
         var node = Parse(json);
         Assert.Equal("refused", (string?)node["status"]);
         Assert.Equal(DarlingMcpServerTagTools.AgentRouteRefusalCode, (string?)node["refusal"]);
-        Assert.Contains($"Agent route {routeId} ", (string?)node["message"], StringComparison.Ordinal);
+        Assert.Contains($"Route {routeId} ", (string?)node["message"], StringComparison.Ordinal);
     }
 
     [Fact]
@@ -270,7 +276,7 @@ VALUES (7, 'alpha-sql-01', 'alpha-sql-01', TRUE, 16, now() AT TIME ZONE 'UTC', n
     }
 
     [Fact]
-    public async Task ADirectWriteAsMcp_IsRefusedByTheStore_AndRemovingAServerStillClearsItsTags()
+    public async Task ADirectWriteAsMcp_IsRefusedByTheStore_AndRemovingAServerCoveredByAnAgentRouteIsRefusedWithItsTagsAndRegistration()
     {
         await using var f = (await OpenAsync())!;
         var ct = TestContext.Current.CancellationToken;
@@ -278,29 +284,154 @@ VALUES (7, 'alpha-sql-01', 'alpha-sql-01', TRUE, 16, now() AT TIME ZONE 'UTC', n
         var ex = await Assert.ThrowsAsync<PostgresException>(() =>
             ExecAsync(f.Mcp, $"INSERT INTO config.server_tag_map (server_id, tag_id) VALUES (7, {f.Grand})"));
         Assert.Equal("DL403", ex.SqlState);
-        Assert.Contains($"Agent route {f.AgentRoute} ", ex.MessageText, StringComparison.Ordinal);
+        Assert.Contains($"Route {f.AgentRoute} ", ex.MessageText, StringComparison.Ordinal);
 
-        /* remove_server deletes the registry row and then clears the server's map rows in one transaction: that has to keep working
-           for a server covered through an agent route, because a removed server covers nothing. */
+        /* remove_server deletes the registry row and then clears the server's map rows in one transaction. A server mapped under an
+           agent route's tag is no longer exempt (its tag rows would come back with it when it is added again, because the id is a
+           hash): the tool answers a refusal, the server stays defined and its tag rows stay. */
         await ExecAsync(f.Owner, $"INSERT INTO config.server_tag_map (server_id, tag_id) VALUES (8, {f.Grand})");
-        await using (var connection = await f.Mcp.OpenConnectionAsync(ct))
-        await using (var transaction = await connection.BeginTransactionAsync(ct))
-        {
-            await using (var delete = new NpgsqlCommand("DELETE FROM config.config_monitored_servers WHERE server_id = 8", connection, transaction))
-            {
-                await delete.ExecuteNonQueryAsync(ct);
-            }
+        var refused = Parse(await DarlingMcpServerAdminTools.RemoveServer(f.Mcp, "alpha-sql-02"));
+        Assert.Equal("refused", (string?)refused["status"]);
+        Assert.Contains($"Route {f.AgentRoute} ", (string?)refused["message"], StringComparison.Ordinal);
+        Assert.Contains("not removed", (string?)refused["message"], StringComparison.Ordinal);
+        Assert.Equal(1, await CountAsync(f.Owner, "SELECT count(*) FROM config.config_monitored_servers WHERE server_id = 8"));
+        Assert.Equal(1, await CountAsync(f.Owner, "SELECT count(*) FROM config.server_tag_map WHERE server_id = 8"));
 
-            await using (var clear = new NpgsqlCommand(ServerTagStore.ClearForServerSql, connection, transaction))
-            {
-                clear.Parameters.Add(new NpgsqlParameter<int> { TypedValue = 8 });
-                await clear.ExecuteNonQueryAsync(ct);
-            }
+        /* A server mapped only under tags with no agent route is removed, and its tag rows go with it. */
+        await ExecAsync(f.Owner, $"INSERT INTO config.server_tag_map (server_id, tag_id) VALUES (7, {f.Free}), (7, {f.PlainChild})");
+        Assert.Equal("removed", (string?)Parse(await DarlingMcpServerAdminTools.RemoveServer(f.Mcp, "alpha-sql-01"))["status"]);
+        Assert.Equal(0, await CountAsync(f.Owner, "SELECT count(*) FROM config.config_monitored_servers WHERE server_id = 7"));
+        Assert.Equal(0, await CountAsync(f.Owner, "SELECT count(*) FROM config.server_tag_map WHERE server_id = 7"));
+    }
 
-            await transaction.CommitAsync(ct);
-        }
+    [Fact]
+    public async Task AnOffRoute_IsHeldLikeAnyAgentRoute_ForAssignUnassignDeleteAndMove()
+    {
+        await using var f = (await OpenAsync())!;
+        var ct = TestContext.Current.CancellationToken;
+        var off = await TagAsync(f, "Off tag", null);
+        var offChild = await TagAsync(f, "Off child", off);
+        var elsewhere = await TagAsync(f, "Elsewhere", null);
+        var offRoute = await RouteAsync(f, off, 0);
+        await ExecAsync(f.Owner, $"INSERT INTO config.server_tag_map (server_id, tag_id) VALUES (7, {offChild})");
+        var store = f.McpStore;
 
-        Assert.Equal(0, await CountAsync(f.Owner, "SELECT count(*) FROM config.server_tag_map WHERE server_id = 8"));
+        AssertRefused(await DarlingMcpServerTagTools.AssignServerTagCore(store, off, new[] { 8 }, ct), offRoute);
+        AssertRefused(await DarlingMcpServerTagTools.AssignServerTagCore(store, offChild, new[] { 8 }, ct), offRoute);
+        AssertRefused(await DarlingMcpServerTagTools.UnassignServerTagCore(store, offChild, new[] { 7 }, ct), offRoute);
+        AssertRefused(await DarlingMcpServerTagTools.UpdateServerTagCore(store, offChild, $"{{\"parent_id\":{elsewhere}}}", ct), offRoute);
+        AssertRefused(await DarlingMcpServerTagTools.DeleteServerTagCore(store, off, true, ct), offRoute);
+
+        Assert.Equal(1, await CountAsync(f.Owner, "SELECT count(*) FROM config.server_tag_map"));
+        Assert.Equal(off, await CountAsync(f.Owner, $"SELECT parent_id FROM config.server_tags WHERE id = {offChild}"));
+    }
+
+    [Fact]
+    public async Task MovingATagAbove_OrDeletingATagAbove_AnAgentRoutesTag_IsRefused()
+    {
+        await using var f = (await OpenAsync())!;
+        var ct = TestContext.Current.CancellationToken;
+        var top = await TagAsync(f, "Top", null);
+        var mid = await TagAsync(f, "Mid", top);
+        var leaf = await TagAsync(f, "Leaf", mid);
+        var other = await TagAsync(f, "Other", null);
+        var route = await RouteAsync(f, leaf, 0);
+        var store = f.McpStore;
+
+        /* A move of an ancestor changes how deep the route's tag sits, which decides which route wins for a server both cover. */
+        AssertRefused(await DarlingMcpServerTagTools.UpdateServerTagCore(store, mid, "{\"parent_id\":null}", ct), route);
+        AssertRefused(await DarlingMcpServerTagTools.UpdateServerTagCore(store, top, $"{{\"parent_id\":{other}}}", ct), route);
+        Assert.Equal(top, await CountAsync(f.Owner, $"SELECT parent_id FROM config.server_tags WHERE id = {mid}"));
+        Assert.Equal(0, await CountAsync(f.Owner, $"SELECT count(*) FROM config.server_tags WHERE id = {top} AND parent_id IS NOT NULL"));
+
+        /* A delete of a tag above takes the route's tag with it. */
+        AssertRefused(await DarlingMcpServerTagTools.DeleteServerTagCore(store, top, true, ct), route);
+        AssertRefused(await DarlingMcpServerTagTools.DeleteServerTagCore(store, mid, true, ct), route);
+        Assert.Equal(1, await CountAsync(f.Owner, $"SELECT count(*) FROM config.server_tags WHERE id = {leaf}"));
+    }
+
+    [Fact]
+    public async Task ATagAddedUnderAnAgentRoutesTag_CannotThenBeAssigned()
+    {
+        await using var f = (await OpenAsync())!;
+        var ct = TestContext.Current.CancellationToken;
+        var store = f.McpStore;
+
+        var created = Parse(await DarlingMcpServerTagTools.CreateServerTagCore(store, "New kid", f.Child, null, ct));
+        Assert.Equal("created", (string?)created["status"]);
+        var kid = Convert.ToInt32(await CountAsync(f.Owner, "SELECT id FROM config.server_tags WHERE name = 'New kid'"));
+
+        AssertRefused(await DarlingMcpServerTagTools.AssignServerTagCore(store, kid, new[] { 7 }, ct), f.AgentRoute);
+        Assert.Equal(0, await CountAsync(f.Owner, "SELECT count(*) FROM config.server_tag_map"));
+    }
+
+    [Fact]
+    public async Task AServerThatIsNotRegistered_CannotBeStagedOntoAnAgentRoutesTag()
+    {
+        await using var f = (await OpenAsync())!;
+        var ct = TestContext.Current.CancellationToken;
+
+        /* Server 9 has a collection row and no registration (a removed server stays in the collection table). Its id is a hash of
+           its connection, so a later add brings its tag rows back. */
+        AssertRefused(await DarlingMcpServerTagTools.AssignServerTagCore(f.McpStore, f.Grand, new[] { 9 }, ct), f.AgentRoute);
+        Assert.Equal(0, await CountAsync(f.Owner, "SELECT count(*) FROM config.server_tag_map"));
+
+        Assert.Equal("assigned", (string?)Parse(await DarlingMcpServerTagTools.AssignServerTagCore(f.McpStore, f.Free, new[] { 9 }, ct))["status"]);
+    }
+
+    [Fact]
+    public async Task AnMcpSessionThatConnectsAsTheOwner_IsHeldToTheRule_WhenItCarriesTheMarker_AndAViewerSessionAsTheOwnerIsNot()
+    {
+        await using var f = (await OpenAsync())!;
+        var ct = TestContext.Current.CancellationToken;
+
+        /* postgres.mcpConnectionString unset: the MCP host connects with the store's own login, but with the marker the host puts on
+           its connections. */
+        var asOwner = new ServerTagStore(f.McpAsOwner, 30);
+        AssertRefused(await DarlingMcpServerTagTools.AssignServerTagCore(asOwner, f.Grand, new[] { 7 }, ct), f.AgentRoute);
+        AssertRefused(await DarlingMcpServerTagTools.DeleteServerTagCore(asOwner, f.Root, true, ct), f.AgentRoute);
+        Assert.Equal(0, await CountAsync(f.Owner, "SELECT count(*) FROM config.server_tag_map"));
+        Assert.Equal(6, await CountAsync(f.Owner, "SELECT count(*) FROM config.server_tags"));
+
+        /* The same login with no marker (the Viewer, the web and the service connect like this) edits the same tags. */
+        var viewerAsOwner = new ServerTagStore(f.Owner, 30);
+        Assert.Equal(new[] { 7 }, (await viewerAsOwner.AssignAsync(f.Grand, new[] { 7 }, ct)).ToArray());
+        Assert.Equal(new[] { 7 }, (await viewerAsOwner.UnassignAsync(f.Grand, new[] { 7 }, ct)).ToArray());
+        Assert.IsType<ServerTagWriteResult.Ok>(await viewerAsOwner.UpdateAsync(f.Grand, new ServerTagEdit(false, null, false, null, true, f.Plain), ct));
+        Assert.IsType<ServerTagWriteResult.Ok>(await viewerAsOwner.DeleteAsync(f.Root, true, ct));
+        Assert.Equal(0, await CountAsync(f.Owner, $"SELECT count(*) FROM config.server_tags WHERE id IN ({f.Root}, {f.Child})"));
+    }
+
+    [Fact]
+    public async Task TheMcpMarker_IsForced_AndKeepsAnOptionsValueTheStringAlreadyHad()
+    {
+        await using var f = (await OpenAsync())!;
+        var baseString = new NpgsqlConnectionStringBuilder(f.OwnerConnectionString) { Options = "-c work_mem=8MB -c darling.surface=viewer" }.ConnectionString;
+
+        await using var source = NpgsqlDataSource.Create(DarlingStoreConnection.WithMcpSurfaceMarker(baseString));
+        Assert.Equal("mcp", await TextAsync(source, "SELECT current_setting('darling.surface', true)"));
+        Assert.Equal("8MB", await TextAsync(source, "SHOW work_mem"));
+
+        /* Nothing else sets it: a connection built without the helper has no marker. */
+        Assert.Equal("", await TextAsync(f.Owner, "SELECT coalesce(current_setting('darling.surface', true), '')"));
+    }
+
+    private static async Task<string> TextAsync(NpgsqlDataSource source, string sql)
+    {
+        await using var command = source.CreateCommand(sql);
+        return Convert.ToString(await command.ExecuteScalarAsync(TestContext.Current.CancellationToken)) ?? "";
+    }
+
+    private static async Task<int> TagAsync(Fixture f, string name, int? parent) =>
+        ((ServerTagWriteResult.Ok)await new ServerTagStore(f.Owner, 30).CreateAsync(name, parent, null, TestContext.Current.CancellationToken)).Tag!.Id;
+
+    private static async Task<int> RouteAsync(Fixture f, int tag, int level)
+    {
+        await using var insert = f.Owner.CreateCommand(
+            "INSERT INTO config.config_notification_routes (metric_match, agent_level, scope_tag_id) VALUES ('Blocking', $1, $2) RETURNING route_id");
+        insert.Parameters.AddWithValue(level);
+        insert.Parameters.AddWithValue(tag);
+        return Convert.ToInt32(await insert.ExecuteScalarAsync(TestContext.Current.CancellationToken));
     }
 
     [Fact]

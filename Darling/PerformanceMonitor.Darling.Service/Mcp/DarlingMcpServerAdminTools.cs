@@ -510,6 +510,13 @@ public sealed partial class DarlingMcpServerAdminTools
                 : Outcome("not_found",
                     $"'{resolved.DisplayName}' was defined when this call resolved it but its definition was gone by the time the delete ran (a concurrent remove); nothing was changed.");
         }
+        catch (PostgresException ex) when (ex.SqlState == "DL403")
+        {
+            /* #6281: the store's guard on the tag writes refused the clearing of this server's tag rows because one of its tags is, or is
+               under or over, the tag of a route with an agent setting. The delete and the clear share one transaction, so the server
+               is still defined and nothing was changed. A refusal, not an error: removing it is done in the Viewer or on the web dashboard. */
+            return Outcome("refused", ex.MessageText + " The server was not removed.");
+        }
         catch (Exception ex)
         {
             return McpHelpers.FormatError("remove_server", ex);
