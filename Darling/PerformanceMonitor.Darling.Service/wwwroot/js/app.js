@@ -673,22 +673,13 @@ function updateRefreshHint() {
    that looks like an unrelated failure.
 
    The sign-in link must RELOAD the document (#6278). A link to the page's own address, fragment included, is a
-   same-document navigation: nothing reloads and no hashchange fires, so the click did nothing. The 401 body's
-   `login` value is used only when it is a same-origin path other than "/" (the server's answer today is "/", which
-   would drop the page being read); anything else — an off-site address, a javascript: URL, "//host", a backslash
-   form, or nothing — falls back to reloading THIS BROWSER's own current location, so a proxy or a
-   misconfiguration cannot send anyone elsewhere. Reloading the current URL rather than "/" (#4221) keeps an alert
-   link's #/triage route through a stale-session sign-in: the hash never left the address bar. */
-function signInAgainTarget(login) {
-  if (typeof login !== "string" || login === "/") return null;
-  if (!/^\/[^/\\]/.test(login) || /[\u0000-\u001f\u007f]/.test(login)) return null;
-  return login;
-}
-
-function signInAgain(login) {
-  const target = signInAgainTarget(login);
-  if (target) location.assign(target);
-  else location.reload();
+   same-document navigation: nothing reloads and no hashchange fires, so the click did nothing. The click always
+   reloads THIS BROWSER's own current location, and the link's href is that same address. The 401 body's `login`
+   value is deliberately never used (the #4187 design: the server's answer is "/", which would drop the page being
+   read, and an address taken from a response could point anywhere). Reloading the current URL rather than "/" (#4221)
+   keeps an alert link's #/triage route through a stale-session sign-in: the hash never left the address bar. */
+function signInAgain() {
+  location.reload();
 }
 
 function showSignedOutState(message, login) {
@@ -702,9 +693,9 @@ function showSignedOutState(message, login) {
   mount(main, el("div", { class: "strip error", role: "alert" }, [
     (message || "Your session is no longer valid.") + " ",
     el("a", {
-      href: signInAgainTarget(login) || (location.pathname + location.search + location.hash),
+      href: location.pathname + location.search + location.hash,
       text: "Sign in again",
-      onClick: (e) => { e.preventDefault(); signInAgain(login); },
+      onClick: (e) => { e.preventDefault(); signInAgain(); },
     }),
   ]));
 }

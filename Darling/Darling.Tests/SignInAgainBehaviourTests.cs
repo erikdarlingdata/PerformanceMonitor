@@ -8,7 +8,6 @@
 
 using System.ComponentModel;
 using System.Diagnostics;
-using System.Linq;
 using System.Text.Json;
 using Xunit;
 using static Darling.Tests.RepoFile;
@@ -17,8 +16,8 @@ namespace Darling.Tests;
 
 /// <summary>
 /// The web shell's "Sign in again" link after a session expiry (#6278), from the shipped <c>app.js</c> run under Node
-/// (<c>sign-in-again-harness.mjs</c>): a click must reload the document (or go to a same-origin sign-in address the
-/// server named), never leave the page on a same-document link that does nothing. Skipped when Node is not installed.
+/// (<c>sign-in-again-harness.mjs</c>): a click always reloads the document, never leaves the page on a same-document
+/// link that does nothing, and never follows the sign-in address the server's 401 named (that value stays unused). Skipped when Node is not installed.
 /// </summary>
 public sealed class SignInAgainBehaviourTests
 {
@@ -59,6 +58,7 @@ public sealed class SignInAgainBehaviourTests
     }
 
     // The server sends "/" with its 401 today: the click reloads the page being read, so its #/ route survives the sign-in.
+    // Any other value the response carries (a path such as "/other", an off-site address, nothing) is ignored the same way.
     [Theory]
     [InlineData("server")]
     [InlineData("missing")]
@@ -67,7 +67,8 @@ public sealed class SignInAgainBehaviourTests
     [InlineData("protocolRelative")]
     [InlineData("backslash")]
     [InlineData("javascript")]
-    public void ClickingSignInAgain_ReloadsTheDocument_WhenTheServerGaveNoUsableSignInAddress(string scenario)
+    [InlineData("sameOriginPath")]
+    public void ClickingSignInAgain_ReloadsTheDocument_WhateverSignInAddressTheServerGave(string scenario)
     {
         if (!TryRun(scenario, out var r)) return;
 
@@ -76,16 +77,5 @@ public sealed class SignInAgainBehaviourTests
         Assert.Empty(r.GetProperty("assign").EnumerateArray());
         // The href is the page's own address, so a middle click or a copied link still opens it.
         Assert.Equal("/?x=1#/job-history", r.GetProperty("href").GetString());
-    }
-
-    [Fact]
-    public void ClickingSignInAgain_GoesToTheSameOriginAddress_TheServerNamed()
-    {
-        if (!TryRun("sameOriginPath", out var r)) return;
-
-        Assert.True(r.GetProperty("prevented").GetBoolean());
-        Assert.Equal(["/auth/login?return=%2F"], r.GetProperty("assign").EnumerateArray().Select(e => e.GetString()).ToArray());
-        Assert.Equal(0, r.GetProperty("reload").GetInt32());
-        Assert.Equal("/auth/login?return=%2F", r.GetProperty("href").GetString());
     }
 }

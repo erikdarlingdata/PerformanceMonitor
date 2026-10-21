@@ -260,7 +260,7 @@ try {
     const source = [
       slice("/* The last good fleet read, kept at module scope", "/* ─────────────────────────── availability-groups nav gate"),
       slice("async function refreshViewList()", "/* ─────────────────────────── status bar"),
-      slice("function signInAgainTarget(", "/* ─────────────────────────── auto-refresh play/pause"),
+      slice("function signInAgain(", "/* ─────────────────────────── auto-refresh play/pause"),
     ].join("\n");
     const calls = { paintViewList: [], paintServerList: 0, mounts: 0, cleared: 0 };
     let expired = false;

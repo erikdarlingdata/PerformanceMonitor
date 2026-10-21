@@ -1,4 +1,4 @@
-/* Runs the web shell's real "Sign in again" code (the region of wwwroot/js/app.js from signInAgainTarget to the
+/* Runs the web shell's real "Sign in again" code (the region of wwwroot/js/app.js from signInAgain to the
    auto-refresh play/pause banner) and prints what the signed-out banner drew and what a click on its link did, as one
    line of JSON (#6278).
    SignInAgainBehaviourTests starts it as: node sign-in-again-harness.mjs <path to app.js> <scenario>
@@ -9,7 +9,7 @@ import vm from "node:vm";
 
 const [appPath, scenario] = process.argv.slice(-2);
 const full = fs.readFileSync(appPath, "utf8").replace(/\r\n/g, "\n");
-const start = full.indexOf("function signInAgainTarget");
+const start = full.indexOf("function signInAgain(");
 const end = full.indexOf("/* ─────────────────────────── auto-refresh play/pause");
 if (start < 0 || end < start) throw new Error("app.js layout changed: sign-in-again region not found");
 const source = full.slice(start, end);
@@ -42,7 +42,7 @@ const click = (login) => {
 
 const logins = {
   server: "/", missing: undefined, nonString: 7, offSite: "https://off-site.example/x", protocolRelative: "//off-site.example/x",
-  backslash: "/\\off-site.example", javascript: "javascript:alert(1)", sameOriginPath: "/auth/login?return=%2F",
+  backslash: "/\\off-site.example", javascript: "javascript:alert(1)", sameOriginPath: "/other",
 };
 if (!(scenario in logins)) throw new Error("unknown scenario " + scenario);
 console.log(JSON.stringify(click(logins[scenario])));
