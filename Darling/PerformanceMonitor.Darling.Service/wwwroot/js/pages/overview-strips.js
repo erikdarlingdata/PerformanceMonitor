@@ -17,7 +17,7 @@
  * Reads are the ones the separate charts used: get_cpu_utilization, get_server_trend (metric total_waits),
  * get_blocking_trend, get_deadlock_trend, get_memory_trend and get_file_io_trend. Every figure drawn is the read's own; the
  * only arithmetic here is the one the desktop does too: the file I/O strip is the read latency of every file at a bucket,
- * weighted by that file's reads. Times are the reads' UTC stamps. A strip with no samples says so; it is never a zero line.
+ * weighted by that file's reads. The reads' times are UTC stamps; the axis and the readout show them in local time. A strip with no samples says so; it is never a zero line.
  */
 import { el, mount, parseUtc, axisTime, windowFromHours, readTool, readToolWithinKeptHistory, getActiveDatabaseFilter, keptWindowStrip, emptyStrip, readErrorStrip } from "../util.js";
 import { chartZoomScope } from "../charts.js";
