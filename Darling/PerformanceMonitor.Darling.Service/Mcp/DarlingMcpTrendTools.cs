@@ -613,9 +613,9 @@ public sealed class DarlingMcpTrendTools
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
+        [Description("One procedure, by the full_name get_top_procedures_by_cpu returns (e.g. dbo.usp_ProcessOrder). Case-sensitive. Needs database_name. Omit for all procedures.")] string? procedure_name = null,
         [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
-        CancellationToken cancellationToken = default,
-        [Description("Limit to ONE procedure, by the schema-qualified name get_top_procedures_by_cpu returns in full_name (e.g. dbo.usp_ProcessOrder). Case-sensitive. Needs database_name. Omit for the sum over every procedure.")] string? procedure_name = null) =>
+        CancellationToken cancellationToken = default) =>
         GetProcedureDurationTrend(postgres, server_name, hours_back, as_of, bucket_minutes, DatabaseFilter.One(database_name), TrendBudget.Mcp(TrendBuckets.DurationMaxPoints), procedure_name, cancellationToken);
 
     /// <summary>get_procedure_duration_trend under an explicit <paramref name="budget"/> (#3897) — the query
