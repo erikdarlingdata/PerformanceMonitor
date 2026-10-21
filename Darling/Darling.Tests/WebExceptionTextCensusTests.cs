@@ -1042,7 +1042,7 @@ public sealed class WebExceptionTextCensusLiveTests
                 result = McpHelpers.FormatError("test_tool", ex);
             }
 
-            return DarlingWebEndpoints.ToHttpResult(result, "/api/__test/tool-caught-timeout", logger, stopwatch.ElapsedMilliseconds, System.Threading.CancellationToken.None, CleanSweep());
+            return DarlingWebEndpoints.ToHttpResult(result, "/api/__test/tool-caught-timeout", logger, stopwatch.ElapsedMilliseconds, System.Threading.CancellationToken.None);
         });
 
         await app.StartAsync(ct);
