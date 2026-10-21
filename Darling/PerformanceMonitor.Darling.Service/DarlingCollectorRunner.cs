@@ -5698,7 +5698,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
     /// one — the probe compares against whatever the engine reported, and null only means the payload row
     /// predated the hash column.</para>
     /// </summary>
-    private static IReadOnlyList<(long PlanId, string? PlanHash)> ExtractPlanReferences<TRow>(List<TRow> batch, IReadOnlySet<long>? onlyPlanIds = null)
+    private static IReadOnlyList<(long PlanId, string? PlanHash)> ExtractPlanReferences<TRow>(List<TRow> batch, HashSet<long>? onlyPlanIds = null)
     {
         if (batch is not List<QueryStoreCollector.Row> rows || rows.Count == 0)
         {
@@ -5730,7 +5730,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
     }
 
     /// <summary>Text twin of <see cref="ExtractPlanReferences"/>, keyed by query_id with query_hash.</summary>
-    private static IReadOnlyList<(long QueryId, string? QueryHash)> ExtractTextReferences<TRow>(List<TRow> batch, IReadOnlySet<long>? onlyQueryIds = null)
+    private static IReadOnlyList<(long QueryId, string? QueryHash)> ExtractTextReferences<TRow>(List<TRow> batch, HashSet<long>? onlyQueryIds = null)
     {
         if (batch is not List<QueryStoreCollector.Row> rows || rows.Count == 0)
         {
@@ -6032,51 +6032,7 @@ AND   collection_time >= $3", storeConnection))
                 }
             }
 
-            /* The hour's rows earlier runs already stored, so the rank is over the whole database-hour (see QueryStoreFetchSelection). Raw rows of the
-               intervals this batch names, newest snapshot per (plan, interval, execution type, replica). Bounded below by the oldest interval start
-               in the batch: a row of an interval is collected no earlier than the interval begins. */
-            var intervalIds = rows.Where(r => r.RuntimeStatsIntervalId is not null).Select(r => r.RuntimeStatsIntervalId!.Value).Distinct().ToArray();
-            var stored = new List<QueryStoreCollector.Row>();
-            if (intervalIds.Length > 0)
-            {
-                var starts = rows.Where(r => r.IntervalStartTimeUtc is not null).Select(r => r.IntervalStartTimeUtc!.Value).ToList();
-                var floor = DateTime.SpecifyKind(starts.Count > 0 ? starts.Min() : context.CollectionTime - s_alwaysFetchLookBack, DateTimeKind.Unspecified);
-                using var hour = new NpgsqlCommand(@"
-SELECT DISTINCT ON (plan_id, runtime_stats_interval_id, execution_type_desc, replica_role)
-       plan_id, query_id, runtime_stats_interval_id, execution_type_desc, replica_role, execution_count, avg_cpu_time_us, avg_duration_us,
-       avg_physical_io_reads, avg_logical_io_writes, max_query_max_used_memory, max_tempdb_space_used
-FROM query_store_stats
-WHERE server_id = $1
-AND   database_name = $2
-AND   collection_time >= $3
-AND   runtime_stats_interval_id = ANY($4)
-ORDER BY plan_id, runtime_stats_interval_id, execution_type_desc, replica_role, collection_time DESC", storeConnection);
-                hour.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
-                hour.Parameters.Add(new NpgsqlParameter<int> { TypedValue = server.ServerId });
-                hour.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName });
-                hour.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = floor });
-                hour.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint, Value = intervalIds });
-                await using var reader = await hour.ExecuteReaderAsync(cancellationToken);
-                while (await reader.ReadAsync(cancellationToken))
-                {
-                    stored.Add(new QueryStoreCollector.Row
-                    {
-                        DatabaseName = databaseName,
-                        PlanId = reader.GetInt64(0),
-                        QueryId = reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
-                        RuntimeStatsIntervalId = reader.GetInt64(2),
-                        ExecutionTypeDesc = reader.IsDBNull(3) ? null : reader.GetString(3),
-                        ReplicaRole = reader.IsDBNull(4) ? null : reader.GetString(4),
-                        ExecutionCount = reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
-                        AvgCpuTimeUs = reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
-                        AvgDurationUs = reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
-                        AvgPhysicalIoReads = reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
-                        AvgLogicalIoWrites = reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
-                        MaxQueryMaxUsedMemory = reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
-                        MaxTempdbSpaceUsed = reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
-                    });
-                }
-            }
+            var stored = await ReadStoredHourRowsAsync(storeConnection, server, databaseName, context, rows, cancellationToken);
 
             var selection = QueryStoreFetchSelection.Select(rows, topN, alwaysPlans, alwaysQueries, stored);
             _logger?.LogDebug(
@@ -6091,6 +6047,120 @@ ORDER BY plan_id, runtime_stats_interval_id, execution_type_desc, replica_role, 
                 server.Config.DisplayName, databaseName);
             return null;
         }
+    }
+
+    /// <summary>
+    /// #6211: the hour's rows earlier runs already stored, so the rank is over the whole database-hour (see <see cref="QueryStoreFetchSelection"/>):
+    /// one row per (plan, interval, execution type, replica), the newest snapshot, for the intervals this batch names.
+    ///
+    /// <para><b>Wide table first.</b> This runs every cycle for every server. Raw <c>query_store_stats</c> holds several cumulative snapshots per
+    /// interval, so reading it needs a DISTINCT ON sort over all of them. <c>collect.query_store_interval_wide</c> (V145) already holds exactly the
+    /// latest snapshot per interval identity, every outcome, with the same columns, and is partitioned by day on <c>first_execution_time</c>
+    /// (the interval's own start at the earliest, never before it: <see cref="QueryStoreIntervalWide.IntervalStartSlack"/>). So the read is
+    /// one bounded range of the table: <c>server_id</c>, the database, the interval ids, and a <c>first_execution_time</c> floor that prunes
+    /// the partitions.</para>
+    ///
+    /// <para><b>Raw only where the wide table cannot answer</b> (its coverage gate): when this server has no coverage row, the row's
+    /// <c>filled_since</c> is later than the oldest interval start in the batch (the table was not yet filled for that hour), or the table
+    /// has a pending batch (an apply that failed). Then the answer is the raw read this method used first. A wide table that lags, whether by
+    /// a batch the writer has not applied yet or a row the gate cannot see, only leaves a competitor out of the rank: the batch plans then
+    /// rank higher, so the selection takes more plans, never fewer.</para>
+    ///
+    /// <para>Rows with no <c>runtime_stats_interval_id</c> (collected before the column existed) are not read here and rank as one batch
+    /// (<see cref="QueryStoreFetchSelection"/>), which also selects more, never less.</para>
+    /// </summary>
+    private static async Task<List<QueryStoreCollector.Row>> ReadStoredHourRowsAsync(
+        NpgsqlConnection storeConnection,
+        ServerRuntime server,
+        string databaseName,
+        CollectorContext context,
+        List<QueryStoreCollector.Row> rows,
+        CancellationToken cancellationToken)
+    {
+        var stored = new List<QueryStoreCollector.Row>();
+        var intervalIds = rows.Where(r => r.RuntimeStatsIntervalId is not null).Select(r => r.RuntimeStatsIntervalId!.Value).Distinct().ToArray();
+        if (intervalIds.Length == 0)
+        {
+            return stored;
+        }
+
+        var starts = rows.Where(r => r.IntervalStartTimeUtc is not null).Select(r => r.IntervalStartTimeUtc!.Value).ToList();
+        var floor = DateTime.SpecifyKind(starts.Count > 0 ? starts.Min() : context.CollectionTime - s_alwaysFetchLookBack, DateTimeKind.Unspecified);
+
+        bool wideCovers;
+        using (var gate = new NpgsqlCommand(@"
+SELECT EXISTS
+(
+    SELECT 1
+    FROM collect.query_store_interval_wide_coverage AS c
+    WHERE c.server_id = $1
+    AND   c.filled_since <= $2
+)
+AND NOT EXISTS
+(
+    SELECT 1
+    FROM collect.query_store_interval_wide_pending AS p
+    WHERE p.server_id = $1
+);", storeConnection))
+        {
+            gate.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+            gate.Parameters.Add(new NpgsqlParameter<int> { TypedValue = server.ServerId });
+            gate.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = floor });
+            wideCovers = (bool)(await gate.ExecuteScalarAsync(cancellationToken))!;
+        }
+
+        string sql = wideCovers
+            ? @"
+SELECT plan_id, query_id, runtime_stats_interval_id, execution_type_desc, replica_role, execution_count, avg_cpu_time_us, avg_duration_us,
+       avg_physical_io_reads, avg_logical_io_writes, max_query_max_used_memory, max_tempdb_space_used
+FROM collect.query_store_interval_wide
+WHERE server_id = $1
+AND   database_name = $2
+AND   first_execution_time >= $3
+AND   runtime_stats_interval_id = ANY($4)"
+            : @"
+SELECT DISTINCT ON (plan_id, runtime_stats_interval_id, execution_type_desc, replica_role)
+       plan_id, query_id, runtime_stats_interval_id, execution_type_desc, replica_role, execution_count, avg_cpu_time_us, avg_duration_us,
+       avg_physical_io_reads, avg_logical_io_writes, max_query_max_used_memory, max_tempdb_space_used
+FROM query_store_stats
+WHERE server_id = $1
+AND   database_name = $2
+AND   collection_time >= $3
+AND   runtime_stats_interval_id = ANY($4)
+ORDER BY plan_id, runtime_stats_interval_id, execution_type_desc, replica_role, collection_time DESC";
+
+        /* Bounded below by the oldest interval start in the batch. The wide table's partition key is first_execution_time, which is at or after
+           the interval's start (the slack below is the documented margin for a clock edge); raw is bounded on collection_time, which is at or
+           after the interval's start too. */
+        var lower = wideCovers ? floor - QueryStoreIntervalWide.IntervalStartSlack : floor;
+        using var hour = new NpgsqlCommand(sql, storeConnection);
+        hour.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+        hour.Parameters.Add(new NpgsqlParameter<int> { TypedValue = server.ServerId });
+        hour.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName });
+        hour.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = lower });
+        hour.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint, Value = intervalIds });
+        await using var reader = await hour.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            stored.Add(new QueryStoreCollector.Row
+            {
+                DatabaseName = databaseName,
+                PlanId = reader.GetInt64(0),
+                QueryId = reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
+                RuntimeStatsIntervalId = reader.GetInt64(2),
+                ExecutionTypeDesc = reader.IsDBNull(3) ? null : reader.GetString(3),
+                ReplicaRole = reader.IsDBNull(4) ? null : reader.GetString(4),
+                ExecutionCount = reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
+                AvgCpuTimeUs = reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
+                AvgDurationUs = reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
+                AvgPhysicalIoReads = reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
+                AvgLogicalIoWrites = reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
+                MaxQueryMaxUsedMemory = reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
+                MaxTempdbSpaceUsed = reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
+            });
+        }
+
+        return stored;
     }
 
     /// <summary>
