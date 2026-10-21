@@ -316,6 +316,110 @@ VALUES ($1, $2, $3, 'Blocking', 99, 98, FALSE, 'email', 'smtp refused', FALSE, F
         Assert.DoesNotContain("get_ag_health", tools.NameableTools);
     }
 
+    private Task InsertFireAsync(DateTime at, bool muted = false, string metric = "Blocking") =>
+        ExecAsync(@"
+INSERT INTO config_alert_log
+    (alert_time, server_id, server_name, metric_name, current_value, threshold_value,
+     alert_sent, notification_type, send_error, muted, dismissed, detail_text, context_json)
+VALUES ($1, $2, $3, $4, 45, 30, $5, 'email', NULL, $6, FALSE, NULL, NULL)",
+            Micros(at), ServerId, ServerName, metric, !muted, muted);
+
+    /// <summary>
+    /// #6261 (Darling's <c>TheStreak_*</c> live facts, same planted shape): days 1, 2 (muted only) and 3 fired, day 4 did not,
+    /// day 5 did, so the streak is 3 and the brief says so beside the #6000 counts, with the note that muted fires count; and a
+    /// 23:50 anchor counts its day-1 fire at 00:10 of its own date, which a count by calendar date would lose.
+    /// </summary>
+    [Fact]
+    public async Task TheStreak_RunsBackFromTheDayBefore_CountsAMutedOnlyDay_StopsAtAGap_AndCrossesMidnight()
+    {
+        var anchor = Now.Date.AddDays(-1).AddHours(2).AddMinutes(10);
+        var requestId = Guid.NewGuid();
+        await InsertRequestAsync(requestId, anchor);
+        await InsertLinkAsync(1, requestId, anchor);
+        await InsertFireAsync(anchor.AddDays(-1).AddMinutes(3));
+        await InsertFireAsync(anchor.AddDays(-2), muted: true);
+        await InsertFireAsync(anchor.AddDays(-3).AddMinutes(-12));
+        await InsertFireAsync(anchor.AddDays(-5));
+        await InsertFireAsync(anchor.AddDays(-4).AddHours(6)); // day 4, at another time of day
+
+        var reader = new DuckDbInvestigationBriefSourceReader(_initializer, () => Now);
+        var sources = await reader.ReadAsync(requestId, TestContext.Current.CancellationToken);
+        var recurrence = sources!.Recurrence!.Single();
+        Assert.Equal(3, recurrence.StreakDays);
+        Assert.False(recurrence.StreakAtLeastDaysWindow);
+
+        var node = System.Text.Json.Nodes.JsonNode.Parse(InvestigationBriefComposer.Compose(
+            sources, LiteInvestigationBriefTools.Tools, McpDataDetail.Full, Now))!["recurrence"]!.AsArray().Single()!;
+        Assert.Equal(3, node["streak_days"]!.GetValue<int>());
+        Assert.False(node["streak_at_least_days_window"]!.GetValue<bool>());
+        Assert.Contains("muted fires count", node["streak_note"]!.GetValue<string>(), StringComparison.Ordinal);
+
+        /* A 23:50 anchor: the day-1 fire is at 00:10 of the anchor's own date, day 2 at 00:10 the date before. */
+        var late = Now.Date.AddDays(-3).AddHours(23).AddMinutes(50);
+        var lateId = Guid.NewGuid();
+        await InsertRequestAsync(lateId, late);
+        await InsertLinkAsync(2, lateId, late);
+        await InsertFireAsync(late.Date.AddMinutes(10));
+        await InsertFireAsync(late.Date.AddDays(-1).AddMinutes(10));
+        var lateRecurrence = (await reader.ReadAsync(lateId, TestContext.Current.CancellationToken))!.Recurrence!.Single();
+        Assert.Equal(2, lateRecurrence.StreakDays);
+    }
+
+    /// <summary>
+    /// #6261: a 00:10 anchor counts a 23:50 fire two calendar dates back as day 1 (24 hours 20 minutes back) and the one before it
+    /// as day 2, so the streak is 2; a count by calendar date would number them 2 and 3 and find no run.
+    /// </summary>
+    [Fact]
+    public async Task TheStreak_OfA_0010Anchor_CountsA_2350FireTwoDatesBackAsDayOne()
+    {
+        var anchor = Now.Date.AddDays(-1).AddMinutes(10);
+        var requestId = Guid.NewGuid();
+        await InsertRequestAsync(requestId, anchor);
+        await InsertLinkAsync(1, requestId, anchor);
+        await InsertFireAsync(anchor.AddDays(-1).AddMinutes(-20));
+        await InsertFireAsync(anchor.AddDays(-2).AddMinutes(-20));
+
+        var reader = new DuckDbInvestigationBriefSourceReader(_initializer, () => Now);
+        var recurrence = (await reader.ReadAsync(requestId, TestContext.Current.CancellationToken))!.Recurrence!.Single();
+        Assert.Equal(2, recurrence.StreakDays);
+    }
+
+    /// <summary>
+    /// #6261: one calendar date holds two day numbers. For a 23:50 anchor, 23:50 on the date before is day 1 and 00:10 on that same
+    /// date is day 2 (47 hours 40 minutes back); a date difference would see one day and a streak of 1.
+    /// </summary>
+    [Fact]
+    public async Task TheStreak_OfA_2350Anchor_CanHoldTwoDayNumbersOnOneCalendarDate()
+    {
+        var anchor = Now.Date.AddDays(-3).AddHours(23).AddMinutes(50);
+        var requestId = Guid.NewGuid();
+        await InsertRequestAsync(requestId, anchor);
+        await InsertLinkAsync(1, requestId, anchor);
+        await InsertFireAsync(anchor.AddDays(-1));
+        await InsertFireAsync(anchor.Date.AddDays(-1).AddMinutes(10));
+
+        var reader = new DuckDbInvestigationBriefSourceReader(_initializer, () => Now);
+        var recurrence = (await reader.ReadAsync(requestId, TestContext.Current.CancellationToken))!.Recurrence!.Single();
+        Assert.Equal(2, recurrence.StreakDays);
+    }
+
+    /// <summary>A fire on every one of the Days days says so as a floor, and a fire older than the look-back adds nothing.</summary>
+    [Fact]
+    public async Task TheStreak_NeverPassesTheLookBack_AndSaysItIsAtLeast()
+    {
+        var anchor = Now.Date.AddDays(-1).AddHours(2).AddMinutes(10);
+        var requestId = Guid.NewGuid();
+        await InsertRequestAsync(requestId, anchor);
+        await InsertLinkAsync(1, requestId, anchor);
+        for (var day = 1; day <= InvestigationAlertRecurrence.Days + 2; day++)
+            await InsertFireAsync(anchor.AddDays(-day));
+
+        var reader = new DuckDbInvestigationBriefSourceReader(_initializer, () => Now);
+        var recurrence = (await reader.ReadAsync(requestId, TestContext.Current.CancellationToken))!.Recurrence!.Single();
+        Assert.Equal(InvestigationAlertRecurrence.Days, recurrence.StreakDays);
+        Assert.True(recurrence.StreakAtLeastDaysWindow);
+    }
+
     /// <summary>The registration hands out a composer over the Lite reader, masking at the registered level, and at full when
     /// the host registered no setting (so the slice runs whether or not the settings registration has landed).</summary>
     [Fact]

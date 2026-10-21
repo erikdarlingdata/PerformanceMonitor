@@ -265,6 +265,10 @@ const scenarios = {
     const calendar = new FakeNode("main");
     modules.util.mount(calendar, modules.tabs.dailySummaryPanels("SRV1").map((p) => p));
     await settle();
+    /* The calendar panel opens as a month calendar (#6294); its "Show as table" is the grid, which opens newest day first. */
+    const toggle = all(calendar, (n) => n.tag === "button" && n.textContent === "Show as table")[0];
+    for (const fn of toggle.listeners.click || []) fn({});
+    await settle();
     const panelTitled = (root, title) =>
       all(root, (n) => String(n.className).startsWith("panel") && n.children[0] && n.children[0].tag === "h3" && n.children[0].textContent.startsWith(title));
     const rowsOf = (root, re) => all(root, (n) => n.tag === "tr").map((tr) => (tr.children[0] ? tr.children[0].textContent : "")).filter((t) => re.test(t));

@@ -114,6 +114,20 @@ public partial class LocalDataService
         return (new AttentionWindow(runs, counts, groups, statements, databases, applications), samples);
     }
 
+    /// <summary>
+    /// The server's Client Timeouts baseline (#5736), the DuckDB twin of <c>DarlingAlertReadAdapter.GetAttentionBaselineAsync</c>: the same
+    /// per-minute bucket statement over <c>v_collection_log</c> and <c>v_attention_events</c> (the archive views, so the 7 days read through
+    /// parquet when the live table holds fewer), then the shared <see cref="AttentionBaselineMath.Compute"/>.
+    /// </summary>
+    public async Task<AttentionBaseline?> GetAttentionBaselineAsync(int serverId, DateTime nowUtc)
+    {
+        using var connection = await OpenConnectionAsync();
+        var from = nowUtc.AddDays(-AttentionBaselineMath.LookbackDays);
+        var minutes = await QueryAttentionAsync(connection, AttentionWindowSql.BaselineMinutes("v_collection_log", "v_attention_events"), serverId, from, nowUtc,
+            r => new AttentionMinute(r.GetDateTime(0), r.GetInt64(1)));
+        return AttentionBaselineMath.Compute(minutes);
+    }
+
     private static async Task<List<T>> QueryAttentionAsync<T>(
         PerformanceMonitorLite.Database.LockedConnection connection, string sql, int serverId, DateTime floor, DateTime ceiling, Func<DbDataReader, T> map)
     {

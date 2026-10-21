@@ -23,7 +23,7 @@ public static class LegacyPinCandidateTables
     public const int RungVersion = 167;
 
     /// <summary>The connection columns the candidate table records, in the order <see cref="ServerConnectionIdentity.StoredColumns"/>
-    /// lists them without <c>query_store_replica</c>, which V211 (#6254) added to the server table after this record was taken.
+    /// lists them without <c>query_store_replica</c>, which V212 (#6254) added to the server table after this record was taken.
     /// A recorded value was sealed, or pinned, for a connection with no Query Store replica, so the pin step reads these columns
     /// and passes no replica; a live row that has one then no longer matches its record and its password is entered again.</summary>
     public const string ConnectionColumns = "host, port, engine, database, read_only_intent, auth, username, " +

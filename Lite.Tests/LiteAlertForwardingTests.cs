@@ -128,6 +128,9 @@ public partial class LiteAlertForwardingTests : IDisposable
         public Task<AttentionWindow> GetAttentionWindowAsync(string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default) =>
             Task.FromResult(AttentionWindow.Empty);
 
+        public Task<AttentionBaseline?> GetAttentionBaselineAsync(string serverKey, DateTime nowUtc, CancellationToken cancellationToken = default) =>
+            Task.FromResult<AttentionBaseline?>(null);
+
         public Task<IReadOnlyList<RunnableQueueSample>> GetRunnableQueueSamplesAsync(string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default) =>
             Task.FromResult<IReadOnlyList<RunnableQueueSample>>(new List<RunnableQueueSample>());
 

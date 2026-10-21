@@ -113,7 +113,7 @@ public sealed class DarlingEmptyEnumerationNoteTests
             "ServerDrainMs: context.ServerScopeDrainMs, ServerWatermarkMs: serverWatermarkMs, " +
             "ServerRowsRead: context.ServerScopeRowsRead, ServerBytesRead: context.ServerScopeBytesRead, " +
             "ServerLastReadMs: context.ServerScopeLastReadMs, TargetSessionId: context.TargetSessionId, " +
-            "FetchPhases: fetchPhases.Result);",
+            "FetchPhases: fetchPhases.Result, ReadSource: queryStoreReadSource);",
             collapsed);
     }
 
