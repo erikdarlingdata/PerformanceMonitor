@@ -295,22 +295,42 @@ public partial class AddServerDialog : Window
         };
     }
 
-    private SqlConnectionStringBuilder BuildConnectionBuilder()
+    /// <summary>
+    /// The Test Connection builder before authentication is applied. The Data Source goes through
+    /// <see cref="ServerHostSetting.TcpDataSource"/>, as the collectors' own builder does, so the test does not fall back
+    /// to a named pipe over SMB with this process's Windows credentials (#6352).
+    /// </summary>
+    internal static SqlConnectionStringBuilder BuildBaseConnectionBuilder(
+        string serverName,
+        string databaseName,
+        bool trustServerCertificate,
+        SqlConnectionEncryptOption encrypt,
+        bool readOnlyIntent,
+        bool multiSubnetFailover)
     {
-        var dbName = DatabaseNameBox.Text.Trim();
-        var builder = new SqlConnectionStringBuilder
+        var dbName = databaseName.Trim();
+        return new SqlConnectionStringBuilder
         {
-            DataSource = ServerNameBox.Text.Trim(),
+            DataSource = ServerHostSetting.TcpDataSource(serverName.Trim()),
             InitialCatalog = string.IsNullOrEmpty(dbName) ? "master" : dbName,
             ApplicationName = "PerformanceMonitorLite",
             ConnectTimeout = 10,
-            TrustServerCertificate = TrustCertCheckBox.IsChecked == true,
-            Encrypt = ParseEncryptOption(GetSelectedEncryptMode()),
-            ApplicationIntent = ReadOnlyIntentCheckBox.IsChecked == true
-                ? ApplicationIntent.ReadOnly
-                : ApplicationIntent.ReadWrite,
-            MultiSubnetFailover = MultiSubnetFailoverCheckBox.IsChecked == true
+            TrustServerCertificate = trustServerCertificate,
+            Encrypt = encrypt,
+            ApplicationIntent = readOnlyIntent ? ApplicationIntent.ReadOnly : ApplicationIntent.ReadWrite,
+            MultiSubnetFailover = multiSubnetFailover
         };
+    }
+
+    private SqlConnectionStringBuilder BuildConnectionBuilder()
+    {
+        var builder = BuildBaseConnectionBuilder(
+            ServerNameBox.Text,
+            DatabaseNameBox.Text,
+            TrustCertCheckBox.IsChecked == true,
+            ParseEncryptOption(GetSelectedEncryptMode()),
+            ReadOnlyIntentCheckBox.IsChecked == true,
+            MultiSubnetFailoverCheckBox.IsChecked == true);
 
         // Credential-profile mode: apply the profile's auth via the SAME shared helper, sourcing every
         // field from the profile (its auth type + non-secret fields + secret from Credential Manager).

@@ -120,4 +120,69 @@ public static class ServerHostSetting
         var shown = clean.Length > MaxEchoLength ? clean[..MaxEchoLength] + "..." : clean;
         return $"The host '{shown}' is not accepted: it {why}. Use the server's name or address, as name, name,port or name\\instance.";
     }
+
+    /// <summary>
+    /// The Data Source to hand SqlClient for a connection to a MONITORED SQL Server (#6352): the host with <c>tcp:</c>
+    /// in front, so the connection is TCP and never falls back to a named pipe.
+    ///
+    /// <para>With no protocol prefix and no port, Microsoft.Data.SqlClient tries TCP and, when that fails, a named pipe
+    /// (measured on 7.1.1: for <c>192.0.2.1</c> it opened 1433, then 445). A named pipe is opened over SMB with the
+    /// Windows credentials of the process, even for a registration that uses SQL authentication, so a host with 1433
+    /// closed would still receive them. <c>tcp:</c> opens only the TCP port. Every place that builds a SqlClient
+    /// connection to a monitored server takes its Data Source from here. The stored host is never rewritten: the prefix is
+    /// added only when the connection string is built.</para>
+    ///
+    /// <para>Two kinds of host are returned as typed. One that already starts with a protocol prefix (<c>tcp:</c>,
+    /// <c>np:</c>, <c>lpc:</c>, <c>admin:</c>, any letters followed by <c>:</c>, or a leading slash), matched the way
+    /// <see cref="Refusal"/> matches them: an existing row with an explicit protocol keeps working as it does today, and a new
+    /// one cannot be saved because <see cref="Refusal"/> refuses it. And a host on this machine, which cannot send
+    /// credentials off the machine and which should keep reaching a local instance over shared memory, where TCP is off by
+    /// default (Developer and Express): <c>(localdb)\...</c>, <c>.</c>, <c>(local)</c>, <c>localhost</c>, <c>127.0.0.1</c>,
+    /// <c>::1</c> and this machine's own name, each with or without <c>\instance</c> or <c>,port</c>, in any case.</para>
+    /// </summary>
+    public static string TcpDataSource(string host)
+    {
+        if (string.IsNullOrWhiteSpace(host))
+        {
+            return host;
+        }
+
+        var text = host.Trim();
+        if (HasProtocolPrefix(text) || IsThisMachine(text))
+        {
+            return host;
+        }
+
+        return "tcp:" + text;
+    }
+
+    /// <summary>True when the trimmed text starts with a slash, or with letters and a colon that are not an IPv6 literal, as <see cref="Refusal"/> reads them.</summary>
+    private static bool HasProtocolPrefix(string text)
+    {
+        if (text.Length > 0 && (text[0] == '\\' || text[0] == '/'))
+        {
+            return true;
+        }
+
+        var colon = text.IndexOf(':');
+        return colon > 0 && IsAllLetters(text.AsSpan(0, colon)) && !IPAddress.TryParse(text, out _);
+    }
+
+    /// <summary>True when the host, without a <c>\instance</c> or <c>,port</c> tail, names this machine.</summary>
+    private static bool IsThisMachine(string text)
+    {
+        if (text.StartsWith("(localdb)", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var end = text.IndexOfAny(new[] { '\\', ',' });
+        var name = (end < 0 ? text : text[..end]).Trim();
+        return name == "."
+            || name.Equals("(local)", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("localhost", StringComparison.OrdinalIgnoreCase)
+            || name == "127.0.0.1"
+            || name == "::1"
+            || name.Equals(Environment.MachineName, StringComparison.OrdinalIgnoreCase);
+    }
 }
