@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Common.KnownPatterns;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Investigations;
 using PerformanceMonitor.Darling.Storage;
@@ -248,6 +249,58 @@ INSERT INTO config.agent_environment_profiles (scope_server_id, profile_text) VA
             var loneBrief = InvestigationBriefComposer.Compose(loneSources, DarlingInvestigationBriefTools.Tools, McpDataDetail.Full, Now);
             Assert.DoesNotContain("prior_links", loneBrief, StringComparison.Ordinal);
             Assert.DoesNotContain("request_url", loneBrief, StringComparison.Ordinal);
+        });
+    }
+
+    /// <summary>
+    /// #6334: the brief lists the operator's known-pattern entries for each linked metric AT THE REQUEST'S FIRST ALERT, not at the
+    /// metric's own alert time. The request links Blocking at T and Deadlocks at T+5 minutes. An entry for Deadlocks at T matches
+    /// (it is judged at the first alert's time), one for Deadlocks at T+5 does not (that is the metric's own time), one for another
+    /// server does not, and a scope-free entry matches both metrics. A store without the table gives no part and no error.
+    /// </summary>
+    [Fact]
+    public async Task KnownPatterns_AreMatchedPerLinkedMetric_AtTheFirstAlertsTime_AndAStoreWithoutTheTableGivesNone()
+    {
+        await RunAsync(async (dataSource, connection, ct) =>
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId + 1, ServerName + "B", ct);
+            var first = Now.AddMinutes(-20);
+            var second = first.AddMinutes(5);
+            var requestStore = new InvestigationRequestStore(dataSource, 30, () => second);
+            var requestId = (await requestStore.OpenOrJoinAsync(Alert(first), ct)).RequestId!.Value;
+            var joined = await requestStore.OpenOrJoinAsync(new InvestigationAlert(1, ServerId, ServerName, "blocking", "Deadlocks", second,
+                new[] { ServerId + ":Blocking" }, null, 20, 100, LeaseMinutes: 15, ExpiryMinutes: 240), ct);
+            Assert.Equal(requestId, joined.RequestId!.Value);
+
+            var firstTime = new TimeOnly(first.Hour, first.Minute);
+            var secondTime = new TimeOnly(second.Hour, second.Minute);
+            await DarlingMcpTestData.ExecAsync(connection, ct, "INSERT INTO config.config_service (id) VALUES (1) ON CONFLICT (id) DO NOTHING");
+            await DarlingMcpTestData.ExecAsync(connection, ct, DarlingManagedRoles.BuildKnownPatternFunctionsSql("config"));
+            var patterns = new PgKnownPatternStore(dataSource);
+            var blockingAtFirst = await patterns.InsertAsync(new KnownPatternInput(ServerId, "Blocking", firstTime, null, 2, "blocking at T", null), "erik", ct);
+            var deadlocksAtFirst = await patterns.InsertAsync(new KnownPatternInput(ServerId, "Deadlocks", firstTime, null, 2, "deadlocks at T", null), "erik", ct);
+            var deadlocksAtOwnTime = await patterns.InsertAsync(new KnownPatternInput(ServerId, "Deadlocks", secondTime, null, 2, "deadlocks at T+5", null), "erik", ct);
+            var otherServer = await patterns.InsertAsync(new KnownPatternInput(ServerId + 1, "Blocking", firstTime, null, 2, "another server", null), "erik", ct);
+            var anything = await patterns.InsertAsync(new KnownPatternInput(ServerId, null, null, null, null, "anything on this server", null), null, ct);
+
+            var reader = new PgInvestigationBriefSourceReader(dataSource, utcNow: () => Now);
+            var sources = await reader.ReadAsync(requestId, ct);
+            var got = sources!.KnownPatterns!.Select(m => (m.MetricName, m.EntryId)).OrderBy(m => m.MetricName, StringComparer.Ordinal).ThenBy(m => m.EntryId).ToArray();
+            Assert.Equal(new[] { ("Blocking", blockingAtFirst), ("Blocking", anything), ("Deadlocks", deadlocksAtFirst), ("Deadlocks", anything) }, got);
+            Assert.DoesNotContain(sources.KnownPatterns!, m => m.EntryId == deadlocksAtOwnTime || m.EntryId == otherServer);
+            Assert.Equal("erik", sources.KnownPatterns!.Single(m => m.EntryId == blockingAtFirst).CreatedBy);
+            Assert.Null(sources.KnownPatterns!.First(m => m.EntryId == anything).CreatedBy);
+
+            var brief = JsonNode.Parse(InvestigationBriefComposer.Compose(sources, DarlingInvestigationBriefTools.Tools, McpDataDetail.Full, Now))!;
+            Assert.Equal(4, brief["known_patterns"]!.AsArray().Count);
+            Assert.Contains("written by an operator", brief["known_patterns_note"]!.GetValue<string>(), StringComparison.Ordinal);
+
+            /* A store that has not taken V214 has no table: no part, no error. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, "DROP TABLE config.config_known_patterns CASCADE");
+            var without = await reader.ReadAsync(requestId, ct);
+            Assert.NotNull(without);
+            Assert.Null(without!.KnownPatterns);
+            Assert.DoesNotContain("known_patterns", InvestigationBriefComposer.Compose(without, DarlingInvestigationBriefTools.Tools, McpDataDetail.Full, Now), StringComparison.Ordinal);
         });
     }
 
