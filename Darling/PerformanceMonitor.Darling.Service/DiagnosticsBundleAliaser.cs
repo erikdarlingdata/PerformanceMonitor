@@ -914,7 +914,7 @@ internal sealed class BundleAliaser
     private static readonly Regex s_serializedProductKey = new(@"""[a-z0-9_]+""", RegexOptions.CultureInvariant, TimeSpan.FromSeconds(5));
 
     private static readonly Regex s_aliasShape = new(
-        @"(?<![A-Za-z0-9_])(?:server|host|db|domain|login|role|ip|tag)-\d+(?![A-Za-z0-9_])",
+        @"(?:(?<![A-Za-z0-9_])|(?<=\\[bfnrt])|(?<=\\u[0-9A-Fa-f]{4})|(?<=%[0-9A-Fa-f]{2}))(?:server|host|db|domain|login|role|ip|tag)-\d+(?![A-Za-z0-9_])",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromSeconds(5));
 
     /// <summary>
@@ -941,7 +941,9 @@ internal sealed class BundleAliaser
     /// character and its neighbour are both ASCII letters in one ordinary run, the same <c>[A-Za-z0-9_]</c> alphabet the
     /// main pass uses. Letters still split a run at a case change (<c>Sales|Report</c>, <c>SQLPROD|Backup</c>,
     /// <c>SQLPROD|backup</c>, <c>DBA|sqlprod</c>) and after an escape sequence (<c>\n</c>, <c>\u003C</c>, <c>%3D</c>), whose
-    /// last character is a letter that belongs to the escape, not to the word. Whitespace and the ends of the text are
+    /// last character is a letter that belongs to the escape, not to the word; a single letter after a digit (<c>%253D</c>,
+    /// <c>=3D</c>, <c>ESC[1m</c>) is read the same way. A name of <see cref="AlwaysReplacedLetterCount"/> letters or more is always a
+    /// sub-token. Whitespace and the ends of the text are
     /// always boundaries. The name itself is matched case-insensitively. <c>wholesales</c> holds <c>sales</c>,
     /// <c>database</c> holds <c>data</c> and <c>administrator</c> holds <c>admin</c> inside plain letter runs, so none
     /// of them is a hit; <c>prod01</c>, <c>SQLPROD_Full.bak</c> and <c>SalesReport</c> are (#6256).
@@ -962,8 +964,15 @@ internal sealed class BundleAliaser
             }
         }
 
-        return StartIsBoundary(text, at) && EndIsBoundary(text, end);
+        return length >= AlwaysReplacedLetterCount || (StartIsBoundary(text, at) && EndIsBoundary(text, end));
     }
+
+    /// <summary>
+    /// A name of this many letters or more is replaced wherever it stands, even inside a plain run of letters: a long
+    /// name glued to other letters (<c>SALESDWFULL.BAK</c>, <c>sqlprodsalesdw</c>) is far more often a hand-made
+    /// identifier than an ordinary word. Shorter names (4 to 6 letters) stay readable inside ordinary words.
+    /// </summary>
+    internal const int AlwaysReplacedLetterCount = 7;
 
     /// <summary>True when the characters before <paramref name="at"/> end a JSON (<c>\n</c>, <c>\u003C</c>) or URL (<c>%3D</c>) escape.</summary>
     private static bool EndsEscape(string text, int at)
@@ -997,6 +1006,12 @@ internal sealed class BundleAliaser
             return true;
         }
 
+        /* One letter between a digit and the name is the tail of an escape or code (%253D, =3D, a hex escape such as x3c, ESC[1m), not a word. */
+        if (at >= 2 && char.IsAsciiDigit(text[at - 2]))
+        {
+            return true;
+        }
+
         return (char.IsAsciiLetterLower(prev) && char.IsAsciiLetterUpper(first))
             || (char.IsAsciiLetterUpper(prev) && char.IsAsciiLetterUpper(first) && at + 1 < text.Length && char.IsAsciiLetterLower(text[at + 1]))
             || (char.IsAsciiLetterUpper(prev) && char.IsAsciiLetterLower(first) && at >= 2 && char.IsAsciiLetterUpper(text[at - 2]));
@@ -1017,7 +1032,7 @@ internal sealed class BundleAliaser
         }
 
         return (char.IsAsciiLetterLower(last) && char.IsAsciiLetterUpper(next))
-            || (char.IsAsciiLetterUpper(last) && char.IsAsciiLetterUpper(next) && end + 1 < text.Length && char.IsAsciiLetterLower(text[end + 1]))
+            || (char.IsAsciiLetterUpper(last) && char.IsAsciiLetterUpper(next) && end + 1 < text.Length && char.IsLower(text[end + 1]))
             || (char.IsAsciiLetterUpper(last) && char.IsAsciiLetterLower(next) && end >= 2 && char.IsAsciiLetterUpper(text[end - 2]));
     }
 
