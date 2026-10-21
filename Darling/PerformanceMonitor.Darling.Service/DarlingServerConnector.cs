@@ -196,21 +196,18 @@ SELECT /* PerformanceMonitorLite */
     }
 
     /// <summary>
-    /// Says out loud that an armed remediation credential does nothing in this build (#2138 phase 1).
+    /// Says at connect what a remediation login is for, and when only half of one is set (#2138, #6263).
     ///
-    /// <para><b>Why this exists.</b> V113 accepts a per-server remediation credential and nothing in this
-    /// build consumes it — the write path is its own change. An operator who has entered one believes the
-    /// server is armed, and the failure mode of a knob that silently does nothing is at its worst when what
-    /// it claims to gate is a write to a production server. So the same discipline #2745 applied to its
-    /// all-gates-open force (journal it as WITHHELD rather than quietly downgrading it) applies here: the
-    /// credential is accepted, stored, resolvable, and announced as inert.</para>
+    /// <para>Level 3 server actions (#5632) use the login: force and unforce a Query Store plan, evict a cached plan and
+    /// kill a session on SQL Server, and kill a session on PostgreSQL. A server action also needs the server's action
+    /// switch, which is off until the store owner turns it on, so an armed login alone does nothing. The line says so,
+    /// because an operator who entered a login should learn what else must be on. A one-sided credential is reported
+    /// separately: "you configured half of one" is a mistake to fix now.</para>
     ///
     /// <para>Once per connect rather than once per sweep: connects are rare, so this cannot become the
-    /// every-60-seconds log line #2255 was about. A one-sided credential is reported separately, because
-    /// "you configured half of one" and "this build cannot use it yet" send an operator to different
-    /// places — the first is a mistake to fix now, the second is a wait.</para>
+    /// every-60-seconds log line #2255 was about.</para>
     /// </summary>
-    private static void WarnIfRemediationCredentialIsInert(MonitoredServer config, ILogger? logger)
+    internal static void WarnIfRemediationCredentialIsInert(MonitoredServer config, ILogger? logger)
     {
         var username = !string.IsNullOrWhiteSpace(config.RemediationUsername);
         var secret = !string.IsNullOrWhiteSpace(config.RemediationEncryptedPassword);
@@ -226,20 +223,18 @@ SELECT /* PerformanceMonitorLite */
 
         if (username && secret)
         {
-            /* "yet" is only true where the capability is coming. BuildRemediationConnectionString
-               throws for a PostgreSQL target, and plan-force remediation is a Query Store concept,
-               so on Postgres this credential is inert PERMANENTLY rather than pending. One message
-               for both would promise an operator a future that engine does not have. */
+            /* Plan force, unforce and eviction are SQL Server only (Query Store and the plan cache), so a PostgreSQL
+               target's login serves kill_session alone (#6263). */
             if (config.IsPostgres)
             {
-                logger?.LogWarning(
-                    "Server '{Server}' has a remediation credential, but plan-force remediation is SQL Server-only (it forces a Query Store plan), so nothing on a PostgreSQL target will ever use it. Remove it, or move it to the SQL Server registration it was meant for.",
+                logger?.LogInformation(
+                    "Server '{Server}' has a remediation login. On a PostgreSQL server Darling uses it only to end a session (kill_session), and only when that server's kill_session switch is on. The monitoring login stays read-only.",
                     config.DisplayName);
                 return;
             }
 
             logger?.LogInformation(
-                "Server '{Server}' has a remediation credential, but this build ships no remediation write path (#2138 phase 1 is the credential seam, the journal's actor and the decision logic). Nothing will use it yet, and the monitoring credential remains read-only.",
+                "Server '{Server}' has a remediation login. Darling uses it only for the server actions an agent asks for at Level 3 (force or unforce a plan, evict a cached plan, kill a session), and only for an action whose switch is on for this server. The monitoring login stays read-only.",
                 config.DisplayName);
         }
     }

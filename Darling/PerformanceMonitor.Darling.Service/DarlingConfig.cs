@@ -2611,7 +2611,7 @@ public sealed class MonitoredServer
 
     /// <summary>
     /// The remediation credential's secret: an <c>env:</c>/<c>file:</c> reference (resolved by the same
-    /// <c>DarlingSecretSource</c>) or a DPAPI-LocalMachine blob, base64, produced by the same
+    /// <c>DarlingSecretSource</c>; a Level 3 server action, #5632, refuses any other form as <c>credential_not_reference</c>) or a DPAPI-LocalMachine blob, base64, produced by the same
     /// <c>--encrypt-password</c> as <see cref="EncryptedPassword"/>. Only a reference works for every action (#6262), and a plain password (none of a reference, a sealed value or a DPAPI blob) is not copied into the store:
     /// a blob opens for operator remediation (#2138), but the agent server actions (plan force, plan eviction, session
     /// kill) accept only a reference and <c>--validate-config</c> and the service warn about a blob. There is deliberately no
