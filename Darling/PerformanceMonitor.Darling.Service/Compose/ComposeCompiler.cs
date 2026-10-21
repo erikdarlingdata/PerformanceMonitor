@@ -60,6 +60,10 @@ namespace PerformanceMonitor.Darling.Service;
 /// (naive UTC, <see cref="DateTimeKind.Unspecified"/>); the runner sets it from the rollup's build state. When it is later than the wide read's
 /// start, and every partial the panel needs has a rollup column, the compile reads the rollup for <c>[start, StampThrough)</c> and the
 /// wide table from <c>StampThrough</c>; otherwise (null, the default, or earlier) it compiles the wide-table text unchanged.
+/// <see cref="QueryStoreRawServerIds"/> (#6115) is the split: the <c>server_id</c>s the runner's gate refused, which a Query Store
+/// panel on the wide route reads from raw <c>collect.query_store_stats</c> while every other server in scope reads the interval table.
+/// Each server reads from exactly one source. Null or empty (the default, and every run whose servers all passed) compiles the
+/// all-wide text unchanged, with no new parameter.
 public sealed record ComposeRunContext(
     IReadOnlyList<string>? Servers,
     DateTime StartUtc,
@@ -75,7 +79,8 @@ public sealed record ComposeRunContext(
     IReadOnlyList<string>? UnregisteredServers = null,
     long? QueryStoreGroupMembers = null,
     DateTime? QueryStoreStampThrough = null,
-    bool ModuleMapMissing = false)
+    bool ModuleMapMissing = false,
+    IReadOnlyList<int>? QueryStoreRawServerIds = null)
 {
     public static readonly IReadOnlyDictionary<string, string?> NoVariables =
         new Dictionary<string, string?>(StringComparer.Ordinal);
@@ -220,7 +225,7 @@ public static class ComposeCompiler
         string sourceTable, ComposeRoute route, string timeColumn, string startParam, string endParam, ComposeRunContext context, string? wideStartParam = null,
         IReadOnlyList<string>? dimensionFilters = null, string? serverScopeSql = null, bool restrictDedupe = false,
         string? edgeStartParam = null, string? edgeEndParam = null, ComposeAggregate aggregate = ComposeAggregate.Sum,
-        StampRelation? stamp = null)
+        StampRelation? stamp = null, string? splitRawParam = null)
     {
         if (route.Tier == ComposeSourceTier.HourlyRawEdges)
         {
@@ -312,6 +317,28 @@ public static class ComposeCompiler
            windows of 12 h or more rely on that index and that setting; without them this read scans the table. */
         if (context.QueryStoreWideEligible)
         {
+            /* #6115: the split. The servers the gate refused (splitRawParam, a bound int[] of server_id) read raw, deduped as the all-raw
+               text dedupes, and every other server in scope reads the interval table, so each server is read from exactly one source and
+               no row is counted twice. Null (every server passed) emits the all-wide text below, unchanged. */
+            if (splitRawParam is not null)
+            {
+                var rawRelation = QueryStoreRawDedupe(timeColumn, startParam, endParam, dimensionFilters, serverScopeSql, restrictDedupe, splitRawParam);
+                if (stamp is not null)
+                {
+                    return BuildStampRelation(stamp, wideStartParam ?? startParam, endParam, dimensionFilters, rawRelation, startParam, serverScopeSql);
+                }
+
+                /* One column list for both arms: every column any Query Store measure or dimension reads. A UNION ALL needs the same
+                   columns in the same order, and the wide table and raw hold different sets (wide has no server_name, raw has the
+                   dedupe's own qs_rn). The registry's name rides the wide arm, as it does in the all-wide text. */
+                var wideColumns = string.Join(", ", s_splitColumns.Select(c => c == "server_name" ? "s.server_name" : "w." + c));
+                var rawColumns = string.Join(", ", s_splitColumns);
+                return $"(SELECT {wideColumns} FROM {PgSchemaGenerator.CollectSchema}.query_store_interval_wide AS w "
+                    + $"JOIN {PgSchemaGenerator.CollectSchema}.servers AS s ON s.server_id = w.server_id "
+                    + $"WHERE w.{timeColumn} >= {wideStartParam ?? startParam} AND w.{timeColumn} <= {endParam} AND w.server_id <> ALL({splitRawParam}) "
+                    + $"UNION ALL SELECT {rawColumns} FROM {rawRelation} AS qs_raw_half)";
+            }
+
             if (stamp is not null)
             {
                 return BuildStampRelation(stamp, wideStartParam ?? startParam, endParam, dimensionFilters);
@@ -322,14 +349,41 @@ public static class ComposeCompiler
                 + $"WHERE w.{timeColumn} >= {wideStartParam ?? startParam} AND w.{timeColumn} <= {endParam})";
         }
 
-        return "(SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY "
+        return QueryStoreRawDedupe(timeColumn, startParam, endParam, dimensionFilters, serverScopeSql, restrictDedupe, null);
+    }
+
+    /// <summary>
+    /// The Query Store raw dedupe (one row per interval identity, the newest snapshot): the all-raw relation, and (#6115) the raw half
+    /// of a split panel. With <paramref name="rawServersParam"/> it reads only those servers, by a <c>server_id = ANY(..)</c> predicate
+    /// inside the window (and inside the partition restriction), so the index on (server_id, collection_time) bounds the read to the
+    /// refused servers and its cost follows them alone. Null is the text every all-raw panel compiled before #6115, byte for byte.
+    /// </summary>
+    private static string QueryStoreRawDedupe(
+        string timeColumn, string startParam, string endParam, IReadOnlyList<string>? dimensionFilters, string? serverScopeSql, bool restrictDedupe,
+        string? rawServersParam) =>
+        "(SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY "
             + $"server_id, server_name, database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role "
             + $"ORDER BY {timeColumn} DESC, execution_count DESC) AS qs_rn "
             + $"FROM {PgSchemaGenerator.CollectSchema}.{QueryStoreTable} "
             + $"WHERE {timeColumn} >= {startParam} AND {timeColumn} <= {endParam}"
-            + QueryStorePartitionRestriction(timeColumn, startParam, endParam, dimensionFilters, serverScopeSql, restrictDedupe)
+            + (rawServersParam is null ? string.Empty : $" AND server_id = ANY({rawServersParam})")
+            + QueryStorePartitionRestriction(timeColumn, startParam, endParam, dimensionFilters, serverScopeSql, restrictDedupe, rawServersParam)
             + ") AS qs_ranked WHERE qs_rn = 1)";
-    }
+
+    /// <summary>#6115: the columns both halves of a split Query Store panel select, in one order: every column a Query Store measure
+    /// (its value, weighted-value, weight and delta columns) or dimension reads, plus the key and the time. Taken from the catalog, so a
+    /// measure added later is covered without a second list.</summary>
+    private static readonly string[] s_splitColumns = MeasureCatalog.Measures
+        .Where(m => string.Equals(m.SourceTable, QueryStoreTable, StringComparison.Ordinal))
+        .SelectMany(m => new[] { m.Column, m.WeightedValueColumn, m.WeightColumn, m.DeltaColumn })
+        .Concat(MeasureCatalog.Dimensions
+            .Where(d => string.Equals(d.SourceTable, QueryStoreTable, StringComparison.Ordinal) && !d.ViaModuleJoin)
+            .Select(d => d.Column))
+        .Concat(new[] { "server_id", "server_name", "collection_time" })
+        .Where(c => c is not null)
+        .Select(c => c!)
+        .Distinct(StringComparer.Ordinal)
+        .ToArray();
 
     /* #5738: the key a stored copy of one Default Trace event shares: the server, then the readers' 16 columns (the 15 fields of
        DarlingDefaultTraceReader.DefaultTraceEventRow plus event_sequence). A row stored before event_sequence existed has a NULL one
@@ -373,7 +427,8 @@ public static class ComposeCompiler
     /// empty and the dedupe is unchanged. When it is added, the inner WHERE still carries every pushable filter.</para>
     /// </summary>
     private static string QueryStorePartitionRestriction(
-        string timeColumn, string startParam, string endParam, IReadOnlyList<string>? dimensionFilters, string? serverScopeSql, bool restrictDedupe)
+        string timeColumn, string startParam, string endParam, IReadOnlyList<string>? dimensionFilters, string? serverScopeSql, bool restrictDedupe,
+        string? rawServersParam = null)
     {
         if (!restrictDedupe || dimensionFilters is not { Count: > 0 })
         {
@@ -383,6 +438,7 @@ public static class ComposeCompiler
         var table = $"{PgSchemaGenerator.CollectSchema}.{QueryStoreTable}";
         var window = $"{FactAlias}.{timeColumn} >= {startParam} AND {FactAlias}.{timeColumn} <= {endParam}"
             + (serverScopeSql is null ? string.Empty : " AND " + serverScopeSql)
+            + (rawServersParam is null ? string.Empty : $" AND {FactAlias}.server_id = ANY({rawServersParam})")
             + string.Concat(dimensionFilters.Select(c => " AND " + c));
         var keys = s_queryStorePartitionKey;
         string Sentinel(string c) => c switch
@@ -543,6 +599,13 @@ public static class ComposeCompiler
         var stampPlan = TryPlanStamp(plan, route, context, stampColumns ?? StampColumnFor);
         var stampThroughParam = stampPlan is null ? null : p.AddTimestamp(context.QueryStoreStampThrough!.Value);
 
+        /* #6115: the servers the gate refused, bound once (after every earlier parameter, so an all-pass compile binds nothing new). */
+        var splitRawParam = context.QueryStoreWideEligible
+            && context.QueryStoreRawServerIds is { Count: > 0 } splitRawServers
+            && string.Equals(plan.Measure.SourceTable, QueryStoreTable, StringComparison.Ordinal)
+                ? p.AddIntArray(splitRawServers)
+                : null;
+
         /* Filter predicates are built — and their values BOUND — once, in filter order, so the parameter
            order is identical for every mode (window, scope, filters, then topN). RankedTimeSeries (#2734)
            reuses the same clause TEXT in both its rank CTE and its series query, which reuses the same $n
@@ -585,8 +648,9 @@ public static class ComposeCompiler
            three arms share (`s.`), because the rollup rows and the wide rows both carry server_id and the registry row carries the name. */
         var stampRelation = stampPlan is null
             ? null
-            : new StampRelation(stampPlan.Partials, stampThroughParam!, hasServerScope ? ServerScope("s.", serverScopeParam!, unregisteredParam) : null,
-                hasServerScope ? ServerScope("b.", serverScopeParam!, null) : null);
+            : new StampRelation(stampPlan.Partials, stampThroughParam!,
+                AndScope(hasServerScope ? ServerScope("s.", serverScopeParam!, unregisteredParam) : null, splitRawParam is null ? null : $"s.server_id <> ALL({splitRawParam})"),
+                AndScope(hasServerScope ? ServerScope("b.", serverScopeParam!, null) : null, splitRawParam is null ? null : $"b.server_id <> ALL({splitRawParam})"));
 
         /* In stamp mode every value is the combine form over the relation's partial columns (single scan: over rank_base's). */
         string PrimaryValue() => singleScan
@@ -601,7 +665,7 @@ public static class ComposeCompiler
            inside the CTE without changing the outer query's byte-for-byte shape. */
         void AppendFactBody(string indent)
         {
-            sql.Append(indent).Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam, context, wideStartParam, pushableFilterClauses, hasServerScope ? FactScope() : null, restrictDedupe, edgeStartParam, edgeEndParam, plan.Aggregate, stampRelation));
+            sql.Append(indent).Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam, context, wideStartParam, pushableFilterClauses, hasServerScope ? FactScope() : null, restrictDedupe, edgeStartParam, edgeEndParam, plan.Aggregate, stampRelation, splitRawParam));
 
             /* #3653 A6: a CAGG route's FROM-clause item (route.CaggFromClause) is already a complete, aliased
                relation — "collect.<x> AS f" or a stitched "(... UNION ALL ...) AS f" — so it must NOT get a
@@ -1598,7 +1662,9 @@ public static class ComposeCompiler
     /// Every arm applies the server scope and the pushable dimension filters, over the registry join <c>s</c> and the fact-row alias
     /// <c>f</c>, so the outer query's own WHERE finds nothing left to remove. The outer query keeps its window predicate as before.
     /// </summary>
-    private static string BuildStampRelation(StampRelation stamp, string wideStartParam, string endParam, IReadOnlyList<string>? dimensionFilters)
+    private static string BuildStampRelation(
+        StampRelation stamp, string wideStartParam, string endParam, IReadOnlyList<string>? dimensionFilters,
+        string? rawRelation = null, string? startParam = null, string? factScopeSql = null)
     {
         var schema = PgSchemaGenerator.CollectSchema;
         var through = stamp.ThroughParam;
@@ -1636,8 +1702,24 @@ public static class ComposeCompiler
             + $"WHERE f.collection_time >= {through} AND f.collection_time <= {endParam}"
             + scopeAndFilters;
 
+        /* #6115: a split panel adds a fourth arm, the servers the gate refused, read raw (deduped) as the partials of each row, so the
+           outer query combines them with the other three. The three arms above already carry `server_id <> ALL(refused)` in their scope. */
+        if (rawRelation is not null)
+        {
+            var rawScopeAndFilters = (factScopeSql is null ? string.Empty : " AND " + factScopeSql)
+                + string.Concat((dimensionFilters ?? Array.Empty<string>()).Select(c => " AND " + c));
+            var rawArm = $"SELECT f.server_id, f.database_name, f.module_name, f.query_hash, f.collection_time, f.server_name{rowPartials} FROM {rawRelation} AS f "
+                + $"WHERE f.collection_time >= {startParam} AND f.collection_time <= {endParam}"
+                + rawScopeAndFilters;
+            return $"({rollup} UNION ALL {stale} UNION ALL {tail} UNION ALL {rawArm})";
+        }
+
         return $"({rollup} UNION ALL {stale} UNION ALL {tail})";
     }
+
+    /// <summary>Two server-scope predicates ANDed; null when neither exists, the one that does when only one does.</summary>
+    private static string? AndScope(string? first, string? second) =>
+        first is null ? second : second is null ? first : first + " AND " + second;
 
     private enum PartialKind { Sum, Count, CountStar, Min, Max }
 
