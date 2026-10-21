@@ -40,6 +40,13 @@ At dispatch:
   fixes what the review found.
 - Give each lane its own rig port.
 - Set a wall-clock check at each lane's deadline; don't wait on notifications.
+- Measure a field number before a plan depends on it. A design built on a derived figure (a lag, a row count, a
+  timing) gets that figure measured first, read-only, by whoever has access to the field. #6254's plan went through
+  seven revisions on a lag figure nobody had measured; a one-hour measurement answered it.
+- Stack or serialize PRs that touch the same files instead of running them in parallel. Each parallel PR on the same
+  files needed a conflict fix and another full CI run.
+- Give browser and click-through checks their own small lane, apart from the code change. Screenshots and page
+  reads fill a lane's context fast.
 - Size each lane to finish under 200k. A lane's context grows about 1.9k tokens per call from a 24-40k base, so
   200k is about 80-90 calls. A lane that converts three tools uses 100-117 calls. A lane with two twin pairs (two
   tools on both products) uses 103-167 calls and peaks at 214-242k. Give a lane that converts tools one twin pair,

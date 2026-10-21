@@ -8,6 +8,8 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -56,6 +58,44 @@ public static class AzureSweepScope
         var skip = new HashSet<string>(separatelyMonitored, StringComparer.OrdinalIgnoreCase);
         return databases.FindAll(database => !skip.Contains(database));
     }
+
+    /// <summary>
+    /// The listed databases without <c>master</c>, for a collector whose read is of a database-scoped Extended Events
+    /// session (<see cref="ICollectorDefinition{TRow}.SkipsMasterDatabase"/>). An Azure SQL Database master cannot host
+    /// such a session, so reading it always answers "XE session is not running" and counted as a failed database on
+    /// every sweep (#6312). Returns the list itself when master is not in it.
+    /// </summary>
+    public static List<string> WithoutMaster(List<string> databases) =>
+        databases.Exists(IsMaster) ? databases.FindAll(database => !IsMaster(database)) : databases;
+
+    private static bool IsMaster(string database) =>
+        string.Equals(database, "master", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The failure a per-database fan-out keeps as its first error (#6312): the first CONNECTION failure when any
+    /// database failed to connect, otherwise the first failure. The kept error becomes the row's message when every
+    /// database failed, and the note's "first error" when some did, so a firewall outage (40615 on every user
+    /// database) must not be reported as the XE-missing answer one other database happened to give first.
+    /// </summary>
+    /// <param name="kept">The error kept so far, or null when nothing has failed yet.</param>
+    /// <param name="candidate">The error of the database that just failed.</param>
+    /// <param name="errorNumbersOf">Reads the SQL error numbers off an exception; each app supplies its own, because
+    /// this project has no SqlClient.</param>
+    public static Exception PreferConnectionFailure(
+        Exception? kept, Exception candidate, Func<Exception, IEnumerable<int>> errorNumbersOf)
+    {
+        if (kept is null)
+        {
+            return candidate;
+        }
+
+        return !IsConnectionFailure(kept, errorNumbersOf) && IsConnectionFailure(candidate, errorNumbersOf)
+            ? candidate
+            : kept;
+    }
+
+    private static bool IsConnectionFailure(Exception ex, Func<Exception, IEnumerable<int>> errorNumbersOf) =>
+        errorNumbersOf(ex).Any(SqlErrorClassification.IsConnectionFailure);
 
     /// <summary>
     /// The single database this registration names, or an EMPTY list when it names none.
