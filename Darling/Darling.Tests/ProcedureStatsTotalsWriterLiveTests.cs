@@ -57,9 +57,10 @@ public sealed class ProcedureStatsTotalsWriterLiveTests
 
         public required ServerRuntime Server { get; init; }
 
-        public static async Task<Rig> OpenAsync(int serverId, string serverName, CancellationToken ct, bool timescale = false)
+        public static async Task<Rig> OpenAsync(int serverId, string serverName, CancellationToken ct, bool timescale = false, bool plainStore = false)
         {
-            var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+            /* plainStore: the test's subject is a store WITHOUT TimescaleDB (the sweep run with its timescale flag off); CreateAsync enables the extension by default (#6317). */
+            var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, plainPostgres: plainStore);
             var connection = new NpgsqlConnection(scratch.ConnectionString);
             await connection.OpenAsync(ct);
             await PgMigrations.MigrateAsync(connection, ct);
@@ -1032,7 +1033,7 @@ public sealed class ProcedureStatsTotalsWriterLiveTests
         var ct = TestContext.Current.CancellationToken;
         const int serverId = -945317;
 
-        await using var rig = await Rig.OpenAsync(serverId, "ProcTotalsPurgePlain", ct);
+        await using var rig = await Rig.OpenAsync(serverId, "ProcTotalsPurgePlain", ct, plainStore: true);
 
         var bodySucceeded = false;
         try
@@ -1121,7 +1122,7 @@ public sealed class ProcedureStatsTotalsWriterLiveTests
         var ct = TestContext.Current.CancellationToken;
         const int serverId = -945319;
 
-        await using var rig = await Rig.OpenAsync(serverId, "ProcTotalsPurgeFail", ct);
+        await using var rig = await Rig.OpenAsync(serverId, "ProcTotalsPurgeFail", ct, plainStore: true);
 
         var bodySucceeded = false;
         try

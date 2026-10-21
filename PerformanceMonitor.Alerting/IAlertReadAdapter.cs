@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -143,6 +144,16 @@ public interface IAlertReadAdapter
     /// </summary>
     Task<AttentionWindow> GetAttentionWindowAsync(
         string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// The server's Client Timeouts baseline (#5736): the p99.9 of its 3-minute average attention rate over the
+    /// <see cref="AttentionBaselineMath.LookbackDays"/> days before <paramref name="nowUtc"/> (naive UTC), or null when it has under a day of capture.
+    /// Reads the per-minute buckets of <c>AttentionWindowSql.BaselineMinutes</c> (the definition of <c>tools/attention-rate-measure.sql</c>), bounded
+    /// by server and time, and hands them to <see cref="AttentionBaselineMath.Compute"/>. A heavy read: the engine caches the answer for
+    /// <see cref="AttentionBaselineMath.RefreshHours"/> hours, so this runs about once a day per server.
+    /// </summary>
+    Task<AttentionBaseline?> GetAttentionBaselineAsync(
+        string serverKey, DateTime nowUtc, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Currently-running queries over <paramref name="thresholdMinutes"/> elapsed, longest first,
