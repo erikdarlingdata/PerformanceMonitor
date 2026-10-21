@@ -205,9 +205,17 @@ The Darling README, section "Ending a PostgreSQL session", lists the sign-in rul
 
 Every server action is off until a person turns it on for that server. A server with no row in `config.config_server_actions` has every action off.
 
-Today only the store owner can write that table. No screen, MCP tool or `darling.json` key turns a switch on. A later change adds a control.
+A person turns a switch on or off from any of three places. Each change is journaled as `server_action_switched` with who made it, the screen it came from, and the state before and after.
 
-The actions are `force_plan` (it covers force and unforce), `evict_plan` and `kill_session`. Connect as the store owner and run this statement for each action and server:
+- **The Viewer.** Open the Investigations window and use the **Server actions** tab.
+- **The web dashboard.** Open the Admin page and use the **Server actions** tab. You must be signed in to the dashboard as an admin. A dashboard with no sign-in configured, or a viewer account, lists the switches and answers 403 to a change.
+- **MCP.** The `set_server_action` tool, served only with `mcp.allowServerAdmin`. Name one server by its exact name. A disabled server works too. A part of a name is refused and the near matches are listed.
+
+A switch cannot be turned on for an action the server's engine cannot run, but it can always be turned off. No `darling.json` key sets a switch.
+
+As a fallback, the store owner can write the table directly.
+
+The actions are `force_plan` (it covers force and unforce), `evict_plan` and `kill_session`. To write the table directly, connect as the store owner and run this statement for each action and server:
 
 ```sql
 INSERT INTO config.config_server_actions (server_id, action, enabled, set_by)
