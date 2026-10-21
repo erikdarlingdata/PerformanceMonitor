@@ -692,6 +692,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         MapCustomViews(app, postgres, logger, readLatencyRecorder, readAdmission);
         MapCustomAlerts(app, postgres, logger, readAdmission, readLatencyRecorder);
         MapMuteRules(app, postgres, logger);
+        DarlingKnownPatternRoutes.Map(app, postgres, logger);
         MapInvestigationNotes(app, new InvestigationRequestStore(postgres, McpCommandDeadlines.ReadSeconds), logger);
         MapThresholdOverrides(app, postgres, logger);
         MapAgentSetup(app, postgres, logger, passwordKeys);
