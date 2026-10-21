@@ -163,9 +163,15 @@ public sealed class McpRouteRoleLiveTests
             Assert.Contains("Viewer", off.MessageText, StringComparison.Ordinal);
             Assert.Equal("DL403", (await Assert.ThrowsAsync<PostgresException>(() => CallAsync(2, "'metric_match'", match: "Blocking"))).SqlState);
 
-            /* What stays open: the enabled flag on the Off route, and a full edit of a route that has no agent setting. */
+            /* Turning the Off route off widens agent coverage (#6281): refused, with the Viewer and the web dashboard named. Turning it on stays open. */
+            var turnOff = await Assert.ThrowsAsync<PostgresException>(() => CallAsync(2, "'enabled'", enabled: false));
+            Assert.Equal("DL403", turnOff.SqlState);
+            Assert.Contains("Viewer", turnOff.MessageText, StringComparison.Ordinal);
+            Assert.Contains("web dashboard", turnOff.MessageText, StringComparison.Ordinal);
+            await CallAsync(2, "'enabled'", enabled: true);
+
+            /* What stays open: the enabled flag on a route with no agent setting, and a full edit of it. */
             await CallAsync(1, "'enabled'", enabled: false);
-            await CallAsync(2, "'enabled'", enabled: false);
             await CallAsync(1, "'scope'", tag: "NULL");
             await CallAsync(3, "'metric_match', 'scope', 'enabled'", match: "Deadlocks", enabled: false, tag: "9001");
 
@@ -178,7 +184,7 @@ public sealed class McpRouteRoleLiveTests
                 rows.Add((reader.GetInt32(0), reader.GetString(1), reader.GetBoolean(2), reader.IsDBNull(3) ? null : reader.GetInt32(3)));
             }
 
-            Assert.Equal([(1, "Deadlocks", false, (int?)null), (2, "Deadlocks", false, (int?)null), (3, "Deadlocks", false, (int?)9001)], rows);
+            Assert.Equal([(1, "Deadlocks", false, (int?)null), (2, "Deadlocks", true, (int?)null), (3, "Deadlocks", false, (int?)9001)], rows);
         });
     }
 
@@ -198,12 +204,69 @@ public sealed class McpRouteRoleLiveTests
             Assert.Contains("agent setting", message, StringComparison.Ordinal);
             Assert.Contains("Viewer", message, StringComparison.Ordinal);
 
-            /* The enabled flag is still changed over MCP on the same route, and a route with a destination takes a match change. */
-            Assert.Equal("updated", Status(await DarlingMcpAlertTools.UpdateNotificationRoute(asMcp, 2, enabled: false, cancellationToken: ct)));
+            /* Turning the Off route off is refused (#6281) and says where it is done; turning it on is still done over MCP, and a route with a destination takes a match change. */
+            var turnOff = JsonDocument.Parse(await DarlingMcpAlertTools.UpdateNotificationRoute(asMcp, 2, enabled: false, cancellationToken: ct)).RootElement;
+            Assert.Equal("refused", turnOff.GetProperty("status").GetString());
+            Assert.Contains("web dashboard", turnOff.GetProperty("message").GetString()!, StringComparison.Ordinal);
+            Assert.True(await RouteEnabledAsync(owner, 2, ct));
+            await ExecAsync(owner, "UPDATE config.config_notification_routes SET enabled = false WHERE route_id = 2", ct);
+            Assert.Equal("updated", Status(await DarlingMcpAlertTools.UpdateNotificationRoute(asMcp, 2, enabled: true, cancellationToken: ct)));
+            Assert.True(await RouteEnabledAsync(owner, 2, ct));
             var edited = await DarlingMcpAlertTools.UpdateNotificationRoute(asMcp, 1, metric_match: "Deadlocks", fleet_wide: true, cancellationToken: ct);
             Assert.Equal("updated", Status(edited));
             Assert.DoesNotContain("sealed-text", edited, StringComparison.Ordinal);
         });
+    }
+
+    /// <summary>#6281: a route with an explicit Off agent setting keeps servers away from a broader agent route, so over MCP it cannot be turned
+    /// off or deleted (the answer names the Viewer and the web dashboard), and nothing changes; turning it on, and a route with no agent setting, work as before.</summary>
+    [Fact]
+    public async Task AnAgentOffRoute_CannotBeTurnedOffOrDeletedOverMcp_ButCanBeTurnedOn()
+    {
+        await WithMcpRoleAsync(async (owner, asMcp, ct) =>
+        {
+            await ExecAsync(owner,
+                "INSERT INTO config.config_notification_routes (metric_match, agent_level) VALUES ('Blocking', 0), ('Deadlocks', NULL), ('High CPU', NULL);", ct);
+
+            var turnOff = JsonDocument.Parse(await DarlingMcpAlertTools.SetNotificationRouteEnabled(asMcp, 1, false)).RootElement;
+            Assert.Equal("refused", turnOff.GetProperty("status").GetString());
+            Assert.Contains("Viewer", turnOff.GetProperty("message").GetString()!, StringComparison.Ordinal);
+            Assert.Contains("web dashboard", turnOff.GetProperty("message").GetString()!, StringComparison.Ordinal);
+            Assert.True(await RouteEnabledAsync(owner, 1, ct));
+
+            var delete = JsonDocument.Parse(await DarlingMcpAlertTools.DeleteNotificationRoute(asMcp, 1)).RootElement;
+            Assert.Equal("refused", delete.GetProperty("status").GetString());
+            Assert.Contains("web dashboard", delete.GetProperty("message").GetString()!, StringComparison.Ordinal);
+            Assert.Equal(3, await RouteCountAsync(owner, ct));
+
+            /* Turning it on stays open, from a disabled state (the owner turns it off, as the Viewer does). */
+            await ExecAsync(owner, "UPDATE config.config_notification_routes SET enabled = false WHERE route_id = 1", ct);
+            Assert.Equal("updated", Status(await DarlingMcpAlertTools.SetNotificationRouteEnabled(asMcp, 1, true)));
+            Assert.True(await RouteEnabledAsync(owner, 1, ct));
+
+            /* A route with no agent setting is turned off and deleted over MCP as before. The delete grants are the managed batch's DELETE and its
+               fallback-column UPDATE (a DO block the replay cannot run on a scratch store), given to this run's role. */
+            var role = new NpgsqlConnectionStringBuilder(asMcp.ConnectionString).Username;
+            await ExecAsync(owner, $"GRANT DELETE, UPDATE (fallback_route_id) ON config.config_notification_routes TO {role}", ct);
+            Assert.Equal("updated", Status(await DarlingMcpAlertTools.SetNotificationRouteEnabled(asMcp, 2, false)));
+            Assert.False(await RouteEnabledAsync(owner, 2, ct));
+            var deletedAnswer = await DarlingMcpAlertTools.DeleteNotificationRoute(asMcp, 3);
+            Assert.True(Status(deletedAnswer) == "deleted", deletedAnswer);
+            Assert.Equal(2, await RouteCountAsync(owner, ct));
+        });
+    }
+
+    private static async Task<bool> RouteEnabledAsync(NpgsqlDataSource owner, int routeId, CancellationToken ct)
+    {
+        await using var command = owner.CreateCommand("SELECT enabled FROM config.config_notification_routes WHERE route_id = $1");
+        command.Parameters.AddWithValue(routeId);
+        return (bool)(await command.ExecuteScalarAsync(ct))!;
+    }
+
+    private static async Task<int> RouteCountAsync(NpgsqlDataSource owner, CancellationToken ct)
+    {
+        await using var command = owner.CreateCommand("SELECT count(*)::int FROM config.config_notification_routes");
+        return (int)(await command.ExecuteScalarAsync(ct))!;
     }
 
     /// <summary>A route the mcp role made has every channel empty, so an alert it matches is delivered through the parent channel

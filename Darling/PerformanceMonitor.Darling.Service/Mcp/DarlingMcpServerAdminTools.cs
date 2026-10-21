@@ -156,6 +156,9 @@ public sealed partial class DarlingMcpServerAdminTools
         "covers (it names one database but connects to a different one, e.g. a wrong Initial Catalog) is refused as " +
         "status \"collides\" — adding it would store one database's history under two identities and alert twice. " +
         "So is a server whose id is already held by a different server (two identities that hash to one id). " +
+        "Over MCP a machine (engine, host and port) has ONE registration: an entry for a machine another registration holds " +
+        "under a different database or read_only_intent, a removed registration included, is refused as status \"collides\" " +
+        "and names that registration, because the routes and tags that cover a server are tied to it. Register the other database in the Viewer or on the web dashboard. " +
         "A SQL password or service-principal client secret is sealed with the service's password key before it is " +
         "stored, and is never returned. password is the password itself: a value that starts with env: or file: is " +
         "rejected as \"invalid\", because references are set in the configuration file. " +
@@ -238,6 +241,28 @@ public sealed partial class DarlingMcpServerAdminTools
             var existingKeys = await definitions.LoadStorageKeysAsync(cancellationToken);
             var (ready, duplicates) = PartitionDuplicates(entries, existingKeys);
             results.AddRange(duplicates);
+
+            /* #6281: over MCP a machine keeps one registration (removed ones count): a second id for the same host and
+               port would sit outside the tags and routes that cover the first. The operator's own command and the web
+               route pass no policy and are not held to this. */
+            if (policy is not null && ready.Count > 0)
+            {
+                var held = await definitions.LoadTargetsAsync(cancellationToken);
+                var kept = new List<ParsedServerEntry>();
+                foreach (var entry in ready)
+                {
+                    if (TargetHeldRefusal(held, entry) is { } heldRefusal)
+                    {
+                        results.Add(new ServerResult(entry.Order, entry.DisplayName, AddStatus.Collides, heldRefusal));
+                        continue;
+                    }
+
+                    kept.Add(entry);
+                    held.Add(new RegisteredTarget(entry.StorageKey, entry.ProbeConfig.Host, entry.ProbeConfig.Engine, entry.ProbeConfig.Port, entry.DisplayName, false));
+                }
+
+                ready = kept;
+            }
 
             /* #2280: the identities claimed so far — the store's, plus every entry this batch is about to add.
                The gate above compares DECLARED identities; the check inside the loop compares each entry's ACTUAL
@@ -1377,6 +1402,10 @@ ON CONFLICT (server_id) DO NOTHING";
 
         /// <summary>The storage key of the row that holds <paramref name="serverId"/>, or null when none does.</summary>
         Task<string?> ReadStorageKeyAsync(int serverId, CancellationToken cancellationToken);
+
+        /// <summary>Every registration an MCP add is compared with (#6281): the live definitions and the removed ones.
+        /// A stand-in that holds none keeps the default.</summary>
+        Task<List<RegisteredTarget>> LoadTargetsAsync(CancellationToken cancellationToken) => Task.FromResult(new List<RegisteredTarget>());
     }
 
     /// <summary>The definitions table itself: <c>config_monitored_servers</c>.</summary>
@@ -1394,6 +1423,9 @@ ON CONFLICT (server_id) DO NOTHING";
 
         public Task<string?> ReadStorageKeyAsync(int serverId, CancellationToken cancellationToken) =>
             ReadStorageKeyByIdAsync(_postgres, serverId, cancellationToken);
+
+        public Task<List<RegisteredTarget>> LoadTargetsAsync(CancellationToken cancellationToken) =>
+            LoadRegisteredTargetsAsync(_postgres, cancellationToken);
     }
 
     /* ─────────────────────────────── helpers ─────────────────────────────── */

@@ -152,7 +152,7 @@ public sealed partial class DarlingMcpAlertTools
         "<<GUIDE>>" +
         "Edits what a route matches and applies to, and where it sends. " + DestinationsHelp + " " +
         "A route that is an agent route keeps everything in the Viewer, and a route with an agent setting (Off included) keeps its match and scope there: changing metric_match, scope_server_id, scope_tag_id or fleet_wide on it answers refused. " +
-        "enabled, send_resolutions, fallback_route_id and the destinations can still be changed on a route with an Off setting. A route's own destinations do not stop a change to what it matches. " +
+        "Turning it on, send_resolutions, fallback_route_id and the destinations can still be changed on a route with an Off setting; setting enabled false on it answers refused (that is done in the Viewer or on the web dashboard). A route's own destinations do not stop a change to what it matches. " +
         "Fields: metric_match (" + MatchHelp + "), enabled, scope (scope_server_id or scope_tag_id, the other is cleared; fleet_wide true clears both), " +
         "send_resolutions (inherit, always or never) and fallback_route_id (an existing route; clear_fallback true removes it), plus the destination fields. A field left out keeps its stored value. " +
         "The same rules the Viewer's route window applies hold: * needs a scope, a route is scoped to one server or one tag, a route is not its own fallback, a webhook is an absolute http or https URL, recipients are plain addresses. " +

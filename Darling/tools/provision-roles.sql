@@ -1289,7 +1289,12 @@ BEGIN
    -- explicit agent setting (Off included) keeps both in the Viewer. A route's own destinations do not stop a change
    -- to what it matches: the destinations are set over MCP too. (#6231)
    IF ('metric_match' = ANY (p_columns) OR 'scope' = ANY (p_columns)) AND v_row.agent_level IS NOT NULL THEN
-      RAISE EXCEPTION 'That route has an agent setting (Off), so what it matches and which servers it covers are changed in the Viewer, not over MCP. Enabled, send_resolutions and fallback_route_id can still be changed here.' USING ERRCODE = 'DL403';
+      RAISE EXCEPTION 'That route has an agent setting (Off), so what it matches and which servers it covers are changed in the Viewer or on the web dashboard, not over MCP. Turning it on, send_resolutions and fallback_route_id can still be changed here.' USING ERRCODE = 'DL403';
+   END IF;
+   -- An Off route keeps servers away from a broader agent route, so turning it off widens agent coverage: that is done in the Viewer
+   -- or on the web dashboard. Turning it on stays here. (#6281)
+   IF 'enabled' = ANY (p_columns) AND v_row.agent_level IS NOT NULL AND COALESCE(p_enabled, v_row.enabled) = false THEN
+      RAISE EXCEPTION 'That route has an agent setting (Off), so turning it off is done in the Viewer or on the web dashboard, not over MCP. Turning it on can still be done here.' USING ERRCODE = 'DL403';
    END IF;
    v_match := CASE WHEN 'metric_match' = ANY (p_columns) THEN btrim(COALESCE(p_metric_match, '')) ELSE v_row.metric_match END;
    v_enabled := CASE WHEN 'enabled' = ANY (p_columns) THEN COALESCE(p_enabled, v_row.enabled) ELSE v_row.enabled END;

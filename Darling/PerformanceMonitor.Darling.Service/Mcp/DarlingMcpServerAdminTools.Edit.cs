@@ -59,6 +59,7 @@ public sealed partial class DarlingMcpServerAdminTools
         public const string NotFound = "not_found";
         public const string Conflict = "conflict";
         public const string Collides = "collides";
+        public const string Refused = "refused";
         public const string ConnectionFailed = "connection_failed";
     }
 
@@ -158,6 +159,7 @@ public sealed partial class DarlingMcpServerAdminTools
         "invalid/not_found/ambiguous/conflict/collides/connection_failed with nothing written." +
         "<<GUIDE>>" +
         "SERVING: edit_server is served only when the operator sets mcp.allowServerAdmin (with mcp.allowWrites), like add_servers and remove_server. A change that points Windows authentication at a connection whose server identity is not verified (trust_server_certificate true, or encrypt_mode Optional) is refused as add_servers refuses it, with nothing probed or saved. " +
+        "A change to where the server connects (host, port, database or read_only_intent) is answered refused while a route with an agent setting (Off included) applies to the server, whether by its id, one of its tags or a tag above one, or no scope at all: that is changed in the Viewer or on the web dashboard. The display name and the other settings stay open. " +
         "Changes ONLY the fields named in changes_json, a JSON object. Keys: display_name, host, port (PostgreSQL), " +
         "database, read_only_intent, auth (\"Windows\", \"SQL\", \"ServicePrincipal\", \"ManagedIdentity\"), username, " +
         "password, encrypt_mode, trust_server_certificate, multi_subnet_failover, monthly_cost_usd, " +
@@ -241,7 +243,8 @@ public sealed partial class DarlingMcpServerAdminTools
 
             return await EditServerCoreAsync(
                 new PostgresServerEditStore(postgres), target.Candidates[0].ServerId, changes!, probe,
-                ring, logger, cancellationToken, policy: policy);
+                ring, logger, cancellationToken, policy: policy,
+                agentRouteCovering: policy is null ? null : (id, token) => AgentRouteCoveringServerAsync(postgres, id, token));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -249,6 +252,35 @@ public sealed partial class DarlingMcpServerAdminTools
             ex = new InvalidOperationException(RedactEditSecret(ex.Message, submittedSecrets));
             return McpHelpers.FormatError("edit_server", ex);
         }
+    }
+
+    /// <summary>The lowest route_id of a route with an agent setting (Off included) that applies to the server: scoped to its id,
+    /// to one of its tags or a tag above one, or with no scope at all. Null when none does.</summary>
+    internal const string AgentRouteCoveringServerSql = @"
+WITH RECURSIVE chain(id, parent_id) AS (
+    SELECT t.id, t.parent_id
+    FROM config.server_tags AS t
+    JOIN config.server_tag_map AS m ON m.tag_id = t.id
+    WHERE m.server_id = $1
+    UNION
+    SELECT p.id, p.parent_id
+    FROM config.server_tags AS p
+    JOIN chain AS c ON p.id = c.parent_id)
+SELECT r.route_id
+FROM config.config_notification_routes AS r
+WHERE r.agent_level IS NOT NULL
+  AND ((r.scope_server_id IS NULL AND r.scope_tag_id IS NULL)
+       OR r.scope_server_id = $1
+       OR r.scope_tag_id IN (SELECT id FROM chain))
+ORDER BY r.route_id
+LIMIT 1";
+
+    internal static async Task<int?> AgentRouteCoveringServerAsync(NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+    {
+        await using var command = postgres.CreateCommand(AgentRouteCoveringServerSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        return await command.ExecuteScalarAsync(cancellationToken) is int routeId ? routeId : null;
     }
 
     /* ─────────────────────────────── the core ─────────────────────────────── */
@@ -301,7 +333,8 @@ public sealed partial class DarlingMcpServerAdminTools
     /// </summary>
     internal static async Task<string> EditServerCoreAsync(
         IServerEditStore store, int serverId, ServerEditChanges changes, ServerProbe probe, IPasswordKeyRing ring, ILogger? logger, CancellationToken cancellationToken,
-        ILogger? probeLogger = null, DarlingMcpAddServersPolicy? policy = null)
+        ILogger? probeLogger = null, DarlingMcpAddServersPolicy? policy = null,
+        Func<int, CancellationToken, Task<int?>>? agentRouteCovering = null)
     {
         var row = await store.ReadRowAsync(serverId, cancellationToken);
         if (row is null)
@@ -332,6 +365,16 @@ public sealed partial class DarlingMcpServerAdminTools
                 modified_at = ModifiedAtToken(row.ModifiedAt),
                 message = "The request equals the stored values; nothing was written.",
             }, McpHelpers.JsonOptions);
+        }
+
+        /* #6281: over MCP, where a registration connects is not changed while a route with an agent setting applies to the
+           server (its id, one of its tags or a tag above, or no scope at all): the edit keeps the id and the tags, so it
+           would point that route's coverage at another machine. The web route and the operator pass no check. */
+        if (plan.AddressChanged && agentRouteCovering is not null && await agentRouteCovering(serverId, cancellationToken) is { } coveringRoute)
+        {
+            return Outcome(EditStatus.Refused,
+                $"Route {coveringRoute} has an agent setting and applies to this server, so where it connects (host, port, database or read-only intent) is changed in the Viewer or on the web dashboard, not over MCP. " +
+                "The display name and the other settings can still be changed here.");
         }
 
         var otherKeys = new HashSet<string>(await store.LoadOtherStorageKeysAsync(serverId, cancellationToken), StringComparer.OrdinalIgnoreCase);
