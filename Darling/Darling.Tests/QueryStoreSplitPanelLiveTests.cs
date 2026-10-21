@@ -298,7 +298,7 @@ FROM collect.query_store_stats AS r WHERE r.server_id = 1", ct);
 
                 /* The rollup is read, the raw half is a fourth arm, and its predicate names the refused server alone. */
                 Assert.Contains("query_store_compose_stamp", sql, StringComparison.Ordinal);
-                Assert.Contains("qs_raw_half", sql, StringComparison.Ordinal);
+                Assert.Contains("qs_rn", sql, StringComparison.Ordinal);
                 Assert.Contains("server_id = ANY(", sql, StringComparison.Ordinal);
                 Assert.Contains("<> ALL(", sql, StringComparison.Ordinal);
                 Assert.NotEmpty(expected);
