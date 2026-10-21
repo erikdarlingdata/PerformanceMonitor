@@ -176,9 +176,16 @@ public sealed class AlertEngineTests
 
         public int AttentionBaselineReads;
 
+        public bool AttentionBaselineThrows { get; set; }
+
         public Task<AttentionBaseline?> GetAttentionBaselineAsync(string serverKey, DateTime nowUtc, CancellationToken cancellationToken = default)
         {
             AttentionBaselineReads++;
+            if (AttentionBaselineThrows)
+            {
+                throw new InvalidOperationException("baseline read failed");
+            }
+
             return Task.FromResult(AttentionBaseline);
         }
 
