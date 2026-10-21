@@ -46,9 +46,9 @@ public sealed class ServerTabGridColumnPinTests
     }
 
     [Fact]
-    public void QueryStoreRegressions_CarriesBaseExecsAndBothReadsColumns() =>
+    public void QueryStoreRegressions_CarriesBaseExecsColumn() =>
         EveryKeyIsReturnedBy("QUERY_STORE_REGRESSION_COLUMNS", "DarlingMcpQueryStoreRegressionTools.cs",
-            "baseline_exec_count", "baseline_reads", "recent_reads");
+            "baseline_exec_count");
 
     [Fact]
     public void PlanCorrections_CarriesEveryFieldTheReadReturnsExceptTheDuplicatedFlags() =>

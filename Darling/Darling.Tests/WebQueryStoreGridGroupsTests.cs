@@ -83,7 +83,7 @@ public sealed class WebQueryStoreGridGroupsTests
     public void EachGrid_StartsOnItsCoreColumns_WithATogglePerGroup()
     {
         var r = Run("defaults");
-        Assert.Equal(new[] { "Columns:", "CPU and reads", "Executions and plans" }, Arr(r, "regressions", "toggles"));
+        Assert.Equal(new[] { "Columns:", "CPU", "Executions and plans" }, Arr(r, "regressions", "toggles"));
         Assert.Equal(new[] { "Severity", "Database", "Query", "QueryID", "ExtraDuration", "Duration+%", "BaselineDuration", "RecentDuration", "CPU+%", "Reads+%", "LastExec" },
             Arr(r, "regressions", "heads"));
         Assert.Equal(new[] { "Columns:", "I/O and rows", "Session" }, Arr(r, "completions", "toggles"));

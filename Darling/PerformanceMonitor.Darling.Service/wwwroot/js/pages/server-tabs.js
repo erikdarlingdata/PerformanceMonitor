@@ -3613,7 +3613,7 @@ const TOP_PROC_GROUPS = {
    same finding as one that went from 1 s to 4 s, and the percent alone cannot tell them apart. Extra
    duration is the ranking key and the column that says whether the regression matters at all. */
 /* Stays local: this page's column set differs from the catalog entry's. */
-const QUERY_STORE_REGRESSION_GROUPS = { groups: ["CPU and reads", "Executions and plans"], defaultGroups: [] };
+const QUERY_STORE_REGRESSION_GROUPS = { groups: ["CPU", "Executions and plans"], defaultGroups: [] };
 
 const QUERY_STORE_REGRESSION_COLUMNS = [
   { key: "severity", label: "Severity" },
@@ -3625,11 +3625,8 @@ const QUERY_STORE_REGRESSION_COLUMNS = [
   { key: "baseline_duration_ms", label: "Baseline Duration", format: "ms" },
   { key: "recent_duration_ms", label: "Recent Duration", format: "ms" },
   { key: "cpu_regression_percent", label: "CPU +%", format: "num1" },
-  { key: "baseline_cpu_ms", label: "Baseline CPU", group: "CPU and reads", format: "ms" },
-  { key: "recent_cpu_ms", label: "Recent CPU", group: "CPU and reads", format: "ms" },
-  { key: "io_regression_percent", label: "Reads +%", format: "num1" },
-  { key: "baseline_reads", label: "Base Reads (pages)", group: "CPU and reads", format: "int" },
-  { key: "recent_reads", label: "Recent Reads (pages)", group: "CPU and reads", format: "int" },
+  { key: "baseline_cpu_ms", label: "Baseline CPU", group: "CPU", format: "ms" },
+  { key: "recent_cpu_ms", label: "Recent CPU", group: "CPU", format: "ms" },
   { key: "baseline_exec_count", label: "Base Execs", group: "Executions and plans", format: "int" },
   { key: "recent_exec_count", label: "Recent Execs", group: "Executions and plans", format: "int" },
   /* A plan count that moved between the two sides is the first thing to check: a query that regressed

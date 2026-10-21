@@ -14,6 +14,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -114,12 +115,12 @@ public sealed class QueryStoreRegressionsIntervalTableLiveTests
 
     private static string Describe(DarlingQueryStoreRegressionReader.RegressionRow r) => string.Join("|",
         r.DatabaseName, r.QueryId, Math.Round(r.BaselineDurationMs, 6), Math.Round(r.RecentDurationMs, 6), Math.Round(r.BaselineCpuMs, 6),
-        Math.Round(r.RecentCpuMs, 6), Math.Round(r.BaselineReads, 6), Math.Round(r.RecentReads, 6), Math.Round(r.AdditionalDurationMs, 6),
+        Math.Round(r.RecentCpuMs, 6), Math.Round(r.AdditionalDurationMs, 6),
         r.BaselineExecCount, r.RecentExecCount, r.BaselinePlanCount, r.RecentPlanCount, r.Severity, r.QueryTextSample, r.LastExecutionTime);
 
     private static string Describe(ViewerQueryStoreRegressionRow r) => string.Join("|",
         r.DatabaseName, r.QueryId, Math.Round(r.BaselineDurationMs, 6), Math.Round(r.RecentDurationMs, 6), Math.Round(r.BaselineCpuMs, 6),
-        Math.Round(r.RecentCpuMs, 6), Math.Round(r.BaselineReads, 6), Math.Round(r.RecentReads, 6), Math.Round(r.AdditionalDurationMs, 6),
+        Math.Round(r.RecentCpuMs, 6), Math.Round(r.AdditionalDurationMs, 6),
         r.BaselineExecCount, r.RecentExecCount, r.BaselinePlanCount, r.RecentPlanCount, r.Severity, r.QueryTextSample, r.LastExecutionTime);
 
     /// <summary>The old read, run as it shipped: <see cref="DarlingQueryStoreRegressionReader.QueryStoreRegressionsSql"/> over raw.</summary>
@@ -133,8 +134,8 @@ public sealed class QueryStoreRegressionsIntervalTableLiveTests
         {
             rows.Add(Describe(new DarlingQueryStoreRegressionReader.RegressionRow(
                 reader.GetString(0), reader.GetInt64(1), reader.GetDouble(2), reader.GetDouble(3), null, reader.GetDouble(5), reader.GetDouble(6),
-                null, reader.GetDouble(8), reader.GetDouble(9), null, reader.GetDouble(11), reader.GetInt64(12), reader.GetInt64(13),
-                reader.GetInt32(14), reader.GetInt32(15), reader.GetString(16), reader.GetString(17), reader.IsDBNull(18) ? null : reader.GetDateTime(18))));
+                null, reader.GetDouble(8), reader.GetInt64(9), reader.GetInt64(10),
+                reader.GetInt32(11), reader.GetInt32(12), reader.GetString(13), reader.GetString(14), reader.IsDBNull(15) ? null : reader.GetDateTime(15))));
         }
 
         return rows;
@@ -148,6 +149,11 @@ public sealed class QueryStoreRegressionsIntervalTableLiveTests
         command.Parameters.Add(DatabaseFilter.One(Db).Parameter());
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = 50 });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = baselineStart });
+        /* #5506: no day from the daily totals (this test builds none), so the whole baseline is the live half. */
+        var plan = QueryStoreRegressionBaseline.AllLive(start);
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Date, Value = plan.RunDays });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = plan.LowEnd });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = plan.HighStart });
     }
 
     /// <summary>
@@ -168,6 +174,10 @@ public sealed class QueryStoreRegressionsIntervalTableLiveTests
                 command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = end });
                 command.Parameters.Add(DatabaseFilter.One(Db).Parameter());
                 command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = baselineStart });
+                var plan = QueryStoreRegressionBaseline.AllLive(start);
+                command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Date, Value = plan.RunDays });
+                command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = plan.LowEnd });
+                command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = plan.HighStart });
             }
             else
             {
@@ -261,9 +271,9 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         Assert.NotNull(table);
         Assert.Equal(raw, table.Select(Describe).ToList());
         var row = Assert.Single(table);
-        /* Latest snapshots only, Aborted included: baseline 3 x 30, window 2 x (18 + 3). */
+        /* Latest snapshots only, Regular executions only (#5506: the daily totals hold no other kind): baseline 3 x 30, window 2 x 18. */
         Assert.Equal(90, row.BaselineExecCount);
-        Assert.Equal(42, row.RecentExecCount);
+        Assert.Equal(36, row.RecentExecCount);
 
         var served = await DarlingQueryStoreRegressionReader.ReadQueryStoreRegressionsAsync(
             postgres, ServerId, start, end, DatabaseFilter.One(Db), 50, baselineStart, ct);
