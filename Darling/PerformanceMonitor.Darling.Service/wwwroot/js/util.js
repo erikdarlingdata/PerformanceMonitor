@@ -1163,6 +1163,14 @@ export function setActiveRange(range) {
   activeRange = range || null;
 }
 
+/** #6300: where server `server`'s current window ends, in ms: the custom range's end, or now for a live range. A read that
+ *  looks at an earlier period (the Compare picker) shifts this end back and names it as `as_of`. */
+export function windowEndMs(server) {
+  const range = liveRange();
+  const end = range && range.server === server && range.asOf ? Date.parse(range.asOf) : NaN;
+  return Number.isFinite(end) ? end : Date.now();
+}
+
 /* The wait the Active Queries grid is filtered to, per server (#5235): set when a wait row or the wait trend chart opens
    Active Queries at that wait. In memory only, like activeRange: not persisted and not in the URL, so a reload or a pasted
    link shows every active query. A blank wait deletes the entry. */
