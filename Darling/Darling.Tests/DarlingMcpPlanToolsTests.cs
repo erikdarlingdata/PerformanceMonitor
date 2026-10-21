@@ -655,9 +655,10 @@ public sealed class DarlingMcpPlanToolsLivePostgresTests
             var qsPlan7 = await DarlingMcpPlanTools.AnalyzeQueryStorePlan(postgres, Db1, 42, ServerName, 7);
             AssertAnalysisEnvelope(qsPlan7, "query_store");
 
-            /* plan_id 9 exists but its plan text is NULL -> unavailable; an absent plan_id likewise. */
+            /* plan_id 9 has runtime statistics but its plan text is NULL: since #6211 that is a plan the top-N fetch did not
+               take, so the tool says not_collected and why. An absent plan_id (no statistics either) is still unavailable. */
             var qsPlan9 = await DarlingMcpPlanTools.AnalyzeQueryStorePlan(postgres, Db1, 42, ServerName, 9);
-            Assert.Equal("unavailable", StatusOf(qsPlan9));
+            Assert.Equal("not_collected", StatusOf(qsPlan9));
             var qsPlan999 = await DarlingMcpPlanTools.AnalyzeQueryStorePlan(postgres, Db1, 42, ServerName, 999);
             Assert.Equal("unavailable", StatusOf(qsPlan999));
 
