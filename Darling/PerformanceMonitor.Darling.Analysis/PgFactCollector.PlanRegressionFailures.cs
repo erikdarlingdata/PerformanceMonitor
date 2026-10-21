@@ -117,18 +117,10 @@ public sealed partial class PgFactCollector
         var recentStart = AsNaive(context.TimeRangeEnd).AddHours(-PlanRegressionFailureRule.RecentHours);
         var baselineHours = Math.Max(1.0, (recentStart - windowStart).TotalHours);
 
-        var useWide = false;
-        try
-        {
-            (useWide, _) = await QueryStoreIntervalWide.ReadsTableAsync(
-                connection, context.ServerId, windowStart, AsNaive(context.TimeRangeEnd), null,
-                QueryStoreIntervalWide.TopMinWindow, FactCommandTimeoutSeconds, _logger, context.CancellationToken);
-        }
-        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
-        {
-            /* The gate failed: the raw read is whole, just slower. */
-            _logger?.LogDebug(ex, "PLAN_REGRESSION failure read: the interval table's gate failed for server {ServerId}; reading raw", context.ServerId);
-        }
+        /* The gate absorbs its own faults (a failed decision answers raw), so nothing is swallowed here. */
+        var (useWide, _) = await QueryStoreIntervalWide.ReadsTableAsync(
+            connection, context.ServerId, windowStart, AsNaive(context.TimeRangeEnd), null,
+            QueryStoreIntervalWide.TopMinWindow, FactCommandTimeoutSeconds, _logger, context.CancellationToken);
 
         using var cmd = new NpgsqlCommand(useWide ? PlanRegressionFailureWideSql : PlanRegressionFailureRawSql, connection)
         {
