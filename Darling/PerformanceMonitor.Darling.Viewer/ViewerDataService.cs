@@ -1544,9 +1544,6 @@ SELECT
            newest-first, and the TOP rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling
            through to 181 and showing a spurious upgrade banner on a store that is current. Named only in the probe line, not this
            prose, per the V71 finding. */
-        /* V208 (#6231): the start time on the mute rules. Column-existence sentinel, newest-first, and the TOP rung, so a fully-migrated
-           store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 207 and showing a spurious upgrade banner
-           on a store that is current. Named only in the probe line, not this prose, per the V71 finding. */
         /* V209 (#6281): the guard on the MCP tag writes. Trigger-existence sentinel, newest-first, and the TOP rung, so a fully-migrated
            store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 208 and showing a spurious upgrade banner
            on a store that is current. Named only in the probe line, not this prose, per the V71 finding. */
@@ -1554,6 +1551,9 @@ SELECT
         {
             return 209;
         }
+        /* V208 (#6231): the start time on the mute rules. Column-existence sentinel, newest-first, and the TOP rung, so a fully-migrated
+           store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 207 and showing a spurious upgrade banner
+           on a store that is current. Named only in the probe line, not this prose, per the V71 finding. */
         if (hasMuteRuleStartsAt)
         {
             return 208;

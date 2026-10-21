@@ -305,7 +305,22 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
             write.CommandType = CommandType.StoredProcedure;
             write.Parameters.Add(new SqlParameter("@query_id", SqlDbType.BigInt) { Value = queryId });
             write.Parameters.Add(new SqlParameter("@plan_id", SqlDbType.BigInt) { Value = planId });
-            await write.ExecuteNonQueryAsync(ct);
+            try
+            {
+                if (PlanWriteSeam.Value is { } seam)
+                    await seam(write, ct);
+                else
+                    await write.ExecuteNonQueryAsync(ct);
+            }
+            catch (Exception ex) when (ex is OperationCanceledException || IsOutcomeUnknown(ex, connection.State == ConnectionState.Open, ct.IsCancellationRequested))
+            {
+                /* The procedure was sent and its reply was lost, or the call was cancelled while it ran: the server may have changed the plan.
+                   Never reported as failed, which would say nothing changed (#5632). */
+                var detail = ex is OperationCanceledException ? "the call was cancelled while the server ran it" : ErrorText(ex, secret);
+                return RemediationResult.Unknown(name,
+                    $"The statement to {(force ? "force" : "unforce")} plan {planId} for query {queryId} was sent, but its reply was lost ({detail}). The plan may have been {(force ? "forced" : "unforced")}. Read the plan's current state before you try again.");
+            }
+
             return RemediationResult.Done(name, dryRun, wrote: true, $"Plan {planId} was {(force ? "forced" : "unforced")} for query {queryId} in {database}.")
                 with { Statement = PlanForceStatement.For(database, queryId, planId, force) };
         }, ct);
@@ -417,6 +432,12 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
     /// the real batch and then lose the reply, the way a dropped connection would.
     /// </summary>
     internal static readonly AsyncLocal<Func<SqlCommand, CancellationToken, Task<SqlDataReader>>?> KillBatchSeam = new();
+
+    /// <summary>
+    /// The test seam for the plan force and unforce write (#5632): null runs the procedure with <c>ExecuteNonQueryAsync</c>. A test sets it, for its
+    /// own async flow only, to run the real procedure and then lose the reply or cancel, the way a dropped connection or a cancelled call would.
+    /// </summary>
+    internal static readonly AsyncLocal<Func<SqlCommand, CancellationToken, Task>?> PlanWriteSeam = new();
 
     /// <summary>
     /// True for an error that came after the kill batch was sent and is not the server refusing a statement: a broken connection (the

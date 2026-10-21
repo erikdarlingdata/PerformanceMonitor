@@ -368,6 +368,36 @@ public sealed class AgentActionGateLiveTests
     }
 
     [Fact]
+    public async Task TheWrite_ReChecksTheAgentActionsSwitch_RefusesActionsOff_JournalsActionFailed_AndNothingReachesTheServer()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var (request, claim) = await OpenAndClaimAsync(store);
+            await ExecAsync(connection, "INSERT INTO config.config_service (id) VALUES (1) ON CONFLICT DO NOTHING", ct);
+            await ExecAsync(connection, "UPDATE config.config_service SET agent_actions_enabled = true", ct);
+            var hooks = new AgentActionHooks
+            {
+                LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, int?>>((_, _) => 2),
+                /* Runs in the gate's transaction after the switch check passed and before action_called commits: a person turns the switch
+                   off now, so only the write's re-check can see it. */
+                ReadBefore = async (_, _, token) =>
+                {
+                    await ExecAsync(connection, "UPDATE config.config_service SET agent_actions_enabled = false", token);
+                    return "{\"reason\":\"old\"}";
+                },
+                Write = (_, _, _) => { _writes++; return Task.FromResult<string?>("{\"reason\":\"new\"}"); },
+            };
+            var result = await store.RunAgentActionAsync(Call(request, claim), hooks, ct);
+            Assert.Equal(AgentActionCodes.ActionsOff, result.Refusal?.Reason);
+            Assert.NotNull(result.CalledId);
+            Assert.Equal(0, _writes);
+            Assert.Equal("action_called|action_failed", await EventsAsync(connection, request, ct));
+            Assert.Equal(AgentActionCodes.ActionsOff, await ScalarAsync(connection,
+                $"SELECT detail->>'error' FROM config.investigation_journal WHERE request_id = '{request}' AND event = 'action_failed'", ct));
+        });
+    }
+
+    [Fact]
     public async Task AFullAgentJournal_RefusesJournalCapped()
     {
         await RunAsync(async (store, connection, ct) =>

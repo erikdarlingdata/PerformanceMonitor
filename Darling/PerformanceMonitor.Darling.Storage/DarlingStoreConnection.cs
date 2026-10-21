@@ -62,6 +62,30 @@ public static class DarlingStoreConnection
         return connectionString + ";Timezone=UTC";
     }
 
+    /// <summary>The session setting the MCP host puts on its store connections (#6281), and the value it carries. The store's guard
+    /// on the tag writes (V209) refuses an MCP session by this marker as well as by the <c>mcp</c> login, so an MCP that connects as
+    /// the store's owner, or as another login, is held to the same rule.</summary>
+    public const string McpSurfaceSetting = "darling.surface";
+
+    /// <summary>The value of <see cref="McpSurfaceSetting"/> on an MCP connection.</summary>
+    public const string McpSurfaceValue = "mcp";
+
+    /// <summary>
+    /// Forces <c>-c darling.surface=mcp</c> into the connection's startup <c>Options</c> (#6281), keeping any <c>Options</c> the
+    /// caller already set and putting the marker LAST, so it wins over a <c>darling.surface</c> the caller's own string names
+    /// (Postgres applies <c>-c</c> options in order). Appended as a quoted <c>Options</c> keyword, like
+    /// <see cref="PinSessionTimeZoneUtc"/>, so every other keyword survives byte for byte. Only the MCP host calls it: the
+    /// service, the Viewer and the web must not carry the marker.
+    /// </summary>
+    public static string WithMcpSurfaceMarker(string connectionString)
+    {
+        var existing = new NpgsqlConnectionStringBuilder(connectionString).Options;
+        var options = string.IsNullOrWhiteSpace(existing)
+            ? $"-c {McpSurfaceSetting}={McpSurfaceValue}"
+            : $"{existing.Trim()} -c {McpSurfaceSetting}={McpSurfaceValue}";
+        return connectionString + ";Options=\"" + options.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
+    }
+
     /// <summary>
     /// The ONE place every STORE connection string picks up its surface's <c>ApplicationName</c> (#4479) —
     /// <c>DarlingManagedPostgres.WebApplicationName</c>/<c>McpApplicationName</c> (#4442) generalized to

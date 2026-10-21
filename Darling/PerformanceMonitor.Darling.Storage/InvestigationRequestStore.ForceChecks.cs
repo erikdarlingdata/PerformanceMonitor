@@ -26,6 +26,14 @@ public sealed partial class InvestigationRequestStore
     /// <summary>The most checks one force gets: two after Query Store passes, then one an hour for 24 hours.</summary>
     public const int MaxForceChecks = 26;
 
+    /// <summary>
+    /// Journals <c>action_done</c> with <c>recorded_late</c> for a force whose reply was lost and which the server shows forced when read again
+    /// (#5632), so <see cref="DueForceChecksSql"/>, which joins on <c>action_done</c>, opens its checks. On a fresh connection with no
+    /// cancellation, skipped when the call already has its <c>action_done</c>. True when the call has an <c>action_done</c> afterwards.
+    /// </summary>
+    public Task<bool> RecordForceTookEffectAsync(Guid requestId, int serverId, string agentId, long calledId, string? afterJson, string note) =>
+        RecordLateDoneAsync(requestId, serverId, "agent:" + agentId, calledId, afterJson, note, Now());
+
     /// <summary>Hours after the force that the last hourly check is due (check 26); nothing opens after one more hour.</summary>
     public const int ForceCheckLastDueHours = 24;
 

@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -2085,17 +2085,22 @@ ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS starts_at_utc time
     /// V209 (#6281, part of #5632): the MCP tag writes may not change which servers an agent route covers. A tag-scoped route covers
     /// every registered server mapped to its tag or to any descendant of it (<c>NotificationRouteScopeExpander</c>), and
     /// <c>update_notification_route</c> refuses over MCP to change an agent route's scope, so the tag tools, which write
-    /// <c>config.server_tags</c> and <c>config.server_tag_map</c> as the <c>mcp</c> login, could not be left to change the same set.
+    /// <c>config.server_tags</c> and <c>config.server_tag_map</c>, could not be left to change the same set.
     ///
-    /// <para><b>The rule, for a session whose login is <c>mcp</c> only.</b> A row trigger on each table refuses with SQLSTATE
-    /// <c>DL403</c>, naming the route, when the write is on a tag that is, or is under, the tag of a route with
-    /// <c>agent_level</c> 1 or higher: an assignment or removal of a registered server (a map row for a server that is not
-    /// registered covers nothing, and <c>remove_server</c> deletes the server row before it clears its map rows, so it passes), a
-    /// delete of the tag (its subtree and their assignments go with it), or a move of the tag to another parent (its old place and
-    /// its new place both count). A rename, a colour or a sort-order change does not touch coverage and is not looked at. Any
-    /// other login, the owner, the Viewer and the web included, is not held to it. The test is on <c>session_user</c>, which a
-    /// non-superuser cannot change, because the function is SECURITY DEFINER (it reads the route table, which <c>mcp</c> may
-    /// not). No new column, no backfill, no grant.</para>
+    /// <para><b>Which sessions.</b> A session whose login is <c>mcp</c>, or whose session setting <c>darling.surface</c> is
+    /// <c>mcp</c>: the MCP host sets that setting on its own connections, so an MCP that connects as the store's owner (no
+    /// <c>postgres.mcpConnectionString</c>), or as another login, is held to the rule too. The Viewer, the web dashboard and the
+    /// service carry neither and are not held to it. The login test is on <c>session_user</c>, which a non-superuser cannot change,
+    /// because the function is SECURITY DEFINER (it reads the route table, which <c>mcp</c> may not).</para>
+    ///
+    /// <para><b>The rule.</b> A row trigger on each table refuses with SQLSTATE <c>DL403</c>, naming the route, when any tag the
+    /// write could reach is the scope tag of a route whose <c>agent_level</c> is set (0, Off, included: an Off route is how a person
+    /// keeps servers away from a broader agent route, the same test the route rule uses). It does not work out which route wins. For
+    /// an assignment or removal of a server, the tag and every tag above it. For a delete of a tag, or a move of it to another
+    /// parent, the tag, every tag under it, and every tag above its old parent and above its new parent. A server that is not
+    /// registered, or has been removed, counts like any other: its tag rows come back with it when it is added again (the id is a
+    /// hash), so <c>remove_server</c> over MCP is refused for a server mapped under an agent route's tag. A rename, a colour or a
+    /// sort-order change does not touch coverage and is not looked at. No new column, no backfill, no grant.</para>
     /// </summary>
     private const string V209Sql = @"
 CREATE OR REPLACE FUNCTION config.agent_route_tag_guard()
@@ -2106,48 +2111,58 @@ SET search_path = pg_catalog, pg_temp
 AS $guard$
 DECLARE
     v_route integer;
-    v_start integer[];
-    v_tag integer;
+    v_up integer[];
+    v_down integer[];
 BEGIN
-    IF session_user::text IS DISTINCT FROM 'mcp' THEN
+    IF session_user::text IS DISTINCT FROM 'mcp'
+       AND COALESCE(pg_catalog.current_setting('darling.surface', true), '') <> 'mcp' THEN
         RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
     END IF;
 
-    v_start := ARRAY[]::integer[];
+    v_up := ARRAY[]::integer[];
+    v_down := ARRAY[]::integer[];
     IF TG_TABLE_NAME = 'server_tag_map' THEN
-        IF TG_OP IN ('INSERT', 'UPDATE')
-           AND EXISTS (SELECT 1 FROM config.config_monitored_servers AS s WHERE s.server_id = NEW.server_id) THEN
-            v_start := v_start || NEW.tag_id;
+        IF TG_OP IN ('INSERT', 'UPDATE') THEN
+            v_up := v_up || NEW.tag_id;
         END IF;
-        IF TG_OP IN ('DELETE', 'UPDATE')
-           AND EXISTS (SELECT 1 FROM config.config_monitored_servers AS s WHERE s.server_id = OLD.server_id) THEN
-            v_start := v_start || OLD.tag_id;
+        IF TG_OP IN ('DELETE', 'UPDATE') THEN
+            v_up := v_up || OLD.tag_id;
         END IF;
     ELSIF TG_OP = 'DELETE' THEN
-        v_start := ARRAY[OLD.id];
+        v_down := ARRAY[OLD.id];
+        IF OLD.parent_id IS NOT NULL THEN
+            v_up := ARRAY[OLD.parent_id];
+        END IF;
     ELSIF NEW.parent_id IS DISTINCT FROM OLD.parent_id THEN
-        v_start := ARRAY[OLD.id];
+        v_down := ARRAY[OLD.id];
+        IF OLD.parent_id IS NOT NULL THEN
+            v_up := v_up || OLD.parent_id;
+        END IF;
         IF NEW.parent_id IS NOT NULL THEN
-            v_start := v_start || NEW.parent_id;
+            v_up := v_up || NEW.parent_id;
         END IF;
     END IF;
 
-    FOREACH v_tag IN ARRAY v_start LOOP
-        WITH RECURSIVE chain(id, parent_id) AS (
-            SELECT t.id, t.parent_id FROM config.server_tags AS t WHERE t.id = v_tag
+    IF cardinality(v_up) + cardinality(v_down) > 0 THEN
+        WITH RECURSIVE above(id, parent_id) AS (
+            SELECT t.id, t.parent_id FROM config.server_tags AS t WHERE t.id = ANY(v_up)
             UNION
-            SELECT p.id, p.parent_id FROM config.server_tags AS p JOIN chain AS c ON p.id = c.parent_id)
+            SELECT p.id, p.parent_id FROM config.server_tags AS p JOIN above AS a ON p.id = a.parent_id),
+        below(id) AS (
+            SELECT t.id FROM config.server_tags AS t WHERE t.id = ANY(v_down)
+            UNION
+            SELECT c.id FROM config.server_tags AS c JOIN below AS b ON c.parent_id = b.id)
         SELECT r.route_id INTO v_route
         FROM config.config_notification_routes AS r
-        JOIN chain ON chain.id = r.scope_tag_id
-        WHERE r.agent_level >= 1
+        WHERE r.agent_level IS NOT NULL
+          AND (r.scope_tag_id IN (SELECT a.id FROM above AS a) OR r.scope_tag_id IN (SELECT b.id FROM below AS b))
         ORDER BY r.route_id
         LIMIT 1;
         IF v_route IS NOT NULL THEN
-            RAISE EXCEPTION 'Agent route % covers this tag, or a tag above it, so which servers it covers is changed in the Viewer, not over MCP.', v_route
+            RAISE EXCEPTION 'Route % has an agent setting (Off included) and its tag is this tag, or is above or below it, so changes to which servers it covers are made in the Viewer or on the web dashboard, not over MCP.', v_route
                 USING ERRCODE = 'DL403';
         END IF;
-    END LOOP;
+    END IF;
 
     RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
 END
