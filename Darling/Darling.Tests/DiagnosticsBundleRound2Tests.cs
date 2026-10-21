@@ -115,8 +115,14 @@ public sealed class DiagnosticsBundleRound2Tests
     {
         var aliaser = new BundleAliaser();
         aliaser.AddName(AliasKind.Database, "Store");
-        var node = new JsonObject { ["status"] = "ok", ["Store_Log"] = 1 };
-        var (text, leaks) = Assemble(aliaser, Section("store_log", node));
+        /* #6256: Store glued to Log by an underscore is one identifier, so it is no longer a name in a key. */
+        var glued = new JsonObject { ["status"] = "ok", ["Store_Log"] = 1 };
+        var (gluedText, gluedLeaks) = Assemble(aliaser, Section("store_log", glued));
+        Assert.Equal(0, gluedLeaks);
+        Assert.NotNull(gluedText);
+
+        var dotted = new JsonObject { ["status"] = "ok", ["Store.Log"] = 1 };
+        var (text, leaks) = Assemble(aliaser, Section("store_log", dotted));
         Assert.True(leaks > 0);
         Assert.Null(text);
 

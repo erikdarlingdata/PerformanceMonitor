@@ -138,15 +138,24 @@ public sealed class DiagnosticsBundleAliasTests
     }
 
     [Fact]
-    public void Verifier_CatchesAGluedName_AndForcesTheNoBoundaryPass()
+    public void Verifier_ReplacesAStandaloneLeftoverName_AndLeavesAGluedOneAlone()
     {
         var a = new BundleAliaser();
         a.AddName(AliasKind.Server, "zeta-07");
         var root = (JsonObject)a.AliasTree(JsonNode.Parse("""{"sections":{"x":{"msg":"zeta-07x failed"}}}"""))!;
         Assert.Contains("zeta-07x", root.ToJsonString(), StringComparison.Ordinal);
         var (leaks, text) = a.Finish(root, DiagnosticsBundle.WriteOptions);
+
+        /* #6256: a name inside a longer word is not a leftover, so the verify pass neither reports nor rewrites it. */
         Assert.Empty(leaks);
-        Assert.DoesNotContain("zeta-07", text!, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("zeta-07x failed", text!, StringComparison.Ordinal);
+
+        /* The same name standing alone, which the scan did not see, is still replaced by the verify pass. */
+        var standalone = new JsonObject { ["sections"] = new JsonObject { ["x"] = new JsonObject { ["msg"] = "zeta-07 failed" } } };
+        var (standaloneLeaks, standaloneText) = a.Finish(standalone, DiagnosticsBundle.WriteOptions);
+        Assert.Empty(standaloneLeaks);
+        Assert.DoesNotContain("zeta-07", standaloneText!, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("server-1 failed", standaloneText!, StringComparison.Ordinal);
     }
 
     [Fact]

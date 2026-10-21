@@ -45,8 +45,9 @@ internal sealed record BundleLeak(string Section, string Field, string Class);
 /// <para><b>The scan</b> rewrites string VALUES, never keys, with one compiled alternation, longest token first, with
 /// word-character boundaries so <c>sales</c> does not match inside <c>wholesales</c>. It runs in one pass, so an alias
 /// is never re-scanned. <see cref="Finish"/> is the proof: it scans the serialized bytes and the JSON-unescaped text
-/// for every known token of <see cref="VerifyMinimumLength"/> characters or more as a plain substring, replaces a
-/// glued hit with no boundary, and reports anything that still survives.</para>
+/// for every known token of <see cref="VerifyMinimumLength"/> characters or more as a whole name (the same boundary
+/// as the scan), replaces a leftover whole name, and reports anything that still survives. A name that only occurs
+/// inside a longer word (<c>apps</c> in <c>appsettings</c>) is neither a leftover nor rewritten (#6256).</para>
 /// </summary>
 internal sealed class BundleAliaser
 {
@@ -627,9 +628,10 @@ internal sealed class BundleAliaser
 
     /// <summary>
     /// The proof. Serializes <paramref name="root"/> (indented), scans the bytes and the JSON-unescaped text for every
-    /// known token and secret as a plain case-insensitive substring, replaces a name that was glued to word
-    /// characters (which the boundary rule let through) with no boundary, and scans again. Returns the leaks that
-    /// survive, and the final serialized text when there are none.
+    /// known token and secret, replaces a whole name the scan missed, and scans again. A token is a hit only between
+    /// non-word characters (see <see cref="ContainsWholeName"/>), so a name inside a longer word is left alone and
+    /// is not reported (#6256). A secret is still matched as a plain substring. Returns the leaks that survive, and
+    /// the final serialized text when there are none.
     /// </summary>
     internal (IReadOnlyList<BundleLeak> Leaks, string? Text) Finish(JsonNode root, JsonSerializerOptions options)
     {
@@ -653,7 +655,8 @@ internal sealed class BundleAliaser
                 return (leaks, null);
             }
 
-            ReplaceGlued(root, tokens);
+            var names = WholeNameRegex(tokens);
+            ReplaceLeftover(root, names, new HashSet<string>(_aliasByToken.Values, StringComparer.OrdinalIgnoreCase));
         }
 
         var finalText = root.ToJsonString(options);
@@ -888,7 +891,7 @@ internal sealed class BundleAliaser
         /* Alias text the generator minted (domain-1, host-3) is output, not information, so a real name such as "main"
            or "host" must not match inside it. The product's own keys are masked the same way (see MaskProductKeys). */
         var maskedValues = MaskAliasText(unescaped, minted);
-        var maskedBytes = MaskAliasText(MaskProductKeys(serialized), minted);
+        var maskedBytes = MaskAliasText(MaskJsonEscapes(MaskProductKeys(serialized)), minted);
         foreach (var token in _aliasByToken.Keys)
         {
             if (!Verifiable(token) || TokenIsAliasText(token, minted))
@@ -896,7 +899,7 @@ internal sealed class BundleAliaser
                 continue;
             }
 
-            if (maskedValues.Contains(token, StringComparison.OrdinalIgnoreCase) || maskedBytes.Contains(token, StringComparison.OrdinalIgnoreCase))
+            if (ContainsWholeName(maskedValues, token) || ContainsWholeName(maskedBytes, token))
             {
                 leaks.Add(Locate(values, token, "name"));
             }
@@ -930,6 +933,66 @@ internal sealed class BundleAliaser
     private static string MaskAliasText(string text, HashSet<string> minted) =>
         s_aliasShape.Replace(text, m => minted.Contains(m.Value) ? new string('\u0001', m.Length) : m.Value);
 
+    private static readonly Regex s_jsonEscape = new(@"\\(?:u[0-9A-Fa-f]{4}|[""\\/bfnrt])", RegexOptions.CultureInvariant, TimeSpan.FromSeconds(5));
+
+    /// <summary>
+    /// Blanks each JSON escape sequence (<c>\u0027</c>, <c>\n</c>, <c>\\</c>) in serialized text, so the letter after the
+    /// backslash is not mistaken for a word character that glues to the name which follows it.
+    /// </summary>
+    private static string MaskJsonEscapes(string serialized) =>
+        s_jsonEscape.Replace(serialized, m => new string('\u0001', m.Length));
+
+    private static bool IsWordChar(char c) => c is (>= 'A' and <= 'Z') or (>= 'a' and <= 'z') or (>= '0' and <= '9') or '_';
+
+    /// <summary>
+    /// True when <paramref name="token"/> occurs in <paramref name="text"/> (case-insensitive) with no word character
+    /// <c>[A-Za-z0-9_]</c> directly before or after it, the same boundary the scan and the secret pass use. A side is
+    /// only checked when the name's own edge character is a word character: a name that starts or ends with
+    /// punctuation has no word edge to protect, so it matches wherever it did before the boundary existed (#6256).
+    /// </summary>
+    internal static bool ContainsWholeName(string text, string token)
+    {
+        var start = 0;
+        while (token.Length > 0 && start <= text.Length - token.Length)
+        {
+            var at = text.IndexOf(token, start, StringComparison.OrdinalIgnoreCase);
+            if (at < 0)
+            {
+                return false;
+            }
+
+            var end = at + token.Length;
+            var clearBefore = at == 0 || !IsWordChar(token[0]) || !IsWordChar(text[at - 1]);
+            var clearAfter = end >= text.Length || !IsWordChar(token[^1]) || !IsWordChar(text[end]);
+            if (clearBefore && clearAfter)
+            {
+                return true;
+            }
+
+            start = at + 1;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// One alternation of the tokens, longest first, each with the <see cref="ContainsWholeName"/> boundary. The
+    /// lookarounds read the real neighbouring characters of the text it runs over.
+    /// </summary>
+    private static Regex WholeNameRegex(IEnumerable<string> tokens)
+    {
+        var parts = tokens
+            .Where(t => t.Length > 0)
+            .OrderByDescending(t => t.Length)
+            .ThenBy(t => t, StringComparer.Ordinal)
+            .Select(t => (IsWordChar(t[0]) ? "(?<![A-Za-z0-9_])" : string.Empty) + Regex.Escape(t) + (IsWordChar(t[^1]) ? "(?![A-Za-z0-9_])" : string.Empty))
+            .ToList();
+        return new Regex(
+            parts.Count == 0 ? "(?!)" : string.Join('|', parts),
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant,
+            TimeSpan.FromSeconds(5));
+    }
+
     /// <summary>
     /// True for text the alias generator itself mints (<c>server-3</c>, <c>ip-1</c>): a token that is exactly one of the
     /// aliases handed out. A real name that merely looks like an alias, and was never handed out, is still verified.
@@ -944,7 +1007,7 @@ internal sealed class BundleAliaser
     {
         foreach (var (path, text) in values)
         {
-            if (text.Contains(needle, StringComparison.OrdinalIgnoreCase))
+            if (cls == "name" ? ContainsWholeName(text, needle) : text.Contains(needle, StringComparison.OrdinalIgnoreCase))
             {
                 return new BundleLeak(SectionOf(path), FieldOf(path), cls);
             }
@@ -976,7 +1039,7 @@ internal sealed class BundleAliaser
         var masked = MaskAliasText(unescaped, minted);
         foreach (var token in _aliasByToken.Keys)
         {
-            if (Verifiable(token) && !TokenIsAliasText(token, minted) && masked.Contains(token, StringComparison.OrdinalIgnoreCase))
+            if (Verifiable(token) && !TokenIsAliasText(token, minted) && ContainsWholeName(masked, token))
             {
                 hits.Add(token);
             }
@@ -985,7 +1048,7 @@ internal sealed class BundleAliaser
         return hits;
     }
 
-    private void ReplaceGlued(JsonNode? node, HashSet<string> tokens)
+    private void ReplaceLeftover(JsonNode? node, Regex names, HashSet<string> minted)
     {
         switch (node)
         {
@@ -994,11 +1057,11 @@ internal sealed class BundleAliaser
                 {
                     if (obj[key] is JsonValue v && v.TryGetValue<string>(out var text))
                     {
-                        obj[key] = _productValues.Contains(text) ? text : ReplaceNoBoundary(text, tokens);
+                        obj[key] = _productValues.Contains(text) ? text : ReplaceWholeNames(text, names, minted);
                     }
                     else
                     {
-                        ReplaceGlued(obj[key], tokens);
+                        ReplaceLeftover(obj[key], names, minted);
                     }
                 }
 
@@ -1008,11 +1071,11 @@ internal sealed class BundleAliaser
                 {
                     if (array[i] is JsonValue v && v.TryGetValue<string>(out var text))
                     {
-                        array[i] = _productValues.Contains(text) ? text : ReplaceNoBoundary(text, tokens);
+                        array[i] = _productValues.Contains(text) ? text : ReplaceWholeNames(text, names, minted);
                     }
                     else
                     {
-                        ReplaceGlued(array[i], tokens);
+                        ReplaceLeftover(array[i], names, minted);
                     }
                 }
 
@@ -1020,40 +1083,28 @@ internal sealed class BundleAliaser
         }
     }
 
-    /// <summary>Replaces each token wherever it occurs, except inside alias text the generator minted (which is output, never information).</summary>
-    private string ReplaceNoBoundary(string text, HashSet<string> tokens)
+    /// <summary>
+    /// Replaces each known name that stands between non-word characters, except inside alias text the generator
+    /// minted (which is output, never information). The text is matched whole with the minted spans blanked to a
+    /// non-word character, so the boundary reads the real neighbouring characters and a name cannot match across an
+    /// alias; the replacement is written into the original text.
+    /// </summary>
+    private string ReplaceWholeNames(string text, Regex names, HashSet<string> minted)
     {
-        var minted = new HashSet<string>(_aliasByToken.Values, StringComparer.OrdinalIgnoreCase);
         var result = new StringBuilder(text.Length);
         var last = 0;
-        foreach (Match alias in s_aliasShape.Matches(text))
+        foreach (Match m in names.Matches(MaskAliasText(text, minted)))
         {
-            if (!minted.Contains(alias.Value))
+            if (m.Length == 0 || !_aliasByToken.TryGetValue(text.Substring(m.Index, m.Length), out var alias))
             {
                 continue;
             }
 
-            result.Append(ReplaceTokens(text[last..alias.Index], tokens));
-            result.Append(alias.Value);
-            last = alias.Index + alias.Length;
+            result.Append(text, last, m.Index - last).Append(alias);
+            last = m.Index + m.Length;
         }
 
-        result.Append(ReplaceTokens(text[last..], tokens));
+        result.Append(text, last, text.Length - last);
         return result.ToString();
-    }
-
-    private string ReplaceTokens(string text, HashSet<string> tokens)
-    {
-        var result = text;
-        foreach (var token in tokens.OrderByDescending(t => t.Length))
-        {
-            if (result.Contains(token, StringComparison.OrdinalIgnoreCase))
-            {
-                result = Regex.Replace(
-                    result, Regex.Escape(token), _aliasByToken[token], RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromSeconds(5));
-            }
-        }
-
-        return result;
     }
 }
