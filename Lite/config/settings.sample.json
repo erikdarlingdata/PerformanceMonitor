@@ -78,6 +78,8 @@
   "alert_client_timeouts_enabled": false,
   "alert_client_timeouts_warning_per_minute": 10,
   "alert_client_timeouts_critical_per_minute": 60,
+  "alert_client_timeouts_warning_multiple": 3,
+  "alert_client_timeouts_critical_multiple": 10,
 
   // ---- Long-running queries ----------------------------------------------------------
   // The five exclude_* switches suppress the queries that are long-running by design and

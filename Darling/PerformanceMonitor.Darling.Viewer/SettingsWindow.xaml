@@ -275,7 +275,17 @@
                                     <TextBlock Text="Critical at" VerticalAlignment="Center" Margin="6,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                     <TextBox AutomationProperties.Name="Client timeouts, critical at" x:Name="AlertClientTimeoutsCriticalBox" Width="45" Text="60" Margin="6,0,0,0" VerticalAlignment="Center"
-                                             ToolTip="Critical bar: client timeouts and cancels (attentions) per minute (same span as the Warning bar). Never below the Warning bar. Default 60."/>
+                                             ToolTip="Critical floor: client timeouts and cancels (attentions) per minute (same span as the Warning floor). Never below the Warning floor. Default 60. The bar is the higher of this floor and the Critical multiple times the server's own baseline."/>
+                                    <TextBlock Text="(floors), or" VerticalAlignment="Center" Margin="6,0,0,0"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox AutomationProperties.Name="Client timeouts, warning multiple" x:Name="AlertClientTimeoutsWarningMultipleBox" Width="35" Text="3" Margin="6,0,0,0" VerticalAlignment="Center"
+                                             ToolTip="Warning multiple: the Warning bar is at least this many times the server's own baseline (the p99.9 of its 3-minute average rate over the last 7 days). At least 1. Default 3. A server with under a day of capture has no baseline and uses the floors."/>
+                                    <TextBlock Text="x /" VerticalAlignment="Center" Margin="4,0,0,0"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox AutomationProperties.Name="Client timeouts, critical multiple" x:Name="AlertClientTimeoutsCriticalMultipleBox" Width="35" Text="10" Margin="6,0,0,0" VerticalAlignment="Center"
+                                             ToolTip="Critical multiple: the Critical bar is at least this many times the server's own baseline. Never below the Warning multiple. Default 10."/>
+                                    <TextBlock Text="x the server's own baseline" VerticalAlignment="Center" Margin="4,0,0,0"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
                                     <CheckBox x:Name="AlertLongRunningQueryCheckBox" Content="Long-running queries over" VerticalAlignment="Center"

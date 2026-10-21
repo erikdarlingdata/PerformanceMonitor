@@ -160,6 +160,13 @@ public sealed class AlertEngine
     private readonly ConcurrentDictionary<string, DateTime> _lastAttentionEvaluation = new();
     private readonly TierEscalation _attentionEscalation = new();
 
+    /* #5736: the Client Timeouts baseline per server, read at most once per AttentionBaselineMath.RefreshHours (and again after a restart,
+       the dictionary being in memory only). A heavy 7-day read must not run on every evaluation. A read that failed is not retried for
+       AttentionBaselineMath.RetryAfterFailureMinutes. */
+    private readonly ConcurrentDictionary<string, AttentionBaselineEntry> _attentionBaselines = new();
+
+    private sealed record AttentionBaselineEntry(DateTime ReadAt, AttentionBaseline? Baseline, bool Failed);
+
     /* Round 2 of #5714 (H1): a Muted Client Timeouts fire is not a delivery. The proportional mute changes from one run to the
        next on its own (the sample mix decides it), so a Muted Critical that stamped the delivery cooldown or recorded its tier
        held back the next real Critical and killed the escalation bypass. Muted fires keep a cooldown stamp and a run marker of
@@ -2446,8 +2453,20 @@ public sealed class AlertEngine
 
             _lastAttentionEvaluation[key] = now;
 
+            var warningFloor = Threshold(AlertThresholdKey.ClientTimeoutsWarningPerMinute, key);
+            var criticalFloor = Threshold(AlertThresholdKey.ClientTimeoutsCriticalPerMinute, key);
+            var multiples = AttentionBaselineMath.ClampMultiples(_settings.ClientTimeoutsWarningMultiple, _settings.ClientTimeoutsCriticalMultiple);
+
+            /* #5736: a relative bar is never below its floor, so a rate under the Warning floor fires nothing and the baseline is not
+               needed: the heavy read happens only for a server whose rate has reached the floor, and then at most once a day. */
+            AttentionBaseline? baseline = null;
+            if (AttentionEvaluator.ReachesFloor(reading, warningFloor))
+            {
+                baseline = await GetAttentionBaselineAsync(key, now, ct);
+            }
+
             var finding = AttentionEvaluator.Evaluate(
-                reading, Threshold(AlertThresholdKey.ClientTimeoutsWarningPerMinute, key), Threshold(AlertThresholdKey.ClientTimeoutsCriticalPerMinute, key),
+                reading, warningFloor, criticalFloor,
                 (database, app) => _isAlertMuted(new AlertMuteContext
                 {
                     ServerName = serverName,
@@ -2455,7 +2474,8 @@ public sealed class AlertEngine
                     MetricName = AttentionEvaluator.MetricName,
                     DatabaseName = database,
                     ClientAppName = app,
-                }));
+                }),
+                new AttentionRelativeBars(baseline?.P999ThreeMinuteAverage, multiples.Warning, multiples.Critical));
 
             if (finding is not null)
             {
@@ -2553,6 +2573,45 @@ public sealed class AlertEngine
         {
             _logger?.LogError("Failed to check client timeouts for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
             _readFailures?.RecordReadFailure(key, "client timeouts", readClock.ElapsedMilliseconds);
+        }
+    }
+
+    /// <summary>
+    /// The server's Client Timeouts baseline (#5736), from the in-memory cache while it is under <see cref="AttentionBaselineMath.RefreshHours"/> old,
+    /// else read once through <see cref="IAlertReadAdapter.GetAttentionBaselineAsync"/>. Null is a server with under a day of capture (the floors
+    /// alone grade it), and that answer is cached for the same day. A failed read throws, so the sweep records a read failure and fires nothing for
+    /// the server (a noisy server must not be graded on the floors because a read failed), and is not retried for
+    /// <see cref="AttentionBaselineMath.RetryAfterFailureMinutes"/>.
+    /// </summary>
+    private async Task<AttentionBaseline?> GetAttentionBaselineAsync(string key, DateTime now, CancellationToken ct)
+    {
+        if (_attentionBaselines.TryGetValue(key, out var held))
+        {
+            if (held.Failed && now - held.ReadAt < TimeSpan.FromMinutes(AttentionBaselineMath.RetryAfterFailureMinutes))
+            {
+                throw new InvalidOperationException("The Client Timeouts baseline read failed recently and is not retried yet.");
+            }
+
+            if (!held.Failed && now - held.ReadAt < TimeSpan.FromHours(AttentionBaselineMath.RefreshHours))
+            {
+                return held.Baseline;
+            }
+        }
+
+        try
+        {
+            var baseline = await _readAdapter.GetAttentionBaselineAsync(key, now, ct);
+            _attentionBaselines[key] = new AttentionBaselineEntry(now, baseline, Failed: false);
+            return baseline;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            _attentionBaselines[key] = new AttentionBaselineEntry(now, null, Failed: true);
+            throw;
         }
     }
 

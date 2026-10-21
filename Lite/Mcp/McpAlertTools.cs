@@ -274,7 +274,12 @@ public sealed class McpAlertTools
                     warning_per_minute = AttentionEvaluator.ClampBars(
                         App.AlertClientTimeoutsWarningPerMinute, App.AlertClientTimeoutsCriticalPerMinute).Warning,
                     critical_per_minute = AttentionEvaluator.ClampBars(
-                        App.AlertClientTimeoutsWarningPerMinute, App.AlertClientTimeoutsCriticalPerMinute).Critical
+                        App.AlertClientTimeoutsWarningPerMinute, App.AlertClientTimeoutsCriticalPerMinute).Critical,
+                    /* #5736: the two bars above are FLOORS; the bar for a server is the higher of its floor and the multiple times its own baseline. */
+                    warning_multiple = AttentionBaselineMath.ClampMultiples(
+                        App.AlertClientTimeoutsWarningMultiple, App.AlertClientTimeoutsCriticalMultiple).Warning,
+                    critical_multiple = AttentionBaselineMath.ClampMultiples(
+                        App.AlertClientTimeoutsWarningMultiple, App.AlertClientTimeoutsCriticalMultiple).Critical
                 },
                 long_running_query = new
                 {

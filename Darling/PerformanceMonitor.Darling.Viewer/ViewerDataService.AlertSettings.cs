@@ -91,7 +91,9 @@ public sealed partial class ViewerDataService
         "client_timeouts_enabled, client_timeouts_warning_per_minute, client_timeouts_critical_per_minute, " +
         /* #6098 (V200): the Volume Free Space alert's excluded mount points (text[], the excluded_databases shape), APPENDED for
            the same reason and under the same connect-time store gate. */
-        "excluded_volumes";
+        "excluded_volumes, " +
+        /* #5736 (V211): the relative Client Timeouts bars' two multiples, APPENDED for the same reason and under the same gate. */
+        "client_timeouts_warning_multiple, client_timeouts_critical_multiple";
 
     /// <summary>The single global alert-settings row (id=1), for the Settings window prefill + the migrate-in
     /// defaults check. Column order matches <see cref="AlertSettingsColumns"/>.</summary>
@@ -108,7 +110,7 @@ INSERT INTO config_alert_settings (id, " + AlertSettingsColumns + @", modified_a
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
         $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43,
         $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62,
-        $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77,
+        $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79,
         (now() AT TIME ZONE 'UTC'))
 ON CONFLICT (id) DO UPDATE SET
     enabled = EXCLUDED.enabled,
@@ -188,6 +190,8 @@ ON CONFLICT (id) DO UPDATE SET
     client_timeouts_warning_per_minute = EXCLUDED.client_timeouts_warning_per_minute,
     client_timeouts_critical_per_minute = EXCLUDED.client_timeouts_critical_per_minute,
     excluded_volumes = EXCLUDED.excluded_volumes,
+    client_timeouts_warning_multiple = EXCLUDED.client_timeouts_warning_multiple,
+    client_timeouts_critical_multiple = EXCLUDED.client_timeouts_critical_multiple,
     modified_at = (now() AT TIME ZONE 'UTC')";
 
     /// <summary>The two <c>cpu_mode</c> values the service honors (it compares case-insensitively against
@@ -314,6 +318,10 @@ ON CONFLICT (id) DO UPDATE SET
         /* #6098 (V200): the excluded mount points, normalised on the way in (trim, blanks dropped, a trailing separator ignored
            when de-duplicating) so the store holds the list the engine applies and get_alert_settings reports back. */
         AddTextArray(command, VolumeExclusions.Normalize(r.ExcludedVolumes));                               // $77
+        /* #5736 (V211): the two multiples, through the shared clamp (each at least 1, Critical never below Warning). */
+        var (ctWarningMultiple, ctCriticalMultiple) = AttentionBaselineMath.ClampMultiples(r.ClientTimeoutsWarningMultiple, r.ClientTimeoutsCriticalMultiple);
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ctWarningMultiple });                // $78 (#5736, V211)
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ctCriticalMultiple });               // $79 (#5736, V211)
     }
 
     private static AlertSettingsRow ReadAlertSettingsRow(NpgsqlDataReader reader) => new()
@@ -414,6 +422,9 @@ ON CONFLICT (id) DO UPDATE SET
         ClientTimeoutsCriticalPerMinute = reader.GetInt32(75),
         /* #6098 (V200) excluded mount points appended at ordinal 76 (text[] NOT NULL, DEFAULT empty). */
         ExcludedVolumes = reader.IsDBNull(76) ? new List<string>() : reader.GetFieldValue<string[]>(76).ToList(),
+        /* #5736 (V211) the relative bars' multiples appended at ordinals 77-78. */
+        ClientTimeoutsWarningMultiple = reader.GetInt32(77),
+        ClientTimeoutsCriticalMultiple = reader.GetInt32(78),
     };
 
     /// <summary>Maps the Settings window's CPU-mode combo tag ("Total"/"SqlOnly") to the store value.</summary>
@@ -548,10 +559,15 @@ public sealed class AlertSettingsRow
     public int RunnableQueueCriticalPerScheduler { get; set; } = RunnableQueueEvaluator.DefaultCriticalPerScheduler;
     /// <summary>#5640 (V179): the Client Timeouts alert's switch. OFF by default: no measured normal rate exists yet (#5736 sets the bars from field data).</summary>
     public bool ClientTimeoutsEnabled { get; set; }
-    /// <summary>#5640 (V179): Warning bar, client attentions (cancels and timeouts) per minute over the covered span. Default 10.</summary>
+    /// <summary>#5640 (V179), #5736: Warning FLOOR, client attentions (cancels and timeouts) per minute over the covered span. Default 10. The bar is
+    /// max(this, <see cref="ClientTimeoutsWarningMultiple"/> x the server's own baseline).</summary>
     public int ClientTimeoutsWarningPerMinute { get; set; } = AttentionEvaluator.DefaultWarningPerMinute;
-    /// <summary>#5640 (V179): Critical bar, attentions per minute. Default 60; never below the Warning bar.</summary>
+    /// <summary>#5640 (V179), #5736: Critical FLOOR, attentions per minute. Default 60; never below the Warning floor.</summary>
     public int ClientTimeoutsCriticalPerMinute { get; set; } = AttentionEvaluator.DefaultCriticalPerMinute;
+    /// <summary>#5736 (V211): the Warning bar is at least this many times the server's baseline (p99.9 of its 3-minute average attention rate over 7 days). Default 3.</summary>
+    public int ClientTimeoutsWarningMultiple { get; set; } = AttentionBaselineMath.DefaultWarningMultiple;
+    /// <summary>#5736 (V211): the Critical bar is at least this many times the baseline. Default 10; never below the Warning multiple.</summary>
+    public int ClientTimeoutsCriticalMultiple { get; set; } = AttentionBaselineMath.DefaultCriticalMultiple;
     public bool LongRunningQueryEnabled { get; set; } = true;
     public int LongRunningQueryThresholdMinutes { get; set; } = 30;
     public bool TempDbSpaceEnabled { get; set; } = true;
@@ -678,6 +694,8 @@ public sealed class AlertSettingsRow
             && ClientTimeoutsEnabled == other.ClientTimeoutsEnabled
             && ClientTimeoutsWarningPerMinute == other.ClientTimeoutsWarningPerMinute
             && ClientTimeoutsCriticalPerMinute == other.ClientTimeoutsCriticalPerMinute
+            && ClientTimeoutsWarningMultiple == other.ClientTimeoutsWarningMultiple
+            && ClientTimeoutsCriticalMultiple == other.ClientTimeoutsCriticalMultiple
             && LongRunningQueryEnabled == other.LongRunningQueryEnabled
             && LongRunningQueryThresholdMinutes == other.LongRunningQueryThresholdMinutes
             && TempDbSpaceEnabled == other.TempDbSpaceEnabled
