@@ -239,6 +239,115 @@ VALUES ($1, $2, $3, $4, 45, 30, $5, 'email', NULL, $6, FALSE, NULL, NULL)",
         });
     }
 
+    /// <summary>
+    /// #6261: the streak through the PG reader. Days 1 (3 minutes late), 2 (muted only) and 3 (12 minutes early) fired, day 4
+    /// fired at another time of day, day 5 at the right time: the streak is the run from day 1, 3, and a muted day keeps it going.
+    /// </summary>
+    [Fact]
+    public async Task TheStreak_RunsFromDayOne_CountsAMutedDay_AndStopsAtAGap()
+    {
+        await RunAsync(async (dataSource, connection, ct) =>
+        {
+            var anchor = new DateTime(2026, 10, 20, 2, 10, 0, DateTimeKind.Utc);
+            var requestId = await OpenAsync(dataSource, anchor, ct);
+            await FireAsync(connection, anchor.AddDays(-1).AddMinutes(3), ct);
+            await FireAsync(connection, anchor.AddDays(-2), ct, muted: true);
+            await FireAsync(connection, anchor.AddDays(-3).AddMinutes(-12), ct);
+            await FireAsync(connection, anchor.AddDays(-4).AddHours(6), ct);   // day 4, another time of day: the gap
+            await FireAsync(connection, anchor.AddDays(-5), ct);               // day 5, after the gap: not part of the run
+
+            var recurrence = await ReadAsync(dataSource, requestId, anchor, ct);
+            Assert.Equal(3, recurrence.StreakDays);
+            Assert.False(recurrence.StreakAtLeastDaysWindow);
+        });
+    }
+
+    /// <summary>A fire on every day of the look-back, and older ones past it, give a streak of exactly
+    /// <see cref="InvestigationAlertRecurrence.Days"/>, flagged as a floor.</summary>
+    [Fact]
+    public async Task TheStreak_NeverPassesTheLookBack_AndSaysItIsAtLeast()
+    {
+        await RunAsync(async (dataSource, connection, ct) =>
+        {
+            var anchor = new DateTime(2026, 10, 20, 2, 10, 0, DateTimeKind.Utc);
+            var requestId = await OpenAsync(dataSource, anchor, ct);
+            for (var day = 1; day <= InvestigationAlertRecurrence.Days + 2; day++)
+                await FireAsync(connection, anchor.AddDays(-day), ct);
+
+            var recurrence = await ReadAsync(dataSource, requestId, anchor, ct);
+            Assert.Equal(InvestigationAlertRecurrence.Days, recurrence.StreakDays);
+            Assert.True(recurrence.StreakAtLeastDaysWindow);
+        });
+    }
+
+    /// <summary>No history for the metric at this time of day: the streak is 0, and it is not a floor.</summary>
+    [Fact]
+    public async Task TheStreak_WithNoHistory_IsZero()
+    {
+        await RunAsync(async (dataSource, connection, ct) =>
+        {
+            var anchor = new DateTime(2026, 10, 20, 2, 10, 0, DateTimeKind.Utc);
+            var requestId = await OpenAsync(dataSource, anchor, ct);
+            await FireAsync(connection, anchor.AddDays(-2).AddHours(5), ct);   // another time of day: not history for this alert
+
+            var recurrence = await ReadAsync(dataSource, requestId, anchor, ct);
+            Assert.Equal(0, recurrence.StreakDays);
+            Assert.False(recurrence.StreakAtLeastDaysWindow);
+        });
+    }
+
+    /// <summary>A 23:50 anchor: the day-1 fire is at 00:10 of the anchor's own date (23 hours 40 minutes back), day 2 at 00:10 the
+    /// date before, day 3 the date before that. Counting by calendar date would number them 0, 1 and 2, and lose the run.</summary>
+    [Fact]
+    public async Task TheStreak_OfA_2350Anchor_CountsA_0010FireOfItsOwnDateAsDayOne()
+    {
+        await RunAsync(async (dataSource, connection, ct) =>
+        {
+            var anchor = new DateTime(2026, 10, 10, 23, 50, 0, DateTimeKind.Utc);
+            var requestId = await OpenAsync(dataSource, anchor, ct);
+            await FireAsync(connection, new DateTime(2026, 10, 10, 0, 10, 0, DateTimeKind.Utc), ct);
+            await FireAsync(connection, new DateTime(2026, 10, 9, 0, 10, 0, DateTimeKind.Utc), ct);
+            await FireAsync(connection, new DateTime(2026, 10, 8, 0, 10, 0, DateTimeKind.Utc), ct);
+
+            var recurrence = await ReadAsync(dataSource, requestId, anchor, ct);
+            Assert.Equal(3, recurrence.StreakDays);
+        });
+    }
+
+    /// <summary>A 00:10 anchor: a 23:50 fire two calendar dates back is 24 hours 20 minutes back, day 1, not day 2; the one the
+    /// date before that is day 2.</summary>
+    [Fact]
+    public async Task TheStreak_OfA_0010Anchor_CountsA_2350FireTwoDatesBackAsDayOne()
+    {
+        await RunAsync(async (dataSource, connection, ct) =>
+        {
+            var anchor = new DateTime(2026, 10, 10, 0, 10, 0, DateTimeKind.Utc);
+            var requestId = await OpenAsync(dataSource, anchor, ct);
+            await FireAsync(connection, new DateTime(2026, 10, 8, 23, 50, 0, DateTimeKind.Utc), ct);
+            await FireAsync(connection, new DateTime(2026, 10, 7, 23, 50, 0, DateTimeKind.Utc), ct);
+
+            var recurrence = await ReadAsync(dataSource, requestId, anchor, ct);
+            Assert.Equal(2, recurrence.StreakDays);
+        });
+    }
+
+    /// <summary>One calendar date holds two day numbers: for a 23:50 anchor, 23:50 on 9 October is day 1 and 00:10 on 9 October is
+    /// day 2 (47 hours 40 minutes back). Both are the same date, so a date difference sees one day and a streak of 1.</summary>
+    [Fact]
+    public async Task TheStreak_OfA_2350Anchor_CanHoldTwoDayNumbersOnOneCalendarDate()
+    {
+        await RunAsync(async (dataSource, connection, ct) =>
+        {
+            var anchor = new DateTime(2026, 10, 10, 23, 50, 0, DateTimeKind.Utc);
+            var requestId = await OpenAsync(dataSource, anchor, ct);
+            await FireAsync(connection, new DateTime(2026, 10, 9, 23, 50, 0, DateTimeKind.Utc), ct);
+            await FireAsync(connection, new DateTime(2026, 10, 9, 0, 10, 0, DateTimeKind.Utc), ct);
+
+            var recurrence = await ReadAsync(dataSource, requestId, anchor, ct);
+            Assert.Equal(2, recurrence.StreakDays);
+        });
+    }
+
     private static async Task RunAsync(Func<NpgsqlDataSource, NpgsqlConnection, CancellationToken, Task> body, int extraServers = 0)
     {
         var baseConnectionString = ConnectionString;

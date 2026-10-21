@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Alerting;
@@ -177,6 +178,59 @@ LIMIT $3";
 
         ApplyDisplayNames(items);
         return items;
+    }
+
+    /// <summary>
+    /// #6261: the streak of each row of <paramref name="page"/>, aligned with it, from one read of the alert log for the whole
+    /// page (Darling's <c>GetAlertStreaksAsync</c> twin; the rule is <see cref="InvestigationAlertStreak"/>). Muted and dismissed
+    /// rows are in: they fired. The history is read through <c>v_config_alert_log</c>, so rows ordinary archival moved to Parquet
+    /// still count. Null on a resolution row (a recovery is not a fire).
+    /// </summary>
+    public async Task<int?[]> GetAlertStreaksAsync(IReadOnlyList<AlertHistoryRow> page)
+    {
+        var streaks = new int?[page.Count];
+        var firing = page.Where(r => !AlertMetricClassifier.IsResolution(r.MetricName)).ToList();
+        if (firing.Count == 0) return streaks;
+
+        var servers = firing.Select(r => r.ServerId).Distinct().ToList();
+        var metrics = firing.Select(r => r.MetricName).Distinct(StringComparer.Ordinal).ToList();
+        var since = firing.Min(r => r.AlertTime).AddDays(-InvestigationAlertRecurrence.Days);
+        var until = firing.Max(r => r.AlertTime);
+
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = $@"
+SELECT server_id, metric_name, alert_time
+FROM v_config_alert_log
+WHERE alert_time >= $1
+AND   alert_time <= $2
+AND   server_id IN ({string.Join(", ", servers.Select((_, i) => "$" + (i + 3).ToString(CultureInfo.InvariantCulture)))})
+AND   metric_name IN ({string.Join(", ", metrics.Select((_, i) => "$" + (i + 3 + servers.Count).ToString(CultureInfo.InvariantCulture)))})";
+        command.Parameters.Add(new DuckDBParameter { Value = since });
+        command.Parameters.Add(new DuckDBParameter { Value = until });
+        foreach (var server in servers) command.Parameters.Add(new DuckDBParameter { Value = server });
+        foreach (var metric in metrics) command.Parameters.Add(new DuckDBParameter { Value = metric });
+
+        var fires = new Dictionary<(int, string), List<DateTime>>();
+        using (var reader = await command.ExecuteReaderAsync())
+        {
+            while (await reader.ReadAsync())
+            {
+                var key = ((int)ToInt64(reader.GetValue(0)), reader.GetString(1));
+                if (!fires.TryGetValue(key, out var list)) fires[key] = list = new List<DateTime>();
+                list.Add(reader.GetDateTime(2));
+            }
+        }
+
+        for (var i = 0; i < page.Count; i++)
+        {
+            if (AlertMetricClassifier.IsResolution(page[i].MetricName)) continue;
+            streaks[i] = fires.TryGetValue((page[i].ServerId, page[i].MetricName), out var list)
+                ? InvestigationAlertStreak.ForAlert(page[i].AlertTime, list)
+                : 0;
+        }
+
+        return streaks;
     }
 
     /// <summary>
