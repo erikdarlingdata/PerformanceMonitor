@@ -208,7 +208,8 @@ async function loadPanelBody(desc, body, signal) {
     return;
   }
 
-  const render = VIZ[desc.viz];
+  /* #6293: a panel whose picture is its own (the Query Heatmap grid) hands its draw function as `desc.render`. */
+  const render = typeof desc.render === "function" ? desc.render : VIZ[desc.viz];
   if (!render) {
     mount(body, errorStrip("Unknown visualization: " + desc.viz));
     return;
