@@ -219,7 +219,7 @@ public sealed class DiagnosticsBundleSeedFailureLiveTests
                 await PgMigrations.MigrateAsync(connection, ct);
                 await ExecAsync(connection,
                     "INSERT INTO config.config_monitored_servers (server_id, name, host, database, auth, query_store_replica) "
-                    + "VALUES (9102, 'replica-owner', 'primary-6254.example.test', 'orders', 'windows', ' ag-listener-6254.example.test,14331 ')", ct);
+                    + "VALUES (9102, 'replica-owner', 'primary-6254.example.test', 'orders', 'windows', '  AGL6254LISTENER,14331 ')", ct);
             }
 
             await using var source = NpgsqlDataSource.Create(scratch.ConnectionString);
@@ -227,8 +227,8 @@ public sealed class DiagnosticsBundleSeedFailureLiveTests
             var result = await DiagnosticsBundleRunner.SeedFromStoreAsync(aliaser, source, ct);
             Assert.Null(result.FailedNameSource);
 
-            var text = aliaser.Alias("Query Store read failed on ag-listener-6254.example.test,14331: timeout.");
-            Assert.DoesNotContain("ag-listener-6254", text, StringComparison.Ordinal);
+            var text = aliaser.Alias("Query Store read failed on AGL6254LISTENER,14331: timeout.");
+            Assert.DoesNotContain("AGL6254LISTENER", text, StringComparison.Ordinal);
             ok = true;
         }
         finally

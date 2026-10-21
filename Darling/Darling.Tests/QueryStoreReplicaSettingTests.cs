@@ -197,6 +197,7 @@ public sealed class QueryStoreReplicaSettingTests
             storeOnly.EncryptedPasswordDeclaredByFile = false;
 
             var refused = Assert.Throws<InvalidOperationException>(() => MonitoredServerConnection.BuildQueryStoreReplicaConnectionString(storeOnly, false, Ring));
+            Assert.Contains("Query Store replica", refused.Message, StringComparison.Ordinal);
             Assert.DoesNotContain("reference-secret-6254", refused.Message, StringComparison.Ordinal);
             Assert.DoesNotContain(Variable, refused.Message, StringComparison.Ordinal);
 
