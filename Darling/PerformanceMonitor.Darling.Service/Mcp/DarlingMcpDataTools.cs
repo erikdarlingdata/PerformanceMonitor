@@ -3291,7 +3291,7 @@ ORDER BY server_name";
                     : null,
                 runs = runRows.Take(pageCount),
             };
-            var json = JsonSerializer.Serialize(payload, McpHelpers.JsonOptions);
+            var json = WithReadSource(JsonSerializer.Serialize(payload, McpHelpers.JsonOptions), pageRows.Select(r => r.ReadSource));
             return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
             }
 
@@ -3301,6 +3301,36 @@ ORDER BY server_name";
         {
             return McpHelpers.FormatError("get_collection_log", ex);
         }
+    }
+
+    /// <summary>
+    /// #6254: adds <c>read_source</c> to the page's runs that have one, in page order. A run with none (every run of a server with the
+    /// Query Store replica setting off, and every run from before the setting existed) gets no key at all, so a page with no
+    /// <c>read_source</c> is byte-for-byte the page it was before. A page with none is returned as it is.
+    /// </summary>
+    internal static string WithReadSource(string json, IEnumerable<string?> readSources)
+    {
+        var sources = readSources.ToList();
+        if (sources.All(s => s is null))
+        {
+            return json;
+        }
+
+        var root = JsonNode.Parse(json)!;
+        if (root["runs"] is not JsonArray runs)
+        {
+            return json;
+        }
+
+        for (var i = 0; i < runs.Count && i < sources.Count; i++)
+        {
+            if (sources[i] is { } source && runs[i] is JsonObject run)
+            {
+                run["read_source"] = source;
+            }
+        }
+
+        return root.ToJsonString(McpHelpers.JsonOptions);
     }
 
     /// <summary>
@@ -3432,7 +3462,7 @@ ORDER BY server_name";
             {
             var pageRows = rows.Take(pageCount).ToList();
             var cut = pageCount < rows.Count;
-            return JsonSerializer.Serialize(new
+            return WithReadSource(JsonSerializer.Serialize(new
             {
                 /* No single `server`: `scope` is the fleet-form's own signal, so a client branching on
                    shape does not have to infer it from a null/absent field. */
@@ -3457,7 +3487,7 @@ ORDER BY server_name";
                     ? $"{rows.Count - pageCount} of the {rows.Count} run(s) this read selected were left off the end to keep this answer within about 32 KB. Ask for fewer rows (limit), a narrower window (hours_back or as_of), or one server_name / collector_name / status to read the rest in full."
                     : null,
                 runs = result.Take(pageCount),
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), pageRows.Select(r => r.Entry.ReadSource));
             }).Json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

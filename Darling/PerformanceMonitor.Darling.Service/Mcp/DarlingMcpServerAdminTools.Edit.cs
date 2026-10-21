@@ -67,7 +67,7 @@ public sealed partial class DarlingMcpServerAdminTools
     internal static readonly string[] EditableKeys =
     [
         "display_name", "host", "port", "database", "read_only_intent", "auth", "username", "password",
-        "encrypt_mode", "trust_server_certificate", "multi_subnet_failover", "monthly_cost_usd", "aws_role_arn", "aws_external_id",
+        "encrypt_mode", "trust_server_certificate", "multi_subnet_failover", "query_store_replica", "monthly_cost_usd", "aws_role_arn", "aws_external_id",
         "expected_modified_at",
     ];
 
@@ -94,6 +94,7 @@ public sealed partial class DarlingMcpServerAdminTools
         ["encrypt_mode"] = "encrypt_mode",
         ["trust_server_certificate"] = "trust_server_certificate",
         ["multi_subnet_failover"] = "multi_subnet_failover",
+        ["query_store_replica"] = "query_store_replica",
         ["monthly_cost_usd"] = "monthly_cost_usd",
         ["aws_role_arn"] = "aws_role_arn",
         ["aws_external_id"] = "aws_external_id",
@@ -162,13 +163,13 @@ public sealed partial class DarlingMcpServerAdminTools
         "A change to where the server connects (host, port, database or read_only_intent) is answered refused while a route with an agent setting (Off included) is scoped to the server, by its id, one of its tags or a tag above one (a route with no scope does not count): that is changed in the Viewer or on the web dashboard. The display name and the other settings stay open. " +
         "Changes ONLY the fields named in changes_json, a JSON object. Keys: display_name, host, port (PostgreSQL), " +
         "database, read_only_intent, auth (\"Windows\", \"SQL\", \"ServicePrincipal\", \"ManagedIdentity\"), username, " +
-        "password, encrypt_mode, trust_server_certificate, multi_subnet_failover, monthly_cost_usd, " +
-        "aws_role_arn, aws_external_id, expected_modified_at. The values mean what they mean in add_servers. Naming engine, is_enabled, " +
+        "password, encrypt_mode, trust_server_certificate, multi_subnet_failover, query_store_replica, monthly_cost_usd, " +
+        "aws_role_arn, aws_external_id, expected_modified_at. The values mean what they mean in add_servers (query_store_replica: empty or null removes it). Naming engine, is_enabled, " +
         "excluded_databases or any other key is status \"invalid\". The server keeps its id: tags, history and " +
         "settings stay attached, even when the address changes; the old address then cannot be added as a new " +
         "server under the same spelling. PASSWORD: omit it, or leave it blank, to keep the stored one; a typed one replaces it and is the password itself (a value starting with env: or file: is refused, references are set in the configuration file). The stored secret cannot be " +
         "read back, so changing the host, port, database, read_only_intent, auth, username, encrypt_mode, " +
-        "trust_server_certificate or multi_subnet_failover of a SQL or ServicePrincipal server REQUIRES password " +
+        "trust_server_certificate, multi_subnet_failover or query_store_replica of a SQL or ServicePrincipal server REQUIRES password " +
         "again, and so does switching into either mode; a name or cost change, and a Windows or ManagedIdentity " +
         "server, need none. AWS ROLE: aws_role_arn (an IAM role ARN such as arn:aws:iam::123456789012:role/darling-monitor) " +
         "applies to a PostgreSQL target only and can be set or changed only to a role darling.json's allowedAwsRoles lists; " +
@@ -571,6 +572,7 @@ LIMIT 1";
         encrypt_mode = row.EncryptMode,
         trust_server_certificate = row.TrustServerCertificate,
         multi_subnet_failover = row.MultiSubnetFailover,
+        query_store_replica = row.QueryStoreReplica,
         monthly_cost_usd = row.MonthlyCostUsd,
         aws_role_arn = row.AwsRoleArn,
         aws_external_id_set = row.AwsExternalIdSet,
@@ -622,6 +624,11 @@ LIMIT 1";
         public bool? TrustServerCertificate { get; set; }
         public bool? MultiSubnetFailover { get; set; }
         public decimal? MonthlyCostUsd { get; set; }
+
+        /// <summary>True when the request names the Query Store replica (#6254): <see cref="QueryStoreReplica"/> null then means
+        /// "remove it". A replica left out keeps the stored one.</summary>
+        public bool HasQueryStoreReplica { get; set; }
+        public string? QueryStoreReplica { get; set; }
 
         /// <summary>True when the request names the role: null in <see cref="AwsRoleArn"/> then means "remove it". A role left
         /// out or sent blank keeps the stored one (#5452).</summary>
@@ -817,6 +824,15 @@ LIMIT 1";
 
                     changes.MonthlyCostUsd = cost;
                     break;
+                case "query_store_replica":
+                    if (node is not null && !TryEditString(node, out _))
+                    {
+                        return (null, "query_store_replica must be text; empty or null removes it.");
+                    }
+
+                    changes.HasQueryStoreReplica = true;
+                    changes.QueryStoreReplica = node is null ? null : QueryStoreReplicaSetting.Normalize(TryGetString(body, "query_store_replica"));
+                    break;
                 case "aws_role_arn":
                     if (node is not null && !TryEditString(node, out _))
                     {
@@ -952,6 +968,7 @@ LIMIT 1";
         var trust = c.TrustServerCertificate ?? row.TrustServerCertificate;
         var multi = c.MultiSubnetFailover ?? row.MultiSubnetFailover;
         var cost = c.MonthlyCostUsd ?? row.MonthlyCostUsd;
+        var replica = c.HasQueryStoreReplica ? c.QueryStoreReplica : QueryStoreReplicaSetting.Normalize(row.QueryStoreReplica);
         var authSwitched = !string.Equals(auth, row.Auth, StringComparison.OrdinalIgnoreCase);
         var secretMode = IsSecretAuth(auth);
         var isSp = string.Equals(auth, ServerStoreAuth.ServicePrincipal, StringComparison.OrdinalIgnoreCase);
@@ -969,6 +986,12 @@ LIMIT 1";
         if (!isPostgres && c.Port is not null)
         {
             return (null, "A SQL Server port goes in host, as host,port.");
+        }
+
+        /* #6254: a Query Store replica is a SQL Server setting; the check is on a replica the request names. */
+        if (c.HasQueryStoreReplica && QueryStoreReplicaRefusal(replica, isPostgres ? row.Engine : EngineSqlServer) is { } replicaRefusal)
+        {
+            return (null, replicaRefusal);
         }
 
         /* #5452: the AWS role. Absent or blank keeps the stored role (the parse left HasAwsRole false); an explicit null
@@ -1020,7 +1043,7 @@ LIMIT 1";
         }
 
         var connectionChanged = ServerConnectionIdentity.Differ(
-            ServerConnectionIdentity.FromStoredColumns(host, port, row.Engine, database, readOnly, auth, username, encryptMode, trust, multi, row.QueryStoreReplica),
+            ServerConnectionIdentity.FromStoredColumns(host, port, row.Engine, database, readOnly, auth, username, encryptMode, trust, multi, replica),
             ServerConnectionIdentity.FromStoredColumns(row.Host, row.Port, row.Engine, row.Database, row.ReadOnlyIntent, row.Auth, row.Username,
                 row.EncryptMode, row.TrustServerCertificate, row.MultiSubnetFailover, row.QueryStoreReplica));
 
@@ -1065,6 +1088,7 @@ LIMIT 1";
         Set("encrypt_mode", NpgsqlDbType.Text, encryptMode, !string.Equals(encryptMode, row.EncryptMode, StringComparison.OrdinalIgnoreCase));
         Set("trust_server_certificate", NpgsqlDbType.Boolean, trust, trust != row.TrustServerCertificate);
         Set("multi_subnet_failover", NpgsqlDbType.Boolean, multi, multi != row.MultiSubnetFailover);
+        Set("query_store_replica", NpgsqlDbType.Text, replica, QueryStoreReplicaSetting.Differ(replica, row.QueryStoreReplica));
         Set("monthly_cost_usd", NpgsqlDbType.Numeric, cost, cost != row.MonthlyCostUsd);
 
         Set("aws_role_arn", NpgsqlDbType.Text, newRole, !string.Equals(newRole, row.AwsRoleArn, StringComparison.Ordinal));
@@ -1106,9 +1130,9 @@ LIMIT 1";
             Port = port,
             AwsRoleArn = newRole,
             AwsExternalId = c.AwsExternalId,
-            /* #6254: the row's Query Store replica rides with the definition, so a password sealed here is sealed for the replica the
-               row holds (PasswordBinding.ForServer). An edit that names a new replica is the next part's. */
-            QueryStoreReplica = row.QueryStoreReplica,
+            /* #6254: the replica rides with the definition, so a password sealed here is sealed for the replica the row will hold
+               (PasswordBinding.ForServer). */
+            QueryStoreReplica = replica,
         };
 
         /* Whether the running service drops and re-opens its connection: the worker's own comparison, over the held
@@ -1132,7 +1156,7 @@ LIMIT 1";
             /* #5452: the role and the external ID are part of the definition the worker compares, so a role-only edit
                reconnects under the new role. The stored ID cannot be read, so it differs by a marker: a typed one
                is "changed", a cleared one (or a cleared role) is none, and an untouched one stays "stored". */
-            QueryStoreReplica = row.QueryStoreReplica,
+            QueryStoreReplica = replica,
             AwsRoleArn = newRole,
             AwsExternalId = newRole is null ? null : c.HasAwsExternalId ? (c.AwsExternalId is null ? null : "changed") : (row.AwsExternalIdSet ? "stored" : null),
         };
@@ -1147,6 +1171,7 @@ LIMIT 1";
         Password = null, EncryptMode = c.EncryptMode, TrustServerCertificate = c.TrustServerCertificate,
         MultiSubnetFailover = c.MultiSubnetFailover, MonthlyCostUsd = c.MonthlyCostUsd, ExpectedModifiedAt = c.ExpectedModifiedAt,
         HasAwsRole = c.HasAwsRole, AwsRoleArn = c.AwsRoleArn, HasAwsExternalId = c.HasAwsExternalId, AwsExternalId = c.AwsExternalId,
+        HasQueryStoreReplica = c.HasQueryStoreReplica, QueryStoreReplica = c.QueryStoreReplica,
     };
 
     /* ─────────────────────────────── store seam ─────────────────────────────── */
@@ -1207,7 +1232,7 @@ FROM config_monitored_servers WHERE server_id = $1";
     /// <see cref="EditFunctionColumns"/> order (null for a column not listed): the new secret rides at <c>$11</c>.
     /// </summary>
     internal const string EditFunctionSql =
-        "SELECT outcome, new_modified_at FROM config.edit_monitored_server($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)";
+        "SELECT outcome, new_modified_at FROM config.edit_monitored_server($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)";
 
     /// <summary>The editable columns in the order the function takes their values (<c>$4</c> onwards).</summary>
     internal static readonly (string Column, NpgsqlDbType DbType)[] EditFunctionColumns =
@@ -1217,7 +1242,7 @@ FROM config_monitored_servers WHERE server_id = $1";
         ("encrypted_password", NpgsqlDbType.Text), ("encrypt_mode", NpgsqlDbType.Text),
         ("trust_server_certificate", NpgsqlDbType.Boolean), ("multi_subnet_failover", NpgsqlDbType.Boolean),
         ("monthly_cost_usd", NpgsqlDbType.Numeric),
-        ("aws_role_arn", NpgsqlDbType.Text), ("aws_external_id", NpgsqlDbType.Text),
+        ("aws_role_arn", NpgsqlDbType.Text), ("aws_external_id", NpgsqlDbType.Text), ("query_store_replica", NpgsqlDbType.Text),
     ];
 
     /// <summary>

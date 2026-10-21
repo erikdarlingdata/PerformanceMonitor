@@ -346,6 +346,9 @@ export const EDIT_FIELDS = [
   { key: "database", label: "Database" },
   { key: "read_only_intent", label: "Read-only intent" },
   { key: "multi_subnet_failover", label: "Multi-subnet failover" },
+  /* #6254: SQL Server only. The host (or listener) a Query Store read may use instead of the primary; blank = off. It is part
+     of how the server is reached: the saved password is bound to it, so changing it needs the password again. */
+  { key: "query_store_replica", label: "QS replica" },
   { key: "monthly_cost_usd", label: "Monthly Cost ($)" },
   /* #5452: PostgreSQL only, like port. A blank box keeps the stored role; "Remove AWS role" sends null. The external ID is
      not here: it is write-only, read from its own box at Save, never held in the form's values. */
@@ -412,6 +415,7 @@ export function editFormValues(row) {
     database: asText(r.database),
     read_only_intent: r.read_only_intent === true,
     multi_subnet_failover: r.multi_subnet_failover === true,
+    query_store_replica: asText(r.query_store_replica),
     monthly_cost_usd: Number.isFinite(cost) ? String(cost) : "0",
     aws_role_arn: asText(r.aws_role_arn),
     aws_external_id_set: r.aws_external_id_set === true,
@@ -444,6 +448,8 @@ export function normalizeEdit(values, engine) {
     database: trim(v.database) || null,
     read_only_intent: v.read_only_intent === true,
     multi_subnet_failover: v.multi_subnet_failover === true,
+    /* Trimmed; blank is "no replica", which the service reads as a removal. A PostgreSQL target has none. */
+    query_store_replica: postgres ? "" : trim(v.query_store_replica),
     monthly_cost_usd: cost === "" ? 0 : /^(\d+\.?\d*|\.\d+)$/.test(cost) ? Number(cost) : NaN,
     /* A blank box is "no role typed" (null): it keeps the stored role, it never removes it. */
     aws_role_arn: postgres ? trim(v.aws_role_arn) || null : null,
@@ -461,7 +467,8 @@ function connectionDiffers(o, v) {
     || o.username !== v.username
     || o.encrypt_mode.toLowerCase() !== v.encrypt_mode.toLowerCase()
     || o.trust_server_certificate !== v.trust_server_certificate
-    || o.multi_subnet_failover !== v.multi_subnet_failover;
+    || o.multi_subnet_failover !== v.multi_subnet_failover
+    || o.query_store_replica !== v.query_store_replica;
 }
 
 /** True when the service will ask for the password again: the effective auth (PostgreSQL is always "SQL") stores a
@@ -556,6 +563,8 @@ export function buildEditBody(original, values, token, password, externalId) {
   body.expected_modified_at = token == null ? null : token;
   return body;
 }
+
+const QS_REPLICA_NOTE = "Optional. A readable secondary (host or host,port) or an availability group listener to read Query Store from instead of this server. Same login and password; blank = off. Not used on Azure SQL Database. Changing it needs the password again.";
 
 const UNEXPECTED_ANSWER = "The service gave an answer this page does not understand, so it is not known whether anything was saved. Your entries are kept; check the server list before saving again.";
 
@@ -972,6 +981,8 @@ function formNode(f) {
     rows.push(
       checkRow(f, "read_only_intent", "Read-only intent (for AG listeners and readable replicas)"),
       checkRow(f, "multi_subnet_failover", "Multi-subnet failover (for AG listeners and FCIs)"),
+      textRow(f, "query_store_replica", "QS replica:", { autocomplete: "off", ...KEEP_FROM_PASSWORD_MANAGERS }).row,
+      el("div", { class: "muted", text: QS_REPLICA_NOTE }),
     );
   }
   rows.push(

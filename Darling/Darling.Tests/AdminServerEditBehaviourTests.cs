@@ -167,7 +167,7 @@ public sealed class AdminServerEditBehaviourTests
     // The form's values for one kind of server, shaped as editFormValues returns them (the engine rides along).
     private static JsonObject Base(string kind)
     {
-        var form = JsonNode.Parse("""{"engine":"sqlserver","host":"sql-a","display_name":"Orders","port":"","auth":"Windows","username":"","encrypt_mode":"Mandatory","trust_server_certificate":false,"database":"","read_only_intent":false,"multi_subnet_failover":false,"monthly_cost_usd":"100"}""")!.AsObject();
+        var form = JsonNode.Parse("""{"engine":"sqlserver","host":"sql-a","display_name":"Orders","port":"","auth":"Windows","username":"","encrypt_mode":"Mandatory","trust_server_certificate":false,"database":"","read_only_intent":false,"multi_subnet_failover":false,"query_store_replica":"","monthly_cost_usd":"100"}""")!.AsObject();
         switch (kind)
         {
             case "windows":
@@ -257,6 +257,12 @@ public sealed class AdminServerEditBehaviourTests
     [InlineData("postgres", """{"port":"5434"}""", "typed", """{"port":5434,"password":"typed","expected_modified_at":"TOKEN"}""")]
     [InlineData("postgres", """{"port":"abc","display_name":"Payments"}""", "", """{"display_name":"Payments","expected_modified_at":"TOKEN"}""")]
     [InlineData("postgres", """{"host":"pg-b"}""", "typed", """{"host":"pg-b","password":"typed","expected_modified_at":"TOKEN"}""")]
+    // #6254: a SQL Server Query Store replica is trimmed and sent when it differs, with the password; blank is sent as an empty text (a removal
+    // the service reads) only once one is stored; a PostgreSQL target never sends one.
+    [InlineData("sql", """{"query_store_replica":" replica-a,1433 "}""", "typed", """{"query_store_replica":"replica-a,1433","password":"typed","expected_modified_at":"TOKEN"}""")]
+    [InlineData("windows", """{"query_store_replica":"replica-a"}""", "", """{"query_store_replica":"replica-a","expected_modified_at":"TOKEN"}""")]
+    [InlineData("sql", """{"query_store_replica":"   "}""", "", "null")]
+    [InlineData("postgres", """{"query_store_replica":"replica-a"}""", "", "null")]
     public void TheEditBody_CarriesOnlyChangedEditableFields_AndTheToken_Pure(string kind, string changes, string password, string expected)
     {
         var body = Pure("buildEditBody", Base(kind), Edited(kind, changes), Token, password);
@@ -299,6 +305,7 @@ public sealed class AdminServerEditBehaviourTests
     [InlineData("sql", """{"trust_server_certificate":true}""", true)]
     [InlineData("sql", """{"read_only_intent":true}""", true)]
     [InlineData("sql", """{"multi_subnet_failover":true}""", true)]
+    [InlineData("sql", """{"query_store_replica":"replica-a"}""", true)]
     [InlineData("windows", """{"auth":"SQL","username":"sa"}""", true)]
     [InlineData("windows", """{"auth":"ServicePrincipal","username":"app-id"}""", true)]
     [InlineData("managed", """{"auth":"SQL","username":"sa"}""", true)]
@@ -311,6 +318,8 @@ public sealed class AdminServerEditBehaviourTests
     [InlineData("sql", """{"monthly_cost_usd":"250"}""", false)]
     [InlineData("sql", """{"encrypt_mode":"mandatory"}""", false)]
     [InlineData("sql", """{"host":" sql-a "}""", false)]
+    [InlineData("sql", """{"query_store_replica":"  "}""", false)]
+    [InlineData("postgres", """{"query_store_replica":"replica-a"}""", false)]
     [InlineData("sp", """{"display_name":"Payments"}""", false)]
     [InlineData("postgres", """{"display_name":"Payments"}""", false)]
     [InlineData("postgres", """{"port":"5433"}""", false)]
@@ -596,7 +605,7 @@ public sealed class AdminServerEditBehaviourTests
     // ------------------------------------------------------------------ the rest of the exports
 
     [Fact]
-    public void TheEditFields_AreTheTwelveEditableKeysInFormOrder_AndNeverTheSecretOrTheToken_Pure()
+    public void TheEditFields_AreTheThirteenEditableKeysInFormOrder_AndNeverTheSecretOrTheToken_Pure()
     {
         var fields = Pure("EDIT_FIELDS").EnumerateArray().Select(f => (f.GetProperty("key").GetString(), f.GetProperty("label").GetString())).ToArray();
 
@@ -605,7 +614,7 @@ public sealed class AdminServerEditBehaviourTests
             {
                 ("host", "Server Name / Address"), ("display_name", "Display Name"), ("port", "Port"), ("auth", "Authentication"),
                 ("username", "Username"), ("encrypt_mode", "Encryption"), ("trust_server_certificate", "Trust server certificate"),
-                ("database", "Database"), ("read_only_intent", "Read-only intent"), ("multi_subnet_failover", "Multi-subnet failover"),
+                ("database", "Database"), ("read_only_intent", "Read-only intent"), ("multi_subnet_failover", "Multi-subnet failover"), ("query_store_replica", "QS replica"),
                 ("monthly_cost_usd", "Monthly Cost ($)"), ("aws_role_arn", "AWS role ARN"),
             },
             fields);
@@ -618,18 +627,18 @@ public sealed class AdminServerEditBehaviourTests
     // true only when exactly true, and no secret, id or token comes along.
     [InlineData(
         """{"server_id":7,"display_name":"Orders","engine":"sqlserver","host":"sql-a","port":0,"database":null,"read_only_intent":true,"auth":"SQL","username":"sa","encrypt_mode":"mandatory","trust_server_certificate":true,"multi_subnet_failover":false,"monthly_cost_usd":1234.5,"modified_at":"2026-01-02T03:04:05.1234567Z"}""",
-        """{"engine":"sqlserver","host":"sql-a","display_name":"Orders","port":"","auth":"SQL","username":"sa","encrypt_mode":"Mandatory","trust_server_certificate":true,"database":"","read_only_intent":true,"multi_subnet_failover":false,"monthly_cost_usd":"1234.5","aws_role_arn":"","aws_external_id_set":false,"aws_remove_role":false,"aws_clear_external_id":false}""")]
+        """{"engine":"sqlserver","host":"sql-a","display_name":"Orders","port":"","auth":"SQL","username":"sa","encrypt_mode":"Mandatory","trust_server_certificate":true,"database":"","read_only_intent":true,"multi_subnet_failover":false,"query_store_replica":"","monthly_cost_usd":"1234.5","aws_role_arn":"","aws_external_id_set":false,"aws_remove_role":false,"aws_clear_external_id":false}""")]
     // PostgreSQL always shows auth "SQL" and its port; an engine that is not sqlserver is PostgreSQL, whatever its case or spelling.
     [InlineData(
         """{"display_name":"Pg","engine":"postgres","host":"pg-a","port":5433,"database":"mon","read_only_intent":false,"auth":"Windows","username":"pgmon","encrypt_mode":"Optional","trust_server_certificate":"true","multi_subnet_failover":1,"monthly_cost_usd":0}""",
-        """{"engine":"postgres","host":"pg-a","display_name":"Pg","port":"5433","auth":"SQL","username":"pgmon","encrypt_mode":"Optional","trust_server_certificate":false,"database":"mon","read_only_intent":false,"multi_subnet_failover":false,"monthly_cost_usd":"0","aws_role_arn":"","aws_external_id_set":false,"aws_remove_role":false,"aws_clear_external_id":false}""")]
+        """{"engine":"postgres","host":"pg-a","display_name":"Pg","port":"5433","auth":"SQL","username":"pgmon","encrypt_mode":"Optional","trust_server_certificate":false,"database":"mon","read_only_intent":false,"multi_subnet_failover":false,"query_store_replica":"","monthly_cost_usd":"0","aws_role_arn":"","aws_external_id_set":false,"aws_remove_role":false,"aws_clear_external_id":false}""")]
     [InlineData(
         """{"display_name":"X","engine":"MySQL","host":"h","port":3306,"auth":"SQL","username":"u","encrypt_mode":"Optional"}""",
-        """{"engine":"postgres","host":"h","display_name":"X","port":"3306","auth":"SQL","username":"u","encrypt_mode":"Optional","trust_server_certificate":false,"database":"","read_only_intent":false,"multi_subnet_failover":false,"monthly_cost_usd":"0","aws_role_arn":"","aws_external_id_set":false,"aws_remove_role":false,"aws_clear_external_id":false}""")]
+        """{"engine":"postgres","host":"h","display_name":"X","port":"3306","auth":"SQL","username":"u","encrypt_mode":"Optional","trust_server_certificate":false,"database":"","read_only_intent":false,"multi_subnet_failover":false,"query_store_replica":"","monthly_cost_usd":"0","aws_role_arn":"","aws_external_id_set":false,"aws_remove_role":false,"aws_clear_external_id":false}""")]
     // An auth the list does not know shows as Windows, as the service's own word for it does; an unknown encryption mode stays as text.
     [InlineData(
         """{"display_name":"X","engine":"SQLServer","host":"h","auth":"Kerberos","username":null,"encrypt_mode":"Weird","monthly_cost_usd":12}""",
-        """{"engine":"sqlserver","host":"h","display_name":"X","port":"","auth":"Windows","username":"","encrypt_mode":"Weird","trust_server_certificate":false,"database":"","read_only_intent":false,"multi_subnet_failover":false,"monthly_cost_usd":"12","aws_role_arn":"","aws_external_id_set":false,"aws_remove_role":false,"aws_clear_external_id":false}""")]
+        """{"engine":"sqlserver","host":"h","display_name":"X","port":"","auth":"Windows","username":"","encrypt_mode":"Weird","trust_server_certificate":false,"database":"","read_only_intent":false,"multi_subnet_failover":false,"query_store_replica":"","monthly_cost_usd":"12","aws_role_arn":"","aws_external_id_set":false,"aws_remove_role":false,"aws_clear_external_id":false}""")]
     public void TheFormValues_AreTheReadAsTheFormHoldsIt_Pure(string read, string expected)
     {
         var values = Pure("editFormValues", JsonNode.Parse(read));
@@ -789,7 +798,7 @@ public sealed class AdminServerEditBehaviourTests
         Assert.Equal("-1", form.GetProperty("headingTabindex").GetString());
         Assert.Equal("SQL Server", form.GetProperty("engine").GetString());
         Assert.Equal(
-            new[] { "engine", "host", "display_name", "auth", "username", "password", "encrypt_mode", "trust_server_certificate", "database", "read_only_intent", "multi_subnet_failover", "monthly_cost_usd" },
+            new[] { "engine", "host", "display_name", "auth", "username", "password", "encrypt_mode", "trust_server_certificate", "database", "read_only_intent", "multi_subnet_failover", "query_store_replica", "monthly_cost_usd" },
             Strings(form.GetProperty("keys")));
         var values = form.GetProperty("values");
         Assert.Equal("charlie", values.GetProperty("host").GetString());
