@@ -314,7 +314,7 @@ DROP TABLE #text_fetch;";
         var reference = new CollectorQuery(GatedOld(textSeparately), query.Parameters);
         var expected = await RunAsync(database, reference, ct);
 
-        AssertFixtureIsRich(expected);
+        AssertFixtureIsRich(expected, _scratch.QueryTextIds);
         AssertSame(expected, actual, "last_execution_time");
         return expected;
     }
@@ -322,7 +322,7 @@ DROP TABLE #text_fetch;";
     private static string GatedOld(bool textSeparately) => OldPayload(textSeparately);
 
     /// <summary>The comparison proves nothing on an empty or thin result, so the fixture must hold what the join keys differ on.</summary>
-    private static void AssertFixtureIsRich(Result expected)
+    private static void AssertFixtureIsRich(Result expected, IReadOnlyDictionary<long, long> queryTextIds)
     {
         var intervals = Array.IndexOf(expected.Columns, "runtime_stats_interval_id");
         var plans = Array.IndexOf(expected.Columns, "plan_id");
@@ -339,6 +339,20 @@ DROP TABLE #text_fetch;";
         Assert.Contains(expected.Rows, r => Cell(r[module]) != "Adhoc" && Cell(r[module]) != "Unknown");
         Assert.All(expected.Rows, r => Assert.NotNull(r[replica]));
         Assert.All(expected.Rows, r => Assert.NotNull(r[start]));
+        AssertTextIdsDifferFromQueryIds(expected.Rows.Select(r => Convert.ToInt64(r[queries], CultureInfo.InvariantCulture)), queryTextIds);
+    }
+
+    /// <summary>
+    /// The text is keyed by <c>query_text_id</c>, not <c>query_id</c>. A fixture where every query has its own text makes the two ids match on every
+    /// row, so a join on the wrong one would still pass. Here two shipped queries must share ONE text id (the same statement under two SET options
+    /// is a second query with the same text), and at least one shipped query must have a text id that is not its own query id.
+    /// </summary>
+    private static void AssertTextIdsDifferFromQueryIds(IEnumerable<long> shippedQueryIds, IReadOnlyDictionary<long, long> queryTextIds)
+    {
+        var shipped = shippedQueryIds.Distinct().ToList();
+        Assert.All(shipped, id => Assert.True(queryTextIds.ContainsKey(id), $"query {id} is not in the fixture map"));
+        Assert.Contains(shipped.GroupBy(id => queryTextIds[id]), g => g.Count() >= 2);
+        Assert.Contains(shipped, id => queryTextIds[id] != id);
     }
 
     [Theory]
@@ -349,6 +363,9 @@ DROP TABLE #text_fetch;";
         var expected = await AssertPayloadSameAsOldAsync(azure, textSeparately: false);
         var text = Array.IndexOf(expected.Columns, "query_sql_text");
         Assert.All(expected.Rows, r => Assert.False(string.IsNullOrEmpty(r[text] as string)));
+        var queries = Array.IndexOf(expected.Columns, "query_id");
+        var byTextId = expected.Rows.GroupBy(r => _scratch.QueryTextIds[Convert.ToInt64(r[queries], CultureInfo.InvariantCulture)]);
+        Assert.All(byTextId, g => Assert.Single(g.Select(r => (string?)r[text]).Distinct(StringComparer.Ordinal)));
     }
 
     [Theory]
@@ -371,6 +388,7 @@ DROP TABLE #text_fetch;";
         var database = _scratch.Database!;
         var ids = _scratch.QueryIds;
         Assert.True(ids.Count >= 6, $"the fixture holds {ids.Count} queries");
+        AssertTextIdsDifferFromQueryIds(ids, _scratch.QueryTextIds);
         var idList = string.Join(", ", ids.Select(i => i.ToString(CultureInfo.InvariantCulture)));
 
         var query = QueryStoreCollector.Instance.BuildTextFetchByIdsQuery(database, Context(azure: false, textSeparately: true), ids, budget);
@@ -396,6 +414,9 @@ DROP TABLE #text_fetch;";
     {
         public string? Database { get; private set; }
         public IReadOnlyList<long> QueryIds { get; private set; } = Array.Empty<long>();
+
+        /// <summary>Every query's text id. Two queries share one when the same statement ran under different SET options.</summary>
+        public IReadOnlyDictionary<long, long> QueryTextIds { get; private set; } = new Dictionary<long, long>();
 
         public static SqlConnectionStringBuilder Admin(string database) => new()
         {
@@ -445,6 +466,10 @@ EXEC dbo.p1 @k = 5;
 EXEC sp_recompile 'dbo.p1';
 EXEC dbo.p1 @k = 1;
 EXEC dbo.p2 @k = 3;", ct);
+
+            /* One statement text, two queries: a second SET option set makes Query Store record a new query_id against the SAME query_text_id. */
+            await SqlAsync(database, "EXEC sys.sp_executesql N'SELECT MAX(id) AS qshared FROM dbo.t WHERE k = 3';", ct);
+            await SqlAsync(database, "SET ARITHABORT OFF; EXEC sys.sp_executesql N'SELECT MAX(id) AS qshared FROM dbo.t WHERE k = 3';", ct);
             await SqlAsync(database, @"
 DECLARE @q bigint, @p bigint;
 SELECT TOP (1) @q = q.query_id FROM sys.query_store_query AS q WHERE q.object_id = OBJECT_ID('dbo.p1');
@@ -467,15 +492,21 @@ EXEC sys.sp_query_store_flush_db;", ct);
             await SqlAsync(database, "SELECT COUNT_BIG(*) AS qa FROM dbo.t WHERE k = 1;", ct);
 
             var ids = new List<long>();
+            var textIds = new Dictionary<long, long>();
             await using (var connection = new SqlConnection(Admin(database).ConnectionString))
             {
                 await connection.OpenAsync(ct);
-                await using var command = new SqlCommand("SELECT query_id FROM sys.query_store_query ORDER BY query_id;", connection) { CommandTimeout = 60 };
+                await using var command = new SqlCommand("SELECT query_id, query_text_id FROM sys.query_store_query ORDER BY query_id;", connection) { CommandTimeout = 60 };
                 await using var reader = await command.ExecuteReaderAsync(ct);
-                while (await reader.ReadAsync(ct)) ids.Add(reader.GetInt64(0));
+                while (await reader.ReadAsync(ct))
+                {
+                    ids.Add(reader.GetInt64(0));
+                    textIds[reader.GetInt64(0)] = reader.GetInt64(1);
+                }
             }
 
             QueryIds = ids;
+            QueryTextIds = textIds;
         }
 
         public async ValueTask DisposeAsync()

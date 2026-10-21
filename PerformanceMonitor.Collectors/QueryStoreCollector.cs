@@ -769,6 +769,8 @@ END;
             ? ""
             : "JOIN #pm_qs_text AS qst\n  ON qst.query_text_id = qsq.query_text_id\n";
 
+        /* The text temp is a heap on purpose: a clustered index on it would rebuild the nvarchar(max) text a second time in tempdb (measured, in
+           the PR for #6257), and the shipping SELECT's hash join does not need one. The id-keyed temps below stay indexed because they hold no text. */
         /* #6257: the staging side of the same gate. The text view is read (into its own temp, from the staged queries' text ids) only when the
            payload ships the text inline, exactly as the join above is present only then. */
         string queryTextStage = context.FetchQueryTextSeparately
@@ -787,8 +789,6 @@ WHERE EXISTS
     WHERE qsq.query_text_id = qst.query_text_id
 )
 OPTION(RECOMPILE, HASH JOIN);
-
-CREATE CLUSTERED INDEX c ON #pm_qs_text (query_text_id);
 ";
 
         /* #6257: the version-gated plan columns the staged plan temp must carry for the shipping SELECT's fragments (planForcingCol, planTypeCol),
@@ -1040,7 +1040,8 @@ OPTION(RECOMPILE);
    Query Store does not show it. The chain is the one the old join walked, slice to plan to query to text: plans by the slice's plan ids,
    queries by those plans' query ids, text by those queries' text ids, intervals by the slice's interval ids. HASH JOIN on the three TVF-backed
    views, for the reason the by-ids fetches carry it (#2791): the optimizer has only a fixed guess for the in-memory half, and a nested loop
-   would re-run it once per slice row. The replica view stays a direct LEFT JOIN in the shipping SELECT: it holds a few role rows and has no
+   would re-run it once per slice row. (PlanCorrectionCollector stages the same views with no join hint, from a short list of recommendations. This slice can
+   hold thousands of plan ids, which is the case #2791 measured.) The replica view stays a direct LEFT JOIN in the shipping SELECT: it holds a few role rows and has no
    in-memory half to merge. The clustered indexes are NOT unique on purpose. The old join would have repeated a row if a view ever
    returned one id twice, so the staged copy repeats it too, where a primary key would turn that into error 2627 and lose the database's cycle. */
 DROP TABLE IF EXISTS #pm_qs_interval;
@@ -1171,7 +1172,15 @@ JOIN #pm_qs_query AS qsq
   ON qsrsi.runtime_stats_interval_id = qsrs.runtime_stats_interval_id
 {replicaJoin}
 ORDER BY qsrs.last_execution_time {shipOrder}
-OPTION(RECOMPILE);";
+OPTION(RECOMPILE);
+
+/* The shipping SELECT is the batch's only result set, so these trailing drops add none. A pooled connection keeps its temps until reset, and
+   #pm_qs_text holds the slice's query text, which would sit in tempdb on a small Azure SQL DB tier. The leading drops stay for a batch that was cut short. */
+DROP TABLE IF EXISTS #pm_qs_text;
+DROP TABLE IF EXISTS #pm_qs_query;
+DROP TABLE IF EXISTS #pm_qs_plan;
+DROP TABLE IF EXISTS #pm_qs_interval;
+DROP TABLE IF EXISTS #pm_qs_slice;";
     }
 
     /// <summary>
@@ -1571,8 +1580,6 @@ WHERE EXISTS
     WHERE q.query_text_id = qst.query_text_id
 )
 OPTION(RECOMPILE, HASH JOIN);
-
-CREATE CLUSTERED INDEX c ON #text_fetch_text (query_text_id);
 
 SELECT /* PerformanceMonitorLite */
     query_id = b.query_id,
