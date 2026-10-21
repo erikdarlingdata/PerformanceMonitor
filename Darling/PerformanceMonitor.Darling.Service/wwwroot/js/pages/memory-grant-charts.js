@@ -17,7 +17,7 @@
  * draws a line of zeros for time nobody sampled. The read's own empty or unavailable answer is that sentence.
  */
 
-import { el, readToolWithinKeptHistory, keptWindowStrip, mount, loadingStrip, readErrorStrip, emptyStrip, metricNote, windowFromHours, fmtInt } from "../util.js";
+import { el, readToolWithinKeptHistory, keptWindowStrip, mount, loadingStrip, readErrorStrip, emptyStrip, metricNote, windowFromHours, fmtInt, dbScopeChip } from "../util.js";
 import { zoomableLineChart, chartZoomScope, CATEGORICAL_COLORS } from "../charts.js";
 import { emptyHeadline } from "../panels.js";
 
@@ -44,7 +44,7 @@ export const GRANT_ACTIVITY_METRICS = [
  * metric order). A pool with no entry at a time has no value there, so its line has a gap and is not drawn to 0. Entries that
  * carry no time, or a non-number value, are dropped. An empty `entries` gives no points and no series.
  */
-export function grantChartSeries(entries, metrics, palette = CATEGORICAL_COLORS) {
+export function grantChartSeries(entries, metrics) {
   const rows = (Array.isArray(entries) ? entries : []).filter((r) => r && r.collection_time != null);
   const pools = [...new Set(rows.map((r) => Number(r.pool_id) || 0))].sort((a, b) => a - b);
   const byTime = new Map();
@@ -52,7 +52,7 @@ export function grantChartSeries(entries, metrics, palette = CATEGORICAL_COLORS)
   pools.forEach((pool) => {
     metrics.forEach((m) => {
       const key = "p" + pool + "_" + m.key;
-      series.push({ key, label: "Pool " + pool + ": " + m.label, color: palette[series.length % palette.length] });
+      series.push({ key, label: "Pool " + pool + ": " + m.label, color: CATEGORICAL_COLORS[series.length % CATEGORICAL_COLORS.length] });
       for (const r of rows) {
         if ((Number(r.pool_id) || 0) !== pool || typeof r[m.key] !== "number") continue;
         let point = byTime.get(r.collection_time);
@@ -72,7 +72,7 @@ function chartPanel(title, subtitle) {
   const body = el("div", { class: "panel-body" }, [loadingStrip()]);
   /* `data-panel` / `data-title` are the hooks the web UI smoke check finds a panel by (#5701). */
   const panel = el("div", { class: "panel card span-2", "data-panel": "get_memory_grants", "data-title": title }, [
-    el("h3", {}, [title, el("span", { class: "panel-sub", text: " " + subtitle })]),
+    el("h3", {}, [title, el("span", { class: "panel-sub", text: " " + subtitle }), dbScopeChip("get_memory_grants")]),
     body,
   ]);
   return { panel, body };
