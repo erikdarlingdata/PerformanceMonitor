@@ -320,6 +320,15 @@ public sealed class MigrationDataMovingRungCensusPins
             + "overrode one collector for one server or the fleet, so a store holds dozens of rows and a very large one a few thousand. Each "
             + "statement reads the table once, and NOT VALID adds a constraint without scanning it. The rung's trigger function on "
             + "config.config_monitored_servers only runs for later INSERTs. It does not move the lock-wait floor."),
+        new(
+            207,
+            SetsTheFloor: false,
+            "one partial unique index on config.investigation_requests (created V184), WHERE trigger_kind = 'change_watch'. The column "
+            + "is added by the same rung with DEFAULT 'alert', so no existing row matches the predicate and the build indexes nothing: "
+            + "it reads the table once (a request is one row per incident, about a hundred a day at the route limits, kept for a few "
+            + "weeks) and is milliseconds. The rung also builds one partial index on collect.query_store_forced_plans, WHERE plan_id IS NULL "
+            + "(the marker rows, one per captured database per pass): a read of that plain table once, a few seconds on a store that keeps "
+            + "30 days of captures. It does not move the lock-wait floor."),
     ];
 
     /// <summary>

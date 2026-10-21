@@ -45,6 +45,24 @@ public sealed record InvestigationAlert(
     /// <summary>The alert's severity, <see cref="InvestigationEvents.Warning"/> or <see cref="InvestigationEvents.Critical"/>
     /// (#6003, D6): stamped as a new request's <c>max_severity</c>, and a join above it is an event. Null reads as warning.</summary>
     public string? Severity { get; init; }
+
+    /// <summary>What opened the request (#6234): <see cref="InvestigationTriggerKinds.Alert"/> (the default) or
+    /// <see cref="InvestigationTriggerKinds.ChangeWatch"/>, a watch window that saw something move after a recorded change. A
+    /// change-watch request is never joined by an alert and never joins one.</summary>
+    public string TriggerKind { get; init; } = InvestigationTriggerKinds.Alert;
+}
+
+/// <summary>The trigger kinds of an investigation request (#6234), the <c>trigger_kind</c> column's values.</summary>
+public static class InvestigationTriggerKinds
+{
+    /// <summary>An alert fired (the only kind before V207).</summary>
+    public const string Alert = "alert";
+
+    /// <summary>A change watch window ended with a measure moved.</summary>
+    public const string ChangeWatch = "change_watch";
+
+    /// <summary>The metric name a change-watch request carries as its first alert (the route match and the brief's alert row).</summary>
+    public const string ChangeWatchMetric = "Change Watch";
 }
 
 /// <summary>

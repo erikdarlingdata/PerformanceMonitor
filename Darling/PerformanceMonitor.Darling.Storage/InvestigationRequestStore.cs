@@ -76,6 +76,7 @@ WHERE r.server_id = $1
   AND r.family = $2
   AND r.practice_of IS NULL
   AND r.force_check_of IS NULL
+  AND r.trigger_kind = 'alert'
   AND r.state IN ('open', 'claimed')
   AND r.expires_at > $3
   AND r.opened_at >= $3 - " + GroupingWindowCapSql + @"
@@ -115,9 +116,9 @@ WHERE route_id = $1
     internal static readonly string OpenSql = @"
 INSERT INTO config.investigation_requests
     (request_id, route_id, server_id, server_name, family, first_metric, first_dedup_key, story_path_hash,
-     first_alert_at, last_alert_at, window_until, opened_at, expires_at, lease_minutes, autonomy_level, max_severity)
+     first_alert_at, last_alert_at, window_until, opened_at, expires_at, lease_minutes, autonomy_level, max_severity, trigger_kind)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $9 + " + GroupingWindowSql + @", $10, $10 + make_interval(mins => $11), $12,
-        " + StampLevelSql(6, 13) + ", $14)";
+        " + StampLevelSql(6, 13) + ", $14, $15)";
 
     internal const string AlertRowsSql = @"
 INSERT INTO config.investigation_request_alerts
@@ -611,10 +612,12 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         Guid? joinId = null;
         string? maxSeverity = null;
         var newMetric = false;
-        await using (var find = Command(connection, transaction, FindJoinSql,
-                         P(alert.ServerId), P(alert.Family), P(now), P(alertTime), P(alert.MetricName)))
-        await using (var found = await find.ExecuteReaderAsync(cancellationToken))
+        /* #6234: a change-watch request is its own incident; it joins nothing, and FindJoinSql never finds one. */
+        if (string.Equals(alert.TriggerKind, InvestigationTriggerKinds.Alert, StringComparison.Ordinal))
         {
+            await using var find = Command(connection, transaction, FindJoinSql,
+                P(alert.ServerId), P(alert.Family), P(now), P(alertTime), P(alert.MetricName));
+            await using var found = await find.ExecuteReaderAsync(cancellationToken);
             if (await found.ReadAsync(cancellationToken))
             {
                 joinId = found.GetGuid(0);
@@ -668,7 +671,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         await ExecAsync(connection, transaction, OpenSql, cancellationToken,
             P(requestId), P(alert.RouteId), P(alert.ServerId), P(alert.ServerName), P(alert.Family), P(alert.MetricName),
             PNullable(keys.FirstOrDefault()), PNullable(alert.StoryPathHash), P(alertTime), P(now), P(alert.ExpiryMinutes),
-            P(alert.LeaseMinutes), P((short)alert.AutonomyLevel), P(severity));
+            P(alert.LeaseMinutes), P((short)alert.AutonomyLevel), P(severity), P(alert.TriggerKind));
         await InsertAlertRowsAsync(connection, transaction, requestId, alert, alertTime, keys, cancellationToken);
         await JournalAsync(connection, transaction, now, requestId, alert.RouteId, alert.ServerId, "opened", "service",
             alert.MetricName, null, null, cancellationToken);

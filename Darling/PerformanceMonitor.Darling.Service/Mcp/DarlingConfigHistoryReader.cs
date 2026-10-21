@@ -77,13 +77,39 @@ internal static class DarlingConfigHistoryReader
         ORDER BY configuration_name, capture_time
         """;
 
+    /// <summary>
+    /// #6234: the bounded form of every snapshot read below, for the change watch's detection. A snapshot diff needs the capture
+    /// BEFORE the first one it reports, so the lower bound is not "newer than $N" but "the newest capture at or before $N, and
+    /// everything after it" (no capture at or before $N: all of them). <paramref name="table"/> is the view, <paramref name="serverParameter"/>
+    /// and <paramref name="afterParameter"/> are the positional parameters. <paramref name="perColumn"/> makes the baseline per value of that column
+    /// (a database): a database that was missing from the newest capture (offline or restoring at that connect) still gets its own baseline capture, so
+    /// its first change in the window is not read as a first-ever row. Only the change watch's bounded reads call this; the tools read all history.
+    /// </summary>
+    internal static string BaselineBound(string table, string serverParameter, string afterParameter, string timeColumn = "capture_time", string? perColumn = null) =>
+        $"{timeColumn} >= coalesce((SELECT max(b.{timeColumn}) FROM {table} AS b WHERE b.server_id = {serverParameter} AND b.{timeColumn} <= {afterParameter}" +
+        (perColumn is null ? "" : $" AND b.{perColumn} IS NOT DISTINCT FROM {table}.{perColumn}") + "), '-infinity'::timestamp)";
+
+    /// <summary>The server-config read of <see cref="ServerConfigSnapshotsSql"/> from the capture at or before $2 on (#6234). $1 server_id, $2 naive UTC.</summary>
+    public static readonly string ServerConfigSnapshotsAfterSql = ServerConfigSnapshotsSql.Replace(
+        "WHERE server_id = $1", "WHERE server_id = $1\n        AND   " + BaselineBound("v_server_config", "$1", "$2"), StringComparison.Ordinal);
+
     public static async Task<List<ConfigChangeDiff.ServerConfigSnapshot>> GetServerConfigSnapshotsAsync(
-        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default) =>
+        await GetServerConfigSnapshotsAsync(postgres, serverId, null, cancellationToken);
+
+    /// <summary>The snapshots from the capture at or before <paramref name="afterUtc"/> on (every capture when null).</summary>
+    public static async Task<List<ConfigChangeDiff.ServerConfigSnapshot>> GetServerConfigSnapshotsAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime? afterUtc, CancellationToken cancellationToken = default)
     {
         var rows = new List<ConfigChangeDiff.ServerConfigSnapshot>();
-        await using var command = postgres.CreateCommand(ServerConfigSnapshotsSql);
+        await using var command = postgres.CreateCommand(afterUtc is null ? ServerConfigSnapshotsSql : ServerConfigSnapshotsAfterSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
+        if (afterUtc is { } after)
+        {
+            DarlingMcpReadParameters.AddTimestamp(command, after);
+        }
+
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -148,14 +174,27 @@ internal static class DarlingConfigHistoryReader
     /// <summary>#5245: the snapshots of a SET of databases (<see cref="DatabaseFilter.All"/> is every database), the
     /// list bound as the one <c>text[]</c> $2 (never spliced). The diff walks each database's own captures, so a
     /// filtered read changes exactly the databases it keeps.</summary>
+    internal static Task<List<ConfigChangeDiff.DatabaseConfigSnapshot>> GetDatabaseConfigSnapshotsAsync(
+        NpgsqlDataSource postgres, int serverId, DatabaseFilter databases, CancellationToken cancellationToken = default) =>
+        GetDatabaseConfigSnapshotsAsync(postgres, serverId, databases, null, cancellationToken);
+
+    /// <summary><see cref="DatabaseConfigSnapshotsSql"/> from the capture at or before $3 on (#6234). $1 server_id, $2 databases, $3 naive UTC.</summary>
+    public static readonly string DatabaseConfigSnapshotsAfterSql = DatabaseConfigSnapshotsSql.Replace(
+        "WHERE server_id = $1", "WHERE server_id = $1\n        AND   " + BaselineBound("v_database_config", "$1", "$3", perColumn: "database_name"), StringComparison.Ordinal);
+
     internal static async Task<List<ConfigChangeDiff.DatabaseConfigSnapshot>> GetDatabaseConfigSnapshotsAsync(
-        NpgsqlDataSource postgres, int serverId, DatabaseFilter databases, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DatabaseFilter databases, DateTime? afterUtc, CancellationToken cancellationToken = default)
     {
         var rows = new List<ConfigChangeDiff.DatabaseConfigSnapshot>();
-        await using var command = postgres.CreateCommand(DatabaseConfigSnapshotsSql);
+        await using var command = postgres.CreateCommand(afterUtc is null ? DatabaseConfigSnapshotsSql : DatabaseConfigSnapshotsAfterSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         command.Parameters.Add(databases.Parameter());
+        if (afterUtc is { } after)
+        {
+            DarlingMcpReadParameters.AddTimestamp(command, after);
+        }
+
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -192,13 +231,27 @@ internal static class DarlingConfigHistoryReader
         ORDER BY capture_time, trace_flag
         """;
 
+    /// <summary><see cref="TraceFlagSnapshotsSql"/> from the capture at or before $2 on (#6234). $1 server_id, $2 naive UTC.</summary>
+    public static readonly string TraceFlagSnapshotsAfterSql = TraceFlagSnapshotsSql.Replace(
+        "WHERE server_id = $1", "WHERE server_id = $1\n        AND   " + BaselineBound("v_trace_flags", "$1", "$2"), StringComparison.Ordinal);
+
     public static async Task<List<ConfigChangeDiff.TraceFlagSnapshot>> GetTraceFlagSnapshotsAsync(
-        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default) =>
+        await GetTraceFlagSnapshotsAsync(postgres, serverId, null, cancellationToken);
+
+    /// <summary>The snapshots from the capture at or before <paramref name="afterUtc"/> on (every capture when null).</summary>
+    public static async Task<List<ConfigChangeDiff.TraceFlagSnapshot>> GetTraceFlagSnapshotsAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime? afterUtc, CancellationToken cancellationToken = default)
     {
         var rows = new List<ConfigChangeDiff.TraceFlagSnapshot>();
-        await using var command = postgres.CreateCommand(TraceFlagSnapshotsSql);
+        await using var command = postgres.CreateCommand(afterUtc is null ? TraceFlagSnapshotsSql : TraceFlagSnapshotsAfterSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
+        if (afterUtc is { } after)
+        {
+            DarlingMcpReadParameters.AddTimestamp(command, after);
+        }
+
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

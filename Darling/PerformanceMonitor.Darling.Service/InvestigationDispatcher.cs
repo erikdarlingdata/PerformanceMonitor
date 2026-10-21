@@ -149,6 +149,9 @@ public sealed class InvestigationDispatcher
         AlertHistoryRecord record, AlertContext? context, string? storyPathHash = null, CancellationToken cancellationToken = default) =>
         _core.DispatchAsync(record, context, storyPathHash, cancellationToken);
 
+    /// <summary>The shared core, for the change watch's pass (#6234).</summary>
+    internal InvestigationDispatchCore Core => _core;
+
     /// <summary>
     /// #5821: the values an alert's history row stores, for its link rows (<see cref="InvestigationDispatchCore.Facts"/>).
     /// </summary>

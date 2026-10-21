@@ -2449,6 +2449,7 @@ $rung$;";
         new Migration(204, "custom-view-folders", V204Sql),
         new Migration(205, "custom-alert-rule-expiry", V205Sql),
         new Migration(206, "collector-enabled-inherit", V206Sql),
+        new Migration(207, "change-watches", ChangeWatchStore.V207Sql),
     };
 
     /// <summary>
