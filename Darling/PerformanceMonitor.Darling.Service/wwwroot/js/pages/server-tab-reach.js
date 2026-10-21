@@ -23,7 +23,7 @@ export const SQL_TAB_REACH = {
     collector: "cpu_utilization",
     reachReads: [
       "get_analysis_findings", "get_blocking_trend", "get_cpu_utilization", "get_deadlock_trend",
-      "get_file_io_trend", "get_memory_trend"
+      "get_file_io_trend", "get_memory_trend", "get_server_trend"
     ]
   },
   waits: {

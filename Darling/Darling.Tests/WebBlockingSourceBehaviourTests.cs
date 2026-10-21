@@ -75,9 +75,9 @@ public sealed class WebBlockingSourceBehaviourTests
     {
         var r = Run(scenario);
 
-        /* Blocking Events is on the Overview tab and the Blocking tab; Blocking Severity only on the Blocking tab. */
+        /* Blocking Events and Blocking Severity are on the Blocking tab (the Overview draws blocking as one of its five strips, #6291). */
         var events = Lines(r, trendTitle);
-        Assert.Equal(2, events.Length);
+        Assert.Single(events);
         Assert.All(events, lines => Assert.Equal(new[] { expected }, lines));
         var severity = Lines(r, "Blocking Severity");
         Assert.Single(severity);
@@ -138,15 +138,15 @@ public sealed class WebBlockingSourceBehaviourTests
 
         Assert.DoesNotContain("\"Blocking Events\"", tabs);
         Assert.DoesNotContain("\"Blocking Events\"", templates);
-        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(tabs, "line\\(\"Blocked process report trend\", \"get_blocking_trend\"").Count);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(tabs, "line\\(\"Blocked process report trend\", \"get_blocking_trend\""));
         Assert.Contains("const BLOCKING_REPORT_SERIES = [{ key: \"count\", label: \"Reports\" }];", tabs);
         Assert.DoesNotContain("No blocking events in this window — an empty trend", tabs);
         /* The starter dashboard panel has no collector tag to follow, so it words itself for both sources. */
         Assert.Contains("title: \"Blocking trend (reports or snapshot rows)\"", templates);
         Assert.Contains("label: \"Reports or snapshot rows\"", templates);
         Assert.DoesNotContain("title: \"Blocked process report trend\"", templates);
-        /* The axis caption says it too: both tab charts and the starter dashboard panel carry unit "reports". */
-        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(tabs, "unit: \"reports\",").Count);
+        /* The axis caption says it too: the Blocking tab chart and the starter dashboard panel carry unit "reports". */
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(tabs, "unit: \"reports\","));
         Assert.Contains("unit: \"reports or snapshot rows\",", templates);
     }
 
@@ -175,7 +175,7 @@ public sealed class WebBlockingSourceBehaviourTests
         var charts = r.GetProperty("charts").EnumerateArray()
             .Where(c => c.GetProperty("labels").EnumerateArray().Any(l => l.GetString() == label))
             .ToList();
-        Assert.Equal(2, charts.Count);
+        Assert.Single(charts);
         Assert.All(charts, c =>
         {
             Assert.Equal(title, c.GetProperty("title").GetString());
@@ -192,6 +192,6 @@ public sealed class WebBlockingSourceBehaviourTests
             .Where(p => p.GetProperty("strips").GetArrayLength() > 0)
             .Select(p => p.GetProperty("title").GetString())
             .ToArray();
-        Assert.Equal(new[] { "Blocking snapshot trend", "Blocking snapshot trend", "Blocking Severity" }, titles);
+        Assert.Equal(new[] { "Blocking snapshot trend", "Blocking Severity" }, titles);
     }
 }

@@ -68,9 +68,11 @@ const NOTES = {
   retentionOnly: { window_truncated: false, truncation_note: null, retention_notice: INPUT.retention },
   neither: { window_truncated: false, truncation_note: null, retention_notice: null },
   markup: { window_truncated: true, truncation_note: null, retention_notice: MARKUP },
+  columns: { window_truncated: false, truncation_note: null, retention_notice: null },
 }[scenario];
 
 const asks = [];
+const details = [];
 const answerFor = (name) => {
   if (name === "get_top_queries_by_cpu") {
     return {
@@ -81,7 +83,7 @@ const answerFor = (name) => {
   if (name === "get_top_procedures_by_cpu") {
     return {
       server: "a", hours_back: 168, tier_used: "raw", ...NOTES,
-      procedures: [{ database_name: "db1", full_name: "dbo.p1", execution_count: 3, total_cpu_ms: 4, total_logical_reads: 9 }],
+      procedures: [{ database_name: "db1", full_name: "dbo.p1", execution_count: 3, total_cpu_ms: 4, total_logical_reads: 9, sql_handle: "0x02" }],
     };
   }
   return {};
@@ -91,6 +93,7 @@ globalThis.fetch = async (url) => {
   const name = u.pathname.replace("/api/read/", "");
   if (name === "get_top_queries_by_cpu" || name === "get_top_procedures_by_cpu") {
     asks.push(name + ":" + (u.searchParams.get("order_by") ?? "-"));
+    details.push(name + ":" + (u.searchParams.get("detail") ?? "-"));
   }
   return { status: 200, ok: true, text: async () => JSON.stringify(answerFor(name)) };
 };
@@ -138,6 +141,29 @@ const report = (root, title) => {
   };
 };
 
+/* #6303: what a card's grid drew, the column headers and the column-group toggles (the Plan and History columns ride the grid's column
+   list; the groups and the full-detail read ride the procedures grid). */
+const shape = (root, title) => {
+  const card = cardOf(root, title);
+  if (!card) return { found: false };
+  return {
+    found: true,
+    headers: all(card).filter((n) => n.tag === "th").map((n) => n.textContent),
+    groupToggles: all(card).filter((n) => n.tag === "button" && /col-toggle/.test(n.className)).map((n) => n.textContent),
+  };
+};
+if (scenario === "columns") {
+  const cols = { cards: {} };
+  const cpuTab = await draw("cpu");
+  cols.cards.cpuQueries = shape(cpuTab, "Top Queries by");
+  cols.cards.cpuProcedures = shape(cpuTab, "Top Procedures by");
+  const queriesTab = await draw("queries");
+  cols.cards.queriesQueries = shape(queriesTab, "Top Queries by");
+  cols.cards.queriesProcedures = shape(queriesTab, "Top Procedures by");
+  cols.details = details;
+  console.log(JSON.stringify(cols));
+  process.exit(0);
+}
 const out = { cards: {} };
 const cpu = await draw("cpu");
 await pickReads(cpu, "Top Queries by");

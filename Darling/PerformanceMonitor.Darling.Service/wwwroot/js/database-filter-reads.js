@@ -62,7 +62,7 @@ export const SERVER_WIDE = new Set([
   "get_health_parser_memory_conditions", "get_health_parser_memory_node_oom", "get_health_parser_scheduler_issues",
   "get_health_parser_significant_waits", "get_health_parser_system_health", "get_job_history", "get_latch_stats",
   "get_lock_wait_trend", "get_memory_clerks", "get_memory_grants", "get_memory_pressure_events", "get_memory_stats",
-  "get_memory_trend", "get_mute_rules", "get_perfmon_stats", "get_perfmon_trend", "get_plan_cache_bloat",
+  "get_memory_trend", "get_mute_rules", "get_overview_baselines", "get_perfmon_stats", "get_perfmon_trend", "get_plan_cache_bloat",
   "get_read_latency", "get_resource_semaphore", "get_running_jobs", "get_server_config", "get_server_config_changes",
   "get_server_properties", "get_server_summary", "get_server_trend", "get_session_stats", "get_slow_reads",
   "get_spinlock_stats", "get_store_query_history", "get_tempdb_trend", "get_trace_flag_changes", "get_trace_flags",

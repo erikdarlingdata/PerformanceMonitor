@@ -353,9 +353,9 @@ public sealed class WebChartAtTimeBehaviourTests
         // deadlock charts "Show Deadlocks at This Time". Every other server-tab line chart keeps the Active Queries default.
         var tabs = File.ReadAllText(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
 
-        // line() panels: Blocking Events sits on both the Overview tab and the Blocking tab; the deadlock chart is "Deadlocks" on Overview and
-        // "Deadlock trend" on the Blocking tab (#5644 W16, so the Deadlocks grid below it is the only panel with that title there).
-        foreach (var (title, item, count) in new[] { ("Blocked process report trend", "blocking", 2), ("Deadlocks", "deadlocks", 1), ("Deadlock trend", "deadlocks", 1), ("Lock Waits", "blocking", 1) })
+        // line() panels: Blocking Events sits on the Blocking tab only (the Overview strips replaced its copy, #6291); the deadlock chart is "Deadlock trend" on the Blocking tab (it was "Deadlocks" on Overview and
+        // (#5644 W16 named it "Deadlock trend" so the Deadlocks grid below it is the only panel with that title; #6291 took the Overview copies out for the strips.)
+        foreach (var (title, item, count) in new[] { ("Blocked process report trend", "blocking", 1), ("Deadlocks", "deadlocks", 0), ("Deadlock trend", "deadlocks", 1), ("Lock Waits", "blocking", 1) })
         {
             var calls = Regex.Matches(tabs, @"line\(""" + title + @""",");
             Assert.Equal(count, calls.Count);
@@ -371,9 +371,9 @@ public sealed class WebChartAtTimeBehaviourTests
             Assert.Contains($"atTimeItem: \"{item}\",", Balanced(tabs, tabs.LastIndexOf('{', at)));
         }
 
-        // No other chart names one: 4 blocking charts and 3 deadlock charts, all counted above.
-        Assert.Equal(4, Regex.Matches(tabs, @"atTimeItem: ""blocking""").Count);
-        Assert.Equal(3, Regex.Matches(tabs, @"atTimeItem: ""deadlocks""").Count);
+        // No other chart names one: 3 blocking charts and 2 deadlock charts, all counted above (the Overview draws blocking and deadlocks as a strip of its own, #6291).
+        Assert.Equal(3, Regex.Matches(tabs, @"atTimeItem: ""blocking""").Count);
+        Assert.Equal(2, Regex.Matches(tabs, @"atTimeItem: ""deadlocks""").Count);
     }
 
     [Fact]

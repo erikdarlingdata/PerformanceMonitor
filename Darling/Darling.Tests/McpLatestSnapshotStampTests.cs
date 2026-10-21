@@ -270,6 +270,8 @@ public sealed class McpLatestSnapshotStampTests
             var darling = ToolMethod(type, name).GetParameters()
                 .Where(p => p.GetCustomAttribute<DescriptionAttribute>() is not null)
                 .Select(p => p.Name!)
+                /* #6299: get_memory_grants' chart + bucket_minutes are Darling's own (the web charts read them); Lite's tool has no series read. */
+                .Where(n => !(name == "get_memory_grants" && (n == "chart" || n == "bucket_minutes")))
                 .ToArray();
             Assert.Equal(darling, LiteParamNames(liteFile, name));
         }
