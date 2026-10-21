@@ -109,6 +109,17 @@ internal static class QueryStoreFetchSelection
             perPlanHour[key] = totals;
         }
 
+        /* A forced plan on a row names its query too: a force placed after the newest forced-plans capture is not in alwaysQueryIds yet, and
+           its other plans would otherwise have to rank to be fetched (#6221 would then call them UNKNOWN_PLAN_NOT_COLLECTED). */
+        var forcedQueries = new HashSet<long>();
+        foreach (var row in rows)
+        {
+            if (row.PlanId > 0 && row.QueryId > 0 && row.IsForcedPlan)
+            {
+                forcedQueries.Add(row.QueryId);
+            }
+        }
+
         var always = new HashSet<long>();
         foreach (var row in rows)
         {
@@ -119,7 +130,8 @@ internal static class QueryStoreFetchSelection
 
             if (row.IsForcedPlan
                 || (alwaysPlanIds is not null && alwaysPlanIds.Contains(row.PlanId))
-                || (alwaysQueryIds is not null && alwaysQueryIds.Contains(row.QueryId)))
+                || (alwaysQueryIds is not null && alwaysQueryIds.Contains(row.QueryId))
+                || forcedQueries.Contains(row.QueryId))
             {
                 always.Add(row.PlanId);
             }

@@ -2085,8 +2085,8 @@ ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS starts_at_utc time
     /// V209 (#6211): <c>config.config_service.query_store_fetch_top_n</c>, how many plans per database-hour and metric the Query Store collector
     /// fetches the text and plan XML of. Default 100 (the measured knee: about 86% of new plans' CPU for about a third of the fetches). 0 or less
     /// means every new plan, the behaviour before this rung. Read live each cycle, so a change needs no restart. One catalog-only <c>ADD COLUMN</c>
-    /// with a constant default; no backfill, no GRANT (the roles' table-level SELECT covers a new column; the viewer writes it through its existing
-    /// table-level UPDATE) and no trigger (the config_version trigger fires on any row update).
+    /// with a constant default; no backfill, no GRANT (the roles' table-level SELECT covers a new column; the Viewer's settings save writes it as the admin role, whose
+    /// table-level UPDATE on the config schema covers it, while the viewer role holds only <c>UPDATE (config_version, updated_at)</c> on this table) and no trigger (the config_version trigger fires on any row update).
     /// </summary>
     private const string V209Sql = @"
 ALTER TABLE config.config_service ADD COLUMN IF NOT EXISTS query_store_fetch_top_n integer NOT NULL DEFAULT 100;";

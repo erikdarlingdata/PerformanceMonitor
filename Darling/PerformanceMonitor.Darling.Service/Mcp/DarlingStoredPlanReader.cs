@@ -402,9 +402,10 @@ internal static class DarlingStoredPlanReader
                     + "new plans in budgeted passes and this one is still waiting for a pass, or it was purged from the monitored server before it was fetched.";
             }
 
-            return $"Runtime statistics are stored for {where} in database '{databaseName}', but its {what} was not collected: the plan was not in its "
-                + $"database-hour's top {n} plans on CPU, duration, physical reads, writes, memory grant, tempdb or executions, and it is not a forced plan "
-                + "or one plan correction names (setting query_store_fetch_top_n; 0 fetches every new plan). A later collection fetches it if it ranks then.";
+            return $"Runtime statistics are stored for {where} in database '{databaseName}', but its {what} was not collected. The likely reason: the plan may not have "
+                + $"ranked in the top {n} plans of its database-hour on CPU, duration, physical reads, writes, memory grant, tempdb or executions, and may not have been a forced plan "
+                + "or one plan correction names when it was read (setting query_store_fetch_top_n; 0 fetches every new plan). Its fetch may also still be waiting on a run budget. "
+                + "A later collection fetches it if it ranks then.";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

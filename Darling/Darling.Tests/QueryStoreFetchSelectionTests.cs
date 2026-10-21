@@ -145,6 +145,28 @@ public sealed class QueryStoreFetchSelectionTests
     }
 
     [Fact]
+    public void TheOtherPlansOfAQueryWhoseForcedPlanIsInTheBatch_AreSelected_EvenBeforeAForcedPlansCaptureNamesTheQuery()
+    {
+        /* Plan 2 of query 20 is forced; a force placed after the newest forced-plans capture means that capture does not name query 20 (no alwaysQueryIds here).
+           Plans 3 and 4 are other plans of query 20 and rank on nothing; plan 5 is another query's and ranks on nothing. */
+        var rows = new List<QueryStoreCollector.Row>
+        {
+            Row(1, executions: 1000, cpuUs: 1000),
+            Row(2, query: 20, forced: true, executions: 1),
+            Row(3, query: 20, executions: 1),
+            Row(4, query: 20, executions: 1),
+            Row(5, query: 50, executions: 1),
+        };
+
+        var selection = QueryStoreFetchSelection.Select(rows, topN: 1);
+
+        Assert.Equal(new long[] { 1, 2, 3, 4 }, selection.PlanIds.OrderBy(p => p).ToArray());
+        Assert.DoesNotContain(5L, selection.PlanIds);
+        Assert.Contains(20L, selection.QueryIds);
+        Assert.DoesNotContain(50L, selection.QueryIds);
+    }
+
+    [Fact]
     public void ZeroOrLess_SelectsEveryPlan_TheBehaviourBeforeTheSetting()
     {
         var rows = Enumerable.Range(1, 20).Select(i => Row(i, executions: 1)).ToList();

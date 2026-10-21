@@ -5898,7 +5898,9 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
         /* #6211: which of this database's plans (and their queries) are worth a fetch this run. Null = every plan, the behaviour before the
            setting (the setting at 0, a batch that is not query_store rows, or a store read that failed: a fault here must cost fetches, never
            the forced plans). Ranked over the rows already read, so it adds nothing to the monitored server. */
-        var fetchSelection = await SelectQueryStoreFetchAsync(storeConnection, server, databaseName, context, batch, cancellationToken);
+        var fetchSelection = ((context.CapturePlanXml || context.FetchQueryTextSeparately) && targetProvider.Engine == CollectorTargetEngine.SqlServer)
+            ? await SelectQueryStoreFetchAsync(storeConnection, server, databaseName, context, batch, cancellationToken)
+            : null;
 
         if (context.CapturePlanXml && targetProvider.Engine == CollectorTargetEngine.SqlServer)
         {
@@ -5915,7 +5917,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
             try
             {
                 await FetchAndStorePlansAsync(targetProvider, targetConnection, storeConnection,
-                    server, databaseName, collectorName, context, commandTimeoutSeconds, ExtractPlanReferences(batch, fetchSelection?.PlanIds), cancellationToken);
+                    server, databaseName, collectorName, context, commandTimeoutSeconds, ExtractPlanReferences(batch), fetchSelection?.PlanIds, cancellationToken);
             }
             finally
             {
@@ -5940,7 +5942,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
             try
             {
                 await FetchAndStoreQueryTextAsync(targetProvider, targetConnection, storeConnection,
-                    server, databaseName, collectorName, context, commandTimeoutSeconds, ExtractTextReferences(batch, fetchSelection?.QueryIds), cancellationToken);
+                    server, databaseName, collectorName, context, commandTimeoutSeconds, ExtractTextReferences(batch), fetchSelection?.QueryIds, cancellationToken);
             }
             finally
             {
@@ -6254,6 +6256,7 @@ ORDER BY plan_id, runtime_stats_interval_id, execution_type_desc, replica_role, 
         CollectorContext context,
         int itemTimeout,
         IReadOnlyList<(long PlanId, string? PlanHash)> references,
+        HashSet<long>? fetchOnlyPlanIds,
         CancellationToken cancellationToken)
     {
         /* Hoisted out of the try (#2776) so the catch can advance this database's backoff counter — the
@@ -6428,7 +6431,13 @@ ORDER BY plan_id, runtime_stats_interval_id, execution_type_desc, replica_role, 
                     {
                         if (!verdict.Resolved || verdict.HashStale)
                         {
-                            missing.Add(verdict.Id);
+                            /* #6211: every reference was touched and probed above (that is the only last_seen refresh a stored plan has),
+                               but only the selected ones are added to what is fetched (the debt already owed is in `missing` from the start). A plan that did not rank is not stored
+                               and not carried: it is fetched on a later run if it ranks then. */
+                            if (fetchOnlyPlanIds is null || fetchOnlyPlanIds.Contains(verdict.Id))
+                            {
+                                missing.Add(verdict.Id);
+                            }
                         }
                         else
                         {
@@ -6781,6 +6790,7 @@ ORDER BY plan_id, runtime_stats_interval_id, execution_type_desc, replica_role, 
         CollectorContext context,
         int itemTimeout,
         IReadOnlyList<(long QueryId, string? QueryHash)> references,
+        HashSet<long>? fetchOnlyQueryIds,
         CancellationToken cancellationToken)
     {
         /* Hoisted out of the try (#2776), same reason as the plan side: the catch advances the backoff.
@@ -6910,7 +6920,12 @@ ORDER BY plan_id, runtime_stats_interval_id, execution_type_desc, replica_role, 
                     {
                         if (!verdict.Resolved || verdict.HashStale)
                         {
-                            missing.Add(verdict.Id);
+                            /* #6211: text twin of the plan side: all references are touched and probed, only the selected queries
+                               are added to what is fetched (carried debt is in `missing` already). */
+                            if (fetchOnlyQueryIds is null || fetchOnlyQueryIds.Contains(verdict.Id))
+                            {
+                                missing.Add(verdict.Id);
+                            }
                         }
                         else
                         {

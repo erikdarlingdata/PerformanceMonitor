@@ -114,7 +114,7 @@ public sealed class QueryStoreTopNFetchLiveTests
         public required NpgsqlConnection Connection { get; init; }
         public required NpgsqlDataSource Postgres { get; init; }
         public required ServerRuntime Server { get; init; }
-        public required DarlingCollectorRunner Runner { get; init; }
+        public required DarlingCollectorRunner Runner { get; set; }
         public required DarlingConfig Config { get; init; }
         public required StoreConfigProvider Provider { get; init; }
         public required string Database { get; init; }
@@ -127,6 +127,11 @@ public sealed class QueryStoreTopNFetchLiveTests
         foreach (var value in values) command.Parameters.AddWithValue(value);
         await command.ExecuteNonQueryAsync(ct);
     }
+
+    /// <summary>A runner wired the way the worker wires it. A second one has empty probe caches, as after a service restart.</summary>
+    private static DarlingCollectorRunner NewRunner(NpgsqlDataSource postgres, DarlingConfig config) =>
+        new(postgres, new CollectorDeltaCalculator(), null, capturePlans: () => true,
+            queryStoreFetchTopN: () => StoreConfigProvider.ClampQueryStoreFetchTopN(config.QueryStoreFetchTopN));
 
     /// <summary>The Viewer's path: a store UPDATE of the setting, then the worker's per-cycle reload into the live config the runner's provider reads.</summary>
     private static async Task SetTopNInStoreAsync(Rig rig, int topN, CancellationToken ct)
@@ -228,8 +233,7 @@ INSERT dbo.t (pad) SELECT TOP (20000) 'x' FROM sys.all_columns AS a CROSS JOIN s
             var rig = new Rig
             {
                 Connection = connection, Postgres = postgres, Server = server, Config = config, Provider = provider, Database = database,
-                Runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator(), null, capturePlans: () => true,
-                    queryStoreFetchTopN: () => StoreConfigProvider.ClampQueryStoreFetchTopN(config.QueryStoreFetchTopN)),
+                Runner = NewRunner(postgres, config),
             };
             await SetTopNInStoreAsync(rig, topN, ct);
             foreach (var tag in Cold.Concat(Hot.Select(h => h.Tag))) rig.Ids[tag] = await IdsAsync(database, tag, ct);
@@ -330,6 +334,89 @@ INSERT dbo.t (pad) SELECT TOP (20000) 'x' FROM sys.all_columns AS a CROSS JOIN s
             var (second, secondQueries) = await StoredAsync(rig, ct);
 
             AssertFetched(rig, second, secondQueries, Cold.Concat(Hot.Select(h => h.Tag)), expected: true);
+        });
+    }
+
+    /// <summary>The newest last_seen of the plan's map row, its plan-dim row (by the map's digest) and its query's text row.</summary>
+    private static async Task<(DateTime Map, DateTime Dim, DateTime Text)> LastSeenAsync(Rig rig, string tag, CancellationToken ct)
+    {
+        var (queryId, planId) = rig.Ids[tag];
+        await using var command = new NpgsqlCommand(@"
+SELECT m.last_seen, d.last_seen, t.last_seen
+FROM collect.query_store_plan_map AS m
+JOIN collect.query_plan_dim AS d ON d.digest = m.digest
+JOIN collect.query_store_text AS t ON t.server_id = m.server_id AND t.database_name = m.database_name AND t.query_id = $4
+WHERE m.server_id = $1 AND m.database_name = $2 AND m.plan_id = $3", rig.Connection);
+        command.Parameters.AddWithValue(rig.Server.ServerId);
+        command.Parameters.AddWithValue(rig.Database);
+        command.Parameters.AddWithValue(planId);
+        command.Parameters.AddWithValue(queryId);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        Assert.True(await reader.ReadAsync(ct), $"{tag} has a stored map row, plan XML and text");
+        return (reader.GetDateTime(0), reader.GetDateTime(1), reader.GetDateTime(2));
+    }
+
+    [Fact]
+    public async Task AFetchedPlan_ThatNoLongerRanks_StillHasItsMapPlanAndTextRowsKeptAlive()
+    {
+        await RunAsync(0, async (rig, ct) =>
+        {
+            /* Run 1 at N = 0 fetches every plan, cold1 included. Then its three rows are aged two days (inside the prune window, past the touch guard). */
+            await CollectAsync(rig, ct);
+            var (queryId, planId) = rig.Ids["cold1"];
+            await Exec(rig.Connection, ct, "UPDATE collect.query_store_plan_map SET last_seen = last_seen - interval '2 days' WHERE server_id = $1 AND database_name = $2 AND plan_id = $3", rig.Server.ServerId, rig.Database, planId);
+            await Exec(rig.Connection, ct, "UPDATE collect.query_plan_dim SET last_seen = last_seen - interval '2 days' WHERE digest IN (SELECT digest FROM collect.query_store_plan_map WHERE server_id = $1 AND database_name = $2 AND plan_id = $3)", rig.Server.ServerId, rig.Database, planId);
+            await Exec(rig.Connection, ct, "UPDATE collect.query_store_text SET last_seen = last_seen - interval '2 days' WHERE server_id = $1 AND database_name = $2 AND query_id = $3", rig.Server.ServerId, rig.Database, queryId);
+            var aged = await LastSeenAsync(rig, "cold1", ct);
+
+            /* N drops to 1 and cold1 runs again: it is in the batch, it is far outside the top 1 on every metric, and it is already stored. The fetch
+               skips it, but it is still referenced, so its rows must be refreshed: that touch is the only thing that keeps them from the prune. */
+            await SetTopNInStoreAsync(rig, 1, ct);
+            rig.Runner = NewRunner(rig.Postgres, rig.Config);
+            await RunQueryAsync(rig.Database, "cold1", hot: false, 1, ct);
+            await CollectAsync(rig, ct);
+
+            var after = await LastSeenAsync(rig, "cold1", ct);
+            Assert.True(after.Map > aged.Map.AddDays(1), $"plan map last_seen advanced: {aged.Map:O} -> {after.Map:O}");
+            Assert.True(after.Dim > aged.Dim.AddDays(1), $"plan dim last_seen advanced: {aged.Dim:O} -> {after.Dim:O}");
+            Assert.True(after.Text > aged.Text.AddDays(1), $"text last_seen advanced: {aged.Text:O} -> {after.Text:O}");
+        });
+    }
+
+    [Fact]
+    public async Task AQueryInTheNewestForcedPlansCapture_HasItsPlanFetched_EvenOutsideTheTopN()
+    {
+        await RunAsync(SmallN, async (rig, ct) =>
+        {
+            /* The capture names cold3's query (with some other plan id as the forced one), so cold3's plan is a variant of a forced query that does not rank. */
+            var (queryId, planId) = rig.Ids["cold3"];
+            await Exec(rig.Connection, ct, @"
+INSERT INTO collect.query_store_forced_plans (collection_id, collection_time, server_id, server_name, database_name, plan_id, query_id)
+VALUES (1, (now() AT TIME ZONE 'utc'), $1, 'forced-test', $2, $3, $4)", rig.Server.ServerId, rig.Database, planId + 100_000, queryId);
+
+            await CollectAsync(rig, ct);
+            var (plans, queries) = await StoredAsync(rig, ct);
+
+            AssertFetched(rig, plans, queries, new[] { "cold3" }, expected: true);
+            AssertFetched(rig, plans, queries, Cold.Where(t => t != "cold3"), expected: false);
+        });
+    }
+
+    [Fact]
+    public async Task ThePlansAPlanCorrectionRowNames_AreFetched_EvenOutsideTheTopN()
+    {
+        await RunAsync(SmallN, async (rig, ct) =>
+        {
+            var (regressed, lastGood) = (rig.Ids["cold5"], rig.Ids["cold6"]);
+            await Exec(rig.Connection, ct, @"
+INSERT INTO collect.plan_correction (collection_id, collection_time, server_id, server_name, database_name, query_id, regressed_plan_id, last_good_plan_id)
+VALUES (1, (now() AT TIME ZONE 'utc'), $1, 'correction-test', $2, $3, $4, $5)", rig.Server.ServerId, rig.Database, regressed.QueryId, regressed.PlanId, lastGood.PlanId);
+
+            await CollectAsync(rig, ct);
+            var (plans, queries) = await StoredAsync(rig, ct);
+
+            AssertFetched(rig, plans, queries, new[] { "cold5", "cold6" }, expected: true);
+            AssertFetched(rig, plans, queries, new[] { "cold1", "cold2", "cold3", "cold4" }, expected: false);
         });
     }
 
