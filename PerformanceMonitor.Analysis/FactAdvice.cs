@@ -995,8 +995,11 @@ public static class FactAdvice
     }
 
     /// <summary>Human-readable duration from milliseconds: "850 ms", "1.4 s", "3.2 min".</summary>
+    /// <summary>#6305: a positive figure under 1 ms is shown in microseconds ("455 us"), never rounded to "0 ms"
+    /// (which read as no change beside a 21 us comparison figure). Zero stays "0 ms".</summary>
     private static string Duration(double ms) =>
-        ms < 1000 ? $"{ms:N0} ms"
+        ms > 0 && ms < 1 ? (ms * 1000 < 10 ? $"{ms * 1000:0.#} us" : $"{ms * 1000:N0} us")
+        : ms < 1000 ? $"{ms:N0} ms"
         : ms < 60000 ? $"{ms / 1000.0:0.#} s"
         : $"{ms / 60000.0:0.#} min";
 

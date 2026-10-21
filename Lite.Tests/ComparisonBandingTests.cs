@@ -190,14 +190,37 @@ public sealed class ComparisonBandingTests
         Assert.True(row.BeyondAnomalyCutoff!.Value);
         Assert.Equal(ComparisonBanding.StatusWorse, row.Status);
 
-        /* A session bucket has no absolute floor: MAD 0 floors at 1% of the median = 1.0 connection, so a
-           +75 move is 75σ raw — decided on the raw value, displayed at the detectors' 25σ cap. */
+        /* A session bucket has no absolute floor: MAD 0 floors at 1% of the median = 1.0 connection, and the
+           #6305 noise floor widens that to 5% of the mean = 5.0, so a +75 move is 15σ raw. */
         var (sb, sc) = Scored([Sessions(100)], [Sessions(175)]);
         var sessions = Compare(sb, sc, SessionsBucket(median: 100, mad: 0.0));
-        Assert.Equal(1.0, sessions.BaselineSigma!.Value, precision: 4);
-        Assert.Equal(AnomalyThresholds.SigmaDisplayCap, sessions.DeltaSigma!.Value, precision: 2);
+        Assert.Equal(5.0, sessions.BaselineSigma!.Value, precision: 4);
+        Assert.Equal(15.0, sessions.DeltaSigma!.Value, precision: 2);
         Assert.True(sessions.BeyondAnomalyCutoff!.Value);
         Assert.Equal(ComparisonBanding.StatusWorse, sessions.Status);
+    }
+
+    /// <summary>
+    /// #6305: a baseline bucket with a near-flat history (sigma 0.07 on a mean of 6 sessions) turned a move from
+    /// 6 to 8 sessions into delta_sigma 25 and the only <c>worse</c> row. The band's sigma is floored at 5% of the
+    /// baseline mean and, for session counts, at 2 sessions, so that move reads stable and a real jump still reads worse.
+    /// </summary>
+    [Fact]
+    public void ATwoSessionMove_OverANearFlatBaseline_IsStable_ButARealJumpIsStillWorse()
+    {
+        var flat = SessionsBucket(median: 6, mad: 0.0472);
+        var (sb, sc) = Scored([Sessions(6)], [Sessions(8)]);
+        var small = Compare(sb, sc, flat);
+
+        Assert.Equal(ComparisonBanding.BandSourceBaseline, small.BandSource);
+        Assert.Equal(ComparisonBanding.StatusStable, small.Status);
+        Assert.Equal(2.0, small.BaselineSigma!.Value, precision: 4);
+        Assert.Equal(1.0, small.DeltaSigma!.Value, precision: 2);
+
+        var (jb, jc) = Scored([Sessions(6)], [Sessions(14)]);
+        var jump = Compare(jb, jc, flat);
+        Assert.Equal(ComparisonBanding.StatusWorse, jump.Status);
+        Assert.Equal(4.0, jump.DeltaSigma!.Value, precision: 2);
     }
 
     /// <summary>
@@ -505,8 +528,8 @@ public sealed class ComparisonBandingTests
         var row = Compare(baseline, comparison, PgBucket(MetricNames.PgSessionCount, median: 20, mad: 0));
         Assert.Equal(ComparisonBanding.BandSourceBaseline, row.BandSource);
         Assert.Equal(MetricNames.PgSessionCount, row.BaselineMetric);
-        Assert.Equal(0.2, row.BaselineSigma!.Value, precision: 4);
-        Assert.Equal(AnomalyThresholds.SigmaDisplayCap, row.DeltaSigma!.Value, precision: 2); // 40 / 0.2 = 200σ raw
+        Assert.Equal(2.0, row.BaselineSigma!.Value, precision: 4); // the #6305 count floor (2 sessions) over 1% of 20
+        Assert.Equal(20.0, row.DeltaSigma!.Value, precision: 2); // 40 / 2 = 20σ raw
         Assert.Equal(ComparisonBanding.StatusWorse, row.Status);
         Assert.Equal(0.2, row.BaselineValue!.Value, precision: 6);   // the fraction, the fact's own unit
         Assert.Equal(0.6, row.ComparisonValue!.Value, precision: 6);
