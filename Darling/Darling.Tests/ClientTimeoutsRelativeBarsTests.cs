@@ -189,7 +189,7 @@ public sealed class ClientTimeoutsRelativeBarsTests
         var h = Armed(null);
         var engine = h.Build();
 
-        h.Adapter.Attention = AttentionAlertTests.StormWindow(h.Now, 1500);   // 500 a minute
+        h.Adapter.Attention = AttentionAlertTests.StormWindow(h.Now, 90);   // 30 a minute: Warning on the floor of 10
         await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
         var first = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == AttentionEvaluator.MetricName);
         Assert.Contains("under 1 day of capture", first.ShortMessage, StringComparison.Ordinal);
@@ -197,7 +197,7 @@ public sealed class ClientTimeoutsRelativeBarsTests
         /* The server now has its capture. Inside the hour it is still answered from the cache. */
         h.Adapter.AttentionBaseline = Normal(150);
         h.Now = h.Now.AddMinutes(AttentionBaselineMath.NoBaselineRefreshMinutes - 1);
-        h.Adapter.Attention = AttentionAlertTests.StormWindow(h.Now, 1500);
+        h.Adapter.Attention = AttentionAlertTests.StormWindow(h.Now, 1500);   // 500 a minute
         await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
         Assert.Equal(1, h.Adapter.AttentionBaselineReads);
 
