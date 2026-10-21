@@ -101,6 +101,25 @@ public partial class AlertsHistoryTab : UserControl
         }
 
         _staleDataTimer.Start();
+        _ = GateKnownPatternsButtonAsync(dataService);
+    }
+
+    /// <summary>#6334: a store older than the known-pattern table (V214) has nothing for the editor to read or write, so the button is
+    /// disabled with the same "needs a newer store" wording the editor window shows. An unanswered probe leaves it enabled.</summary>
+    private async Task GateKnownPatternsButtonAsync(ViewerDataService dataService)
+    {
+        try
+        {
+            if (!await dataService.KnownPatternsSupportedAsync())
+            {
+                KnownPatternsButton.IsEnabled = false;
+                KnownPatternsButton.ToolTip = ViewerDataService.KnownPatternsNeedNewerStoreMessage;
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            ViewerLogger.Error("AlertsHistoryTab", "Known patterns store probe failed", ex);
+        }
     }
 
     /// <summary>Reloads the alert history (the shell calls this when the Alerts tab becomes visible / on the timer).</summary>
@@ -564,6 +583,17 @@ public partial class AlertsHistoryTab : UserControl
         }
 
         var window = new MuteRulesWindow(_dataService) { Owner = Window.GetWindow(this) };
+        window.ShowDialog();
+    }
+
+    private void KnownPatterns_Click(object sender, RoutedEventArgs e)
+    {
+        if (_dataService == null)
+        {
+            return;
+        }
+
+        var window = new KnownPatternsWindow(_dataService) { Owner = Window.GetWindow(this) };
         window.ShowDialog();
     }
 

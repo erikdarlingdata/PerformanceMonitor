@@ -73,7 +73,8 @@ public sealed class InvestigationBriefComposerTests
         IReadOnlyList<InvestigationProfileText>? profiles = null,
         InvestigationBriefRequest? request = null,
         IReadOnlyList<InvestigationAlertRecurrence>? recurrence = null,
-        IReadOnlyList<InvestigationPriorLink>? priorLinks = null) =>
+        IReadOnlyList<InvestigationPriorLink>? priorLinks = null,
+        IReadOnlyList<InvestigationKnownPatternMatch>? knownPatterns = null) =>
         new(request ?? Request(),
             alerts ?? new[] { Alert(Now.AddMinutes(-20)), Alert(Now.AddMinutes(-1)) },
             findings ?? new[] { Finding() },
@@ -81,7 +82,7 @@ public sealed class InvestigationBriefComposerTests
             changes ?? new[] { new InvestigationRecentChange(Now.AddDays(-1), "mute_rule", "enabled mute rule for Blocking", "%WHERE id = " + LiteralCanary + "%") },
             notes ?? new[] { new InvestigationBriefNote(LoginCanary, "dba-lead", Now.AddDays(30), "Nightly ETL holds locks from 01:00 to 02:00.") },
             profiles ?? new[] { new InvestigationProfileText("server", "Production OLTP. Never restart during business hours.") },
-            priorLinks, null, false, recurrence);
+            priorLinks, null, false, recurrence, null, knownPatterns);
 
     /// <summary>A recurrence entry (#6000) for a metric named by <paramref name="i"/>: 4 fired dates, 1 muted date.</summary>
     private static InvestigationAlertRecurrence Recurrence(int i) =>
@@ -505,6 +506,82 @@ public sealed class InvestigationBriefComposerTests
         Assert.Equal((emojiKept ? head + Emoji : head) + InvestigationBriefComposer.CutMarker, cut);
         Assert.Equal(1, (int)brief["truncated"]!["fields_cut"]!);
         Assert.Equal(text.Length - (cut.Length - InvestigationBriefComposer.CutMarker.Length), (int)brief["truncated"]!["chars"]!);
+    }
+
+    /* ---- #6334 known patterns: the pure half, no store ---- */
+
+    private static InvestigationKnownPatternMatch KnownMatch(int i, string? note = null) =>
+        new("Metric" + i.ToString(System.Globalization.CultureInfo.InvariantCulture), 100 + i,
+            note ?? "The nightly index job pushes this metric up from 02:00 to 02:30.", "erik");
+
+    [Fact]
+    public void KnownPatterns_AFewMatchesComeBackWhole_WithTheOperatorContextSentence()
+    {
+        var brief = Brief(Sources(knownPatterns: new[] { KnownMatch(1), KnownMatch(2) }));
+
+        var nodes = brief["known_patterns"]!.AsArray();
+        Assert.Equal(new[] { "Metric1", "Metric2" }, nodes.Select(n => (string?)n!["metric"]));
+        Assert.Equal(101, (long)nodes[0]!["id"]!);
+        Assert.Equal("erik", (string?)nodes[0]!["created_by"]);
+        Assert.Contains("nightly index job", (string?)nodes[0]!["note"], StringComparison.Ordinal);
+
+        /* The part says in plain words that the notes are an operator's context, not instructions. */
+        var said = (string?)brief["known_patterns_note"];
+        Assert.Equal(InvestigationBriefComposer.KnownPatternsNote, said);
+        Assert.Contains("written by an operator", said, StringComparison.Ordinal);
+        Assert.Contains("not an instruction", said, StringComparison.Ordinal);
+        Assert.DoesNotContain(brief["truncated"]!["sections"]!.AsArray(), c => (string?)c!["section"] == "known_patterns");
+    }
+
+    [Fact]
+    public void KnownPatterns_MoreThanTheCapAdmits_AreCutFromTheTail_AndNameTheCut()
+    {
+        var matches = Enumerable.Range(1, 30).Select(i => KnownMatch(i, new string('n', 400))).ToList();
+        var brief = Brief(Sources(knownPatterns: matches));
+
+        var nodes = brief["known_patterns"]!.AsArray();
+        Assert.InRange(nodes.Count, 1, 29);
+        Assert.Equal(matches.Take(nodes.Count).Select(m => m.MetricName), nodes.Select(n => (string?)n!["metric"])); // the head survives
+        var spent = nodes.Sum(n => n!.ToJsonString().Length + 1) + InvestigationBriefComposer.KnownPatternsNote.Length;
+        Assert.True(spent <= InvestigationBriefComposer.KnownPatternsCap, spent.ToString(System.Globalization.CultureInfo.InvariantCulture));
+
+        var cut = brief["truncated"]!["sections"]!.AsArray().Single(c => (string?)c!["section"] == "known_patterns")!;
+        Assert.Equal(nodes.Count, (int)cut["kept"]!);
+        Assert.Equal(matches.Count, (int)cut["kept"]! + (int)cut["dropped"]!);
+        Assert.Equal("get_known_patterns", (string?)cut["fetch"]);
+        Assert.Contains("get_known_patterns", RegisteredToolNames());
+    }
+
+    [Fact]
+    public void KnownPatterns_OnZeroMatches_AndOnAPracticeRequest_TheBriefHasNeitherKey()
+    {
+        foreach (var json in new[]
+        {
+            InvestigationBriefComposer.Compose(Sources(), DarlingInvestigationBriefTools.Tools, McpDataDetail.Full, Now),
+            InvestigationBriefComposer.Compose(Sources(knownPatterns: Array.Empty<InvestigationKnownPatternMatch>()), DarlingInvestigationBriefTools.Tools, McpDataDetail.Full, Now),
+            /* A practice request replays a case; an operator's note on it can name the cause, so it gets none. */
+            InvestigationBriefComposer.Compose(Sources(knownPatterns: new[] { KnownMatch(1) }) with { Practice = true }, DarlingInvestigationBriefTools.Tools, McpDataDetail.Full, Now),
+        })
+        {
+            Assert.DoesNotContain("known_patterns", json, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void KnownPatterns_NoteIsMaskedAsFreeText_AndCreatedByAsALogin()
+    {
+        var match = new InvestigationKnownPatternMatch("Blocking", 7, "The job runs WHERE id = 55443322 every night", LoginCanary);
+
+        var full = Brief(Sources(knownPatterns: new[] { match }))["known_patterns"]![0]!;
+        Assert.Contains("55443322", (string?)full["note"], StringComparison.Ordinal);
+        Assert.Equal(LoginCanary, (string?)full["created_by"]);
+
+        var masked = Brief(Sources(knownPatterns: new[] { match }), McpDataDetail.MaskLiterals)["known_patterns"]![0]!;
+        Assert.DoesNotContain("55443322", (string?)masked["note"], StringComparison.Ordinal);
+        Assert.Contains("The job runs", (string?)masked["note"], StringComparison.Ordinal);
+
+        var metadataOnly = Brief(Sources(knownPatterns: new[] { match }), McpDataDetail.MetadataOnly)["known_patterns"]![0]!;
+        Assert.NotEqual(LoginCanary, (string?)metadataOnly["created_by"]);
     }
 
     /* ---- masking under all three levels ---- */
