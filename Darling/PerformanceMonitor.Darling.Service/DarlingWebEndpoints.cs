@@ -702,6 +702,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             investigationExportGate ?? new InvestigationExportGate(InvestigationExportGate.FolderFor(
                 DarlingManagedPostgres.ResolveDataDirectory(postgresConfig ?? new PostgresConfig()))));
         MapInvestigationPractice(app, postgres, logger);
+        MapInvestigationPersonWrites(app, postgres, logger);
         MapWebhookSigningStatus(app, collector);
 
         /* The fleet sweep feed (#3466 lane 3): dedicated read routes like /api/fleet, over the same
@@ -2702,8 +2703,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// The web's list of practice scores (#5918, #5632 Phase B): <c>GET /api/investigation-practice-scores</c> answers the score per agent
     /// over the practice requests opened in the last <c>hours_back</c> hours (default 720, at most 8760): <c>{hours_back, agents: [{agent_id,
     /// cases, scored, matched, unscored, points, possible, percent, missed_step_cases}]}</c>, agents in name order, <c>percent</c> null for an
-    /// agent with nothing scored yet. List-only: a practice request is started in the desktop Viewer, and the score is advisory, so nothing
-    /// here decides anything or writes.
+    /// agent with nothing scored yet. This route only reads: the score is advisory, so nothing here decides anything or writes
+    /// (a practice request is started by <see cref="MapInvestigationPersonWrites"/>).
     /// </summary>
     internal static void MapInvestigationPractice(WebApplication app, NpgsqlDataSource postgres, ILogger logger)
     {
@@ -2731,6 +2732,241 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
             }
         });
+    }
+
+    /* ─────────────────────── #6265 close a request, write a note, start a practice request ─────────────────────── */
+
+    /// <summary>The 403 sentence these three writes answer when the store refuses them for privilege (SQLSTATE 42501): the web host runs on
+    /// whatever login <c>postgres.webConnectionString</c> names, the <c>viewer</c> role on a managed or compose store (#6265).</summary>
+    internal const string InvestigationWriteRefusedMessage =
+        "Closing a request, writing a note and starting a practice request need a store login with the admin role. Managed and compose stores "
+        + "connect the web dashboard as the viewer role, which lists them but cannot: do it in the desktop Viewer, or (bring-your-own store) set "
+        + "postgres.webConnectionString to an admin login.";
+
+    /// <summary>The most bytes one of these write bodies may carry (a note is at most 2,000 characters).</summary>
+    internal const int MaxInvestigationWriteBodyBytes = 64 * 1024;
+
+    /// <summary>
+    /// The three investigation writes a person makes (#6265, #5632), the web's twins of the desktop Viewer's: <c>PUT /api/investigation-requests/{id}/close</c>
+    /// (body <c>{reason}</c>) closes an open, claimed or reported request; <c>PUT /api/investigation-notes</c> (body <c>{note_text, server_id?, metric_name?, days?}</c>)
+    /// writes a note a person stands behind, approved as written (an agent's proposed note still waits for Approve); <c>PUT /api/investigation-practice-requests/{id}</c>
+    /// opens a practice request replaying one judged case. They call the same storage code the Viewer does
+    /// (<see cref="InvestigationRequestStore.CloseRequestAsync"/>, <see cref="InvestigationRequestStore.WriteNoteAsync"/>,
+    /// <see cref="InvestigationPracticeStore.OpenAsync"/>), so the states, the refusals and the journal rows are the same: <c>closed</c>,
+    /// <c>note_written</c> and <c>opened</c>, each by <c>person:&lt;signed-in name&gt;</c>. Born gated as the other web writes are: <c>application/json</c>
+    /// required, a read-only seat refused by the host's write gate, a store login without the admin role answered 403 with
+    /// <see cref="InvestigationWriteRefusedMessage"/>. An agent's token is an MCP token and is not a web sign-in, so it never reaches these routes.
+    /// 400 for a value the rules refuse (in plain words), 404 for an unknown request or case, 409 for a request that cannot be closed or a case that
+    /// cannot be replayed, a fixed-sentence 500 or 503 for any other store failure.
+    /// </summary>
+    internal static void MapInvestigationPersonWrites(WebApplication app, NpgsqlDataSource postgres, ILogger logger)
+    {
+        var requests = new InvestigationRequestStore(postgres, McpCommandDeadlines.ReadSeconds, () => DateTime.UtcNow);
+        var practice = new InvestigationPracticeStore(postgres, McpCommandDeadlines.ReadSeconds);
+
+        app.MapPut("/api/investigation-requests/{requestId}/close", async (HttpContext context, string requestId) =>
+        {
+            const string route = "/api/investigation-requests/{requestId}/close";
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            var stopwatch = Stopwatch.StartNew();
+            if (!Guid.TryParse(requestId, out var request))
+            {
+                return ErrorResult("The request id is not a request id.", StatusCodes.Status400BadRequest);
+            }
+
+            var (body, bodyRefusal) = await ReadInvestigationWriteBodyAsync(context);
+            if (body is null)
+            {
+                return bodyRefusal!;
+            }
+
+            var reason = body["reason"] is JsonValue reasonValue && reasonValue.TryGetValue<string>(out var reasonText) ? reasonText : null;
+            if (InvestigationPersonWrites.ValidateCloseReason(reason) is { } reasonRefusal)
+            {
+                return ErrorResult(reasonRefusal, StatusCodes.Status400BadRequest);
+            }
+
+            if (PersonWriteActor(context) is not { } actor)
+            {
+                return PersonWriteActorRefusedResult();
+            }
+
+            try
+            {
+                if (!await requests.CloseRequestAsync(request, actor, reason!, context.RequestAborted))
+                {
+                    return ErrorResult("That request is not open: it is already closed or expired, or it is gone.", StatusCodes.Status409Conflict);
+                }
+
+                return DarlingWebStatementSweep.JsonText(
+                    new JsonObject { ["status"] = "closed", ["request_id"] = request.ToString(), ["closed_by"] = actor },
+                    route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+            }
+            catch (Exception ex) when (IsInsufficientPrivilege(ex))
+            {
+                return ErrorResult(InvestigationWriteRefusedMessage, StatusCodes.Status403Forbidden);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                DarlingWebFailureLog.Report(logger, route, stopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
+                return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
+            }
+        });
+
+        app.MapPut("/api/investigation-notes", async (HttpContext context) =>
+        {
+            const string route = "/api/investigation-notes";
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            var stopwatch = Stopwatch.StartNew();
+            var (body, bodyRefusal) = await ReadInvestigationWriteBodyAsync(context);
+            if (body is null)
+            {
+                return bodyRefusal!;
+            }
+
+            var text = body["note_text"] is JsonValue textValue && textValue.TryGetValue<string>(out var noteText) ? noteText : null;
+            var metric = body["metric_name"] is JsonValue metricValue && metricValue.TryGetValue<string>(out var metricText) ? metricText : null;
+            int? serverId = null;
+            if (body["server_id"] is { } serverNode)
+            {
+                if (serverNode is not JsonValue serverValue || !serverValue.TryGetValue<int>(out var id) || id < 1)
+                {
+                    return ErrorResult("server_id must be a whole number, or left out for a fleet note.", StatusCodes.Status400BadRequest);
+                }
+
+                serverId = id;
+            }
+
+            var days = InvestigationPersonWrites.NoteDefaultDays;
+            if (body["days"] is { } daysNode && (daysNode is not JsonValue daysValue || !daysValue.TryGetValue<int>(out days)))
+            {
+                return ErrorResult("days must be a whole number.", StatusCodes.Status400BadRequest);
+            }
+
+            if (InvestigationPersonWrites.ValidateNote(text, days) is { } noteRefusal)
+            {
+                return ErrorResult(noteRefusal, StatusCodes.Status400BadRequest);
+            }
+
+            if (PersonWriteActor(context) is not { } actor)
+            {
+                return PersonWriteActorRefusedResult();
+            }
+
+            try
+            {
+                if (serverId is { } named && !await requests.ServerRegisteredAsync(named, context.RequestAborted))
+                {
+                    return ErrorResult("That server is not registered.", StatusCodes.Status404NotFound);
+                }
+
+                var noteId = await requests.WriteNoteAsync(serverId, metric, text!, actor, days, context.RequestAborted);
+                return DarlingWebStatementSweep.JsonText(
+                    new JsonObject { ["status"] = "approved", ["note_id"] = noteId, ["author"] = actor, ["server_id"] = serverId, ["days"] = days },
+                    route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+            }
+            catch (Exception ex) when (IsInsufficientPrivilege(ex))
+            {
+                return ErrorResult(InvestigationWriteRefusedMessage, StatusCodes.Status403Forbidden);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                DarlingWebFailureLog.Report(logger, route, stopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
+                return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
+            }
+        });
+
+        app.MapPut("/api/investigation-practice-requests/{requestId}", async (HttpContext context, string requestId) =>
+        {
+            const string route = "/api/investigation-practice-requests/{requestId}";
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            var stopwatch = Stopwatch.StartNew();
+            if (!Guid.TryParse(requestId, out var source))
+            {
+                return ErrorResult("The request id is not a request id.", StatusCodes.Status400BadRequest);
+            }
+
+            if (PersonWriteActor(context) is not { } actor)
+            {
+                return PersonWriteActorRefusedResult();
+            }
+
+            try
+            {
+                var result = await practice.OpenAsync(source, actor, context.RequestAborted);
+                if (result.Outcome != InvestigationPracticeOutcome.Opened)
+                {
+                    /* The store's own sentence says why the case was not replayed (never an exception's text). */
+                    return DarlingWebStatementSweep.JsonText(
+                        new JsonObject { ["error"] = result.Message ?? "The practice request was not opened.", ["outcome"] = result.Outcome.ToString(), ["request_id"] = result.RequestId?.ToString() },
+                        route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted,
+                        result.Outcome == InvestigationPracticeOutcome.NotFound ? StatusCodes.Status404NotFound : StatusCodes.Status409Conflict);
+                }
+
+                return DarlingWebStatementSweep.JsonText(
+                    new JsonObject { ["status"] = "opened", ["request_id"] = result.RequestId?.ToString(), ["source_request_id"] = source.ToString(), ["opened_by"] = actor },
+                    route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+            }
+            catch (Exception ex) when (IsInsufficientPrivilege(ex))
+            {
+                return ErrorResult(InvestigationWriteRefusedMessage, StatusCodes.Status403Forbidden);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                DarlingWebFailureLog.Report(logger, route, stopwatch.ElapsedMilliseconds, ex, context.RequestAborted);
+                return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
+            }
+        });
+    }
+
+    /// <summary>The journal actor of a person's investigation write: <c>person:&lt;signed-in name&gt;</c> (the seat's
+    /// <see cref="DarlingWebSeat.EditorPrincipal"/>), or null when the name is longer than the journal holds.</summary>
+    private static string? PersonWriteActor(HttpContext context)
+    {
+        var login = DarlingWebSeat.FromContext(context).EditorPrincipal;
+        return InvestigationPersonWrites.ValidateLogin(login) is null ? InvestigationPersonWrites.PersonActor(login) : null;
+    }
+
+    private static IResult PersonWriteActorRefusedResult() =>
+        ErrorResult("The signed-in name cannot be recorded as the person who made this change.", StatusCodes.Status400BadRequest);
+
+    /// <summary>Reads a bounded JSON object body for the investigation writes: the object, or the refusal to answer.</summary>
+    private static async Task<(JsonObject? Body, IResult? Refusal)> ReadInvestigationWriteBodyAsync(HttpContext context)
+    {
+        string text;
+        try
+        {
+            text = await ReadBoundedBodyAsync(context, MaxInvestigationWriteBodyBytes);
+        }
+        catch (InvalidDataException)
+        {
+            return (null, ErrorResult("Request body is too large.", StatusCodes.Status400BadRequest));
+        }
+
+        try
+        {
+            if (JsonNode.Parse(text) is JsonObject body)
+            {
+                return (body, null);
+            }
+        }
+        catch (JsonException)
+        {
+        }
+
+        return (null, ErrorResult("The body must be a JSON object.", StatusCodes.Status400BadRequest));
     }
 
     /// <summary>PURE: the practice scores body (see <see cref="MapInvestigationPractice"/>).</summary>

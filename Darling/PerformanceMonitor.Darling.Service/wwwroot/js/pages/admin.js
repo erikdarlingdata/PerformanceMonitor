@@ -13,8 +13,8 @@
      Alert Settings      get_alert_settings
      Report Feedback     GET /api/investigation-feedback (#5913: the feedback people gave investigation reports, the false-positive
                          counts per alert family, and a form to record feedback for a sign-in that can make changes)
-     Practice Scores     GET /api/investigation-practice-scores (#5918: how each agent did on practice requests, list only)
-     Pending Notes       GET /api/investigation-notes/pending, with Approve and Reject (#5903)
+     Practice Scores     GET /api/investigation-practice-scores (#5918: how each agent did on practice requests), and Start (#6265)
+     Pending Notes       GET /api/investigation-notes/pending, with Approve and Reject (#5903), and Write a note (#6265)
      Threshold Overrides GET /api/threshold-overrides, with Save, Edit and Remove under an admin store login (#5916)
    Routes and Settings change nothing. The Servers tab also lets a sign-in that can make changes edit one server in place
    (#5240): an Edit button on each row opens a form above the grid, filled from GET /api/admin/servers/{id}.
@@ -26,6 +26,7 @@
 import { VIZ } from "../panels.js";
 import { el, mount, loadingStrip, errorStrip, emptyStrip, noticeStrip, readTool, apiGet, apiWrite, onSessionExpired, localizeIsoText } from "../util.js";
 import { getSession } from "../views-api.js";
+import { writeNote, startPractice, NOTE_MAX_LENGTH, NOTE_MAX_DAYS, NOTE_DEFAULT_DAYS } from "../investigation-writes.js";
 import { buildAgentChanges, resetAgentChangesStatus } from "./admin-agent-changes.js";
 
 export const SERVER_COLUMNS = [
@@ -1415,12 +1416,56 @@ async function buildFeedback(body, generation) {
 /* ─────────────────────────── practice scores (#5918) ─────────────────────────── */
 
 /* Practice Scores: how each agent did on practice requests, cases an operator already judged and replayed without their answers.
-   GET /api/investigation-practice-scores. List-only: a practice request is started in the desktop Viewer. The score is advisory and
-   turns no route on or off. */
+   GET /api/investigation-practice-scores. The score is advisory and turns no route on or off. A seat that can make changes also
+   gets the Start form (#6265). */
 const PRACTICE_NOTE =
   "A practice request replays a case somebody gave feedback on, without its answers, and scores the agent's report against that " +
   "feedback. A corrected verdict is the answer; otherwise right makes the report's verdict the answer, partly counts half, and wrong " +
-  "with no correction has no answer. Scores are advisory and turn no route on or off. Start a practice request in the desktop Viewer.";
+  "with no correction has no answer. Scores are advisory and turn no route on or off. A sign-in that can make changes can start a practice " +
+  "request here for a judged case, as the desktop Viewer can.";
+
+/* #6265: start a practice request for one judged case (a reported request somebody gave feedback on, from the Report Feedback list).
+   The service refuses what the Viewer refuses: an unknown case, a practice request, no report, no feedback, or a case whose practice
+   request is still live, each in the store's own words. */
+let practiceStatus = "";
+let practicePick = "";
+
+export function judgedCases(data) {
+  const list = data && Array.isArray(data.requests) ? data.requests : [];
+  return list.filter((r) => r && typeof r.request_id === "string" && Array.isArray(r.feedback) && r.feedback.length > 0);
+}
+
+function practiceStartForm(cases) {
+  const select = el("select", { class: "tag-input", "data-practice-case": "1", "aria-label": "Judged case to replay" },
+    [el("option", { value: "", text: "(choose a judged case)" })].concat(cases.map((r) => el("option", {
+      value: r.request_id,
+      text: (r.server_name || "?") + " - " + (r.family || "?") + " - " + (r.first_metric || "?") + " (" + (r.feedback.length) + " feedback)",
+    }))));
+  select.value = practicePick;
+  select.addEventListener("input", () => { practicePick = select.value; });
+  const status = el("div", { class: "tag-status", role: "status", "data-practice-status": "1", text: practiceStatus });
+  const start = el("button", { class: "btn primary", type: "button", text: "Start practice request", "data-action": "start-practice" });
+  start.addEventListener("click", async () => {
+    if (!select.value) {
+      practiceStatus = "Select a judged case to replay.";
+      status.textContent = practiceStatus;
+      return;
+    }
+    start.disabled = true;
+    const out = await startPractice(select.value);
+    start.disabled = false;
+    if (out.message === null) return;
+    practiceStatus = out.message;
+    status.textContent = out.message;
+  });
+  return el("section", { class: "feedback-card", "data-practice-start": "1" }, [
+    el("h4", { text: "Start a practice request" }),
+    el("p", { class: "mute-label", text: "Replays a judged case without its answers. An agent on the case's route can claim it, and its report is scored against the feedback." }),
+    cases.length ? el("label", { class: "tag-field" }, [el("span", { class: "mute-label", text: "Judged case" }), select]) : emptyStrip("No report has feedback in the last week, so there is no case to replay."),
+    cases.length ? start : null,
+    status,
+  ]);
+}
 
 export function practiceScoreText(a) {
   if (a.percent === null || a.percent === undefined) return "not scored yet";
@@ -1450,13 +1495,18 @@ const PRACTICE_COLUMNS = [
 ];
 
 async function buildPractice(body, generation) {
-  const res = await apiGet("/api/investigation-practice-scores");
+  const [session, res] = await Promise.all([getSession(), apiGet("/api/investigation-practice-scores")]);
   if (generation !== renderGeneration) return;
   const bad = failure(res);
   if (bad) return mount(body, bad);
   const data = res.data || {};
   const agents = practiceRows(data.agents);
   const nodes = [noticeStrip(PRACTICE_NOTE)];
+  if (session.can_edit === true) {
+    const feedback = await apiGet("/api/investigation-feedback");
+    if (generation !== renderGeneration) return;
+    nodes.push(practiceStartForm(feedback.kind === "data" ? judgedCases(feedback.data) : []));
+  }
   nodes.push(el("p", { class: "mute-label", "data-practice-window": "1", text: "Practice requests opened in the last " + (data.hours_back || 720) + " hours." }));
   if (!agents.length) nodes.push(emptyStrip("No agent has reported on a practice request in this window."));
   else nodes.push(VIZ.table({ agents }, { rowsKey: "agents", columns: PRACTICE_COLUMNS, emptyText: "No practice scores." }));
@@ -1602,6 +1652,57 @@ function drawNoteStatus(body) {
   else if (node) body.insertBefore(node, body.firstChild);
 }
 
+/* #6265: write a note as a person, the twin of the desktop Viewer's Write note. A note a person writes is approved as written (no
+   second person decides it) and goes into the briefs for its scope: a server, or the whole fleet. An agent's proposed note keeps its
+   Approve and Reject above. The form is drawn only for a seat that can make changes; the service checks every value again, and a
+   store login without the admin role answers with the sentence that says what to do. */
+const noteDraft = { server_id: "", metric_name: "", note_text: "", days: String(NOTE_DEFAULT_DAYS) };
+
+function noteWriteForm(servers) {
+  const field = (label, control) => el("label", { class: "tag-field" }, [el("span", { class: "mute-label", text: label }), control]);
+  const server = el("select", { class: "tag-input", "data-note-field": "server_id", "aria-label": "Server the note is about" },
+    [el("option", { value: "", text: "Fleet (every server)" })].concat(
+      servers.filter((s) => Number.isInteger(s.server_id)).map((s) => el("option", { value: String(s.server_id), text: s.display_name || s.server_name || "server " + s.server_id }))));
+  const metric = el("input", { type: "text", class: "tag-input", "data-note-field": "metric_name", placeholder: "optional, such as Blocking", "aria-label": "Metric the note is about" });
+  const text = el("textarea", { "data-note-field": "note_text", rows: "3", maxlength: String(NOTE_MAX_LENGTH), "aria-label": "Note text" });
+  const days = el("input", { type: "number", class: "tag-input", "data-note-field": "days", min: "1", max: String(NOTE_MAX_DAYS), "aria-label": "Keep for days" });
+  server.value = noteDraft.server_id;
+  metric.value = noteDraft.metric_name;
+  text.value = noteDraft.note_text;
+  days.value = noteDraft.days;
+  const sync = () => { noteDraft.server_id = server.value; noteDraft.metric_name = metric.value; noteDraft.note_text = text.value; noteDraft.days = days.value; };
+  for (const c of [server, metric, text, days]) c.addEventListener("input", sync);
+  const status = el("div", { class: "tag-status", role: "status", "data-note-write-status": "1", text: noteWriteMessage || "" });
+  const save = el("button", { class: "btn primary", type: "button", text: "Write note", "data-action": "write-note" });
+  save.addEventListener("click", async () => {
+    sync();
+    save.disabled = true;
+    const out = await writeNote(noteDraft);
+    save.disabled = false;
+    if (out.message === null) return;
+    noteWriteMessage = out.message;
+    status.textContent = out.message;
+    if (out.ok) {
+      noteDraft.note_text = "";
+      noteDraft.metric_name = "";
+      text.value = "";
+      metric.value = "";
+    }
+  });
+  return el("section", { class: "feedback-card", "data-note-write": "1" }, [
+    el("h4", { text: "Write a note" }),
+    el("p", { class: "mute-label", text: "Tell agents something about a server or the fleet. It is approved as written and goes into their briefs until it expires." }),
+    field("About", server),
+    field("Metric", metric),
+    field("Note (" + NOTE_MAX_LENGTH + " characters at most)", text),
+    field("Keep for days (1 to " + NOTE_MAX_DAYS + ")", days),
+    save,
+    status,
+  ]);
+}
+
+let noteWriteMessage = "";
+
 async function buildPending(body, generation) {
   const [session, res] = await Promise.all([getSession(), apiGet("/api/investigation-notes/pending")]);
   if (generation !== renderGeneration) return;
@@ -1616,6 +1717,11 @@ async function buildPending(body, generation) {
   const rows = pendingNoteRows(res.data);
   const canEdit = session.can_edit === true;
   nodes.push(noticeStrip((canEdit ? NOTES_NOTE_EDITING : NOTES_NOTE_READ_ONLY) + NOTES_NOTE_EXPIRY));
+  if (canEdit) {
+    const serverList = await apiGet("/api/admin/servers");
+    if (generation !== renderGeneration) return;
+    nodes.push(noteWriteForm(serverList.kind === "data" && serverList.data && Array.isArray(serverList.data.servers) ? serverList.data.servers : []));
+  }
   const cut = pendingNotesTruncatedNotice(res.data);
   if (cut) nodes.push(noticeStrip(cut));
   nodes.push(VIZ.table({ notes: rows }, {

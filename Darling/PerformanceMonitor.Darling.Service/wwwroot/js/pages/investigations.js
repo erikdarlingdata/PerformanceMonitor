@@ -12,7 +12,8 @@
  * list_investigation_requests for the list (filtered by state and family by the read itself), and
  * get_investigation_reports for ONE request when a row is picked: its stored brief, its reports and its journal.
  *
- * Read only. Nothing here claims, releases, reports or decides anything about a request. The page draws exactly what
+ * Read only, except that a sign-in that can make changes may close an open, claimed or reported request with a reason (#6265, the
+ * desktop Viewer's Close). Nothing here claims, releases or reports anything for an agent. The page draws exactly what
  * the read answered: the operator sees the full report and brief, as in the desktop viewer (mcp.dataDetail masks
  * agents over MCP only). A report is an agent's own claim, unreviewed and self-attributed, and the page says so.
  *
@@ -26,6 +27,8 @@
 
 import { VIZ } from "../panels.js";
 import { READ_FIELDS } from "../read-fields.js";
+import { getSession } from "../views-api.js";
+import { canCloseState, closeRequest, CLOSE_REASON_MAX_LENGTH } from "../investigation-writes.js";
 import { el, mount, loadingStrip, emptyStrip, noticeStrip, errorStrip, readErrorStrip, readTool, localTime, makeActivatable, rowsUnder } from "../util.js";
 
 /** The states the list read takes; an empty value is every state. */
@@ -114,6 +117,28 @@ function select(label, options, value, onPick) {
   return el("label", { class: "range-control" }, [el("span", { text: label }), sel]);
 }
 
+/* #6265: the Close form of one request, drawn only for a seat that can make changes and a request that can still be closed. The
+   service checks the reason and the state again; a refusal's sentence is shown as the service wrote it. */
+function closeForm(row, canEdit) {
+  if (!canEdit || !canCloseState(row.state)) return null;
+  const reason = el("input", { type: "text", maxlength: String(CLOSE_REASON_MAX_LENGTH), "aria-label": "Reason for closing this request", "data-close-reason": "1", placeholder: "Why is this request being closed?" });
+  const status = el("div", { class: "muted", role: "status", "data-close-status": "1" });
+  const button = el("button", { type: "button", class: "btn", "data-close-request": row.request_id, text: "Close request" });
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    const out = await closeRequest(row.request_id, reason.value);
+    button.disabled = false;
+    if (out.message === null) return;
+    status.textContent = out.message;
+    if (out.ok && reloadList) await reloadList();
+  });
+  return section("Close this request", [
+    el("div", { class: "muted", text: "Closing ends the request for good and is recorded in its journal under your name. Give a reason." }),
+    el("div", {}, [reason, button]),
+    status,
+  ]);
+}
+
 function section(title, children) {
   return el("div", { class: "inv-section" }, [el("strong", { text: title }), ...children]);
 }
@@ -149,7 +174,7 @@ function reportBlock(rep) {
 }
 
 /* The pane under the list for one request, from its get_investigation_reports answer. */
-function detailPane(row, data) {
+function detailPane(row, data, canEdit) {
   const reports = reportRows(data, row.request_id);
   const journal = journalRows(data, row.request_id);
   const claimed = claimedAt(journal, row.request_id);
@@ -166,6 +191,9 @@ function detailPane(row, data) {
     ]),
     el("div", { class: "muted", text: facts }),
   ];
+
+  const closer = closeForm(row, canEdit);
+  if (closer) parts.push(closer);
 
   if (reports.length) {
     parts.push(noticeStrip("A report is an agent's own claim: unreviewed and self-attributed, not a finding."));
@@ -187,19 +215,20 @@ function detailPane(row, data) {
 }
 
 let slot = null;
+let reloadList = null;
 
 async function loadDetail(row) {
   const ticket = ++detailSeq;
   if (detailAbort) detailAbort.abort();
   const signal = (detailAbort = new AbortController()).signal;
   mount(slot, [loadingStrip("Loading this request…")]);
-  const res = await readTool("get_investigation_reports", { request_id: row.request_id }, signal);
+  const [res, session] = await Promise.all([readTool("get_investigation_reports", { request_id: row.request_id }, signal), getSession()]);
   if (ticket !== detailSeq) return;
   if (res.kind === "aborted" || res.kind === "auth") return;
   if (res.kind === "error") return mount(slot, [readErrorStrip(res.message)]);
   if (res.kind === "empty") return mount(slot, [emptyStrip(res.message || "This request has no stored report or journal.")]);
   try {
-    mount(slot, detailPane(row, res.data || {}));
+    mount(slot, detailPane(row, res.data || {}, session.can_edit === true));
   } catch (e) {
     mount(slot, [errorStrip("Could not draw this request: " + (e && e.message ? e.message : String(e)))]);
   }
@@ -221,7 +250,7 @@ export function renderInvestigations(main) {
   const family = select("Family", FAMILIES, choices.family, (v) => { choices.family = v; reload(); });
   mount(main, [
     el("div", { class: "page-head" }, [el("h2", { text: "Investigations" }), el("div", { class: "spacer" }), state, family]),
-    el("div", { class: "muted", text: "Requests the service opened for agents to look into, newest first. Read only." }),
+    el("div", { class: "muted", text: "Requests the service opened for agents to look into, newest first. Pick a request to read its report and journal; a sign-in that can make changes can also close it." }),
     body,
     slot,
   ]);
@@ -255,5 +284,6 @@ export function renderInvestigations(main) {
     else choices.requestId = null;
   }
 
+  reloadList = load;
   load();
 }
