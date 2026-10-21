@@ -139,6 +139,38 @@ internal static class DarlingAgentDispatchChecks
     internal const string CountAgentRoutesSql =
         "SELECT count(*) FROM config.config_notification_routes WHERE enabled AND agent_level >= 1";
 
+    /// <summary>The store's MCP switch and the agent route count for <c>--validate-config</c>, each null when the store cannot
+    /// answer. Never throws except on cancellation.</summary>
+    internal static async Task<(bool? McpEnabled, int? AgentRoutes)> TryReadStoreFactsAsync(
+        string connectionString, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            budget.CancelAfter(TimeSpan.FromSeconds(ServiceCommandDeadlines.CliStoreReadSeconds));
+            await using var source = NpgsqlDataSource.Create(connectionString);
+            bool? enabled = null;
+            await using (var toggle = source.CreateCommand("SELECT mcp_enabled FROM config.config_service WHERE id = 1"))
+            {
+                toggle.CommandTimeout = ServiceCommandDeadlines.CliBudgetBackstopSeconds;
+                if (await toggle.ExecuteScalarAsync(budget.Token) is bool stored)
+                {
+                    enabled = stored;
+                }
+            }
+
+            return (enabled, await TryCountAgentRoutesAsync(source, budget.Token));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return (null, null);
+        }
+    }
+
     /// <summary>The count, or null when the store cannot answer. Never throws except on cancellation.</summary>
     internal static async Task<int?> TryCountAgentRoutesAsync(NpgsqlDataSource dataSource, CancellationToken cancellationToken)
     {

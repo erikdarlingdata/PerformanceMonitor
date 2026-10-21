@@ -607,33 +607,13 @@ public static partial class DarlingCliCommands
         if (TryBuildStoreConnectionString(config.Postgres, out var connectionString, out _)
             && !string.IsNullOrWhiteSpace(connectionString))
         {
-            try
-            {
-                await using var connection = new NpgsqlConnection(
-                    DarlingStoreConnection.PinSessionTimeZoneUtc(
-                        DarlingStoreConnection.WithApplicationName(connectionString, DarlingManagedPostgres.CliApplicationName)));
-                using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                budget.CancelAfter(TimeSpan.FromSeconds(ServiceCommandDeadlines.CliStoreReadSeconds));
-                await connection.OpenAsync(budget.Token);
-                await using (var toggle = new NpgsqlCommand("SELECT mcp_enabled FROM config.config_service WHERE id = 1", connection))
-                {
-                    if (await toggle.ExecuteScalarAsync(budget.Token) is bool stored)
-                    {
-                        mcpEnabled = stored;
-                    }
-                }
-
-                await using var count = new NpgsqlCommand(DarlingAgentDispatchChecks.CountAgentRoutesSql, connection);
-                agentRoutes = Convert.ToInt32(await count.ExecuteScalarAsync(budget.Token), System.Globalization.CultureInfo.InvariantCulture);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception)
-            {
-                /* The store did not answer: the file's switch stands and the route hint is skipped. */
-            }
+            var facts = await DarlingAgentDispatchChecks.TryReadStoreFactsAsync(
+                DarlingStoreConnection.PinSessionTimeZoneUtc(
+                    DarlingStoreConnection.WithApplicationName(connectionString, DarlingManagedPostgres.CliApplicationName)),
+                cancellationToken);
+            /* The store did not answer: the file's switch stands and the route hint is skipped. */
+            mcpEnabled = facts.McpEnabled ?? mcpEnabled;
+            agentRoutes = facts.AgentRoutes;
         }
 
         var (token, unreadable) = DarlingAgentDispatchChecks.ResolveToken(config.Mcp);
