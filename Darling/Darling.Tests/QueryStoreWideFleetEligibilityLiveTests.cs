@@ -220,8 +220,11 @@ public sealed class QueryStoreWideFleetEligibilityLiveTests
         var end = await EndAsync(connection, ct);
 
         Assert.Equal(default, await SerialAsync(connection, end, ct));
+        /* #6115: the serial answer is still "raw for the fleet", because one server refuses. The runner no longer sends the fleet there:
+           the three passing servers keep the interval table and the server holding legacy rows reads raw. */
         var got = await DarlingWebEndpoints.ResolveQueryStoreWideEligibleAsync(postgres, null, S, end, end, ct);
-        Assert.False(got.Eligible);
-        Assert.Null(got.WideStart);
+        Assert.True(got.Eligible);
+        Assert.Equal(new[] { -4605204 }, got.RawServerIds);
+        Assert.Equal(S.AddHours(14), got.WideStart);
     }
 }
