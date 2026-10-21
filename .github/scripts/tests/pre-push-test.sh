@@ -119,8 +119,6 @@ check stopred "the failing test is printed" $(printf '%s
 # 4c. CI's FULL answer (a keep-full file changed) is the whole suite too, even for a handful of classes; before #6336 the
 # gate fell back to the symbol set there and was GREEN on a few classes
 run_gate full '{"full": true, "selected": {}, "why": {}, "seconds": {}, "total": {}}' '["Darling.Tests.AlphaTests", "Darling.Tests.ReaderTests"]' "$list_l_big" --skip-build
-printf "%s
-" "$out" > /tmp/w6336/fullout.txt
 check full "exit 0 and the database-free GATE GREEN line" $([ $rc -eq 0 ] && last | grep -qF 'GATE GREEN: guard stage and the source-reading classes passed'; echo $?)
 check full "only the source readers ran" $([ "$(grep -c -- ' -class ' "$calls")" = 2 ]; echo $?)
 
@@ -137,6 +135,6 @@ check chunks "GATE GREEN" $([ $rc -eq 0 ] && last | grep -q '^GATE GREEN: '; ech
 check chunks "several darling batches ($nb), longest $longest characters, at most 2000" $([ "$nb" -gt 1 ] && [ "$longest" -le 2000 ]; echo $?)
 check chunks "every class ran once ($ran of 401)" $([ "$ran" -eq 401 ]; echo $?)
 
-[ -n "${PRE_PUSH_TEST_KEEP:-}" ] || rm -rf "$work"
+rm -rf "$work"
 if [ $fails -gt 0 ]; then echo "pre-push-test: $fails FAILED"; exit 1; fi
 echo "pre-push-test: all passed"

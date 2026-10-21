@@ -11,12 +11,13 @@
 #      test files name them; once the union would pass the cap the rest are dropped and listed, since a symbol named
 #      by most of the suite is the suite (the laptop never runs a full suite: CI decides).
 #   When the selection is the whole suite (the map answers FULL because a keep-full file changed, as CI's would, or a
-#   project's selection is over PRE_PUSH_MAX_CLASSES) stage 3 is the DATABASE-FREE STEP (#6336): the gate runs every test of
-#   both suites that needs no database, with no -class filter and every DARLING_* and PG* variable unset for the run, so a
-#   live test finds no connection string and skips on its own and nothing can reach a PostgreSQL store or a SQL Server.
-#   That is where the tests that read the source and enforce a project rule run (they need no database), and the step prints
-#   its seconds and how many tests it skipped for want of a database. Before this the gate stopped here with no test run
-#   and CI, about 40 minutes later, was the first to run them.
+#   project's selection is over PRE_PUSH_MAX_CLASSES) stage 3 is the SOURCE-READING STEP (#6336): the gate runs every class
+#   of every test file that reads the repository as text (test-map.py's TEXT_READ pattern), in both suites, with every
+#   DARLING_* and PG* variable unset for the run, so a live test finds no connection string and skips on its own and nothing
+#   can reach a PostgreSQL store or a SQL Server. Those are the tests that enforce a project rule on the source. The rest of
+#   the database-free suite is not run: it took 24 minutes on the Darling suite alone under load, so CI runs it. The step
+#   prints its seconds and how many tests it skipped for want of a database. Before this the gate stopped here with no test
+#   run and CI, about 40 minutes later, was the first to run them.
 #   Stage 2 already ran every Stage=Guard class, so stage 3 leaves them out: map-select gets --guard-stage-separate and
 #   the symbol set drops the classes of `-list classes/json -trait Stage=Guard` (#5894). A diff of documentation files
 #   only selects just the classes that read a changed document as text (CI's docs fast path runs no test for it) and
@@ -28,16 +29,16 @@
 # Flags: --dry-run (steps 1-2 skipped; step 3 lists the classes and each batch's class count and length, resolved
 # against an existing Debug build when there is one), --skip-build, --no-map (symbol set only).
 # Environment: PRE_PUSH_CAP (test-file cap of the symbol set, default 250); PRE_PUSH_MAX_CLASSES (the most classes of
-# one project run class by class, default 400: above it the selection is the whole suite and the database-free step runs); PRE_PUSH_ARG_BUDGET
+# one project run class by class, default 400: above it the selection is the whole suite and the source-reading step runs); PRE_PUSH_ARG_BUDGET
 # (the characters of -class arguments per batch, default 30000, as CI's run-darling-pg-shard.ps1); PRE_PUSH_SELECTION
 # (a map-select selection JSON used instead of the nightly map, for replays and the script's tests); PRE_PUSH_CACHE
 # (test-map cache, default pre-push-cache in the repository's common .git directory, which every worktree shares and
 # git never commits).
 # Outcomes: GATE GREEN (exit 0): the build and the Guard stage passed, and either the selected classes passed or, on a
-# whole-suite selection, every test that needs no database passed. The second GATE GREEN line says so
-# ("every test that needs no database passed"): the tests that need a database were skipped and CI runs them. GATE RED
-# (exit 1): a build, a run or a class listing failed, a test failed in any stage including the database-free step, or a
-# run reported Total: 0 (it matched nothing, which the runner does not count as a failure). There is no GATE STOP any more.
+# whole-suite selection, the source-reading classes passed. The GATE GREEN line says which ("guard stage and the
+# source-reading classes passed"): every other test is left to CI. GATE RED (exit 1): a build, a run or a class listing
+# failed, a test failed in any stage including the source-reading step, a suite has no source-reading class, or a run
+# reported Total: 0 (it matched nothing, which the runner does not count as a failure). There is no GATE STOP and no exit 3.
 # --dry-run on a whole-suite selection prints GATE DRY-RUN and exits 0, having run nothing.
 # Live classes in the selection skip without a rig; the Skipped count is printed so you see it.
 set -uo pipefail
@@ -257,7 +258,7 @@ elif [ $((miss_n[darling] + miss_n[lite])) -gt 0 ]; then
 fi
 
 # #5868, #6336: a selection the size of the suite (CI's FULL answer, or over PRE_PUSH_MAX_CLASSES in one project) is not
-# run class by class. The gate runs every test that needs no database instead (the step below).
+# run class by class. The gate runs the source-reading classes instead (the step below).
 if [ "${sel_n[darling]}" -gt "$MAXC" ] || [ "${sel_n[lite]}" -gt "$MAXC" ]; then
   whole=1; whole_why="${whole_why:-selection is over PRE_PUSH_MAX_CLASSES=$MAXC classes in one project (darling ${sel_n[darling]}, lite ${sel_n[lite]})}"
 fi
@@ -323,11 +324,11 @@ if [ $DRY -eq 1 ]; then
   sed 's/^/  darling: /' "$SCRATCH/selected-darling.txt"
   sed 's/^/  lite: /' "$SCRATCH/selected-lite.txt"
   run_batches darling "$DARLING"; run_batches lite "$LITE"
-  if [ $whole -eq 1 ]; then echo "GATE DRY-RUN: selection is the whole suite ($whole_why): a real run runs every test that needs no database; nothing built or run"; exit 0; fi
+  if [ $whole -eq 1 ]; then echo "GATE DRY-RUN: selection is the whole suite ($whole_why): a real run runs the source-reading classes; nothing built or run"; exit 0; fi
   echo "GATE DRY-RUN: nothing built or run"; exit 0
 fi
 
-# the whole-suite step (#6336): every test of both suites that needs no database, in one run each. NODB=1 unsets every
+# the whole-suite step (#6336): the source-reading classes of both suites, in batches. NODB=1 unsets every
 # DARLING_* and PG* variable for it, so no test finds a connection string: a live test skips on its own (it asserts the
 # variable is set) and nothing can reach a PostgreSQL store or a SQL Server. The Guard stage ran above and is left out.
 if [ ${#red[@]} -eq 0 ] && [ $whole -eq 1 ]; then
