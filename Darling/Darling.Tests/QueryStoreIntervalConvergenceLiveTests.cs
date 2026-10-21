@@ -711,7 +711,10 @@ public sealed class QueryStoreIntervalConvergenceLiveTests
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        /* Plain PostgreSQL on purpose (#6317): the race is built from core PostgreSQL's lock queue (a session already holding ACCESS SHARE
+           on the parent drops the partition ahead of the queued product DROP). With TimescaleDB loaded the same two sessions deadlock
+           (40P01, reproduced) instead of the second one winning, so the scenario this test builds does not exist there. */
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, plainPostgres: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
         await using var other = await OpenStoreAsync(scratch, ct);
         var logger = new ListLogger();
