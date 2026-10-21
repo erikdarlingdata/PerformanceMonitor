@@ -38,15 +38,31 @@ public static class QueryStoreReplicaSetting
 
     /// <summary>Why <paramref name="value"/> may not be a replica, or null when it may be (also null for an empty setting). The
     /// setting becomes the <c>Data Source</c> of a connection the service opens with its own credentials, and SqlClient reads a
-    /// protocol prefix there (<c>np:</c>, <c>lpc:</c>, <c>admin:</c>, <c>tcp:</c>) and a UNC-looking value as a named-pipe path,
+    /// protocol prefix there (<c>np:</c>, <c>lpc:</c>, <c>admin:</c>) and a UNC-looking value as a named-pipe path,
     /// which on Windows opens an SMB connection to a machine the writer names. So a replica is a plain host, <c>host,port</c>,
     /// <c>host\instance</c> or listener name: any <c>letters:</c> prefix, and any value that starts with a backslash or slash,
-    /// is refused. (An IPv6 literal goes in brackets.)</summary>
+    /// is refused. (An IPv6 literal goes in brackets.) The one prefix allowed is <c>tcp:</c> (any case, the ruling on #6254): it
+    /// forces TCP and names no other transport, so the part after it is judged by the same rules and may not be a path or carry
+    /// another prefix.</summary>
     public static string? Refusal(string? value)
     {
         if (Normalize(value) is not { } text)
         {
             return null;
+        }
+
+        if (text.StartsWith("tcp:", StringComparison.OrdinalIgnoreCase))
+        {
+            text = text[4..].Trim();
+            if (text.Length == 0)
+            {
+                return "query_store_replica must name a host after tcp:.";
+            }
+
+            if (text.StartsWith("tcp:", StringComparison.OrdinalIgnoreCase))
+            {
+                return "query_store_replica must be a host name, host,port or listener name, with at most one tcp: prefix.";
+            }
         }
 
         if (text[0] is '\\' or '/')
@@ -57,7 +73,7 @@ public static class QueryStoreReplicaSetting
         var colon = text.IndexOf(':');
         if (colon > 0 && IsLetters(text.AsSpan(0, colon)))
         {
-            return "query_store_replica must be a host name, host,port or listener name, without a protocol prefix such as np: or tcp:.";
+            return "query_store_replica must be a host name, host,port or listener name, without a protocol prefix other than tcp:.";
         }
 
         return null;

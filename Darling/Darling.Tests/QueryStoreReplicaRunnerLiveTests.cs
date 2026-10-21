@@ -320,6 +320,70 @@ public sealed class QueryStoreReplicaRunnerLiveTests
         Assert.Null(seen["wait_stats"]);
     }
 
+    /// <summary>
+    /// The runner's own wiring of the per-database watermark commit (#4661, #5684), driven through <c>RunAsync</c>: a database's rows
+    /// are flushed to <c>collect.query_store_stats</c> first and ONLY THEN does the cache advance to the batch's newest row. The
+    /// flush is held at a table lock; while it waits, the cache must still say what the store says (nothing). A runner that commits
+    /// before the flush says the new row while the store has none, and a runner that never commits leaves the cache behind the store.
+    /// </summary>
+    [Fact]
+    public async Task TheRunnerCommitsTheDatabaseWatermark_OnlyAfterTheFlush_AndDoesCommit()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #6254 runner pins.");
+        var token = TestContext.Current.CancellationToken;
+        var target = new Target();
+        await using var rig = await Rig.OpenAsync(target, token);
+        var server = MakeServer(null);
+        var w = WholeSeconds(DateTime.UtcNow.AddMinutes(-20));
+        target.Rows.Add(Row(1, w));
+
+        async Task<DateTime?> CachedAsync()
+        {
+            var now = DateTime.UtcNow;
+            return await rig.Runner.ResolveQueryStoreDatabaseWatermarkAsync(
+                server, "query_store_stats", "last_execution_time", "database_name", Db, WatermarkPolicy.ReadFloor(now)!.Value, now, token);
+        }
+
+        Task<CollectorRunResult> run;
+        await using (var holder = new NpgsqlConnection(rig.Scratch.ConnectionString))
+        {
+            await holder.OpenAsync(token);
+            await using var transaction = await holder.BeginTransactionAsync(token);
+            await using (var lockCommand = new NpgsqlCommand("LOCK TABLE collect.query_store_stats IN SHARE ROW EXCLUSIVE MODE", holder, transaction))
+            {
+                await lockCommand.ExecuteNonQueryAsync(token);
+            }
+
+            run = rig.Runner.RunAsync(QueryStoreCollector.Instance, server, token);
+
+            /* The flush is waiting on the lock: the rows are read and staged, nothing is stored. */
+            var blocked = false;
+            for (var attempt = 0; attempt < 200 && !blocked; attempt++)
+            {
+                await using var probe = new NpgsqlConnection(rig.Scratch.ConnectionString);
+                await probe.OpenAsync(token);
+                await using var waiting = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()", probe);
+                blocked = Convert.ToInt64(await waiting.ExecuteScalarAsync(token), System.Globalization.CultureInfo.InvariantCulture) > 0;
+                if (!blocked)
+                {
+                    Assert.False(run.IsCompleted, "the run finished without waiting on the table lock");
+                    await Task.Delay(50, token);
+                }
+            }
+
+            Assert.True(blocked, "the flush never reached the table lock");
+            Assert.Null(await CachedAsync());
+            await transaction.RollbackAsync(token);
+        }
+
+        var result = await run;
+
+        Assert.Equal(1, result.Rows);
+        Assert.Equal(new Dictionary<long, long> { [1] = 1 }, await StoredAsync(rig, token));
+        Assert.Equal(w, await CachedAsync());
+    }
+
     // ---- the fake target ----------------------------------------------------------------------------------------------------
 
     private sealed class FakeTargetProvider(Target target) : ITargetProvider
@@ -464,10 +528,10 @@ public sealed class QueryStoreReplicaRunnerLiveTests
 
             var names = new DataTable();
             names.Columns.Add("name", typeof(string));
-            names.Rows.Add(Db);
             var facts = new DataTable();
             facts.Columns.Add("name", typeof(string));
             facts.Columns.Add("flush_interval_seconds", typeof(int));
+            names.Rows.Add(Db);
             facts.Rows.Add(Db, target.FlushSeconds);
             return new DataTableReader([names, failures, facts]);
         }
