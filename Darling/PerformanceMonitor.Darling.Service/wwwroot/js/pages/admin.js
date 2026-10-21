@@ -43,6 +43,10 @@ export const SERVER_COLUMNS = [
   { key: "read_only", label: "Read only", format: "bool" },
   { key: "added", label: "Added", format: "time" },
   { key: "last_collected", label: "Last Collected", format: "time" },
+  /* #6351: the other enabled registrations that last reported this machine's identity, worked out when the list is read (an address
+     can start reaching another machine, e.g. after an availability group listener fails over). An agent-scoped notification route
+     on one of them does not cover the other. The service sends the names already joined; blank when there is no overlap. */
+  { key: "same_machine_as", label: "Same machine as", wrap: true },
 ];
 
 /* A disabled server's row is drawn with the grey row class the grid already uses for a canceled job run. */

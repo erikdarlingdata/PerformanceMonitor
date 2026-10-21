@@ -294,7 +294,8 @@ internal static class DarlingDataReader
         string? EngineKind = null,
         int? PostgresMajorVersion = null,
         DateTime? RegisteredAt = null,
-        int? SqlEngineEdition = null);
+        int? SqlEngineEdition = null,
+        IReadOnlyList<string>? SameMachineAs = null);
 
     /// <summary>The latest server_properties snapshot (Lite's <c>ServerPropertiesRow</c>).
     /// <paramref name="UtcOffsetMinutes"/> is the offset IN FORCE at that collection (V16; null on a pre-V16 row)
@@ -3273,6 +3274,18 @@ internal static class DarlingDataReader
     /* ─────────────────────────── discovery / health ─────────────────────────── */
 
     /// <summary>
+    /// The names of the OTHER enabled registrations whose <c>machine_identity</c> equals the one on the row aliased <c>s</c> (#6351), as
+    /// a text array (empty when none). Worked out when a list is read and never stored, so when an address moves back the flag is gone
+    /// with nothing to clear. NULL never matches: <c>=</c> on NULL is not true, so a registration that reported none (or whose row does
+    /// not exist yet) has no peers. An agent-scoped notification route on one registration does not cover the other. $-free.
+    /// </summary>
+    internal const string SameMachineAsColumnSql = """
+        COALESCE((SELECT array_agg(COALESCE(NULLIF(m.display_name, ''), m.server_name) ORDER BY m.server_name)
+                  FROM servers m
+                  WHERE m.machine_identity = s.machine_identity AND m.server_id <> s.server_id AND m.is_enabled), ARRAY[]::text[]) AS same_machine_as
+        """;
+
+    /// <summary>
     /// Every enabled server plus its newest collection instant — the list_servers read. Drives the
     /// freshness-derived status the tool assigns (the headless viewer has no live ping either — see
     /// <c>ServerSummaryItem.ClassifyFreshness</c>). <c>created_date</c> rides on the same registry row for the
@@ -3303,7 +3316,8 @@ internal static class DarlingDataReader
             s.engine_kind,
             s.postgres_major_version,
             s.created_date,
-            s.sql_engine_edition
+            s.sql_engine_edition,
+            {SameMachineAsColumnSql}
         FROM servers s
         LEFT JOIN LATERAL
         (
@@ -3336,7 +3350,8 @@ internal static class DarlingDataReader
                 reader.IsDBNull(5) ? null : reader.GetString(5),
                 reader.IsDBNull(6) ? null : reader.GetInt32(6),
                 reader.IsDBNull(7) ? null : reader.GetDateTime(7),
-                reader.IsDBNull(8) ? null : reader.GetInt32(8)));
+                reader.IsDBNull(8) ? null : reader.GetInt32(8),
+                reader.IsDBNull(9) ? null : reader.GetFieldValue<string[]>(9)));
         }
 
         return rows;

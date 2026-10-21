@@ -271,6 +271,59 @@ FROM config_monitored_servers c
 LEFT JOIN servers s ON s.server_id = c.server_id
 ORDER BY COALESCE(s.display_name, c.name)";
 
+    /// <summary>The store version that added <c>collect.servers.machine_identity</c> (V212, #6285). A store older than this has no
+    /// column to compare, so the sidebar shows no same-machine flag rather than failing the list.</summary>
+    internal const int MachineIdentityStoreSchemaVersion = 212;
+
+    /// <summary>
+    /// The enabled registrations that last reported the same machine identity as another enabled one (#6351), one row per registration
+    /// with the OTHER registrations' names. Worked out at read, never stored, so the flag is gone when an address moves back. NULL never
+    /// matches. An agent-scoped notification route on one of them does not cover the other.
+    /// </summary>
+    internal const string SameMachineSql = @"
+SELECT s.server_id, array_agg(COALESCE(NULLIF(m.display_name, ''), m.server_name) ORDER BY m.server_name)
+FROM servers s
+JOIN servers m ON m.machine_identity = s.machine_identity AND m.server_id <> s.server_id AND m.is_enabled
+WHERE s.is_enabled
+GROUP BY s.server_id";
+
+    /// <summary>
+    /// Fills <see cref="DarlingServer.SameMachineAs"/> on the listed servers (#6351). A store older than V212 has no column, so nothing
+    /// is read and no flag shows; a failed read leaves the list as it was, because a flag is never worth losing the sidebar over.
+    /// </summary>
+    private async Task AttachSameMachineAsync(List<DarlingServer> servers, CancellationToken cancellationToken)
+    {
+        if (servers.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            var version = _cachedStoreSchemaVersion ??= await GetStoreSchemaVersionAsync(cancellationToken);
+            if (version is not int known || known < MachineIdentityStoreSchemaVersion)
+            {
+                return;
+            }
+
+            var byId = servers.GroupBy(x => x.ServerId).ToDictionary(g => g.Key, g => g.First());
+            await using var command = _dataSource.CreateCommand(SameMachineSql);
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (byId.TryGetValue(reader.GetInt32(0), out var server))
+                {
+                    server.SameMachineAs = reader.GetFieldValue<string[]>(1);
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            ViewerLogger.Warn("App", $"Same-machine flag read failed: {ex.Message}");
+        }
+    }
+
     /// <summary>
     /// The managed server set for the sidebar. Config-authoritative once the service has seeded the store
     /// (added servers appear, removed ones disappear); on a pre-seed store (<c>config_service</c> absent) it
@@ -318,6 +371,7 @@ ORDER BY COALESCE(s.display_name, c.name)";
                 reader.IsDBNull(9) ? null : reader.GetDateTime(9)));
         }
 
+        await AttachSameMachineAsync(servers, cancellationToken);
         return servers;
     }
 

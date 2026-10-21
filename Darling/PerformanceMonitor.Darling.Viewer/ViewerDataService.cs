@@ -89,6 +89,25 @@ public sealed class DarlingServer : INotifyPropertyChanged
     public override string ToString() => DisplayName;
 
     public bool IsEnabled { get; }
+
+    /// <summary>The names of the OTHER enabled registrations that last reported the same machine identity as this one (#6351), empty
+    /// when none or when the store predates the identity column. Worked out when the list is read, never stored. Settable like the
+    /// sidebar overlay state: it is filled by a second read after the registry rows are built.</summary>
+    public IReadOnlyList<string> SameMachineAs { get; set; } = Array.Empty<string>();
+
+    /// <summary>The sidebar's details line (#6351): the version label, then the same-machine flag when there is one. The flag is part of
+    /// the row's text rather than a tooltip alone, so it is on the screen without hovering.</summary>
+    public string SidebarDetail => SameMachineAs.Count == 0
+        ? VersionLabel
+        : (string.IsNullOrEmpty(VersionLabel) ? "" : VersionLabel + " | ") + "same machine as " + string.Join(", ", SameMachineAs);
+
+    /// <summary>What the same-machine flag means, for the tooltip on the row's name; empty when there is no flag.</summary>
+    public string SameMachineTooltip => SameMachineAs.Count == 0
+        ? ""
+        : "This registration last reported the same machine as " + string.Join(", ", SameMachineAs)
+          + ". An address can start reaching another machine (an availability group listener failing over, a DNS change). "
+          + "An agent-scoped notification route on one registration does not cover the other.";
+
     public int? SqlMajorVersion { get; }
     public decimal MonthlyCostUsd { get; }
 
@@ -3309,6 +3328,7 @@ SELECT
                 reader.IsDBNull(9) ? null : reader.GetDateTime(9)));
         }
 
+        await AttachSameMachineAsync(servers, cancellationToken);
         return servers;
     }
 

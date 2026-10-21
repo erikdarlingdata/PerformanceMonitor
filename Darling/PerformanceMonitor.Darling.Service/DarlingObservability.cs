@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -59,6 +61,25 @@ ON CONFLICT (server_id) DO UPDATE SET
     postgres_major_version = EXCLUDED.postgres_major_version,
     machine_identity = CASE WHEN EXCLUDED.machine_identity IS NULL AND servers.server_name = EXCLUDED.server_name AND servers.engine_kind = EXCLUDED.engine_kind
                             THEN servers.machine_identity ELSE EXCLUDED.machine_identity END;";
+
+    /* The identity the registry holds for this registration BEFORE the connect's upsert (#6351). An upsert cannot hand back the
+       value it overwrote, so it is read right before; the connect path is single-threaded per server, so nothing writes between. */
+    internal const string PriorMachineIdentitySql = "SELECT machine_identity FROM servers WHERE server_id = $1";
+
+    /* The OTHER enabled registrations holding this identity (#6351). Worked out on read, never stored: when the address moves back the
+       overlap is simply gone. NULL never matches (the parameter is never NULL here, and `=` on NULL is not true). */
+    internal const string SameMachinePeersSql = @"
+SELECT COALESCE(NULLIF(p.display_name, ''), p.server_name)
+FROM servers p
+WHERE p.machine_identity = $2 AND p.server_id <> $1 AND p.is_enabled
+ORDER BY p.server_name;";
+
+    /// <summary>The one service log line per identity change that lands on a machine another enabled registration already holds
+    /// (#6351). Says what the overlap means for notification routes, which scope by registration.</summary>
+    internal static string SameMachineWarning(string registration, IReadOnlyList<string> peers) =>
+        $"Registration '{registration}' now reports the same machine as {string.Join(", ", peers.Select(p => $"'{p}'"))}. "
+        + "An address can start reaching another machine (an availability group listener failing over, a DNS change). "
+        + "An agent-scoped notification route on one of these registrations does not cover the other.";
 
     /* Mirror the DESIRED config (config.config_monitored_servers) onto the OBSERVED registry
        (collect.servers) for the two fields the viewer/FinOps read straight off collect.servers: is_enabled
@@ -146,6 +167,16 @@ ON CONFLICT (server_id) DO UPDATE SET
         try
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            /* #6351: what the registry held before, so a connect that CHANGES the identity can be told from one that restates it. */
+            string? priorIdentity;
+            using (var prior = new NpgsqlCommand(PriorMachineIdentitySql, connection))
+            {
+                prior.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+                prior.Parameters.AddWithValue(server.ServerId);
+                priorIdentity = await prior.ExecuteScalarAsync(cancellationToken) as string;
+            }
+
+            var machineIdentity = Mcp.DarlingMcpServerAdminTools.MachineIdentityOf(server.MachineIdentity, server.EngineEdition);
             using var command = new NpgsqlCommand(UpsertServerSql, connection);
             command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
             command.Parameters.AddWithValue(server.ServerId);
@@ -185,9 +216,29 @@ ON CONFLICT (server_id) DO UPDATE SET
                     : (object)DBNull.Value);
             /* The machine's own name (V212, #6285, #6339), folded to the form the add and edit tools compare. NULL when the connect
                read none. */
-            command.Parameters.AddWithValue(
-                (object?)Mcp.DarlingMcpServerAdminTools.MachineIdentityOf(server.MachineIdentity, server.EngineEdition) ?? DBNull.Value);
+            command.Parameters.AddWithValue((object?)machineIdentity ?? DBNull.Value);
             await command.ExecuteNonQueryAsync(cancellationToken);
+
+            /* #6351: a connect that reads an identity stores exactly that value (the upsert keeps the old one only when none was read),
+               so a changed identity is the one that differs from the value read before. One warning per change, never per cycle: this
+               runs at connect only, and the next connect that restates the value finds it equal and stays quiet. No refusal, no alert:
+               a failover is normal. */
+            if (machineIdentity is not null && !string.Equals(priorIdentity, machineIdentity, StringComparison.Ordinal))
+            {
+                var peers = new List<string>();
+                using (var overlap = new NpgsqlCommand(SameMachinePeersSql, connection))
+                {
+                    overlap.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+                    overlap.Parameters.AddWithValue(server.ServerId);
+                    overlap.Parameters.AddWithValue(machineIdentity);
+                    using var peerReader = await overlap.ExecuteReaderAsync(cancellationToken);
+                    while (await peerReader.ReadAsync(cancellationToken))
+                        peers.Add(peerReader.GetString(0));
+                }
+
+                if (peers.Count > 0)
+                    logger?.LogWarning("{Message}", SameMachineWarning(server.Config.DisplayName, peers));
+            }
         }
         catch (Exception ex)
         {
