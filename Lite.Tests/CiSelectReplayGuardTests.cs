@@ -52,7 +52,10 @@ public sealed class CiSelectReplayGuardTests
         using var p = Process.Start(psi) ?? throw new InvalidOperationException("python did not start");
         var stdout = p.StandardOutput.ReadToEndAsync();
         var stderr = p.StandardError.ReadToEndAsync();
-        Assert.True(p.WaitForExit(120_000), "ci-select.py did not finish in two minutes");
+        /* #6346: the script reads every test source file (about 3,300). On a busy developer machine, where file opens
+           are slow, that took over 7 minutes and a two-minute wait failed both replay tests with no real miss. The wait
+           is a hang guard only: a stuck script still fails, the replay result is judged exactly as before. */
+        Assert.True(p.WaitForExit(900_000), "ci-select.py did not finish in fifteen minutes");
         return (p.ExitCode, stdout.Result + stderr.Result);
     }
 
