@@ -467,8 +467,9 @@ EXEC sp_recompile 'dbo.p1';
 EXEC dbo.p1 @k = 1;
 EXEC dbo.p2 @k = 3;", ct);
 
-            /* One statement text, two queries: a second SET option set makes Query Store record a new query_id against the SAME query_text_id. */
-            await SqlAsync(database, "EXEC sys.sp_executesql N'SELECT MAX(id) AS qshared FROM dbo.t WHERE k = 3';", ct);
+            /* One statement text, two queries: a second SET option set makes Query Store record a new query_id against the SAME query_text_id. Both settings
+               are explicit, because the client's own default for ARITHABORT is not the server's. */
+            await SqlAsync(database, "SET ARITHABORT ON; EXEC sys.sp_executesql N'SELECT MAX(id) AS qshared FROM dbo.t WHERE k = 3';", ct);
             await SqlAsync(database, "SET ARITHABORT OFF; EXEC sys.sp_executesql N'SELECT MAX(id) AS qshared FROM dbo.t WHERE k = 3';", ct);
             await SqlAsync(database, @"
 DECLARE @q bigint, @p bigint;
