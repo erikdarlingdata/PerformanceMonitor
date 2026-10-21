@@ -26,7 +26,8 @@ case "$1" in
            *) if [ $suite = darling ]; then cat "$FAKE_LIST_DARLING"; else cat "$FAKE_LIST_LITE"; fi;;
          esac;;
   -trait) echo "  Fake.Tests  Total: ${FAKE_GUARD_TOTAL:-7}, Errors: 0, Failed: 0";;
-  -class) echo "  Fake.Tests  Total: ${FAKE_CLASS_TOTAL:-3}, Errors: 0, Failed: 0";;
+  -class) echo "env $suite DARLING_TEST_PG=${DARLING_TEST_PG:-unset} PGHOST=${PGHOST:-unset}" >> "$FAKE_LOG"
+          echo "  Fake.Tests  Total: ${FAKE_CLASS_TOTAL:-3}, Errors: 0, Failed: ${FAKE_ALL_FAILED:-0}, Skipped: 4"; [ "${FAKE_ALL_FAILED:-0}" = 0 ] || { echo "    Fake.Tests.SourceRuleTests.Rule [FAIL]"; exit 2; };;
 esac
 exit 0
 FAKE
@@ -39,6 +40,8 @@ cp "${PRE_PUSH_TEST_GATE:-$src/.github/scripts/pre-push.sh}" "$repo/.github/scri
 cp "$src/.github/scripts/ci-select.py" "$repo/.github/scripts/"
 echo 'namespace Darling.Tests; public class AlphaTests { }' > "$repo/Darling/Darling.Tests/AlphaTests.cs"
 echo 'namespace Lite.Tests; public class BetaTests { }' > "$repo/Lite.Tests/BetaTests.cs"
+printf 'namespace Darling.Tests;\npublic class ReaderTests { string t = File.ReadAllText("x"); }\n' > "$repo/Darling/Darling.Tests/ReaderTests.cs"
+printf 'namespace Lite.Tests;\npublic class LiteReaderTests { string t = File.ReadAllText("x"); }\n' > "$repo/Lite.Tests/LiteReaderTests.cs"
 g() { git -C "$repo" -c user.name=pre-push-test -c user.email=pre-push-test@example.invalid "$@"; }
 g init -q && g add -A && g commit -qm base && g update-ref refs/remotes/origin/dev HEAD
 echo change > "$repo/notes.txt"; g add notes.txt && g commit -qm change
@@ -93,18 +96,40 @@ check guardout "the Guard class is not run again" $(grep -qxF 'darling -class Da
 check guardout "the gate says how many it left out" $(printf '%s
 ' "$out" | grep -qF 'guard-stage classes left out of the selection (stage 2 ran them): darling 1'; echo $?)
 
-# 4. a whole-suite selection (401 darling classes over the 400 default) is a STOP: exit 3, no selected class runs
+# 4. a whole-suite selection (401 darling classes over the 400 default) runs the database-free step (#6336): no -class run,
+# only the classes of test files that read the repository as text run, with no DARLING_* or PG* variable, and a GREEN that says so
 names=$(seq -f 'C%03gTests' 1 401)
 sel_big="{\"full\": false, \"selected\": {\"darling\": [$(printf '"%s",' $names | sed 's/,$//')], \"lite\": [\"BetaTests\"]}}"
-list_big="[$(printf '"Darling.Tests.%s",' $names | sed 's/,$//')]"
-run_gate stop "$sel_big" "$list_big" "$list_l" --skip-build
-check stop "exit 3" $([ $rc -eq 3 ]; echo $?)
-check stop "last line is the GATE STOP line" $(last | grep -qF "GATE STOP: selection is the whole suite (darling 401, lite 1): run the brief's classes; CI decides"; echo $?)
-check stop "no -class run" $(! grep -q -- '-class' "$calls"; echo $?)
+list_big="[\"Darling.Tests.ReaderTests\",$(printf '"Darling.Tests.%s",' $names | sed 's/,$//')]"
+list_l_big='["Lite.Tests.BetaTests", "Lite.Tests.LiteReaderTests"]'
+DARLING_TEST_PG='Host=db.example.invalid' PGHOST=db.example.invalid run_gate stop "$sel_big" "$list_big" "$list_l_big" --skip-build
+check stop "exit 0 and the database-free GATE GREEN line" $([ $rc -eq 0 ] && last | grep -qF 'GATE GREEN: guard stage and the source-reading classes passed'; echo $?)
+check stop "only the source readers ran, one class per suite" $(grep -qxF 'darling -class Darling.Tests.ReaderTests' "$calls" && grep -qxF 'lite -class Lite.Tests.LiteReaderTests' "$calls" && [ "$(grep -c -- ' -class ' "$calls")" = 2 ]; echo $?)
 check stop "the Guard stage still ran" $(grep -c -- '^[a-z]* -trait Stage=Guard' "$calls" | grep -qx 2; echo $?)
+check stop "the run saw no database variable" $(grep -q '^env darling DARLING_TEST_PG=unset PGHOST=unset' "$calls" && grep -q '^env lite DARLING_TEST_PG=unset PGHOST=unset' "$calls"; echo $?)
+check stop "it reports its seconds and the skips" $(printf '%s
+' "$out" | grep -qE '^database-free: [0-9]+s in all; 8 tests skipped'; echo $?)
+
+# 4b. a test that fails in the database-free step is GATE RED and names the suite
+FAKE_ALL_FAILED=1 run_gate stopred "$sel_big" "$list_big" "$list_l_big" --skip-build
+check stopred "exit 1 and GATE RED naming the step" $([ $rc -eq 1 ] && last | grep -q '^GATE RED: classes-darling-1 '; echo $?)
+check stopred "the failing test is printed" $(printf '%s
+' "$out" | grep -qF 'SourceRuleTests.Rule [FAIL]'; echo $?)
+
+# 4c. CI's FULL answer (a keep-full file changed) is the whole suite too, even for a handful of classes; before #6336 the
+# gate fell back to the symbol set there and was GREEN on a few classes
+run_gate full '{"full": true, "selected": {}, "why": {}, "seconds": {}, "total": {}}' '["Darling.Tests.AlphaTests", "Darling.Tests.ReaderTests"]' "$list_l_big" --skip-build
+printf "%s
+" "$out" > /tmp/w6336/fullout.txt
+check full "exit 0 and the database-free GATE GREEN line" $([ $rc -eq 0 ] && last | grep -qF 'GATE GREEN: guard stage and the source-reading classes passed'; echo $?)
+check full "only the source readers ran" $([ "$(grep -c -- ' -class ' "$calls")" = 2 ]; echo $?)
+
+# 4d. a dry run of a whole-suite selection runs nothing and exits 0
+run_gate drywhole "$sel_big" "$list_big" "$list_l_big" --dry-run
+check drywhole "exit 0 and a GATE DRY-RUN line naming the whole suite" $([ $rc -eq 0 ] && last | grep -q '^GATE DRY-RUN: selection is the whole suite'; echo $?)
 
 # 5. batches are cut by length: 401 classes under a 2000-character budget run in several batches, each under it
-FAKE_CLASS_TOTAL=3 PRE_PUSH_MAX_CLASSES=1000 PRE_PUSH_ARG_BUDGET=2000 run_gate chunks "$sel_big" "$list_big" "$list_l" --skip-build
+FAKE_CLASS_TOTAL=3 PRE_PUSH_MAX_CLASSES=1000 PRE_PUSH_ARG_BUDGET=2000 run_gate chunks "$sel_big" "$list_big" "$list_l_big" --skip-build
 nb=$(grep -c '^darling -class ' "$calls")
 longest=$(grep '^darling -class ' "$calls" | sed 's/^darling //' | awk '{ if (length($0) + 1 > m) m = length($0) + 1 } END { print m + 0 }')
 ran=$(grep '^darling -class ' "$calls" | grep -o -- '-class ' | wc -l | tr -d ' ')
@@ -112,6 +137,6 @@ check chunks "GATE GREEN" $([ $rc -eq 0 ] && last | grep -q '^GATE GREEN: '; ech
 check chunks "several darling batches ($nb), longest $longest characters, at most 2000" $([ "$nb" -gt 1 ] && [ "$longest" -le 2000 ]; echo $?)
 check chunks "every class ran once ($ran of 401)" $([ "$ran" -eq 401 ]; echo $?)
 
-rm -rf "$work"
+[ -n "${PRE_PUSH_TEST_KEEP:-}" ] || rm -rf "$work"
 if [ $fails -gt 0 ]; then echo "pre-push-test: $fails FAILED"; exit 1; fi
 echo "pre-push-test: all passed"
