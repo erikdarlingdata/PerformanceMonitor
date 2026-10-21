@@ -22,7 +22,7 @@ It supports SQL Server 2016 SP2 to 2025. SQL Server 2017 needs CU3 or later. It 
 - **Lite** is a single desktop app that monitors your servers remotely, on demand. Nothing is installed on your server. It stores data in local DuckDB and Parquet files.
 - **Darling** is a service on Windows or Linux that collects 24/7 into a central PostgreSQL store. The Windows viewer and the web dashboard read that store from any seat.
 
-Both editions can hand an alert to an AI agent that you run. Lite lets the agent read and report. Darling can also let it change a setting on the server, and records every change so that a person can undo it. [Agent dispatch](docs/darling-agent-dispatch.md) explains the levels.
+Both editions can hand an alert to an AI agent that you run, and Lite lets the agent read and report. Darling can also let it change alert settings (mutes, custom alert rules and thresholds). On a server, it can force or unforce a Query Store plan, evict a cached plan or kill a session. Each of these has its own switch per server, and all are off until you turn them on. Darling records every change, and a person can undo alert-setting changes and plan forces but not a plan eviction or a session kill. [Agent dispatch](docs/darling-agent-dispatch.md) explains the levels.
 
 The Dashboard edition is deprecated. Existing installs keep working, but we recommend Lite or Darling for new deployments. [Choosing an edition](docs/editions.md) compares all three.
 

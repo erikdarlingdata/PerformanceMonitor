@@ -75,7 +75,7 @@ sits on top of `pg_stat_statements`), `pg_predicate_stats` (`pg_qualstats` — p
 `CREATE EXTENSION` per database), and `pg_wait_sampling` (the `pg_wait_sampling` module — preload-only,
 so check it with `SHOW shared_preload_libraries;`, not `pg_extension`). Skipping any of them is fine:
 the collector records a non-fatal skip naming exactly which install is missing (step 10), and the other
-27 collectors are unaffected.
+24 collectors are unaffected.
 
 `pg_wait_sampling` is the one whose absence is no longer a skip (#3604). Without the extension the same
 collector takes its **service-sampler arm**: it polls `pg_stat_activity` once a second for a 30-second
@@ -378,10 +378,10 @@ reasons come from the collectors' own gates in `CollectorCatalog`:
 
 | Target | Applies | Skipped, and why |
 |---|---|---|
-| Aurora writer, PG 16+ | 28 of 28 | — |
-| Aurora reader | 24 of 28 | `pg_autovacuum_stats`, `pg_index_usage_stats`, `pg_table_bloat_stats`, `pg_index_bloat` — all four are writer-only: a standby's per-table statistics are either zeros or its own, and both readings are wrong for the cluster |
-| Self-managed 16+ writer | 26 of 28 | `pg_wait_stats`, `pg_cpu_utilization` — one reads `aurora_stat_system_waits()`, the other AWS Performance Insights; both gate on Aurora detection |
-| Self-managed 15 reader | 21 of 28 | all of the above, plus `pg_io_stats` (needs `pg_stat_io`, PostgreSQL 16+) |
+| Aurora writer, PG 16+ | 29 of 29 | — |
+| Aurora reader | 25 of 29 | `pg_autovacuum_stats`, `pg_index_usage_stats`, `pg_table_bloat_stats`, `pg_index_bloat` — all four are writer-only: a standby's per-table statistics are either zeros or its own, and both readings are wrong for the cluster |
+| Self-managed 16+ writer | 27 of 29 | `pg_wait_stats`, `pg_cpu_utilization` — one reads `aurora_stat_system_waits()`, the other AWS Performance Insights; both gate on Aurora detection |
+| Self-managed 15 reader | 22 of 29 | all of the above, plus `pg_io_stats` (needs `pg_stat_io`, PostgreSQL 16+) |
 
 A PostgreSQL 13 target additionally skips `pg_write_stats`, whose `pg_stat_wal` source is 14+.
 

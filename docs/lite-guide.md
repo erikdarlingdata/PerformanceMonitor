@@ -70,7 +70,7 @@ That was not always true: through 3.5.0 the ZIP was a portable build with no run
 | database_scoped_config | On connect | Database-scoped configurations |
 | trace_flags | On connect | `DBCC TRACESTATUS` |
 
-Darling runs this same shared collector set across a fleet of servers (latch stats, spinlock stats, CPU scheduler, plan cache, and system_health parsing are now part of the shared catalog above, collected by Lite too) — see the [Darling collector reference](../Darling/README.md).
+Darling runs these same 43 collectors across a fleet of servers, plus a 44th, `query_store_forced_plans`, which reads each database's forced plans. Lite does not have it. Darling also runs 29 PostgreSQL collectors. See the [Darling collector reference](../Darling/README.md).
 
 ### The Extended Events Sessions Lite Creates
 
@@ -166,7 +166,7 @@ The shared `PerformanceMonitor_Deadlock` and `PerformanceMonitor_BlockedProcess`
 
 All data is stored in `%LOCALAPPDATA%\PerformanceMonitorLite-Data\` — a different folder from the install directory (`%LOCALAPPDATA%\PerformanceMonitorLite\`), so neither an in-app update nor re-running `Setup.exe` can disturb it. Data from an older install is moved into the new folder automatically the first time this version starts.
 
-- **Hot data** in DuckDB 1.5.2 — non-blocking checkpoints, free block reuse, stable file size without periodic resets
+- **Hot data** in DuckDB 1.5.5 — non-blocking checkpoints, free block reuse, stable file size without periodic resets
 - **Archive** to Parquet with ZSTD compression (~10x reduction) — automatic monthly compaction keeps file count low (~75 files vs thousands)
 - **Retention**: 3-month calendar-month rolling window
 - **Memory limit**: DuckDB's memory limit is a setting (Settings, Dashboard Defaults, "DuckDB memory limit"). The default is 2 GB, and it can go from 1 GB up to 80% of memory. A change applies after a restart.
