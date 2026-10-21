@@ -93,7 +93,7 @@ public sealed class DarlingQueryStoreRegressionsSurfaceAndSqlTests
         Assert.Equal(1, CountOf(sql, "ROW_NUMBER() OVER"));
         Assert.Equal(1, CountOf(sql, "PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role"));
         Assert.Equal(1, CountOf(sql, "ORDER BY collection_time DESC, execution_count DESC"));
-        Assert.Equal(2, CountOf(sql, "WHERE rn = 1"));
+        Assert.Equal(3, CountOf(sql, "WHERE rn = 1"));
     }
 
     /// <summary>

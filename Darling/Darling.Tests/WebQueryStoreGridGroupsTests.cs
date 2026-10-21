@@ -84,7 +84,7 @@ public sealed class WebQueryStoreGridGroupsTests
     {
         var r = Run("defaults");
         Assert.Equal(new[] { "Columns:", "CPU", "Executions and plans" }, Arr(r, "regressions", "toggles"));
-        Assert.Equal(new[] { "Severity", "Database", "Query", "QueryID", "ExtraDuration", "Duration+%", "BaselineDuration", "RecentDuration", "CPU+%", "Reads+%", "LastExec" },
+        Assert.Equal(new[] { "Severity", "Database", "Query", "QueryID", "ExtraDuration", "Duration+%", "BaselineDuration", "RecentDuration", "CPU+%", "LastExec" },
             Arr(r, "regressions", "heads"));
         Assert.Equal(new[] { "Columns:", "I/O and rows", "Session" }, Arr(r, "completions", "toggles"));
         Assert.Equal(new[] { "Time", "Statement", "EventType", "Duration", "CPU", "Result", "Database", "Object", "QueryHash" },

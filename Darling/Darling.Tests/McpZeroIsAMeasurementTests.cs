@@ -166,9 +166,9 @@ public sealed class McpZeroIsAMeasurementTests
         Assert.Equal(3, Regex.Matches(lite, @"RegressionPercent = reader\.IsDBNull\(\d+\) \? null ").Count);
         Assert.Equal(3, Regex.Matches(lite, @"public double\? \w+RegressionPercent").Count);
 
-        /* Darling's reader is positional; the three percent columns are 4, 7 and 10. */
+        /* Darling's reader is positional; the two percent columns are 4 and 7 (#5506: no reads percent). */
         var darling = ReadRepoFile(DarlingMcp.Split('/').Append("DarlingQueryStoreRegressionReader.cs").ToArray());
-        foreach (var column in new[] { 4, 7, 10 })
+        foreach (var column in new[] { 4, 7 })
         {
             Assert.Contains($"reader.IsDBNull({column}) ? null : Convert.ToDouble(reader.GetValue({column}))", darling, StringComparison.Ordinal);
         }
@@ -176,7 +176,7 @@ public sealed class McpZeroIsAMeasurementTests
         var percents = typeof(DarlingQueryStoreRegressionReader.RegressionRow).GetProperties()
             .Where(p => p.Name.EndsWith("RegressionPercent", StringComparison.Ordinal))
             .ToArray();
-        Assert.Equal(3, percents.Length);
+        Assert.Equal(2, percents.Length);
         Assert.All(percents, p => Assert.Equal(typeof(double?), p.PropertyType));
     }
 

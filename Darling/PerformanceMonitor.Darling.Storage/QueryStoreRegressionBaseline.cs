@@ -280,9 +280,9 @@ public static class QueryStoreRegressionBaseline
                 b.database_name,
                 b.query_id,
                 b.plan_id,
-                CAST(b.execution_count AS numeric),
-                CAST(b.avg_cpu_time_us AS numeric) * b.execution_count,
-                CAST(b.avg_duration_us AS numeric) * b.execution_count
+                CAST(b.execution_count AS numeric) AS execs,
+                CAST(b.avg_cpu_time_us AS numeric) * b.execution_count AS cpu_us,
+                CAST(b.avg_duration_us AS numeric) * b.execution_count AS dur_us
             FROM deduped_baseline AS b
             WHERE b.rn = 1
 """;

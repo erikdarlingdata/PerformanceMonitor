@@ -229,10 +229,8 @@ internal static class DarlingQueryStoreRegressionReader
         await SetReadOnlyAsync(connection, transaction, cancellationToken);
         var plan = await QueryStoreRegressionBaseline.ResolveAsync(
             connection, transaction, serverId, baselineStartUtc, startUtc, McpCommandDeadlines.ReadSeconds, ReadScope.Current?.Logger, cancellationToken);
-        await using var command = new NpgsqlCommand(plan.BuiltDayCount > 0 ? QueryStoreRegressionsSql : s_rawLiveSql, connection, transaction)
-        {
-            CommandTimeout = McpCommandDeadlines.ReadSeconds,
-        };
+        var rawSql = plan.BuiltDayCount > 0 ? QueryStoreRegressionsSql : s_rawLiveSql;
+        await using var command = new NpgsqlCommand(rawSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds };
         AddParameters(command, serverId, startUtc, endUtc, databases, limit, baselineStartUtc, plan);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         var rows = await ReadRowsAsync(reader, cancellationToken);
@@ -302,7 +300,8 @@ internal static class DarlingQueryStoreRegressionReader
             gateDecided = true;
             var plan = await QueryStoreRegressionBaseline.ResolveAsync(
                 connection, transaction, serverId, wide.ClampedStart, startUtc, McpCommandDeadlines.ReadSeconds, ReadScope.Current?.Logger, cancellationToken);
-            await using var command = new NpgsqlCommand(plan.BuiltDayCount > 0 ? QueryStoreRegressionsTableSql : s_wideLiveSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds };
+            var wideSql = plan.BuiltDayCount > 0 ? QueryStoreRegressionsTableSql : s_wideLiveSql;
+            await using var command = new NpgsqlCommand(wideSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds };
             AddParameters(command, serverId, startUtc, endUtc, databases, limit, wide.ClampedStart, plan);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             var rows = await ReadRowsAsync(reader, cancellationToken);
