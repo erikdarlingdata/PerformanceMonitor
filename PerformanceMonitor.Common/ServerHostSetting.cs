@@ -128,7 +128,9 @@ public static class ServerHostSetting
        pool and connects to it when the principal stops answering, even with no Failover Partner in the connection string. That
        name does not go through TcpDataSource, so it has no tcp: prefix and falls back from TCP to a named pipe over SMB with
        the process's Windows credentials (#6365; measured on 7.1.1: a fake principal reporting 192.0.2.1, then connect with the
-       principal down, opened 1433 and 445 on 192.0.2.1). We never set a Failover Partner, so the switch costs nothing.
+       principal down, opened 1433 and 445 on 192.0.2.1). We never set a Failover Partner, so a configured partner is not affected. What the switch does change: a monitored
+       connection is no longer redirected to a mirroring partner. That partner is another instance and is monitored as its own
+       server. The Darling service and Lite csprojs also write the switch into runtimeconfig.json; this is the backup.
        SqlClient reads the switch once and caches it, so it is set here, before the first TcpDataSource call in the process
        (every connection to a monitored server takes its Data Source from there). */
     static ServerHostSetting() => AppContext.SetSwitch(IgnoreServerProvidedFailoverPartnerSwitch, true);
