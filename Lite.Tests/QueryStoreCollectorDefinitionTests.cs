@@ -591,7 +591,7 @@ public sealed class QueryStoreCollectorDefinitionTests
            the remainder - every other column at its ordinal - must be identical between the two forms. */
         const string qstJoin = "JOIN #pm_qs_text AS qst\n  ON qst.query_text_id = qsq.query_text_id\n";
         var stageStart = Lf(inline).IndexOf("\nSELECT /* PerformanceMonitorLite */\n    qst.query_text_id", StringComparison.Ordinal);
-        const string stageEndMarker = "CREATE CLUSTERED INDEX c ON #pm_qs_text (query_text_id);\n";
+        const string stageEndMarker = "    WHERE qsq.query_text_id = qst.query_text_id\n)\nOPTION(RECOMPILE, HASH JOIN);\n";
         var stageEnd = Lf(inline).IndexOf(stageEndMarker, StringComparison.Ordinal) + stageEndMarker.Length;
         Assert.True(stageStart > 0 && stageEnd > stageStart, "the inline form stages the text view into #pm_qs_text");
         Assert.Equal(
