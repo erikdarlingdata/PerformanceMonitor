@@ -353,6 +353,49 @@ public sealed class ServerActionSwitchWriteLiveTests
     }
 
     [Fact]
+    public async Task TheWebList_AnswersEachServersEngineKindFromTheSharedParser_SoPgAndAuroraAreLabelledPostgreSql()
+    {
+        await WithWebAsync("admin", async (owner, _, Send, ct) =>
+        {
+            await ExecAsync(owner, "INSERT INTO config.config_monitored_servers (server_id, name, host, engine) VALUES (3, 'beta-pg-01', 'beta-pg-01.example.test', 'pg')", ct);
+            await ExecAsync(owner, "INSERT INTO config.config_monitored_servers (server_id, name, host, engine) VALUES (4, 'beta-aurora-01', 'beta-aurora-01.example.test', 'Aurora')", ct);
+
+            var list = await Send("GET", "/api/server-actions", null);
+            Assert.Equal(200, list.Status);
+            var kinds = list.Body!["servers"]!.AsArray().ToDictionary(s => (string)s!["server_name"]!, s => (string)s!["engine_kind"]!);
+            Assert.Equal("sqlserver", kinds["alpha-sql-01"]);
+            Assert.Equal("postgresql", kinds["alpha-pg-01"]);
+            Assert.Equal("postgresql", kinds["beta-pg-01"]);
+            Assert.Equal("postgresql", kinds["beta-aurora-01"]);
+        });
+    }
+
+    [Fact]
+    public async Task AnOnSwitchTheEngineCannotRun_IsListedByTheWebAsInvalidAndOn_AnOffPutClearsIt_AndAnOnPutIsStillRefused()
+    {
+        await WithWebAsync("admin", async (owner, _, Send, ct) =>
+        {
+            /* force_plan was on for server 2 (alpha-pg-01) when its engine was edited to PostgreSQL: the row is left behind. */
+            await ExecAsync(owner, "INSERT INTO config.config_server_actions (server_id, action, enabled, set_by) VALUES (2, 'force_plan', true, 'person:alice')", ct);
+
+            JsonNode StuckRow(JsonNode body) => body["servers"]!.AsArray().Single(s => (int)s!["server_id"]! == 2)!["actions"]!.AsArray().Single(a => (string?)a!["action"] == "force_plan")!;
+            var before = StuckRow((await Send("GET", "/api/server-actions", null)).Body!);
+            Assert.False((bool)before["valid"]!);
+            Assert.True((bool)before["enabled"]!);
+
+            var refused = await Send("PUT", "/api/servers/2/actions/force_plan", "application/json", "{\"enabled\":true}");
+            Assert.Equal(409, refused.Status);
+            Assert.Equal("True", await ScalarAsync(owner, "SELECT enabled FROM config.config_server_actions WHERE server_id = 2 AND action = 'force_plan'", ct));
+
+            var off = await Send("PUT", "/api/servers/2/actions/force_plan", "application/json", "{\"enabled\":false}");
+            Assert.Equal(200, off.Status);
+            Assert.Equal("set", (string)off.Body!["status"]!);
+            Assert.Equal("False", await ScalarAsync(owner, "SELECT enabled FROM config.config_server_actions WHERE server_id = 2 AND action = 'force_plan'", ct));
+            Assert.False((bool)StuckRow((await Send("GET", "/api/server-actions", null)).Body!)["enabled"]!);
+        });
+    }
+
+    [Fact]
     public async Task TurningASwitchOff_OnAServerWhoseEngineCannotRunIt_StillWorks_ButTurningItOnIsRefused()
     {
         await WithStoreAsync(async (owner, ct) =>

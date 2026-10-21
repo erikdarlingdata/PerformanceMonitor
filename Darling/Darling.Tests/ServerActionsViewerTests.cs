@@ -26,12 +26,39 @@ public sealed class ServerActionsViewerTests
     });
 
     [Fact]
-    public void OnlyTheActionsTheEngineCanRun_AreListed()
+    public void OnlyTheActionsTheEngineCanRun_AreListed_PlusAnOnSwitchItCannotRun()
     {
         Assert.Equal(3, ServerActionViewRow.From(new[] { Server("sqlserver") }).Count);
+        /* force_plan is ON (left behind by an engine edit) and evict_plan is off: only the on one is listed beside the kill_session row. */
         var pg = ServerActionViewRow.From(new[] { Server("postgres") });
-        Assert.Equal(new[] { ServerActionNames.KillSession }, pg.Select(r => r.Action).ToArray());
+        Assert.Equal(new[] { ServerActionNames.ForcePlan, ServerActionNames.KillSession }, pg.Select(r => r.Action).ToArray());
         Assert.Equal("PostgreSQL", pg[0].EngineDisplay);
+    }
+
+    [Fact]
+    public void AnOnSwitchTheEngineCannotRun_ShowsTheNote_CanBeTurnedOff_AndIsRefusedTurnedOn()
+    {
+        var pg = ServerActionViewRow.From(new[] { Server("postgres") });
+        var stuck = pg.Single(r => r.Action == ServerActionNames.ForcePlan);
+        Assert.True(stuck.Enabled);
+        Assert.False(stuck.CanRun);
+        Assert.Equal("This server's engine can't run this action. Turn it off to clear it.", stuck.Note);
+        Assert.Null(ServerActionViewRow.ChangeError(stuck, false));
+        Assert.Equal(stuck.Note, ServerActionViewRow.ChangeError(stuck, true));
+        Assert.Equal("", pg.Single(r => r.Action == ServerActionNames.KillSession).Note);
+    }
+
+    [Theory]
+    [InlineData("pg", "PostgreSQL")]
+    [InlineData("Aurora", "PostgreSQL")]
+    [InlineData(" Aurora-PostgreSQL ", "PostgreSQL")]
+    [InlineData("POSTGRES", "PostgreSQL")]
+    [InlineData("sqlserver", "SQL Server")]
+    [InlineData("", "SQL Server")]
+    public void TheEngineLabel_ComesFromTheSharedParser_SoAliasesAndMixedCaseReadAsTheStoreTreatsThem(string engine, string label)
+    {
+        var row = ServerActionViewRow.From(new[] { Server(engine) }).First();
+        Assert.Equal(label, row.EngineDisplay);
     }
 
     [Fact]

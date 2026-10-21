@@ -309,6 +309,7 @@ try {
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
   const page = await import(pathToFileURL(path.join(scratch, "pages", "admin.js")).href);
   const util = await import(pathToFileURL(path.join(scratch, "util.js")).href);
+  const actionsPage = await import(pathToFileURL(path.join(scratch, "pages", "admin-server-actions.js")).href);
   const main = body.appendChild(new FakeNode("main"));
   const mountPage = async (tab = "servers") => {
     page.renderAdmin(main, tab);
@@ -1227,8 +1228,9 @@ try {
     pure: async () => {
       const request = JSON.parse(await readStdin());
       const call = ({ fn, args = [] }) => {
-        if (!(fn in page)) throw new Error("admin.js exports no " + fn);
-        return typeof page[fn] === "function" ? page[fn](...args) : page[fn];
+        const source = fn in page ? page : fn in actionsPage ? actionsPage : null;
+        if (!source) throw new Error("admin.js exports no " + fn);
+        return typeof source[fn] === "function" ? source[fn](...args) : source[fn];
       };
       return Array.isArray(request.calls) ? { results: request.calls.map(call) } : { result: call(request) };
     },

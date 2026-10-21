@@ -106,7 +106,16 @@ public sealed class ServerActionViewRow
 
     public string ServerName => Server.ServerName;
 
-    public string EngineDisplay => Server.Engine.Contains("postgres", StringComparison.OrdinalIgnoreCase) ? "PostgreSQL" : "SQL Server";
+    /// <summary>The engine label from the shared parser, so pg, aurora and mixed-case spellings read PostgreSQL like the store treats them.</summary>
+    public string EngineDisplay => Server.EngineKind == PerformanceMonitor.Collectors.CollectorTargetEngine.PostgreSql ? "PostgreSQL" : "SQL Server";
+
+    /// <summary>False for a switch that is on but that the server's engine cannot run (an engine edit left it behind). It can only be turned off.</summary>
+    public bool CanRun => State.Valid;
+
+    public const string EngineCannotRunNote = "This server's engine can't run this action. Turn it off to clear it.";
+
+    /// <summary>The sentence shown beside a switch that is on but that the engine cannot run; empty otherwise.</summary>
+    public string Note => State.Valid ? "" : EngineCannotRunNote;
 
     public string Action => State.Action;
 
@@ -123,9 +132,9 @@ public sealed class ServerActionViewRow
 
     public string ChangedDisplay => State.UpdatedAtUtc is DateTime at ? at.ToLocalTime().ToString("g", CultureInfo.CurrentCulture) : "";
 
-    /// <summary>One row per server and per action its engine can run; an action the engine cannot run is not listed.</summary>
+    /// <summary>One row per server and per action its engine can run, plus any switch that is on but that the engine cannot run (listed with a note so it can be turned off).</summary>
     public static IReadOnlyList<ServerActionViewRow> From(IEnumerable<ServerActionSwitchRow> servers) =>
-        servers.SelectMany(s => s.Actions.Where(a => a.Valid).Select(a => new ServerActionViewRow(s, a))).ToList();
+        servers.SelectMany(s => s.Actions.Where(a => a.Valid || a.Enabled).Select(a => new ServerActionViewRow(s, a))).ToList();
 
     /// <summary>An action in plain words.</summary>
     public static string ActionLabel(string action) => action switch
@@ -154,6 +163,7 @@ public sealed class ServerActionViewRow
     /// <summary>The check before a change: what is wrong with it, or null.</summary>
     internal static string? ChangeError(ServerActionViewRow? selected, bool turnOn) =>
         selected is null ? "Select a server and an action first."
+        : turnOn && !selected.CanRun ? EngineCannotRunNote
         : selected.Enabled == turnOn ? selected.ActionDisplay + " is already " + (turnOn ? "on" : "off") + " for " + selected.ServerName + "."
         : null;
 }

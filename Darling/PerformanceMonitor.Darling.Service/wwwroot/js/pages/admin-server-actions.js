@@ -7,7 +7,7 @@
  */
 
 /* Admin > Server actions (#6269): each server's agent action switches, who changed each and when, and an on/off control.
-     GET /api/server-actions                          {can_decide, signed_in_admin, servers: [{server_id, server_name, engine, actions: [{action, valid, enabled, set_by, updated_at_utc}]}]}
+     GET /api/server-actions                          {can_decide, signed_in_admin, servers: [{server_id, server_name, engine, engine_kind, actions: [{action, valid, enabled, set_by, updated_at_utc}]}]}
      PUT /api/servers/{id}/actions/{action}           {"enabled": true|false}  ->  200 {status: set|unchanged, message}; 403 viewer role; 404; 409 wrong engine
    Every switch is off until a person turns it on. Turning one ON shows a plain warning first and writes only after the person confirms it.
    The tab decides only under the admin store login. Under the viewer role (managed and compose stores) the list still shows and the page says so;
@@ -24,7 +24,11 @@ export const SERVER_ACTION_COLUMNS = [
   { key: "state", label: "Switch" },
   { key: "set_by", label: "Changed by" },
   { key: "changed", label: "Changed", format: "time" },
+  { key: "note", label: "Note" },
 ];
+
+const ENGINE_CANNOT_RUN =
+  "This server's engine can't run this action. Turn it off to clear it.";
 
 const LIST_ONLY =
   "This dashboard signs in to the store as the viewer role (managed and compose stores), so this page lists the switches only. " +
@@ -59,14 +63,15 @@ export function serverActionWarning(serverName, action) {
     "Every agent change is journaled, and can be undone where that is possible.";
 }
 
-/** One row per server and per action its engine can run; an action the engine cannot run is not listed. */
+/** One row per server and per action its engine can run, plus a switch that is on but that the engine cannot run (shown with a note; it can only be turned off). */
 export function serverActionRows(data) {
   const servers = data && Array.isArray(data.servers) ? data.servers : [];
   const rows = [];
   for (const s of servers) {
-    const postgres = typeof s.engine === "string" && s.engine.toLowerCase().includes("postgres");
+    /* The service parses the registry's spelling (pg, aurora, mixed case) with the shared parser and answers engine_kind; this page never parses it. */
+    const postgres = s.engine_kind === "postgresql";
     for (const a of Array.isArray(s.actions) ? s.actions : []) {
-      if (a.valid !== true) continue;
+      if (a.valid !== true && a.enabled !== true) continue;
       rows.push({
         server_id: s.server_id,
         server_name: s.server_name,
@@ -74,6 +79,8 @@ export function serverActionRows(data) {
         engine: postgres ? "PostgreSQL" : "SQL Server",
         action: serverActionLabel(a.action),
         action_key: a.action,
+        can_run: a.valid === true,
+        note: a.valid === true ? "" : ENGINE_CANNOT_RUN,
         enabled: a.enabled === true,
         state: a.enabled === true ? "ON" : "off",
         set_by: a.set_by || null,

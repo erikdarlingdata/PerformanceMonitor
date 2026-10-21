@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -125,7 +126,7 @@ public sealed class DarlingMcpServerActionTools
         }
     }
 
-    /// <summary>The list as the MCP read and the web GET both answer it: <c>{servers_returned, servers: [{server_id, server_name, engine, actions: [{action, valid, enabled, set_by, updated_at_utc}]}]}</c>.</summary>
+    /// <summary>The list as the MCP read and the web GET both answer it: <c>{servers_returned, servers: [{server_id, server_name, engine, engine_kind (postgresql|sqlserver), actions: [{action, valid, enabled, set_by, updated_at_utc}]}]}</c>.</summary>
     internal static JsonObject ListToJson(System.Collections.Generic.IReadOnlyList<ServerActionSwitchRow> rows) => new()
     {
         ["servers_returned"] = rows.Count,
@@ -134,6 +135,7 @@ public sealed class DarlingMcpServerActionTools
             ["server_id"] = r.ServerId,
             ["server_name"] = r.ServerName,
             ["engine"] = r.Engine,
+            ["engine_kind"] = r.EngineKind == CollectorTargetEngine.PostgreSql ? "postgresql" : "sqlserver",
             ["actions"] = new JsonArray(r.Actions.Select(a => (JsonNode)new JsonObject
             {
                 ["action"] = a.Action,

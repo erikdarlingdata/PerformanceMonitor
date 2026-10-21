@@ -3496,7 +3496,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
     /// <summary>
     /// The server action switch routes (#6269). <c>GET /api/server-actions</c> lists every server with a state for each action
-    /// (<c>{can_decide, servers_returned, servers: [{server_id, server_name, engine, actions: [{action, valid, enabled, set_by,
+    /// (<c>{can_decide, servers_returned, servers: [{server_id, server_name, engine, engine_kind, actions: [{action, valid, enabled, set_by,
     /// updated_at_utc}]}]}</c>; <c>can_decide</c> is false under the viewer role, which lists only). <c>PUT /api/servers/{id}/actions/{action}</c>
     /// with <c>{"enabled": true|false}</c> sets one switch: 200 <c>{status: set|unchanged, ...}</c>; 400 for a bad body, an unknown action or a
     /// signed-in name that cannot be recorded; 403 under the viewer role (and for a read-only seat, which the host's method gate refuses first);

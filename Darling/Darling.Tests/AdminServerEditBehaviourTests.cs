@@ -111,6 +111,36 @@ public sealed class AdminServerEditBehaviourTests
         Assert.Equal(["Inherit", "Off", "Investigate (7/h, 70/day)", "Act (7/h, 70/day)"], text);
     }
 
+    // #6269: the Server actions tab labels the engine from the service's engine_kind (never by parsing the spelling), and lists a switch
+    // that is on but that the engine cannot run, with a note, so it can be turned off.
+    [Fact]
+    public void TheServerActionRows_LabelTheEngineFromTheServicesKind_AndListAnOnSwitchTheEngineCannotRunWithTheNote_Pure()
+    {
+        var data = new
+        {
+            servers = new object[]
+            {
+                new { server_id = 1, server_name = "alpha-sql-01", engine = "sqlserver", engine_kind = "sqlserver", actions = new object[]
+                {
+                    new { action = "force_plan", valid = true, enabled = false },
+                } },
+                new { server_id = 2, server_name = "beta-pg-01", engine = "pg", engine_kind = "postgresql", actions = new object[]
+                {
+                    new { action = "force_plan", valid = false, enabled = true },
+                    new { action = "evict_plan", valid = false, enabled = false },
+                    new { action = "kill_session", valid = true, enabled = false },
+                } },
+            },
+        };
+        var rows = Pure("serverActionRows", data).EnumerateArray().ToArray();
+        Assert.Equal(["alpha-sql-01 SQL Server force_plan", "beta-pg-01 PostgreSQL force_plan", "beta-pg-01 PostgreSQL kill_session"],
+            rows.Select(r => r.GetProperty("server").GetString() + " " + r.GetProperty("engine").GetString() + " " + r.GetProperty("action_key").GetString()).ToArray());
+        Assert.Equal("", rows[0].GetProperty("note").GetString());
+        Assert.Equal("This server's engine can't run this action. Turn it off to clear it.", rows[1].GetProperty("note").GetString());
+        Assert.True(rows[1].GetProperty("enabled").GetBoolean());
+        Assert.Equal("", rows[2].GetProperty("note").GetString());
+    }
+
     // The form's values for one kind of server, shaped as editFormValues returns them (the engine rides along).
     private static JsonObject Base(string kind)
     {

@@ -33,7 +33,11 @@ public static class ServerActionSurfaces
 public sealed record ServerActionSwitchState(string Action, bool Valid, bool Enabled, string? SetBy, DateTime? UpdatedAtUtc);
 
 /// <summary>One monitored server and its action switches (#6269).</summary>
-public sealed record ServerActionSwitchRow(int ServerId, string ServerName, string Engine, IReadOnlyList<ServerActionSwitchState> Actions);
+public sealed record ServerActionSwitchRow(int ServerId, string ServerName, string Engine, IReadOnlyList<ServerActionSwitchState> Actions)
+{
+    /// <summary>The engine the registry's raw spelling names (pg, aurora and mixed case read as PostgreSQL), through the one shared parser. Both screens label the engine from this (#6269).</summary>
+    public CollectorTargetEngine EngineKind => MonitoredEngineKind.ParseConfiguredEngine(Engine);
+}
 
 /// <summary>The answer to one switch change (#6269). <see cref="Code"/> is null on success: <c>set</c> or <c>unchanged</c> (the switch already held that
 /// state, so nothing was written or journaled). A refusal is <c>unknown_action</c>, <c>unknown_server</c> or <c>not_for_engine</c>.</summary>
