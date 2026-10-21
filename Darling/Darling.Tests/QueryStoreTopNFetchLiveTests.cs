@@ -163,6 +163,10 @@ public sealed class QueryStoreTopNFetchLiveTests
     private static async Task CollectAsync(Rig rig, CancellationToken ct)
     {
         await SqlAsync(rig.Database, "EXEC sys.sp_query_store_flush_db;", ct);
+
+        /* The collector skips the still-open interval for 30 minutes after it last read it (QueryStoreOpenIntervalState). This database's one
+           interval is open for the whole test, so a second run in the same interval needs that stamp gone, which is what 30 minutes would do. */
+        await Exec(rig.Connection, ct, "DELETE FROM collect.collector_state WHERE server_id = $1 AND state_key LIKE $2", rig.Server.ServerId, QueryStoreOpenIntervalState.WatermarkKeyPrefix + "%");
         var result = await rig.Runner.RunAsync(QueryStoreCollector.Instance, rig.Server, ct);
         Assert.True(result.Rows > 0, "the run read the Query Store rows");
     }
