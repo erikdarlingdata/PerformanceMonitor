@@ -568,6 +568,8 @@ WHERE server_id = $1";
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (!await reader.ReadAsync(cancellationToken))
             {
+                /* No stored row: the upsert inserts, which is a new registration. */
+                ThrowIfHostRefused(row, null);
                 return;
             }
 
@@ -588,6 +590,9 @@ WHERE server_id = $1";
         {
             throw new ViewerSchemaSkewException(ex);
         }
+
+        /* #6352: a changed host is held to the add rule; a row saved before it keeps its host and stays editable. */
+        ThrowIfHostRefused(row, stored.Host, stored.Engine);
 
         var incoming = ViewerPasswordSealer.IdentityOf(row);
         var connectionChanged = ServerConnectionIdentity.Differ(incoming, stored);
@@ -619,6 +624,43 @@ WHERE server_id = $1";
         if (connectionChanged)
         {
             throw new MonitoredServerPasswordNeededException();
+        }
+    }
+
+    /// <summary>
+    /// #6352: null when <paramref name="row"/>'s host may be saved, otherwise the sentence to refuse with. A SQL Server
+    /// host SqlClient would read as a named pipe or an admin connection is refused for a NEW row
+    /// (<paramref name="storedHost"/> null) and for an edit that CHANGES the host; an edit that keeps the host it has is not
+    /// held to it, so a registration saved before the rule stays editable. A PostgreSQL host is not read that way (a
+    /// leading slash is a Unix socket directory there), so it is not held to the rule. The Add/Edit dialog calls this
+    /// before it tests or saves, and the upsert calls it again under its transaction. The add (<see cref="AddMonitoredServerAsync"/>)
+    /// is not checked here: the import of an older registry goes through it, and an existing registration is not blocked.
+    /// </summary>
+    public static string? HostRefusal(MonitoredServerRow row, string? storedHost, string? storedEngine = null)
+    {
+        ArgumentNullException.ThrowIfNull(row);
+        /* A stored PostgreSQL row was never held to the SQL Server host rule, so it has no stored SQL Server host to keep:
+           when the save turns it into a SQL Server row (the upsert writes engine = EXCLUDED.engine) its host is checked. */
+        if (storedHost is not null && new MonitoredServerRow { Engine = storedEngine ?? "" }.IsPostgres)
+        {
+            storedHost = null;
+        }
+
+        /* Ordinal, no trim: a stored "<U+00A0>np:x" is not a pipe and "np:x" is, so they are not the same host. */
+        if (row.IsPostgres
+            || (storedHost is not null && string.Equals(row.Host, storedHost, StringComparison.Ordinal)))
+        {
+            return null;
+        }
+
+        return ServerHostSetting.Refusal(row.Host);
+    }
+
+    private static void ThrowIfHostRefused(MonitoredServerRow row, string? storedHost, string? storedEngine = null)
+    {
+        if (HostRefusal(row, storedHost, storedEngine) is { } refusal)
+        {
+            throw new MonitoredServerHostRefusedException(refusal);
         }
     }
 
@@ -1101,6 +1143,13 @@ public sealed class MonitoredServerPasswordNeededException : InvalidOperationExc
     {
     }
 }
+
+/// <summary>
+/// <see cref="ViewerDataService.UpsertMonitoredServerAsync"/> refused a host (#6352): a new or changed SQL Server host
+/// that SqlClient would read as a named pipe or an admin connection (<see cref="ServerHostSetting.Refusal"/>). The dialog's
+/// save handler shows the message as it is. Nothing was written.
+/// </summary>
+public sealed class MonitoredServerHostRefusedException(string message) : InvalidOperationException(message);
 
 /// <summary>
 /// <see cref="ViewerDataService.UpsertMonitoredServerAsync"/> refused an edit (#5240): under the identity lock,

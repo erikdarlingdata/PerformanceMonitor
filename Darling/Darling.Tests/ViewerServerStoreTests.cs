@@ -276,4 +276,30 @@ public sealed class ViewerServerStoreTests : IDisposable
 
         public void Delete(string id) => _map.Remove(id);
     }
+
+    /// <summary>#6352: an imported entry is a new registration, so a named-pipe or admin host is skipped.</summary>
+    [Fact]
+    public void ImportServersFromFile_SkipsAPipeOrAdminHost()
+    {
+        var source = Path.Combine(Path.GetTempPath(), $"viewer-servers-src-{Guid.NewGuid():N}.json");
+        var sourceStore = new ViewerServerStore(source, new FakeSecretStore());
+        sourceStore.AddServer(new ViewerServerEntry { ServerName = "np:pipe-host", DisplayName = "Pipe" }, null, null);
+        sourceStore.AddServer(new ViewerServerEntry { ServerName = "admin:dac-host", DisplayName = "Dac" }, null, null);
+        sourceStore.AddServer(new ViewerServerEntry { ServerName = "plain-host", DisplayName = "Plain" }, null, null);
+
+        try
+        {
+            var store = NewStore();
+
+            var (imported, skipped) = store.ImportServersFromFile(source);
+
+            Assert.Equal(1, imported);
+            Assert.Equal(2, skipped);
+            Assert.Equal("plain-host", Assert.Single(store.GetAllServers()).ServerName);
+        }
+        finally
+        {
+            try { File.Delete(source); } catch { /* best-effort */ }
+        }
+    }
 }

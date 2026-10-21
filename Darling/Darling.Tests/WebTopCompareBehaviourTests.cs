@@ -124,11 +124,19 @@ public sealed class WebTopCompareBehaviourTests
 
         Assert.Equal("delta", plans.GetProperty("ok").GetProperty("mode").GetString());
         Assert.Equal(6, plans.GetProperty("ok").GetProperty("rows").GetInt32());
-        foreach (var name in new[] { "baselineEmpty", "baselineError", "baselineNoExecutions", "baselineNoRows", "currentError", "currentEmpty" })
+        foreach (var name in new[] { "baselineEmpty", "baselineError", "baselineNoExecutions", "baselineNoRows" })
         {
             var plan = plans.GetProperty(name);
             Assert.Equal("plain", plan.GetProperty("mode").GetString());
             Assert.StartsWith("No data for the comparison window", plan.GetProperty("notice").GetString());
+        }
+
+        // #6353: this window being the empty or unread one is said by its own card; the comparison notice would blame the wrong window.
+        foreach (var name in new[] { "currentError", "currentEmpty", "bothEmpty" })
+        {
+            var plan = plans.GetProperty(name);
+            Assert.Equal("plain", plan.GetProperty("mode").GetString());
+            Assert.Equal(JsonValueKind.Null, plan.GetProperty("notice").ValueKind);
         }
     }
 

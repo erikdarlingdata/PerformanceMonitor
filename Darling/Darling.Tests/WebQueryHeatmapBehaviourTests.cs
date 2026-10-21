@@ -137,6 +137,19 @@ public sealed class WebQueryHeatmapBehaviourTests
 
     /// <summary>An answer with no cells draws no grid and no empty cells: the table's own empty text shows, never a grid of blanks.</summary>
     [Fact]
+    public void TheCaptionSaysWhatIsAtTheTop_ForTheMetricPicked()
+    {
+        // #6353: the caption said "the slowest queries are at the top" for every metric; the rows follow the metric picked.
+        var captions = Run("caption").GetProperty("captions");
+
+        Assert.Contains("the slowest queries are at the top", captions.GetProperty("duration").GetString());
+        Assert.Contains("the most-executed queries are at the top", captions.GetProperty("execution_count").GetString());
+        Assert.DoesNotContain("slowest", captions.GetProperty("execution_count").GetString());
+        Assert.Contains("the queries using the most CPU are at the top", captions.GetProperty("cpu").GetString());
+        Assert.Contains("the queries doing the most logical writes are at the top", captions.GetProperty("logical_writes").GetString());
+    }
+
+    [Fact]
     public void AnAnswerWithNoCells_DrawsNoGrid()
     {
         var r = Run("renderEmpty");

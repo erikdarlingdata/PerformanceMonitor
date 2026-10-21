@@ -57,6 +57,17 @@ public sealed class WebOverviewStripsBehaviourTests
         }
     }
 
+    /// <summary>
+    /// The readout is the crosshair's time in the browser's local time (the harness pins New York, where 12:xx UTC on 1 January is 07:xx),
+    /// two spaces, then the strip's values. The clock's AM/PM suffix and its space are the machine's locale, so only its HH:mm is compared.
+    /// </summary>
+    private static void AssertReadout(string clock, string rest, string? actual)
+    {
+        Assert.NotNull(actual);
+        Assert.StartsWith(clock, actual);
+        Assert.EndsWith("  " + rest, actual);
+    }
+
     private static (double? T, double? V)[] Samples(JsonElement series) =>
         series.EnumerateArray().Select(e => (
             e.GetProperty("t").ValueKind == JsonValueKind.Null ? (double?)null : e.GetProperty("t").GetDouble(),
@@ -80,7 +91,7 @@ public sealed class WebOverviewStripsBehaviourTests
         Assert.Equal((15.0, 3.0), Samples(at22.GetProperty("io"))[0]);
         // Blocking happened at minutes 12 and 47 only: nothing is read at minute 22.
         Assert.All(Samples(at22.GetProperty("blocking")), s => Assert.Null(s.V));
-        Assert.Equal("12:22  no sample here", r.GetProperty("at22Text").GetProperty("blocking").GetString());
+        AssertReadout("07:22", "no sample here", r.GetProperty("at22Text").GetProperty("blocking").GetString());
 
         // On the blocking bucket the blocking series answers; the deadlock series (an empty read) still has no sample.
         var at12 = Samples(r.GetProperty("at12").GetProperty("blocking"));
@@ -89,7 +100,7 @@ public sealed class WebOverviewStripsBehaviourTests
 
         Assert.Equal((30.0, 3.0), Samples(r.GetProperty("at30").GetProperty("io"))[0]);
         // A pointer move drives the same lookup, over one crosshair line.
-        Assert.Equal("12:30  SQL 40 %  |  Total 45 %", r.GetProperty("pointerText").GetProperty("cpu").GetString());
+        AssertReadout("07:30", "SQL 40 %  |  Total 45 %", r.GetProperty("pointerText").GetProperty("cpu").GetString());
         Assert.Equal(1, r.GetProperty("hoverLines").GetInt32());
     }
 
@@ -106,7 +117,7 @@ public sealed class WebOverviewStripsBehaviourTests
         Assert.All(Samples(at38.GetProperty("cpu")), s => Assert.Null(s.V));
         Assert.Equal((40.0, 180.0), Samples(at38.GetProperty("waits"))[0]);
         Assert.Equal((40.0, 2004.0), Samples(at38.GetProperty("memory"))[0]);
-        Assert.Equal("12:38  no sample here", r.GetProperty("at38Text").GetProperty("cpu").GetString());
+        AssertReadout("07:38", "no sample here", r.GetProperty("at38Text").GetProperty("cpu").GetString());
 
         Assert.Equal(4, Run("zoom").GetProperty("cpuPolylinesFull").GetInt32());
     }
@@ -129,8 +140,8 @@ public sealed class WebOverviewStripsBehaviourTests
         Assert.Equal(12, r.GetProperty("cpuPointsZoomed").GetInt32());
         Assert.Equal(7, r.GetProperty("waitPointsZoomed").GetInt32());
         var labels = r.GetProperty("axisLabels").EnumerateArray().Select(e => e.GetString()).ToArray();
-        Assert.Equal("12:20", labels.First());
-        Assert.Equal("12:40", labels.Last());
+        Assert.StartsWith("07:20", labels.First());
+        Assert.StartsWith("07:40", labels.Last());
     }
 
     /// <summary>
@@ -223,5 +234,39 @@ public sealed class WebOverviewStripsBehaviourTests
         Assert.Equal(1, drawn.GetProperty("blocking").GetProperty("band").GetInt32());
         Assert.Equal(0, drawn.GetProperty("blocking").GetProperty("dots").GetInt32());
         Assert.Equal(0, drawn.GetProperty("memory").GetProperty("band").GetInt32());
+    }
+
+    /// <summary>
+    /// The axis labels and the crosshair readout are in the browser's local time, the zone the zoom chip and the rest of the page show
+    /// (#6360). They used to read UTC, so a reader in New York saw 20:28 on the axis under a chip that said 4:28:55 PM. The window here is
+    /// 12:00-13:00 UTC, which is 07:00-08:00 in the zone the harness pins.
+    /// </summary>
+    [Fact]
+    public void TheAxisAndTheReadout_ReadInLocalTime_NotUtc()
+    {
+        var r = Run("localtime");
+
+        var labels = r.GetProperty("axisLabels").EnumerateArray().Select(e => e.GetString()!).ToArray();
+        Assert.StartsWith("07:00", labels.First());
+        Assert.StartsWith("08:00", labels.Last());
+        Assert.DoesNotContain(labels, l => l.StartsWith("12:") || l.StartsWith("13:"));
+        AssertReadout("07:22", "SQL 32 %  |  Total 37 %", r.GetProperty("readout").GetString());
+    }
+
+    /// <summary>
+    /// On a reload the panel's host is built before it is in the page, so the first draw measures no width and falls back to 1000. Once the
+    /// host is attached and laid out (328 px, a phone) the observer's first report must redraw the strips at 328, not leave the 1000 px
+    /// drawing for the browser to scale down to a third of its size, with titles and axis text about 4 px tall (#6360).
+    /// </summary>
+    [Fact]
+    public void OnFirstLoad_TheStripsAreRedrawnAtTheWidthTheHostIsLaidOutAt()
+    {
+        var r = Run("firstload");
+
+        var before = r.GetProperty("afterFill").EnumerateArray().Single();
+        Assert.Equal("1000", before.GetProperty("width").GetString());
+        var after = r.GetProperty("afterObserver").EnumerateArray().Single();
+        Assert.Equal("328", after.GetProperty("width").GetString());
+        Assert.StartsWith("0 0 328 ", after.GetProperty("viewBox").GetString());
     }
 }

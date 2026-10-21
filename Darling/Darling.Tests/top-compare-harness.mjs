@@ -59,6 +59,7 @@ try {
     baselineNoRows: plan(data(current), data([])),
     currentError: plan({ kind: "error", message: "x" }, data(baseline)),
     currentEmpty: plan({ kind: "empty", message: "x" }, data(baseline)),
+    bothEmpty: plan({ kind: "empty", message: "x" }, { kind: "empty", message: "y" }),
   };
   out.formats = { up: tc.formatDelta(12.34), down: tc.formatDelta(-4), none: tc.formatDelta(null), zeroBase: tc.deltaPct(5, 0) };
   console.log(JSON.stringify(out));
