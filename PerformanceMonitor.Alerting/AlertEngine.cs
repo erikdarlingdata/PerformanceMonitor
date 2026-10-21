@@ -2462,7 +2462,9 @@ public sealed class AlertEngine
             AttentionBaseline? baseline = null;
             if (AttentionEvaluator.ReachesFloor(reading, warningFloor))
             {
+                readClock.Restart();
                 baseline = await GetAttentionBaselineAsync(key, now, ct);
+                readClock.Restart();
             }
 
             var finding = AttentionEvaluator.Evaluate(

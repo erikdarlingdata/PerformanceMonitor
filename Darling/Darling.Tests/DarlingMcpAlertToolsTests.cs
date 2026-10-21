@@ -1197,7 +1197,7 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         Assert.True(ct["enabled"]!.GetValue<bool>());
         Assert.Equal(4, ct["warning_per_minute"]!.GetValue<int>());
         Assert.Equal(25, ct["critical_per_minute"]!.GetValue<int>());
-        Assert.Equal(new[] { "enabled", "warning_per_minute", "critical_per_minute" }, ct.AsObject().Select(p => p.Key).ToArray());
+        Assert.Equal(new[] { "enabled", "warning_per_minute", "critical_per_minute", "warning_multiple", "critical_multiple" }, ct.AsObject().Select(p => p.Key).ToArray());
 
         /* A stored pair the engine would rewrite is reported the way the engine reads it. */
         var crossed = SampleSettingsRow() with { ClientTimeoutsWarningPerMinute = 9, ClientTimeoutsCriticalPerMinute = 3 };
