@@ -1126,11 +1126,48 @@ OPTION(RECOMPILE);";
            database in a cycle, so a stale true from the previous database would misreport this one. */
         context.CatchupClampApplied = context.Watermark.HasValue && clamped != context.Watermark;
 
+        /* #6279: step the cutoff back SecondaryCaptureLookback, so rows a capturing secondary sent late are
+           read once they land. Only an incremental read has a watermark to step back from; a first run
+           keeps its own 60-minute fallback. */
+        var cutoff = clamped is { } floor && AppliesSecondaryCaptureLookback(context.Target)
+            ? floor - SecondaryCaptureLookback
+            : clamped;
+
         return new List<CollectorParameter>
         {
-            new("@cutoff_time", clamped ?? context.CollectionTime.AddMinutes(-60), CollectorParameterType.DateTime2),
+            new("@cutoff_time", cutoff ?? context.CollectionTime.AddMinutes(-60), CollectorParameterType.DateTime2),
         };
     }
+
+    /// <summary>
+    /// How far behind the watermark the incremental read starts, so rows a capturing readable secondary
+    /// sends to the primary are read once they land (#6279).
+    ///
+    /// <para><b>Measured on a two-node SQL Server 2025 CU9 availability group</b> (secondary capture on,
+    /// DATA_FLUSH_INTERVAL_SECONDS = 900): rows for queries run on the secondary between 16:09 and 16:24
+    /// first appeared on the primary at 16:27, and carried the <c>last_execution_time</c> of the
+    /// execution itself, up to 18.5 minutes older than the primary's own newest row. The primary keeps
+    /// writing rows of its own in that gap, so the watermark (the newest stored <c>last_execution_time</c>)
+    /// has already passed them and the strict <c>&gt; @cutoff_time</c> never read them: every one of the 91
+    /// secondary rows in the trial was below the watermark of the cycle that ran just before they landed.
+    /// The delay is the secondary's own flush interval plus a few minutes of transport, so 30 minutes
+    /// covers the 15-minute default flush interval with a full flush cycle to spare.</para>
+    ///
+    /// <para>The re-read costs nothing in correctness: the read is already at interval grain (see the
+    /// HAVING below), so a (plan, interval, execution type, replica group) seen again is shipped whole
+    /// and the read side keeps the newest copy per key. The secondary's rows are their own replica
+    /// group, so nothing else on the primary would pull them in: only a look-back reads them.</para>
+    /// </summary>
+    public static readonly TimeSpan SecondaryCaptureLookback = TimeSpan.FromMinutes(30);
+
+    /// <summary>
+    /// Query Store for readable secondaries exists from SQL Server 2022 and on Azure SQL Database / Managed
+    /// Instance; an older server has no replica_group_id and sends nothing late. An unknown version (0)
+    /// counts as new, the same way database_config assumes the newest, because the version here can be
+    /// unknown on a first connect and a missed secondary row cannot be recovered later.
+    /// </summary>
+    internal static bool AppliesSecondaryCaptureLookback(CollectorTargetInfo target)
+        => target.IsAzureSqlDb || target.IsAzureManagedInstance || target.SqlMajorVersion is 0 or >= 16;
 
     /// <summary>
     /// On-prem / RDS / Managed Instance: the SAME body <see cref="BuildQuery"/> runs on Azure, only

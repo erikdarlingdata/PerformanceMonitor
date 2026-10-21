@@ -38,14 +38,15 @@ public sealed class QueryStoreCollectorDefinitionTests
         DateTime? watermark = null,
         DateTime? collectionTime = null,
         bool capturePlanXml = false,
-        bool fetchQueryTextSeparately = false)
+        bool fetchQueryTextSeparately = false,
+        int sqlMajorVersion = 13)
         => new()
         {
             ServerId = 42,
             ServerName = "test-server",
             CollectionTime = collectionTime ?? new DateTime(2026, 7, 2, 12, 0, 0, DateTimeKind.Utc),
             Deltas = s_deltas,
-            Target = new CollectorTargetInfo { IsAzureSqlDb = isAzureSqlDb },
+            Target = new CollectorTargetInfo { IsAzureSqlDb = isAzureSqlDb, SqlMajorVersion = sqlMajorVersion },
             Watermark = watermark,
             EnumerationProbeResult = probeResult,
             CapturePlanXml = capturePlanXml,
@@ -315,12 +316,14 @@ public sealed class QueryStoreCollectorDefinitionTests
 
         var stale = QueryStoreCollector.Instance.BuildQuery(
             MakeContext(isAzureSqlDb: true, watermark: collectionTime.AddDays(-5), collectionTime: collectionTime));
-        Assert.Equal(collectionTime - WatermarkPolicy.MaxCatchup, Assert.Single(stale.Parameters).Value);
+        /* The clamped watermark, stepped back the secondary-capture look-back (#6279): Azure SQL Database
+           always captures on secondaries. */
+        Assert.Equal(collectionTime - WatermarkPolicy.MaxCatchup - QueryStoreCollector.SecondaryCaptureLookback, Assert.Single(stale.Parameters).Value);
 
-        /* Inside the horizon: passed through untouched. */
+        /* Inside the horizon: not clamped, only stepped back the look-back. */
         var fresh = QueryStoreCollector.Instance.BuildQuery(
             MakeContext(isAzureSqlDb: true, watermark: collectionTime.AddMinutes(-30), collectionTime: collectionTime));
-        Assert.Equal(collectionTime.AddMinutes(-30), Assert.Single(fresh.Parameters).Value);
+        Assert.Equal(collectionTime.AddMinutes(-30) - QueryStoreCollector.SecondaryCaptureLookback, Assert.Single(fresh.Parameters).Value);
 
         /* Nothing collected yet for this database: the documented 60-minute first-run window. */
         var first = QueryStoreCollector.Instance.BuildQuery(
@@ -358,6 +361,68 @@ public sealed class QueryStoreCollectorDefinitionTests
         var alreadyClamped = MakeContext(watermark: collectionTime - WatermarkPolicy.MaxCatchup, collectionTime: collectionTime);
         QueryStoreCollector.Instance.BuildPerItemQuery("SO", alreadyClamped);
         Assert.False(alreadyClamped.CatchupClampApplied);
+    }
+
+    /* #6279: a readable secondary that captures its own Query Store data sends it to the primary on its own
+       flush interval, and the primary shows it with the last_execution_time of the execution itself. Measured
+       on a two-node SQL Server 2025 availability group (flush interval 900 s): rows first visible on the
+       primary 3 to 18.5 minutes after they ran, while the primary's own newest row, which is the watermark,
+       had moved on. A cutoff equal to the watermark never reads such a row. */
+    private static readonly TimeSpan s_measuredSecondaryDelay = TimeSpan.FromMinutes(18.5);
+
+    private static DateTime CutoffOf(CollectorContext context)
+    {
+        var plan = QueryStoreCollector.Instance.BuildPerItemQuery("SO", context);
+        var parameter = Assert.Single(plan.Parameters);
+        Assert.Equal("@cutoff_time", parameter.Name);
+        return Assert.IsType<DateTime>(parameter.Value);
+    }
+
+    [Theory]
+    [InlineData(16)]
+    [InlineData(17)]
+    [InlineData(0)]
+    public void Cutoff_OnServerWithSecondaryCapture_ReachesBackPastTheMeasuredSecondaryDelay(int sqlMajorVersion)
+    {
+        var collectionTime = new DateTime(2026, 7, 2, 12, 0, 0, DateTimeKind.Utc);
+        var watermark = collectionTime.AddMinutes(-2);
+        var lateRowLastExecution = watermark - s_measuredSecondaryDelay;
+
+        var cutoff = CutoffOf(MakeContext(watermark: watermark, collectionTime: collectionTime, sqlMajorVersion: sqlMajorVersion));
+
+        Assert.True(lateRowLastExecution > cutoff,
+            $"a secondary row that ran {s_measuredSecondaryDelay} before the watermark is read only if it is newer than the cutoff; the cutoff was {cutoff:O}");
+    }
+
+    [Fact]
+    public void Cutoff_OnAzureSqlDatabase_ReachesBackPastTheMeasuredSecondaryDelay()
+    {
+        var collectionTime = new DateTime(2026, 7, 2, 12, 0, 0, DateTimeKind.Utc);
+        var watermark = collectionTime.AddMinutes(-2);
+
+        var cutoff = CutoffOf(MakeContext(isAzureSqlDb: true, watermark: watermark, collectionTime: collectionTime, sqlMajorVersion: 12));
+
+        Assert.True(watermark - s_measuredSecondaryDelay > cutoff);
+    }
+
+    [Theory]
+    [InlineData(13)]
+    [InlineData(14)]
+    [InlineData(15)]
+    public void Cutoff_OnServerBeforeSecondaryCapture_IsTheWatermark(int sqlMajorVersion)
+    {
+        var collectionTime = new DateTime(2026, 7, 2, 12, 0, 0, DateTimeKind.Utc);
+        var watermark = collectionTime.AddMinutes(-2);
+
+        Assert.Equal(watermark, CutoffOf(MakeContext(watermark: watermark, collectionTime: collectionTime, sqlMajorVersion: sqlMajorVersion)));
+    }
+
+    [Fact]
+    public void Cutoff_FirstRun_KeepsTheSixtyMinuteFallback_EvenWithSecondaryCapture()
+    {
+        var collectionTime = new DateTime(2026, 7, 2, 12, 0, 0, DateTimeKind.Utc);
+
+        Assert.Equal(collectionTime.AddMinutes(-60), CutoffOf(MakeContext(collectionTime: collectionTime, sqlMajorVersion: 17)));
     }
 
     [Fact]
