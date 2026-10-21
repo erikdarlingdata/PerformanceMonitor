@@ -1974,16 +1974,16 @@ const agentChangesContext = {
 };
 const buildAgentChangesTab = (body, generation) => buildAgentChanges(body, generation, agentChangesContext);
 
-/* Server actions (#6269) lives in its own file too, with the same helpers. */
-const serverActionsContext = {
-  ...agentChangesContext,
-  repaint: () => {
-    if (shownTab === "server-actions" && shownBody) return startBuilder("server-actions", shownBody, ++renderGeneration);
-    return null;
-  },
-};
-const buildServerActionsTab = (body, generation) => buildServerActions(body, generation, serverActionsContext);
-
+/* Server actions (#6269) lives in its own file too, with the same helpers. */
+const serverActionsContext = {
+  ...agentChangesContext,
+  repaint: () => {
+    if (shownTab === "server-actions" && shownBody) return startBuilder("server-actions", shownBody, ++renderGeneration);
+    return null;
+  },
+};
+const buildServerActionsTab = (body, generation) => buildServerActions(body, generation, serverActionsContext);
+
 const BUILDERS = { servers: buildServers, routes: buildRoutes, settings: buildSettings, feedback: buildFeedback, practice: buildPractice, pending: buildPending, overrides: buildOverrides, "agent-changes": buildAgentChangesTab, profiles: buildProfilesTab, "server-actions": buildServerActionsTab };
 
 /* Run a tab's builder. A builder that throws leaves an error strip: in the Servers tab's table area when its boxes are on the
