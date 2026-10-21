@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -2082,6 +2082,91 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_custom_views_personal_name ON config.custom
 ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS starts_at_utc timestamp;";
 
     /// <summary>
+    /// V209 (#6281, part of #5632): the MCP tag writes may not change which servers an agent route covers. A tag-scoped route covers
+    /// every registered server mapped to its tag or to any descendant of it (<c>NotificationRouteScopeExpander</c>), and
+    /// <c>update_notification_route</c> refuses over MCP to change an agent route's scope, so the tag tools, which write
+    /// <c>config.server_tags</c> and <c>config.server_tag_map</c> as the <c>mcp</c> login, could not be left to change the same set.
+    ///
+    /// <para><b>The rule, for a session whose login is <c>mcp</c> only.</b> A row trigger on each table refuses with SQLSTATE
+    /// <c>DL403</c>, naming the route, when the write is on a tag that is, or is under, the tag of a route with
+    /// <c>agent_level</c> 1 or higher: an assignment or removal of a registered server (a map row for a server that is not
+    /// registered covers nothing, and <c>remove_server</c> deletes the server row before it clears its map rows, so it passes), a
+    /// delete of the tag (its subtree and their assignments go with it), or a move of the tag to another parent (its old place and
+    /// its new place both count). A rename, a colour or a sort-order change does not touch coverage and is not looked at. Any
+    /// other login, the owner, the Viewer and the web included, is not held to it. The test is on <c>session_user</c>, which a
+    /// non-superuser cannot change, because the function is SECURITY DEFINER (it reads the route table, which <c>mcp</c> may
+    /// not). No new column, no backfill, no grant.</para>
+    /// </summary>
+    private const string V209Sql = @"
+CREATE OR REPLACE FUNCTION config.agent_route_tag_guard()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $guard$
+DECLARE
+    v_route integer;
+    v_start integer[];
+    v_tag integer;
+BEGIN
+    IF session_user::text IS DISTINCT FROM 'mcp' THEN
+        RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+    END IF;
+
+    v_start := ARRAY[]::integer[];
+    IF TG_TABLE_NAME = 'server_tag_map' THEN
+        IF TG_OP IN ('INSERT', 'UPDATE')
+           AND EXISTS (SELECT 1 FROM config.config_monitored_servers AS s WHERE s.server_id = NEW.server_id) THEN
+            v_start := v_start || NEW.tag_id;
+        END IF;
+        IF TG_OP IN ('DELETE', 'UPDATE')
+           AND EXISTS (SELECT 1 FROM config.config_monitored_servers AS s WHERE s.server_id = OLD.server_id) THEN
+            v_start := v_start || OLD.tag_id;
+        END IF;
+    ELSIF TG_OP = 'DELETE' THEN
+        v_start := ARRAY[OLD.id];
+    ELSIF NEW.parent_id IS DISTINCT FROM OLD.parent_id THEN
+        v_start := ARRAY[OLD.id];
+        IF NEW.parent_id IS NOT NULL THEN
+            v_start := v_start || NEW.parent_id;
+        END IF;
+    END IF;
+
+    FOREACH v_tag IN ARRAY v_start LOOP
+        WITH RECURSIVE chain(id, parent_id) AS (
+            SELECT t.id, t.parent_id FROM config.server_tags AS t WHERE t.id = v_tag
+            UNION
+            SELECT p.id, p.parent_id FROM config.server_tags AS p JOIN chain AS c ON p.id = c.parent_id)
+        SELECT r.route_id INTO v_route
+        FROM config.config_notification_routes AS r
+        JOIN chain ON chain.id = r.scope_tag_id
+        WHERE r.agent_level >= 1
+        ORDER BY r.route_id
+        LIMIT 1;
+        IF v_route IS NOT NULL THEN
+            RAISE EXCEPTION 'Agent route % covers this tag, or a tag above it, so which servers it covers is changed in the Viewer, not over MCP.', v_route
+                USING ERRCODE = 'DL403';
+        END IF;
+    END LOOP;
+
+    RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+END
+$guard$;
+REVOKE ALL ON FUNCTION config.agent_route_tag_guard() FROM PUBLIC;
+
+DROP TRIGGER IF EXISTS trg_agent_route_tag_guard ON config.server_tag_map;
+CREATE TRIGGER trg_agent_route_tag_guard
+    BEFORE INSERT OR UPDATE OR DELETE ON config.server_tag_map
+    FOR EACH ROW EXECUTE FUNCTION config.agent_route_tag_guard();
+ALTER TABLE config.server_tag_map ENABLE ALWAYS TRIGGER trg_agent_route_tag_guard;
+
+DROP TRIGGER IF EXISTS trg_agent_route_tag_guard ON config.server_tags;
+CREATE TRIGGER trg_agent_route_tag_guard
+    BEFORE UPDATE OR DELETE ON config.server_tags
+    FOR EACH ROW EXECUTE FUNCTION config.agent_route_tag_guard();
+ALTER TABLE config.server_tags ENABLE ALWAYS TRIGGER trg_agent_route_tag_guard;";
+
+    /// <summary>
     /// V196 (#5632, step 5): Level 3 and the per-server action switches. <b>Nothing here turns an action on.</b>
     ///
     /// <para><b>Levels.</b> <c>ck_config_notification_routes_agent</c> now allows <c>agent_level</c> NULL and 0 to 3, and
@@ -2464,6 +2549,7 @@ $rung$;";
         new Migration(206, "collector-enabled-inherit", V206Sql),
         new Migration(207, "change-watches", ChangeWatchStore.V207Sql),
         new Migration(208, "mute-rule-starts-at", V208Sql),
+        new Migration(209, "mcp-agent-route-tag-guard", V209Sql),
     };
 
     /// <summary>

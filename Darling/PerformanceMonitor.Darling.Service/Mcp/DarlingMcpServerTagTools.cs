@@ -223,6 +223,12 @@ public sealed class DarlingMcpServerTagTools
                 ["affected_rules"] = RulesNode(ServerTagCoverage.Diff(before, after), before, after),
             });
         }
+        catch (PostgresException ex) when (ex.SqlState == AgentRouteSqlState)
+        {
+            // #6281: the store refused the write because it would change which servers an agent route covers; nothing was written.
+            return Refusal("refused", AgentRouteRefusalCode, ex.MessageText);
+        }
+
         catch (Exception ex)
         {
             return McpHelpers.FormatError("update_server_tag", ex);
@@ -389,6 +395,12 @@ public sealed class DarlingMcpServerTagTools
                 ["affected_rules"] = RulesNode(ServerTagCoverage.Diff(before, after), before, after),
             });
         }
+        catch (PostgresException ex) when (ex.SqlState == AgentRouteSqlState)
+        {
+            // #6281: the store refused the write because it would change which servers an agent route covers; nothing was written.
+            return Refusal("refused", AgentRouteRefusalCode, ex.MessageText);
+        }
+
         catch (Exception ex)
         {
             return McpHelpers.FormatError("delete_server_tag", ex);
@@ -478,6 +490,12 @@ public sealed class DarlingMcpServerTagTools
             result["affected_rules"] = RulesNode(ServerTagCoverage.Diff(before, after), before, after);
             return Serialize(result);
         }
+        catch (PostgresException ex) when (ex.SqlState == AgentRouteSqlState)
+        {
+            // #6281: the store refused the write because it would change which servers an agent route covers; nothing was written.
+            return Refusal("refused", AgentRouteRefusalCode, ex.MessageText);
+        }
+
         catch (Exception ex)
         {
             return McpHelpers.FormatError("assign_server_tag", ex);
@@ -534,6 +552,12 @@ public sealed class DarlingMcpServerTagTools
             result["affected_rules"] = RulesNode(ServerTagCoverage.Diff(before, after), before, after);
             return Serialize(result);
         }
+        catch (PostgresException ex) when (ex.SqlState == AgentRouteSqlState)
+        {
+            // #6281: the store refused the write because it would change which servers an agent route covers; nothing was written.
+            return Refusal("refused", AgentRouteRefusalCode, ex.MessageText);
+        }
+
         catch (Exception ex)
         {
             return McpHelpers.FormatError("unassign_server_tag", ex);
@@ -680,6 +704,13 @@ public sealed class DarlingMcpServerTagTools
     }
 
     // -------------------------------------------------------------- results
+
+    /// <summary>The SQLSTATE the store's guard on these writes raises (V209, #6281) when a tag write would change which servers an
+    /// agent route covers. The message names the route.</summary>
+    private const string AgentRouteSqlState = "DL403";
+
+    /// <summary>The <c>refusal</c> code of that envelope.</summary>
+    internal const string AgentRouteRefusalCode = "agent_route";
 
     /// <summary>Maps a non-Ok store or rules result to its envelope; null for <c>Ok</c>.</summary>
     private static string? FromWriteResult(ServerTagWriteResult result, JsonObject? extra) => result switch

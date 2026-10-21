@@ -461,6 +461,14 @@ ALTER TABLE IF EXISTS config.investigation_requests
         new(208, "hasMuteRuleStartsAt",
             @"
 ALTER TABLE IF EXISTS config.config_mute_rules DROP COLUMN IF EXISTS starts_at_utc;"),
+
+        // /// V209 (#6281): the guard on the MCP tag writes. The trigger on the map is the probe's newest sentinel. The rewind drops both
+        // triggers and the function, so a re-run of V209 builds them again. Safe on a store that never had them.
+        new(209, "hasAgentRouteTagGuard",
+            @"
+DROP TRIGGER IF EXISTS trg_agent_route_tag_guard ON config.server_tag_map;
+DROP TRIGGER IF EXISTS trg_agent_route_tag_guard ON config.server_tags;
+DROP FUNCTION IF EXISTS config.agent_route_tag_guard();"),
     ];
 
     /// <summary>
