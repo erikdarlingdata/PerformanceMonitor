@@ -118,10 +118,13 @@ public sealed class DiagnosticsBundleAliasHardeningTests
     {
         var a = new BundleAliaser();
         a.AddName(AliasKind.Database, "main");
-        var root = new JsonObject { ["sections"] = new JsonObject { ["x"] = new JsonObject { ["msg"] = "remaining rows" } } };
+        var root = new JsonObject { ["sections"] = new JsonObject { ["x"] = new JsonObject { ["msg"] = "main rows remaining" } } };
         var (leaks, text) = a.Finish(root, DiagnosticsBundle.WriteOptions);
         Assert.Empty(leaks);
-        Assert.DoesNotContain("remaining", text!, StringComparison.Ordinal);
+
+        /* #6256: the standalone name is still verified and replaced; the same letters inside "remaining" are not a name. */
+        Assert.DoesNotContain("main rows", text!, StringComparison.Ordinal);
+        Assert.Contains("remaining", text!, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -162,5 +165,343 @@ public sealed class DiagnosticsBundleAliasHardeningTests
         var (bothLeaks, bothText) = a.Finish(both, DiagnosticsBundle.WriteOptions);
         Assert.Empty(bothLeaks);
         Assert.NotNull(bothText);
+    }
+
+    /* ── #6256: a leftover name is replaced when it is a whole sub-token of its identifier, not inside a plain letter run ── */
+
+    private static JsonObject OneValue(string text) =>
+        new() { ["sections"] = new JsonObject { ["x"] = new JsonObject { ["msg"] = text } } };
+
+    private static string Message(string serialized) =>
+        JsonNode.Parse(serialized)!["sections"]!["x"]!["msg"]!.GetValue<string>();
+
+    [Theory]
+    [InlineData("sales", "wholesales report")]
+    [InlineData("data", "the database is up")]
+    [InlineData("admin", "an administrator signed in")]
+    public void ANameInsideAnOrdinaryWord_IsNeitherReplacedNorCountedAsALeftover(string name, string input)
+    {
+        var a = new BundleAliaser();
+        a.AddName(AliasKind.Login, name);
+
+        var (leaks, text) = a.Finish(OneValue(input), DiagnosticsBundle.WriteOptions);
+        Assert.Empty(leaks);
+        Assert.Equal(input, Message(text!));
+    }
+
+    [Theory]
+    [InlineData("sqlprod", "restore SQLPROD_Full.bak now")]
+    [InlineData("sqlprod", "job DBA_SQLPROD_Backup ran")]
+    [InlineData("prod", "see prod01 and prod-02")]
+    [InlineData("sqlprod", "see SQLPRODBackup today")]
+    [InlineData("sales", "open SalesReport now")]
+    [InlineData("sales", "open the sales_report.csv")]
+    [InlineData("prod", "path C:\\backups\\prod\\full.bak")]
+    [InlineData("sales", "see oldSalesReport now")]
+    [InlineData("prod", "job SQLProd ran")]
+    [InlineData("sqlprod", "file SQLPRODbackup.bak")]
+    [InlineData("sqlprod", "tables SQLPRODdb")]
+    [InlineData("sqlprod", "job DBAsqlprod done")]
+    public void AnIdentifierShapedLeftover_IsStillReplaced(string name, string input)
+    {
+        var a = new BundleAliaser();
+        a.AddName(AliasKind.Server, name);
+
+        var (leaks, text) = a.Finish(OneValue(input), DiagnosticsBundle.WriteOptions);
+        Assert.Empty(leaks);
+        Assert.DoesNotContain(name, Message(text!), StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("server-", Message(text!), StringComparison.Ordinal);
+    }
+
+    /* A name that holds a digit or punctuation is never an ordinary word, so a letter beside it does not protect it. */
+    [Theory]
+    [InlineData("alpha-sql-01", "mainalpha-sql-01")]
+    [InlineData("alpha-sql-01", "job Xalpha-sql-01 failed")]
+    [InlineData("alpha-sql-01", "job alpha-sql-01x failed")]
+    [InlineData("svc_sql", "run as svc_sqlx now")]
+    [InlineData("sqlprod01", "see mysqlprod01 and BKPsqlprod01")]
+    [InlineData("alpha-sql-01", "host%3Dalpha-sql-01")]
+    [InlineData("example.internal", "to wwwexample.internal failed")]
+    public void ANameWithADigitOrPunctuation_IsReplaced_WhateverLetterTouchesIt(string name, string input)
+    {
+        var a = new BundleAliaser();
+        a.AddName(AliasKind.Server, name);
+
+        var (leaks, text) = a.Finish(OneValue(input), DiagnosticsBundle.WriteOptions);
+        Assert.Empty(leaks);
+        Assert.DoesNotContain(name, Message(text!), StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("server-", Message(text!), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ADomainLogin_WithALetterGluedToItsAccountPart_IsReplacedInBothHalves()
+    {
+        var a = new BundleAliaser();
+        a.AddName(AliasKind.Login, "CORP\\svc_sql");
+
+        var (leaks, text) = a.Finish(OneValue("user CORP\\svc_sqlx"), DiagnosticsBundle.WriteOptions);
+        Assert.Empty(leaks);
+        Assert.DoesNotContain("svc_sql", Message(text!), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("CORP", Message(text!), StringComparison.OrdinalIgnoreCase);
+    }
+
+    /* The last character of an escape sequence is a letter, but it belongs to the escape, not to a word before the name. */
+    [Theory]
+    [InlineData("sqlprod01", "{\"m\":\"line one\\nsqlprod01 is down\"}")]
+    [InlineData("salesdw", "{\"m\":\"x\\nsalesdw\\nbackup\"}")]
+    [InlineData("sqlprod", "body: \"a\\tsqlprod\"")]
+    [InlineData("sqlprod", "{\"m\":\"err\\r\\nsqlprod down\"}")]
+    [InlineData("sqlprod", "{\"m\":\"to \\u003Csqlprod\\u003E\"}")]
+    [InlineData("sqlprod", "{\"m\":\"a\\u002Bsqlprod\"}")]
+    [InlineData("sqlprod", "GET /cb?cs=Server%3Dsqlprod%3BX")]
+    [InlineData("sales", "GET /cb?cs=Database%3Dsales%3B")]
+    public void ANameRightAfterAnEscapeSequence_IsReplaced(string name, string input)
+    {
+        var a = new BundleAliaser();
+        a.AddName(AliasKind.Server, name);
+
+        var (leaks, text) = a.Finish(OneValue(input), DiagnosticsBundle.WriteOptions);
+        Assert.Empty(leaks);
+        Assert.DoesNotContain(name, Message(text!), StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("server-", Message(text!), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AnEscapedAccountSeparator_InAUrl_ReplacesBothHalvesOfTheLogin()
+    {
+        var a = new BundleAliaser();
+        a.AddName(AliasKind.Login, "CORP\\jsmith");
+
+        var (leaks, text) = a.Finish(OneValue("user=CORP%5Cjsmith&x=1"), DiagnosticsBundle.WriteOptions);
+        Assert.Empty(leaks);
+        Assert.DoesNotContain("jsmith", Message(text!), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("CORP", Message(text!), StringComparison.OrdinalIgnoreCase);
+    }
+
+    /* The main pass counts only ASCII letters, digits and _ as word characters; a letter of another script is a boundary. */
+    [Theory]
+    [InlineData("sqlprod", "数据库sqlprod_01数据")]
+    [InlineData("sales", "库Sales2024")]
+    [InlineData("sqlprod", "אבגsqlprod_01")]
+    [InlineData("sqlprod", "ésqlprod_full.bak")]
+    public void ANameBesideANonAsciiLetter_IsReplaced(string name, string input)
+    {
+        var a = new BundleAliaser();
+        a.AddName(AliasKind.Server, name);
+
+        var (leaks, text) = a.Finish(OneValue(input), DiagnosticsBundle.WriteOptions);
+        Assert.Empty(leaks);
+        Assert.DoesNotContain(name, Message(text!), StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("server-", Message(text!), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ASubTokenMatch_ReplacesOnlyTheOccurrencesThatQualify()
+    {
+        var a = new BundleAliaser();
+        a.AddName(AliasKind.Server, "sales");
+
+        var (leaks, text) = a.Finish(OneValue("wholesales and SalesReport and sales and unsalesly"), DiagnosticsBundle.WriteOptions);
+        Assert.Empty(leaks);
+        var message = Message(text!);
+        Assert.StartsWith("wholesales and ", message, StringComparison.Ordinal);
+        Assert.EndsWith(" and unsalesly", message, StringComparison.Ordinal);
+        Assert.Matches(@"^wholesales and server-\d+Report and server-\d+ and unsalesly$", message);
+    }
+
+    [Fact]
+    public void TheLongestLeftoverName_IsReplacedFirst_AndAliasTextIsNeverRewritten()
+    {
+        var a = new BundleAliaser();
+        a.AddName(AliasKind.Server, "prod");
+        a.AddName(AliasKind.Server, "prod_two");
+        var alias = a.Alias("prod_two");
+
+        var (leaks, text) = a.Finish(OneValue("prod_two and prod and " + alias), DiagnosticsBundle.WriteOptions);
+        Assert.Empty(leaks);
+        var message = Message(text!);
+        Assert.DoesNotContain("prod", message, StringComparison.OrdinalIgnoreCase);
+        Assert.Matches(@"^server-\d+ and server-\d+ and server-\d+$", message);
+        Assert.EndsWith(" and " + alias, message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AStandaloneLeftoverName_IsStillCaught_InAValueAndInAKey()
+    {
+        var a = new BundleAliaser();
+        a.AddName(AliasKind.Login, "apps");
+
+        var (valueLeaks, valueText) = a.Finish(OneValue("apps is down, appsettings is up"), DiagnosticsBundle.WriteOptions);
+        Assert.Empty(valueLeaks);
+        Assert.DoesNotContain("apps is down", valueText!, StringComparison.Ordinal);
+        Assert.Contains("appsettings is up", valueText!, StringComparison.Ordinal);
+
+        /* A data-shaped key is never rewritten, so a name in one is reported and no text comes back. */
+        var keyed = new JsonObject { ["sections"] = new JsonObject { ["x"] = new JsonObject { ["apps node"] = 1 } } };
+        var (keyLeaks, keyText) = a.Finish(keyed, DiagnosticsBundle.WriteOptions);
+        Assert.NotEmpty(keyLeaks);
+        Assert.Null(keyText);
+
+        /* The bundle's encoder does not escape an apostrophe, but it does escape a tab: the serialized key reads
+           x\tapps node, and the t that ends the escape is not part of a word that runs into the name. */
+        var escaped = new JsonObject { ["sections"] = new JsonObject { ["x"] = new JsonObject { ["x\tapps node"] = 1 } } };
+        var (escapedLeaks, escapedText) = a.Finish(escaped, DiagnosticsBundle.WriteOptions);
+        Assert.NotEmpty(escapedLeaks);
+        Assert.Null(escapedText);
+
+        /* A name inside a plain word in a key is no leftover. */
+        var word = new JsonObject { ["sections"] = new JsonObject { ["x"] = new JsonObject { ["appsettings node"] = 1 } } };
+        var (wordLeaks, wordText) = a.Finish(word, DiagnosticsBundle.WriteOptions);
+        Assert.Empty(wordLeaks);
+        Assert.NotNull(wordText);
+    }
+
+    [Fact]
+    public void AShortLoginNameInsideALongerWord_IsLeftAlone_AndPunctuationNeighboursAreAliased()
+    {
+        var a = new BundleAliaser();
+        a.AddName(AliasKind.Login, "app");
+
+        var scanned = a.Alias("login app ran application and appsettings and app_pool");
+        Assert.DoesNotContain("login app ", scanned, StringComparison.Ordinal);
+        Assert.Contains("application and appsettings and app_pool", scanned, StringComparison.Ordinal);
+
+        foreach (var input in new[] { "user 'app' failed", "user app. Then", "user [app] failed", "user app\\ failed", "DOMAIN\\app failed", "user=app;pwd" })
+        {
+            Assert.DoesNotContain("app", a.Alias(input), StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    [Fact]
+    public void ADottedHostName_IsStillAliasedAsAWhole()
+    {
+        var a = new BundleAliaser();
+        a.AddName(AliasKind.Host, "db01.example.internal");
+
+        var scanned = a.Alias("connect to db01.example.internal failed");
+        Assert.DoesNotContain("db01", scanned, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("example", scanned, StringComparison.OrdinalIgnoreCase);
+
+        var (leaks, text) = a.Finish(OneValue("connect to db01.example.internal failed"), DiagnosticsBundle.WriteOptions);
+        Assert.Empty(leaks);
+        Assert.DoesNotContain("db01", text!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /* A name of 7 or more letters is replaced wherever it stands: glued to other letters it is a hand-made identifier, not a word. */
+    [Theory]
+    [InlineData("salesdw", "backup SALESDWFULL.BAK done")]
+    [InlineData("salesdw", "job SALESDWBACKUP ran")]
+    [InlineData("salesdw", "listener SALESDWLSNR up")]
+    [InlineData("salesdw", "file salesdwfull.bak")]
+    [InlineData("salesdw", "report SALESDWMünchen")]
+    public void ALongNameGluedToLetters_IsReplaced(string name, string input)
+    {
+        var a = new BundleAliaser();
+        a.AddName(AliasKind.Database, name);
+
+        var (leaks, text) = a.Finish(OneValue(input), DiagnosticsBundle.WriteOptions);
+        Assert.Empty(leaks);
+        Assert.DoesNotContain(name, Message(text!), StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("db-", Message(text!), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TwoLongNamesRunTogether_AreBothReplaced()
+    {
+        var a = new BundleAliaser();
+        a.AddName(AliasKind.Server, "sqlprod");
+        a.AddName(AliasKind.Database, "salesdw");
+
+        var (leaks, text) = a.Finish(OneValue("connect sqlprodsalesdw now"), DiagnosticsBundle.WriteOptions);
+        Assert.Empty(leaks);
+        Assert.DoesNotContain("sqlprod", Message(text!), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("salesdw", Message(text!), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void TheLetterCountThatSeparatesWordsFromLongNames_IsSeven()
+    {
+        /* Six letters inside an ordinary word stay readable; seven are replaced. */
+        var six = new BundleAliaser();
+        six.AddName(AliasKind.Login, "reason");
+        var (sixLeaks, sixText) = six.Finish(OneValue("it is unreasonable"), DiagnosticsBundle.WriteOptions);
+        Assert.Empty(sixLeaks);
+        Assert.Equal("it is unreasonable", Message(sixText!));
+
+        var seven = new BundleAliaser();
+        seven.AddName(AliasKind.Login, "customer");
+        var (sevenLeaks, sevenText) = seven.Finish(OneValue("open the customers table"), DiagnosticsBundle.WriteOptions);
+        Assert.Empty(sevenLeaks);
+        Assert.DoesNotContain("customer", Message(sevenText!), StringComparison.OrdinalIgnoreCase);
+        Assert.Matches(@"^open the login-\d+s table$", Message(sevenText!));
+    }
+
+    /* An all-caps name followed by a capital and an accented lower-case letter is a name then a word (Prod|Béton), not one run. */
+    [Theory]
+    [InlineData("prod", "see xPRODBéton now")]
+    [InlineData("sales", "see xSALESBéton now")]
+    public void ACapsNameBeforeACapitalAndAnAccentedLowerCaseLetter_IsReplaced(string name, string input)
+    {
+        var a = new BundleAliaser();
+        a.AddName(AliasKind.Server, name);
+
+        var (leaks, text) = a.Finish(OneValue(input), DiagnosticsBundle.WriteOptions);
+        Assert.Empty(leaks);
+        Assert.DoesNotContain(name, Message(text!), StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("server-", Message(text!), StringComparison.Ordinal);
+    }
+
+    /* One letter between a digit and the name is the end of an escape or colour code, not part of a word. */
+    [Theory]
+    [InlineData("prod", "next=%2Fcb%3Fcs%3DServer%253Dprod%253BDatabase%253Dsales")]
+    [InlineData("prod", "colour \u001b[38;5;0045mprod \u001b[0m end")]
+    [InlineData("prod", "Server=3Dprod")]
+    [InlineData("prod", @"b'\x3cprod'")]
+    [InlineData("sales", "db \u001b[1msales \u001b[22m")]
+    public void ANameAfterADigitAndOneLetter_IsReplaced(string name, string input)
+    {
+        var a = new BundleAliaser();
+        a.AddName(AliasKind.Server, name);
+
+        var (leaks, text) = a.Finish(OneValue(input), DiagnosticsBundle.WriteOptions);
+        Assert.Empty(leaks);
+        Assert.DoesNotContain(name, Message(text!), StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("server-", Message(text!), StringComparison.Ordinal);
+
+        var keyed = new JsonObject { ["sections"] = new JsonObject { ["x"] = new JsonObject { ["cs%253D" + name] = 1 } } };
+        var (keyLeaks, keyText) = a.Finish(keyed, DiagnosticsBundle.WriteOptions);
+        Assert.NotEmpty(keyLeaks);
+        Assert.Null(keyText);
+    }
+
+    [Theory]
+    [InlineData("4xsales", false)]
+    [InlineData("2ndsales", true)]
+    [InlineData("a1sales", false)]
+    public void OnlyOneLetterAfterADigit_SplitsTheRun(string input, bool stays)
+    {
+        var a = new BundleAliaser();
+        a.AddName(AliasKind.Server, "sales");
+
+        var (leaks, text) = a.Finish(OneValue(input), DiagnosticsBundle.WriteOptions);
+        Assert.Empty(leaks);
+        Assert.Equal(stays, string.Equals(input, Message(text!), StringComparison.Ordinal));
+    }
+
+    /* A real name that equals the start of an alias (server, host) still matches nothing inside the alias text after an escape. */
+    [Theory]
+    [InlineData("Server", "sqlprod", "Login", "server", "line one\nsqlprod down", "line one\nserver-1 down")]
+    [InlineData("Host", "appbox", "Server", "host", "a\tappbox b", "a\thost-1 b")]
+    [InlineData("Server", "sqlprod", "Login", "server", "path C:\\nsqlprod", "path C:\\nserver-1")]
+    public void ANameThatEqualsAnAliasPrefix_DoesNotMatchInsideAliasTextAfterAnEscape(string kindA, string nameA, string kindB, string nameB, string input, string expected)
+    {
+        var a = new BundleAliaser();
+        a.AddName(Enum.Parse<AliasKind>(kindA), nameA);
+        a.AddName(Enum.Parse<AliasKind>(kindB), nameB);
+
+        var (leaks, text) = a.Finish(OneValue(a.Alias(input)), DiagnosticsBundle.WriteOptions);
+        Assert.Empty(leaks);
+        Assert.NotNull(text);
+        Assert.Equal(expected, Message(text!));
     }
 }
