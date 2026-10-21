@@ -122,7 +122,7 @@ public sealed record QueryStoreRouteDecision
 
     public required QueryStoreRouteReason Reason { get; init; }
 
-    /// <summary>The flush interval L is built from; the replica's for a replica read, the primary's otherwise.</summary>
+    /// <summary>The flush interval L is built from; for a replica read the larger of the primary's and the replica's reported value, the primary's otherwise.</summary>
     public required int FlushIntervalSeconds { get; init; }
 
     /// <summary>L, the look-back (flush interval plus margin), or zero when this read keeps today's cutoff.</summary>

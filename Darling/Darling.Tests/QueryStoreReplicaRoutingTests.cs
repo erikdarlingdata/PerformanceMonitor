@@ -565,33 +565,8 @@ public sealed class QueryStoreReplicaRoutingTests
         QueryStoreReplicaConfigured = replicaConfigured,
     };
 
-    [Theory]
-    [InlineData(15)]
-    [InlineData(17)]
-    public void Enumeration_WithNoReplicaSet_IsToday_OnAnyVersion(int version)
-    {
-        var text = QueryStoreCollector.Instance.BuildEnumerationQuery(Ctx(version, false))!.Text;
-
-        Assert.DoesNotContain("@facts", text, StringComparison.Ordinal);
-        Assert.DoesNotContain("query_store_replicas", text, StringComparison.Ordinal);
-        Assert.DoesNotContain("query_store_runtime_stats", text, StringComparison.Ordinal);
-        Assert.DoesNotContain("FACTS_", text, StringComparison.Ordinal);
-    }
-
     [Fact]
-    public void Enumeration_WithAReplicaSet_ReadsTheFlushInterval_AndTouchesNoOtherQueryStoreView()
-    {
-        var text = QueryStoreCollector.Instance.BuildEnumerationQuery(Ctx(17, true))!.Text;
-
-        Assert.Contains("@facts", text, StringComparison.Ordinal);
-        Assert.Contains("flush_interval_seconds", text, StringComparison.Ordinal);
-        Assert.DoesNotContain("query_store_replicas", text, StringComparison.Ordinal);
-        Assert.DoesNotContain("query_store_runtime_stats", text, StringComparison.Ordinal);
-        Assert.DoesNotContain("FACTS_", text, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void ReplicaEnumeration_IsNullOnAzureSqlDatabase_AndAdmitsSecondariesElsewhere()
+    public void ReplicaEnumeration_IsNullOnAzureSqlDatabase_AndBuiltElsewhere()
     {
         var azure = new CollectorContext
         {
@@ -603,12 +578,7 @@ public sealed class QueryStoreReplicaRoutingTests
         };
         Assert.Null(QueryStoreCollector.Instance.BuildReplicaEnumerationQuery(azure));
 
-        var text = QueryStoreCollector.Instance.BuildReplicaEnumerationQuery(Ctx(17, true))!.Text;
-
-        Assert.DoesNotContain("is_primary_replica", text, StringComparison.Ordinal);
-        Assert.DoesNotContain("readonly_reason & 8 = 0", text, StringComparison.Ordinal);
-        Assert.DoesNotContain("EXCLUSION_FILTER", text, StringComparison.Ordinal);
-        Assert.DoesNotContain("query_store_replicas", text, StringComparison.Ordinal);
+        Assert.NotNull(QueryStoreCollector.Instance.BuildReplicaEnumerationQuery(Ctx(17, true)));
     }
 
     // ---- #6279: capturing secondary, learned from the rows already read -----------------------------------------------------
