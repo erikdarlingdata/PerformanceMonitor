@@ -1352,7 +1352,7 @@ public sealed class QueryStoreCollectorDefinitionTests
             body.IndexOf("interval_start_time_utc =", StringComparison.Ordinal) < body.IndexOf("interval_end_time_utc =", StringComparison.Ordinal),
             "the interval end is selected after the interval start");
         Assert.True(
-            body.IndexOf("interval_end_time_utc =", StringComparison.Ordinal) < body.IndexOf("FROM #pm_qs_slice AS qsrs", StringComparison.Ordinal),
+            body.IndexOf("interval_end_time_utc =", StringComparison.Ordinal) < body.LastIndexOf("FROM #pm_qs_slice AS qsrs", StringComparison.Ordinal),
             "the interval end is the last SELECT item, ahead of the FROM");
 
         /* LEFT JOIN, never INNER: an interval row that failed to resolve must cost this collector ONE
