@@ -15,6 +15,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Storage;
@@ -82,8 +83,9 @@ FROM config.config_monitored_servers AS s
 LEFT JOIN config.config_server_actions AS a ON a.server_id = s.server_id
 ORDER BY s.name, s.server_id";
 
+    /* The registry holds the raw darling.json spelling ("pg", "aurora"), so the engine is read through the one parser the collectors use (#6269). */
     private static bool IsPostgres(string? engine) =>
-        engine is not null && engine.Contains("postgres", StringComparison.OrdinalIgnoreCase);
+        MonitoredEngineKind.ParseConfiguredEngine(engine) == CollectorTargetEngine.PostgreSql;
 
     /// <summary>
     /// Sets one server's switch for one action. <paramref name="actor"/> is the journal actor, already in the shape of its surface
@@ -121,7 +123,8 @@ ORDER BY s.name, s.server_id";
         if (serverName is null)
             return Refused("unknown_server", "That server is not in the registry.", serverId, null, name);
 
-        if (!ServerActionNames.IsValidForEngine(name, IsPostgres(engine)))
+        /* Turning a switch OFF is never refused for the engine: a switch left on before an engine edit must still be clearable (#6269). */
+        if (enabled && !ServerActionNames.IsValidForEngine(name, IsPostgres(engine)))
         {
             return Refused("not_for_engine",
                 $"{name} cannot run on {serverName}: it is a {(IsPostgres(engine) ? "PostgreSQL" : "SQL Server")} target. The switch was not changed.", serverId, serverName, name);

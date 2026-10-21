@@ -3223,9 +3223,10 @@ CREATE OR REPLACE TRIGGER trg_investigation_request_alerts_owner_rows
    BEFORE INSERT ON {config}.investigation_request_alerts
    FOR EACH ROW EXECUTE FUNCTION {config}.investigation_request_alerts_owner_rows();";
 
-    /// <summary>The journal events only the owner writes (<see cref="BuildJournalEventRulesSql"/>), as a SQL list.</summary>
+    /// <summary>The journal events only the owner writes (<see cref="BuildJournalEventRulesSql"/>), as a SQL list. <c>server_action_switched</c>
+    /// is the owner's alone (#6269): only the switch writer, on the owner connection, journals it, so no other login can forge who changed a switch.</summary>
     internal static string JournalOwnerEventList => string.Join(", ",
-        InvestigationEvents.Kinds.Append(InvestigationEvents.Delivered).Append(InvestigationEvents.FallbackSent)
+        InvestigationEvents.Kinds.Append(InvestigationEvents.Delivered).Append(InvestigationEvents.FallbackSent).Append(ServerActionSwitches.JournalEvent)
             .Select(k => "'" + k + "'"));
 
     /// <summary>

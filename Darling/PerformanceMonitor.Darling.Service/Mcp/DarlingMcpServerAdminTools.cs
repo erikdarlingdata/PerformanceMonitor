@@ -656,7 +656,7 @@ SELECT d.server_id, d.name, d.host, d.database, d.read_only_intent, d.engine, d.
 FROM config_monitored_servers d
 ORDER BY d.host, d.database";
 
-    private static async Task<List<ServerDefinition>> LoadDefinitionsForRemovalAsync(NpgsqlDataSource postgres)
+    internal static async Task<List<ServerDefinition>> LoadDefinitionsForRemovalAsync(NpgsqlDataSource postgres)
     {
         var definitions = new List<ServerDefinition>();
         await using var command = postgres.CreateCommand(DefinitionsForRemovalSql);

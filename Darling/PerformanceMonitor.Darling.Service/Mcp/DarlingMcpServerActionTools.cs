@@ -44,7 +44,7 @@ public sealed class DarlingMcpServerActionTools
     [McpServerTool(Name = "set_server_action"), Description(
         "Turns ONE server's switch for ONE agent server action on or off: force_plan and evict_plan (SQL Server only) and kill_session (SQL Server and PostgreSQL). All switches start off; an agent can act on a server only while its switch for that action is on (and the other conditions hold: Level 3, the service's agent actions on, a remediation login given as an env: or file: reference). Served only with mcp.allowServerAdmin, and never offered to an agent that investigates an alert. The change is journaled with who made it, from MCP, and the state before and after. Reversed by calling it again with the other value. The answer gives the state before and after and the call that puts it back.")]
     public static Task<string> SetServerAction(
-        [Description("Server name (the name list_servers shows), or a unique part of it.")] string server_name,
+        [Description("The server's full name, exactly as list_servers shows it (a disabled server too). A part of a name is refused and the near matches are listed.")] string server_name,
         [Description("force_plan, evict_plan or kill_session.")] string action,
         [Description("True to turn the switch on, false to turn it off.")] bool enabled,
         NpgsqlDataSource postgres,
@@ -69,12 +69,26 @@ public sealed class DarlingMcpServerActionTools
                 return Refuse("no_owner_source", "The service has not published its store owner connection yet, so the switch cannot be written. Nothing was changed.");
             }
 
-            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, serverName, ct, NameClash.Refuse);
-            if (error is not null)
+            /* One server, named exactly: this write must never land on a neighbour whose name merely contains the text. The lookup is the one
+               edit_server and remove_server run: every definition (a disabled server too), an exact name only. A partial name is refused with the
+               near matches listed, so the caller picks one (#6269). */
+            var definitions = await DarlingMcpServerAdminTools.LoadDefinitionsForRemovalAsync(postgres);
+            var servers = definitions.Select(d => d.Server).ToList();
+            var target = DarlingMcpServerAdminTools.ResolveForRemoval(servers, serverName, nameClash: NameClash.Refuse);
+            if (target.Candidates.Count == 0)
             {
-                return error;
+                return Refuse("not_found", $"Could not resolve server '{Clip(serverName)}': it is not a defined server. Nothing was changed.");
             }
 
+            if (target.MatchedBy != "exact" || target.Candidates.Count > 1)
+            {
+                var near = string.Join(", ", target.Candidates.Take(10).Select(c => c.ServerName));
+                return Refuse("ambiguous",
+                    $"'{Clip(serverName)}' is not the exact name of one server (it matches {target.Candidates.Count} as {(target.MatchedBy == "exact" ? "an exact name" : "part of a name")}: {near}). "
+                    + "Send ONE server's full name. Nothing was changed.");
+            }
+
+            var resolved = target.Candidates[0];
             var result = await ServerActionSwitches.SetAsync(owner, resolved.ServerId, action, enabled, actor, ServerActionSurfaces.Mcp, ct);
             var node = result.ToJson();
             if (result.Status == "set")
@@ -130,6 +144,8 @@ public sealed class DarlingMcpServerActionTools
             }).ToArray()),
         }).ToArray()),
     };
+
+    private static string Clip(string text) => text.Length <= 80 ? text : text[..80];
 
     private static string Refuse(string code, string message) =>
         new JsonObject { ["status"] = "refused", ["code"] = code, ["message"] = message }.ToJsonString();

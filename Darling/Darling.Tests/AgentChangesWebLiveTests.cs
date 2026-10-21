@@ -21,6 +21,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -82,6 +83,24 @@ public sealed class AgentChangesWebLiveTests
     }
 
     [Fact]
+    public async Task OnAnUnsignedLoopbackDashboard_APlanUndo_Answers403WithTheSignInSentence_AndWritesAndJournalsNothing()
+    {
+        await WithWebRoutesAsync("admin", async (owner, Send, ct) =>
+        {
+            var planCall = await ScalarAsync(owner, "SELECT journal_id FROM config.investigation_journal WHERE detail->>'kind' = 'plan_force'", ct);
+            var before = await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal", ct);
+            foreach (var payload in new[] { "{}", "{\"confirm\":true}" })
+            {
+                var refused = await Send("PUT", "/api/agent-changes/" + planCall + "/undo", "application/json", payload);
+                Assert.Equal(403, refused.Status);
+                Assert.Equal(DarlingWebEndpoints.MonitoredServerWriteSeatMessage, (string)refused.Body!["error"]!);
+            }
+
+            Assert.Equal(before, await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal", ct));
+        }, signedIn: false);
+    }
+
+    [Fact]
     public async Task AsTheManagedAdminRole_APlanUndo_IsRefusedWith409WhenTheServersSwitchIsOff_JournaledWithThePerson_AndNeverWritesWithoutTheSwitch()
     {
         await WithWebRoutesAsync("admin", async (owner, Send, ct) =>
@@ -139,7 +158,7 @@ public sealed class AgentChangesWebLiveTests
             $"SELECT j.journal_id FROM config.investigation_journal j WHERE j.event = 'action_called' AND j.detail->'target'->>'id' = '{target}' AND EXISTS (SELECT 1 FROM config.investigation_journal d WHERE d.event = 'action_done' AND d.detail->>'called_id' = j.journal_id::text) ORDER BY j.journal_id LIMIT 1", ct);
 
     private static async Task WithWebRoutesAsync(
-        string managedRole, Func<NpgsqlDataSource, Sender, CancellationToken, Task> body)
+        string managedRole, Func<NpgsqlDataSource, Sender, CancellationToken, Task> body, bool signedIn = true)
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the agent changes web live tests.");
@@ -196,6 +215,16 @@ VALUES ('{Guid.NewGuid()}', 7, 'action_called', 'agent:a', '{{""tool"":""force_q
             builder.Logging.ClearProviders();
             builder.Services.AddSingleton(webLogin);
             await using var app = builder.Build();
+            if (signedIn)
+            {
+                /* What the sign-in middleware stores for a request that holds a valid session (#6269). A dashboard with none stores nothing. */
+                app.Use((context, next) =>
+                {
+                    context.Items[DarlingWebSeat.HttpContextItemKey] = DarlingWebSeat.SharedToken;
+                    return next(context);
+                });
+            }
+
             var ownerSeam = new PerformanceMonitor.Darling.Service.Mcp.StoreOwnerSource();
             ownerSeam.Publish(owner);
             DarlingWebEndpoints.MapAll(app, webLogin, new CollectorRuntimeState(), new CapturingTestLogger(), ownerSource: ownerSeam);

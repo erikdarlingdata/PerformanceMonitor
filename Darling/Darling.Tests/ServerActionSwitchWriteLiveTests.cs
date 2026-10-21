@@ -24,6 +24,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -184,7 +185,7 @@ public sealed class ServerActionSwitchWriteLiveTests
         await WithStoreAsync(async (owner, ct) =>
         {
             const string actor = "mcp:token 3fa9c1d2, client says: claude-desktop 1.2.3";
-            var set = JsonNode.Parse(await DarlingMcpServerActionTools.RunAsync(owner, owner, null, "alpha-sql", "evict_plan", true, actor, ct))!;
+            var set = JsonNode.Parse(await DarlingMcpServerActionTools.RunAsync(owner, owner, null, "alpha-sql-01", "evict_plan", true, actor, ct))!;
             Assert.Equal("set", (string)set["status"]!);
             Assert.Equal("off", (string)set["before"]!);
             Assert.Equal("on", (string)set["after"]!);
@@ -243,6 +244,7 @@ public sealed class ServerActionSwitchWriteLiveTests
             var list = await Send("GET", "/api/server-actions", null);
             Assert.Equal(200, list.Status);
             Assert.True((bool)list.Body!["can_decide"]!);
+            Assert.True((bool)list.Body["signed_in_admin"]!);
             Assert.Equal(2, list.Body["servers"]!.AsArray().Count);
 
             var on = await Send("PUT", "/api/servers/1/actions/force_plan", "application/json", "{\"enabled\":true}");
@@ -289,6 +291,154 @@ public sealed class ServerActionSwitchWriteLiveTests
             Assert.Equal(DarlingWebEndpoints.ServerActionRefusedMessage, (string)refused.Body!["error"]!);
             Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.config_server_actions", ct));
             Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal", ct));
+        });
+    }
+
+    [Fact]
+    public async Task OnAnUnsignedLoopbackDashboard_TheSwitchPutAnswers403WithTheSignInSentence_WritesAndJournalsNothing_AndTheListOnlyLists()
+    {
+        /* The web's store login is the admin role, yet nobody signed in: the store login says nothing about the caller. */
+        await WithWebAsync("admin", async (owner, _, Send, ct) =>
+        {
+            var list = await Send("GET", "/api/server-actions", null);
+            Assert.Equal(200, list.Status);
+            Assert.False((bool)list.Body!["can_decide"]!);
+            Assert.False((bool)list.Body["signed_in_admin"]!);
+
+            foreach (var payload in new[] { "{\"enabled\":true}", "{\"enabled\":false}" })
+            {
+                var refused = await Send("PUT", "/api/servers/1/actions/kill_session", "application/json", payload);
+                Assert.Equal(403, refused.Status);
+                Assert.Equal(DarlingWebEndpoints.MonitoredServerWriteSeatMessage, (string)refused.Body!["error"]!);
+            }
+
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.config_server_actions", ct));
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal", ct));
+        }, signedIn: false);
+    }
+
+    [Fact]
+    public async Task AServerRegisteredWithAnEngineAlias_PgAuroraOrMixedCase_IsAPostgreSqlTarget_RefusingForcePlanAndEvictPlanOn_AndListingThemInvalid()
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            var aliases = new[] { (3, "alpha-alias-pg", "pg"), (4, "alpha-alias-aurora", "aurora"), (5, "alpha-alias-aurora-pg", "Aurora-PostgreSQL"), (6, "alpha-alias-mixed", " PostgreSQL ") };
+            foreach (var (id, name, engine) in aliases)
+            {
+                await ExecAsync(owner, $"INSERT INTO config.config_monitored_servers (server_id, name, host, engine) VALUES ({id}, '{name}', '{name}.example.test', '{engine}')", ct);
+            }
+
+            foreach (var (id, _, _) in aliases)
+            {
+                foreach (var action in new[] { "force_plan", "evict_plan" })
+                {
+                    var refused = await ServerActionSwitches.SetAsync(owner, id, action, true, "person:alice", ServerActionSurfaces.Viewer, ct);
+                    Assert.False(refused.Succeeded);
+                    Assert.Equal("not_for_engine", refused.Code);
+                }
+
+                Assert.True((await ServerActionSwitches.SetAsync(owner, id, "kill_session", true, "person:alice", ServerActionSurfaces.Viewer, ct)).Succeeded);
+            }
+
+            var listed = await ServerActionSwitches.ListAsync(owner, ct);
+            foreach (var (id, _, _) in aliases)
+            {
+                var actions = listed.Single(r => r.ServerId == id).Actions;
+                Assert.False(actions.Single(a => a.Action == "force_plan").Valid);
+                Assert.True(actions.Single(a => a.Action == "kill_session").Valid);
+            }
+
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.config_server_actions WHERE action IN ('force_plan', 'evict_plan')", ct));
+        });
+    }
+
+    [Fact]
+    public async Task TurningASwitchOff_OnAServerWhoseEngineCannotRunIt_StillWorks_ButTurningItOnIsRefused()
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            /* force_plan was on for server 1 when its engine was edited to postgres: the row is left behind. */
+            await ExecAsync(owner, "INSERT INTO config.config_server_actions (server_id, action, enabled, set_by) VALUES (1, 'force_plan', true, 'person:alice')", ct);
+            await ExecAsync(owner, "UPDATE config.config_monitored_servers SET engine = 'postgres' WHERE server_id = 1", ct);
+
+            var off = await ServerActionSwitches.SetAsync(owner, 1, "force_plan", false, "person:bob", ServerActionSurfaces.Mcp, ct);
+            Assert.True(off.Succeeded);
+            Assert.Equal("set", off.Status);
+            Assert.Equal("False", await ScalarAsync(owner, "SELECT enabled FROM config.config_server_actions WHERE server_id = 1 AND action = 'force_plan'", ct));
+            Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'server_action_switched' AND detail->>'after' = 'off'", ct));
+
+            var again = await ServerActionSwitches.SetAsync(owner, 1, "force_plan", true, "person:bob", ServerActionSurfaces.Mcp, ct);
+            Assert.Equal("not_for_engine", again.Code);
+            Assert.Equal("False", await ScalarAsync(owner, "SELECT enabled FROM config.config_server_actions WHERE server_id = 1 AND action = 'force_plan'", ct));
+        });
+    }
+
+    [Theory]
+    [InlineData("admin")]
+    [InlineData("mcp")]
+    public async Task TheAdminAndMcpLogins_CannotInsertAServerActionSwitchedJournalRow_42501_WhileTheOwnersSwitchStillJournals(string role)
+    {
+        await WithWebAsync(role, async (owner, login, _, ct) =>
+        {
+            var forged = await Assert.ThrowsAsync<PostgresException>(async () => await ExecAsync(login,
+                "INSERT INTO config.investigation_journal (event_time, server_id, event, actor, detail) "
+                + "VALUES (now(), 1, 'server_action_switched', 'person:someone', '{\"after\":\"on\"}')", ct));
+            Assert.Equal("42501", forged.SqlState);
+
+            /* The owner's own write is not held to the rule. */
+            Assert.True((await ServerActionSwitches.SetAsync(owner, 1, "kill_session", true, "person:alice", ServerActionSurfaces.Viewer, ct)).Succeeded);
+            Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'server_action_switched'", ct));
+        });
+    }
+
+    [Fact]
+    public async Task TheMcpTool_TakesOneServerByItsExactName_RefusesAPartialNameListingTheNearMatches_AndFindsADisabledServerLikeEditServerDoes()
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            await ExecAsync(owner, "INSERT INTO config.config_monitored_servers (server_id, name, host, is_enabled) VALUES (3, 'alpha-sql-010', 'alpha-sql-010.example.test', true)", ct);
+            await ExecAsync(owner, "INSERT INTO config.config_monitored_servers (server_id, name, host, is_enabled) VALUES (4, 'alpha-sql-off', 'alpha-sql-off.example.test', false)", ct);
+            const string actor = "mcp:token 3fa9c1d2, client: test";
+
+            foreach (var partial in new[] { "alpha-sql", "alpha-sql-0", "sql-010" })
+            {
+                var refused = JsonNode.Parse(await DarlingMcpServerActionTools.RunAsync(owner, owner, null, partial, "kill_session", true, actor, ct))!;
+                Assert.Equal("refused", (string)refused["status"]!);
+                Assert.Equal("ambiguous", (string)refused["code"]!);
+            }
+
+            var listing = (string)JsonNode.Parse(await DarlingMcpServerActionTools.RunAsync(owner, owner, null, "alpha-sql", "kill_session", true, actor, ct))!["message"]!;
+            Assert.Contains("alpha-sql-01", listing, StringComparison.Ordinal);
+            Assert.Contains("alpha-sql-010", listing, StringComparison.Ordinal);
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.config_server_actions", ct));
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal", ct));
+
+            /* The exact name picks the one server, though another server's name contains it. */
+            var exact = JsonNode.Parse(await DarlingMcpServerActionTools.RunAsync(owner, owner, null, "alpha-sql-01", "kill_session", true, actor, ct))!;
+            Assert.Equal("set", (string)exact["status"]!);
+            Assert.Equal(1, (int)exact["server_id"]!);
+
+            /* A disabled server is a definition: edit_server and remove_server find it by its exact name, and so does this tool. */
+            var disabled = JsonNode.Parse(await DarlingMcpServerActionTools.RunAsync(owner, owner, null, "alpha-sql-off", "kill_session", true, actor, ct))!;
+            Assert.Equal("set", (string)disabled["status"]!);
+            Assert.Equal(4, (int)disabled["server_id"]!);
+        });
+    }
+
+    [Fact]
+    public async Task TheViewerCommand_LogsOnlyAnActionFromTheFixedList_NeverTheCallersText()
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            var logger = new CapturingTestLogger();
+            var executor = new DarlingCommandExecutor(owner, new NoCommandHost(), "test-instance", logger);
+            await RunCommandAsync(owner, executor, SqlServerId, "{\"action\":\"evict_plan\\r\\n[Information] fake line from nowhere\",\"enabled\":true}", "alice", ct);
+            await RunCommandAsync(owner, executor, SqlServerId, "{\"action\":\"evict_plan\",\"enabled\":true}", "alice", ct);
+
+            var lines = logger.Joined;
+            Assert.DoesNotContain("fake line", lines, StringComparison.Ordinal);
+            Assert.Contains("unknown action", lines, StringComparison.Ordinal);
+            Assert.Contains("evict_plan on server", lines, StringComparison.Ordinal);
         });
     }
 
@@ -354,7 +504,7 @@ public sealed class ServerActionSwitchWriteLiveTests
         }
     }
 
-    private static async Task WithWebAsync(string managedRole, Func<NpgsqlDataSource, NpgsqlDataSource, Sender, CancellationToken, Task> body)
+    private static async Task WithWebAsync(string managedRole, Func<NpgsqlDataSource, NpgsqlDataSource, Sender, CancellationToken, Task> body, bool signedIn = true)
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the server action switch live tests.");
@@ -373,6 +523,7 @@ public sealed class ServerActionSwitchWriteLiveTests
         try
         {
             await SeedAsync(owner, ct);
+            await ExecAsync(owner, DarlingManagedRoles.BuildJournalEventRulesSql("config"), ct);
             await ExecAsync(owner, $"CREATE ROLE {roleName} LOGIN NOSUPERUSER PASSWORD '{RolePassword}'", ct);
             foreach (var statement in ViewerGrantReplay.StatementsFor(roleName, scratch.DatabaseName, managedRole))
             {
@@ -397,6 +548,16 @@ public sealed class ServerActionSwitchWriteLiveTests
             builder.Logging.ClearProviders();
             builder.Services.AddSingleton(webLogin);
             await using var app = builder.Build();
+            if (signedIn)
+            {
+                /* What the sign-in middleware stores for a request that holds a valid session. A dashboard with no sign-in stores nothing (#6269). */
+                app.Use((context, next) =>
+                {
+                    context.Items[DarlingWebSeat.HttpContextItemKey] = DarlingWebSeat.SharedToken;
+                    return next(context);
+                });
+            }
+
             var ownerSeam = new StoreOwnerSource();
             ownerSeam.Publish(owner);
             DarlingWebEndpoints.MapAll(app, webLogin, new CollectorRuntimeState(), new CapturingTestLogger(), ownerSource: ownerSeam);

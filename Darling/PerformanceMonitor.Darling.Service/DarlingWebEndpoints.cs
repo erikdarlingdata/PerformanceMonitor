@@ -1547,6 +1547,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                    (no confirm) answers the statement and the state and writes nothing; {"confirm": true, "statement": "<shown>"} writes. */
                 if ((await changes.GetAsync(id, context.RequestAborted))?.IsPlanChange == true)
                 {
+                    /* A plan undo writes to the monitored server, so it needs a signed-in admin, not just the web's store login (#6269). */
+                    if (!DarlingWebSeat.IsSignedInAdmin(context))
+                    {
+                        return ErrorResult(MonitoredServerWriteSeatMessage, StatusCodes.Status403Forbidden);
+                    }
+
                     if (!await changes.CanDecideAsync(context.RequestAborted))
                     {
                         return AgentChangeRefusedResult();
@@ -3474,6 +3480,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         return ErrorResult(message, noMatch ? StatusCodes.Status404NotFound : StatusCodes.Status400BadRequest);
     }
 
+    /// <summary>The 403 a write that reaches a monitored server, or turns that on, answers when no admin is signed in to the dashboard (#6269). A
+    /// dashboard with no sign-in configured is loopback-only: any local process can reach it, so it never counts as an admin.</summary>
+    internal const string MonitoredServerWriteSeatMessage =
+        "Sign in to the dashboard as an admin to do this, or use the Viewer app. A dashboard with no sign-in configured only lists.";
+
     /// <summary>The 403 a refused switch change answers when the web signs in to the store as the viewer role (#6269).</summary>
     internal const string ServerActionRefusedMessage =
         "This dashboard signs in to the store as the viewer role, so it cannot change server action switches. "
@@ -3499,7 +3510,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             {
                 var rows = await ServerActionSwitches.ListAsync(postgres, context.RequestAborted);
                 var body = Mcp.DarlingMcpServerActionTools.ListToJson(rows);
-                body["can_decide"] = await changes.CanDecideAsync(context.RequestAborted);
+                body["can_decide"] = DarlingWebSeat.IsSignedInAdmin(context) && await changes.CanDecideAsync(context.RequestAborted);
+                body["signed_in_admin"] = DarlingWebSeat.IsSignedInAdmin(context);
                 return DarlingWebStatementSweep.JsonText(body, "/api/server-actions", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -3532,6 +3544,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 catch (ArgumentException)
                 {
                     return ErrorResult("The signed-in name cannot be recorded as the person who changed this switch.", StatusCodes.Status400BadRequest);
+                }
+
+                /* A signed-in admin comes first: the store login the web runs on says nothing about who is calling (#6269). */
+                if (!DarlingWebSeat.IsSignedInAdmin(context))
+                {
+                    return ErrorResult(MonitoredServerWriteSeatMessage, StatusCodes.Status403Forbidden);
                 }
 
                 /* The admin check comes before anything is read or written. */

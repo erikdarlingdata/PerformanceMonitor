@@ -2519,11 +2519,7 @@ public sealed class MonitoredServer
     /// immediately anyway — the SQL Server detection query fails against a Postgres target.
     /// </summary>
     [JsonIgnore]
-    public CollectorTargetEngine TargetEngine => Engine?.Trim().ToLowerInvariant() switch
-    {
-        "postgres" or "postgresql" or "pg" or "aurora-postgresql" or "aurora" => CollectorTargetEngine.PostgreSql,
-        _ => CollectorTargetEngine.SqlServer,
-    };
+    public CollectorTargetEngine TargetEngine => MonitoredEngineKind.ParseConfiguredEngine(Engine);
 
     /// <summary>True when this entry targets PostgreSQL, so the SQL Server-only config is inapplicable.</summary>
     [JsonIgnore]

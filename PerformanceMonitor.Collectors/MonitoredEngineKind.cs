@@ -102,6 +102,18 @@ public static class MonitoredEngineKind
         _ => null,
     };
 
+    /// <summary>
+    /// The engine a darling.json / registry <c>engine</c> string names, under every accepted spelling (postgres, postgresql, pg,
+    /// aurora-postgresql, aurora, case-insensitive). The registry stores the raw spelling (<c>config_monitored_servers.engine</c>), so a
+    /// reader of that column asks this rather than matching a substring. Anything unrecognized reads as SQL Server, the same default
+    /// the service gives a typo in one server entry. The single copy: <c>MonitoredServer.TargetEngine</c> calls it too (#6269).
+    /// </summary>
+    public static CollectorTargetEngine ParseConfiguredEngine(string? engine) => engine?.Trim().ToLowerInvariant() switch
+    {
+        "postgres" or "postgresql" or "pg" or "aurora-postgresql" or "aurora" => CollectorTargetEngine.PostgreSql,
+        _ => CollectorTargetEngine.SqlServer,
+    };
+
     /// <summary>True only when the store says this target IS PostgreSQL. An absent or unrecognised token is
     /// false — "not known to be PostgreSQL", which is not the same claim as "known to be SQL Server".</summary>
     public static bool IsPostgres(string? engineKind) => EngineOf(engineKind) == CollectorTargetEngine.PostgreSql;

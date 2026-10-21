@@ -414,7 +414,7 @@ WHERE status = 'in_progress'
                 var result = await ServerActionSwitches.SetAsync(_postgres, switchServer, switchArgs.Action, switchArgs.Enabled,
                     AgentChangeUndo.PersonActor(command.RequestedBy ?? string.Empty), ServerActionSurfaces.Viewer, cancellationToken);
                 _logger?.LogInformation("Command {Id} (set_server_action {Action} on server {ServerId}) => {Status} {Code}",
-                    command.CommandId, switchArgs.Action, switchServer, result.Status, result.Code);
+                    command.CommandId, result.Action ?? "unknown action", switchServer, result.Status, result.Code); /* only an action that matched the fixed list is logged; the caller's text never is (#6269) */
                 return new CommandOutcome(result.Succeeded, result.Code ?? result.Status, result.ToJson().ToJsonString());
             }
 

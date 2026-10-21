@@ -7,7 +7,7 @@
  */
 
 /* Admin > Server actions (#6269): each server's agent action switches, who changed each and when, and an on/off control.
-     GET /api/server-actions                          {can_decide, servers: [{server_id, server_name, engine, actions: [{action, valid, enabled, set_by, updated_at_utc}]}]}
+     GET /api/server-actions                          {can_decide, signed_in_admin, servers: [{server_id, server_name, engine, actions: [{action, valid, enabled, set_by, updated_at_utc}]}]}
      PUT /api/servers/{id}/actions/{action}           {"enabled": true|false}  ->  200 {status: set|unchanged, message}; 403 viewer role; 404; 409 wrong engine
    Every switch is off until a person turns it on. Turning one ON shows a plain warning first and writes only after the person confirms it.
    The tab decides only under the admin store login. Under the viewer role (managed and compose stores) the list still shows and the page says so;
@@ -29,6 +29,9 @@ export const SERVER_ACTION_COLUMNS = [
 const LIST_ONLY =
   "This dashboard signs in to the store as the viewer role (managed and compose stores), so this page lists the switches only. " +
   "To turn one on or off, use the Viewer app, or run the web under the admin login.";
+const NOT_SIGNED_IN =
+  "Sign in to the dashboard as an admin to turn a switch on or off; this page lists the switches only. A dashboard with no sign-in configured " +
+  "never changes them. Or use the Viewer app.";
 const CAN_DECIDE =
   "Each server's agent action switches. Every switch is off until a person turns it on. A switch that is on lets agents change that server, " +
   "and it also needs the remediation login and its grants (see the Darling README). Every agent change is journaled and can be undone where that is possible. " +
@@ -107,7 +110,7 @@ export async function buildServerActions(body, generation, ctx) {
   if (bad) return mount(body, nodes.concat([bad]));
   const data = res.data || {};
   const canDecide = data.can_decide === true;
-  nodes.push(noticeStrip(canDecide ? CAN_DECIDE : LIST_ONLY));
+  nodes.push(noticeStrip(canDecide ? CAN_DECIDE : data.signed_in_admin === false ? NOT_SIGNED_IN : LIST_ONLY));
   const columns = SERVER_ACTION_COLUMNS.concat(canDecide ? [{
     key: "change", label: "Change", csv: false, copy: false,
     render: (row) => (row ? el("button", {
