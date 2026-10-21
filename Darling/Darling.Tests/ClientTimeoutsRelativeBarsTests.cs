@@ -66,6 +66,20 @@ public sealed class ClientTimeoutsRelativeBarsTests
         Assert.NotNull(AttentionBaselineMath.Compute(Minutes(T0, 1_441, _ => 150)));
     }
 
+    [Fact]
+    public void Baseline_NeedsHalfADayOfObservedMinutes_NotJustAFirstToLastSpanOfADay()
+    {
+        /* One stray run two days ago plus a recent stretch spans over a day from first bucket to last but observes almost nothing. */
+        var stray = Minutes(T0.AddDays(-2), 1, _ => 150);
+        Assert.Null(AttentionBaselineMath.Compute(stray.Concat(Minutes(T0.AddMinutes(-60), 60, _ => 150)).ToList()));
+        Assert.Null(AttentionBaselineMath.Compute(stray.Concat(Minutes(T0.AddMinutes(-(AttentionBaselineMath.MinimumObservedMinutes - 2)), AttentionBaselineMath.MinimumObservedMinutes - 2, _ => 150)).ToList()));
+
+        /* With the minimum observed minutes (720) the same shape has a baseline. */
+        var enough = stray.Concat(Minutes(T0.AddMinutes(-(AttentionBaselineMath.MinimumObservedMinutes - 1)), AttentionBaselineMath.MinimumObservedMinutes - 1, _ => 150)).ToList();
+        Assert.Equal(AttentionBaselineMath.MinimumObservedMinutes, enough.Count);
+        Assert.NotNull(AttentionBaselineMath.Compute(enough));
+    }
+
     [Theory]
     [InlineData(10, 3, 150d, 450)]
     [InlineData(10, 3, 1d, 10)]
@@ -166,6 +180,81 @@ public sealed class ClientTimeoutsRelativeBarsTests
         Assert.Equal("10 per minute", outcome.ThresholdValue);
         Assert.Contains("under 1 day of capture", outcome.ShortMessage, StringComparison.Ordinal);
         Assert.Equal(1, h.Adapter.AttentionBaselineReads);
+    }
+
+    [Fact]
+    public async Task ANoBaselineAnswer_IsKeptAnHourNotADay_SoAServerThatCrossesTheMinimumIsGradedOnItsBaselineAtOnce()
+    {
+        var h = Armed(null);
+        var engine = h.Build();
+
+        h.Adapter.Attention = AttentionAlertTests.StormWindow(h.Now, 1500);   // 500 a minute
+        await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+        var first = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == AttentionEvaluator.MetricName);
+        Assert.Contains("under 1 day of capture", first.ShortMessage, StringComparison.Ordinal);
+
+        /* The server now has its capture. Inside the hour it is still answered from the cache. */
+        h.Adapter.AttentionBaseline = Normal(150);
+        h.Now = h.Now.AddMinutes(AttentionBaselineMath.NoBaselineRefreshMinutes - 1);
+        h.Adapter.Attention = AttentionAlertTests.StormWindow(h.Now, 1500);
+        await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+        Assert.Equal(1, h.Adapter.AttentionBaselineReads);
+
+        /* An hour on, nowhere near the day, the baseline is read and applies. */
+        h.Now = h.Now.AddMinutes(2);
+        h.Adapter.Attention = AttentionAlertTests.StormWindow(h.Now, 1500);
+        await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+
+        Assert.Equal(2, h.Adapter.AttentionBaselineReads);
+        Assert.Contains(h.Deliverer.Outcomes, o => o.MetricName == AttentionEvaluator.MetricName
+            && o.ShortMessage.Contains("Baseline for this server: 150.0 per minute", StringComparison.Ordinal));
+        Assert.True(AttentionBaselineMath.NoBaselineRefreshMinutes < AttentionBaselineMath.RefreshHours * 60);
+    }
+
+    [Fact]
+    public async Task AFailedBaselineRead_IsOneReadFailure_NotOnePerSweepDuringTheBackOff()
+    {
+        var counter = new AlertReadFailureCounter(() => new DateTime(2026, 9, 5, 8, 0, 0, DateTimeKind.Utc));
+        var h = new AlertEngineTests.Harness { ReadFailures = counter };
+        h.Settings.ClientTimeoutsEnabled = true;
+        h.Adapter.AttentionBaselineThrows = true;
+        var engine = h.Build();
+        var key = AlertEngineTests.Harness.Snapshot().ServerKey;
+
+        for (var i = 0; i < 5; i++)
+        {
+            h.Adapter.Attention = AttentionAlertTests.StormWindow(h.Now, 600);
+            await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+            h.Now = h.Now.AddMinutes(1);
+        }
+
+        Assert.Equal(1, h.Adapter.AttentionBaselineReads);
+        Assert.Equal(1, counter.ReadFor(key).ServerReadFailures);
+
+        /* A real second failed read, after the back-off, is the second failure. */
+        h.Now = h.Now.AddMinutes(AttentionBaselineMath.RetryAfterFailureMinutes);
+        h.Adapter.Attention = AttentionAlertTests.StormWindow(h.Now, 600);
+        await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+
+        Assert.Equal(2, h.Adapter.AttentionBaselineReads);
+        Assert.Equal(2, counter.ReadFor(key).ServerReadFailures);
+    }
+
+    [Fact]
+    public void TheBarSentence_SaysFloorOnlyWhenTheScaledBarIsUnderTheFloor()
+    {
+        static AttentionEvaluator.Finding Crossed(double baseline, int multiple, int bar) =>
+            new(AlertSeverityLevel.Warning, 30, bar, 90, 90, 3, 3, 0, false, false, T0,
+                new AttentionEvaluator.BarBasis(baseline, 10, 60, multiple, 10));
+
+        /* 1 x 3 = 3, under the floor of 10. */
+        Assert.Contains("under the floor", AttentionEvaluator.BarSentence(Crossed(1, 3, 10)), StringComparison.Ordinal);
+        /* 5 x 2 = 10, EQUAL to the floor: the scaled bar is the bar, not "under the floor". */
+        var equal = AttentionEvaluator.BarSentence(Crossed(5, 2, 10));
+        Assert.DoesNotContain("under the floor", equal, StringComparison.Ordinal);
+        Assert.Contains("Warning is 2 x baseline = 10 per minute", equal, StringComparison.Ordinal);
+        /* 3.4 x 3 = 10.2: the bar is 11. */
+        Assert.Contains("Warning is 3 x baseline = 11 per minute", AttentionEvaluator.BarSentence(Crossed(3.4, 3, 11)), StringComparison.Ordinal);
     }
 
     [Fact]

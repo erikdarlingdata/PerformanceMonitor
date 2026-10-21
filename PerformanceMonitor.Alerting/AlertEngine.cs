@@ -2395,8 +2395,8 @@ public sealed class AlertEngine
 
     /// <summary>
     /// The Client Timeouts alert (#5640): client attentions (a client cancelled or timed out a query) per minute, from the
-    /// attention collector's <c>attention_events</c>, graded Warning at the Warning bar (10 per minute by default) and Critical
-    /// at the Critical bar (60). OFF by default. The count model, the rate rule, the not-observed rule and the proportional
+    /// attention collector's <c>attention_events</c>, graded Warning at the Warning bar (the higher of the 10 per minute floor and 3 times the baseline by default) and Critical
+    /// at the Critical bar (60), where each bar is the higher of its floor and a multiple of the server's own baseline (#5736). OFF by default. The count model, the rate rule, the not-observed rule and the proportional
     /// mute are on <see cref="AttentionEvaluator"/>.
     ///
     /// <para>Everything around the grade is Runnable Queue's: a window that is not an observation neither fires nor clears
@@ -2463,7 +2463,15 @@ public sealed class AlertEngine
             if (AttentionEvaluator.ReachesFloor(reading, warningFloor))
             {
                 readClock.Restart();
-                baseline = await GetAttentionBaselineAsync(key, now, ct);
+                var held = await GetAttentionBaselineAsync(key, now, ct);
+                if (held.SkipEvaluation)
+                {
+                    /* A recent failed read is waiting out its back-off: no read happened this sweep, so it is not a fresh read failure
+                       and the server is skipped (a noisy server must not be graded on the floors because the read failed). */
+                    return;
+                }
+
+                baseline = held.Baseline;
                 readClock.Restart();
             }
 
@@ -2580,23 +2588,28 @@ public sealed class AlertEngine
 
     /// <summary>
     /// The server's Client Timeouts baseline (#5736), from the in-memory cache while it is under <see cref="AttentionBaselineMath.RefreshHours"/> old,
-    /// else read once through <see cref="IAlertReadAdapter.GetAttentionBaselineAsync"/>. Null is a server with under a day of capture (the floors
-    /// alone grade it), and that answer is cached for the same day. A failed read throws, so the sweep records a read failure and fires nothing for
-    /// the server (a noisy server must not be graded on the floors because a read failed), and is not retried for
-    /// <see cref="AttentionBaselineMath.RetryAfterFailureMinutes"/>.
+    /// else read once through <see cref="IAlertReadAdapter.GetAttentionBaselineAsync"/>. Null is a server without a baseline yet (the floors
+    /// alone grade it), and that answer is kept only <see cref="AttentionBaselineMath.NoBaselineRefreshMinutes"/> minutes, so a server that crosses
+    /// the capture minimum is graded on its baseline within the hour. A failed read throws, so the sweep records a read failure and fires nothing
+    /// for the server (a noisy server must not be graded on the floors because a read failed). It is not retried for
+    /// <see cref="AttentionBaselineMath.RetryAfterFailureMinutes"/>, and while it waits the answer is the skip sentinel: no read happened, so no
+    /// further failure is recorded.
     /// </summary>
-    private async Task<AttentionBaseline?> GetAttentionBaselineAsync(string key, DateTime now, CancellationToken ct)
+    private async Task<(bool SkipEvaluation, AttentionBaseline? Baseline)> GetAttentionBaselineAsync(string key, DateTime now, CancellationToken ct)
     {
         if (_attentionBaselines.TryGetValue(key, out var held))
         {
             if (held.Failed && now - held.ReadAt < TimeSpan.FromMinutes(AttentionBaselineMath.RetryAfterFailureMinutes))
             {
-                throw new InvalidOperationException("The Client Timeouts baseline read failed recently and is not retried yet.");
+                return (true, null);
             }
 
-            if (!held.Failed && now - held.ReadAt < TimeSpan.FromHours(AttentionBaselineMath.RefreshHours))
+            var keptFor = held.Baseline is null
+                ? TimeSpan.FromMinutes(AttentionBaselineMath.NoBaselineRefreshMinutes)
+                : TimeSpan.FromHours(AttentionBaselineMath.RefreshHours);
+            if (!held.Failed && now - held.ReadAt < keptFor)
             {
-                return held.Baseline;
+                return (false, held.Baseline);
             }
         }
 
@@ -2604,7 +2617,7 @@ public sealed class AlertEngine
         {
             var baseline = await _readAdapter.GetAttentionBaselineAsync(key, now, ct);
             _attentionBaselines[key] = new AttentionBaselineEntry(now, baseline, Failed: false);
-            return baseline;
+            return (false, baseline);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {

@@ -245,7 +245,7 @@
                                               Foreground="{DynamicResource ForegroundBrush}"
                                               ToolTip="The Client Timeouts alert counts client timeouts and cancels per minute (the sqlserver.attention event: a client cancelled a query or its timeout expired) over the attention collector's last runs (about 3 minutes). The two bars are floors: the Warning bar is the higher of the first floor and the Warning multiple times the server's own baseline (the p99.9 of its 3-minute average rate over the last 7 days), and the Critical bar the same with the second floor and the Critical multiple. A server with under a day of capture uses the floors. A Warning that worsens to Critical is delivered at once. Off by default."/>
                                     <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertClientTimeoutsCheckBox}" x:Name="AlertClientTimeoutsWarningBox" Width="45" Text="10" Margin="6,0,0,0" VerticalAlignment="Center"
-                                             ToolTip="Warning bar: client timeouts and cancels (attentions) per minute over the covered span. At least 1. Default 10."/>
+                                             ToolTip="Warning floor: client timeouts and cancels (attentions) per minute over the covered span. At least 1. Default 10. The bar is the higher of this floor and the Warning multiple times the server's own baseline."/>
                                     <TextBlock Text="Critical at" VerticalAlignment="Center" Margin="6,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                     <TextBox AutomationProperties.Name="Client timeouts, critical at" x:Name="AlertClientTimeoutsCriticalBox" Width="45" Text="60" Margin="6,0,0,0" VerticalAlignment="Center"
@@ -253,7 +253,7 @@
                                     <TextBlock Text="(floors), or" VerticalAlignment="Center" Margin="6,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                     <TextBox AutomationProperties.Name="Client timeouts, warning multiple" x:Name="AlertClientTimeoutsWarningMultipleBox" Width="35" Text="3" Margin="6,0,0,0" VerticalAlignment="Center"
-                                             ToolTip="Warning multiple: the Warning bar is at least this many times the server's own baseline (the p99.9 of its 3-minute average rate over the last 7 days). At least 1. Default 3. A server with under a day of capture has no baseline and uses the floors."/>
+                                             ToolTip="Warning multiple: the Warning bar is at least this many times the server's own baseline (the p99.9 of its 3-minute average rate over the last 7 days). At least 1. Default 3. A server with under a day of capture (or under 720 minutes with a successful run) has no baseline and uses the floors."/>
                                     <TextBlock Text="x /" VerticalAlignment="Center" Margin="4,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                     <TextBox AutomationProperties.Name="Client timeouts, critical multiple" x:Name="AlertClientTimeoutsCriticalMultipleBox" Width="35" Text="10" Margin="6,0,0,0" VerticalAlignment="Center"

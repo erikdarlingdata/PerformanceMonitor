@@ -47,8 +47,16 @@ public static class AttentionBaselineMath
     /// <summary>The capture a server needs before it has a baseline: the first bucket to the last must span this many days.</summary>
     public const int MinimumCaptureDays = 1;
 
+    /// <summary>The minutes with a successful run a server needs before it has a baseline, on top of the first-to-last span: half a day. One stray run
+    /// two days ago plus an hour of recent capture spans a day but observes almost nothing, and is not a baseline.</summary>
+    public const int MinimumObservedMinutes = 720;
+
     /// <summary>How long a computed baseline is kept before it is read again, in hours.</summary>
     public const int RefreshHours = 24;
+
+    /// <summary>How long a "no baseline yet" answer is kept before it is read again, in minutes. Short, so a server that crosses the capture
+    /// minimum is graded on its baseline within the hour and not a day later.</summary>
+    public const int NoBaselineRefreshMinutes = 60;
 
     /// <summary>How long a failed baseline read waits before it is tried again, in minutes. Until then the floors alone grade.</summary>
     public const int RetryAfterFailureMinutes = 30;
@@ -71,7 +79,7 @@ public static class AttentionBaselineMath
 
     /// <summary>
     /// The baseline of <paramref name="minutes"/>, or null when the server has under <see cref="MinimumCaptureDays"/> day of capture
-    /// (first bucket to last) or no three-minute window exists.
+    /// (first bucket to last), under <see cref="MinimumObservedMinutes"/> observed minutes, or no three-minute window exists.
     /// </summary>
     public static AttentionBaseline? Compute(IReadOnlyList<AttentionMinute> minutes)
     {
@@ -83,7 +91,7 @@ public static class AttentionBaselineMath
         var ordered = minutes.OrderBy(m => m.Minute).ToList();
         var from = ordered[0].Minute;
         var to = ordered[^1].Minute;
-        if (to - from < TimeSpan.FromDays(MinimumCaptureDays))
+        if (to - from < TimeSpan.FromDays(MinimumCaptureDays) || ordered.Count < MinimumObservedMinutes)
         {
             return null;
         }

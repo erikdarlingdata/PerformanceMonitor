@@ -480,7 +480,7 @@ public static class AttentionEvaluator
         var scaled = multiple * baseline;
         var lead = string.Create(CultureInfo.InvariantCulture,
             $"Baseline for this server: {baseline:N1} per minute (p99.9 of its 3-minute average over the last {AttentionBaselineMath.LookbackDays} days).");
-        return finding.BarCrossed > floor
+        return scaled >= floor
             ? string.Create(CultureInfo.InvariantCulture, $"{lead} {tier} is {multiple} x baseline = {finding.BarCrossed} per minute.")
             : string.Create(CultureInfo.InvariantCulture, $"{lead} {multiple} x baseline is {scaled:N1}, under the floor, so the {tier} bar is the floor, {floor} per minute.");
     }

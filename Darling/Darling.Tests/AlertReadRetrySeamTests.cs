@@ -473,7 +473,7 @@ public sealed class AlertReadRetrySeamTests
            (GetRunnableQueueSamplesAsync), a forwarder over a private Core sibling like the other twelve and
            seamed under "runnable queue", the name the engine's catch arm records; the per-forwarder loop and
            the name check below cover it without a roster entry. The fifteenth is #5736's Client Timeouts baseline
-           read (GetAttentionBaselineAsync), seamed under "client timeouts baseline". */
+           read (GetAttentionBaselineAsync), seamed under "client timeouts". */
         Assert.Equal(15, forwarders.Count);
 
         /* No public read is left in the old self-executing shape. The control below proves this pattern
