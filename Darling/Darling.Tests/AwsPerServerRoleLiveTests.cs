@@ -325,6 +325,7 @@ public sealed class AwsPerServerRoleLiveTests
         {
             await using var owner = await OpenOwnerAsync(scratch, ct);
             await ExecAsync(owner, DarlingManagedRoles.BuildEditMonitoredServerFunctionSql("config"), ct);
+            await ExecAsync(owner, DarlingManagedRoles.BuildEditMonitoredServerSeventeenWrapperSql("config"), ct);
             await ExecAsync(owner, DarlingManagedRoles.BuildEditMonitoredServerLegacyWrapperSql("config"), ct);
             await InsertServerAsync(owner, 8401, null, null, ct);
 
@@ -388,6 +389,7 @@ public sealed class AwsPerServerRoleLiveTests
         {
             await using var owner = await OpenOwnerAsync(scratch, ct);
             await ExecAsync(owner, DarlingManagedRoles.BuildEditMonitoredServerFunctionSql("config"), ct);
+            await ExecAsync(owner, DarlingManagedRoles.BuildEditMonitoredServerSeventeenWrapperSql("config"), ct);
             await ExecAsync(owner, DarlingManagedRoles.BuildEditMonitoredServerLegacyWrapperSql("config"), ct);
             await InsertServerAsync(owner, 8501, Role, External, ct);
 
@@ -444,6 +446,7 @@ public sealed class AwsPerServerRoleLiveTests
         {
             await using var owner = await OpenOwnerAsync(scratch, ct);
             await ExecAsync(owner, DarlingManagedRoles.BuildEditMonitoredServerFunctionSql("config"), ct);
+            await ExecAsync(owner, DarlingManagedRoles.BuildEditMonitoredServerSeventeenWrapperSql("config"), ct);
             await ExecAsync(owner, DarlingManagedRoles.BuildEditMonitoredServerLegacyWrapperSql("config"), ct);
             await InsertServerAsync(owner, 8701, Role, External, ct);
 

@@ -172,7 +172,7 @@ public sealed class SealedSecretResolverTests
     {
         /* A row's NULL database and an empty one are the same text in the binding, and the identity read from the row is what the
            sealed value was bound to. */
-        var identity = ServerConnectionIdentity.FromStoredColumns("alpha-host.example.test", null, null, null, false, "sql", "monitor", "Mandatory", false, false);
+        var identity = ServerConnectionIdentity.FromStoredColumns("alpha-host.example.test", null, null, null, false, "sql", "monitor", "Mandatory", false, false, null);
         var sealedText = PasswordSeal.Seal(Plain, s_key.Value.PublicKey, PasswordBinding.ForServer(identity));
         var server = Server(stored: sealedText);
         server.StoredIdentity = identity;

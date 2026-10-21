@@ -9,6 +9,7 @@
 using System;
 using Microsoft.Data.SqlClient;
 using Npgsql;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -83,6 +84,37 @@ public static class MonitoredServerConnection
         {
             builder.IntegratedSecurity = true;
         }
+
+        return builder.ConnectionString;
+    }
+
+    /// <summary>
+    /// #6254: the connection string for reading Query Store from the server's readable replica, or null when the server has none
+    /// (<see cref="MonitoredServer.QueryStoreReplica"/> empty) or is not a SQL Server target (a PostgreSQL target never has one).
+    /// It is the server's own connection string (<see cref="BuildConnectionString"/>) with the host replaced by the replica (a host,
+    /// <c>host,port</c> or listener name, taken as typed) and <c>ApplicationIntent=ReadOnly</c>: the same login, password,
+    /// authentication, encryption, certificate trust, MultiSubnetFailover, database and timeouts. The ONE place the replica
+    /// connection is built, so no caller assembles its own: the password in it is the one resolved for this server, which is
+    /// opened only when the sealed password's binding included this replica host (<see cref="PasswordBinding.ForServer"/>).
+    /// This builds a string and opens nothing.
+    /// </summary>
+    public static string? BuildQueryStoreReplicaConnectionString(MonitoredServer server, string? resolvedPassword = null)
+    {
+        if (server is null)
+        {
+            throw new ArgumentNullException(nameof(server));
+        }
+
+        if (server.IsPostgres || QueryStoreReplicaSetting.Normalize(server.QueryStoreReplica) is not { } replica)
+        {
+            return null;
+        }
+
+        var builder = new SqlConnectionStringBuilder(BuildConnectionString(server, resolvedPassword))
+        {
+            DataSource = replica,
+            ApplicationIntent = ApplicationIntent.ReadOnly,
+        };
 
         return builder.ConnectionString;
     }

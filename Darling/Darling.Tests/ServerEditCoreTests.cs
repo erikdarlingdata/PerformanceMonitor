@@ -669,12 +669,12 @@ public sealed class ServerEditCoreTests : IDisposable
         var row = SqlRow();
         var binding = PasswordBinding.ForServer(ServerConnectionIdentity.FromStoredColumns(
             "b.example.test", row.Port, row.Engine, row.Database, row.ReadOnlyIntent, row.Auth, row.Username, row.EncryptMode,
-            row.TrustServerCertificate, row.MultiSubnetFailover));
+            row.TrustServerCertificate, row.MultiSubnetFailover, null));
         Assert.Equal(Secret, TestKeyRings.Healthy.Open((string)stored.Value!, binding));
         Assert.NotEqual(Secret, stored.Value);
         var movedAgain = PasswordBinding.ForServer(ServerConnectionIdentity.FromStoredColumns(
             row.Host, row.Port, row.Engine, row.Database, row.ReadOnlyIntent, row.Auth, row.Username, row.EncryptMode,
-            row.TrustServerCertificate, row.MultiSubnetFailover));
+            row.TrustServerCertificate, row.MultiSubnetFailover, null));
         Assert.Throws<PasswordSealException>(() => { _ = TestKeyRings.Healthy.Open((string)stored.Value!, movedAgain); });
     }
 

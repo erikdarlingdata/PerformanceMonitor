@@ -705,7 +705,7 @@ public sealed class DarlingConfigTests
     {
         var ring = TestKeyRings.Healthy;
         var binding = PasswordBinding.ForServer(
-            ServerConnectionIdentity.FromStoredColumns("sql-example", 0, "sqlserver", null, false, "sql", "monitor", "Mandatory", false, false));
+            ServerConnectionIdentity.FromStoredColumns("sql-example", 0, "sqlserver", null, false, "sql", "monitor", "Mandatory", false, false, null));
 
         Assert.Equal(
             "file:/run/secrets/sql_password",
@@ -721,7 +721,7 @@ public sealed class DarlingConfigTests
         Assert.Equal("literal-pw", ring.Open(stored!, binding));
 
         var other = PasswordBinding.ForServer(
-            ServerConnectionIdentity.FromStoredColumns("sql-other", 0, "sqlserver", null, false, "sql", "monitor", "Mandatory", false, false));
+            ServerConnectionIdentity.FromStoredColumns("sql-other", 0, "sqlserver", null, false, "sql", "monitor", "Mandatory", false, false, null));
         Assert.Throws<PasswordSealException>(() => { _ = ring.Open(stored!, other); });
     }
 
@@ -729,7 +729,7 @@ public sealed class DarlingConfigTests
     public void ProtectPasswordForStorage_ALiteralWhileTheKeyIsNotReady_Throws_WithTheKeysReason()
     {
         var binding = PasswordBinding.ForServer(
-            ServerConnectionIdentity.FromStoredColumns("sql-example", 0, "sqlserver", null, false, "sql", "monitor", "Mandatory", false, false));
+            ServerConnectionIdentity.FromStoredColumns("sql-example", 0, "sqlserver", null, false, "sql", "monitor", "Mandatory", false, false, null));
 
         var ex = Assert.Throws<InvalidOperationException>(
             () => { _ = DarlingMcpServerAdminTools.ProtectPasswordForStorage("literal-pw", binding, TestKeyRings.NotReady); });

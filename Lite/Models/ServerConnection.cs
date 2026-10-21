@@ -145,6 +145,15 @@ public class ServerConnection : INotifyPropertyChanged
     public bool MultiSubnetFailover { get; set; } = false;
 
     /// <summary>
+    /// #6254: a readable replica (host[,port] or an AG listener name) to read Query Store from, so the heavy Query Store
+    /// reads spare the primary. Null or blank = off, and the server reads Query Store from its own connection as before.
+    /// Saved in servers.json with the rest of the server; an older file without the field loads it as null. The replica is
+    /// reached with this server's own login, password, encryption and timeouts (see
+    /// <see cref="ResolveQueryStoreReplicaConnectionString"/>), so it must accept the same login.
+    /// </summary>
+    public string? QueryStoreReplica { get; set; }
+
+    /// <summary>
     /// User databases to skip in per-database collectors (query_store, file_io_stats, etc.).
     /// System databases (master/tempdb/model/msdb) and the connection database itself are always
     /// excluded by the collectors and aren't represented here.
@@ -415,6 +424,44 @@ public class ServerConnection : INotifyPropertyChanged
     {
         var auth = server.ResolveAuth(credentialService, profileLookup);
         return server.BuildConnectionString(auth);
+    }
+
+    /// <summary>
+    /// #6254: the connection string for the Query Store replica: this server's own resolved string with the host replaced by
+    /// <see cref="QueryStoreReplica"/> and <c>ApplicationIntent=ReadOnly</c>. Login, password, encryption, certificate trust,
+    /// database and timeouts are the server's own, so a replica that takes the same login needs nothing more. Null when the
+    /// setting is empty: the caller then reads from the primary and opens nothing. Builds a string only; it opens no connection.
+    /// </summary>
+    public static string? ResolveQueryStoreReplicaConnectionString(
+        ServerConnection server,
+        CredentialService credentialService,
+        IProfileLookup? profileLookup)
+    {
+        if (string.IsNullOrWhiteSpace(server.QueryStoreReplica))
+            return null;
+
+        return WithQueryStoreReplicaHost(ResolveConnectionString(server, credentialService, profileLookup), server.QueryStoreReplica);
+    }
+
+    /// <summary>
+    /// Replica string with the given credentials: the server-self shape, for tests (as <see cref="BuildConnectionString(string?, string?)"/>).
+    /// </summary>
+    internal string? BuildQueryStoreReplicaConnectionString(string? username, string? password)
+        => string.IsNullOrWhiteSpace(QueryStoreReplica)
+            ? null
+            : WithQueryStoreReplicaHost(BuildConnectionString(username, password), QueryStoreReplica);
+
+    /// <summary>
+    /// Replica string from a primary string and the replica host. Internal so a test can pin the swap without Credential Manager.
+    /// </summary>
+    internal static string WithQueryStoreReplicaHost(string primaryConnectionString, string replica)
+    {
+        var builder = new SqlConnectionStringBuilder(primaryConnectionString)
+        {
+            DataSource = replica.Trim(),
+            ApplicationIntent = ApplicationIntent.ReadOnly
+        };
+        return builder.ConnectionString;
     }
 
     /// <summary>

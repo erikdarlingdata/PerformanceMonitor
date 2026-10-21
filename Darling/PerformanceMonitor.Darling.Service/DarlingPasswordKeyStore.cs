@@ -319,7 +319,7 @@ RETURNING key_id;", c);
     {
         var candidates = new Dictionary<(int, string), Candidate>();
         await using var read = new NpgsqlCommand(
-            $"SELECT server_id, slot, value_sha256, {ServerConnectionIdentity.StoredColumns}, remediation_username, smtp_use_ssl " +
+            $"SELECT server_id, slot, value_sha256, {LegacyPinCandidateTables.ConnectionColumns}, remediation_username, smtp_use_ssl " +
             "FROM config.legacy_secret_pin_candidate;", c, tx);
         read.CommandTimeout = timeoutSeconds;
         await using var reader = await read.ExecuteReaderAsync(ct).ConfigureAwait(false);
@@ -341,7 +341,7 @@ RETURNING key_id;", c);
                 var identity = ServerConnectionIdentity.FromStoredColumns(
                     host, reader.IsDBNull(4) ? null : reader.GetInt32(4), Text(reader, 5), Text(reader, 6),
                     !reader.IsDBNull(7) && reader.GetBoolean(7), Text(reader, 8), username, Text(reader, 10),
-                    !reader.IsDBNull(11) && reader.GetBoolean(11), !reader.IsDBNull(12) && reader.GetBoolean(12));
+                    !reader.IsDBNull(11) && reader.GetBoolean(11), !reader.IsDBNull(12) && reader.GetBoolean(12), null);
                 binding = string.Equals(slot, "server", StringComparison.Ordinal)
                     ? PasswordBinding.ForServer(identity)
                     : PasswordBinding.ForRemediation(identity, Text(reader, 13));
@@ -369,8 +369,8 @@ RETURNING key_id;", c);
                 var identity = ServerConnectionIdentity.FromStoredColumns(
                     Text(reader, 1), reader.IsDBNull(2) ? null : reader.GetInt32(2), Text(reader, 3), Text(reader, 4),
                     !reader.IsDBNull(5) && reader.GetBoolean(5), Text(reader, 6), Text(reader, 7), Text(reader, 8),
-                    !reader.IsDBNull(9) && reader.GetBoolean(9), !reader.IsDBNull(10) && reader.GetBoolean(10));
-                rows.Add((reader.GetInt32(0), identity, Text(reader, 11), Text(reader, 12), Text(reader, 13)));
+                    !reader.IsDBNull(9) && reader.GetBoolean(9), !reader.IsDBNull(10) && reader.GetBoolean(10), Text(reader, 11));
+                rows.Add((reader.GetInt32(0), identity, Text(reader, 12), Text(reader, 13), Text(reader, 14)));
             }
         }
 

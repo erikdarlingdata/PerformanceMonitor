@@ -2088,6 +2088,17 @@ ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS starts_at_utc time
     /// with a constant default; no backfill, no GRANT (the roles' table-level SELECT covers a new column; the Viewer's settings save writes it as the admin role, whose
     /// table-level UPDATE on the config schema covers it, while the viewer role holds only <c>UPDATE (config_version, updated_at)</c> on this table) and no trigger (the config_version trigger fires on any row update).
     /// </summary>
+    /// <summary>
+    /// V211 (#6254): two nullable text columns. <c>config.config_monitored_servers.query_store_replica</c> is the host (or listener
+    /// name) Query Store is read from instead of the server itself; NULL, the default for every existing row, keeps today's behaviour.
+    /// <c>config.collection_log.read_source</c> says which host a collection read came from; NULL on every existing row. Neither has a
+    /// default and neither needs a backfill, so each <c>ADD COLUMN</c> is catalog-only. An older build ignores both columns and reads
+    /// every row as it did before, so there is no rollback line. Idempotent.
+    /// </summary>
+    private const string V211Sql = @"
+ALTER TABLE config.config_monitored_servers ADD COLUMN IF NOT EXISTS query_store_replica text;
+ALTER TABLE config.collection_log ADD COLUMN IF NOT EXISTS read_source text;";
+
     private const string V209Sql = @"
 ALTER TABLE config.config_service ADD COLUMN IF NOT EXISTS query_store_fetch_top_n integer NOT NULL DEFAULT 100;";
 
@@ -2576,6 +2587,7 @@ $rung$;";
         new Migration(208, "mute-rule-starts-at", V208Sql),
         new Migration(209, "query-store-fetch-top-n", V209Sql),
         new Migration(210, "mcp-agent-route-tag-guard", V210Sql),
+        new Migration(211, "query-store-replica", V211Sql),
     };
 
     /// <summary>

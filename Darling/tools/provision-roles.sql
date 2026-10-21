@@ -648,6 +648,18 @@ GRANT SELECT (hypothetical_index_username) ON config.config_monitored_servers TO
 $v203$;
    END IF;
 END $$;
+-- V211 (#6254): the Query Store replica HOST, on the registry. Non-secret, like host. Guarded on the column, so a store below V211
+-- still commits the rest of the carve instead of failing on a column it does not have yet.
+DO $$
+BEGIN
+   IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+              WHERE attrelid = pg_catalog.to_regclass('config.config_monitored_servers')
+                AND attname = 'query_store_replica' AND NOT attisdropped) THEN
+      EXECUTE $v211r$
+GRANT SELECT (query_store_replica) ON config.config_monitored_servers TO viewer;
+$v211r$;
+   END IF;
+END $$;
 
 -- 2c. The SAME carve for mcp (#3914): it reads exactly what viewer reads, so it is denied exactly the same
 --     secret columns -- the column lists are identical to 2b's, and the drift test holds both to the C# list.
@@ -750,6 +762,18 @@ BEGIN
       EXECUTE $v203$
 GRANT SELECT (hypothetical_index_username) ON config.config_monitored_servers TO mcp;
 $v203$;
+   END IF;
+END $$;
+-- V211 (#6254): the Query Store replica HOST, on the registry. Non-secret, like host. Guarded on the column, so a store below V211
+-- still commits the rest of the carve instead of failing on a column it does not have yet.
+DO $$
+BEGIN
+   IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+              WHERE attrelid = pg_catalog.to_regclass('config.config_monitored_servers')
+                AND attname = 'query_store_replica' AND NOT attisdropped) THEN
+      EXECUTE $v211r$
+GRANT SELECT (query_store_replica) ON config.config_monitored_servers TO mcp;
+$v211r$;
    END IF;
 END $$;
 -- The collector run times (V160, #4938): get_collection_health reads them as mcp. The blanket config SELECT above
@@ -912,7 +936,8 @@ CREATE OR REPLACE FUNCTION config.edit_monitored_server(
    p_multi_subnet_failover boolean,
    p_monthly_cost_usd numeric,
    p_aws_role_arn text,
-   p_aws_external_id text)
+   p_aws_external_id text,
+   p_query_store_replica text)
 RETURNS TABLE (outcome text, new_modified_at timestamp)
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -929,6 +954,8 @@ DECLARE
    v_old_encrypt_mode text;
    v_old_trust_server_certificate boolean;
    v_old_multi_subnet_failover boolean;
+   v_old_query_store_replica text;
+   v_query_store_replica text;
    v_host text;
    v_port integer;
    v_auth text;
@@ -954,10 +981,10 @@ BEGIN
    SELECT s.modified_at, s.host, s.port, s.auth, s.database, s.read_only_intent, s.username, s.encrypt_mode,
           s.trust_server_certificate, s.multi_subnet_failover,
           (COALESCE(s.remediation_encrypted_password, '') <> '' OR COALESCE((to_jsonb(s) ->> 'hypothetical_index_encrypted_password'), '') <> ''),
-          s.aws_role_arn, s.aws_external_id
+          s.aws_role_arn, s.aws_external_id, NULLIF(btrim(s.query_store_replica), '')
    INTO v_old_modified_at, v_old_host, v_old_port, v_old_auth, v_old_database, v_old_read_only_intent,
         v_old_username, v_old_encrypt_mode, v_old_trust_server_certificate, v_old_multi_subnet_failover,
-        v_remediation_held, v_old_role, v_old_ext
+        v_remediation_held, v_old_role, v_old_ext, v_old_query_store_replica
    FROM config.config_monitored_servers AS s
    WHERE s.server_id = p_server_id
    FOR UPDATE OF s;
@@ -982,6 +1009,9 @@ BEGIN
    v_encrypt_mode := CASE WHEN 'encrypt_mode' = ANY (p_columns) THEN p_encrypt_mode ELSE v_old_encrypt_mode END;
    v_trust_server_certificate := CASE WHEN 'trust_server_certificate' = ANY (p_columns) THEN p_trust_server_certificate ELSE v_old_trust_server_certificate END;
    v_multi_subnet_failover := CASE WHEN 'multi_subnet_failover' = ANY (p_columns) THEN p_multi_subnet_failover ELSE v_old_multi_subnet_failover END;
+   -- The Query Store replica (#6254): trimmed, blank is none. Left out of p_columns, the stored one is kept. It is a host the stored
+   -- password would be sent to, so a change of it is a change of how the row connects, below.
+   v_query_store_replica := CASE WHEN 'query_store_replica' = ANY (p_columns) THEN NULLIF(btrim(p_query_store_replica), '') ELSE v_old_query_store_replica END;
    -- The AWS role (#5452). Left out of p_columns, the stored role and external ID are kept. A role named in p_columns
    -- with a NULL value clears it, and a cleared role takes its external ID with it.
    v_role := CASE WHEN 'aws_role_arn' = ANY (p_columns) THEN p_aws_role_arn ELSE v_old_role END;
@@ -1023,7 +1053,7 @@ BEGIN
    END IF;
 
    -- Any change to how the row connects (host, port, database, read-only intent, authentication mode, username,
-   -- encryption, certificate trust, multi-subnet failover) never keeps the stored secret on a row that has one:
+   -- encryption, certificate trust, multi-subnet failover, Query Store replica) never keeps the stored secret on a row that has one:
    -- the same set the route refuses (#5240). The caller's word is not taken: the change is worked out from the row.
    v_connection_changed := v_host IS DISTINCT FROM v_old_host
       OR v_port IS DISTINCT FROM v_old_port
@@ -1033,7 +1063,8 @@ BEGIN
       OR v_username IS DISTINCT FROM v_old_username
       OR lower(v_encrypt_mode) IS DISTINCT FROM lower(v_old_encrypt_mode)
       OR v_trust_server_certificate IS DISTINCT FROM v_old_trust_server_certificate
-      OR v_multi_subnet_failover IS DISTINCT FROM v_old_multi_subnet_failover;
+      OR v_multi_subnet_failover IS DISTINCT FROM v_old_multi_subnet_failover
+      OR v_query_store_replica IS DISTINCT FROM v_old_query_store_replica;
 
    -- A row that holds a remediation secret, or a hypothetical-index login secret (#6170), is not moved from here,
    -- whatever else the call sends: that secret is set and changed on the service host, and a new main password
@@ -1075,6 +1106,7 @@ BEGIN
           encrypt_mode = v_encrypt_mode,
           trust_server_certificate = v_trust_server_certificate,
           multi_subnet_failover = v_multi_subnet_failover,
+          query_store_replica = v_query_store_replica,
           monthly_cost_usd = CASE WHEN 'monthly_cost_usd' = ANY (p_columns) THEN p_monthly_cost_usd ELSE s.monthly_cost_usd END,
           aws_role_arn = v_role,
           aws_external_id = v_ext,
@@ -1089,6 +1121,42 @@ BEGIN
    outcome := 'saved';
    RETURN NEXT;
 END;
+$fn$;
+REVOKE ALL ON FUNCTION config.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric, text, text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION config.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric, text, text, text) TO viewer, mcp;
+
+-- #6254: the 17-argument edit function stays as a permanent wrapper over the 18-argument one, for a caller built before the Query
+--     Store replica column. It passes NULL for the replica and strips the column name from p_columns, so a caller of the older
+--     signature can neither change nor clear a replica. Same grants, same owner.
+CREATE OR REPLACE FUNCTION config.edit_monitored_server(
+   p_server_id integer,
+   p_expected_modified_at timestamp,
+   p_columns text[],
+   p_name text,
+   p_host text,
+   p_port integer,
+   p_database text,
+   p_read_only_intent boolean,
+   p_auth text,
+   p_username text,
+   p_secret text,
+   p_encrypt_mode text,
+   p_trust_server_certificate boolean,
+   p_multi_subnet_failover boolean,
+   p_monthly_cost_usd numeric,
+   p_aws_role_arn text,
+   p_aws_external_id text)
+RETURNS TABLE (outcome text, new_modified_at timestamp)
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+   SELECT e.outcome, e.new_modified_at
+   FROM config.edit_monitored_server(
+      p_server_id, p_expected_modified_at,
+      array_remove(COALESCE(p_columns, ARRAY[]::text[]), 'query_store_replica'),
+      p_name, p_host, p_port, p_database, p_read_only_intent, p_auth, p_username, p_secret, p_encrypt_mode,
+      p_trust_server_certificate, p_multi_subnet_failover, p_monthly_cost_usd, p_aws_role_arn, p_aws_external_id, NULL::text) AS e;
 $fn$;
 REVOKE ALL ON FUNCTION config.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric, text, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION config.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric, text, text) TO viewer, mcp;
@@ -1632,7 +1700,10 @@ BEGIN
       OR NEW.username IS DISTINCT FROM OLD.username
       OR lower(NEW.encrypt_mode) IS DISTINCT FROM lower(OLD.encrypt_mode)
       OR NEW.trust_server_certificate IS DISTINCT FROM OLD.trust_server_certificate
-      OR NEW.multi_subnet_failover IS DISTINCT FROM OLD.multi_subnet_failover;
+      OR NEW.multi_subnet_failover IS DISTINCT FROM OLD.multi_subnet_failover
+      -- The Query Store replica (#6254) is a host the stored password would be sent to. Read through to_jsonb, blank as none, so this
+      -- function also runs on a store below V211 that does not have the column yet.
+      OR COALESCE(NULLIF(btrim(to_jsonb(NEW) ->> 'query_store_replica'), ''), '') IS DISTINCT FROM COALESCE(NULLIF(btrim(to_jsonb(OLD) ->> 'query_store_replica'), ''), '');
 
    -- A remediation secret that is kept goes with the login name it was stored for: that name is as much a part of how
    -- the row is reached as the host is, so it is not changed here either. Not part of v_moved, so it never raises PW002.

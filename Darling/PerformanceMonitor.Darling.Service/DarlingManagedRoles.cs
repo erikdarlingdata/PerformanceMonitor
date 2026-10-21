@@ -196,6 +196,8 @@ public static class DarlingManagedRoles
                 "remediation_username",
                 /* V203 (#6170): the hypothetical-index login's LOGIN NAME. Non-secret on the same reasoning as `remediation_username`. */
                 "hypothetical_index_username",
+                /* V211 (#6254): the Query Store replica HOST. Non-secret on the same reasoning as `host` above, which is already readable. */
+                "query_store_replica",
                 /* V169 (#5452): the AWS role Darling assumes for an RDS or Aurora target, and whether an external
                    ID is stored with it. Non-secret: an account id is an identifier, not a credential, and the
                    viewer has to be able to SHOW which role a target uses. The flag lets it show that an
@@ -1737,6 +1739,11 @@ GRANT EXECUTE ON FUNCTION {config}.record_custom_alert_resolution(integer, text,
 --     tools/provision-roles.sql, and is told to re-run it when the function is missing.
 {BuildEditMonitoredServerFunctionSql(config)}
 GRANT EXECUTE ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerSignature}) TO {viewer}, {mcp};
+-- #6254: the 17-argument edit function stays as a permanent wrapper over the 18-argument one, for a caller built before the Query
+--     Store replica column. It passes NULL for the replica and strips the column name from p_columns, so a caller of the older
+--     signature can neither change nor clear a replica. Same grants, same owner.
+{BuildEditMonitoredServerSeventeenWrapperSql(config)}
+GRANT EXECUTE ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerSeventeenSignature}) TO {viewer}, {mcp};
 -- #5452: the 15-argument edit function stays as a permanent wrapper over the 17-argument one, for a caller that
 --     was built before the AWS role columns. It passes NULL for both and strips the two AWS column names from
 --     p_columns, so a caller of the old signature can neither change nor clear a role. Same grants, same owner.
@@ -2822,7 +2829,8 @@ BEGIN
                 'name', s.name, 'engine', s.engine, 'host', s.host, 'port', s.port, 'database', s.database,
                 'auth', s.auth, 'username', s.username, 'encryptedPassword', s.encrypted_password,
                 'readOnlyIntent', s.read_only_intent, 'trustServerCertificate', s.trust_server_certificate,
-                'encryptMode', s.encrypt_mode, 'multiSubnetFailover', s.multi_subnet_failover))
+                'encryptMode', s.encrypt_mode, 'multiSubnetFailover', s.multi_subnet_failover,
+                'queryStoreReplica', NULLIF(btrim(s.query_store_replica), '')))
         INTO v_args
       FROM {config}.config_monitored_servers AS s
       WHERE s.server_id = p_server_id;
@@ -2859,9 +2867,14 @@ REVOKE ALL ON FUNCTION {config}.request_mcp_command(text, integer, integer, text
     internal const string McpMonitoredServerUpdateColumns =
         "server_id, name, host, database, auth, username, encrypted_password, encrypt_mode, trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd, capture_plans, is_enabled, created_at, modified_at, alert_delivery_mode_override, engine, port, plan_force_bot_enabled, remediation_username, remediation_encrypted_password";
 
-    /// <summary>The argument types of <c>config.edit_monitored_server</c> (#5240), in order. The one place the signature is
+    /// <summary>The argument types of <c>config.edit_monitored_server</c> (#5240, 18 since #6254), in order. The one place the signature is
     /// spelled for the <c>GRANT EXECUTE</c>, so a changed parameter list cannot leave the grant naming another function.</summary>
-    internal const string EditMonitoredServerSignature = "integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric, text, text";
+    internal const string EditMonitoredServerSignature = "integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric, text, text, text";
+
+    /// <summary>The argument types of the 17-argument <c>config.edit_monitored_server</c> that callers built before the Query
+    /// Store replica column (#6254) still call: a permanent wrapper over <see cref="EditMonitoredServerSignature"/>'s function
+    /// (<see cref="BuildEditMonitoredServerSeventeenWrapperSql"/>).</summary>
+    internal const string EditMonitoredServerSeventeenSignature = "integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric, text, text";
 
     /// <summary>The argument types of the 15-argument <c>config.edit_monitored_server</c> that callers built before the AWS
     /// role columns (#5452) still call: a permanent wrapper over <see cref="EditMonitoredServerSignature"/>'s function
@@ -2898,7 +2911,8 @@ CREATE OR REPLACE FUNCTION {config}.edit_monitored_server(
    p_multi_subnet_failover boolean,
    p_monthly_cost_usd numeric,
    p_aws_role_arn text,
-   p_aws_external_id text)
+   p_aws_external_id text,
+   p_query_store_replica text)
 RETURNS TABLE (outcome text, new_modified_at timestamp)
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -2915,6 +2929,8 @@ DECLARE
    v_old_encrypt_mode text;
    v_old_trust_server_certificate boolean;
    v_old_multi_subnet_failover boolean;
+   v_old_query_store_replica text;
+   v_query_store_replica text;
    v_host text;
    v_port integer;
    v_auth text;
@@ -2940,10 +2956,10 @@ BEGIN
    SELECT s.modified_at, s.host, s.port, s.auth, s.database, s.read_only_intent, s.username, s.encrypt_mode,
           s.trust_server_certificate, s.multi_subnet_failover,
           (COALESCE(s.remediation_encrypted_password, '') <> '' OR COALESCE((to_jsonb(s) ->> 'hypothetical_index_encrypted_password'), '') <> ''),
-          s.aws_role_arn, s.aws_external_id
+          s.aws_role_arn, s.aws_external_id, NULLIF(btrim(s.query_store_replica), '')
    INTO v_old_modified_at, v_old_host, v_old_port, v_old_auth, v_old_database, v_old_read_only_intent,
         v_old_username, v_old_encrypt_mode, v_old_trust_server_certificate, v_old_multi_subnet_failover,
-        v_remediation_held, v_old_role, v_old_ext
+        v_remediation_held, v_old_role, v_old_ext, v_old_query_store_replica
    FROM {config}.config_monitored_servers AS s
    WHERE s.server_id = p_server_id
    FOR UPDATE OF s;
@@ -2968,6 +2984,9 @@ BEGIN
    v_encrypt_mode := CASE WHEN 'encrypt_mode' = ANY (p_columns) THEN p_encrypt_mode ELSE v_old_encrypt_mode END;
    v_trust_server_certificate := CASE WHEN 'trust_server_certificate' = ANY (p_columns) THEN p_trust_server_certificate ELSE v_old_trust_server_certificate END;
    v_multi_subnet_failover := CASE WHEN 'multi_subnet_failover' = ANY (p_columns) THEN p_multi_subnet_failover ELSE v_old_multi_subnet_failover END;
+   -- The Query Store replica (#6254): trimmed, blank is none. Left out of p_columns, the stored one is kept. It is a host the stored
+   -- password would be sent to, so a change of it is a change of how the row connects, below.
+   v_query_store_replica := CASE WHEN 'query_store_replica' = ANY (p_columns) THEN NULLIF(btrim(p_query_store_replica), '') ELSE v_old_query_store_replica END;
    -- The AWS role (#5452). Left out of p_columns, the stored role and external ID are kept. A role named in p_columns
    -- with a NULL value clears it, and a cleared role takes its external ID with it.
    v_role := CASE WHEN 'aws_role_arn' = ANY (p_columns) THEN p_aws_role_arn ELSE v_old_role END;
@@ -3009,7 +3028,7 @@ BEGIN
    END IF;
 
    -- Any change to how the row connects (host, port, database, read-only intent, authentication mode, username,
-   -- encryption, certificate trust, multi-subnet failover) never keeps the stored secret on a row that has one:
+   -- encryption, certificate trust, multi-subnet failover, Query Store replica) never keeps the stored secret on a row that has one:
    -- the same set the route refuses (#5240). The caller's word is not taken: the change is worked out from the row.
    v_connection_changed := v_host IS DISTINCT FROM v_old_host
       OR v_port IS DISTINCT FROM v_old_port
@@ -3019,7 +3038,8 @@ BEGIN
       OR v_username IS DISTINCT FROM v_old_username
       OR lower(v_encrypt_mode) IS DISTINCT FROM lower(v_old_encrypt_mode)
       OR v_trust_server_certificate IS DISTINCT FROM v_old_trust_server_certificate
-      OR v_multi_subnet_failover IS DISTINCT FROM v_old_multi_subnet_failover;
+      OR v_multi_subnet_failover IS DISTINCT FROM v_old_multi_subnet_failover
+      OR v_query_store_replica IS DISTINCT FROM v_old_query_store_replica;
 
    -- A row that holds a remediation secret, or a hypothetical-index login secret (#6170), is not moved from here,
    -- whatever else the call sends: that secret is set and changed on the service host, and a new main password
@@ -3061,6 +3081,7 @@ BEGIN
           encrypt_mode = v_encrypt_mode,
           trust_server_certificate = v_trust_server_certificate,
           multi_subnet_failover = v_multi_subnet_failover,
+          query_store_replica = v_query_store_replica,
           monthly_cost_usd = CASE WHEN 'monthly_cost_usd' = ANY (p_columns) THEN p_monthly_cost_usd ELSE s.monthly_cost_usd END,
           aws_role_arn = v_role,
           aws_external_id = v_ext,
@@ -3079,8 +3100,48 @@ $fn$;
 REVOKE ALL ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerSignature}) FROM PUBLIC;";
 
     /// <summary>
+    /// The 17-argument <c>config.edit_monitored_server</c> (#5452), kept for good as a wrapper over the 18-argument function
+    /// (#6254), for a caller built before the Query Store replica column existed. It passes NULL for the replica and removes
+    /// <c>query_store_replica</c> from <c>p_columns</c> first, so a caller of this signature cannot change or clear a replica,
+    /// however it builds its list. <c>SECURITY DEFINER</c> with a pinned <c>search_path</c>, revoked from PUBLIC; the caller adds
+    /// the <c>GRANT EXECUTE</c>. Must run after <see cref="BuildEditMonitoredServerFunctionSql"/>.
+    /// </summary>
+    internal static string BuildEditMonitoredServerSeventeenWrapperSql(string config) => $@"
+CREATE OR REPLACE FUNCTION {config}.edit_monitored_server(
+   p_server_id integer,
+   p_expected_modified_at timestamp,
+   p_columns text[],
+   p_name text,
+   p_host text,
+   p_port integer,
+   p_database text,
+   p_read_only_intent boolean,
+   p_auth text,
+   p_username text,
+   p_secret text,
+   p_encrypt_mode text,
+   p_trust_server_certificate boolean,
+   p_multi_subnet_failover boolean,
+   p_monthly_cost_usd numeric,
+   p_aws_role_arn text,
+   p_aws_external_id text)
+RETURNS TABLE (outcome text, new_modified_at timestamp)
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+   SELECT e.outcome, e.new_modified_at
+   FROM {config}.edit_monitored_server(
+      p_server_id, p_expected_modified_at,
+      array_remove(COALESCE(p_columns, ARRAY[]::text[]), 'query_store_replica'),
+      p_name, p_host, p_port, p_database, p_read_only_intent, p_auth, p_username, p_secret, p_encrypt_mode,
+      p_trust_server_certificate, p_multi_subnet_failover, p_monthly_cost_usd, p_aws_role_arn, p_aws_external_id, NULL::text) AS e;
+$fn$;
+REVOKE ALL ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerSeventeenSignature}) FROM PUBLIC;";
+
+    /// <summary>
     /// The 15-argument <c>config.edit_monitored_server</c> (#5452), kept for good as a wrapper over the 17-argument
-    /// function, for a caller built before the AWS role columns existed (the web route, the MCP tool and the service's
+    /// wrapper (which reaches the 18-argument function), for a caller built before the AWS role columns existed (the web route, the MCP tool and the service's
     /// own call all name the shorter list until they are moved). It passes NULL for the role and the external ID, and
     /// removes both AWS column names from <c>p_columns</c> first, so a caller of this signature cannot change or clear a
     /// role, however it builds its list. <c>SECURITY DEFINER</c> with a pinned <c>search_path</c>, revoked from PUBLIC;
@@ -3317,7 +3378,10 @@ BEGIN
       OR NEW.username IS DISTINCT FROM OLD.username
       OR lower(NEW.encrypt_mode) IS DISTINCT FROM lower(OLD.encrypt_mode)
       OR NEW.trust_server_certificate IS DISTINCT FROM OLD.trust_server_certificate
-      OR NEW.multi_subnet_failover IS DISTINCT FROM OLD.multi_subnet_failover;
+      OR NEW.multi_subnet_failover IS DISTINCT FROM OLD.multi_subnet_failover
+      -- The Query Store replica (#6254) is a host the stored password would be sent to. Read through to_jsonb, blank as none, so this
+      -- function also runs on a store below V211 that does not have the column yet.
+      OR COALESCE(NULLIF(btrim(to_jsonb(NEW) ->> 'query_store_replica'), ''), '') IS DISTINCT FROM COALESCE(NULLIF(btrim(to_jsonb(OLD) ->> 'query_store_replica'), ''), '');
 
    -- A remediation secret that is kept goes with the login name it was stored for: that name is as much a part of how
    -- the row is reached as the host is, so it is not changed here either. Not part of v_moved, so it never raises PW002.
@@ -3470,12 +3534,12 @@ WHERE t.tgrelid = 'config.config_monitored_servers'::regclass
     }
 
     /// <summary>
-    /// Both <c>config.edit_monitored_server</c> overloads (#5240, #5452), the 17-argument function first and then the wrapper
+    /// All three <c>config.edit_monitored_server</c> overloads (#5240, #5452, #6254), the 18-argument function first and then the wrappers
     /// over it: what a self-managed store replaces on every start (<see cref="EnsureServerPasswordRulesAsync"/>), because
     /// <c>CREATE OR REPLACE</c> keeps the grants the script made. The same text is in <c>tools/provision-roles.sql</c>.
     /// </summary>
     internal static string BuildEditMonitoredServerFunctionsSql(string config) =>
-        BuildEditMonitoredServerFunctionSql(config) + BuildEditMonitoredServerLegacyWrapperSql(config);
+        BuildEditMonitoredServerFunctionSql(config) + BuildEditMonitoredServerSeventeenWrapperSql(config) + BuildEditMonitoredServerLegacyWrapperSql(config);
 
     /// <summary>
     /// Whether the <c>config.edit_monitored_server</c> overloads of a store are the ones this build writes (#6170): body text
@@ -3493,6 +3557,7 @@ WHERE t.tgrelid = 'config.config_monitored_servers'::regclass
             foreach (var (signature, builder) in new (string, Func<string, string>)[]
             {
                 (EditMonitoredServerSignature, BuildEditMonitoredServerFunctionSql),
+                (EditMonitoredServerSeventeenSignature, BuildEditMonitoredServerSeventeenWrapperSql),
                 (EditMonitoredServerLegacySignature, BuildEditMonitoredServerLegacyWrapperSql),
             })
             {
@@ -3530,7 +3595,7 @@ WHERE t.tgrelid = 'config.config_monitored_servers'::regclass
                 }
             }
 
-            return present is 0 or 2;
+            return present is 0 or 3;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

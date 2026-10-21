@@ -1233,7 +1233,7 @@ public sealed class DarlingMcpServerAdminToolsLivePostgresTests
                     identityRow.IsDBNull(6) ? null : identityRow.GetString(6),
                     identityRow.IsDBNull(7) ? null : identityRow.GetString(7),
                     identityRow.GetBoolean(8),
-                    identityRow.GetBoolean(9));
+                    identityRow.GetBoolean(9), null);
                 Assert.Equal(password, TestKeyRings.Healthy.Open(storedSecret!, PasswordBinding.ForServer(identity)));
             }
 

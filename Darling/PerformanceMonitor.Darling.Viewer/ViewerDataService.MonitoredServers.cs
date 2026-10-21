@@ -571,7 +571,7 @@ WHERE server_id = $1";
                 reader.IsDBNull(3) ? null : reader.GetString(3), !reader.IsDBNull(4) && reader.GetBoolean(4),
                 reader.IsDBNull(5) ? null : reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6),
                 reader.IsDBNull(7) ? null : reader.GetString(7), !reader.IsDBNull(8) && reader.GetBoolean(8),
-                !reader.IsDBNull(9) && reader.GetBoolean(9));
+                !reader.IsDBNull(9) && reader.GetBoolean(9), null /* #6254: the Viewer reads and writes the Query Store replica in the darling-setting-ui part */);
             carriesStoredBlob = reader.GetBoolean(10);
             holdsRemediationSecret = reader.GetBoolean(11);
         }
