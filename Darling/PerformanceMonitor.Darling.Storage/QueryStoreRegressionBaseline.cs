@@ -65,16 +65,16 @@ public static class QueryStoreRegressionBaseline
 
     /// <summary>A rise in timeouts or errors qualifies when the recent per-hour rate is at least this many times the baseline's
     /// (#5506). A nonzero recent rate where the baseline had none qualifies whatever the multiple.</summary>
-    public const int FailureRateMultiple = 2;
+    public const int FailureRateMultiple = PerformanceMonitor.Analysis.PlanRegressionFailureRule.RateMultiple;
 
     /// <summary>A rise in timeouts or errors needs at least this many such runs in the recent window (#5506), so one stray
     /// timeout on a quiet query does not flag it.</summary>
-    public const int FailureMinRecentRuns = 3;
+    public const int FailureMinRecentRuns = PerformanceMonitor.Analysis.PlanRegressionFailureRule.MinRecentRuns;
 
     /// <summary>A timeouts-only or errors-only row is HIGH when its rate is at least this many times the baseline's (or the
     /// baseline had none), MEDIUM otherwise (#5506). Cost rows keep the duration bands; a failure row never gets CRITICAL,
     /// which stays the band of a duration more than doubled.</summary>
-    public const int FailureHighMultiple = 5;
+    public const int FailureHighMultiple = PerformanceMonitor.Analysis.PlanRegressionFailureRule.HighMultiple;
 
     /// <summary>Rows with no cost rise (timeouts or errors only) may take at most this share of the row cap, as
     /// <c>cap / FailureShareDivisor</c>, so a flood of error rows cannot push every cost row past the cap (#5506). Cost rows

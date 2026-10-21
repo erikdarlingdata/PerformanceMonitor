@@ -969,6 +969,11 @@ public static class FactAdvice
     private static bool Fired(IReadOnlyDictionary<string, Fact> facts, string key) =>
         facts.TryGetValue(key, out var f) && f.Severity > 0;
 
+    /// <summary>#6267: PLAN_REGRESSION fired on a cost regression (a fact raised by timeouts or errors alone carries no cost
+    /// figures), the case the "force the historically faster plan" text is true for.</summary>
+    private static bool CostRegressionFired(IReadOnlyDictionary<string, Fact> facts) =>
+        Fired(facts, "PLAN_REGRESSION") && FactMeta(facts, "PLAN_REGRESSION", "worst_regression_factor") is not null;
+
     /// <summary>
     /// Names the query-level findings that ACTUALLY co-fired this window (plan regression, parameter
     /// sensitivity, missing indexes, plan warnings), so a CPU/wait remediation points at the real
@@ -981,7 +986,7 @@ public static class FactAdvice
            different inputs, so it is named second and carries no force advice. */
         if (Fired(facts, "PARAMETER_SENSITIVITY"))
             bits.Add("parameter sensitivity — a plan is far more expensive for some parameter values (that finding has the figures)");
-        if (Fired(facts, "PLAN_REGRESSION"))
+        if (CostRegressionFired(facts))
         {
             bits.Add(Fired(facts, "PARAMETER_SENSITIVITY")
                 ? "a plan regression — do not force a query that also shows the parameter-sensitivity signature (see that finding)"
@@ -1311,10 +1316,10 @@ public static class FactAdvice
         if (Fired(facts, "PARAMETER_SENSITIVITY"))
         {
             rem.Append("Parameter sensitivity co-fired — do NOT force a plan (it locks in the wrong shape for the other parameter values); use OPTION (RECOMPILE) on the affected statement, or branch the procedure by parameter.");
-            if (Fired(facts, "PLAN_REGRESSION"))
+            if (CostRegressionFired(facts))
                 rem.Append(" A plan regression co-fired too, but do not force a query that also shows that signature.");
         }
-        else if (Fired(facts, "PLAN_REGRESSION"))
+        else if (CostRegressionFired(facts))
             rem.Append("A plan regression co-fired — the engine attaches the historically faster plan and a ready-to-run force statement; forcing it is the fast fix while you address why the worse plan got chosen.");
         else
             rem.Append("Neither a plan regression nor parameter sensitivity fired this window, so the burst is most likely ad-hoc or scheduled work — the sessions active at the peak are attached; Resource Governor or moving that work off-peak is the durable fix.");
@@ -1719,6 +1724,45 @@ public static class FactAdvice
         };
     }
 
+    /// <summary>#6267: the sentence about queries whose timeouts (Aborted runs) or errors (Exception runs) rose, from the
+    /// PLAN_REGRESSION fact's failure metadata. Empty when none did.</summary>
+    private static string PlanRegressionFailureText(IReadOnlyDictionary<string, Fact> facts)
+    {
+        var hours = FactMeta(facts, "PLAN_REGRESSION", "failure_recent_hours") ?? 24;
+        var parts = new List<string>();
+        var timeouts = FactMeta(facts, "PLAN_REGRESSION", "timeout_offender_count");
+        if (timeouts is > 0)
+        {
+            parts.Add($"{Plural(timeouts.Value, "query")} timed out more often (the worst, query {FactMeta(facts, "PLAN_REGRESSION", "worst_timeout_query_id"):0}, had {FactMeta(facts, "PLAN_REGRESSION", "worst_timeout_recent_runs"):0} timed-out runs in the last {hours:0} hours against {FactMeta(facts, "PLAN_REGRESSION", "worst_timeout_baseline_runs"):0} in the rest of the window)");
+        }
+
+        var errors = FactMeta(facts, "PLAN_REGRESSION", "error_offender_count");
+        if (errors is > 0)
+        {
+            parts.Add($"{Plural(errors.Value, "query")} failed with errors more often (the worst, query {FactMeta(facts, "PLAN_REGRESSION", "worst_error_query_id"):0}, had {FactMeta(facts, "PLAN_REGRESSION", "worst_error_recent_runs"):0} failed runs in the last {hours:0} hours against {FactMeta(facts, "PLAN_REGRESSION", "worst_error_baseline_runs"):0} in the rest of the window)");
+        }
+
+        return parts.Count == 0
+            ? ""
+            : "Runs that did not complete are counted apart from the cost comparison, which sees successful runs only: " + string.Join("; ", parts) + ".";
+    }
+
+    /// <summary>#6267: the PLAN_REGRESSION block when no plan's cost regressed but timeouts or errors rose. The cost comparison
+    /// counts only runs that completed, so these queries can look no worse by cost.</summary>
+    private static AdviceBlock ComposePlanRegressionFailuresOnly(IReadOnlyDictionary<string, Fact> facts, AdviceBlock fallback)
+    {
+        var timeouts = FactMeta(facts, "PLAN_REGRESSION", "timeout_offender_count") is > 0;
+        var errors = FactMeta(facts, "PLAN_REGRESSION", "error_offender_count") is > 0;
+        var what = timeouts && errors ? "timeouts and errors" : timeouts ? "timeouts" : "errors";
+        return fallback with
+        {
+            Headline = $"Query Store shows more {what} than this window's baseline",
+            Investigation = PlanRegressionFailureText(facts)
+                + " Their cost per execution is not the signal here: a run that times out is cut off, so the runs that finish can look cheaper than the plan really is.",
+            Remediation = "Look at the named queries' recent plans in Query Store: a plan change, a stale statistic, a blocked or starved workload or a changed parameter can each turn a query's runs into timeouts or errors. Compare a recent plan with an older one before forcing anything, because forcing the historically cheaper plan answers a cost regression, not a failure rise."
+        };
+    }
+
     /// <summary>
     /// PLAN_REGRESSION composed: states the regression factor, latest-vs-best per-exec CPU, how many
     /// queries regressed, and PERMUTES on whether a forced plan is failing to apply (a silent fallback
@@ -1728,8 +1772,10 @@ public static class FactAdvice
     {
         var fallback = _byKey["PLAN_REGRESSION"];
         var factor = FactMeta(facts, "PLAN_REGRESSION", "worst_regression_factor");
+        var failureOffenders = FactMeta(facts, "PLAN_REGRESSION", "failure_offender_count");
+        /* #6267: a fact raised by timeouts or errors alone carries no cost figures. */
         if (factor is null)
-            return fallback;
+            return failureOffenders is > 0 ? ComposePlanRegressionFailuresOnly(facts, fallback) : fallback;
 
         var offenders = FactMeta(facts, "PLAN_REGRESSION", "offender_count");
         var latest = FactMeta(facts, "PLAN_REGRESSION", "latest_cpu_per_exec_us");
@@ -1789,6 +1835,10 @@ public static class FactAdvice
             rem += " A forced plan is also failing to apply, so clear the broken force (or fix why it fails) — it is not taking effect, and the plan was likely evicted or invalidated.";
         if (unverified is > 0)
             rem += $" {Plural(unverified.Value, "reported query")} could not be compared (a stored plan or the statement text was unavailable), so check each one's compiled parameter values and statistics dates before forcing.";
+
+        var failureText = PlanRegressionFailureText(facts);
+        if (failureText.Length > 0)
+            inv.Append(' ').Append(failureText);
 
         return fallback with
         {

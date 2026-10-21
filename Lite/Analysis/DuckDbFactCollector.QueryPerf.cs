@@ -317,10 +317,22 @@ ORDER BY worker_ratio DESC";
         try
         {
             var candidates = new List<PlanRegressionCandidate>();
+            var failures = new List<PlanRegressionFailureRule.Failure>();
             {
                 using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
                 using var connection = _duckDb.CreateConnection();
                 await connection.OpenAsync(context.CancellationToken);
+
+                /* #6267: the queries whose timeouts or errors rose. The cost read below counts Regular runs only, so a plan
+                   that regresses into timeouts or errors is found here. A failed read costs the failure half only. */
+                try
+                {
+                    failures = await ReadPlanRegressionFailuresAsync(connection, context);
+                }
+                catch (Exception failureEx) when (!AnalysisAbandon.IsExpected(failureEx, context.CancellationToken))
+                {
+                    ReportCollectionFailure(failureEx, context);
+                }
 
                 using var cmd = connection.CreateCommand();
                 cmd.CommandText = @"
@@ -591,7 +603,7 @@ LIMIT 100";
 
             context.PlanRegressionOffenders = offenders;
 
-            if (offenderCount == 0) return;
+            if (offenderCount == 0 && failures.Count == 0) return;
 
             var fact = new Fact
             {
@@ -602,11 +614,6 @@ LIMIT 100";
                 Metadata = new Dictionary<string, double>
                 {
                     ["offender_count"] = offenderCount,
-                    ["worst_regression_factor"] = worstFactor,
-                    ["worst_query_id"] = worstQueryId,
-                    ["latest_cpu_per_exec_us"] = worstLatestCpu,
-                    ["best_cpu_per_exec_us"] = worstBestCpu,
-                    ["regressed_dimension"] = worstDimension,
                     ["latest_is_forced"] = worstLatestForced,
                     ["force_failure_count"] = worstForceFailures,
                     /* #3953 parity: Lite reads its raw slice (0); Darling's 1 is the interval table. */
@@ -621,9 +628,23 @@ LIMIT 100";
                     /* #5631: how the worst kept offender's inputs were judged: 1 same compiled values, 2 statistics
                        changed between the compiles, 0 not checked. The advice reads it so it claims no cause the
                        data does not show. */
-                    ["worst_input_basis"] = kept[0].InputBasis,
+                    ["worst_input_basis"] = offenderCount > 0 ? kept[0].InputBasis : 0,
                 }
             };
+
+            /* The cost figures exist only when a plan's cost regressed: a fact raised by failures alone carries none, so the
+               advice reads their absence as "no cost regression" and not as a zero factor (#6267). */
+            if (offenderCount > 0)
+            {
+                fact.Metadata["worst_regression_factor"] = worstFactor;
+                fact.Metadata["worst_query_id"] = worstQueryId;
+                fact.Metadata["latest_cpu_per_exec_us"] = worstLatestCpu;
+                fact.Metadata["best_cpu_per_exec_us"] = worstBestCpu;
+                fact.Metadata["regressed_dimension"] = worstDimension;
+            }
+
+            /* #6267: the failure figures, and the larger of the two values. */
+            fact.Value = Math.Max(worstFactor, PlanRegressionFailureRule.AddMetadata(fact.Metadata, failures));
 
             /* #3953: the worst offender's best plan's age at the window's end, in days. Absent only if the read
                returned no timestamp, which a plan with executions in the window cannot do. */
