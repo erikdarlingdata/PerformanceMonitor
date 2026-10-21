@@ -468,7 +468,7 @@ public class QueryStorePlanFetchTests
     /// The hint belongs ONLY on the statement that joins. The second statement of each builder reads the
     /// #temp and joins nothing, so forcing a strategy there would be cargo-cult - and a query-level hint on
     /// a joinless statement is the kind of thing that gets copied forward and later defended as load-bearing.
-    /// Exactly one hinted statement, exactly one plain RECOMPILE, in both builders.
+    /// The plan fetch: one hinted statement and one plain RECOMPILE. The text fetch (#6257): two hinted staging statements and one plain RECOMPILE.
     /// </summary>
     [Fact]
     public void TheBudgetStatementsKeepPlainRecompile_BecauseTheyJoinNothing()
@@ -480,7 +480,8 @@ public class QueryStorePlanFetchTests
 
         Assert.Equal(1, plan.Split("HASH JOIN").Length - 1);
         Assert.Equal(1, plan.Split("OPTION(RECOMPILE);").Length - 1);
-        Assert.Equal(1, text.Split("HASH JOIN").Length - 1);
+        /* #6257: the text fetch stages the query view and the text view separately, each read hinted, and the budget statement joins only temps. */
+        Assert.Equal(2, text.Split("HASH JOIN").Length - 1);
         Assert.Equal(1, text.Split("OPTION(RECOMPILE);").Length - 1);
     }
 
