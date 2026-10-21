@@ -4087,6 +4087,55 @@ internal static class DarlingDataReader
                 GetCollectionHealthAsync(postgres, scanServerId, scanWindowStart, scanToken),
             cancellationToken);
 
+    /// <summary>
+    /// #6254: the newest Query Store run's <c>read_source</c> on this server in the window, which collection health shows beside that
+    /// collector. The newest run, not the newest run that had one: a server whose setting was turned off must stop showing a source
+    /// the moment its runs stop writing one. One keyed index walk that stops at the first row.
+    /// </summary>
+    internal const string CollectionHealthReadSourceSql = @"
+SELECT read_source
+FROM v_collection_log
+WHERE server_id = $1
+AND   collector_name = $3
+AND   collection_time >= $2
+ORDER BY collection_time DESC, log_id DESC
+LIMIT 1";
+
+    /// <summary>
+    /// #6254: collector name to <c>read_source</c> for the collectors whose newest run has one. Empty when none does (every server with the
+    /// Query Store replica setting off), and then collection health is exactly what it was. A failed read is empty too, with a warning: the
+    /// health read answers without the extra field. A cancellation is not swallowed.
+    /// </summary>
+    internal static async Task<Dictionary<string, string>> ReadCollectionHealthReadSourcesAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime windowStartUtc, CancellationToken cancellationToken)
+    {
+        var sources = new Dictionary<string, string>(StringComparer.Ordinal);
+        try
+        {
+            await using var command = postgres.CreateCommand(CollectionHealthReadSourceSql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            AddInt(command, serverId);
+            AddTimestamp(command, windowStartUtc);
+            command.Parameters.Add(new NpgsqlParameter { Value = QueryStoreWideReadGuard.QueryStoreRawCollector });
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0))
+            {
+                var source = reader.GetString(0);
+                if (source.Length > 0)
+                {
+                    sources[QueryStoreWideReadGuard.QueryStoreRawCollector] = source;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            ReadScope.Warn($"#6254 collection health could not read the Query Store read source for server {serverId}; it is shown without one", ex);
+            return new Dictionary<string, string>(StringComparer.Ordinal);
+        }
+
+        return sources;
+    }
+
     public static async Task<List<CollectorHealth>> GetCollectionHealthAsync(
         NpgsqlDataSource postgres, int serverId, DateTime windowStartUtc, CancellationToken cancellationToken = default)
     {

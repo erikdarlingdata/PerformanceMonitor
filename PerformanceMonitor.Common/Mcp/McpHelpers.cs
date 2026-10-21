@@ -63,6 +63,69 @@ internal static class McpHelpers
     public static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = false };
 
     /// <summary>
+    /// #6254: adds <c>read_source</c> to the runs of a <c>get_collection_log</c> page that have one, in page order. A run with none (every
+    /// run of a server with the Query Store replica setting off, and every run from before the setting existed) gets no key at all, so a
+    /// page with no <c>read_source</c> is returned as it is, byte for byte. Shared by Lite and Darling so the two tools carry the same field.
+    /// </summary>
+    public static string WithRunsReadSource(string json, IEnumerable<string?> readSources)
+    {
+        var sources = readSources.ToList();
+        if (sources.All(s => s is null))
+        {
+            return json;
+        }
+
+        var root = System.Text.Json.Nodes.JsonNode.Parse(json)!;
+        if (root["runs"] is not System.Text.Json.Nodes.JsonArray runs)
+        {
+            return json;
+        }
+
+        for (var i = 0; i < runs.Count && i < sources.Count; i++)
+        {
+            if (sources[i] is { } source && runs[i] is System.Text.Json.Nodes.JsonObject run)
+            {
+                run["read_source"] = source;
+            }
+        }
+
+        return root.ToJsonString(JsonOptions);
+    }
+
+    /// <summary>
+    /// #6254: adds <c>read_source</c> to the <c>collectors</c> rows of a <c>get_collection_health</c> reply whose collector has one
+    /// (<paramref name="readSources"/> maps collector name to where its newest run read from). A collector with none, which is every
+    /// collector of a server with the Query Store replica setting off, gets no key, so a reply with no read source is returned as it is,
+    /// byte for byte. Shared by Lite and Darling so the two tools carry the same field.
+    /// </summary>
+    public static string WithCollectorReadSource(string json, IReadOnlyDictionary<string, string> readSources)
+    {
+        if (readSources.Count == 0)
+        {
+            return json;
+        }
+
+        var root = System.Text.Json.Nodes.JsonNode.Parse(json)!;
+        if (root["collectors"] is not System.Text.Json.Nodes.JsonArray collectors)
+        {
+            return json;
+        }
+
+        foreach (var node in collectors)
+        {
+            if (node is System.Text.Json.Nodes.JsonObject row
+                && row["collector"] is System.Text.Json.Nodes.JsonValue name
+                && name.TryGetValue<string>(out var collector)
+                && readSources.TryGetValue(collector, out var source))
+            {
+                row["read_source"] = source;
+            }
+        }
+
+        return root.ToJsonString(JsonOptions);
+    }
+
+    /// <summary>
     /// Truncates a string to the specified maximum length, adding a truncation suffix. The cut lands on a whole
     /// text element at or before <paramref name="maxLength"/> (<see cref="TextElementCutLength"/>), so it never
     /// splits an emoji's surrogate pair or a letter from its accent. A split pair would reach the caller as U+FFFD,

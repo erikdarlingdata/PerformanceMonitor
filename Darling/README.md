@@ -584,6 +584,7 @@ Two mutually exclusive modes — setting `managed: true` together with `connecti
 | `encryptedPassword` | *(none)* | DPAPI blob from `--encrypt-password` (preferred) |
 | `password` | *(none)* | A literal (dev only, warned on every use) or an `env:NAME` / `file:/path` reference (#1804) — references are the supported non-Windows shape and are not warned |
 | `readOnlyIntent` | `false` | Route to a readable AG secondary (`ApplicationIntent=ReadOnly`) |
+| `queryStoreReplica` | *(none)* | SQL Server only: a readable AG secondary (`host` or `host,port`) or a listener name that Darling reads Query Store from, instead of the server itself, so the primary carries none of that read. Empty (the default) reads the primary and changes nothing. Azure SQL Database never reads a replica. The replica host gets the same login and password as the server, so the replica must accept them. Changing it counts as a change of how the server is reached, so the web dashboard, the MCP `edit_server` tool and the desktop viewer ask for the password again. Collection health shows the newest Query Store run's `read_source` (for example `replica 12, primary 2`) beside the collector, only when a run has one |
 | `trustServerCertificate` | `false` | |
 | `encryptMode` | `"Mandatory"` | `Mandatory` / `Strict` / `Optional`; unknown values fail closed to `Mandatory` |
 | `multiSubnetFailover` | `false` | |

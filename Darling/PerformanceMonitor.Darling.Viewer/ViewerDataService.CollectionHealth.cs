@@ -493,7 +493,64 @@ public sealed partial class ViewerDataService
         }
 
         ApplyScheduledFrequencies(items, serverId, scheduleOverrides);
+        await ApplyReadSourceAsync(items, serverId, cancellationToken);
         return items;
+    }
+
+    /// <summary>
+    /// #6254: the newest Query Store run's <c>read_source</c> on this server in the trailing 7 days. The newest run, not the newest run
+    /// that had one, so a server whose Query Store replica setting was turned off stops showing a source as soon as its runs stop writing
+    /// one. One keyed index walk that stops at the first row.
+    /// </summary>
+    internal const string CollectionHealthReadSourceSql = @"
+SELECT read_source
+FROM v_collection_log
+WHERE server_id = $1
+AND   collector_name = 'query_store'
+AND   collection_time >= $2
+ORDER BY collection_time DESC, log_id DESC
+LIMIT 1";
+
+    /// <summary>
+    /// #6254: stamps the Query Store row with <see cref="CollectionHealthReadSourceSql"/>'s value. Null everywhere with the setting off
+    /// (every server until an operator sets it), and then no row changes and the grid is what it was. A failed read leaves the rows
+    /// unstamped: the health view answers without the extra note. A cancellation is not swallowed.
+    /// </summary>
+    private async Task ApplyReadSourceAsync(List<CollectorHealthRow> rows, int serverId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var command = _dataSource.CreateCommand(CollectionHealthReadSourceSql);
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            command.Parameters.Add(new NpgsqlParameter<DateTime>
+            {
+                TypedValue = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-7), DateTimeKind.Unspecified),
+            });
+            var value = await command.ExecuteScalarAsync(cancellationToken);
+            ApplyReadSource(rows, value as string);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            System.Diagnostics.Trace.TraceWarning($"#6254 collection health could not read the Query Store read source for server {serverId}; it is shown without one: {ex.GetType().Name}");
+        }
+    }
+
+    /// <summary>#6254: puts <paramref name="readSource"/> on the <c>query_store</c> row. Blank or null changes nothing. Pure, so a test needs no store.</summary>
+    internal static void ApplyReadSource(IEnumerable<CollectorHealthRow> rows, string? readSource)
+    {
+        if (string.IsNullOrWhiteSpace(readSource))
+        {
+            return;
+        }
+
+        foreach (var row in rows)
+        {
+            if (string.Equals(row.CollectorName, "query_store", StringComparison.Ordinal))
+            {
+                row.ReadSource = readSource;
+            }
+        }
     }
 
     /// <summary>
@@ -1273,7 +1330,11 @@ public class CollectorHealthRow
     /// identically. Never feeds <see cref="HealthStatus"/>.
     /// </summary>
     public string NoteFormatted =>
-        CollectorHealthClassifier.FormatCollectionNote(LastNote, NoteCount, TotalRuns, CollectorName, TargetHasUserDatabases, RecoveredNote);
+        CollectorHealthClassifier.FormatCollectionNote(LastNote, NoteCount, TotalRuns, CollectorName, TargetHasUserDatabases, RecoveredNote, ReadSource);
+
+    /// <summary>#6254: where the newest Query Store run read its rows from (for example <c>replica 12, primary 2</c>), shown in the Note column.
+    /// Null for every collector but Query Store and for every server with the replica setting off. Informational only: it never feeds <see cref="HealthStatus"/>.</summary>
+    public string? ReadSource { get; set; }
 }
 
 /// <summary>

@@ -2538,22 +2538,32 @@ namespace PerformanceMonitor.Common
         /// whether the emptiness is surprising, and a false alarm on a legitimately empty install is
         /// worse than a missing hint. The fleet rollup passes nothing at all, by design.
         /// </param>
+        /// <param name="readSource">
+        /// #6254: where the collector's newest run read its rows from, for a Query Store run that read a replica
+        /// (<c>replica 12, primary 2</c>). Null or blank, the default and every server with the setting off, adds
+        /// nothing, so the note is the one it was before.
+        /// </param>
         public static string FormatCollectionNote(
             string? lastNote,
             long noteCount,
             long totalRuns,
             string? collectorName = null,
             bool targetHasUserDatabases = false,
-            string? recoveredNote = null)
+            string? recoveredNote = null,
+            string? readSource = null)
         {
             /* #5646: the recovery sentence rides beside the run note, in the same column on every surface. */
             var runNote = FormatRunNote(lastNote, noteCount, totalRuns, collectorName, targetHasUserDatabases);
-            if (string.IsNullOrEmpty(recoveredNote))
+            var note = string.IsNullOrEmpty(recoveredNote)
+                ? runNote
+                : runNote.Length == 0 ? recoveredNote : recoveredNote + "; " + runNote;
+            if (string.IsNullOrWhiteSpace(readSource))
             {
-                return runNote;
+                return note;
             }
 
-            return runNote.Length == 0 ? recoveredNote : recoveredNote + "; " + runNote;
+            var source = "read source: " + readSource.Trim();
+            return note.Length == 0 ? source : note + "; " + source;
         }
 
         private static string FormatRunNote(
