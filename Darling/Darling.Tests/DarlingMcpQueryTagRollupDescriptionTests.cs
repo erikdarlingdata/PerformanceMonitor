@@ -11,6 +11,7 @@ using System.ComponentModel;
 using System.Linq;
 using System.Reflection;
 using ModelContextProtocol.Server;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -37,11 +38,14 @@ public sealed class DarlingMcpQueryTagRollupDescriptionTests
     }
 
     [Fact]
-    public void TheToolDescription_SaysTheQueryStoreSectionNeedsTheMinimum_BeforeTheGuide()
+    public void TheToolGuide_SaysTheQueryStoreSectionNeedsTheMinimum_WhileTheSharedHeadStaysLitesOwn()
     {
-        var text = Tool.GetCustomAttribute<DescriptionAttribute>()!.Description;
-        var head = text[..text.IndexOf("<<GUIDE>>", StringComparison.Ordinal)];
+        // The head is byte-identical on both SKUs (McpToolGuideTests) and Lite has no 24-hour minimum, so the note
+        // lives in the guide, which Darling alone serves.
+        var (head, guide) = McpToolGuide.Split(Tool.GetCustomAttribute<DescriptionAttribute>()!.Description);
+        var minimum = $"{DarlingQueryTagRollupReader.QueryStoreMinWindow.TotalHours:0}";
 
-        Assert.Contains($"query_store section needs hours_back {DarlingQueryTagRollupReader.QueryStoreMinWindow.TotalHours:0} or more", head, StringComparison.Ordinal);
+        Assert.Contains($"read only when hours_back is {minimum} or more", guide!, StringComparison.Ordinal);
+        Assert.DoesNotContain("hours_back", head, StringComparison.Ordinal);
     }
 }
