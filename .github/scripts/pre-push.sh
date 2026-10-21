@@ -10,6 +10,9 @@
 #      diff, or the hunk's enclosing declaration, or an added file's type). Symbols are added in order of how many
 #      test files name them; once the union would pass the cap the rest are dropped and listed, since a symbol named
 #      by most of the suite is the suite (the laptop never runs a full suite: CI decides).
+#   CI's FULL answer from map-select (a keep-full file changed) counts as a whole-suite selection too (#6336): the gate
+#   ends in GATE STOP, as it does over PRE_PUSH_MAX_CLASSES. It used to fall back to the symbol set there and report GREEN
+#   on a few hundred classes while CI ran them all (#6309: 146 classes).
 #   Stage 2 already ran every Stage=Guard class, so stage 3 leaves them out: map-select gets --guard-stage-separate and
 #   the symbol set drops the classes of `-list classes/json -trait Stage=Guard` (#5894). A diff of documentation files
 #   only selects just the classes that read a changed document as text (CI's docs fast path runs no test for it) and
@@ -28,7 +31,7 @@
 # git never commits).
 # Outcomes: GATE GREEN (exit 0). GATE RED (exit 1): a build, a run or a class listing failed, or a run reported
 # Total: 0 (it matched nothing, which the runner does not count as a failure). GATE STOP (exit 3): the selection is
-# the whole suite, which the laptop never runs; the Guard stage still ran, and a red in it wins over the stop.
+# the whole suite (over PRE_PUSH_MAX_CLASSES, or CI's map answers FULL), which the laptop never runs; the Guard stage still ran, and a red in it wins over the stop.
 # Live classes in the selection skip without a rig; the Skipped count is printed so you see it.
 set -uo pipefail
 DRY=0; BUILD=1; MAP=1; CAP=${PRE_PUSH_CAP:-250}; MAXC=${PRE_PUSH_MAX_CLASSES:-400}; BUDGET=${PRE_PUSH_ARG_BUDGET:-30000}
@@ -86,6 +89,7 @@ echo "diff: $(wc -l < "$SCRATCH/changed.txt" | tr -d ' ') changed files since me
 
 # Initialised empty: under set -u a declared but unassigned array is unbound, and an empty selection read as GATE RED.
 declare -A want_d=() want_l=()
+full_why=""   # set when CI's map answers FULL for a suite (#6336)
 if [ $MAP -eq 1 ]; then
   # PRE_PUSH_SELECTION replaces the nightly map and map-select (a replay, or the script's own tests)
   mapfile=${PRE_PUSH_SELECTION:-}; ids=""
@@ -128,6 +132,11 @@ except Exception:
       if head -n1 "$SCRATCH/keep-$suite.txt" | grep -qE '^SELECTED [0-9]+$'; then
         while read -r c; do [ -n "$c" ] && { if [ $suite = darling ]; then want_d["$c"]=map; else want_l["$c"]=map; fi; }; done < <(tail -n +2 "$SCRATCH/keep-$suite.txt")
         echo "map: $(basename "$(dirname "$mapfile")"), $suite $(head -n1 "$SCRATCH/keep-$suite.txt")"
+      elif head -n1 "$SCRATCH/keep-$suite.txt" | grep -q '^FULL'; then
+        # #6336: FULL is CI's own answer (a keep-full file changed): CI runs the whole suite, so this is a whole-suite
+        # selection, a STOP. It used to fall through to the symbol set here and report GREEN on a few hundred classes.
+        full_why="${full_why:-$suite: $(head -n1 "$SCRATCH/keep-$suite.txt" | cut -c1-140)}"
+        echo "map: $suite $(head -n1 "$SCRATCH/keep-$suite.txt" | cut -c1-140); the whole suite"
       else
         echo "map: $suite $(head -n1 "$SCRATCH/keep-$suite.txt" | cut -c1-140); symbol set only"
       fi
@@ -237,8 +246,10 @@ elif [ $((miss_n[darling] + miss_n[lite])) -gt 0 ]; then
 fi
 
 # #5868: the laptop never runs a full suite, so a selection the size of the suite is a STOP, never a GREEN.
-stop=0
-if [ "${sel_n[darling]}" -gt "$MAXC" ] || [ "${sel_n[lite]}" -gt "$MAXC" ]; then stop=1; fi
+stop=0; stop_why=""
+if [ "${sel_n[darling]}" -gt "$MAXC" ] || [ "${sel_n[lite]}" -gt "$MAXC" ]; then stop=1; stop_why="over PRE_PUSH_MAX_CLASSES=$MAXC in one project"; fi
+# #6336: CI's FULL answer is the whole suite whatever size the symbol set is
+if [ -n "$full_why" ]; then stop=1; stop_why="CI's test map answers FULL ($full_why)"; fi
 
 # batches cut by the length of their -class arguments, under the command-line limit (32,767 characters on Windows)
 for suite in darling lite; do
@@ -267,11 +278,12 @@ run_batches() { # run_batches <suite> <project>: every batch of the suite, even 
 }
 
 stopline="GATE STOP: selection is the whole suite (darling ${sel_n[darling]}, lite ${sel_n[lite]}): run the brief's classes; CI decides"
+if [ -n "$full_why" ]; then stopline="GATE STOP: selection is the whole suite (CI's map answers FULL): run the brief's classes; CI decides"; fi
 if [ $DRY -eq 1 ]; then
   sed 's/^/  darling: /' "$SCRATCH/selected-darling.txt"
   sed 's/^/  lite: /' "$SCRATCH/selected-lite.txt"
   run_batches darling "$DARLING"; run_batches lite "$LITE"
-  if [ $stop -eq 1 ]; then echo "$stopline (over PRE_PUSH_MAX_CLASSES=$MAXC in one project; dry run, nothing built or run)"; exit 3; fi
+  if [ $stop -eq 1 ]; then echo "$stopline ($stop_why; dry run, nothing built or run)"; exit 3; fi
   echo "GATE DRY-RUN: nothing built or run"; exit 0
 fi
 # a red Guard stage or listing already decides the gate, and a STOP runs no selected class at all
@@ -280,5 +292,5 @@ if [ ${#red[@]} -eq 0 ] && [ $stop -eq 0 ]; then
 fi
 
 if [ ${#red[@]} -gt 0 ]; then echo "GATE RED: ${red[*]}"; exit 1; fi
-if [ $stop -eq 1 ]; then echo "$stopline (over PRE_PUSH_MAX_CLASSES=$MAXC in one project; no selected class ran; logs $SCRATCH)"; exit 3; fi
+if [ $stop -eq 1 ]; then echo "$stopline ($stop_why; no selected class ran; logs $SCRATCH)"; exit 3; fi
 echo "GATE GREEN: guard stage of both suites and ${sel_n[darling]}+${sel_n[lite]} selected classes in $nbatch batches passed (logs $SCRATCH)"; exit 0
