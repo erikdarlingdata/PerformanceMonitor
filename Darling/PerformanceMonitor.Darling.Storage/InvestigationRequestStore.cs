@@ -450,12 +450,12 @@ ORDER BY n.created_at, n.note_id
 LIMIT $1";
 
     /* #5903: a decision lands only on a pending note, so a second click or a second viewer changes nothing. $1 note,
-       $2 the new state, $3 who, $4 when. */
+       $2 the new state, $3 who. The time is the store's clock (now()), returned for the journal row. */
     internal const string DecideNoteSql = @"
 UPDATE config.investigation_notes
-SET state = $2, decided_by = $3, decided_at = $4
+SET state = $2, decided_by = $3, decided_at = now()
 WHERE note_id = $1 AND state = 'pending'
-RETURNING source_request_id, server_id";
+RETURNING source_request_id, server_id, decided_at";
 
     internal static string ReportsRequestsSql => ReportsRequestsSelect + @"
 WHERE ($2::uuid IS NULL OR r.request_id = $2)
@@ -1627,25 +1627,24 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
        through here, so there is one statement, one clock and one decided_by rule. The update and its journal row share one
        transaction: a decision is never stamped without its audit row. */
     /// <summary>Approves (<paramref name="approve"/>) or rejects a pending note. False when the note is gone or already decided.
-    /// Throws <see cref="ArgumentException"/> when <paramref name="decidedBy"/> fails
-    /// <see cref="InvestigationNoteRules.ValidateDecidedBy"/>.</summary>
+    /// Throws <see cref="ArgumentException"/> when <paramref name="decidedBy"/> is not a <c>person:&lt;login&gt;</c> actor
+    /// (<see cref="InvestigationPersonWrites.ValidateActor"/>, the guard close and note hold), so no caller approves a note as an agent.
+    /// The decision time is the store's clock (<c>now()</c>), as the person close and note use, not the caller's.</summary>
     public async Task<bool> DecideNoteAsync(long noteId, bool approve, string decidedBy, CancellationToken cancellationToken = default)
     {
-        var refusal = InvestigationNoteRules.ValidateDecidedBy(decidedBy);
-        if (refusal is not null)
+        if (InvestigationPersonWrites.ValidateActor(decidedBy) is { } refusal)
         {
             throw new ArgumentException(refusal, nameof(decidedBy));
         }
 
-        decidedBy = decidedBy.Trim();
         var state = approve ? "approved" : "rejected";
         var journalEvent = approve ? "note_approved" : "note_rejected";
-        var now = Now();
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         Guid? sourceRequest;
         int? serverId;
-        await using (var command = Command(connection, transaction, DecideNoteSql, P(noteId), P(state), P(decidedBy), P(now)))
+        DateTime now;
+        await using (var command = Command(connection, transaction, DecideNoteSql, P(noteId), P(state), P(decidedBy)))
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
             if (!await reader.ReadAsync(cancellationToken))
@@ -1655,6 +1654,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
 
             sourceRequest = reader.IsDBNull(0) ? null : reader.GetGuid(0);
             serverId = reader.IsDBNull(1) ? null : reader.GetInt32(1);
+            now = reader.GetFieldValue<DateTime>(2);
         }
 
         await JournalAsync(connection, transaction, now, sourceRequest, null, serverId, journalEvent, decidedBy,

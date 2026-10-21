@@ -1247,8 +1247,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// born gated by the host's write gate (<see cref="Hosting.DarlingWebSeat.IsRequestAllowed"/> refuses every unsafe
     /// method to a read-only seat), 404 when the note is gone or already decided, 403 with <see cref="NoteDecisionRefusedMessage"/>
     /// when the store refuses the write for privilege (SQLSTATE 42501: deciding a note is an <c>admin</c> role write, and the web
-    /// host runs on whatever login it was given, the <c>viewer</c> role on a managed or compose store), 400 when the store's
-    /// <c>decided_by</c> rule refuses the seat's name (<see cref="InvestigationNoteRules.ValidateDecidedBy"/>), a fixed-sentence 500 or 503
+    /// host runs on whatever login it was given, the <c>viewer</c> role on a managed or compose store), 400 when the person
+    /// rule refuses the seat's name (<see cref="InvestigationPersonWrites.ValidateActor"/>), a fixed-sentence 500 or 503
     /// for any other store failure. The decision is stamped as every web write is: the seat's <see cref="DarlingWebSeat.EditorPrincipal"/>
     /// (the signed-in subject, else <c>web</c>) shaped as <c>person:&lt;name&gt;</c>, as the Viewer stamps a decision. The list body goes through the statement sweep (#4348) like every other body that carries text an agent wrote.
     /// </summary>
@@ -1290,11 +1290,6 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 return PersonActorRefusedResult();
             }
 
-            if (InvestigationNoteRules.ValidateDecidedBy(decidedBy) is { } refused)
-            {
-                return NoteDeciderRefusedResult(refused);
-            }
-
             try
             {
                 if (!await notes.ApproveNoteAsync(id, decidedBy, context.RequestAborted))
@@ -1333,11 +1328,6 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             if (InvestigationPersonWrites.ValidateActor(decidedBy) is not null)
             {
                 return PersonActorRefusedResult();
-            }
-
-            if (InvestigationNoteRules.ValidateDecidedBy(decidedBy) is { } refused)
-            {
-                return NoteDeciderRefusedResult(refused);
             }
 
             try
@@ -1442,11 +1432,6 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <summary>The 403 a refused note decision answers: the fixed <see cref="NoteDecisionRefusedMessage"/> sentence in the mute-rule error envelope.</summary>
     private static IResult NoteDecisionRefusedResult() =>
         ErrorResult(NoteDecisionRefusedMessage, StatusCodes.Status403Forbidden);
-
-    /// <summary>The 400 a decision answers when the store's <c>decided_by</c> rule refuses the seat's name: the rule's own plain
-    /// sentence (<see cref="InvestigationNoteRules.ValidateDecidedBy"/>), which never carries the name itself.</summary>
-    private static IResult NoteDeciderRefusedResult(string rulesSentence) =>
-        ErrorResult(rulesSentence, StatusCodes.Status400BadRequest);
 
     /// <summary>True when the store refused the statement for privilege (SQLSTATE 42501).</summary>
     internal static bool IsInsufficientPrivilege(Exception ex) => ex is PostgresException { SqlState: "42501" };
@@ -1559,6 +1544,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
         app.MapPut("/api/agent-changes/{id:long}/undo", async (HttpContext context, long id) =>
         {
+            /* #6265: an undo is a person's act, so it needs a signed-in admin before anything is read or written. */
+            if (!DarlingWebSeat.IsSignedInAdmin(context))
+            {
+                return SignInRequiredResult();
+            }
+
             if (!IsJsonContentType(context.Request.ContentType))
             {
                 return UnsupportedMediaTypeResult();
@@ -1609,6 +1600,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
         app.MapPut("/api/agent-changes/switch", async (HttpContext context) =>
         {
+            /* #6265: the service-wide agent switch is a person's act, so it needs a signed-in admin before anything is read or written. */
+            if (!DarlingWebSeat.IsSignedInAdmin(context))
+            {
+                return SignInRequiredResult();
+            }
+
             if (!IsJsonContentType(context.Request.ContentType))
             {
                 return UnsupportedMediaTypeResult();

@@ -369,7 +369,7 @@ WHERE coalesce(scope_server_id, 0) = coalesce($1::integer, 0) AND coalesce(scope
             throw new ArgumentException(error, nameof(login));
         }
 
-        /* #5903: the decide statement, its journal row, the clock and the decided_by rule (1 to 128 characters) are the storage
+        /* #5903: the decide statement, its journal row, the clock and the person guard are the storage
            store's, the one the web routes and Lite's twin share; the Viewer only adds its two translations. */
         var actor = InvestigationPersonActor(login);
         try
@@ -556,7 +556,7 @@ WHERE coalesce(scope_server_id, 0) = coalesce($1::integer, 0) AND coalesce(scope
         }
     }
 
-    /// <summary>The login the actor names: not blank, 1 to 64 letters, digits or . _ : - @ \ (the undo path's shape).</summary>
+    /// <summary>The login the actor names: not blank, and the undo path's person shape (1 to 256 characters: letters, digits, single spaces, a few punctuation marks).</summary>
     public static string? ValidateInvestigationLogin(string? login) => InvestigationPersonWrites.ValidateLogin(login);
 
     /// <summary>A close reason: not blank, at most 500 characters.</summary>

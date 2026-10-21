@@ -34,8 +34,8 @@ public static class InvestigationPersonWrites
     /// <summary>A written note's longest lifetime in days.</summary>
     public const int NoteMaxDays = 365;
 
-    /// <summary>The longest journal actor (the same bound the note decision holds).</summary>
-    public const int ActorMaxLength = 128;
+    /// <summary>The longest journal actor: the prefix and the longest name the undo path's person shape holds.</summary>
+    public const int ActorMaxLength = 7 + AgentChangeUndo.LoginMaxLength;
 
     /// <summary>The longest metric name a note may carry.</summary>
     public const int MetricNameMaxLength = 128;
@@ -45,10 +45,10 @@ public static class InvestigationPersonWrites
 
     /// <summary>The journal actor for a person: <c>person:&lt;login&gt;</c>, as the V184 journal records people. Shapes the name only;
     /// <see cref="ValidateActor"/> says whether the result may be written.</summary>
-    public static string PersonActor(string login) => PersonActorPrefix + login.Trim();
+    public static string PersonActor(string login) => PersonActorPrefix + AgentChangeUndo.NormalizeLogin(login);
 
-    /// <summary>The login the actor names: not blank, and the same shape the undo path holds a person's name to (1 to 64 letters, digits
-    /// or . _ : - @ \), which refuses control, format, bidi and zero-width characters, and whitespace, in a name.</summary>
+    /// <summary>The login the actor names: not blank, and the same shape the undo path holds a person's name to (<see cref="AgentChangeUndo.IsValidLogin"/>),
+    /// which refuses control, format, bidi and zero-width characters and odd whitespace in a name.</summary>
     public static string? ValidateLogin(string? login)
     {
         if (string.IsNullOrWhiteSpace(login))
@@ -56,16 +56,7 @@ public static class InvestigationPersonWrites
             return "The viewer could not tell who you are, so it cannot record the change.";
         }
 
-        try
-        {
-            _ = AgentChangeUndo.PersonActor(login);
-        }
-        catch (ArgumentException)
-        {
-            return "The signed-in name must be 1 to 64 letters, digits or . _ : - @ \\ to be recorded as the person who made a change.";
-        }
-
-        return PersonActor(login).Length > ActorMaxLength ? "The login is longer than 128 characters." : null;
+        return AgentChangeUndo.IsValidLogin(AgentChangeUndo.NormalizeLogin(login)) ? null : AgentChangeUndo.LoginRefusal;
     }
 
     /// <summary>The storage guard: a <c>person:&lt;login&gt;</c> actor built by <see cref="PersonActor"/> from a valid login, and nothing

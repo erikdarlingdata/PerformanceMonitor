@@ -541,7 +541,7 @@ WHERE status = 'in_progress'
 
                 return UndoPlanChangeArgs.LoginIsValid(command.RequestedBy)
                     ? new CommandPlan(CommandKind.UndoPlanChange, null, null, "plan change undone", null)
-                    : Fail("undo_plan_change requires requested_by to be the person's login (1 to 64 letters, digits or . _ : - @ \\)");
+                    : Fail("undo_plan_change requires requested_by to be the person's login (1 to 256 characters: letters, digits, spaces and a few punctuation marks)");
 
             case "fetch_active_queries":
                 /* Worker-delegated like fetch_plan (needs the target's LIVE runtime connection to read what is

@@ -323,9 +323,9 @@ WHERE event = 'note_rejected' AND actor = 'person:tester' AND request_id = '{rej
 
     /* #5903 round 1: a note is born with a 90-day expires_at and the brief read drops one past it, so approving an expired
        pending note would do nothing. The list leaves it out and shows the expiry of the ones it lists; the one decide
-       statement refuses a decided_by outside 1 to 128 characters. */
+       statement refuses a decided_by that is not a person (#6265). */
     [Fact]
-    public async Task AnExpiredPendingNote_IsNotListed_AListedOneShowsItsExpiry_AndADecidedByOver128IsRefused()
+    public async Task AnExpiredPendingNote_IsNotListed_AListedOneShowsItsExpiry_AndOnlyAPersonDecides()
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the investigation note decision live tests.");
@@ -343,13 +343,75 @@ WHERE event = 'note_rejected' AND actor = 'person:tester' AND request_id = '{rej
         Assert.Equal(DateTimeKind.Utc, pending.ExpiresAtUtc.Kind);
         Assert.InRange(pending.ExpiresAtUtc, DateTime.UtcNow.AddDays(90).AddMinutes(-5), DateTime.UtcNow.AddDays(90).AddMinutes(5));
 
-        await Assert.ThrowsAsync<ArgumentException>(() => store.ApproveNoteAsync(pending.NoteId, new string('x', 129), ct));
-        await Assert.ThrowsAsync<ArgumentException>(() => store.RejectNoteAsync(pending.NoteId, "  ", ct));
+        /* #6265: the one decide statement holds the same person guard as close and note: only person:<name> decides. */
+        foreach (var actor in new[] { "agent:x", "mcp:x", "service", "web", "person:", "  ", "x", "person:erik\u200B", "person:erik  smith", " person:erik" })
+        {
+            await Assert.ThrowsAsync<ArgumentException>(() => store.ApproveNoteAsync(pending.NoteId, actor, ct));
+            await Assert.ThrowsAsync<ArgumentException>(() => store.RejectNoteAsync(pending.NoteId, actor, ct));
+        }
+
         Assert.Equal("0", await ScalarAsync(owner,
             "SELECT count(*) FROM config.investigation_journal WHERE event IN ('note_approved', 'note_rejected')", ct));
-        Assert.True(await store.ApproveNoteAsync(pending.NoteId, "  " + new string('x', 128) + "  ", ct));
-        Assert.Equal(new string('x', 128), await ScalarAsync(owner,
+        Assert.Equal("pending", await ScalarAsync(owner, $"SELECT state FROM config.investigation_notes WHERE note_id = {pending.NoteId}", ct));
+
+        /* A name of exactly the longest length decides, and is recorded whole. */
+        var longest = new string('x', AgentChangeUndo.LoginMaxLength);
+        Assert.True(await store.ApproveNoteAsync(pending.NoteId, InvestigationPersonWrites.PersonActor(longest), ct));
+        Assert.Equal("person:" + longest, await ScalarAsync(owner,
             $"SELECT decided_by FROM config.investigation_notes WHERE note_id = {pending.NoteId}", ct));
+    }
+
+    /* #6265: a decision carries the store's clock, not the caller's. A desktop whose clock is 400 days slow still stamps decided_at
+       and the journal row with the store's time, and the two agree. */
+    [Fact]
+    public async Task ADecision_UsesTheStoresClock_NotTheCallersClock()
+    {
+        var baseConnectionString = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the investigation note decision live tests.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var owner = await MigratedAsync(scratch, ct);
+        var store = new InvestigationRequestStore(owner, 30, () => DateTime.UtcNow);
+        await ProposeAsync(store, DateTime.UtcNow.AddHours(-3), "approve from a slow clock", ct);
+        await ProposeAsync(store, DateTime.UtcNow.AddHours(-2), "reject from a slow clock", ct);
+        var pending = await store.ListPendingNotesAsync(200, ct);
+        var skewed = new InvestigationRequestStore(owner, 30, () => DateTime.UtcNow.AddDays(-400));
+
+        Assert.True(await skewed.ApproveNoteAsync(pending[0].NoteId, "person:tester", ct));
+        Assert.True(await skewed.RejectNoteAsync(pending[1].NoteId, "person:tester", ct));
+
+        Assert.Equal("2", await ScalarAsync(owner, @"
+SELECT count(*) FROM config.investigation_notes AS n
+JOIN config.investigation_journal AS j ON j.event = 'note_' || n.state AND j.reason = 'note ' || n.note_id
+WHERE abs(extract(epoch FROM now() - n.decided_at)) < 120 AND j.event_time = n.decided_at", ct));
+    }
+
+    /* #6265 round 2: the Viewer's login is Environment.UserName, which can hold a space or an accented letter. The Viewer's own decide
+       records it, in normal form C, where it once refused anything outside ASCII letters, digits and a few marks. */
+    [Fact]
+    public async Task TheViewerDecide_RecordsANameWithASpaceOrAnAccent()
+    {
+        var baseConnectionString = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the investigation note decision live tests.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var owner = await MigratedAsync(scratch, ct);
+        var store = new InvestigationRequestStore(owner, 30, () => DateTime.UtcNow);
+        await ProposeAsync(store, DateTime.UtcNow.AddHours(-3), "approve as a name with a space", ct);
+        await ProposeAsync(store, DateTime.UtcNow.AddHours(-2), "reject as a name with an accent", ct);
+        var pending = await store.ListPendingNotesAsync(200, ct);
+
+        await using var viewer = new PerformanceMonitor.Darling.Viewer.ViewerDataService(scratch.ConnectionString);
+        Assert.True(await viewer.DecideInvestigationNoteAsync(pending[0].NoteId, true, "John Smith", ct));
+        /* e + a combining acute accent: stored as the one composed letter. */
+        Assert.True(await viewer.DecideInvestigationNoteAsync(pending[1].NoteId, false, "Jose\u0301", ct));
+
+        Assert.Equal("approved|person:John Smith,rejected|person:Jos\u00E9", await ScalarAsync(owner,
+            "SELECT string_agg(state || '|' || decided_by, ',' ORDER BY note_id) FROM config.investigation_notes", ct));
+        Assert.Equal("2", await ScalarAsync(owner,
+            "SELECT count(*) FROM config.investigation_journal WHERE event IN ('note_approved', 'note_rejected') AND actor IN ('person:John Smith', 'person:Jos\u00E9')", ct));
     }
 
     /* #5903 round 1: the cap. 201 pending notes (199 planted older than the two the fixture proposes) answer 200, truncated,

@@ -77,10 +77,12 @@ globalThis.document = withDocumentListeners({
 });
 
 const fetches = [];
-const bodies = {};
+const bodies = { session: { can_edit: true, signed_in_admin: false } };
 globalThis.fetch = async (url, init) => {
   const u = String(url);
   fetches.push(u);
+  /* The seat the page learns from /api/session: can edit, but not signed in as an admin (#6265). */
+  if (u.split("?")[0].endsWith("/api/session")) return { status: 200, ok: true, text: async () => JSON.stringify(bodies.session) };
   const tool = u.split("/api/read/")[1].split("?")[0];
   const b = bodies[tool];
   if (b && b.fail) return { status: 500, ok: false, text: async () => JSON.stringify({ error: "the store is down" }) };
@@ -171,6 +173,10 @@ try {
     journalRows: all(main, "tbody").pop().children.map(cells),
     journalHeaders: JOURNAL_COLUMNS.map((c) => c.label),
     createdImgOrScript: created.filter((t) => t === "img" || t === "script").length,
+    /* A seat that can edit but is not signed in as an admin sees the sign-in sentence in place of the Close form (#6265). */
+    signInLines: all(main, "div").filter((d) => d.attrs["data-close-sign-in"] === "1").map((d) => d.textContent),
+    closeInputs: all(main, "input").filter((i) => i.attrs["data-close-reason"] === "1").length,
+    closeButtons: all(main, "button").filter((b) => b.attrs["data-close-request"] != null).length,
   };
 
   // A poll rebuild keeps the open request.

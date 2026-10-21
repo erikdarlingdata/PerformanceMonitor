@@ -381,6 +381,20 @@ FROM config.investigation_journal WHERE event = 'note_written'", ct));
                 Assert.Equal(SignInSentence, (string)answer.Body!["error"]!);
             }
 
+            /* Ids that do not exist answer the same 403, not 404: the gate is the first statement, before any store read. */
+            foreach (var (path, text) in new[]
+            {
+                ($"/api/investigation-requests/{Guid.NewGuid()}/close", "{\"reason\":\"no sign-in\"}"),
+                ($"/api/investigation-practice-requests/{Guid.NewGuid()}", "{}"),
+                ("/api/investigation-notes/9999999999/approve", "{}"),
+                ("/api/investigation-notes/9999999999/reject", "{}"),
+            })
+            {
+                var answer = await Send("PUT", path, Json, text);
+                Assert.Equal(403, answer.Status);
+                Assert.Equal(SignInSentence, (string)answer.Body!["error"]!);
+            }
+
             Assert.Equal("open", await ScalarAsync(owner, $"SELECT state FROM config.investigation_requests WHERE request_id = '{open}'", ct));
             Assert.Equal("pending", await ScalarAsync(owner, $"SELECT state FROM config.investigation_notes WHERE note_id = {pendingId}", ct));
             Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_notes", ct));
@@ -402,12 +416,13 @@ FROM config.investigation_journal WHERE event = 'note_written'", ct));
             var pendingId = await ScalarAsync(owner, "SELECT note_id FROM config.investigation_notes WHERE state = 'pending'", ct);
             var journalBefore = await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal", ct);
 
-            /* Too long for the journal actor (person: + name over 128, and over the 64 a name may hold), and names with invisible,
-               format or bidi characters that would pass for another person's. */
+            /* One more than the longest name the shape holds, a double space, and names with invisible, format, bidi or filler characters
+               that would pass for another person's, or characters that no sink should have to encode. */
             foreach (var name in new[]
             {
-                new string('a', 122), new string('a', 128), new string('a', 207),
-                "erik\u200B@example.com", "erik\u202E@example.com", "erik\u2066@example.com", "erik\uFEFF@example.com", "erik smith",
+                new string('a', AgentChangeUndo.LoginMaxLength + 1), "erik  smith",
+                "erik\u200B@example.com", "erik\u202E@example.com", "erik\u2066@example.com", "erik\uFEFF@example.com", "erik\u3164",
+                "erik<x>@example.com", "erik;smith",
             })
             {
                 current = name;
@@ -430,11 +445,52 @@ FROM config.investigation_journal WHERE event = 'note_written'", ct));
             Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_notes", ct));
             Assert.Equal(journalBefore, await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal", ct));
 
-            /* The longest name the shape holds is recorded in full. */
-            current = new string('a', 57) + "@x.com";
+            /* The longest name the shape holds (exactly LoginMaxLength) is recorded in full. */
+            current = new string('a', AgentChangeUndo.LoginMaxLength - 6) + "@x.com";
+            Assert.Equal(AgentChangeUndo.LoginMaxLength, current.Length);
             var closed = await Send("PUT", $"/api/investigation-requests/{open}/close", Json, "{\"reason\":\"long but fine\"}");
             Assert.Equal(200, closed.Status);
             Assert.Equal("person:" + current, (string)closed.Body!["closed_by"]!);
+            Assert.Equal("person:" + current, await ScalarAsync(owner, $"SELECT closed_by FROM config.investigation_requests WHERE request_id = '{open}'", ct));
+        });
+    }
+
+    /* #6265 round 2: a real sign-in name or Windows user name is recorded as the person, whatever it holds besides letters: a space, an
+       accent, an email's plus or quote, an Auth0 pipe, a domain and a backslash. The note route and the approve route both stamp it,
+       in normal form C, and the journal's actor agrees. */
+    [Fact]
+    public async Task ARealName_WithASpaceAnAccentOrAnEmailsPunctuation_IsRecordedExactlyAsThePerson()
+    {
+        string current = Lee;
+        await WithWebRoutesAsync("admin", () => current, async (owner, store, Send, ct) =>
+        {
+            await ReportedAsync(store, DateTime.UtcNow.AddHours(-5), "agent proposal: stays pending", ct);
+            var pendingId = await ScalarAsync(owner, "SELECT note_id FROM config.investigation_notes WHERE state = 'pending'", ct);
+
+            var names = new[]
+            {
+                "John Smith", "Jos\u00E9", "erik+ops@example.com", "o'brien@example.com", "auth0|abc123", "CORP\\jsmith",
+                new string('z', AgentChangeUndo.LoginMaxLength),
+            };
+            foreach (var name in names)
+            {
+                current = name;
+                var written = await Send("PUT", "/api/investigation-notes", Json, "{\"note_text\":\"written as " + name.Length + "\"}");
+                Assert.True(written.Status == 200, $"a note as {name.Length}-character name answered {written.Status}");
+                Assert.Equal("person:" + name, (string)written.Body!["author"]!);
+                Assert.Equal("person:" + name, await ScalarAsync(owner,
+                    $"SELECT author FROM config.investigation_notes WHERE note_id = {(long)written.Body["note_id"]!}", ct));
+            }
+
+            /* A name given in decomposed form (e and a combining acute) is stored once, composed. */
+            current = "Jose\u0301";
+            var approved = await Send("PUT", $"/api/investigation-notes/{pendingId}/approve", Json, "{}");
+            Assert.Equal(200, approved.Status);
+            Assert.Equal("person:Jos\u00E9", (string)approved.Body!["decided_by"]!);
+            Assert.Equal("person:Jos\u00E9", await ScalarAsync(owner, $"SELECT decided_by FROM config.investigation_notes WHERE note_id = {pendingId}", ct));
+            Assert.Equal("person:Jos\u00E9", await ScalarAsync(owner, "SELECT actor FROM config.investigation_journal WHERE event = 'note_approved'", ct));
+            Assert.Equal(names.Length.ToString(CultureInfo.InvariantCulture), await ScalarAsync(owner,
+                "SELECT count(*) FROM config.investigation_journal WHERE event = 'note_written'", ct));
         });
     }
 
@@ -469,7 +525,7 @@ FROM config.investigation_journal WHERE event = 'note_written'", ct));
             var open = await OpenAsync(store, DateTime.UtcNow.AddHours(-1), ct);
             var journalBefore = await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal", ct);
 
-            foreach (var actor in new[] { "agent:x", "mcp:x", "service", "web", "person:", "person:erik\u200B", "Person:erik", " person:erik", "person: erik", "person:erik smith" })
+            foreach (var actor in new[] { "agent:x", "mcp:x", "service", "web", "person:", "person:erik\u200B", "Person:erik", " person:erik", "person: erik", "person:erik  smith" })
             {
                 await Assert.ThrowsAsync<ArgumentException>(() => store.CloseRequestAsync(open, actor, "reason", ct));
                 await Assert.ThrowsAsync<ArgumentException>(() => store.WriteNoteAsync(null, null, "an approved note", actor, 30, ct));
@@ -478,6 +534,23 @@ FROM config.investigation_journal WHERE event = 'note_written'", ct));
             Assert.Equal("open", await ScalarAsync(owner, $"SELECT state FROM config.investigation_requests WHERE request_id = '{open}'", ct));
             Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_notes", ct));
             Assert.Equal(journalBefore, await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal", ct));
+
+            /* The note decision and the practice request hold the same person guard (#6265). */
+            var judged = await ReportedAsync(store, DateTime.UtcNow.AddHours(-5), "agent proposal: stays pending", ct);
+            await new InvestigationFeedbackStore(owner, 30).RecordAsync(new InvestigationFeedbackSubmission(judged, "right", null, null, null, "lee"), ct);
+            var pendingId = long.Parse(await ScalarAsync(owner, "SELECT note_id FROM config.investigation_notes WHERE state = 'pending'", ct) ?? "0", CultureInfo.InvariantCulture);
+            var practice = new InvestigationPracticeStore(owner, 30);
+            var journalAfterReport = await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal", ct);
+            foreach (var actor in new[] { "agent:x", "mcp:x", "service", "web", "person:", "person:erik\u200B", "Person:erik", " person:erik", "person:erik  smith" })
+            {
+                await Assert.ThrowsAsync<ArgumentException>(() => store.ApproveNoteAsync(pendingId, actor, ct));
+                await Assert.ThrowsAsync<ArgumentException>(() => store.RejectNoteAsync(pendingId, actor, ct));
+                await Assert.ThrowsAsync<ArgumentException>(() => practice.OpenAsync(judged, actor, ct));
+            }
+
+            Assert.Equal("pending", await ScalarAsync(owner, $"SELECT state FROM config.investigation_notes WHERE note_id = {pendingId}", ct));
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_requests WHERE practice_of IS NOT NULL", ct));
+            Assert.Equal(journalAfterReport, await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal", ct));
 
             /* A person's actor, built the one way, writes. */
             var actorOk = InvestigationPersonWrites.PersonActor(Lee);
