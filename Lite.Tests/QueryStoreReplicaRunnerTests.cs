@@ -35,6 +35,7 @@ namespace Lite.Tests;
 public sealed class QueryStoreReplicaRunnerTests : IDisposable
 {
     private const string Sales = "Sales";
+    private const string Orders = "Orders";
     private static readonly Guid GroupDatabaseId = Guid.Parse("7a88cd1f-6fcf-444c-a320-feb92dfbd0d2");
 
     private readonly List<DuckDbInitializer> _initializers = [];
@@ -164,12 +165,123 @@ public sealed class QueryStoreReplicaRunnerTests : IDisposable
     {
         var f = await BuildAsync(replica: "replica-host", engineEdition: 5);
         f.Service.AzureDatabaseListOverrideForTests = (_, _) => Task.FromResult(new List<string> { Sales });
-        f.Service.AzureDatabaseReaderOverrideForTests = (_, _) => new DataTable().CreateDataReader();
+        var azureReads = 0;
+        f.Service.AzureDatabaseReaderOverrideForTests = (_, _) =>
+        {
+            Interlocked.Increment(ref azureReads);
+            return new DataTable().CreateDataReader();
+        };
 
         await RunAsync(f);
 
+        /* The run really went through the Azure per-database arm and was logged, so the null below is not an absent run. */
+        Assert.True(azureReads > 0, "the Azure per-database arm never read");
+        Assert.Equal(1, await LogRowsAsync(f));
         Assert.Equal(0, f.Service.QueryStoreReplicaConnectionsOpened);
+        Assert.Equal(0, f.ReplicaCalls);
         Assert.Null(await ReadSourceAsync(f));
+    }
+
+    [Fact]
+    public async Task AReplicaReadThatFailsForOneDatabase_SendsThatDatabaseToThePrimary_WhileTheOthersStillReadTheReplica()
+    {
+        var f = await BuildAsync(replica: "replica-host");
+        f.Databases.Add(Orders);
+        var now = Truncate(DateTime.UtcNow);
+        f.ReplicaRowsByDb[Sales] = [Row(queryId: 1, lastExecution: now.AddMinutes(-20))];
+        f.ReplicaRowsByDb[Orders] = [Row(queryId: 10, lastExecution: now.AddMinutes(-20))];
+        f.PrimaryRowsByDb[Orders] = [Row(queryId: 20, lastExecution: now.AddMinutes(-18))];
+        f.ReplicaItemReadFails.Add(Orders);
+
+        await RunAsync(f);
+
+        /* Sales read the replica and nothing else; Orders tried the replica, failed, and was read from the primary in the
+           same run (the primary's row is stored, the replica's is not). */
+        Assert.Equal(1, await CountAsync(f, queryId: 1));
+        Assert.Single(f.ReplicaItemCutoffs);
+        Assert.Empty(f.PrimaryItemCutoffs);
+        Assert.Single(Fixture.CutoffsOf(f.ReplicaCutoffsByDb, Orders));
+        Assert.Single(Fixture.CutoffsOf(f.PrimaryCutoffsByDb, Orders));
+        Assert.Equal(1, await CountAsync(f, queryId: 20, database: Orders));
+        Assert.Equal(0, await CountAsync(f, queryId: 10, database: Orders));
+
+        /* The run records which database fell back, and why. */
+        var source = await ReadSourceAsync(f);
+        Assert.StartsWith("replica 1, primary 1", source, StringComparison.Ordinal);
+        Assert.Contains("replica_unavailable", source, StringComparison.Ordinal);
+        Assert.Contains(Orders, source, StringComparison.Ordinal);
+
+        /* The fallback is for the run: the next run tries the replica for Orders again. */
+        await RunAsync(f);
+        Assert.Equal(2, Fixture.CutoffsOf(f.ReplicaCutoffsByDb, Orders).Count);
+        Assert.Equal(2, f.ReplicaItemCutoffs.Count);
+    }
+
+    [Fact]
+    public async Task AReplicaReadOfAWatermarkOlderThanTheCatchUp_StartsAtTheClamp_AndLeavesTheLookBackWindowAsAHole_NotReadTwice()
+    {
+        var f = await BuildAsync(replica: "replica-host");
+        var now = Truncate(DateTime.UtcNow);
+        f.ReplicaRows = [Row(queryId: 1, lastExecution: now.AddMinutes(-30))];
+        await RunAsync(f);
+
+        /* The stored watermark W is 2 hours old: older than the 1-hour catch-up, so the clamp fires on the RAW value. */
+        var watermark = now.AddHours(-2);
+        await SetWatermarkAsync(f, watermark);
+
+        var late = Row(queryId: 2, lastExecution: watermark.AddMinutes(-10));        /* inside (W - L, W): the look-back would have re-read it */
+        var between = Row(queryId: 3, lastExecution: watermark.AddMinutes(30));      /* between W and the clamp: the clamp skips it, as before */
+        var fresh = Row(queryId: 4, lastExecution: now.AddMinutes(-45));            /* after the clamp: the run's own work */
+        f.ReplicaRows = [Row(queryId: 1, lastExecution: now.AddMinutes(-30)), late, between, fresh];
+
+        var before = DateTime.UtcNow;
+        await RunAsync(f);
+        var after = DateTime.UtcNow;
+
+        /* Clamped: the cutoff is the clamp (collection time - 1 hour), never W - L, so the hole's rows are not read here. */
+        var cutoff = f.ReplicaItemCutoffs[1]!.Value;
+        Assert.InRange(cutoff, before.AddHours(-1).AddSeconds(-2), after.AddHours(-1));
+        Assert.Equal(1, await CountAsync(f, queryId: 4));
+        Assert.Equal(0, await CountAsync(f, queryId: 2));
+        Assert.Equal(0, await CountAsync(f, queryId: 3));
+
+        /* The hole is (W - L, clamp), recorded for the backfill, so the rows the look-back would have re-read are not lost. */
+        var hole = await ReadHoleAsync(f, Sales);
+        Assert.NotNull(hole);
+        Assert.Equal(watermark.AddMinutes(-20), hole!.Value.From);
+        Assert.Equal(cutoff, hole.Value.To);
+    }
+
+    [Fact]
+    public async Task AReplicaReadCutByTheRowCap_RecordsTheLookBackWindowAsAHole_AndTheNextReadStartsAtTheWatermark()
+    {
+        var f = await BuildAsync(replica: "replica-host");
+        var now = Truncate(DateTime.UtcNow);
+        var start = now.AddMinutes(-55);
+        f.ReplicaRows = Enumerable.Range(1, QueryStoreCollector.MaxRowsPerDatabase)
+            .Select(i => Row(queryId: i, lastExecution: start.AddSeconds(i % 300)))
+            .ToList();
+        var watermark = start.AddSeconds(299);
+
+        await RunAsync(f);
+
+        /* The read hit the row cap, so the rows beyond it are for the next read, and the window the look-back would have
+           re-read before this one's watermark rides a hole instead. */
+        Assert.Equal(QueryStoreCollector.MaxRowsPerDatabase, await CountAsync(f));
+        var hole = await ReadHoleAsync(f, Sales);
+        Assert.NotNull(hole);
+        Assert.Equal(watermark.AddMinutes(-20), hole!.Value.From);
+        Assert.Equal(watermark, hole.Value.To);
+
+        /* A late row inside that window: the next read starts AT the watermark (a look-back would repeat the same full
+           window), so the live path does not read it and the hole is the only place it is found. */
+        var inside = Row(queryId: QueryStoreCollector.MaxRowsPerDatabase + 1, lastExecution: watermark.AddMinutes(-5));
+        f.ReplicaRows.Add(inside);
+        await RunAsync(f);
+
+        Assert.Equal(2, f.ReplicaItemCutoffs.Count);
+        Assert.Equal(watermark, f.ReplicaItemCutoffs[1]);
+        Assert.Equal(0, await CountAsync(f, queryId: inside.QueryId));
     }
 
     private sealed record QsRow(long QueryId, DateTime LastExecution, string Role);
@@ -185,12 +297,35 @@ public sealed class QueryStoreReplicaRunnerTests : IDisposable
         public required ServerConnection Server { get; init; }
         public required int ServerId { get; init; }
         public required DuckDbInitializer DuckDb { get; init; }
-        public List<QsRow> PrimaryRows { get; set; } = [];
-        public List<QsRow> ReplicaRows { get; set; } = [];
+        /* The databases the server has (Sales alone unless a test adds more). */
+        public List<string> Databases { get; } = [Sales];
+        public Dictionary<string, List<QsRow>> PrimaryRowsByDb { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, List<QsRow>> ReplicaRowsByDb { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, List<DateTime?>> PrimaryCutoffsByDb { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, List<DateTime?>> ReplicaCutoffsByDb { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+        /* Databases whose item read on the replica throws (the replica answers everything else). */
+        public HashSet<string> ReplicaItemReadFails { get; } = new(StringComparer.OrdinalIgnoreCase);
         public bool ReplicaFails { get; set; }
         public int ReplicaCalls;
-        public List<DateTime?> PrimaryItemCutoffs { get; } = [];
-        public List<DateTime?> ReplicaItemCutoffs { get; } = [];
+
+        public List<QsRow> PrimaryRows
+        {
+            get => PrimaryRowsByDb.GetValueOrDefault(Sales) ?? [];
+            set => PrimaryRowsByDb[Sales] = value;
+        }
+
+        public List<QsRow> ReplicaRows
+        {
+            get => ReplicaRowsByDb.GetValueOrDefault(Sales) ?? [];
+            set => ReplicaRowsByDb[Sales] = value;
+        }
+
+        public List<DateTime?> PrimaryItemCutoffs => CutoffsOf(PrimaryCutoffsByDb, Sales);
+        public List<DateTime?> ReplicaItemCutoffs => CutoffsOf(ReplicaCutoffsByDb, Sales);
+
+        public static List<DateTime?> CutoffsOf(Dictionary<string, List<DateTime?>> byDb, string database) =>
+            byDb.TryGetValue(database, out var list) ? list : [];
     }
 
     private async Task<Fixture> BuildAsync(string? replica, int engineEdition = 3)
@@ -237,9 +372,24 @@ public sealed class QueryStoreReplicaRunnerTests : IDisposable
 
         if (plan.Parameters?.Any(static p => p.Name == "@cutoff_time") == true)
         {
+            /* The item statement names its database: EXECUTE [db].sys.sp_executesql ... */
+            var open = plan.Text.IndexOf("EXECUTE [", StringComparison.Ordinal) + "EXECUTE [".Length;
+            var database = plan.Text[open..plan.Text.IndexOf("].sys.sp_executesql", open, StringComparison.Ordinal)];
             var cutoff = plan.Parameters.First(static p => p.Name == "@cutoff_time").Value as DateTime?;
-            (replica ? f.ReplicaItemCutoffs : f.PrimaryItemCutoffs).Add(cutoff);
-            var rows = (replica ? f.ReplicaRows : f.PrimaryRows).Where(r => cutoff is null || r.LastExecution > cutoff).ToList();
+            var cutoffs = replica ? f.ReplicaCutoffsByDb : f.PrimaryCutoffsByDb;
+            if (!cutoffs.TryGetValue(database, out var seen))
+            {
+                cutoffs[database] = seen = [];
+            }
+
+            seen.Add(cutoff);
+            if (replica && f.ReplicaItemReadFails.Contains(database))
+            {
+                throw new InvalidOperationException("the replica cannot be read for " + database);
+            }
+
+            var rows = ((replica ? f.ReplicaRowsByDb : f.PrimaryRowsByDb).GetValueOrDefault(database) ?? [])
+                .Where(r => cutoff is null || r.LastExecution > cutoff).ToList();
             return ItemTable(rows).CreateDataReader();
         }
 
@@ -258,7 +408,11 @@ public sealed class QueryStoreReplicaRunnerTests : IDisposable
             redo.Columns.Add("group_database_id", typeof(Guid));
             redo.Columns.Add("last_commit_time", typeof(DateTime));
             redo.Columns.Add("is_primary_replica", typeof(bool));
-            redo.Rows.Add(Sales, GroupDatabaseId, DateTime.UtcNow, !replica);
+            foreach (var database in f.Databases)
+            {
+                redo.Rows.Add(database, database == Sales ? GroupDatabaseId : new Guid(System.Security.Cryptography.MD5.HashData(System.Text.Encoding.UTF8.GetBytes(database))), DateTime.UtcNow, !replica);
+            }
+
             return redo.CreateDataReader();
         }
 
@@ -273,16 +427,24 @@ public sealed class QueryStoreReplicaRunnerTests : IDisposable
             databases.Columns.Add("actual_state", typeof(int));
             databases.Columns.Add("readonly_reason", typeof(int));
             databases.Columns.Add("flush", typeof(int));
-            databases.Rows.Add(Sales, 0, 8, 900);
+            foreach (var database in f.Databases)
+            {
+                databases.Rows.Add(database, 0, 8, 900);
+            }
+
             return new DataTableReader([databases, failures]);
         }
 
         databases.Columns.Add("database_name", typeof(string));
-        databases.Rows.Add(Sales);
         var facts = new DataTable();
         facts.Columns.Add("name", typeof(string));
         facts.Columns.Add("flush", typeof(int));
-        facts.Rows.Add(Sales, 900);
+        foreach (var database in f.Databases)
+        {
+            databases.Rows.Add(database);
+            facts.Rows.Add(database, 900);
+        }
+
         return new DataTableReader([databases, failures, facts]);
     }
 
@@ -327,7 +489,7 @@ public sealed class QueryStoreReplicaRunnerTests : IDisposable
         return table;
     }
 
-    private static async Task<long> CountAsync(Fixture f, long? queryId = null)
+    private static async Task<long> CountAsync(Fixture f, long? queryId = null, string database = Sales)
     {
         using var connection = f.DuckDb.CreateConnection();
         await connection.OpenAsync();
@@ -335,7 +497,7 @@ public sealed class QueryStoreReplicaRunnerTests : IDisposable
         command.CommandText = "SELECT COUNT(*) FROM query_store_stats WHERE server_id = $1 AND database_name = $2"
             + (queryId is null ? "" : " AND query_id = $3");
         command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = f.ServerId });
-        command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = Sales });
+        command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = database });
         if (queryId is not null)
         {
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = queryId.Value });
@@ -353,5 +515,41 @@ public sealed class QueryStoreReplicaRunnerTests : IDisposable
         command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = f.ServerId });
         var value = await command.ExecuteScalarAsync();
         return value is null or DBNull ? null : Convert.ToString(value, CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>Moves a database's stored watermark (its newest last_execution_time) to the given instant.</summary>
+    private static async Task SetWatermarkAsync(Fixture f, DateTime watermark)
+    {
+        using var connection = f.DuckDb.CreateConnection();
+        await connection.OpenAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE query_store_stats SET last_execution_time = $1 WHERE server_id = $2";
+        command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = watermark });
+        command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = f.ServerId });
+        await command.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>The backfill hole recorded for a database, as the backfill worker reads it.</summary>
+    private static async Task<(DateTime From, DateTime To)?> ReadHoleAsync(Fixture f, string database)
+    {
+        using var connection = f.DuckDb.CreateConnection();
+        await connection.OpenAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT state_value FROM collector_state WHERE server_id = $1 AND collector_name = $2 AND state_key = $3";
+        command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = f.ServerId });
+        command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = QueryStoreBackfillState.StateCollectorName });
+        command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = QueryStoreBackfillState.HoleKeyPrefix + database });
+        var value = await command.ExecuteScalarAsync();
+        return value is string encoded && QueryStoreBackfillState.TryDecodeHole(encoded, out var from, out var to) ? (from, to) : null;
+    }
+
+    private static async Task<long> LogRowsAsync(Fixture f)
+    {
+        using var connection = f.DuckDb.CreateConnection();
+        await connection.OpenAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM collection_log WHERE server_id = $1 AND collector_name = 'query_store'";
+        command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = f.ServerId });
+        return Convert.ToInt64(await command.ExecuteScalarAsync(), CultureInfo.InvariantCulture);
     }
 }
