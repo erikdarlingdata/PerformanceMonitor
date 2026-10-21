@@ -17,8 +17,8 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #6254: the store half of the Query Store replica setting, against a live store. V212 adds
-/// <c>config.config_monitored_servers.query_store_replica</c> and <c>collect.collection_log.read_source</c> to a store at V211 and
+/// #6254: the store half of the Query Store replica setting, against a live store. V213 adds
+/// <c>config.config_monitored_servers.query_store_replica</c> and <c>collect.collection_log.read_source</c> to a store at V212 and
 /// every row that was there reads NULL for both (an older row means "read from the server itself"), the collection-log view
 /// shows the new column, and an upgraded store ends holding the 18-argument edit function and its two wrappers (R9-18).
 /// </summary>
@@ -45,15 +45,15 @@ public sealed class QueryStoreReplicaStoreLiveTests
             $"SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('{table}') AND attname = '{column}' AND NOT attisdropped)", ct);
 
     /// <summary>
-    /// A store at V211 holding a server row and a collection-log row climbs to V212: both columns appear, the rows read NULL for
+    /// A store at V212 holding a server row and a collection-log row climbs to V213: both columns appear, the rows read NULL for
     /// them (through the table and through <c>collect.v_collection_log</c>, whose column list is frozen when it is created), the
     /// rung re-applied over itself changes nothing, and a new row takes a value in each column.
     /// </summary>
     [Fact]
-    public async Task AStoreAtV211WithRows_TakesV212_AndTheOldRowsReadNullForBothColumns_AgainstDevPostgres()
+    public async Task AStoreAtV212WithRows_TakesV213_AndTheOldRowsReadNullForBothColumns_AgainstDevPostgres()
     {
         var cs = ConnectionString;
-        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the V212 rung test.");
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the V213 rung test.");
 
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
@@ -67,13 +67,13 @@ public sealed class QueryStoreReplicaStoreLiveTests
             Assert.True(await ColumnExistsAsync(connection, "config.config_monitored_servers", "query_store_replica", ct));
             Assert.True(await ColumnExistsAsync(connection, "collect.collection_log", "read_source", ct));
 
-            /* Back to V211: both columns gone, the version stamps above it removed. */
-            await RungRewindArtifacts.DropSentinelsAboveAsync(connection, 211, ct);
-            await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version >= 212;", ct);
+            /* Back to V212: both columns gone, the version stamps above it removed. */
+            await RungRewindArtifacts.DropSentinelsAboveAsync(connection, 212, ct);
+            await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version >= 213;", ct);
             Assert.False(await ColumnExistsAsync(connection, "config.config_monitored_servers", "query_store_replica", ct));
             Assert.False(await ColumnExistsAsync(connection, "collect.collection_log", "read_source", ct));
 
-            /* The rows an upgrade finds: a registered server and a collection-log row, written the V211 way. */
+            /* The rows an upgrade finds: a registered server and a collection-log row, written the V212 way. */
             await ExecAsync(connection,
                 "INSERT INTO config.config_monitored_servers (server_id, name, host, database, auth, username, encrypted_password, engine, port) " +
                 "VALUES (6254, 'old-row', 'primary-host', 'master', 'sql', 'monitor', 'sealed-blob', 'sqlserver', 0);", ct);
@@ -100,7 +100,7 @@ public sealed class QueryStoreReplicaStoreLiveTests
             Assert.Equal("replica-host", await ScalarAsync<string>(connection, "SELECT read_source FROM collect.v_collection_log WHERE log_id = 6254001;", ct));
 
             /* Re-applied over its own columns (stamps rewound, columns kept): nothing changes and nothing throws. */
-            await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version >= 212;", ct);
+            await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version >= 213;", ct);
             await PgMigrations.MigrateAsync(connection, ct);
             Assert.Equal("replica-host", await ScalarAsync<string>(connection, "SELECT query_store_replica FROM config.config_monitored_servers WHERE server_id = 6254;", ct));
             Assert.Equal(StorageVersion.SchemaVersion, await ScalarAsync<int>(connection, "SELECT max(version) FROM darling_schema_version;", ct));

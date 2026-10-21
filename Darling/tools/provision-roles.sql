@@ -648,7 +648,7 @@ GRANT SELECT (hypothetical_index_username) ON config.config_monitored_servers TO
 $v203$;
    END IF;
 END $$;
--- V212 (#6254): the Query Store replica HOST, on the registry. Non-secret, like host. Guarded on the column, so a store below V212
+-- V213 (#6254): the Query Store replica HOST, on the registry. Non-secret, like host. Guarded on the column, so a store below V213
 -- still commits the rest of the carve instead of failing on a column it does not have yet.
 DO $$
 BEGIN
@@ -764,7 +764,7 @@ GRANT SELECT (hypothetical_index_username) ON config.config_monitored_servers TO
 $v203$;
    END IF;
 END $$;
--- V212 (#6254): the Query Store replica HOST, on the registry. Non-secret, like host. Guarded on the column, so a store below V212
+-- V213 (#6254): the Query Store replica HOST, on the registry. Non-secret, like host. Guarded on the column, so a store below V213
 -- still commits the rest of the carve instead of failing on a column it does not have yet.
 DO $$
 BEGIN
@@ -1117,6 +1117,18 @@ BEGIN
       RETURN QUERY SELECT 'invalid_value'::text, NULL::timestamp;
       RETURN;
    END;
+
+   -- A registration moved to another address no longer vouches for the machine it reached before (#6340 round 2, N2): the machine
+   -- identity the last connect stored (collect.servers.machine_identity, V212) belongs to the old address, so it is cleared here and the
+   -- next connect writes the new one. A store that predates V212 has no such column; the edit is not held up by that.
+   IF v_host IS DISTINCT FROM v_old_host OR v_port IS DISTINCT FROM v_old_port
+      OR v_database IS DISTINCT FROM v_old_database OR v_read_only_intent IS DISTINCT FROM v_old_read_only_intent THEN
+      BEGIN
+         UPDATE collect.servers SET machine_identity = NULL WHERE server_id = p_server_id;
+      EXCEPTION WHEN undefined_column OR undefined_table THEN
+         NULL;
+      END;
+   END IF;
 
    outcome := 'saved';
    RETURN NEXT;
@@ -1702,7 +1714,7 @@ BEGIN
       OR NEW.trust_server_certificate IS DISTINCT FROM OLD.trust_server_certificate
       OR NEW.multi_subnet_failover IS DISTINCT FROM OLD.multi_subnet_failover
       -- The Query Store replica (#6254) is a host the stored password would be sent to. Read through to_jsonb, blank as none, so this
-      -- function also runs on a store below V212 that does not have the column yet.
+      -- function also runs on a store below V213 that does not have the column yet.
       OR COALESCE(NULLIF(btrim(to_jsonb(NEW) ->> 'query_store_replica'), ''), '') IS DISTINCT FROM COALESCE(NULLIF(btrim(to_jsonb(OLD) ->> 'query_store_replica'), ''), '');
 
    -- A remediation secret that is kept goes with the login name it was stored for: that name is as much a part of how

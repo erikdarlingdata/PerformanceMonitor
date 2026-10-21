@@ -802,7 +802,7 @@ FROM config_monitored_servers", connection) { CommandTimeout = ServiceCommandDea
                     Port = reader.IsDBNull(14) ? 0 : reader.GetInt32(14),
                     /* #5452: the role is compared; the external ID beside it is not read at all (a stored secret). */
                     AwsRoleArn = reader.IsDBNull(16) ? null : reader.GetString(16),
-                    /* V212 (#6254): compared, because it decides where Query Store is read and which saved password opens. */
+                    /* V213 (#6254): compared, because it decides where Query Store is read and which saved password opens. */
                     QueryStoreReplica = reader.IsDBNull(17) ? null : reader.GetString(17),
                 },
                 /* NOT NULL DEFAULT TRUE in the table, so the guard is for a store mid-migration; an unknown
@@ -1683,7 +1683,7 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
                and then the check is refused on it. */
             AddNullableText(command, server.HypotheticalIndexUsername);
             AddNullableText(command, server.HypotheticalIndexEncryptedPassword);
-            /* V212 (#6254): the Query Store replica, trimmed with blank as NULL. NULL is every server nobody set one on: Query Store is then read
+            /* V213 (#6254): the Query Store replica, trimmed with blank as NULL. NULL is every server nobody set one on: Query Store is then read
                from the server itself. A password sealed for this entry was sealed for this setting (PasswordBinding.ForServer). */
             AddNullableText(command, QueryStoreReplicaSetting.Normalize(server.QueryStoreReplica));
             await command.ExecuteNonQueryAsync(ct);
@@ -2408,7 +2408,7 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
             /* V203 (#6170): the hypothetical-index login. Nullable with no default: NULL is the shipped state and means the check is refused. */
             HypotheticalIndexUsername = reader.IsDBNull(21) ? null : reader.GetString(21),
             HypotheticalIndexEncryptedPassword = reader.IsDBNull(22) ? null : reader.GetString(22),
-            /* V212 (#6254): the Query Store replica. Nullable with no default: NULL is the shipped state and reads from the server itself. */
+            /* V213 (#6254): the Query Store replica. Nullable with no default: NULL is the shipped state and reads from the server itself. */
             QueryStoreReplica = reader.IsDBNull(23) ? null : reader.GetString(23),
         };
 

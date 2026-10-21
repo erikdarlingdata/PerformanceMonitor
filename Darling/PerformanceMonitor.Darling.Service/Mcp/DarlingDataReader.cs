@@ -125,7 +125,7 @@ internal static class DarlingDataReader
         double? TextFetchWriteMs = null,
         long? TextFetchIdsAttempted = null,
         long? TextFetchProbeIds = null,
-        /* V212 (#6254): which host a Query Store run read from, e.g. "replica 12, primary 2 (redo_behind: Sales)". NULL on every run
+        /* V213 (#6254): which host a Query Store run read from, e.g. "replica 12, primary 2 (redo_behind: Sales)". NULL on every run
            written before the setting existed and on every run of a server with the setting off: the tools then show nothing. */
         string? ReadSource = null)
     {

@@ -2089,13 +2089,13 @@ ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS starts_at_utc time
     /// table-level UPDATE on the config schema covers it, while the viewer role holds only <c>UPDATE (config_version, updated_at)</c> on this table) and no trigger (the config_version trigger fires on any row update).
     /// </summary>
     /// <summary>
-    /// V212 (#6254): two nullable text columns. <c>config.config_monitored_servers.query_store_replica</c> is the host (or listener
+    /// V213 (#6254): two nullable text columns. <c>config.config_monitored_servers.query_store_replica</c> is the host (or listener
     /// name) Query Store is read from instead of the server itself; NULL, the default for every existing row, keeps today's behaviour.
     /// <c>collect.collection_log.read_source</c> says which host a collection read came from; NULL on every existing row. Neither has a
     /// default and neither needs a backfill, so each <c>ADD COLUMN</c> is catalog-only. An older build ignores both columns and reads
     /// every row as it did before, so there is no rollback line. Idempotent.
     /// </summary>
-    private const string V212Sql = @"
+    private const string V213Sql = @"
 ALTER TABLE config.config_monitored_servers ADD COLUMN IF NOT EXISTS query_store_replica text;
 ALTER TABLE collect.collection_log ADD COLUMN IF NOT EXISTS read_source text;
 
@@ -2220,6 +2220,18 @@ ALTER TABLE config.server_tags ENABLE ALWAYS TRIGGER trg_agent_route_tag_guard;"
 ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS client_timeouts_warning_multiple integer NOT NULL DEFAULT 3,
     ADD COLUMN IF NOT EXISTS client_timeouts_critical_multiple integer NOT NULL DEFAULT 10;";
+    /// V212 (#6285, #6339): <c>collect.servers.machine_identity</c>, the name the monitored machine gives itself, written on every
+    /// connect. For a SQL Server it is <c>SERVERPROPERTY('ServerName')</c> folded to lower case (NULL on an Azure SQL Database, which
+    /// names no machine of its own); for PostgreSQL it is the cluster's <c>system_identifier</c>, a colon and the server port (NULL
+    /// when the monitoring role may not call <c>pg_control_system()</c>). <c>add_servers</c> and <c>edit_server</c> over MCP compare
+    /// what a new connection reports with this column, so a machine reached under a second name is recognised. It lives on the
+    /// registry, which no retention purge touches and which keeps a removed registration's row, so the identity of a removed
+    /// registration stays. No backfill: a registration fills its own on its next connect, and until then it is matched by its
+    /// text alone. No view refresh: <c>collect.servers</c> is a registry, not a hypertable.
+    /// </summary>
+    private const string V212Sql = @"
+ALTER TABLE collect.servers
+    ADD COLUMN IF NOT EXISTS machine_identity text;";
 
     /// <summary>
     /// V196 (#5632, step 5): Level 3 and the per-server action switches. <b>Nothing here turns an action on.</b>
@@ -2607,7 +2619,8 @@ $rung$;";
         new Migration(209, "query-store-fetch-top-n", V209Sql),
         new Migration(210, "mcp-agent-route-tag-guard", V210Sql),
         new Migration(211, "client-timeouts-relative-bars", V211Sql),
-        new Migration(212, "query-store-replica", V212Sql),
+        new Migration(212, "server-machine-identity", V212Sql),
+        new Migration(213, "query-store-replica", V213Sql),
     };
 
     /// <summary>

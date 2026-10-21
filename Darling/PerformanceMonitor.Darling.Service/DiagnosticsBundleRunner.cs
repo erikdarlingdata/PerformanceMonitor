@@ -45,7 +45,7 @@ FROM config_monitored_servers
 WHERE aws_role_arn IS NOT NULL OR aws_external_id IS NOT NULL";
 
     /// <summary>
-    /// The registry's Query Store replica (#6254, store version 211), for the name set: a host (or listener name) set through the
+    /// The registry's Query Store replica (#6254, store version 213), for the name set: a host (or listener name) set through the
     /// Viewer, the web dashboard or MCP lives only in the store, so a bundle that seeded darling.json alone would show it in clear.
     /// A store older than 211 has no such column; that read adds nothing instead of refusing the bundle.
     /// </summary>

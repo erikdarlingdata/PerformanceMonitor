@@ -52,6 +52,11 @@ public sealed class ServerRuntime
     /// </summary>
     public string? ConnectedDatabase { get; init; }
 
+    /// <summary>#6285: the machine and instance the SQL Server calls itself (<c>SERVERPROPERTY('ServerName')</c>), read by the
+    /// same detection query; null on an Azure SQL Database, which names no machine of its own. #6339: on PostgreSQL, the cluster's
+    /// <c>system_identifier</c>, a colon and the server port, or null when the role may not read it.</summary>
+    public string? MachineIdentity { get; init; }
+
     public bool HasMsdbAccess { get; init; }
 
     /// <summary>
@@ -107,7 +112,7 @@ public static class DarlingServerConnector
        depend on it (#1535). sqlserver_start_time - the one column that needs the DMV - is not read
        here (the service never surfaces a start time), so unlike Lite/Dashboard no best-effort
        start-time read is needed. Columns: 0 sql_version, 1 major_version, 2 utc_offset,
-       3 engine_edition, 4 is_aws_rds, 5 has_msdb_access, 6 connected_database (#2228).
+       3 engine_edition, 4 is_aws_rds, 5 has_msdb_access, 6 connected_database (#2228), 7 server_name (#6285).
 
        #2228 — connected_database is DB_NAME(): the database this connection ACTUALLY reached, which is not
        necessarily the one the registration names. An Initial Catalog that is absent, misspelled or overridden
@@ -127,7 +132,9 @@ SELECT /* PerformanceMonitorLite */
     CASE WHEN DB_ID('rdsadmin') IS NOT NULL THEN 1 ELSE 0 END AS is_aws_rds,
     HAS_DBACCESS(N'msdb') AS has_msdb_access,
     /* #2228: which database this connection actually landed in. Appended; see the comment above. */
-    DB_NAME() AS connected_database";
+    DB_NAME() AS connected_database,
+    /* #6285: the machine and instance the server calls itself, appended like the column above. */
+    CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')) AS server_name";
 
     /// <summary>
     /// The tripwire's verdict: the message to raise when a registration is connected to a database it does not
@@ -499,7 +506,7 @@ SELECT
 
         int majorVersion = 0, engineEdition = 0;
         bool isAwsRds = false, hasMsdbAccess = true;
-        string? connectedDatabase = null;
+        string? connectedDatabase = null, machineIdentity = null;
         if (await reader.ReadAsync(cancellationToken))
         {
             // Column indices per DetectionQueryText: 1 major_version, 3 engine_edition,
@@ -509,6 +516,9 @@ SELECT
             isAwsRds = !reader.IsDBNull(4) && reader.GetInt32(4) == 1;
             hasMsdbAccess = reader.IsDBNull(5) || reader.GetInt32(5) == 1;
             connectedDatabase = reader.IsDBNull(6) ? null : reader.GetString(6);   /* #2228 */
+            /* #6285: the server's own name, for the add and edit tools' same-machine check. An Azure SQL Database has no
+               machine of its own to name, so it reports none. */
+            machineIdentity = reader.IsDBNull(7) || engineEdition == 5 ? null : reader.GetString(7);
         }
 
         return new ServerRuntime
@@ -536,6 +546,7 @@ SELECT
             IsAwsRds = isAwsRds,
             EngineEdition = engineEdition,
             ConnectedDatabase = connectedDatabase,
+            MachineIdentity = machineIdentity,
         };
     }
 
@@ -617,6 +628,10 @@ SELECT
 
         var isAurora = await ProbeAuroraAsync(connection, cancellationToken, logger);
 
+        /* #6339: which cluster this is, for the add and edit tools' same-machine check. After the facts the collectors depend on,
+           and on its own statement, so a role that may not read it costs nothing but the identity. */
+        var machineIdentity = await ProbePostgresIdentityAsync(connection, logger, cancellationToken, isAurora);
+
         /* #3604: the wait-tier decision's second fact. Probed AFTER Aurora-ness and independently of it —
            an Aurora cluster cannot load the module, so the answer there is false by construction, but the
            gate reads the two facts separately and the sweep varies them separately. */
@@ -660,11 +675,57 @@ SELECT
             StorageName = storageName,
             ServerId = config.ServerId,
             ConnectedDatabase = connectedDatabase,
+            MachineIdentity = machineIdentity,
             /* #3830: on the runtime rather than on Target, because nothing dispatches on it - it feeds one
                fault sentence - and CollectorTargetInfo is the type whose facts the engine-capability sweep
                has to vary or fix. */
             PgStatStatementsExtension = statementsExtension,
         };
+    }
+
+    /// <summary>
+    /// #6339: what identifies the PostgreSQL cluster this session reached, as <c>system_identifier</c>, a colon and the port the
+    /// server listens on (<c>pg_control_system()</c> and the <c>port</c> setting), so one cluster reached under two host names reads
+    /// as one machine while two clusters on a host (a different identifier, or a different port) do not. Null when the role may not
+    /// call <c>pg_control_system()</c> (a managed service can refuse it): the caller then matches by host text alone. Never throws
+    /// except for cancellation, and never fails the connect. Standalone statement outside any transaction, so a refusal leaves the
+    /// session usable. Streaming replicas of one primary share its identifier and usually its port, so they read as one cluster.
+    /// </summary>
+    internal const string PostgresIdentityQueryText = @"
+SELECT s.system_identifier::text AS system_identifier,
+       pg_catalog.current_setting('port') AS port
+FROM pg_catalog.pg_control_system() AS s";
+
+    internal static async Task<string?> ProbePostgresIdentityAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken, bool isAurora = false)
+    {
+        /* #6340 round 2 (N4): none on Aurora. No AWS documentation shows system_identifier to be unique per Aurora cluster (the control
+           file is virtual there, and one report has RDS instances sharing one), so a value that two clusters could share would only
+           make the add and edit tools refuse unrelated clusters. The host-text match decides there. */
+        if (isAurora)
+        {
+            return null;
+        }
+
+        try
+        {
+            using var command = new NpgsqlCommand(PostgresIdentityQueryText, connection) { CommandTimeout = 30 };
+            using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0) && !reader.IsDBNull(1))
+            {
+                return reader.GetString(0) + ":" + reader.GetString(1);
+            }
+
+            return null;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger?.LogDebug("pg_control_system() is not readable on this target ({Message}); it is matched by host text alone", ex.Message);
+            return null;
+        }
     }
 
     /// <summary>
@@ -700,6 +761,7 @@ SELECT
                 HasMsdbAccess: runtime.HasMsdbAccess,
                 Error: null,
                 ConnectedDatabase: runtime.ConnectedDatabase,
+                MachineIdentity: runtime.MachineIdentity,
                 Engine: runtime.Target.Engine,
                 PostgresMajorVersion: runtime.Target.PostgresMajorVersion,
                 PostgresVersionNum: runtime.Target.PostgresVersionNum,
@@ -825,7 +887,11 @@ public sealed record ConnectionProbeResult(
     /* #6183: the failure was SqlClient's native library not loading. No SQL Server connection can work from this
        install, so a caller that probes several servers says so once instead of once per server. Trailing and
        defaulted, like the fields above. */
-    bool SqlClientNativeLoadFailed = false)
+    bool SqlClientNativeLoadFailed = false,
+    /* #6285: the machine and instance name the SQL Server reached calls itself (SERVERPROPERTY('ServerName')), read on this
+       same connection, so add_servers and edit_server can tell one machine reached under two names. Null when the probe
+       read none: a failed connection, an Azure SQL Database, or a PostgreSQL role that may not read the cluster identity (#6339). Trailing and defaulted, like the fields above. */
+    string? MachineIdentity = null)
 {
     /// <summary>
     /// Rebuilds the gate's-eye view of this target, so a caller can ask which collectors would actually

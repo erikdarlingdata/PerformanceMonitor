@@ -482,10 +482,15 @@ DROP FUNCTION IF EXISTS config.agent_route_tag_guard();"),
             @"
 ALTER TABLE IF EXISTS config.config_alert_settings DROP COLUMN IF EXISTS client_timeouts_warning_multiple, DROP COLUMN IF EXISTS client_timeouts_critical_multiple;"),
 
-        // V212 (#6254): the Query Store replica setting. The config column is the probe's newest sentinel. The rewind drops both new columns;
+        // V212 (#6285): the machine identity on the server registry. The column is the probe's newest sentinel. Safe on a store that never had it.
+        new(212, "hasServerMachineIdentity",
+            @"
+ALTER TABLE IF EXISTS collect.servers DROP COLUMN IF EXISTS machine_identity;"),
+
+        // V213 (#6254): the Query Store replica setting. The config column is the probe's newest sentinel. The rewind drops both new columns;
         // collect.v_collection_log freezes its column list at CREATE, so it is dropped first and made again over the table without read_source
-        // (the shape V210 left), and a re-run of V212 appends the column to it again. Safe on a store that never had them.
-        new(212, "hasQueryStoreReplica",
+        // (the shape V210 left), and a re-run of V213 appends the column to it again. Safe on a store that never had them.
+        new(213, "hasQueryStoreReplica",
             @"
 ALTER TABLE IF EXISTS config.config_monitored_servers DROP COLUMN IF EXISTS query_store_replica;
 DROP VIEW IF EXISTS collect.v_collection_log;
