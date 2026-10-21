@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -481,6 +481,18 @@ DROP FUNCTION IF EXISTS config.agent_route_tag_guard();"),
         new(211, "hasClientTimeoutsMultiples",
             @"
 ALTER TABLE IF EXISTS config.config_alert_settings DROP COLUMN IF EXISTS client_timeouts_warning_multiple, DROP COLUMN IF EXISTS client_timeouts_critical_multiple;"),
+
+        // V212 (#6254): the Query Store replica setting. The config column is the probe's newest sentinel. The rewind drops both new columns;
+        // collect.v_collection_log freezes its column list at CREATE, so it is dropped first and made again over the table without read_source
+        // (the shape V210 left), and a re-run of V212 appends the column to it again. Safe on a store that never had them.
+        new(212, "hasQueryStoreReplica",
+            @"
+ALTER TABLE IF EXISTS config.config_monitored_servers DROP COLUMN IF EXISTS query_store_replica;
+DROP VIEW IF EXISTS collect.v_collection_log;
+ALTER TABLE IF EXISTS collect.collection_log DROP COLUMN IF EXISTS read_source;
+DO $$ BEGIN IF to_regclass('collect.collection_log') IS NOT NULL THEN
+  EXECUTE 'CREATE VIEW collect.v_collection_log AS SELECT * FROM collect.collection_log';
+END IF; END $$;"),
     ];
 
     /// <summary>

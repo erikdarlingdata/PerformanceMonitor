@@ -85,8 +85,8 @@ public sealed class StoreServerPasswordRulesLiveTests
         return script[start..(end + triggerEnd.Length)];
     }
 
-    /// <summary>The edit function as the self-managed script carries it, cut out of the script's text: the 17-argument
-    /// function and the 15-argument wrapper that follows it (#5452).</summary>
+    /// <summary>The edit function as the self-managed script carries it, cut out of the script's text: the 18-argument
+    /// function and the two wrappers that follow it, the 17-argument one and the 15-argument one (#5452, #6254).</summary>
     private static string ByoEditFunctionSql()
     {
         var script = RepoFile.ReadRepoFile("Darling", "tools", "provision-roles.sql").Replace("\r\n", "\n", StringComparison.Ordinal);
@@ -95,7 +95,9 @@ public sealed class StoreServerPasswordRulesLiveTests
         const string functionEnd = "$fn$;";
         var end = script.IndexOf(functionEnd, start, StringComparison.Ordinal);
         Assert.True(end >= 0, "provision-roles.sql carries no end for the edit function");
-        var wrapperEnd = script.IndexOf(functionEnd, end + functionEnd.Length, StringComparison.Ordinal);
+        var seventeenEnd = script.IndexOf(functionEnd, end + functionEnd.Length, StringComparison.Ordinal);
+        Assert.True(seventeenEnd >= 0, "provision-roles.sql carries no end for the edit function's 17-argument wrapper");
+        var wrapperEnd = script.IndexOf(functionEnd, seventeenEnd + functionEnd.Length, StringComparison.Ordinal);
         Assert.True(wrapperEnd >= 0, "provision-roles.sql carries no end for the edit function's legacy wrapper");
         return script[start..(wrapperEnd + functionEnd.Length)];
     }
@@ -778,5 +780,97 @@ public sealed class StoreServerPasswordRulesLiveTests
                 await ExecAsync(cleanup,
                     "DROP OWNED BY admin, viewer, mcp; DROP ROLE IF EXISTS admin; DROP ROLE IF EXISTS viewer; DROP ROLE IF EXISTS mcp", cleanupCt));
         }
+    }
+
+    /// <summary>The 18-argument edit (#6254): only the columns named in <paramref name="columns"/> are written, the replica among them.</summary>
+    private static async Task<string?> ReplicaEditOutcomeAsync(
+        NpgsqlConnection role, int id, string columns, string? replica, string? secret, NpgsqlConnection ownerConnection, CancellationToken ct)
+    {
+        var token = await TextAsync(ownerConnection, $"SELECT to_char(modified_at, 'YYYY-MM-DD HH24:MI:SS.US') FROM config_monitored_servers WHERE server_id = {id}", ct);
+        string Lit(string? value) => value is null ? "NULL" : "'" + value.Replace("'", "''", StringComparison.Ordinal) + "'";
+        return await TextAsync(role,
+            $"SELECT outcome FROM config.edit_monitored_server({id}, '{token}'::timestamp, ARRAY[{columns}]::text[], NULL, NULL, NULL, NULL, NULL, NULL, NULL, {Lit(secret)}, NULL, NULL, NULL, NULL, NULL, NULL, {Lit(replica)})", ct);
+    }
+
+    /// <summary>
+    /// #6254: the Query Store replica is a host the stored password is sent to, so an edit that changes only it never keeps the
+    /// stored secret. Through the viewer's own role, on a row holding a sealed password: setting a replica, changing it and
+    /// clearing it with no new password answer <c>password_needed</c> and write nothing; with a new password they save; the same
+    /// value written again, and a change that names a replica it already has, move nothing and need no password.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnEditThatChangesOnlyTheQueryStoreReplica_NeedsANewPassword_ThroughTheViewerRole(bool selfManagedText)
+    {
+        await RunScenarioAsync(selfManagedText, async (ownerString, owner, ct) =>
+        {
+            await InsertServerAsync(owner, 8401, "replica-row", ProtectedBlob, null, ct);
+            await using var viewer = await ConnectAsync(ownerString, "viewer", ProvisioningTestSecrets.ViewerPassword, ct);
+            const string Replica = "SELECT query_store_replica FROM config_monitored_servers WHERE server_id = 8401";
+            const string Secret = "SELECT encrypted_password FROM config_monitored_servers WHERE server_id = 8401";
+
+            /* Setting one: refused, nothing written. */
+            Assert.Equal("password_needed", await ReplicaEditOutcomeAsync(viewer, 8401, "'query_store_replica'", "replica-a", null, owner, ct));
+            Assert.Equal("", await TextAsync(owner, Replica, ct));
+            Assert.Equal(ProtectedBlob, await TextAsync(owner, Secret, ct));
+
+            /* With a new password it saves, and the new password is the one stored. */
+            Assert.Equal("saved", await ReplicaEditOutcomeAsync(viewer, 8401, "'query_store_replica','encrypted_password'", " replica-a ", "a-new-blob", owner, ct));
+            Assert.Equal("replica-a", await TextAsync(owner, Replica, ct));
+            Assert.Equal("a-new-blob", await TextAsync(owner, Secret, ct));
+
+            /* Changing it, and clearing it, are the same: a new password or nothing. */
+            Assert.Equal("password_needed", await ReplicaEditOutcomeAsync(viewer, 8401, "'query_store_replica'", "replica-b", null, owner, ct));
+            Assert.Equal("password_needed", await ReplicaEditOutcomeAsync(viewer, 8401, "'query_store_replica'", "  ", null, owner, ct));
+            Assert.Equal("replica-a", await TextAsync(owner, Replica, ct));
+            Assert.Equal("a-new-blob", await TextAsync(owner, Secret, ct));
+
+            /* The value it already has, spaced differently, is no change. */
+            Assert.Equal("saved", await ReplicaEditOutcomeAsync(viewer, 8401, "'query_store_replica'", "replica-a  ", null, owner, ct));
+            Assert.Equal("a-new-blob", await TextAsync(owner, Secret, ct));
+
+            /* A blank clears it, with a password. */
+            Assert.Equal("saved", await ReplicaEditOutcomeAsync(viewer, 8401, "'query_store_replica','encrypted_password'", "", "cleared-blob", owner, ct));
+            Assert.Equal("", await TextAsync(owner, Replica, ct));
+            Assert.Equal("cleared-blob", await TextAsync(owner, Secret, ct));
+        });
+    }
+
+    /// <summary>
+    /// R9-18 (#6254): a store that holds an edit function from before the replica existed, one that does not count a replica
+    /// change as a change of how the row connects, is given the current function by the service's start. The older function lets a
+    /// replica-only edit through with the stored password kept (the state a store upgraded without the start would be in); once the
+    /// start has run, the same edit answers <c>password_needed</c> and writes nothing. The start is the self-managed path's; a
+    /// managed store's provisioning batch carries the same function text.
+    /// </summary>
+    [Fact]
+    public async Task AStoreHoldingTheEditFunctionWithoutTheReplica_GetsTheCurrentOneFromTheServicesStart()
+    {
+        await RunScenarioAsync(selfManagedText: false, async (ownerString, owner, ct) =>
+        {
+            const string replicaTerm = "\n      OR v_query_store_replica IS DISTINCT FROM v_old_query_store_replica;";
+            var current = DarlingManagedRoles.BuildEditMonitoredServerFunctionSql("config").Replace("\r\n", "\n", StringComparison.Ordinal);
+            Assert.Contains(replicaTerm, current, StringComparison.Ordinal);
+            await ExecAsync(owner, current.Replace(replicaTerm, ";", StringComparison.Ordinal), ct);
+
+            await InsertServerAsync(owner, 8402, "replica-before", ProtectedBlob, null, ct);
+            await InsertServerAsync(owner, 8403, "replica-after", ProtectedBlob, null, ct);
+            await using var viewer = await ConnectAsync(ownerString, "viewer", ProvisioningTestSecrets.ViewerPassword, ct);
+
+            Assert.Equal("saved", await ReplicaEditOutcomeAsync(viewer, 8402, "'query_store_replica'", "replica-a", null, owner, ct));
+            Assert.Equal("replica-a", await TextAsync(owner, "SELECT query_store_replica FROM config_monitored_servers WHERE server_id = 8402", ct));
+            Assert.Equal(ProtectedBlob, await TextAsync(owner, "SELECT encrypted_password FROM config_monitored_servers WHERE server_id = 8402", ct));
+
+            var log = new CapturingTestLogger();
+            await using (var ownerSource = NpgsqlDataSource.Create(ownerString))
+            {
+                Assert.True(await DarlingManagedRoles.EnsureServerPasswordRulesAsync(ownerSource, log, ct), log.Joined);
+            }
+
+            Assert.Equal(0, log.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
+            Assert.Equal("password_needed", await ReplicaEditOutcomeAsync(viewer, 8403, "'query_store_replica'", "replica-a", null, owner, ct));
+            Assert.Equal("", await TextAsync(owner, "SELECT query_store_replica FROM config_monitored_servers WHERE server_id = 8403", ct));
+        });
     }
 }
