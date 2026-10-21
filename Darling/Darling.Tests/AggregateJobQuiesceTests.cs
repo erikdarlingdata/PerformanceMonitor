@@ -677,8 +677,8 @@ SELECT query_id, time_bucket('1 day', bucket) AS bucket, sum(s) AS s FROM collec
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #5551 quiesce tests.");
 
-        /* No extension: the information views do not exist, and the lookup is never run. */
-        await using (var plain = await ScratchPostgres.CreateAsync(baseConnectionString!, ct))
+        /* No extension: the information views do not exist, and the lookup is never run. plainPostgres: CreateAsync enables TimescaleDB by default (#6317). */
+        await using (var plain = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, plainPostgres: true))
         await using (var plainConnection = new NpgsqlConnection(plain.ConnectionString))
         {
             await plainConnection.OpenAsync(ct);

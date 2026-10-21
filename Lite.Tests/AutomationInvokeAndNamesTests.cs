@@ -38,12 +38,7 @@ public class AutomationInvokeAndNamesTests
         }
     }
 
-    private static void Pump(Dispatcher dispatcher)
-    {
-        var frame = new DispatcherFrame();
-        dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(() => frame.Continue = false));
-        Dispatcher.PushFrame(frame);
-    }
+    private static void Pump(Dispatcher dispatcher) => StaTestThread.WaitForIdle(dispatcher, StaTestThread.IdleLimit);
 
     private static List<AutomationPeer> InvokableItems(AutomationPeer root)
     {

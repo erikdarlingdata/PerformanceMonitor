@@ -121,7 +121,7 @@ public sealed class WebPlanViewerPageTests
     [InlineData("ACTIVE_COLUMNS", "[...ACTIVE_COLUMNS, ...activePlanColumns(server)]")]
     [InlineData("QUERY_STORE_COLUMNS", "[...QUERY_STORE_COLUMNS, queryStorePlanColumn(server), queryStoreHistoryColumn(server, ctx.hours)]")]
     [InlineData("TOP_PROC_COLUMNS", "[...TOP_PROC_COLUMNS, procedurePlanColumn(server)]")]
-    [InlineData("BLOCKING_COLUMNS", "[...BLOCKING_COLUMNS, ...blockingPlanColumns(server)]")]
+    [InlineData("BLOCKING_COLUMNS", "[...BLOCKING_COLUMNS, ...blockingPlanColumns(server)")] // the #6292 chain column follows on the same list
     [InlineData("DEADLOCK_COLUMNS", "[...DEADLOCK_COLUMNS, deadlockPlanColumn(server)]")]
     public void TheRowGrids_AddTheirPlanColumns_WhereTheyAreBuilt(string list, string composed)
     {
