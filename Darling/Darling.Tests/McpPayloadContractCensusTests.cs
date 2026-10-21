@@ -350,17 +350,13 @@ public sealed class McpPayloadContractCensusTests
     /// whose value reaches the wire as prose where every other outcome is JSON — with the reason each
     /// survives. #3739 shaped every REFUSAL as <c>McpHelpers.Refusal</c>'s <c>invalid</c> envelope (in the
     /// producers: the validators, both resolvers, the web dispatch's missing-parameter arm, and the handful of
-    /// tools that refuse a parameter of their own inline), so what is left here is not a refusal at all: three
-    /// MISS sentences that predate the four miss words and belong to #3703's lane, not this one. The roster is
+    /// tools that refuse a parameter of their own inline), so what is left here is not a refusal at all: one
+    /// MISS sentence that predates the four miss words and belongs to #3703's lane, not this one. The roster is
     /// exact so a new bare sentence fails by name — a refusal is <c>Refusal(parameter, sentence)</c>, a miss is
     /// <c>Status(word, sentence)</c>, and a tool body has no third way to say no.
     /// </summary>
     public static readonly (string File, string Tool, string Sentence, string WhyItSurvives)[] BareSentenceReturns =
     [
-        ("DarlingMcpDataTools.cs", "list_servers", "No servers are registered yet.",
-            "a MISS on an empty registry (nothing to list), not a refusal of the request — the miss-word lane's (#3703), where `empty` is its word"),
-        ("McpDiscoveryTools.cs", "list_servers", "No servers are configured.",
-            "the Lite twin of the above: a MISS on an empty ServerManager, the miss-word lane's (#3703)"),
         ("McpPlanTools.cs", "analyze_query_store_plan", "Could not find connection details for server",
             "a resolved server whose connection details are gone from the manager between resolve and read — the request was fine, so not `invalid`; an `unavailable` miss for #3703's lane"),
     ];

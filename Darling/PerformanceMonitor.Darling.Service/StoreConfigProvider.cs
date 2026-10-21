@@ -149,6 +149,11 @@ public sealed class StoreConfigProvider
                 await WarnAboutFileVersusStoreAsync(connection, config, cancellationToken);
             }
 
+            /* #6262: the one setting darling.json still owns after the seed. It has its own failure scope, so a refusal there
+               never stops the service row below from being seeded. */
+            await SyncRemediationLoginsAsync(connection, config, cancellationToken);
+            await SyncHypotheticalIndexLoginsAsync(connection, config, cancellationToken);
+
             /* LAST — its presence marks the seed complete (the reload gate keys on config_version). */
             if (await CountAsync(connection, "config_service", cancellationToken) == 0)
             {
@@ -161,6 +166,355 @@ public sealed class StoreConfigProvider
                 "Could not seed the config store from darling.json — running on the file config; the store will seed on a later start: {Message}",
                 ex.Message);
         }
+    }
+
+    /// <summary>One registry row as the login sync reads it: the slot, the connection the row names (the one raw-row mapping every other comparison uses) and <c>modified_at</c>, the token the write is conditional on.</summary>
+    internal sealed record StoredLoginRow(int Id, string Name, string? Username, string? Secret, DateTime ModifiedAt, ServerConnectionIdentity Identity);
+
+    /// <summary>One change <see cref="PlanRemediationSync"/> or <see cref="PlanHypotheticalIndexSync"/> found: the registry row to write, what it becomes, the verb for the log, and the <c>modified_at</c> the row had when it was read.</summary>
+    internal sealed record RemediationSyncChange(int ServerId, string Name, string? Username, string? Secret, string Action, DateTime ExpectedModifiedAt, ServerConnectionIdentity Identity);
+
+    /// <summary>Why a sync pass left a file entry's login alone.</summary>
+    internal enum LoginSyncSkipReason
+    {
+        /// <summary>The entry has one of the login's two keys and not the other.</summary>
+        HalfLogin,
+
+        /// <summary>The entry and the registry do not pair one to one: two entries claim a row, or a name matches more than one row.</summary>
+        AmbiguousPairing,
+
+        /// <summary>The row the entry pairs with names another connection (host, port, engine or any other setting the connection rule compares).</summary>
+        ConnectionDiffers,
+
+        /// <summary>The secret is a shape the code that connects with this login refuses.</summary>
+        SecretShapeRefused,
+    }
+
+    /// <summary>A file entry whose login a sync pass did not write, and why. <see cref="Detail"/> is the secret's shape for a refused shape and empty otherwise; it is never a value.</summary>
+    internal sealed record LoginSyncSkip(string Name, LoginSyncSkipReason Reason, string Detail);
+
+    /// <summary>What a sync pass will write and what it left alone.</summary>
+    internal sealed record LoginSyncPlan(IReadOnlyList<RemediationSyncChange> Changes, IReadOnlyList<LoginSyncSkip> Skips);
+
+    /// <summary>Which of a registered server's two login slots a sync pass writes, how the file's keys map onto it, and which secret shapes the code that connects with the slot accepts.</summary>
+    private sealed record LoginSlot(
+        string Label, string UserColumn, string SecretColumn, string UserKey, string SecretKey,
+        Func<MonitoredServer, string?> FileUser, Func<MonitoredServer, string?> FileSecret, Func<string, bool> AcceptsSecret);
+
+    /* The remediation connection (ResolveRemediationPassword) opens an env:/file: reference, a sealed value or a DPAPI blob; a plain
+       password has no arm there, so it is not copied into the store. */
+    private static readonly LoginSlot RemediationSlot = new(
+        "Remediation login", "remediation_username", "remediation_encrypted_password",
+        "remediationUsername", "remediationEncryptedPassword",
+        s => s.RemediationUsername, s => s.RemediationEncryptedPassword, DarlingSecrets.RemediationSecretAccepted);
+
+    /* The index-test connection (ResolveHypotheticalIndexPassword) takes an env:/file: reference and nothing else. */
+    private static readonly LoginSlot HypotheticalIndexSlot = new(
+        "Hypothetical-index login", "hypothetical_index_username", "hypothetical_index_encrypted_password",
+        "hypotheticalIndexUsername", "hypotheticalIndexEncryptedPassword",
+        s => s.HypotheticalIndexUsername, s => s.HypotheticalIndexEncryptedPassword, DarlingSecretSource.IsReference);
+
+    /// <summary>
+    /// #6262: on every start, a darling.json entry that names BOTH keys of a server's remediation login sets or replaces that
+    /// registered server's slot. Anything else leaves the slot alone: an entry with neither key (the registry may hold a login that
+    /// was set directly in the store, the only way to change one on an existing server before this sync) and an entry with one key
+    /// (logged, so the half login is not silent). Turning a server's actions off is done with its action switches, not by removing keys.
+    /// A server that is not in the file is never touched. The sync runs as the store owner, so the store's own checks do not apply;
+    /// it therefore writes only to a row that pairs with exactly one entry and names the same connection as that entry, and only if
+    /// the row has not changed since it was read. Logs one line per change that names the server and the slot's shape, never the
+    /// login or the secret. A failing row is warned with its server name and the start goes on.
+    /// </summary>
+    internal Task SyncRemediationLoginsAsync(
+        NpgsqlConnection connection, DarlingConfig config, CancellationToken ct, Func<CancellationToken, Task>? afterRead = null) =>
+        SyncLoginSlotAsync(connection, config, RemediationSlot, afterRead, ct);
+
+    /// <summary>
+    /// #6262: the same sync, with the same rule, for the PostgreSQL "Test an index" login (#6170). The README documents an owner-role
+    /// UPDATE on the store row as a way to set this pair, so a file without the keys must not undo that. The secret is written as the
+    /// file has it, so the same-reference check that lets darling.json name one of Darling's own files for this server
+    /// (<c>HypotheticalIndexEncryptedPasswordDeclaredByFile</c>) keeps matching, and only an <c>env:</c> or <c>file:</c> reference is
+    /// written, the one shape the check accepts.
+    /// </summary>
+    internal Task SyncHypotheticalIndexLoginsAsync(
+        NpgsqlConnection connection, DarlingConfig config, CancellationToken ct, Func<CancellationToken, Task>? afterRead = null) =>
+        SyncLoginSlotAsync(connection, config, HypotheticalIndexSlot, afterRead, ct);
+
+    private async Task SyncLoginSlotAsync(
+        NpgsqlConnection connection, DarlingConfig config, LoginSlot slot, Func<CancellationToken, Task>? afterRead, CancellationToken ct)
+    {
+        LoginSyncPlan plan;
+        try
+        {
+            var stored = new List<StoredLoginRow>();
+            using (var read = new NpgsqlCommand(
+                $"SELECT server_id, name, {slot.UserColumn}, {slot.SecretColumn}, modified_at, {ServerConnectionIdentity.StoredColumns} "
+                + "FROM config_monitored_servers",
+                connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds })
+            await using (var reader = await read.ExecuteReaderAsync(ct))
+            {
+                while (await reader.ReadAsync(ct))
+                {
+                    stored.Add(new StoredLoginRow(
+                        reader.GetInt32(0), reader.IsDBNull(1) ? "" : reader.GetString(1),
+                        reader.IsDBNull(2) ? null : reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetString(3),
+                        reader.GetDateTime(4),
+                        ServerConnectionIdentity.FromStoredColumns(
+                            reader.IsDBNull(5) ? null : reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetInt32(6),
+                            reader.IsDBNull(7) ? null : reader.GetString(7), reader.IsDBNull(8) ? null : reader.GetString(8),
+                            !reader.IsDBNull(9) && reader.GetBoolean(9), reader.IsDBNull(10) ? null : reader.GetString(10),
+                            reader.IsDBNull(11) ? null : reader.GetString(11), reader.IsDBNull(12) ? null : reader.GetString(12),
+                            !reader.IsDBNull(13) && reader.GetBoolean(13), !reader.IsDBNull(14) && reader.GetBoolean(14))));
+                }
+            }
+
+            plan = PlanLoginSync(config.Servers, stored, slot);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            LogSyncFailure(slot, null, ex);
+            return;
+        }
+
+        foreach (var skip in plan.Skips)
+        {
+            LogSkip(slot, skip);
+        }
+
+        if (afterRead is not null)
+        {
+            await afterRead(ct);
+        }
+
+        foreach (var change in plan.Changes)
+        {
+            try
+            {
+                /* The write holds only while the row still has the modified_at AND the connection it was read with. modified_at alone
+                   is not enough: a raw UPDATE of the host does not bump it, and when such a transaction commits while this statement
+                   waits on the row lock, PostgreSQL re-checks the WHERE against the new row version. With the connection columns in
+                   the WHERE a moved row matches nothing, and the next start plans again. Each column is compared the way
+                   ServerConnectionIdentity.FromStoredColumns maps it (NULL becomes the empty text, 0 or false). */
+                using var write = new NpgsqlCommand(
+                    $"UPDATE config_monitored_servers SET {slot.UserColumn} = $2, {slot.SecretColumn} = $3, modified_at = $4 "
+                    + "WHERE server_id = $1 AND modified_at = $5 "
+                    + "AND COALESCE(host, '') = $6 AND COALESCE(port, 0) = $7 AND COALESCE(engine, '') = $8 "
+                    + "AND COALESCE(database, '') = $9 AND COALESCE(read_only_intent, false) = $10 AND COALESCE(auth, '') = $11 "
+                    + "AND COALESCE(username, '') = $12 AND COALESCE(encrypt_mode, '') = $13 "
+                    + "AND COALESCE(trust_server_certificate, false) = $14 AND COALESCE(multi_subnet_failover, false) = $15",
+                    connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
+                write.Parameters.AddWithValue(change.ServerId);
+                AddNullableText(write, change.Username);
+                AddNullableText(write, change.Secret);
+                write.Parameters.AddWithValue(Naive(DateTime.UtcNow));
+                write.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = change.ExpectedModifiedAt });
+                var read = change.Identity;
+                write.Parameters.AddWithValue(read.Host ?? "");
+                write.Parameters.AddWithValue(read.Port);
+                write.Parameters.AddWithValue(read.Engine ?? "");
+                write.Parameters.AddWithValue(read.Database ?? "");
+                write.Parameters.AddWithValue(read.ReadOnlyIntent);
+                write.Parameters.AddWithValue(read.Auth ?? "");
+                write.Parameters.AddWithValue(read.Username ?? "");
+                write.Parameters.AddWithValue(read.EncryptMode ?? "");
+                write.Parameters.AddWithValue(read.TrustServerCertificate);
+                write.Parameters.AddWithValue(read.MultiSubnetFailover);
+                if (await write.ExecuteNonQueryAsync(ct) > 0)
+                {
+                    _logger?.LogInformation(
+                        "{Slot} for server '{Server}' {Action} from darling.json (secret: {Shape}).",
+                        slot.Label, change.Name, change.Action, DarlingSecrets.RemediationSlotShape(change.Secret));
+                }
+                else
+                {
+                    _logger?.LogWarning(
+                        "{Slot} for server '{Server}' not applied: the registry row changed after it was read. The next start plans it again.",
+                        slot.Label, change.Name);
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                LogSyncFailure(slot, change.Name, ex);
+            }
+        }
+    }
+
+    private void LogSkip(LoginSlot slot, LoginSyncSkip skip)
+    {
+        switch (skip.Reason)
+        {
+            case LoginSyncSkipReason.HalfLogin:
+                _logger?.LogWarning(
+                    "{Slot} for server '{Server}' not changed: darling.json has only one of {UserKey} and {SecretKey}, so the registry keeps what it has. Set both keys to change the login.",
+                    slot.Label, skip.Name, slot.UserKey, slot.SecretKey);
+                break;
+            case LoginSyncSkipReason.AmbiguousPairing:
+                _logger?.LogWarning(
+                    "{Slot} for server '{Server}' not applied: it does not pair with one registered server (two entries claim the same row, or the name matches more than one). Give each server its own id and name.",
+                    slot.Label, skip.Name);
+                break;
+            case LoginSyncSkipReason.ConnectionDiffers:
+                _logger?.LogWarning(
+                    "{Slot} for server '{Server}' not applied: the registered server connects differently from its darling.json entry. Update the entry.",
+                    slot.Label, skip.Name);
+                break;
+            default:
+                _logger?.LogWarning(
+                    "{Slot} for server '{Server}' not applied: the secret is a {Shape}, which the login's connection refuses. Use an env:NAME or file:/path reference.",
+                    slot.Label, skip.Name, skip.Detail);
+                break;
+        }
+    }
+
+    private void LogSyncFailure(LoginSlot slot, string? server, Exception ex)
+    {
+        /* The exception's message is deliberately not logged: a PostgreSQL error can carry a row's values (a constraint's DETAIL
+           line), and the row holds a secret reference. The type and the SQLSTATE say what happened without repeating any of it. */
+        var sqlState = (ex as PostgresException ?? ex.InnerException as PostgresException)?.SqlState ?? "none";
+        if (server is null)
+        {
+            _logger?.LogWarning(
+                "Could not sync the {Slot} from darling.json to the registry; the registry keeps what it has (error: {ErrorType}, SQLSTATE {SqlState}).",
+                slot.Label.ToLowerInvariant() + "s", ex.GetType().Name, sqlState);
+        }
+        else
+        {
+            _logger?.LogWarning(
+                "Could not sync the {Slot} for server '{Server}' from darling.json to the registry; the registry keeps what it has and the other servers go on (error: {ErrorType}, SQLSTATE {SqlState}).",
+                slot.Label.ToLowerInvariant(), server, ex.GetType().Name, sqlState);
+        }
+    }
+
+    /// <summary>The pure half of <see cref="SyncRemediationLoginsAsync"/> (see <see cref="PlanLoginSync"/> for the rules).</summary>
+    internal static LoginSyncPlan PlanRemediationSync(IEnumerable<MonitoredServer>? fileServers, IReadOnlyList<StoredLoginRow> stored) =>
+        PlanLoginSync(fileServers, stored, RemediationSlot);
+
+    /// <summary>The pure half of <see cref="SyncHypotheticalIndexLoginsAsync"/>: the same pairing and checks, with the index-test slot's accepted shapes.</summary>
+    internal static LoginSyncPlan PlanHypotheticalIndexSync(IEnumerable<MonitoredServer>? fileServers, IReadOnlyList<StoredLoginRow> stored) =>
+        PlanLoginSync(fileServers, stored, HypotheticalIndexSlot);
+
+    /// <summary>
+    /// Pairs file entries with registered servers one to one, then lists the entries whose login the registry should take. Pairing never
+    /// guesses: an entry takes the row with its server id; only an entry with no such row looks at the name, and only among rows that
+    /// no entry claimed by id. A row claimed by two entries, or a name that matches more than one row, pairs nobody. A paired entry
+    /// is written only if it names both keys, the row names the same connection (<see cref="ServerConnectionIdentity.Differ"/>, the rule
+    /// <see cref="BackfillSecretFromFile"/> and <see cref="MarkSlotsTheFileDeclares"/> apply) and its secret is a shape the slot's
+    /// connection code accepts. An entry with neither key, or a pair that already holds the file's login, is not listed.
+    /// </summary>
+    private static LoginSyncPlan PlanLoginSync(IEnumerable<MonitoredServer>? fileServers, IReadOnlyList<StoredLoginRow> stored, LoginSlot slot)
+    {
+        var changes = new List<RemediationSyncChange>();
+        var skips = new List<LoginSyncSkip>();
+        var file = (fileServers ?? Enumerable.Empty<MonitoredServer>()).Where(s => s is not null).ToList();
+        var pairs = PairEntries(file, stored);
+
+        for (var i = 0; i < file.Count; i++)
+        {
+            var entry = file[i];
+            var user = string.IsNullOrWhiteSpace(slot.FileUser(entry)) ? null : slot.FileUser(entry);
+            var secret = string.IsNullOrWhiteSpace(slot.FileSecret(entry)) ? null : slot.FileSecret(entry);
+            if (user is null && secret is null)
+            {
+                continue;
+            }
+
+            if (user is null || secret is null)
+            {
+                skips.Add(new LoginSyncSkip(entry.DisplayName, LoginSyncSkipReason.HalfLogin, ""));
+                continue;
+            }
+
+            var (row, ambiguous) = pairs[i];
+            if (ambiguous)
+            {
+                skips.Add(new LoginSyncSkip(entry.DisplayName, LoginSyncSkipReason.AmbiguousPairing, ""));
+                continue;
+            }
+
+            if (row is null)
+            {
+                continue;
+            }
+
+            if (ServerConnectionIdentity.Differ(ConnectionIdentityOf(entry), row.Identity))
+            {
+                skips.Add(new LoginSyncSkip(entry.DisplayName, LoginSyncSkipReason.ConnectionDiffers, ""));
+                continue;
+            }
+
+            if (!slot.AcceptsSecret(secret))
+            {
+                skips.Add(new LoginSyncSkip(entry.DisplayName, LoginSyncSkipReason.SecretShapeRefused, DarlingSecrets.RemediationSlotShape(secret)));
+                continue;
+            }
+
+            var heldUser = string.IsNullOrWhiteSpace(row.Username) ? null : row.Username;
+            var heldSecret = string.IsNullOrWhiteSpace(row.Secret) ? null : row.Secret;
+            if (string.Equals(user, heldUser, StringComparison.Ordinal) && string.Equals(secret, heldSecret, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var action = heldUser is null && heldSecret is null ? "set" : "changed";
+            changes.Add(new RemediationSyncChange(row.Id, row.Name ?? string.Empty, user, secret, action, row.ModifiedAt, row.Identity));
+        }
+
+        return new LoginSyncPlan(changes, skips);
+    }
+
+    /// <summary>One entry per file entry, in order: the row it pairs with (id first, then name among rows no entry claimed by id), or whether it is ambiguous.</summary>
+    private static (StoredLoginRow? Row, bool Ambiguous)[] PairEntries(List<MonitoredServer> file, IReadOnlyList<StoredLoginRow> stored)
+    {
+        var rows = new StoredLoginRow?[file.Count];
+        var ambiguous = new bool[file.Count];
+        var byId = new bool[file.Count];
+        var claimedById = new HashSet<int>();
+
+        for (var i = 0; i < file.Count; i++)
+        {
+            var candidates = stored.Where(s => s.Id == file[i].ServerId).ToList();
+            if (candidates.Count == 1)
+            {
+                rows[i] = candidates[0];
+                byId[i] = true;
+                claimedById.Add(candidates[0].Id);
+            }
+            else if (candidates.Count > 1)
+            {
+                ambiguous[i] = true;
+                byId[i] = true;
+            }
+        }
+
+        for (var i = 0; i < file.Count; i++)
+        {
+            var name = file[i].DisplayName;
+            if (byId[i] || string.IsNullOrWhiteSpace(name))
+            {
+                continue;
+            }
+
+            var candidates = stored.Where(s => !claimedById.Contains(s.Id) && string.Equals(s.Name, name, StringComparison.OrdinalIgnoreCase)).ToList();
+            if (candidates.Count == 1)
+            {
+                rows[i] = candidates[0];
+            }
+            else if (candidates.Count > 1)
+            {
+                ambiguous[i] = true;
+            }
+        }
+
+        /* A row two entries claim (the same id twice in the file, or two entries with one name) is nobody's. */
+        foreach (var claimants in Enumerable.Range(0, file.Count).Where(i => rows[i] is not null).GroupBy(i => rows[i]!.Id).Where(g => g.Count() > 1).ToList())
+        {
+            foreach (var i in claimants)
+            {
+                rows[i] = null;
+                ambiguous[i] = true;
+            }
+        }
+
+        return Enumerable.Range(0, file.Count).Select(i => (rows[i], ambiguous[i])).ToArray();
     }
 
     /// <summary>

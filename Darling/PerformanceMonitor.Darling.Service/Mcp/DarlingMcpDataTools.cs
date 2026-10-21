@@ -1741,14 +1741,19 @@ public sealed class DarlingMcpDataTools
                 return McpHelpers.FormatError("list_servers (reading the servers registry from the store)", ex);
             }
 
-            /* #2339: the empty-registry answer is prose, not the JSON envelope, so it carries the peer
+            /* #2339: the empty-registry answer is not the server-list envelope, so it carries the peer
                disclosure explicitly — otherwise it is the one path where the declaration silently vanishes,
                and it is the worst one to lose it on: a store with nothing registered is a fresh or
                just-restarted box, where "no servers here" with no mention of the siblings is the strongest
-               version of the wrong conclusion. */
+               version of the wrong conclusion. #6277: it is the `empty` status envelope, the true negative
+               get_fleet_overview already answers an empty registry with, and not bare prose: prose is not
+               JSON, so the web read surface mapped it to a 400 and the Alert History, FinOps and Job History
+               pages logged a console error on a fresh install. */
             if (servers.Count == 0)
-                return "No servers are registered yet. The service registers each monitored server on its first successful connection."
-                    + DarlingPeerDirectory.EmptyRegistryDisclosure(DarlingPeerDirectory.Current);
+                return McpHelpers.Status(
+                    "empty",
+                    "No servers are registered yet. The service registers each monitored server on its first successful connection."
+                    + DarlingPeerDirectory.EmptyRegistryDisclosure(DarlingPeerDirectory.Current));
 
             return RenderServerList(servers, DateTime.UtcNow, DarlingPeerDirectory.Current);
         }
