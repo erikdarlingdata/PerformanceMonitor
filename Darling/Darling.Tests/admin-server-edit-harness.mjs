@@ -225,7 +225,7 @@ globalThis.fetch = async (url, init = {}) => {
   const sent = init.body ? JSON.parse(init.body) : null;
   requests.push({ method, url: u, body: sent, contentType: (init.headers || {})["Content-Type"] || null });
   if (u === "/api/session") {
-    const r = state.sessionReply ? state.sessionReply() : { status: 200, body: { can_edit: state.canEdit } };
+    const r = state.sessionReply ? state.sessionReply() : { status: 200, body: { can_edit: state.canEdit, signed_in_admin: state.canEdit && state.signedIn !== false } };
     return reply(r.status, r.body, r.raw);
   }
   if (method === "GET" && u === "/api/admin/servers") {
@@ -1198,6 +1198,7 @@ try {
         approved: () => { pending = pending.filter((n) => n.note_id !== 7); return { status: 200, body: { status: "approved", note_id: 7 } }; },
         gone: () => { pending = pending.filter((n) => n.note_id !== 7); return { status: 404, body: { error: "That note is not pending: it was already decided, or it is gone." } }; },
         refused: () => ({ status: 403, body: { error: "Deciding a note needs a store login with the admin role." } }),
+        signin: () => ({ status: 403, body: { error: "Sign in to the web as an admin to make this change, or use the Viewer." } }),
         broken: () => ({ status: 500, body: { error: "The store did not answer." } }),
       };
       state.responder = (method, url) => {
@@ -1220,6 +1221,27 @@ try {
         writes: requests.filter((r) => r.method === "PUT").map((r) => r.url),
         rowsAfter: approveIds(),
         status: byAttr(main, "data-note-status").map((n) => n.textContent),
+      };
+    },
+    /* #6265: a seat that can edit but holds no sign-in (a dashboard with no web token) sees the Pending Notes and Practice Scores lists,
+       the sign-in sentence, and none of the write forms or the Approve and Reject buttons. */
+    signedout: async (tab) => {
+      state.canEdit = true;
+      state.signedIn = false;
+      const note = { note_id: 7, server_id: 1, server_name: "alpha", metric_name: "Blocking", family: "blocking", story_path_hash: "ABCDEF0123456789",
+        note_text: "note 7", author: "agent:a", source_request_id: null, proposed_at_utc: "2026-10-01T00:00:00Z", expires_at_utc: "2026-12-30T00:00:00Z" };
+      state.responder = (method, url) => {
+        if (method === "GET" && url === "/api/investigation-notes/pending") return { status: 200, body: { notes_returned: 1, truncated: false, notes: [note] } };
+        if (method === "GET" && url === "/api/investigation-practice-scores") return { status: 200, body: { hours_back: 720, agents: [] } };
+        return { status: 404, body: { error: "no such request " + url } };
+      };
+      await mountPage(tab);
+      return {
+        sentence: main.textContent.includes("Sign in to the web as an admin to make this change, or use the Viewer."),
+        approveButtons: byAttr(main, "data-note-id").length,
+        noteForm: byAttr(main, "data-note-write").length,
+        practiceForm: byAttr(main, "data-practice-start").length,
+        writes: requests.filter((r) => r.method === "PUT").length,
       };
     },
     /* One call of an admin.js export, {"fn": "buildEditBody", "args": [...]} on stdin, printed as {"result": ...}; or

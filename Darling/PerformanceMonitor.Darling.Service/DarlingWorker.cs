@@ -2162,6 +2162,12 @@ LIMIT 1";
             _logger.LogWarning("{Warning}", warning);
         }
 
+        /* #6262: a remediation secret that is a DPAPI blob works for operator remediation but is refused by agent server actions. */
+        foreach (var warning in DarlingSecrets.RemediationSecretWarnings(config.Servers))
+        {
+            _logger.LogWarning("{Warning}", warning);
+        }
+
         /* #5307: a key under web.network / mcp.network (or their tls blocks, or web.network.oidc) that no config
            class declares is dropped at load; name each one so a mistyped key is visible. Paths only. */
         foreach (var warning in GetUnknownNetworkKeyWarnings(config))

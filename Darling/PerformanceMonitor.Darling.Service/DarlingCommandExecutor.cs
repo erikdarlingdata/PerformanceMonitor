@@ -434,7 +434,9 @@ WHERE status = 'in_progress'
         switch ((command.CommandType ?? string.Empty).Trim().ToLowerInvariant())
         {
             case "pause":
-                return StoreWrite("UPDATE config.config_service SET paused = TRUE WHERE id = 1", null, "paused");
+                /* The pause waits for an agent change in progress, which holds the service row until its remote work ends (#5632). */
+                return StoreWrite("UPDATE config.config_service SET paused = TRUE WHERE id = 1", null, "paused",
+                    PerformanceMonitor.Darling.Storage.InvestigationRequestStore.AgentOffSwitchWaitSeconds);
 
             case "resume":
                 return StoreWrite("UPDATE config.config_service SET paused = FALSE WHERE id = 1", null, "resumed");
@@ -557,7 +559,7 @@ WHERE status = 'in_progress'
 
                 return UndoPlanChangeArgs.LoginIsValid(command.RequestedBy)
                     ? new CommandPlan(CommandKind.UndoPlanChange, null, null, "plan change undone", null)
-                    : Fail("undo_plan_change requires requested_by to be the person's login (1 to 64 letters, digits or . _ : - @ \\)");
+                    : Fail("undo_plan_change requires requested_by to be the person's login (1 to 256 characters: letters, digits, spaces and a few punctuation marks)");
 
             case "set_server_action":
                 /* #6269: a person's switch change, run in the service as the store owner. args_json {action, enabled}; the action name and the
@@ -857,6 +859,8 @@ WHERE status = 'in_progress'
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
         using var command = new NpgsqlCommand(plan.Sql, connection);
         command.CommandTimeout = ServiceCommandDeadlines.CommandPlaneSeconds;
+        if (plan.TimeoutSeconds is { } ownSeconds)
+            command.CommandTimeout = ownSeconds;
         if (plan.Parameters is not null)
         {
             foreach (var parameter in plan.Parameters)
@@ -1023,8 +1027,8 @@ WHERE status = 'in_progress'
         return null;
     }
 
-    private static CommandPlan StoreWrite(string sql, object?[]? parameters, string successStatus) =>
-        new(CommandKind.StoreWrite, sql, parameters, successStatus, null);
+    private static CommandPlan StoreWrite(string sql, object?[]? parameters, string successStatus, int? timeoutSeconds = null) =>
+        new(CommandKind.StoreWrite, sql, parameters, successStatus, null) { TimeoutSeconds = timeoutSeconds };
 
     private static CommandPlan Fail(string reason) =>
         new(CommandKind.Fail, null, null, string.Empty, reason);
@@ -1172,7 +1176,11 @@ internal sealed record UndoPlanChangeArgs(long CalledId, bool Confirm, string? S
 }
 
 /// <summary>The resolved (pure) plan for one command — see <see cref="DarlingCommandExecutor.ResolvePlan"/>.</summary>
-public sealed record CommandPlan(CommandKind Kind, string? Sql, object?[]? Parameters, string SuccessStatus, string? FailReason);
+public sealed record CommandPlan(CommandKind Kind, string? Sql, object?[]? Parameters, string SuccessStatus, string? FailReason)
+{
+    /// <summary>A store write's own command timeout in seconds; null is the command plane's.</summary>
+    public int? TimeoutSeconds { get; init; }
+}
 
 /// <summary>
 /// The worker's callback surface for the two imperative commands that need the LIVE collection loop:

@@ -155,6 +155,42 @@ public sealed class InvestigationContractLiveTests
         });
     }
 
+    /// <summary>#5632 acceptance test: a route at its hourly limit opens no new request, and the alert still goes to its
+    /// other channels. The agent route carries its own generic webhook and inherits Slack from the settings row; 22 alerts
+    /// on 22 servers (the 21st and 22nd are past the limit of 20) each post to both, and the history row is written
+    /// for every one of them.</summary>
+    [Fact]
+    public async Task AnAlertPastTheHourlyLimit_OpensNoRequest_AndStillReachesTheRoutesOtherChannels()
+    {
+        using var slack = new CapturingWebhookEndpoint();
+        using var generic = new CapturingWebhookEndpoint();
+        await RunAsync(McpDataDetail.Full, async (h, ct) =>
+        {
+            for (int server = 1; server <= 22; server++)
+            {
+                await h.Deliverer.DeliverAsync(Outcome("Blocking Detected", serverId: 100 + server), ct);
+            }
+
+            Assert.Equal("20|1|22", await ScalarAsync(h.Connection,
+                "SELECT (SELECT count(*) FROM config.investigation_requests) || '|' || " +
+                "(SELECT count(*) FROM config.investigation_journal WHERE event = 'limit_reached') || '|' || " +
+                "(SELECT count(*) FROM config_alert_log)", ct));
+
+            /* The two past the limit reached both channels, as the twenty before them did. */
+            Assert.Equal(22, slack.Bodies.Count);
+            Assert.Equal(22, generic.Bodies.Count);
+            foreach (var past in new[] { "srv-121", "srv-122" })
+            {
+                Assert.Contains(slack.Bodies, b => b.Contains(past, StringComparison.Ordinal));
+                Assert.Contains(generic.Bodies, b => b.Contains(past, StringComparison.Ordinal));
+            }
+        }, config =>
+        {
+            config.Webhooks.SlackUrl = slack.Url;
+            config.NotificationRoutes = new[] { AgentRoute(1, AlertFamily.Performance) with { GenericUrl = generic.Url } };
+        });
+    }
+
     [Fact]
     public async Task TheSweep_ExpiresAnUnclaimedRequest_AndAClaimAfterThatIsNotOpen()
     {
@@ -222,7 +258,7 @@ public sealed class InvestigationContractLiveTests
         Assert.Contains(detail.Journal, j => j.Event == "reported" && j.Actor.Contains(agent.AgentId, StringComparison.Ordinal));
     }
 
-    private async Task RunAsync(McpDataDetail dataDetail, Func<Harness, CancellationToken, Task> body)
+    private async Task RunAsync(McpDataDetail dataDetail, Func<Harness, CancellationToken, Task> body, Action<DarlingConfig>? configure = null)
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
@@ -245,6 +281,7 @@ public sealed class InvestigationContractLiveTests
         var config = new DarlingConfig();
         config.Alerts.DeliveryMode = AlertNotificationMode.Summary;
         config.NotificationRoutes = new[] { AgentRoute(1, AlertFamily.Performance) };
+        configure?.Invoke(config);
         var settings = new DarlingAlertSettings(config);
         var history = new PgAlertHistoryStore(historySource);
         var webhooks = new WebhookAlertService(settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, history);

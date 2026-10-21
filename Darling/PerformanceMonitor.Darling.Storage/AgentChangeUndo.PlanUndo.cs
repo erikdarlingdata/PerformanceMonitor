@@ -58,6 +58,9 @@ public sealed record PlanUndoAnswer(
     public const string RefusedStatus = "refused";
     public const string Failed = "failed";
 
+    /// <summary>The write was sent and its reply was lost (or the call was cancelled while it ran): nobody knows whether the plan changed (#5632). Nothing is journaled as undone or as refused.</summary>
+    public const string OutcomeUnknown = "outcome_unknown";
+
     /// <summary>True when the request was answered without a refusal or a failure: a confirm step or an undo.</summary>
     public bool Succeeded => Status is Confirm or Undone;
 
@@ -112,6 +115,15 @@ public sealed partial class AgentChangeUndo
 {
     /// <summary>The tool name a person's plan undo journals its refusals under.</summary>
     public const string PlanUndoTool = "undo_plan_change";
+
+    /// <summary>The late <c>action_undone</c> of a plan undo the server accepted (#5632, step 13): written only while the call has no <c>action_undone</c> yet.</summary>
+    private const string LateUndoneSql = @"
+INSERT INTO config.investigation_journal (event_time, request_id, server_id, event, actor, reason, detail)
+SELECT $1, $2, $3, 'action_undone', $4, NULL, $5::jsonb
+WHERE NOT EXISTS (
+    SELECT 1 FROM config.investigation_journal AS x
+    WHERE x.request_id IS NOT DISTINCT FROM $2 AND x.event = 'action_undone' AND x.detail->>'called_id' = $6)
+RETURNING journal_id";
 
     private const string PlanCalledSql = @"
 SELECT c.detail::text, c.request_id, c.server_id, c.event_time, r.server_name
@@ -213,6 +225,8 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
         private readonly NpgsqlConnection _connection;
         private readonly NpgsqlTransaction _transaction;
         private bool _done;
+        private bool _serverChanged;
+        private JsonObject? _detail;
 
         internal PlanUndoSession(AgentChangeUndo owner, NpgsqlConnection connection, NpgsqlTransaction transaction, PlanChangeFacts facts, string actor)
         {
@@ -238,6 +252,10 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
         {
             ArgumentNullException.ThrowIfNull(ownerSource);
             var store = new InvestigationRequestStore(_owner._dataSource, _owner._commandTimeoutSeconds);
+            /* The shared form of the server's switch lock, in the session's transaction and before the switch is read, as an agent's write takes it:
+               a switch writer that takes the exclusive form then waits for this undo, and an undo that starts after it reads the committed switch. */
+            await ServerActionSwitchLock.AcquireSharedAsync(_connection, _transaction, Facts.ServerId, ServerActionNames.ForcePlan,
+                _owner._commandTimeoutSeconds, cancellationToken);
             var refusal = await store.SwitchAndCredentialRefusalAsync(_connection, _transaction, Facts.ServerId, Facts.ServerName, ServerActionNames.ForcePlan,
                 (serverId, token) => store.ReadServerCredentialStateAsync(ownerSource, serverId, token), person: true, cancellationToken);
             if (refusal is not null)
@@ -266,11 +284,77 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
         }
 
         /// <summary>
-        /// Journals <c>action_undone</c> (#5632, step 9, rule 7) with the call's own <c>request_id</c> and <c>server_id</c> and <c>detail.called_id</c> as
-        /// a JSON number, the shape step 8's readers and the list match on. <paramref name="replaced"/> is the state read before the write,
-        /// <paramref name="restored"/> the state read after it.
+        /// The undo's write was sent and its reply was lost, or the call was cancelled while it ran (#5632): the plan may have changed. Journals the
+        /// attempt as an <c>action_called</c> row of kind <see cref="AgentChangeKinds.PlanUndo"/> with the person as the actor and no result row,
+        /// the way a kill whose reply was lost is journaled, so the Agent changes list reads it as "result unknown" next to the change it tried to
+        /// undo. It is written and committed here with no cancellation (the caller's token may be the thing that fired), on a fresh connection when
+        /// the session's own cannot take it. The change itself stays offered: its next undo reads the server first. Best effort: a store that
+        /// cannot be written leaves only the service log.
         /// </summary>
-        public async Task JournalUndoneAsync(string statement, JsonNode? replaced, JsonNode? restored, string? restoredAs, CancellationToken cancellationToken = default)
+        public async Task RecordOutcomeUnknownAsync(string statement)
+        {
+            var detail = new JsonObject
+            {
+                ["kind"] = AgentChangeKinds.PlanUndo,
+                ["tool"] = PlanUndoTool,
+                ["called_id"] = Facts.CalledId,
+                ["target"] = Facts.Target?.DeepClone(),
+                ["statement"] = statement,
+            }.ToJsonString();
+            try
+            {
+                await _owner.JournalAsync(_connection, _transaction, "action_called", Actor, Facts.RequestId, Facts.ServerId, detail, CancellationToken.None);
+                await _transaction.CommitAsync(CancellationToken.None);
+                _done = true;
+                return;
+            }
+            catch (Exception)
+            {
+                /* The session's transaction cannot take it: write it on its own. */
+            }
+
+            try
+            {
+                await using var connection = await _owner._dataSource.OpenConnectionAsync(CancellationToken.None);
+                await _owner.JournalAsync(connection, null, "action_called", Actor, Facts.RequestId, Facts.ServerId, detail, CancellationToken.None);
+            }
+            catch (Exception)
+            {
+            }
+        }
+
+        /// <summary>
+        /// The monitored server accepted the undo's write (#5632, step 13). From here the undo has happened whatever the store does, so a failed
+        /// <c>action_undone</c> insert or commit is recorded late on a fresh connection instead of being lost with the rolled-back transaction.
+        /// </summary>
+        public async Task MarkServerChangedAsync(string statement, JsonNode? replaced, string? restoredAs)
+        {
+            _serverChanged = true;
+            _detail = BuildDetail(statement, replaced, null, restoredAs);
+            /* The call's advisory lock is a transaction lock, so a failed commit would drop it before the late row exists and a second undo
+               could read the call as not yet undone. Hold it for the session as well; DisposeAsync lets it go after the late row. */
+            try
+            {
+                await using var command = _owner.Command(_connection, _transaction, "SELECT pg_advisory_lock($1)", P(Facts.CalledId));
+                await command.ExecuteNonQueryAsync(CancellationToken.None);
+                _sessionLocked = true;
+            }
+            catch (Exception)
+            {
+                /* The connection is already failing: the late write then takes the lock on a fresh connection. */
+            }
+        }
+
+        private bool _sessionLocked;
+        private bool _lateHandled;
+
+        /// <summary>True when the <c>action_undone</c> row was written late, after the store's own write or commit failed. False when the commit had gone through, so the row was already there.</summary>
+        public bool RecordedLate { get; private set; }
+
+        /// <summary>True when the server accepted the undo and the store could not record it at all, not even late.</summary>
+        public bool JournalMissing { get; private set; }
+
+        private JsonObject BuildDetail(string statement, JsonNode? replaced, JsonNode? restored, string? restoredAs)
         {
             var detail = new JsonObject
             {
@@ -283,23 +367,172 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
             };
             if (restoredAs is not null)
                 detail["restored_as"] = restoredAs;
-            await _owner.JournalAsync(_connection, _transaction, "action_undone", Actor, Facts.RequestId, Facts.ServerId, detail.ToJsonString(), cancellationToken);
+            return detail;
         }
 
-        /// <summary>Commits what the session journaled and drops the lock.</summary>
+        /// <summary>
+        /// Journals <c>action_undone</c> (#5632, step 9, rule 7) with the call's own <c>request_id</c> and <c>server_id</c> and <c>detail.called_id</c> as
+        /// a JSON number, the shape step 8's readers and the list match on. <paramref name="replaced"/> is the state read before the write,
+        /// <paramref name="restored"/> the state read after it. After <see cref="MarkServerChangedAsync"/> a failure of the insert is recorded late and
+        /// not thrown (a cancellation is thrown after the late row).
+        /// </summary>
+        public async Task JournalUndoneAsync(string statement, JsonNode? replaced, JsonNode? restored, string? restoredAs, CancellationToken cancellationToken = default)
+        {
+            _detail = BuildDetail(statement, replaced, restored, restoredAs);
+            try
+            {
+                await _owner.JournalAsync(_connection, _transaction, "action_undone", Actor, Facts.RequestId, Facts.ServerId, _detail.ToJsonString(), cancellationToken);
+            }
+            catch (Exception ex) when (_serverChanged)
+            {
+                await RecordLateAsync(ex.Message);
+                if (ex is OperationCanceledException)
+                    throw;
+            }
+        }
+
+        /// <summary>
+        /// Commits what the session journaled and drops the lock. After <see cref="MarkServerChangedAsync"/> a failed commit records
+        /// <c>action_undone</c> late and does not throw, so the person is told the undo happened (a cancellation is thrown after the late row).
+        /// </summary>
         public async Task CommitAsync(CancellationToken cancellationToken = default)
         {
             if (_done)
                 return;
             _done = true;
-            await _transaction.CommitAsync(cancellationToken);
+            if (_lateHandled)
+                return;
+            try
+            {
+                await _transaction.CommitAsync(cancellationToken);
+            }
+            catch (Exception ex) when (_serverChanged)
+            {
+                await RecordLateAsync(ex.Message);
+                if (ex is OperationCanceledException)
+                    throw;
+            }
+        }
+
+        /// <summary>
+        /// Writes <c>action_undone</c> with <c>recorded_late</c>, at most <see cref="InvestigationRequestStore.AgentActionLateAttempts"/> times, under the
+        /// call's advisory lock, as one statement that skips a call that already has its row (#5632). The first attempt runs on this session's own
+        /// connection, which still holds the lock (<see cref="MarkServerChangedAsync"/>), so a second undo waiting on the call stays waiting until the
+        /// row exists and then reads <c>already_undone</c>. If that connection is gone the next attempt opens a fresh one and takes the lock there.
+        /// </summary>
+        private async Task RecordLateAsync(string storeError)
+        {
+            var detail = (_detail ?? new JsonObject { ["called_id"] = Facts.CalledId, ["kind"] = Facts.Kind, ["target"] = Facts.Target?.DeepClone() }).DeepClone().AsObject();
+            detail["recorded_late"] = true;
+            detail["error"] = storeError;
+            var text = detail.ToJsonString();
+            for (var attempt = 0; attempt < InvestigationRequestStore.AgentActionLateAttempts; attempt++)
+            {
+                try
+                {
+                    /* While this session's connection is open every attempt runs on it: a statement timeout or a deadlock leaves it usable and it holds
+                       the call's lock, so a fresh connection would wait on a lock its own session holds. A fresh one is for a broken connection only. */
+                    RecordedLate = _connection.State == System.Data.ConnectionState.Open
+                        ? await InsertLateAsync(_connection, text, takeLock: !_sessionLocked, endFirst: true)
+                        : await InsertLateOnFreshConnectionAsync(text);
+                    _lateHandled = true;
+                    return;
+                }
+                catch (Exception)
+                {
+                    /* Try once more; a second failure leaves the change with no row, which the person is told. */
+                }
+            }
+
+            _lateHandled = true;
+            JournalMissing = true;
+        }
+
+        private async Task<bool> InsertLateOnFreshConnectionAsync(string text)
+        {
+            await using var connection = await _owner._dataSource.OpenConnectionAsync(CancellationToken.None);
+            return await InsertLateAsync(connection, text, takeLock: true, endFirst: false);
+        }
+
+        /// <summary>One transaction: the call's lock when it is not already held, then the insert that skips a call with a row. True when a row was written.</summary>
+        private async Task<bool> InsertLateAsync(NpgsqlConnection connection, string text, bool takeLock, bool endFirst)
+        {
+            if (endFirst)
+            {
+                /* The session's own transaction failed (an insert error leaves it aborted; a failed commit has ended it): end it first. */
+                try
+                {
+                    await _transaction.RollbackAsync(CancellationToken.None);
+                }
+                catch (Exception)
+                {
+                }
+            }
+
+            await using var transaction = await connection.BeginTransactionAsync(CancellationToken.None);
+            if (takeLock)
+            {
+                /* A lock still held by a connection the server has not noticed is dead must not hang the late write. */
+                await using (var timeout = _owner.Command(connection, transaction, "SET LOCAL lock_timeout = '5s'"))
+                    await timeout.ExecuteNonQueryAsync(CancellationToken.None);
+                await using var lockCommand = _owner.Command(connection, transaction, "SELECT pg_advisory_xact_lock($1)", P(Facts.CalledId));
+                await lockCommand.ExecuteNonQueryAsync(CancellationToken.None);
+            }
+
+            bool inserted;
+            await using (var command = _owner.Command(connection, transaction, LateUndoneSql,
+                new NpgsqlParameter<DateTime> { TypedValue = _owner.Now(), NpgsqlDbType = NpgsqlDbType.TimestampTz },
+                new NpgsqlParameter<Guid?> { TypedValue = Facts.RequestId, NpgsqlDbType = NpgsqlDbType.Uuid },
+                new NpgsqlParameter<int?> { TypedValue = Facts.ServerId, NpgsqlDbType = NpgsqlDbType.Integer },
+                PText(Actor), PText(text), PText(Facts.CalledId.ToString(CultureInfo.InvariantCulture))))
+            {
+                /* No row back means the call already has its action_undone (the commit went through and the failure came after it). */
+                inserted = await command.ExecuteScalarAsync(CancellationToken.None) is not null;
+            }
+
+            await transaction.CommitAsync(CancellationToken.None);
+            return inserted;
         }
 
         public async ValueTask DisposeAsync()
         {
             _done = true;
-            await _transaction.DisposeAsync();
-            await _connection.DisposeAsync();
+            try
+            {
+                try
+                {
+                    await _transaction.DisposeAsync();
+                }
+                catch (Exception)
+                {
+                    /* A broken connection: the unlock below fails too and the pool is cleared. */
+                }
+
+                if (_sessionLocked)
+                {
+                    try
+                    {
+                        await using var unlock = _owner.Command(_connection, null, "SELECT pg_advisory_unlock($1)", P(Facts.CalledId));
+                        await unlock.ExecuteNonQueryAsync(CancellationToken.None);
+                    }
+                    catch (Exception)
+                    {
+                        /* A pooled connection keeps a session lock until it is reused: have the data source close its connections for good instead.
+                           (NpgsqlConnection.ClearPool clears only the pools of connection strings, not a data source's.) */
+                        try
+                        {
+                            _owner._dataSource.Clear();
+                        }
+                        catch (Exception)
+                        {
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                await _connection.DisposeAsync();
+            }
         }
     }
 }

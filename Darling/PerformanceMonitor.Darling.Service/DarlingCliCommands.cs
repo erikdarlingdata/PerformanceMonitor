@@ -544,6 +544,12 @@ public static partial class DarlingCliCommands
             return 1;
         }
 
+        /* #6262: a warning, not a failure: operator remediation opens a DPAPI blob, so the file is valid, but agent server actions would refuse it. */
+        foreach (var warning in DarlingSecrets.RemediationSecretWarnings(config.Servers))
+        {
+            output.WriteLine("WARNING: " + warning);
+        }
+
         var targets = await ResolveValidationTargetsAsync(config, output, error, cancellationToken);
         if (targets is null)
         {
@@ -551,6 +557,12 @@ public static partial class DarlingCliCommands
         }
 
         await ReportAgentDispatchAsync(config, output, cancellationToken);
+
+        /* #6265: a warning, not an error, so a setup that started before still starts; the web refuses that token for sign-in. */
+        if (DarlingAgentDispatchChecks.WebTokenFinding(config) is { } webTokenFinding)
+        {
+            output.WriteLine("WARNING: " + webTokenFinding);
+        }
 
         output.WriteLine($"Validating connectivity to {targets.Count} server(s)...");
 

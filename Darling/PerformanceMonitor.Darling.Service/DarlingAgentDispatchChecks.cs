@@ -137,6 +137,42 @@ internal static class DarlingAgentDispatchChecks
         }
     }
 
+    /// <summary>The sentence for a web token that has the same value as the MCP token (#6265): the web token is refused for sign-in,
+    /// because an MCP agent holds the MCP token and the web token signs in as a person.</summary>
+    internal const string WebTokenSameAsMcpMessage =
+        "The web token has the same value as the MCP token, so it is refused for web sign-in: an agent that holds the MCP token must not be " +
+        "able to sign in to the web as a person. Set a different web token (web.network.encryptedToken or web.network.token).";
+
+    /// <summary>True when the web token and the MCP token are both set and the same value.</summary>
+    internal static bool WebTokenIsMcpToken(string? webToken, string? mcpToken) =>
+        DarlingHostBinding.FixedTimeTokenEquals(webToken, mcpToken);
+
+    /// <summary>The configured web token, resolved the way the web host does, without logging it. Empty when none is set or it cannot be
+    /// read (the web host reports that itself).</summary>
+    internal static string ResolveWebToken(WebConfig web)
+    {
+        var network = web.Network;
+        if (network is null
+            || (string.IsNullOrWhiteSpace(network.EncryptedToken) && string.IsNullOrWhiteSpace(network.Token)))
+        {
+            return "";
+        }
+
+        try
+        {
+            return network.ResolveToken(out _) ?? "";
+        }
+        catch (Exception)
+        {
+            return "";
+        }
+    }
+
+    /// <summary>The warning for <c>--validate-config</c> and the service log when the configured web token equals the MCP token, else
+    /// null. A warning and not an error, so a setup that started before still starts.</summary>
+    internal static string? WebTokenFinding(DarlingConfig config) =>
+        WebTokenIsMcpToken(ResolveWebToken(config.Web), ResolveToken(config.Mcp).Token) ? WebTokenSameAsMcpMessage : null;
+
     /// <summary>Counts the enabled notification routes whose agent level is 1 or more.</summary>
     internal const string CountAgentRoutesSql =
         "SELECT count(*) FROM config.config_notification_routes WHERE enabled AND agent_level >= 1";

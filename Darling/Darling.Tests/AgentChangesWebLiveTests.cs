@@ -93,11 +93,11 @@ public sealed class AgentChangesWebLiveTests
             {
                 var refused = await Send("PUT", "/api/agent-changes/" + planCall + "/undo", "application/json", payload);
                 Assert.Equal(403, refused.Status);
-                Assert.Equal(DarlingWebEndpoints.MonitoredServerWriteSeatMessage, (string)refused.Body!["error"]!);
+                Assert.Equal(DarlingWebEndpoints.InvestigationWriteSignInMessage, (string)refused.Body!["error"]!);
             }
 
             Assert.Equal(before, await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal", ct));
-        }, signedIn: false);
+        }, signedInAs: () => null);
     }
 
     [Fact]
@@ -151,15 +151,73 @@ public sealed class AgentChangesWebLiveTests
         });
     }
 
+    /* #6265 round 2: the undo and the service-wide switch are a person's acts. A dashboard with no sign-in answers 403 with the sign-in
+       sentence, for a real call, an unknown one and a plan change alike, before any store read, and changes nothing. */
+    [Fact]
+    public async Task WithNoSignedInAdmin_UndoAndTheSwitchAnswer403_ChangingNothing()
+    {
+        await WithWebRoutesAsync("admin", async (owner, Send, ct) =>
+        {
+            var called = await CalledIdAsync(owner, "m-web", ct);
+            var planCall = await ScalarAsync(owner, "SELECT journal_id FROM config.investigation_journal WHERE detail->>'kind' = 'plan_force'", ct);
+            var journalBefore = await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal", ct);
+
+            foreach (var (path, payload) in new[]
+            {
+                ("/api/agent-changes/" + called + "/undo", "{}"),
+                ("/api/agent-changes/" + planCall + "/undo", "{\"confirm\":true}"),
+                ("/api/agent-changes/999999/undo", "{}"),
+                ("/api/agent-changes/switch", "{\"enabled\":false}"),
+                ("/api/agent-changes/switch", "{\"enabled\":\"yes\"}"),
+            })
+            {
+                var answer = await Send("PUT", path, "application/json", payload);
+                Assert.True(answer.Status == 403, $"{path} answered {answer.Status}");
+                Assert.Equal(SignInSentence, (string)answer.Body!["error"]!);
+            }
+
+            Assert.Equal("agent says", await ScalarAsync(owner, "SELECT reason FROM config.config_mute_rules WHERE id = 'm-web'", ct));
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.config_service", ct));
+            Assert.Equal(journalBefore, await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal", ct));
+        }, () => null);
+    }
+
+    /* The undo and the switch stamp the signed-in person's exact name (a name with a space, as a Viewer or a web sign-in can hold),
+       once: person:<name>, never person:person:<name>. */
+    [Fact]
+    public async Task TheUndoAndTheSwitch_StampTheSignedInPersonsExactName()
+    {
+        await WithWebRoutesAsync("admin", async (owner, Send, ct) =>
+        {
+            var called = await CalledIdAsync(owner, "m-web", ct);
+            var undone = await Send("PUT", "/api/agent-changes/" + called + "/undo", "application/json");
+            Assert.Equal(200, undone.Status);
+            Assert.Equal("person:John Smith", (string)undone.Body!["undone_by"]!);
+            Assert.Equal("person:John Smith", await ScalarAsync(owner,
+                $"SELECT actor FROM config.investigation_journal WHERE event = 'action_undone' AND detail->>'called_id' = '{called}'", ct));
+            Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'action_undone'", ct));
+
+            Assert.Equal(200, (await Send("PUT", "/api/agent-changes/switch", "application/json", "{\"enabled\":false}")).Status);
+            Assert.Equal("person:John Smith", await ScalarAsync(owner, "SELECT updated_by FROM config.config_service", ct));
+            Assert.Equal("person:John Smith", await ScalarAsync(owner, "SELECT actor FROM config.investigation_journal WHERE event = 'agent_actions_switched'", ct));
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE actor LIKE 'person:person:%'", ct));
+        }, () => "John Smith");
+    }
+
     private delegate Task<(int Status, JsonNode? Body)> Sender(string method, string path, string? contentType, string? payload = null);
 
     private static async Task<string?> CalledIdAsync(NpgsqlDataSource owner, string target, CancellationToken ct) =>
         await ScalarAsync(owner,
             $"SELECT j.journal_id FROM config.investigation_journal j WHERE j.event = 'action_called' AND j.detail->'target'->>'id' = '{target}' AND EXISTS (SELECT 1 FROM config.investigation_journal d WHERE d.event = 'action_done' AND d.detail->>'called_id' = j.journal_id::text) ORDER BY j.journal_id LIMIT 1", ct);
 
+    private const string SignInSentence = "Sign in to the web as an admin to make this change, or use the Viewer.";
+
+    /// <param name="signedInAs">The signed-in admin's name read on every request (default a real email), or null for a dashboard with
+    /// no sign-in configured (no seat is stored, as the host does when no web token is set).</param>
     private static async Task WithWebRoutesAsync(
-        string managedRole, Func<NpgsqlDataSource, Sender, CancellationToken, Task> body, bool signedIn = true)
+        string managedRole, Func<NpgsqlDataSource, Sender, CancellationToken, Task> body, Func<string?>? signedInAs = null)
     {
+        signedInAs ??= () => "erik@example.com";
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the agent changes web live tests.");
 
@@ -215,16 +273,15 @@ VALUES ('{Guid.NewGuid()}', 7, 'action_called', 'agent:a', '{{""tool"":""force_q
             builder.Logging.ClearProviders();
             builder.Services.AddSingleton(webLogin);
             await using var app = builder.Build();
-            if (signedIn)
+            app.Use(async (http, next) =>
             {
-                /* What the sign-in middleware stores for a request that holds a valid session (#6269). A dashboard with none stores nothing. */
-                app.Use((context, next) =>
+                if (signedInAs() is { } name)
                 {
-                    context.Items[DarlingWebSeat.HttpContextItemKey] = DarlingWebSeat.SharedToken;
-                    return next(context);
-                });
-            }
+                    http.Items[PerformanceMonitor.Darling.Service.Hosting.DarlingWebSeat.HttpContextItemKey] = new PerformanceMonitor.Darling.Service.Hosting.DarlingWebSeat(name, true);
+                }
 
+                await next(http);
+            });
             var ownerSeam = new PerformanceMonitor.Darling.Service.Mcp.StoreOwnerSource();
             ownerSeam.Publish(owner);
             DarlingWebEndpoints.MapAll(app, webLogin, new CollectorRuntimeState(), new CapturingTestLogger(), ownerSource: ownerSeam);

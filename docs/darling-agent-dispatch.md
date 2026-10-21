@@ -177,12 +177,16 @@ Set it in the server entry of `darling.json`:
 
 The value must be an `env:NAME` or `file:/path` reference. The gate refuses a stored password and an encrypted blob. Both keys are required. One alone counts as unarmed, and the service says so at connect.
 
-Darling reads these keys only when it first adds a server to the store. For a server that is already registered, a person sets the login on the store row. Connect as the store owner:
+On every service start, Darling sets or replaces the remediation login on each matching registered server from `darling.json`. Both keys set or replace the login. Anything else changes nothing: an entry with neither key, or with only one key, leaves the stored login as it is. Darling never clears a login. It skips a server whose stored connection no longer matches the `darling.json` entry, and it logs that server by name.
+
+Because a missing key never clears a login, taking the keys out of `darling.json` does not remove it. To stop agent actions on a server, turn off its action switches, or turn off agent changes service-wide. The switches cover agent actions only.
+
+To remove a server's remediation login entirely, take both keys out of `darling.json` first. An entry with both keys sets the login again on the next start. Then connect as the store owner and run this statement. It sets both remediation columns to NULL and bumps `modified_at`:
 
 ```sql
 UPDATE config.config_monitored_servers
-SET remediation_username = 'pm_remediate',
-    remediation_encrypted_password = 'env:PM_REMEDIATE_PASSWORD',
+SET remediation_username = NULL,
+    remediation_encrypted_password = NULL,
     modified_at = (now() AT TIME ZONE 'UTC')
 WHERE name = 'alpha-sql-01';
 ```

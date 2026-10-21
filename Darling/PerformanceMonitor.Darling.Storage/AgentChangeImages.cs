@@ -51,6 +51,9 @@ public static class AgentChangeKinds
 
     /// <summary>One session killed on a monitored SQL Server (#5632, step 12). It has no undo: a killed session cannot be brought back, so the kind is not in <see cref="AgentChangeUndo.UndoableKinds"/>.</summary>
     public const string SessionKill = "session_kill";
+
+    /// <summary>A person's attempt to undo a plan change whose write was sent and whose reply was lost (#5632). Journaled as an <c>action_called</c> row with no result, so the list reads it as "result unknown". It has no undo.</summary>
+    public const string PlanUndo = "plan_undo";
 }
 
 /// <summary>A mute rule as <c>config.config_mute_rules</c> holds it. Also the wire shape of the mute tools' <c>mute_rule</c> object.</summary>

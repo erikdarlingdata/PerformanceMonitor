@@ -2591,16 +2591,27 @@ public sealed class MonitoredServer
     /// <para><b>Settable from the file</b>, unlike <see cref="PlanForceBotEnabled"/> — and the difference is
     /// deliberate. That flag is an ARM STATE, so a file knob would be a silent no-op on a seeded box
     /// (#2254). This is a CREDENTIAL, and the container/compose deploy has no viewer to type one into; the
-    /// <c>env:</c>/<c>file:</c> reference path is the only way to arm a Linux install at all. It is still
-    /// only read at seed time like every other credential field here.</para>
+    /// <c>env:</c>/<c>file:</c> reference path is the only way to arm a Linux install at all. Unlike every other
+    /// per-server field here it is NOT only a seed value (#6262): when BOTH keys are present,
+    /// <c>StoreConfigProvider.SyncRemediationLoginsAsync</c> sets or replaces the registered server's login on every start, only on the
+    /// server that pairs with this entry and connects the same way. Absent keys never clear it, and one key alone changes nothing (it is
+    /// logged): removing the keys disarms nothing. To stop agent actions on a server, turn off its action switches, or turn off agent
+    /// changes service-wide; the switches cover agent actions only, not operator remediation from the Viewer. To remove a server's
+    /// remediation login entirely, so neither agents nor operators can use it, take both keys out of the file and run, as the store owner,
+    /// <c>UPDATE config_monitored_servers SET remediation_username = NULL, remediation_encrypted_password = NULL,
+    /// modified_at = now() AT TIME ZONE 'UTC' WHERE name = 'alpha-sql-01'</c>. Services that share one
+    /// store should declare the same logins, because each copies its own file on start.</para>
     /// </summary>
     [JsonPropertyName("remediationUsername")]
     public string? RemediationUsername { get; set; }
 
     /// <summary>
-    /// The remediation credential's secret, as an <c>env:</c>/<c>file:</c> reference that <c>DarlingSecretSource</c>
-    /// resolves. A Level 3 server action (#5632) refuses any other form (<c>credential_not_reference</c>). There is
-    /// deliberately no plaintext sibling of this one (no counterpart to <see cref="Password"/>): the dev-convenience
+    /// The remediation credential's secret: an <c>env:</c>/<c>file:</c> reference (resolved by the same
+    /// <c>DarlingSecretSource</c>; a Level 3 server action, #5632, refuses any other form as <c>credential_not_reference</c>) or a DPAPI-LocalMachine blob, base64, produced by the same
+    /// <c>--encrypt-password</c> as <see cref="EncryptedPassword"/>. Only a reference works for every action (#6262), and a plain password (none of a reference, a sealed value or a DPAPI blob) is not copied into the store:
+    /// a blob opens for operator remediation (#2138), but the agent server actions (plan force, plan eviction, session
+    /// kill) accept only a reference and <c>--validate-config</c> and the service warn about a blob. There is deliberately no
+    /// plaintext sibling of this one (no counterpart to <see cref="Password"/>): the dev-convenience
     /// plaintext slot exists because a wrong monitoring password fails a read, and a wrong remediation
     /// password fails a write to a production server.
     /// </summary>
@@ -2617,7 +2628,11 @@ public sealed class MonitoredServer
     /// CONNECT, USAGE on the schemas and SELECT on the tables of the statements to test. Null here means the check is refused on this
     /// server with a message that says what to set up. There is no fallback.</para>
     ///
-    /// <para>Read from the file at seed time like the other credential fields. Presence is the auth mode: always SQL auth.</para>
+    /// <para>Presence is the auth mode: always SQL auth. Read at seed time, and (#6262) when BOTH keys are in the file they are also applied
+    /// to the registered server on every start (<c>StoreConfigProvider.SyncHypotheticalIndexLoginsAsync</c>): set, or replaced, only on
+    /// the server that pairs with this entry and connects the same way. The file never clears the slot (the same rule as the remediation
+    /// login), because an owner's UPDATE on the store row is a documented way to set it too; only an <c>env:</c> or <c>file:</c>
+    /// reference is written.</para>
     /// </summary>
     [JsonPropertyName("hypotheticalIndexUsername")]
     public string? HypotheticalIndexUsername { get; set; }
