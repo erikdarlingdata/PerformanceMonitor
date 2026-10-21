@@ -511,6 +511,7 @@
           "PerformanceMonitor.Analysis": "[3.10.0, )",
           "PerformanceMonitor.Collectors": "[3.10.0, )",
           "PerformanceMonitor.Common": "[3.10.0, )",
+          "PerformanceMonitor.Notifications": "[3.10.0, )",
           "PerformanceMonitor.PlanAnalysis": "[3.10.0, )"
         }
       },

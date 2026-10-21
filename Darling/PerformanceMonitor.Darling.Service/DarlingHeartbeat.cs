@@ -17,6 +17,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -70,6 +71,8 @@ public sealed class HeartbeatConfig
         "heartbeat.url must be an absolute http or https URL. (The value is not echoed: the URL is a secret.)";
     internal const string UserInfoProblem =
         "heartbeat.url must not carry a user name or password; put the check's token in the path. (The value is not echoed: the URL is a secret.)";
+    internal const string BlockedAddressProblem =
+        "heartbeat.url must not be a link-local or cloud instance address (169.254.0.0/16, fe80::/10, fd00:ec2::254, 168.63.129.16, 100.100.100.200). (The value is not echoed: the URL is a secret.)";
     internal const string EnvShapeProblem =
         "heartbeat.url: an env: reference must name an environment variable. (The value is not echoed.)";
     internal const string FileShapeProblem =
@@ -134,27 +137,17 @@ public sealed class HeartbeatConfig
         return true;
     }
 
-    /// <summary>Parses a literal URL: absolute, http or https, a host, and no user info. Null problem = fine.</summary>
-    private static string? TryParseUrl(string text, out Uri? uri)
+    /// <summary>Parses a literal URL: absolute, http or https, a host, and no user info. Null problem = fine. The rule is
+    /// <see cref="PerformanceMonitor.Darling.Storage.WebhookUrlShape"/>, shared with every webhook URL writer (#6231).</summary>
+    private static string? TryParseUrl(string text, out Uri? uri) => PerformanceMonitor.Darling.Storage.WebhookUrlShape.TryParse(text, out uri) switch
     {
-        uri = null;
-        if (!Uri.TryCreate(text, UriKind.Absolute, out var parsed)
-            || (parsed.Scheme != Uri.UriSchemeHttp && parsed.Scheme != Uri.UriSchemeHttps)
-            || string.IsNullOrEmpty(parsed.Host))
-        {
-            return UrlShapeProblem;
-        }
-
-        /* HttpClient never turns user info into an Authorization header, so a URL with it would just fail as HTTP 401
-           with no hint. Refused up front instead. */
-        if (!string.IsNullOrEmpty(parsed.UserInfo))
-        {
-            return UserInfoProblem;
-        }
-
-        uri = parsed;
-        return null;
-    }
+        PerformanceMonitor.Darling.Storage.WebhookUrlShape.Problem.Shape => UrlShapeProblem,
+        PerformanceMonitor.Darling.Storage.WebhookUrlShape.Problem.UserInfo => UserInfoProblem,
+        PerformanceMonitor.Darling.Storage.WebhookUrlShape.Problem.BlockedAddress => BlockedAddressProblem,
+        PerformanceMonitor.Darling.Storage.WebhookUrlShape.Problem.None => null,
+        /* A problem value added later reads as a problem, never as fine (#6231). */
+        _ => UrlShapeProblem,
+    };
 
     /// <summary>
     /// Resolves <see cref="Url"/> to an absolute http/https <see cref="Uri"/>, for the loop's tick (and the diagnostics
@@ -391,7 +384,7 @@ internal sealed class DarlingHeartbeat
        than a handler per ping, with redirects off so a 3xx is reported as the failure it is and is never followed
        to a host the operator did not configure. */
     private static readonly HttpClient s_client =
-        new(new SocketsHttpHandler { PooledConnectionLifetime = TimeSpan.FromMinutes(5), AllowAutoRedirect = false })
+        new(WebhookConnectGuard.NewHandler(allowAutoRedirect: false))
         { Timeout = TimeSpan.FromSeconds(30) };
 
     /// <summary>The production client, so a test can prove its redirect setting rather than a copy's.</summary>

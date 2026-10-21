@@ -477,7 +477,9 @@ public sealed class NotificationChannelFailingTests
 
         var health = webhooks.GetSlackHealth();
         Assert.Equal(3, health.ConsecutiveFailures);
-        Assert.Contains("SecretTokenAbc123", health.LastError, StringComparison.Ordinal);
+        /* #6231: the stored text is the status only; the endpoint's body never reaches it. */
+        Assert.Equal("HTTP 500 Internal Server Error", health.LastError);
+        Assert.DoesNotContain("SecretTokenAbc123", health.LastError, StringComparison.Ordinal);
 
         var rig = new Rig();
         var e = new DarlingSelfAlertEvaluator(

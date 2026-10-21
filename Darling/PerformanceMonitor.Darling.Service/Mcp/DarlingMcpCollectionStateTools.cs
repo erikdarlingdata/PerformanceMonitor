@@ -37,7 +37,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <see cref="DarlingCommandExecutor.ExecuteStoreWriteAsync(NpgsqlDataSource, CommandPlan, CancellationToken)"/>: the same SQL the
 /// command plane runs. The excluded-databases write is <see cref="MonitoredServerExclusions"/>, shared with the Viewer. This class owns no
 /// write SQL and no bounds of its own. A server is found the way <c>edit_server</c> and <c>remove_server</c> find one; a name that matches
-/// several servers is answered with the candidates, never picked from. Each server write logs at Warning with the tool, the server and the caller.</para>
+/// several servers is answered with the candidates, never picked from. Each server write logs at Warning with the tool, the server and the caller (<see cref="ReadCaller.WriteIdentity"/>: the token's fingerprint, then the client's own name).</para>
 ///
 /// <para><b>Every answer says what changed, what it was, and the call that puts it back.</b> The service re-reads these on its next
 /// config poll (the reload beacon the writes bump), so there is no restart.</para>
@@ -258,7 +258,7 @@ public sealed class DarlingMcpCollectionStateTools
             }
 
             logger?.LogWarning("MCP {Tool} queued command {CommandId} ({CommandType}) for the whole service, caller {Caller}",
-                tool, queued.CommandId, commandType, ReadCaller.AmbientMcpCaller ?? ReadCaller.Unknown);
+                tool, queued.CommandId, commandType, ReadCaller.WriteIdentity());
             var runsAfter = pending.Count == 0 ? null : pending[^1];
             return new JsonObject
             {
@@ -305,7 +305,7 @@ public sealed class DarlingMcpCollectionStateTools
 
     private static void LogWrite(ILogger? logger, string tool, ServerRow server) =>
         logger?.LogWarning("MCP {Tool} changed server id {ServerId} ({Server}), caller {Caller}",
-            tool, server.ServerId, server.StorageName, ReadCaller.AmbientMcpCaller ?? ReadCaller.Unknown);
+            tool, server.ServerId, server.StorageName, ReadCaller.WriteIdentity());
 
     private static async Task<string> ApplyEnabledAsync(
         NpgsqlDataSource postgres, string tool, string? serverName, bool enable, ILogger? logger, CancellationToken cancellationToken)

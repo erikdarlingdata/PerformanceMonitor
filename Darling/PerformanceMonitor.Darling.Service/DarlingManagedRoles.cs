@@ -1589,8 +1589,14 @@ GRANT UPDATE (config_version, updated_at) ON {config}.config_service TO {viewer}
 --    may call the route (a read-only OIDC seat is refused every unsafe method by the host's write gate). The WPF
 --    read-only probe is unaffected: has_table_privilege(..., 'UPDATE') answers for the TABLE-level privilege only
 --    (the column-level form is has_column_privilege), so it stays false for viewer and the locked-down Viewer's
---    dismiss buttons stay hidden. mcp gets no such grant: no MCP tool dismisses an alert.
+--    dismiss buttons stay hidden. mcp gets the same one-column grant just below (#6231).
 GRANT UPDATE (dismissed) ON {config}.config_alert_log TO {viewer};
+-- #6231: the MCP dismiss_alert_history / restore_alert_history tools run as mcp and set the SAME one column through
+--    AlertDismissStore, so mcp gets the same column-level grant (revoke first, so a table-level UPDATE from an older
+--    provisioning run cannot linger). It names no other column and no INSERT/DELETE: mcp can flip the dismissed
+--    flag and cannot rewrite what an alert said. The store records only that flag, not who set it.
+REVOKE UPDATE ON {config}.config_alert_log FROM {mcp};
+GRANT UPDATE (dismissed) ON {config}.config_alert_log TO {mcp};
 -- #5085: the web dashboard's server-tag endpoints (POST/PATCH/DELETE under /api/server-tags) run as viewer, so it
 --    gets the SAME two single-table writes mcp holds above. The seat model decides who may call them (a read-only
 --    seat is refused every unsafe method); these grants are only the floor beneath that gate. Both tables are
@@ -1660,7 +1666,9 @@ GRANT UPDATE (slack_send_resolutions, teams_send_resolutions, generic_send_resol
 -- redirect alert content (query text, server names) anywhere. So mcp gets exactly the two writes that move no
 -- destination: DELETE (alerts fall back to the parent, which the operator configured) and UPDATE on the
 -- enabled flag plus its modified_at stamp (set_notification_route_enabled / delete_notification_route), the
--- shape of set_mute_rule_enabled / delete_mute_rule. No INSERT, no destination column. The READ side is the
+-- shape of set_mute_rule_enabled / delete_mute_rule. No INSERT, no destination column. (#6231: create and edit of a route's
+-- non-destination fields go through the two functions in section 10, never through a grant here, and no MCP tool ever sets a
+-- destination.) The READ side is the
 -- section-6 carve: route_id, metric_match, enabled, smtp_recipients and the GENERATED configured_channels
 -- presence column, never the URLs. The BEACON is covered: trg_bump_notification_routes -> config_bump_version
 -- (SECURITY INVOKER) UPDATEs config_service.config_version AS mcp, which the two-column grant above serves.
@@ -1742,6 +1750,18 @@ GRANT EXECUTE ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerLeg
 --     NOT a versioned migration, for the same reason as the edit function above.
 {BuildRequestSnapshotNowFunctionSql(config)}
 GRANT EXECUTE ON FUNCTION {config}.request_snapshot_now(integer, text, text) TO {viewer}, {mcp};
+-- #6231: the MCP route tools. mcp holds no INSERT on {config}.config_notification_routes and no SELECT or UPDATE on its
+--     destination columns, and gets none here: create_notification_route and update_notification_route reach the table only
+--     through these functions. create leaves every channel empty and update writes the match, scope, enabled flag, resolution
+--     override and fallback (the match or scope only on a route with no explicit agent setting); neither takes a destination.
+--     set_notification_route_destinations is the one function that sets a route's own destinations: the service seals each
+--     webhook value for the route's own row first and passes it in, and the function stores only an empty value or a sealed one
+--     (the address list is plain text). All three re-read the row FOR UPDATE and refuse an agent route inside the transaction.
+--     Granted to mcp only.
+{BuildNotificationRouteFunctionsSql(config)}
+GRANT EXECUTE ON FUNCTION {config}.create_notification_route(text, boolean, integer, integer, boolean, integer) TO {mcp};
+GRANT EXECUTE ON FUNCTION {config}.update_notification_route(integer, text[], text, boolean, integer, integer, boolean, integer) TO {mcp};
+GRANT EXECUTE ON FUNCTION {config}.set_notification_route_destinations(integer, text[], text, text, text, text, text) TO {mcp};
 -- #6230: the MCP incident tools (analyze now, purge now, test a connection, pause, resume) queue their command through
 --     {config}.request_mcp_command, the only way the mcp role writes a command row. It names five command types and refuses any
 --     other, builds a connection test from the stored server row (no credential or connection string is an argument), and
@@ -2467,6 +2487,243 @@ BEGIN
 END
 $fn$;
 REVOKE ALL ON FUNCTION {config}.request_snapshot_now(integer, text, text) FROM PUBLIC;";
+
+    /// <summary>
+    /// The SECURITY DEFINER functions (#6231) the MCP <c>create_notification_route</c> and <c>update_notification_route</c>
+    /// tools write a notification route through; <c>set_notification_route_destinations</c> is the one that sets a route's own
+    /// destinations (the service seals the webhook values for the route's row and the function stores only sealed text or empty). The <c>mcp</c> login holds no INSERT on the table and no SELECT or UPDATE on its
+    /// destination columns, and these functions are how it still creates and edits a route: create inserts a route with every
+    /// destination empty (it has no destinations of its own, so each channel goes where it went before: the next matching route,
+    /// else the Settings channels), and update writes the match, scope, enabled flag, resolution override and fallback, never
+    /// a destination, and changes the match or scope only on a route with no destination and no agent setting. Update reads the row again under its lock and refuses an
+    /// agent route inside the transaction. Created and REVOKEd from PUBLIC here; the caller adds the GRANT EXECUTE to mcp only.
+    /// </summary>
+    internal static string BuildNotificationRouteFunctionsSql(string config) => $@"
+CREATE OR REPLACE FUNCTION {config}.create_notification_route(
+   p_metric_match text,
+   p_enabled boolean,
+   p_scope_server_id integer,
+   p_scope_tag_id integer,
+   p_send_resolutions boolean,
+   p_fallback_route_id integer)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+   v_match text := btrim(COALESCE(p_metric_match, ''));
+   v_id integer;
+BEGIN
+   IF v_match = '' THEN
+      RAISE EXCEPTION 'Choose a family or enter an exact metric name.' USING ERRCODE = 'DL400';
+   END IF;
+   IF p_scope_server_id IS NOT NULL AND p_scope_tag_id IS NOT NULL THEN
+      RAISE EXCEPTION 'A route is scoped to one server or one tag, not both.' USING ERRCODE = 'DL400';
+   END IF;
+   IF v_match = '*' AND p_scope_server_id IS NULL AND p_scope_tag_id IS NULL THEN
+      RAISE EXCEPTION 'Every metric (*) needs a server or a tag scope. Pick one, or choose a family or an exact metric.' USING ERRCODE = 'DL400';
+   END IF;
+   IF p_scope_server_id IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM {config}.config_monitored_servers WHERE server_id = p_scope_server_id) THEN
+      RAISE EXCEPTION 'No monitored server has that server_id.' USING ERRCODE = 'DL404';
+   END IF;
+   IF p_scope_tag_id IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM {config}.server_tags WHERE id = p_scope_tag_id) THEN
+      RAISE EXCEPTION 'No server tag has that id.' USING ERRCODE = 'DL404';
+   END IF;
+   IF p_fallback_route_id IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM {config}.config_notification_routes WHERE route_id = p_fallback_route_id) THEN
+      RAISE EXCEPTION 'The fallback route does not exist.' USING ERRCODE = 'DL404';
+   END IF;
+   -- Every destination column keeps its empty default, so the route has no destinations of its own: each channel
+   -- goes where it went before (the next matching route, else the Settings channels), and no caller of this function can name a URL, a key or an address list.
+   -- The agent columns keep their defaults too: this function never makes an agent route.
+   INSERT INTO {config}.config_notification_routes
+      (metric_match, enabled, scope_server_id, scope_tag_id, send_resolutions, fallback_route_id, modified_at)
+   VALUES
+      (v_match, COALESCE(p_enabled, true), p_scope_server_id, p_scope_tag_id, p_send_resolutions, p_fallback_route_id,
+       (now() AT TIME ZONE 'UTC'))
+   RETURNING route_id INTO v_id;
+   RETURN v_id;
+END
+$fn$;
+REVOKE ALL ON FUNCTION {config}.create_notification_route(text, boolean, integer, integer, boolean, integer) FROM PUBLIC;
+CREATE OR REPLACE FUNCTION {config}.update_notification_route(
+   p_route_id integer,
+   p_columns text[],
+   p_metric_match text,
+   p_enabled boolean,
+   p_scope_server_id integer,
+   p_scope_tag_id integer,
+   p_send_resolutions boolean,
+   p_fallback_route_id integer)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+   v_row {config}.config_notification_routes%ROWTYPE;
+   v_match text;
+   v_enabled boolean;
+   v_server integer;
+   v_tag integer;
+   v_resolutions boolean;
+   v_fallback integer;
+BEGIN
+   IF p_columns IS NULL OR cardinality(p_columns) = 0
+      OR EXISTS (SELECT 1 FROM unnest(p_columns) AS c(name)
+                 WHERE c.name IS NULL OR c.name NOT IN ('metric_match', 'enabled', 'scope', 'send_resolutions', 'fallback_route_id')) THEN
+      RAISE EXCEPTION 'The columns to change are metric_match, enabled, scope, send_resolutions and fallback_route_id.' USING ERRCODE = 'DL400';
+   END IF;
+   -- The row is read again here, under its lock, so the agent-route refusal and every check below are on what is stored now
+   -- and not on what the caller read a moment ago.
+   SELECT * INTO v_row FROM {config}.config_notification_routes WHERE route_id = p_route_id FOR UPDATE;
+   IF NOT FOUND THEN
+      RAISE EXCEPTION 'No notification route has that route_id.' USING ERRCODE = 'DL404';
+   END IF;
+   IF v_row.agent_level IS NOT NULL AND v_row.agent_level >= 1 THEN
+      RAISE EXCEPTION 'That route is an agent route: it is changed in the Viewer, not over MCP.' USING ERRCODE = 'DL403';
+   END IF;
+   -- What a route matches and which servers it covers decide which servers an agent route covers, so a route with an
+   -- explicit agent setting (Off included) keeps both in the Viewer. A route's own destinations do not stop a change
+   -- to what it matches: the destinations are set over MCP too. (#6231)
+   IF ('metric_match' = ANY (p_columns) OR 'scope' = ANY (p_columns)) AND v_row.agent_level IS NOT NULL THEN
+      RAISE EXCEPTION 'That route has an agent setting (Off), so what it matches and which servers it covers are changed in the Viewer, not over MCP. Enabled, send_resolutions and fallback_route_id can still be changed here.' USING ERRCODE = 'DL403';
+   END IF;
+   v_match := CASE WHEN 'metric_match' = ANY (p_columns) THEN btrim(COALESCE(p_metric_match, '')) ELSE v_row.metric_match END;
+   v_enabled := CASE WHEN 'enabled' = ANY (p_columns) THEN COALESCE(p_enabled, v_row.enabled) ELSE v_row.enabled END;
+   v_server := CASE WHEN 'scope' = ANY (p_columns) THEN p_scope_server_id ELSE v_row.scope_server_id END;
+   v_tag := CASE WHEN 'scope' = ANY (p_columns) THEN p_scope_tag_id ELSE v_row.scope_tag_id END;
+   v_resolutions := CASE WHEN 'send_resolutions' = ANY (p_columns) THEN p_send_resolutions ELSE v_row.send_resolutions END;
+   v_fallback := CASE WHEN 'fallback_route_id' = ANY (p_columns) THEN p_fallback_route_id ELSE v_row.fallback_route_id END;
+   IF v_match = '' THEN
+      RAISE EXCEPTION 'Choose a family or enter an exact metric name.' USING ERRCODE = 'DL400';
+   END IF;
+   IF v_server IS NOT NULL AND v_tag IS NOT NULL THEN
+      RAISE EXCEPTION 'A route is scoped to one server or one tag, not both.' USING ERRCODE = 'DL400';
+   END IF;
+   IF v_match = '*' AND v_server IS NULL AND v_tag IS NULL THEN
+      RAISE EXCEPTION 'Every metric (*) needs a server or a tag scope. Pick one, or choose a family or an exact metric.' USING ERRCODE = 'DL400';
+   END IF;
+   IF v_server IS NOT NULL AND v_server IS DISTINCT FROM v_row.scope_server_id
+      AND NOT EXISTS (SELECT 1 FROM {config}.config_monitored_servers WHERE server_id = v_server) THEN
+      RAISE EXCEPTION 'No monitored server has that server_id.' USING ERRCODE = 'DL404';
+   END IF;
+   IF v_tag IS NOT NULL AND v_tag IS DISTINCT FROM v_row.scope_tag_id
+      AND NOT EXISTS (SELECT 1 FROM {config}.server_tags WHERE id = v_tag) THEN
+      RAISE EXCEPTION 'No server tag has that id.' USING ERRCODE = 'DL404';
+   END IF;
+   IF v_fallback IS NOT NULL AND v_fallback = p_route_id THEN
+      RAISE EXCEPTION 'A route cannot be its own fallback route.' USING ERRCODE = 'DL400';
+   END IF;
+   IF v_fallback IS NOT NULL AND v_fallback IS DISTINCT FROM v_row.fallback_route_id
+      AND NOT EXISTS (SELECT 1 FROM {config}.config_notification_routes WHERE route_id = v_fallback) THEN
+      RAISE EXCEPTION 'The fallback route does not exist.' USING ERRCODE = 'DL404';
+   END IF;
+   -- The one UPDATE names no destination column: the sealed webhook values, the key, the signing keys and the address list
+   -- stay exactly as stored.
+   UPDATE {config}.config_notification_routes
+      SET metric_match = v_match,
+          enabled = v_enabled,
+          scope_server_id = v_server,
+          scope_tag_id = v_tag,
+          send_resolutions = v_resolutions,
+          fallback_route_id = v_fallback,
+          modified_at = (now() AT TIME ZONE 'UTC')
+    WHERE route_id = p_route_id;
+END
+$fn$;
+REVOKE ALL ON FUNCTION {config}.update_notification_route(integer, text[], text, boolean, integer, integer, boolean, integer) FROM PUBLIC;
+-- The return type changed (a previous value is now only a flag for whether one was saved), which CREATE OR REPLACE cannot do on its own.
+DROP FUNCTION IF EXISTS {config}.set_notification_route_destinations(integer, text[], text, text, text, text, text);
+CREATE OR REPLACE FUNCTION {config}.set_notification_route_destinations(
+   p_route_id integer,
+   p_columns text[],
+   p_teams_url text,
+   p_slack_url text,
+   p_generic_url text,
+   p_pagerduty_routing_key text,
+   p_smtp_recipients text)
+RETURNS TABLE (prev_teams_url_set boolean, prev_slack_url_set boolean, prev_generic_url_set boolean, prev_pagerduty_routing_key_set boolean, prev_smtp_recipients_set boolean)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+   v_row {config}.config_notification_routes%ROWTYPE;
+   v_teams text;
+   v_slack text;
+   v_generic text;
+   v_key text;
+   v_recipients text;
+BEGIN
+   IF p_columns IS NULL OR cardinality(p_columns) = 0
+      OR EXISTS (SELECT 1 FROM unnest(p_columns) AS c(name)
+                 WHERE c.name IS NULL OR c.name NOT IN ('teams_url', 'slack_url', 'generic_url', 'pagerduty_routing_key', 'smtp_recipients')) THEN
+      RAISE EXCEPTION 'The destinations to change are teams_url, slack_url, generic_url, pagerduty_routing_key and smtp_recipients.' USING ERRCODE = 'DL400';
+   END IF;
+   -- The row is read under its lock, so every check below is on what is stored now. The agent-route rule of
+   -- update_notification_route holds here too: an agent route is changed in the Viewer.
+   SELECT * INTO v_row FROM {config}.config_notification_routes WHERE route_id = p_route_id FOR UPDATE;
+   IF NOT FOUND THEN
+      RAISE EXCEPTION 'No notification route has that route_id.' USING ERRCODE = 'DL404';
+   END IF;
+   IF v_row.agent_level IS NOT NULL AND v_row.agent_level >= 1 THEN
+      RAISE EXCEPTION 'That route is an agent route: it is changed in the Viewer, not over MCP.' USING ERRCODE = 'DL403';
+   END IF;
+   v_teams := CASE WHEN 'teams_url' = ANY (p_columns) THEN COALESCE(p_teams_url, '') ELSE v_row.teams_url END;
+   v_slack := CASE WHEN 'slack_url' = ANY (p_columns) THEN COALESCE(p_slack_url, '') ELSE v_row.slack_url END;
+   v_generic := CASE WHEN 'generic_url' = ANY (p_columns) THEN COALESCE(p_generic_url, '') ELSE v_row.generic_url END;
+   v_key := CASE WHEN 'pagerduty_routing_key' = ANY (p_columns) THEN COALESCE(p_pagerduty_routing_key, '') ELSE v_row.pagerduty_routing_key END;
+   v_recipients := CASE WHEN 'smtp_recipients' = ANY (p_columns) THEN btrim(COALESCE(p_smtp_recipients, '')) ELSE v_row.smtp_recipients END;
+   -- A webhook value is sealed by the Darling service before it gets here, for this route's own row. This function stores
+   -- only an empty value or a sealed one, so no caller of it can store a destination as text. A changed value must be exactly
+   -- the sealed shape (sealed:v1:, the 16 character key id, base64) and no longer than 16384 characters: a half-formed value
+   -- turns the channel off for the route, and an oversized one is loaded on every configuration reload.
+   IF EXISTS (SELECT 1
+                FROM (VALUES (v_teams, v_row.teams_url), (v_slack, v_row.slack_url), (v_generic, v_row.generic_url), (v_key, v_row.pagerduty_routing_key))
+                     AS w(new_value, old_value)
+               WHERE w.new_value <> w.old_value AND w.new_value <> ''
+                 AND (length(w.new_value) > 16384
+                      OR w.new_value !~ '^sealed:v1:[0-9a-f]+:[A-Za-z0-9+/]+=?=?$'
+                      OR length(split_part(w.new_value, ':', 3)) <> 16)) THEN
+      RAISE EXCEPTION 'A webhook value is stored sealed by the Darling service, never as text.' USING ERRCODE = 'DL400';
+   END IF;
+   IF length(v_recipients) > 4000 THEN
+      RAISE EXCEPTION 'The email recipients are longer than can be stored.' USING ERRCODE = 'DL400';
+   END IF;
+   -- A changed recipient list is a comma separated list of at most 50 plain addresses: no control character, angle bracket or
+   -- double quote (so no display name or group), the rule the Viewer and the MCP tools apply before they get here.
+   IF v_recipients <> v_row.smtp_recipients
+      AND (v_recipients ~ '[[:cntrl:]<>]' OR position(chr(34) IN v_recipients) > 0
+           OR (SELECT count(*) FROM unnest(string_to_array(v_recipients, ',')) AS e(item) WHERE btrim(e.item) <> '') > 50) THEN
+      RAISE EXCEPTION 'The email recipients are a comma separated list of at most 50 plain addresses such as name@example.com.' USING ERRCODE = 'DL400';
+   END IF;
+   -- A signing key is sealed for the route's stored generic URL text (#5998): a change to that text needs the key removed first.
+   IF v_row.signing_key <> '' AND v_generic IS DISTINCT FROM v_row.generic_url THEN
+      RAISE EXCEPTION 'A signing key is saved for this route''s generic webhook, and it is tied to the generic webhook URL. Remove the key in the Viewer first, then change the URL.' USING ERRCODE = 'DL403';
+   END IF;
+   UPDATE {config}.config_notification_routes
+      SET teams_url = v_teams,
+          slack_url = v_slack,
+          generic_url = v_generic,
+          pagerduty_routing_key = v_key,
+          smtp_recipients = v_recipients,
+          modified_at = (now() AT TIME ZONE 'UTC')
+    WHERE route_id = p_route_id;
+   -- What was stored before comes back only as a flag for whether one was saved, and only for the columns this call names: the function runs
+   -- with the owner's rights, so it never hands a stored value (sealed text, or a value saved before sealing) to its caller.
+   RETURN QUERY SELECT
+      CASE WHEN 'teams_url' = ANY (p_columns) THEN v_row.teams_url <> '' END,
+      CASE WHEN 'slack_url' = ANY (p_columns) THEN v_row.slack_url <> '' END,
+      CASE WHEN 'generic_url' = ANY (p_columns) THEN v_row.generic_url <> '' END,
+      CASE WHEN 'pagerduty_routing_key' = ANY (p_columns) THEN v_row.pagerduty_routing_key <> '' END,
+      CASE WHEN 'smtp_recipients' = ANY (p_columns) THEN v_row.smtp_recipients <> '' END;
+END
+$fn$;
+REVOKE ALL ON FUNCTION {config}.set_notification_route_destinations(integer, text[], text, text, text, text, text) FROM PUBLIC;";
 
     /// <summary>
     /// The SECURITY DEFINER read function (#6230) behind <c>get_command_result</c> and the collector-run state read: one command's

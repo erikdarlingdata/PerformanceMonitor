@@ -605,7 +605,7 @@ public partial class MainWindow
         try
         {
             var rules = await _dataService.GetMuteRulesAsync();
-            if (rules.Any(r => ViewerDataService.IsWholeServerSilence(r, server.ServerId, server.DisplayName) && r.Enabled && !r.IsExpired))
+            if (rules.Any(r => ViewerDataService.IsWholeServerSilence(r, server.ServerId, server.DisplayName) && r.Enabled && !r.IsExpired && !r.IsUpcomingAt(DateTime.UtcNow)))
             {
                 StatusText.Text = $"'{server.DisplayName}' is already silenced.";
                 return;
@@ -738,7 +738,7 @@ public partial class MainWindow
         {
             var readStartedUtc = DateTime.UtcNow;
             var rules = await _dataService.GetMuteRulesAsync();
-            var active = rules.Where(r => r.Enabled && !r.IsExpired).ToList();
+            var active = rules.Where(r => r.Enabled && !r.IsExpired && !r.IsUpcomingAt(DateTime.UtcNow)).ToList();
 
             /* Replace, not merge: the store is the authority. A rule this viewer added locally before this read
                began is in the store too (persist-then-cache), so it comes back in `rules`; a rule deleted from

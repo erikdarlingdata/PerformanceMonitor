@@ -102,30 +102,14 @@ public sealed partial class ViewerPasswordSealer(PasswordPublicKey key)
     {
         ArgumentNullException.ThrowIfNull(plaintext);
         ArgumentNullException.ThrowIfNull(binding);
-        if (!string.Equals(binding.Purpose, PasswordBinding.WebhookPurpose, StringComparison.Ordinal))
-        {
-            throw new ArgumentException("A webhook value is sealed with a webhook binding.", nameof(binding));
-        }
-
-        if (!IsValidText(plaintext))
-        {
-            throw new ViewerPasswordRefusedException("The value contains characters that cannot be stored.");
-        }
-
         try
         {
-            return PasswordSeal.Seal(plaintext, key, binding);
+            /* #6231: the refusal sentences are NotificationRouteWriter.SealValue, the one copy the MCP route tools share. */
+            return NotificationRouteWriter.SealValue(plaintext, binding, (text, bound) => PasswordSeal.Seal(text, key, bound));
         }
-        catch (PasswordSealException)
+        catch (NotificationRouteRefusedException ex)
         {
-            throw new ViewerPasswordRefusedException(
-                s_strictUtf8.GetByteCount(plaintext) > PasswordSeal.MaxPlaintextBytes
-                    ? "The value is longer than can be stored."
-                    : "The value contains characters that cannot be stored.");
-        }
-        catch (ArgumentException)
-        {
-            throw new ViewerPasswordRefusedException("The value contains characters that cannot be stored.");
+            throw new ViewerPasswordRefusedException(ex.Message);
         }
     }
 

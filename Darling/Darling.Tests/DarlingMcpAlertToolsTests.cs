@@ -53,20 +53,25 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     private static readonly string[] AlertToolSurface =
     {
         "create_mute_rule",
+        /* #6231: the route author and editor (sealed through the shared writer) and the dismiss pair. */
+        "create_notification_route",
         "delete_mute_rule",
         /* #3598 (V131): the notification-routes trio — the read publishes the family taxonomy and the routes
            (destinations withheld, presence reported); the two writes are the ones that move no destination,
            the set_mute_rule_enabled / delete_mute_rule shape. */
         "delete_notification_route",
+        "dismiss_alert_history",
         "get_alert_history",
         "get_alert_settings",
         "get_mute_rules",
         "get_notification_routes",
+        "restore_alert_history",
         "set_mute_rule_enabled",
         "set_notification_route_enabled",
         "set_notification_route_fallback",
         "update_alert_settings",
         "update_mute_rule",
+        "update_notification_route",
     };
 
     private static MethodInfo[] ToolMethods() => typeof(DarlingMcpAlertTools)
@@ -103,7 +108,7 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     [InlineData("get_mute_rules", "enabled_only")]
     [InlineData("update_alert_settings", "settings_json")]
     /* #5915: each mute write tool also takes the optional agent_action, last (Level 2: ignored under the writes arm). */
-    [InlineData("create_mute_rule", "server_name,metric_name,database_pattern,query_text_pattern,wait_type_pattern,job_name_pattern,reason,expires_at,server_id,client_app_pattern,external_source,agent_action")]
+    [InlineData("create_mute_rule", "server_name,metric_name,database_pattern,query_text_pattern,wait_type_pattern,job_name_pattern,reason,expires_at,server_id,client_app_pattern,external_source,agent_action,starts_at")]
     [InlineData("delete_mute_rule", "rule_id,agent_action")]
     [InlineData("set_mute_rule_enabled", "rule_id,enabled,agent_action")]
     [InlineData("update_mute_rule", "rule_id,changes_json,agent_action")]

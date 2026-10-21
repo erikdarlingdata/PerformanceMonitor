@@ -60,20 +60,22 @@ const TOOL_NAME_SET = new Set(MCP_TOOL_NAMES);
     tools. A message that names one tells a client what to call next; a web reader cannot call it. WebPlainTextTests checks
     this list against the registry, like the get_ list above. */
 export const MCP_ACTION_TOOL_NAMES = [
-  "add_servers", "analyze_plan_xml", "analyze_procedure_plan", "analyze_query_plan", "analyze_query_store_plan", "analyze_server",
-  "assign_query_tag", "assign_server_tag", "audit_config", "backtest_custom_alert_rule", "claim_investigation_request",
-  "compare_analysis", "create_custom_alert_rule", "create_custom_view", "create_mute_rule", "create_query_tag",
-  "create_query_tag_rule", "create_server_tag", "delete_custom_alert_rule", "delete_custom_view", "delete_mute_rule",
-  "delete_notification_route", "delete_query_tag", "delete_query_tag_rule", "delete_server_tag", "describe_custom_view_catalog", "disable_server", "enable_server",
-  "edit_server", "evict_cached_plan", "find_database", "force_query_store_plan", "kill_session", "list_custom_alert_rules",
-  "list_custom_alert_templates", "list_custom_views", "list_investigation_requests", "list_query_tag_rules", "list_query_tags",
-  "list_servers", "merge_deadlock_signatures", "mute_analysis_finding", "pause_collection", "reload_config", "remove_server", "resume_collection", "run_collectors_now", "test_connection", "analyze_now", "purge_now", "undo_plan_change",
-  "disable_collector", "enable_collector", "set_collector_frequency", "set_collector_retention", "set_collector_run_at",
-  "run_custom_view_panel", "set_alert_threshold_override", "set_mute_rule_enabled", "set_notification_route_enabled",
-  "set_notification_route_fallback", "set_server_excluded_databases", "submit_investigation_report", "test_custom_alert_rule", "test_query_tag_rule",
-  "unassign_query_tag", "unassign_server_tag", "unforce_query_store_plan", "update_alert_settings", "update_custom_alert_rule",
-  "update_custom_view", "update_mute_rule", "update_query_tag", "update_query_tag_rule", "update_server_tag",
-  "validate_custom_alert_rule", "validate_custom_view", "wait_for_investigation_requests",
+  "add_servers", "analyze_now", "analyze_plan_xml", "analyze_procedure_plan", "analyze_query_plan", "analyze_query_store_plan",
+  "analyze_server", "assign_query_tag", "assign_server_tag", "audit_config", "backtest_custom_alert_rule", "claim_investigation_request",
+  "clear_quiet_window", "compare_analysis", "create_custom_alert_rule", "create_custom_view", "create_mute_rule",
+  "create_notification_route", "create_query_tag", "create_query_tag_rule", "create_server_tag", "delete_custom_alert_rule",
+  "delete_custom_view", "delete_mute_rule", "delete_notification_route", "delete_query_tag", "delete_query_tag_rule",
+  "delete_server_tag", "describe_custom_view_catalog", "disable_collector", "disable_server", "dismiss_alert_history", "edit_server",
+  "enable_collector", "enable_server", "evict_cached_plan", "find_database", "force_query_store_plan", "kill_session",
+  "list_custom_alert_rules", "list_custom_alert_templates", "list_custom_views", "list_investigation_requests", "list_query_tag_rules",
+  "list_query_tags", "list_servers", "merge_deadlock_signatures", "mute_analysis_finding", "pause_collection", "purge_now",
+  "reload_config", "remove_server", "restore_alert_history", "resume_collection", "run_collectors_now", "run_custom_view_panel",
+  "set_alert_threshold_override", "set_collector_frequency", "set_collector_retention", "set_collector_run_at", "set_mute_rule_enabled",
+  "set_notification_route_enabled", "set_notification_route_fallback", "set_quiet_window", "set_server_excluded_databases",
+  "submit_investigation_report", "test_connection", "test_custom_alert_rule", "test_query_tag_rule", "unassign_query_tag",
+  "unassign_server_tag", "undo_plan_change", "unforce_query_store_plan", "update_alert_settings", "update_custom_alert_rule",
+  "update_custom_view", "update_mute_rule", "update_notification_route", "update_query_tag", "update_query_tag_rule",
+  "update_server_tag", "validate_custom_alert_rule", "validate_custom_view", "wait_for_investigation_requests",
 ];
 const ACTION_TOOL_SET = new Set(MCP_ACTION_TOOL_NAMES);
 

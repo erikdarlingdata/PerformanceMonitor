@@ -1415,6 +1415,8 @@ public sealed class McpPayloadContractCensusTests
         /* #4734: create_mute_rule's body moved into CreateMuteRuleOver (the tool hands it the Postgres-backed
            store), so the expires_at parse, unchanged, is found under the new method name. */
         "DarlingMcpAlertTools.cs CreateMuteRuleOver",
+        /* #6231: set_quiet_window's end and start, parsed under invariant UTC styles like create_mute_rule's expires_at. */
+        "DarlingMcpQuietWindowTools.cs TryParseUtc",
     ];
 
     private static readonly Regex GeneralTimestampParse = new(

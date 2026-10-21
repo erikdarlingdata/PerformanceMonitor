@@ -51,6 +51,17 @@ AND    (alert_time, server_id, metric_name) IN (
     FROM   unnest($1::timestamp[], $2::integer[], $3::text[]) AS t(alert_time, server_id, metric_name)
 )";
 
+    /// <summary>The undo of <see cref="DismissAlertsSql"/> (#6231): the dismissed rows named by the keys are shown again. The same single
+    /// column, so the <c>viewer</c> role's column grant covers it.</summary>
+    public const string RestoreAlertsSql = @"
+UPDATE config_alert_log
+SET    dismissed = FALSE
+WHERE  dismissed = TRUE
+AND    (alert_time, server_id, metric_name) IN (
+    SELECT t.alert_time, t.server_id, t.metric_name
+    FROM   unnest($1::timestamp[], $2::integer[], $3::text[]) AS t(alert_time, server_id, metric_name)
+)";
+
     /// <summary>Dismiss all visible rows in the window across every server. $1 window start.</summary>
     public const string DismissAllAlertsSql = @"
 UPDATE config_alert_log
@@ -138,6 +149,77 @@ WHERE  EXISTS (SELECT 1 FROM config_alert_log a
         }
 
         return new AlertDismissOutcome(distinct, known, dismissed);
+    }
+
+    /// <summary>
+    /// Shows the keyed rows again (#6231), the undo of <see cref="DismissKeysAsync"/>. <c>Dismissed</c> in the outcome is the rows
+    /// the UPDATE brought back; a key whose row was not dismissed or does not exist changes nothing.
+    /// </summary>
+    public static async Task<AlertDismissOutcome> RestoreKeysAsync(
+        NpgsqlDataSource dataSource, IReadOnlyList<AlertDismissKey> keys, int timeoutSeconds,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(dataSource);
+        ArgumentNullException.ThrowIfNull(keys);
+        if (keys.Count == 0)
+        {
+            return new AlertDismissOutcome(0, 0, 0);
+        }
+
+        var distinct = new HashSet<AlertDismissKey>(keys).Count;
+
+        int known;
+        await using (var count = dataSource.CreateCommand(CountKnownKeysSql))
+        {
+            count.CommandTimeout = timeoutSeconds;
+            BindKeys(count, keys);
+            known = Convert.ToInt32(await count.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        int restored;
+        await using (var update = dataSource.CreateCommand(RestoreAlertsSql))
+        {
+            update.CommandTimeout = timeoutSeconds;
+            BindKeys(update, keys);
+            restored = await update.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        return new AlertDismissOutcome(distinct, known, restored);
+    }
+
+    /// <summary>The keys, of those named, whose row exists with <c>dismissed</c> equal to $4 (#6231): what a dismiss is about to change
+    /// ($4 = FALSE) or a restore is about to change ($4 = TRUE), so the answer's undo names exactly those rows.</summary>
+    public const string KeysInStateSql = @"
+SELECT DISTINCT a.alert_time, a.server_id, a.metric_name
+FROM   config_alert_log a
+JOIN   unnest($1::timestamp[], $2::integer[], $3::text[]) AS t(alert_time, server_id, metric_name)
+       ON a.alert_time = t.alert_time AND a.server_id = t.server_id AND a.metric_name = t.metric_name
+WHERE  a.dismissed = $4";
+
+    /// <summary>Which of the keys name an existing row in the given <paramref name="dismissed"/> state (#6231).</summary>
+    public static async Task<IReadOnlyList<AlertDismissKey>> KeysInStateAsync(
+        NpgsqlDataSource dataSource, IReadOnlyList<AlertDismissKey> keys, bool dismissed, int timeoutSeconds,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(dataSource);
+        ArgumentNullException.ThrowIfNull(keys);
+        var found = new List<AlertDismissKey>();
+        if (keys.Count == 0)
+        {
+            return found;
+        }
+
+        await using var command = dataSource.CreateCommand(KeysInStateSql);
+        command.CommandTimeout = timeoutSeconds;
+        BindKeys(command, keys);
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = dismissed });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            found.Add(new AlertDismissKey(DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Unspecified), reader.GetInt32(1), reader.GetString(2)));
+        }
+
+        return found;
     }
 
     private static void BindKeys(NpgsqlCommand command, IReadOnlyList<AlertDismissKey> keys)

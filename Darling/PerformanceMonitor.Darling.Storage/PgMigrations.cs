@@ -2069,6 +2069,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_custom_views_shared_name ON config.custom_v
 CREATE UNIQUE INDEX IF NOT EXISTS ux_custom_views_personal_name ON config.custom_views (owner_key, name) WHERE personal;";
 
     /// <summary>
+    /// V208 (#6231): <c>config.config_mute_rules.starts_at_utc</c>, the moment a mute rule begins to apply. A quiet window for planned
+    /// work is a mute rule with only a server scope (or none, for the fleet) and an end time; what it lacked was a START, so work
+    /// planned for tonight could not be set up this afternoon.
+    ///
+    /// <para><b>NULL means the rule applies from the moment it exists</b>, exactly as every stored rule did, so there is no backfill.
+    /// Nullable, no DEFAULT, one catalog-only <c>ADD COLUMN</c>. Needs no GRANT (the roles' table-level grants cover a new column)
+    /// and no trigger (the V117 reload beacon fires on any change to the table). An older build ignores the column and would apply a
+    /// rule that has not started yet, so a window set ahead of its start mutes early on a rolled-back build.</para>
+    /// </summary>
+    private const string V208Sql = @"
+ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS starts_at_utc timestamp;";
+
+    /// <summary>
     /// V196 (#5632, step 5): Level 3 and the per-server action switches. <b>Nothing here turns an action on.</b>
     ///
     /// <para><b>Levels.</b> <c>ck_config_notification_routes_agent</c> now allows <c>agent_level</c> NULL and 0 to 3, and
@@ -2450,6 +2463,7 @@ $rung$;";
         new Migration(205, "custom-alert-rule-expiry", V205Sql),
         new Migration(206, "collector-enabled-inherit", V206Sql),
         new Migration(207, "change-watches", ChangeWatchStore.V207Sql),
+        new Migration(208, "mute-rule-starts-at", V208Sql),
     };
 
     /// <summary>

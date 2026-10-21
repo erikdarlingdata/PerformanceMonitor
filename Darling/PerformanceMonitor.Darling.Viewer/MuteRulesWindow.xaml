@@ -50,6 +50,7 @@
                     <DataGridTextColumn Header="Metric" Binding="{Binding MetricName}" Width="130"/>
                     <DataGridTextColumn Header="Server" Binding="{Binding ServerName}" Width="130"/>
                     <DataGridTextColumn Header="Reason" Binding="{Binding Reason}" Width="*"/>
+                    <DataGridTextColumn Header="Starts" Binding="{Binding StartsDisplay}" Width="140" SortMemberPath="StartsAtUtc"/>
                     <DataGridTextColumn Header="Expires" Binding="{Binding ExpiresDisplay}" Width="140" SortMemberPath="ExpiresAtUtc"/>
                 </DataGrid.Columns>
             </DataGrid>

@@ -242,7 +242,7 @@ public sealed class DarlingMcpCollectorScheduleBehaviourLiveTests
                 Assert.Contains(tool, line, StringComparison.Ordinal);
                 Assert.Contains(tool == "set_collector_run_at" ? Daily : Delta, line, StringComparison.Ordinal);
                 Assert.Contains("beh-alpha", line, StringComparison.Ordinal);
-                Assert.Contains(Caller, line, StringComparison.Ordinal);
+                Assert.Contains("client says: " + Caller, line, StringComparison.Ordinal);
             }
 
             /* A refused call changes nothing and so logs nothing. */
@@ -312,7 +312,7 @@ public sealed class DarlingMcpCollectorScheduleBehaviourLiveTests
             Assert.Contains("changed", reply, StringComparison.Ordinal);
             var landed = Assert.Single(filterLog.Lines, l => l.Contains("MCP write tool", StringComparison.Ordinal));
             Assert.Contains("disable_collector", landed, StringComparison.Ordinal);
-            Assert.Contains(Caller, landed, StringComparison.Ordinal);
+            Assert.Contains("client says: ua:" + Caller, landed, StringComparison.Ordinal);
             Assert.Contains("completed", landed, StringComparison.Ordinal);
             Assert.DoesNotContain("wait_stats", landed, StringComparison.Ordinal);
             Assert.DoesNotContain("beh-alpha", landed, StringComparison.Ordinal);
@@ -322,7 +322,7 @@ public sealed class DarlingMcpCollectorScheduleBehaviourLiveTests
             var own = Assert.Single(toolLog.Lines, l => l.Contains("MCP schedule write", StringComparison.Ordinal));
             Assert.Contains("wait_stats", own, StringComparison.Ordinal);
             Assert.Contains("beh-alpha", own, StringComparison.Ordinal);
-            Assert.Contains(Caller, own, StringComparison.Ordinal);
+            Assert.Contains("client says: ua:" + Caller, own, StringComparison.Ordinal);
 
             /* A call the tool refuses is still a write call: the filter logs it, with an outcome, and still not the arguments. */
             filterLog = new CapturingTestLogger();
@@ -334,7 +334,7 @@ public sealed class DarlingMcpCollectorScheduleBehaviourLiveTests
             Assert.Contains("set_collector_frequency", refused, StringComparison.Ordinal);
             Assert.EndsWith(": refused", refused, StringComparison.Ordinal);
             Assert.DoesNotContain("completed", refused, StringComparison.Ordinal);
-            Assert.Contains(Caller, refused, StringComparison.Ordinal);
+            Assert.Contains("client says: ua:" + Caller, refused, StringComparison.Ordinal);
             Assert.DoesNotContain("secret_collector_name", refused, StringComparison.Ordinal);
             Assert.DoesNotContain("beh-beta", refused, StringComparison.Ordinal);
             Assert.Empty(toolLog.Lines);

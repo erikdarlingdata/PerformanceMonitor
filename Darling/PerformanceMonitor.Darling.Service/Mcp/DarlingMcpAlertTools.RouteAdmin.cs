@@ -1,0 +1,559 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Linq;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
+using ModelContextProtocol.Server;
+using Npgsql;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Notifications;
+
+#pragma warning disable CA1707 // MCP tools use snake_case naming convention
+
+namespace PerformanceMonitor.Darling.Service.Mcp;
+
+/// <summary>
+/// The alert admin writes an operator used to do only in the Viewer or the web dashboard (#6231 part C): create and edit a
+/// notification route, dismiss alert history, and the restore that undoes a dismiss. A route is written through the store's own
+/// <c>config.create_notification_route</c>, <c>config.update_notification_route</c> and <c>config.set_notification_route_destinations</c>
+/// functions, because the <c>mcp</c> login holds no INSERT on the table and no read or write on a destination column. Both tools can set
+/// a route's own destinations (Slack, Teams, a generic webhook, PagerDuty, email recipients), with the Viewer's own rules
+/// (<see cref="NotificationRouteWriter"/>): the service seals each webhook value for the route's own row, in the transaction that creates
+/// or edits the route. Update changes the match or scope only on a route with no explicit agent setting; the store function refuses the
+/// rest, in plain words. An answer shows a route the way <c>get_notification_routes</c> does (channels by name) and a destination as saved
+/// or none (with the host for Teams and Slack only) and the recipient list in full, never a URL or key. Every tool here is in
+/// <see cref="DarlingMcpWritePolicy.WriteTools"/> (served only with <c>mcp.allowWrites</c> and a token) and in
+/// <see cref="DarlingMcpWritePolicy.NeverAgentTools"/> (an agent working an alert can never call it).
+/// </summary>
+public sealed partial class DarlingMcpAlertTools
+{
+    private const string MatchHelp = "a family (performance, self-monitor, reports, agent-jobs, external), 'Analysis: <category>', an exact metric name, or * (scoped routes only)";
+
+    [McpServerTool(Name = "create_notification_route"), Description(
+        "Creates a notification route, optionally with its own destinations (Slack, Teams, generic webhook, PagerDuty, email). With none, each channel goes where it went before (the next matching route, else Settings). Changes shared alert configuration; the service delivers on it at its next sweep. Returns created (the route with its recipient list in full, and for each destination set whether it is saved: the host for Teams and Slack, never a URL or key) with the undo call, or invalid. It cannot set the agent channel." +
+        "<<GUIDE>>" +
+        "Creates a route that decides WHICH alerts it covers and, when you pass them, where they go. " + DestinationsHelp + " " +
+        "With no destination field the route is stored with every destination empty, so it has none of its own and each channel goes where it went before: to the next less specific matching route that sets that channel, else to the Settings > Notifications channels. " +
+        "What it can set: metric_match (" + MatchHelp + "), a scope of one server or one tag (not both; * only with a scope), enabled, " +
+        "send_resolutions (inherit, always or never: the clear message to the channels this route resolves to) and fallback_route_id (an existing route). " +
+        "The database role this tool runs as has no INSERT on the routes table and no read or write on a destination column: the route is written by the store's own " +
+        "config.create_notification_route function and its destinations by config.set_notification_route_destinations, in one transaction, so a destination that is refused leaves no route behind. " +
+        "A destination is sealed for this route's own row, so it cannot be copied to another route. scope_server_id and scope_tag_id are ids from get_notification_routes or the server and tag reads; an id that names nothing is invalid. " +
+        "Returns {status:\"created\", route:{...}, destinations:{changed, now}, sends_to, undo:{tool:\"delete_notification_route\", arguments:{route_id}}}; check it with get_notification_routes.")]
+    public static Task<string> CreateNotificationRoute(
+        NpgsqlDataSource postgres,
+        [Description("What the route matches: " + MatchHelp + ".")] string metric_match,
+        [Description("true (default) puts the route in force; false creates it disabled.")] bool enabled = true,
+        [Description("Scope the route to this registry server_id. Omit for fleet-wide. Not with scope_tag_id.")] int? scope_server_id = null,
+        [Description("Scope the route to this server tag id and every tag under it. Omit for fleet-wide. Not with scope_server_id.")] int? scope_tag_id = null,
+        [Description("inherit (default: each channel's own setting), always (send the clear message to the channels this route resolves to) or never.")] string? send_resolutions = null,
+        [Description("The route_id of an existing route an expired investigation request goes to first. Omit for none.")] int? fallback_route_id = null,
+        [Description("The route's own Teams webhook URL (absolute http or https). Sealed for this route; never shown back. Omit for none.")] string? teams_webhook_url = null,
+        [Description("The route's own Slack webhook URL (absolute http or https). Sealed for this route; never shown back. Omit for none.")] string? slack_webhook_url = null,
+        [Description("The route's own generic webhook URL (absolute http or https). Sealed for this route; never shown back. Omit for none.")] string? generic_webhook_url = null,
+        [Description("The route's own PagerDuty Events API v2 routing key. Sealed for this route; never shown back. Omit for none.")] string? pagerduty_routing_key = null,
+        [Description("The route's own email recipients, comma separated plain addresses. Omit for none.")] string? email_recipients = null,
+        ILogger? logger = null,
+        CancellationToken cancellationToken = default) =>
+        CreateNotificationRouteAsync(
+            postgres, metric_match, enabled, scope_server_id, scope_tag_id, send_resolutions, fallback_route_id,
+            new RouteDestinationRequest(teams_webhook_url, slack_webhook_url, generic_webhook_url, pagerduty_routing_key, email_recipients),
+            DarlingPasswordKey.Current, logger, cancellationToken);
+
+    /// <summary>The create: the route and its destinations in one transaction (a sealed value is bound to the route's id, so the id comes first).</summary>
+    internal static async Task<string> CreateNotificationRouteAsync(
+        NpgsqlDataSource postgres, string metric_match, bool enabled, int? scope_server_id, int? scope_tag_id, string? send_resolutions,
+        int? fallback_route_id, RouteDestinationRequest destinations, IPasswordKeyRing ring, ILogger? logger, CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (ParseSendResolutions(send_resolutions, out var resolutions) is { } badResolutions)
+            {
+                return Outcome("invalid", badResolutions);
+            }
+
+            var match = NormalizeRouteMatch(metric_match);
+            int routeId;
+            RouteDestinationChange? change = null;
+            try
+            {
+                var proxies = destinations.Any
+                    ? await NotificationRouteWriter.ReadProxiesAsync(postgres, McpCommandDeadlines.ReadSeconds, cancellationToken)
+                    : new WebhookProxies("", "", "", "");
+                await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+                await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+                const string createSql = "SELECT config.create_notification_route($1, $2, $3, $4, $5, $6)";
+                await using (var command = new NpgsqlCommand(createSql, connection) { Transaction = transaction })
+                {
+                    command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                    command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = match });
+                    command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = enabled });
+                    NotificationRouteWriter.AddNullableInt(command, scope_server_id);
+                    NotificationRouteWriter.AddNullableInt(command, scope_tag_id);
+                    command.Parameters.Add(resolutions.HasValue
+                        ? new NpgsqlParameter<bool> { TypedValue = resolutions.Value }
+                        : new NpgsqlParameter { Value = DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Boolean });
+                    NotificationRouteWriter.AddNullableInt(command, fallback_route_id);
+                    routeId = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture);
+                }
+
+                if (destinations.Any)
+                {
+                    change = await ApplyRouteDestinationsAsync(connection, transaction, routeId, destinations, proxies, ring, cancellationToken);
+                }
+
+                await transaction.CommitAsync(cancellationToken);
+            }
+            catch (PostgresException ex) when (RouteFunctionOutcome(ex) is { } refusal)
+            {
+                return refusal;
+            }
+            catch (NotificationRouteRefusedException ex)
+            {
+                return Outcome("invalid", ex.Message);
+            }
+
+            var fields = "metric_match, enabled, scope, send_resolutions, fallback_route_id" + (change is { Fields.Count: > 0 } ? ", " + DestinationFieldNames(change) : "");
+            LogRouteWrite(logger, "create_notification_route", CallerOf(), routeId, fields);
+            var stored = (await new PgNotificationRouteStore(postgres).LoadSummariesAsync(cancellationToken)).FirstOrDefault(r => r.RouteId == routeId);
+            return JsonSerializer.Serialize(new
+            {
+                status = "created",
+                route = RouteWritePayload(stored),
+                destinations = DestinationsPayload(change),
+                sends_to = change is { Fields.Count: > 0 }
+                    ? "The route sends to the destinations set on it. A channel it sets nothing for goes where it went before: to the next matching route that sets that channel, else to the channels configured in Settings > Notifications."
+                    : "The route has no destinations of its own, so each channel goes where it went before: to the next matching route that sets that channel, else to the channels configured in Settings > Notifications. Set the route's own destinations with update_notification_route or in the Viewer.",
+                undo = new { tool = "delete_notification_route", arguments = new { route_id = routeId } },
+                note = "The service picks the route up on its next collection sweep.",
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return McpHelpers.FormatError("create_notification_route", ex);
+        }
+    }
+
+    [McpServerTool(Name = "update_notification_route"), Description(
+        "Edits a notification route by route_id: only the fields you pass change: its match and scope, enabled flag, resolution override, fallback and own destinations (Slack, Teams, generic webhook, PagerDuty, email). Changes shared alert configuration the service delivers on. Returns updated (the route with its recipient list in full, and each destination changed as saved or none, with the host for Teams and Slack and never a URL or key), previous and the undo call, or unchanged, invalid, not_found or refused (an agent route, or a match or scope change on a route with an agent setting)." +
+        "<<GUIDE>>" +
+        "Edits what a route matches and applies to, and where it sends. " + DestinationsHelp + " " +
+        "A route that is an agent route keeps everything in the Viewer, and a route with an agent setting (Off included) keeps its match and scope there: changing metric_match, scope_server_id, scope_tag_id or fleet_wide on it answers refused. " +
+        "enabled, send_resolutions, fallback_route_id and the destinations can still be changed on a route with an Off setting. A route's own destinations do not stop a change to what it matches. " +
+        "Fields: metric_match (" + MatchHelp + "), enabled, scope (scope_server_id or scope_tag_id, the other is cleared; fleet_wide true clears both), " +
+        "send_resolutions (inherit, always or never) and fallback_route_id (an existing route; clear_fallback true removes it), plus the destination fields. A field left out keeps its stored value. " +
+        "The same rules the Viewer's route window applies hold: * needs a scope, a route is scoped to one server or one tag, a route is not its own fallback, a webhook is an absolute http or https URL, recipients are plain addresses. " +
+        "A route whose generic webhook has a signing key keeps its generic URL until the key is removed in the Viewer. " +
+        "The database role this tool runs as can neither read nor write a destination column; the row is changed by the store's own config.update_notification_route and config.set_notification_route_destinations functions in one transaction, " +
+        "which re-read the row under its lock and refuse an agent route inside it. " +
+        "Use set_notification_route_enabled to turn a route off and on without the rest. " +
+        "The answer's previous is the route before the change and undo is the update_notification_route call that puts the match, scope, enabled flag, resolution override and fallback back. " +
+        "A webhook URL or key is never shown, so to put one back pass its earlier value again in its field; destinations.previous says whether one was saved (the host for Teams and Slack). The earlier recipient list is shown, and undo.arguments carries it as email_recipients. " +
+        "Returns {status:\"updated\", route, previous, destinations:{changed, now, previous}, undo}, or {status:\"unchanged\"} when nothing differs.")]
+    public static Task<string> UpdateNotificationRoute(
+        NpgsqlDataSource postgres,
+        [Description("The route_id to edit (from get_notification_routes).")] int route_id,
+        [Description("New match: " + MatchHelp + ". Omit to keep.")] string? metric_match = null,
+        [Description("Put the route in force (true) or skip it (false). Omit to keep.")] bool? enabled = null,
+        [Description("Scope the route to this registry server_id (clears a tag scope). Omit to keep.")] int? scope_server_id = null,
+        [Description("Scope the route to this server tag id (clears a server scope). Omit to keep.")] int? scope_tag_id = null,
+        [Description("true makes the route fleet-wide (clears the server or tag scope).")] bool? fleet_wide = null,
+        [Description("inherit, always or never. Omit to keep.")] string? send_resolutions = null,
+        [Description("The route_id of an existing route an expired investigation request goes to first. Omit to keep.")] int? fallback_route_id = null,
+        [Description("true removes the fallback route.")] bool? clear_fallback = null,
+        [Description("The route's own Teams webhook URL (absolute http or https). Sealed for this route; never shown back. Omit to keep; - removes it.")] string? teams_webhook_url = null,
+        [Description("The route's own Slack webhook URL (absolute http or https). Sealed for this route; never shown back. Omit to keep; - removes it.")] string? slack_webhook_url = null,
+        [Description("The route's own generic webhook URL (absolute http or https). Sealed for this route; never shown back. Omit to keep; - removes it.")] string? generic_webhook_url = null,
+        [Description("The route's own PagerDuty Events API v2 routing key. Sealed for this route; never shown back. Omit to keep; - removes it.")] string? pagerduty_routing_key = null,
+        [Description("The route's own email recipients, comma separated plain addresses. Omit to keep; - removes them.")] string? email_recipients = null,
+        ILogger? logger = null,
+        CancellationToken cancellationToken = default) =>
+        UpdateNotificationRouteAsync(
+            postgres, route_id, metric_match, enabled, scope_server_id, scope_tag_id, fleet_wide, send_resolutions, fallback_route_id, clear_fallback,
+            new RouteDestinationRequest(teams_webhook_url, slack_webhook_url, generic_webhook_url, pagerduty_routing_key, email_recipients),
+            DarlingPasswordKey.Current, logger, cancellationToken);
+
+    /// <summary>The edit: the match, scope and flag columns and the destinations in one transaction.</summary>
+    internal static async Task<string> UpdateNotificationRouteAsync(
+        NpgsqlDataSource postgres, int route_id, string? metric_match, bool? enabled, int? scope_server_id, int? scope_tag_id, bool? fleet_wide,
+        string? send_resolutions, int? fallback_route_id, bool? clear_fallback, RouteDestinationRequest destinations, IPasswordKeyRing ring,
+        ILogger? logger, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var store = new PgNotificationRouteStore(postgres);
+            var existing = (await store.LoadSummariesAsync(cancellationToken)).FirstOrDefault(r => r.RouteId == route_id);
+            if (existing is null)
+            {
+                return Outcome("not_found", $"No notification route with route_id {route_id}.");
+            }
+
+            if (AgentRouteRefusal(existing, "update_notification_route") is { } agentRefusal)
+            {
+                return agentRefusal;
+            }
+
+            if (scope_server_id.HasValue && scope_tag_id.HasValue)
+            {
+                return Outcome("invalid", "A route is scoped to one server or one tag, not both.");
+            }
+
+            var columns = new List<string>();
+            var match = existing.MetricMatch;
+            if (!string.IsNullOrWhiteSpace(metric_match) && NormalizeRouteMatch(metric_match) is var wanted && wanted != existing.MetricMatch)
+            {
+                match = wanted;
+                columns.Add("metric_match");
+            }
+
+            var enabledNow = existing.Enabled;
+            if (enabled.HasValue && enabled.Value != existing.Enabled)
+            {
+                enabledNow = enabled.Value;
+                columns.Add("enabled");
+            }
+
+            var serverScope = existing.ScopeServerId;
+            var tagScope = existing.ScopeTagId;
+            if (fleet_wide == true)
+            {
+                serverScope = null;
+                tagScope = null;
+            }
+
+            if (scope_server_id.HasValue)
+            {
+                serverScope = scope_server_id;
+                tagScope = null;
+            }
+            else if (scope_tag_id.HasValue)
+            {
+                tagScope = scope_tag_id;
+                serverScope = null;
+            }
+
+            if (serverScope != existing.ScopeServerId || tagScope != existing.ScopeTagId)
+            {
+                columns.Add("scope");
+            }
+
+            var resolutions = existing.SendResolutions;
+            if (send_resolutions is not null)
+            {
+                if (ParseSendResolutions(send_resolutions, out var parsed) is { } badResolutions)
+                {
+                    return Outcome("invalid", badResolutions);
+                }
+
+                if (parsed != existing.SendResolutions)
+                {
+                    resolutions = parsed;
+                    columns.Add("send_resolutions");
+                }
+            }
+
+            var fallback = existing.FallbackRouteId;
+            if (clear_fallback == true)
+            {
+                fallback = null;
+            }
+            else if (fallback_route_id.HasValue)
+            {
+                fallback = fallback_route_id;
+            }
+
+            if (fallback != existing.FallbackRouteId)
+            {
+                columns.Add("fallback_route_id");
+            }
+
+            if (columns.Count == 0 && !destinations.Any)
+            {
+                return JsonSerializer.Serialize(new { status = "unchanged", route = RouteWritePayload(existing) }, McpHelpers.JsonOptions);
+            }
+
+            RouteDestinationChange? change = null;
+            try
+            {
+                var proxies = destinations.Any
+                    ? await NotificationRouteWriter.ReadProxiesAsync(postgres, McpCommandDeadlines.ReadSeconds, cancellationToken)
+                    : new WebhookProxies("", "", "", "");
+                await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+                await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+                if (columns.Count > 0)
+                {
+                    const string updateSql = "SELECT config.update_notification_route($1, $2, $3, $4, $5, $6, $7, $8)";
+                    await using var command = new NpgsqlCommand(updateSql, connection) { Transaction = transaction };
+                    command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                    command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = route_id });
+                    command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = columns.ToArray() });
+                    command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = match });
+                    command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = enabledNow });
+                    NotificationRouteWriter.AddNullableInt(command, serverScope);
+                    NotificationRouteWriter.AddNullableInt(command, tagScope);
+                    command.Parameters.Add(resolutions.HasValue
+                        ? new NpgsqlParameter<bool> { TypedValue = resolutions.Value }
+                        : new NpgsqlParameter { Value = DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Boolean });
+                    NotificationRouteWriter.AddNullableInt(command, fallback);
+                    await command.ExecuteNonQueryAsync(cancellationToken);
+                }
+
+                if (destinations.Any)
+                {
+                    change = await ApplyRouteDestinationsAsync(connection, transaction, route_id, destinations, proxies, ring, cancellationToken);
+                }
+
+                await transaction.CommitAsync(cancellationToken);
+            }
+            catch (PostgresException ex) when (RouteFunctionOutcome(ex) is { } refusal)
+            {
+                return refusal;
+            }
+            catch (NotificationRouteRefusedException ex)
+            {
+                return Outcome("invalid", ex.Message);
+            }
+
+            var changedFields = columns.Concat(change is { Fields.Count: > 0 } ? change.Fields : Array.Empty<string>()).ToList();
+            LogRouteWrite(logger, "update_notification_route", CallerOf(), route_id, string.Join(", ", changedFields));
+            var stored = (await store.LoadSummariesAsync(cancellationToken)).FirstOrDefault(r => r.RouteId == route_id);
+            return JsonSerializer.Serialize(new
+            {
+                status = "updated",
+                route = RouteWritePayload(stored),
+                previous = RouteWritePayload(existing),
+                changed = changedFields,
+                destinations = DestinationsPayload(change),
+                undo = new
+                {
+                    tool = "update_notification_route",
+                    arguments = UndoArguments(existing, change),
+                    destinations = change is { Fields.Count: > 0 }
+                        ? "A webhook URL or key is never shown. To put one back, pass its earlier value again in the same field (destinations.previous says whether one was saved). The earlier recipient list is in the arguments as email_recipients."
+                        : null,
+                },
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return McpHelpers.FormatError("update_notification_route", ex);
+        }
+    }
+
+    /// <summary>The route's recipient list as stored now, read on the write's own transaction (the <c>mcp</c> login may read that column).</summary>
+    private static async Task<string> ReadRecipientsAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, int routeId, CancellationToken cancellationToken)
+    {
+        const string readSql = "SELECT smtp_recipients FROM config.config_notification_routes WHERE route_id = $1";
+        await using var command = new NpgsqlCommand(readSql, connection) { Transaction = transaction };
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });
+        return await command.ExecuteScalarAsync(cancellationToken) as string ?? "";
+    }
+
+    /// <summary>The refusal a route function raised (its own DL400, DL403 or DL404 sentence), or null for any other error.</summary>
+    private static string? RouteFunctionOutcome(PostgresException ex) => ex.SqlState switch
+    {
+        "DL400" or "DL404" => Outcome("invalid", ex.MessageText),
+        "DL403" => Outcome("refused", ex.MessageText),
+        _ => null,
+    };
+
+    /// <summary>Who made a route write, for the log: the token's server-side identity, then the name the client reported for itself
+    /// (<see cref="ReadCaller.WriteIdentity"/>). The tool-call filter sets both once per call.</summary>
+    private static string CallerOf() => ReadCaller.WriteIdentity();
+
+    /// <summary>One line per route write (#6231): the tool, the token and client identity, the route and the names of the fields changed. Never a value.</summary>
+    internal static void LogRouteWrite(ILogger? logger, string tool, string caller, int routeId, string fields) =>
+        logger?.LogInformation("MCP route write {Tool} by {Identity}: route {RouteId}, fields changed: {Fields}", tool, caller, routeId, fields);
+
+    /// <summary>The update call that puts a route's fields back to <paramref name="existing"/>'s values, and the recipient list back when the call changed it (<c>-</c> removes a list that was empty).</summary>
+    private static Dictionary<string, object?> UndoArguments(PgNotificationRouteStore.RouteSummary existing, RouteDestinationChange? change)
+    {
+        var args = new Dictionary<string, object?>
+        {
+            ["route_id"] = existing.RouteId,
+            ["metric_match"] = existing.MetricMatch,
+            ["enabled"] = existing.Enabled,
+            ["send_resolutions"] = existing.SendResolutions switch { true => "always", false => "never", _ => "inherit" },
+        };
+        if (existing.ScopeServerId.HasValue)
+        {
+            args["scope_server_id"] = existing.ScopeServerId.Value;
+        }
+        else if (existing.ScopeTagId.HasValue)
+        {
+            args["scope_tag_id"] = existing.ScopeTagId.Value;
+        }
+        else
+        {
+            args["fleet_wide"] = true;
+        }
+
+        if (existing.FallbackRouteId.HasValue)
+        {
+            args["fallback_route_id"] = existing.FallbackRouteId.Value;
+        }
+        else
+        {
+            args["clear_fallback"] = true;
+        }
+
+        if (change?.PreviousRecipients is { } previousRecipients)
+        {
+            args["email_recipients"] = previousRecipients.Trim().Length == 0 ? NotificationRouteWriter.ClearMarker : previousRecipients;
+        }
+
+        return args;
+    }
+
+    /// <summary>The match as the Viewer's dialog stores it: an exact name that is really a family spelled by hand is the family.</summary>
+    private static string NormalizeRouteMatch(string? match)
+    {
+        var text = (match ?? "").Trim();
+        return AlertFamily.NormalizeFamily(text) ?? text;
+    }
+
+    private static string? ParseSendResolutions(string? text, out bool? value)
+    {
+        value = null;
+        switch ((text ?? "").Trim().ToLowerInvariant())
+        {
+            case "":
+            case "inherit":
+                return null;
+            case "always":
+                value = true;
+                return null;
+            case "never":
+                value = false;
+                return null;
+            default:
+                return "send_resolutions is inherit, always or never.";
+        }
+    }
+
+    // ── Alert history dismiss ──
+
+    [McpServerTool(Name = "dismiss_alert_history"), Description(
+        "Dismisses alert history rows: they leave get_alert_history's default read (include_dismissed true still shows them) and nothing else changes. The rows stay stored. Pass the rows to dismiss as alert_time, server_id and metric_name exactly as get_alert_history returned them. Returns dismissed (counts: requested, dismissed, already_dismissed, unknown) with the undo call, restore_alert_history. Dismissing is a flag, not a delete, so it is fully undone." +
+        "<<GUIDE>>" +
+        "Dismisses alert history rows the way the web dashboard's Dismiss does (the same store call): sets the dismissed flag on each named row and no other column. " +
+        "alerts_json is a JSON array of up to 1000 objects {\"alert_time\":\"...\",\"server_id\":1,\"metric_name\":\"...\"}, copied from get_alert_history rows. " +
+        "A key that names no row counts under unknown and is not an error; a row already dismissed counts under already_dismissed. " +
+        "Nothing is deleted. The undo is restore_alert_history with the rows this call actually dismissed (rows that were already dismissed are not in it, so the undo does not bring back a dismissal somebody else made). " +
+        "Check with get_alert_history (the rows are gone from the default read) and include_dismissed true.")]
+    public static async Task<string> DismissAlertHistory(
+        NpgsqlDataSource postgres,
+        [Description("JSON array of {alert_time, server_id, metric_name} copied from get_alert_history rows. At most 1000.")] string alerts_json,
+        ILogger? logger = null,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (ParseAlertKeys(alerts_json, out var keys) is { } refusal)
+            {
+                return Outcome("invalid", refusal);
+            }
+
+            var willChange = await AlertDismissStore.KeysInStateAsync(postgres, keys, dismissed: false, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            var outcome = await AlertDismissStore.DismissKeysAsync(postgres, keys, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            LogAlertWrite(logger, "dismiss_alert_history", outcome.Dismissed);
+            return JsonSerializer.Serialize(new
+            {
+                status = "dismissed",
+                requested = outcome.Requested,
+                dismissed = outcome.Dismissed,
+                already_dismissed = Math.Max(0, outcome.Known - outcome.Dismissed),
+                unknown = Math.Max(0, outcome.Requested - outcome.Known),
+                undo = new { tool = "restore_alert_history", arguments = new { alerts_json = KeysJson(willChange) } },
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return McpHelpers.FormatError("dismiss_alert_history", ex);
+        }
+    }
+
+    [McpServerTool(Name = "restore_alert_history"), Description(
+        "Brings dismissed alert history rows back into get_alert_history's default read: the undo of dismiss_alert_history. Pass the rows as alert_time, server_id and metric_name. Returns restored (counts: requested, restored, not_dismissed_or_unknown) with the call that dismisses them again." +
+        "<<GUIDE>>" +
+        "Clears the dismissed flag on each named row and no other column. alerts_json has the same shape dismiss_alert_history takes, " +
+        "and its answer's undo carries exactly the rows to pass. A row that was not dismissed, or that names no row, is counted and left alone. " +
+        "Check with get_alert_history.")]
+    public static async Task<string> RestoreAlertHistory(
+        NpgsqlDataSource postgres,
+        [Description("JSON array of {alert_time, server_id, metric_name}. At most 1000.")] string alerts_json,
+        ILogger? logger = null,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (ParseAlertKeys(alerts_json, out var keys) is { } refusal)
+            {
+                return Outcome("invalid", refusal);
+            }
+
+            var willChange = await AlertDismissStore.KeysInStateAsync(postgres, keys, dismissed: true, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            var outcome = await AlertDismissStore.RestoreKeysAsync(postgres, keys, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            LogAlertWrite(logger, "restore_alert_history", outcome.Dismissed);
+            return JsonSerializer.Serialize(new
+            {
+                status = "restored",
+                requested = outcome.Requested,
+                restored = outcome.Dismissed,
+                not_dismissed_or_unknown = Math.Max(0, outcome.Requested - outcome.Dismissed),
+                undo = new { tool = "dismiss_alert_history", arguments = new { alerts_json = KeysJson(willChange) } },
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return McpHelpers.FormatError("restore_alert_history", ex);
+        }
+    }
+
+    /// <summary>One Information line per dismiss or restore call: the tool, who called, and how many rows changed.</summary>
+    private static void LogAlertWrite(ILogger? logger, string tool, int rows) =>
+        logger?.LogInformation("MCP write {Tool} by {Identity}: {Rows} alert history rows changed",
+            tool, ReadCaller.WriteIdentity(), rows);
+
+    /// <summary>Parses the keys with the web dismiss route's own parser, so the two surfaces refuse a body in the same words.</summary>
+    private static string? ParseAlertKeys(string? alertsJson, out List<AlertDismissKey> keys)
+    {
+        keys = new List<AlertDismissKey>();
+        JsonNode? node;
+        try
+        {
+            node = JsonNode.Parse(alertsJson ?? "");
+        }
+        catch (JsonException)
+        {
+            return "alerts_json must be a JSON array of {alert_time, server_id, metric_name}.";
+        }
+
+        if (node is not JsonArray array)
+        {
+            return "alerts_json must be a JSON array of {alert_time, server_id, metric_name}.";
+        }
+
+        var body = new JsonObject { ["alerts"] = array.DeepClone() }.ToJsonString();
+        return DarlingWebEndpoints.ParseDismissBody(body, out keys, out var refusal) ? null : refusal;
+    }
+
+    private static string KeysJson(IEnumerable<AlertDismissKey> keys) =>
+        JsonSerializer.Serialize(
+            keys.Select(k => new { alert_time = k.AlertTime.ToString("o", System.Globalization.CultureInfo.InvariantCulture), server_id = k.ServerId, metric_name = k.MetricName }),
+            McpHelpers.JsonOptions);
+}

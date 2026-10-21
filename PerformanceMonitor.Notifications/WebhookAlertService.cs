@@ -493,7 +493,7 @@ public class WebhookAlertService
                 return "Teams webhook URL is not configured.";
 
             var payload = BuildTeamsPayload("Test Notification", "", "Webhook configuration verified", "", branding, isTest: true);
-            return await PostWebhookAsync(webhookUrl, payload, proxyAddress);
+            return await PostWebhookAsync(webhookUrl, payload, proxyAddress, bodyInResult: true);
         }
         catch (Exception ex)
         {
@@ -512,7 +512,7 @@ public class WebhookAlertService
                 return "Slack webhook URL is not configured.";
 
             var payload = BuildSlackPayload("Test Notification", "", "Webhook configuration verified", "", branding, isTest: true);
-            return await PostWebhookAsync(webhookUrl, payload, proxyAddress);
+            return await PostWebhookAsync(webhookUrl, payload, proxyAddress, bodyInResult: true);
         }
         catch (Exception ex)
         {
@@ -556,10 +556,10 @@ public class WebhookAlertService
             {
                 var sendUtc = DateTime.UtcNow;
                 var signed = new WebhookSendSigning(signing.LiveKeys(sendUtc), WebhookSigning.NewMessageId(), WebhookSigning.UnixSeconds(sendUtc));
-                return await PostWebhookAsync(webhookUrl, payload, proxyAddress, headers, WebhookPostTimeout, signed, CancellationToken.None);
+                return await PostWebhookAsync(webhookUrl, payload, proxyAddress, headers, WebhookPostTimeout, signed, CancellationToken.None, bodyInResult: true);
             }
 
-            return await PostWebhookAsync(webhookUrl, payload, proxyAddress, headers);
+            return await PostWebhookAsync(webhookUrl, payload, proxyAddress, headers, bodyInResult: true);
         }
         catch (Exception ex)
         {
@@ -659,7 +659,7 @@ public class WebhookAlertService
         {
             var payload = BuildTeamsPayload(metricName, serverName, currentValue, thresholdValue, _branding, context: context, triageUrl: triageUrl,
                 detailText: detailText, displayName: displayName, nowUtc: nowUtc);
-            var error = await PostWebhookAsync(webhookUrl, payload, settings.TeamsProxyAddress, cancellationToken: cancellationToken);
+            var error = await PostWebhookAsync(webhookUrl, payload, settings.TeamsProxyAddress, cancellationToken: cancellationToken, bodyLog: _logger);
 
             if (error != null)
             {
@@ -1077,7 +1077,7 @@ public class WebhookAlertService
         {
             var payload = BuildSlackPayload(metricName, serverName, currentValue, thresholdValue, _branding, context: context, triageUrl: triageUrl,
                 detailText: detailText, displayName: displayName, nowUtc: nowUtc);
-            var error = await PostWebhookAsync(webhookUrl, payload, settings.SlackProxyAddress, cancellationToken: cancellationToken);
+            var error = await PostWebhookAsync(webhookUrl, payload, settings.SlackProxyAddress, cancellationToken: cancellationToken, bodyLog: _logger);
 
             if (error != null)
             {
@@ -2220,7 +2220,7 @@ public class WebhookAlertService
             /* #3598: the routed endpoint; headers, body template and proxy stay the parent's — a route
                redirects the POST, it does not re-author it. */
             var error = await PostWebhookAsync(
-                webhookUrl, payload, settings.GenericWebhookProxyAddress, headers, WebhookPostTimeout, signed, cancellationToken);
+                webhookUrl, payload, settings.GenericWebhookProxyAddress, headers, WebhookPostTimeout, signed, cancellationToken, _logger);
 
             if (error != null)
             {
@@ -2992,7 +2992,7 @@ public class WebhookAlertService
         try
         {
             return await PostWebhookAsync(
-                url, payload, delivery.GenericWebhookProxyAddress, headers: null, WebhookPostTimeout, signed, cancellationToken);
+                url, payload, delivery.GenericWebhookProxyAddress, headers: null, WebhookPostTimeout, signed, cancellationToken, _logger);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -3074,7 +3074,7 @@ public class WebhookAlertService
             var endpoint = PagerDutyEndpoint(settings.PagerDutyUseEuRegion);
             var error = PostPagerDutyAsyncOverride is not null
                 ? await PostPagerDutyAsyncOverride(endpoint, payload)
-                : await PostWebhookAsync(endpoint, payload, settings.PagerDutyProxyAddress, cancellationToken: cancellationToken);
+                : await PostWebhookAsync(endpoint, payload, settings.PagerDutyProxyAddress, cancellationToken: cancellationToken, bodyLog: _logger);
 
             if (error != null)
             {
@@ -3438,7 +3438,7 @@ public class WebhookAlertService
                 branding, routingKey, isTest: true, dedupKey: testDedupKey);
 
             var endpoint = PagerDutyEndpoint(useEuRegion);
-            return await PostWebhookAsync(endpoint, payload, proxyAddress);
+            return await PostWebhookAsync(endpoint, payload, proxyAddress, bodyInResult: true);
         }
         catch (Exception ex)
         {
@@ -3470,9 +3470,10 @@ public class WebhookAlertService
     /* Reuse HttpClients instead of newing one (plus a handler) per send. A fresh
        HttpClient/handler per request leaks sockets into TIME_WAIT and can exhaust
        the ephemeral port range when many servers alert. One pooled client covers the
-       no-proxy case; proxied clients are cached per proxy address. */
+       no-proxy case; proxied clients are cached per proxy address. #6231: the two direct clients connect through
+       WebhookConnectGuard, which refuses link-local and cloud instance addresses (a proxied client connects to its proxy, which resolves the host). */
     private static readonly HttpClient s_defaultClient =
-        new(new SocketsHttpHandler { PooledConnectionLifetime = TimeSpan.FromMinutes(5) })
+        new(WebhookConnectGuard.NewHandler())
         { Timeout = TimeSpan.FromSeconds(30) };
 
     private static readonly ConcurrentDictionary<string, HttpClient> s_proxyClients = new();
@@ -3481,7 +3482,7 @@ public class WebhookAlertService
        were set up for and nowhere else. These two clients serve only those sends; sends without headers keep the
        clients above. */
     private static readonly HttpClient s_defaultNoRedirectClient =
-        new(new SocketsHttpHandler { PooledConnectionLifetime = TimeSpan.FromMinutes(5), AllowAutoRedirect = false })
+        new(WebhookConnectGuard.NewHandler(allowAutoRedirect: false))
         { Timeout = TimeSpan.FromSeconds(30) };
 
     private static readonly ConcurrentDictionary<string, HttpClient> s_proxyNoRedirectClients = new();
@@ -3527,8 +3528,11 @@ public class WebhookAlertService
         string jsonPayload,
         string? proxyAddress,
         IReadOnlyDictionary<string, string>? headers = null,
+        ILogger? bodyLog = null,
+        bool bodyInResult = false,
         CancellationToken cancellationToken = default) =>
-        PostWebhookAsync(webhookUrl, jsonPayload, proxyAddress, headers, WebhookPostTimeout, cancellationToken);
+        PostWebhookAsync(
+            webhookUrl, jsonPayload, proxyAddress, headers, WebhookPostTimeout, signing: null, cancellationToken, bodyLog, bodyInResult);
 
     /// <summary>
     /// The post with its timeout stated, so a test can hang an endpoint and wait 200 ms for the answer instead
@@ -3553,7 +3557,9 @@ public class WebhookAlertService
         IReadOnlyDictionary<string, string>? headers,
         TimeSpan postTimeout,
         WebhookSendSigning? signing,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ILogger? bodyLog = null,
+        bool bodyInResult = false)
     {
         var sendsHeaders = headers is { Count: > 0 };
         /* #6003 review: a signed send is held to #5366's rule too. A followed 307/308 would carry the body and a valid
@@ -3614,19 +3620,44 @@ public class WebhookAlertService
                     $"HTTP {(int)response.StatusCode}: the endpoint answered with a redirect. Set the webhook URL to the final address.");
             }
 
-            /* Cap the destination's error body: it goes into the log + the health getter, and an unbounded read
-               lets a hostile/misconfigured endpoint bloat both (and, if it echoes request headers, spill more of
-               them). The first 2 KB is plenty to diagnose a 4xx/5xx. */
+            /* #6231: the text this returns is what the alert log's send_error and the channel health getter store and
+               serve, and a read-only MCP client can read both. A destination can be any address the host can reach,
+               so what it answers with must not be stored: the stored text keeps the status and its reason, and the
+               first 2 KB of the body goes to the log only (capped, because an unbounded read lets an endpoint bloat
+               the log). The interactive Test buttons (bodyInResult) show the operator the body, because nothing from
+               them is stored. */
             var body = await response.Content.ReadAsStringAsync(timeout.Token);
             if (body.Length > 2048)
                 body = string.Concat(body.AsSpan(0, 2048), "…(truncated)");
 
-            return $"HTTP {(int)response.StatusCode}: {body}";
+            var statusText = HttpStatusText(response.StatusCode);
+            if (bodyInResult)
+                return $"{statusText}: {body}";
+
+            if (bodyLog is not null)
+            {
+                var oneLine = body.Replace('\r', ' ').Replace('\n', ' ');
+                bodyLog.LogError($"Webhook post failed with {statusText}; the endpoint's response: {oneLine}");
+            }
+
+            return statusText;
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             return string.Create(CultureInfo.InvariantCulture, $"timed out after {postTimeout.TotalSeconds:0.###} seconds");
         }
+    }
+
+    /// <summary>
+    /// "HTTP 500 Internal Server Error": the status and its standard name, never the reason phrase the endpoint sent,
+    /// which is free text the endpoint chooses.
+    /// </summary>
+    internal static string HttpStatusText(HttpStatusCode status)
+    {
+        var code = (int)status;
+        return Enum.IsDefined(status)
+            ? string.Create(CultureInfo.InvariantCulture, $"HTTP {code} {Regex.Replace(status.ToString(), "(?<=[a-z])(?=[A-Z])", " ")}")
+            : string.Create(CultureInfo.InvariantCulture, $"HTTP {code}");
     }
 
     /// <summary>

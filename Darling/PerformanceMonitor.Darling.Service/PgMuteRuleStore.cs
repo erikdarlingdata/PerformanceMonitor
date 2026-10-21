@@ -64,7 +64,7 @@ public sealed class PgMuteRuleStore : IMuteRuleStore
         using var command = new NpgsqlCommand(@"
 SELECT id, enabled, created_at_utc, expires_at_utc, reason,
        server_name, metric_name, database_pattern,
-       query_text_pattern, wait_type_pattern, job_name_pattern, server_id, client_app_pattern, external_source
+       query_text_pattern, wait_type_pattern, job_name_pattern, server_id, client_app_pattern, external_source, starts_at_utc
 FROM config_mute_rules
 ORDER BY created_at_utc DESC", scope.Connection, scope.Transaction) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
 
@@ -86,7 +86,8 @@ ORDER BY created_at_utc DESC", scope.Connection, scope.Transaction) { CommandTim
                 JobNamePattern = reader.IsDBNull(10) ? null : reader.GetString(10),
                 ServerId = reader.IsDBNull(11) ? null : reader.GetInt32(11),
                 ClientAppPattern = reader.IsDBNull(12) ? null : reader.GetString(12),
-                ExternalSource = reader.IsDBNull(13) ? null : reader.GetString(13)
+                ExternalSource = reader.IsDBNull(13) ? null : reader.GetString(13),
+                StartsAtUtc = reader.IsDBNull(14) ? null : DateTime.SpecifyKind(reader.GetDateTime(14), DateTimeKind.Utc)
             });
         }
 
@@ -105,8 +106,8 @@ ORDER BY created_at_utc DESC", scope.Connection, scope.Transaction) { CommandTim
 INSERT INTO config_mute_rules
     (id, enabled, created_at_utc, expires_at_utc, reason,
      server_name, metric_name, database_pattern,
-     query_text_pattern, wait_type_pattern, job_name_pattern, server_id, client_app_pattern, external_source)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)", scope.Connection, scope.Transaction) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+     query_text_pattern, wait_type_pattern, job_name_pattern, server_id, client_app_pattern, external_source, starts_at_utc)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)", scope.Connection, scope.Transaction) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(rule.Id);
         command.Parameters.AddWithValue(rule.Enabled);
         command.Parameters.AddWithValue(Naive(rule.CreatedAtUtc));
@@ -121,6 +122,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)", scope.Con
         AddNullableInt(command, rule.ServerId);
         AddNullableText(command, rule.ClientAppPattern);
         AddNullableText(command, rule.ExternalSource);
+        AddNullable(command, rule.StartsAtUtc);
         await command.ExecuteNonQueryAsync();
     }
 
@@ -137,7 +139,7 @@ UPDATE config_mute_rules SET
     enabled = $2, expires_at_utc = $3, reason = $4,
     server_name = $5, metric_name = $6, database_pattern = $7,
     query_text_pattern = $8, wait_type_pattern = $9, job_name_pattern = $10, server_id = $11, client_app_pattern = $12,
-    external_source = $13
+    external_source = $13, starts_at_utc = $14
 WHERE id = $1", scope.Connection, scope.Transaction) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(rule.Id);
         command.Parameters.AddWithValue(rule.Enabled);
@@ -152,6 +154,7 @@ WHERE id = $1", scope.Connection, scope.Transaction) { CommandTimeout = DarlingA
         AddNullableInt(command, rule.ServerId);
         AddNullableText(command, rule.ClientAppPattern);
         AddNullableText(command, rule.ExternalSource);
+        AddNullable(command, rule.StartsAtUtc);
         await command.ExecuteNonQueryAsync();
     }
 

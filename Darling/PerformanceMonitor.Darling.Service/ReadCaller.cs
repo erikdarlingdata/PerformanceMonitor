@@ -50,6 +50,32 @@ internal static class ReadCaller
        composed-panel runner can record it without a new tool parameter. */
     private static readonly AsyncLocal<string?> s_ambientMcpCaller = new();
 
+    /* #6231: the server-side identity of the bearer token the call came in on, set beside the caller. */
+    private static readonly AsyncLocal<string?> s_ambientMcpToken = new();
+
+    /// <summary>The token identity set by the tool filter for the call in progress, or null outside one.</summary>
+    internal static string? AmbientMcpToken => s_ambientMcpToken.Value;
+
+    /// <summary>Sets the token identity for the rest of the current async flow (the tool filter's call to the tool).</summary>
+    internal static void SetAmbientMcpToken(string? tokenIdentity) => s_ambientMcpToken.Value = tokenIdentity;
+
+    /// <summary>
+    /// What the service itself knows about who made a call: the bearer token the request carried, shown as the first 8 hex
+    /// characters of its SHA-256 (<c>token 3fa9c1d2</c>), which names a token without revealing it, or <c>no token</c> when the
+    /// request carried none. The service has one token per endpoint and no token labels, so this is the whole server-side identity.
+    /// </summary>
+    internal static string OfMcpToken(string? bearerToken) =>
+        string.IsNullOrEmpty(bearerToken)
+            ? "no token"
+            : "token " + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(bearerToken)))[..8].ToLowerInvariant();
+
+    /// <summary>
+    /// The text a write log line carries for who made the call: the token identity the service worked out, then the name the client
+    /// gave itself, labelled as the client's own claim (any client can send any name).
+    /// </summary>
+    internal static string WriteIdentity() =>
+        (AmbientMcpToken ?? "token unknown") + ", client says: " + (AmbientMcpCaller ?? Unknown);
+
     /// <summary>The MCP caller set by the tool filter for the call in progress, or null outside one.</summary>
     internal static string? AmbientMcpCaller => s_ambientMcpCaller.Value;
 
