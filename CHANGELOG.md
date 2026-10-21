@@ -39,7 +39,7 @@ Full entries: [docs/changelog/3.11.md](docs/changelog/3.11.md)
 - **Store schema for Level 2 agent investigations** ([#5920])
 - **The alert engine can take per-server and per-database threshold overrides** ([#5921])
 - **Investigation reports can record Jira, pull request and bug report links** ([#5922])
-- **The Level 2 agent action gate and its journal** ([#5925])
+- **The Level 2 agent action gate and its journal** ([#5925], [#5632])
 - **People can give feedback on investigation reports** ([#5926])
 - **Lite: Level 1 agent investigations** ([#5820])
 - **Deadlock graph window: a visible Copy button for the SQL text** ([#5663])
@@ -54,7 +54,7 @@ Full entries: [docs/changelog/3.11.md](docs/changelog/3.11.md)
 - **Read caller** ([#5795])
 - **A store sizing guide for Darling, and a load-test harness for the Query Store tables** ([#5800])
 - **Darling limits how many long reads run at once** ([#5806])
-- **Darling can hand an alert to your own AI agent** ([#5632])
+- **Darling can hand an alert to your own AI agent** ([#5632], [#5850], [#6066], [#6237], [#6273])
 - **Alert Details window: resizable, selectable values, Copy all details, and a link to the full chain** ([#5854])
 - **MCP long-poll: an agent waits for an investigation request to open for its routes** ([#5856])
 - **Alert resolutions go to the channels that got the fire, opt-in per channel** ([#5855])
@@ -63,37 +63,34 @@ Full entries: [docs/changelog/3.11.md](docs/changelog/3.11.md)
 - **Practice requests with a score per agent** ([#5937])
 - **Agents at Level 2 can change mute rules and custom alert rules, journaled** ([#5934])
 - **Per-server alert threshold overrides** ([#5933])
-- **Agent changes list with one-click undo and an off switch** ([#5936])
+- **Agent changes list with one-click undo and an off switch** ([#5936], [#6271])
 - **CI lints the workflow files with actionlint** ([#5947])
-- **Test code can no longer call `Thread.Sleep`, and CI failures are counted with the skip marker apart** ([#5943])
+- **Tests wait on conditions, not fixed sleeps, and CI failures are counted apart from the skip marker** ([#5943])
 - **CI can set aside a test that dev's own latest push broke, for up to 72 hours, on pull requests that do not reach it** ([#5942])
 - **Run all collectors now, or one collector now, for a server** ([#5941])
 - **Client Timeouts measurement scripts** ([#5736])
-- **Query tags: shared rule matcher** ([#5979])
-- **Query tags: store tables** ([#5977])
 - **Alert recurrence in investigation briefs** ([#6000])
-- **Query tag sightings from the collectors** ([#5980])
 - **Query tag rule MCP tools** ([#5982])
 - **Investigation evidence, follow-ups and signed-webhook keys in the store** ([#5997])
 - **Lite has a query-tag store** ([#5989])
 - **Tags on the Darling query reads** ([#5984])
-- **Query tag MCP tools** ([#5981])
+- **Query tag MCP tools** ([#5981], [#6027])
 - **Investigation reports carry a family, fix links, evidence basis and the queries run** ([#6004])
-- **Query tag map built by the collector** ([#5985])
+- **Query tag map built by the collector** ([#5985], [#5971])
 - **Investigation evidence is frozen at the open** ([#6001])
 - **Lite now records which queries it saw and builds the query tag map** ([#5990])
 - **Resource use by query tag** ([#5983])
 - **Signed webhooks** ([#5998])
 - **Lite can roll resource use up by query tag** ([#5992])
 - **Investigation evidence now covers deadlocks, blocking and plan regressions** ([#6031])
-- **Lite MCP tools to manage query tags, assignments and rules** ([#5991])
+- **Lite MCP tools to manage query tags, assignments and rules** ([#5991], [#6027])
 - **Lite can manage query tags and see resource use by tag** ([#5993])
 - **Investigation request events reach the agent and its people** ([#6032])
 - **Agents can read an investigation's frozen evidence** ([#6033])
 - **Notification routes can now set a fallback route** ([#6036])
 - **The Darling viewer shows query tags: a Tag column and filter on the Queries grids, and a by-tag resource view** ([#5988])
 - **Web dashboard: a Query Tag Usage page, and a tag column and filter on the query grids** ([#5987])
-- **The web dashboard can manage query tags, their hand assignments and their rules** ([#5986])
+- **The web dashboard can manage query tags, their hand assignments and their rules** ([#5986], [#5971])
 - **Investigation briefs hint at a plan change behind high CPU, and the reverse** ([#6007])
 - **Investigation reports can schedule a follow-up request** ([#6008])
 - **Lite investigations freeze evidence sections per request** ([#6010])
@@ -104,26 +101,24 @@ Full entries: [docs/changelog/3.11.md](docs/changelog/3.11.md)
 - **Lite investigations carry server names, time-of-day recurrence and the new report fields** ([#6011])
 - **Lite opens time follow-ups and signs generic webhooks** ([#6012])
 - **An MCP read checks a Query Store plan before anyone forces it** ([#5632])
-- **Darling collects each database's forced plans** ([#5632])
+- **Darling collects each database's forced plans** ([#5632], [#6221])
 - **Four small MCP read fixes for agents** ([#6074])
 - **Darling ranks queries by aborted and failed executions** ([#6073])
-- **Level 3 routes, and a per-server switch for each server action, all off** ([#5632])
-- **Darling says whether each forced plan works** ([#5632])
-- **The server write code for agent actions, in its own assembly and not called yet** ([#5632])
+- **Level 3 routes, and a per-server switch for each server action, all off** ([#5632], [#6271], [#6282], [#6281])
+- **Darling says whether each forced plan works** ([#5632], [#6160], [#6221])
 - **Darling says who drove the load on a server** ([#6072])
-- **Agents can force and unforce a Query Store plan on SQL Server** ([#5632])
+- **Agents can force and unforce a Query Store plan on SQL Server** ([#5632], [#6207])
 - **Darling checks every plan an agent forces, and asks the agent to keep or remove it** ([#5632])
 - **A person can undo an agent's plan force or unforce from the Agent changes list** ([#5632])
-- **An agent can evict one cached plan, then see its next compile** ([#5632])
+- **An agent can evict one cached plan, then see its next compile** ([#5632], [#6207])
 - **The blocking capture records what a person needs to judge a head blocker** ([#5632])
 - **An agent can kill one SQL Server session, after checking it is still the session it named** ([#5632])
 - **Volume Free Space alert: a fleet-wide excluded volumes list** ([#6098])
 - **Sibling server tags can be put in order with Move Up and Move Down** ([#6111])
 - **Lite answers "which database, which caller, which statement piled up" the way Darling does** ([#6124])
 - **The Blocking grids show the head blocker's login time, last request end, open transactions and log used** ([#6146])
-- **An agent can end one PostgreSQL session with `kill_session`, after Darling checks it is still the session the agent named** ([#6126])
+- **An agent can end one PostgreSQL session with `kill_session`, after Darling checks it is still the session the agent named** ([#6126], [#6143])
 - **kill_session works on Azure SQL Database** ([#6184])
-- **Plan changes an agent makes now say how to undo them** ([#6207])
 - **Custom views and notebooks can sit in shared folders and be personal** ([#6214])
 - **Custom alert rules can expire** ([#6235])
 - **Export the investigation cases that have feedback** ([#6236])
@@ -143,41 +138,29 @@ Full entries: [docs/changelog/3.11.md](docs/changelog/3.11.md)
 - **Plan analysis and exports are bounded, spreadsheet-safe and warn on unencrypted mail** ([#5699])
 - **darling.json and the store's admin and viewer credential files are limited to a local operator group** ([#5700])
 - **A token in the web dashboard's address no longer signs anyone in; the dashboard and MCP host take the access token only from the sign-in form or bearer header, with a minimum length and a wait after failures** ([#5702])
-- **harden-files and the install scripts cover TLS key files** ([#5700])
-- **get_collection_health partial rows leave out null, false and 0 keys** ([#5748])
+- **harden-files and the install scripts cover TLS key files** ([#5700], [#5753])
+- **get_collection_health partial rows leave out null, false and 0 keys, except collector, status, partial_detail, total_runs and errors, which always stay** ([#5748])
 - **MCP tool descriptions and server instructions use plain wording** ([#5779])
-- **CI selects every test class that names a symbol a change defines or edits, repo-walking tests run in the guard set, and a local mode prints the filter CI will use** ([#5801])
 - **The release signature guard checks the Darling PowerShell scripts** ([#5799])
-- **Lane orders and review traps ask for behavior tests, not pins** ([#5835])
-- **Guard-stage spelling tests deleted, slice 1** ([#5840])
-- **Guard-stage spelling tests deleted, slice 2** ([#5842])
-- **Guard-stage spelling tests deleted, slice 3** ([#5839])
-- **Guard-stage spelling tests deleted, slice 4** ([#5837])
-- **Guard-stage spelling tests deleted, slice 5** ([#5841])
-- **Guard-stage spelling tests deleted, slice 6** ([#5838])
-- **Guard-stage spelling tests deleted, follow-through** ([#5848])
 - **Settings window: tabs grouped by task, in both the Darling Viewer and Lite** ([#5852])
 - **The hourly store self-metrics sizing reads every hypertable in one catalog pass** ([#5885])
 - **The repository's top page is now a short README with a quick start and links** ([#5869])
-- **The pre-push gate no longer runs Guard classes twice or selects tests for a docs-only diff** ([#5895])
-- **The investigation contracts, tool rules, brief composer and dispatch core now live in the shared libraries** ([#5900])
+- **Investigation code shared with Lite** ([#5900])
 - **The hourly store self-metrics sweep sizes hypertables from the compression catalog** ([#5901])
-- **Two bookkeeping tests no longer fail a pull request that adds a store rung, and the MCP instructions budget states its rule** ([#5944])
-- **CI derives the Lite-reads and Darling-reads test sets from the source** ([#5961])
+- **CI finds the tests that read the other product's files by scanning the test sources** ([#5961])
 - **CI now lints the shell scripts in the workflow files** ([#5970])
-- **Tag rules shared** ([#5978])
+- **Server tag rules shared** ([#5978])
 - **Test selection for shared projects** ([#5951])
 - **Server names in investigations** ([#5999])
-- **Review prompt asks for behavior coverage, not pins** ([#5836])
-- **The force pre-check blocks only a force that cannot work** ([#5632])
-- **Alerts keep joining an investigation request while they keep firing** ([#5632])
-- **A login or host keeps one pseudonym across metadataOnly answers** ([#6066])
-- **A PostgreSQL server's tabs read plainly** ([#6151])
+- **A PostgreSQL server's tabs read plainly in the Darling Viewer** ([#6151])
 - **Web page text reads plainly** ([#6172])
 - **The deadlock graph's detail pane shows each process's sql_handle** ([#6209])
-- **Starter agent file: use a small model for the first step** ([#6237])
 - **The Query Store regressions read shows Regular, Aborted (timeouts) and Exception (errors) runs side by side, and flags a rise in timeouts or errors as well as cost** ([#5506])
 - **The Query Store collector fetches text and plans only for each database-hour's top N plans, N a setting (default 100)** ([#6211])
+- **The web Alert History grid puts Triage and Mute in the first columns** ([#5705])
+- **PR CI runs the Guard tests beside the shards instead of before them** ([#5952])
+- **PR CI builds the two test projects in parallel** ([#5955])
+- **Darling alerts run on their own 30 second beat and show how old their newest sample is** ([#5680])
 
 ### Fixed
 
@@ -199,7 +182,6 @@ Full entries: [docs/changelog/3.11.md](docs/changelog/3.11.md)
 - **The raw procedure duration trend reads one small totals row per database per collection instead of every procedure row, and the duration trend tools pick one data source for a 95 hour window** ([#5706])
 - **The CPU scheduler collector writes one row per collection, and readers combine the split rows already stored** ([#5712])
 - **Long-query trace rows no longer all show query_hash 0 as one query** ([#5721])
-- **The MCP instructions of Darling and Lite now give the default tool count and what the write settings add** ([#5722])
 - **`get_store_host` no longer fails when the store's size reads are slow** ([#5718])
 - **The Darling viewer's query duration, procedure duration and execution-count trends no longer switch to hourly data on a window that starts 95 hours back** ([#5727])
 - **The module_map refresh no longer warns every hour on a quiet fleet** ([#5729])
@@ -219,48 +201,36 @@ Full entries: [docs/changelog/3.11.md](docs/changelog/3.11.md)
 - **Custom view panels accept a server's display name** ([#5704])
 - **get_waiting_tasks shows one row per session and wait type** ([#5704])
 - **Plan analysis no longer reports dop 0 for parallel cached plans** ([#5704])
-- **A panel scoped to a removed server no longer shows another server's rows** ([#5704])
-- **Top procedures by CPU for a past window keeps databases dropped since** ([#5704])
 - **Lite recommendations no longer list dropped databases** ([#5704])
-- **Collector status messages show the UTC time with a colon on every host** ([#5704])
-- **Waiting-task rows show one thread's wait, resource and blocker, and every extra blocker** ([#5704])
 - **Spill columns say they count 8 KB pages, and the spilling-query count counts queries** ([#5704])
 - **Turning off the last enabled trace flag now shows up as a change** ([#5704])
-- **A failed trace-flag read no longer reads as every flag turned off, and an old empty run no longer reads as a flag turned on** ([#5704])
-- **get_query_store_clutter with as_of keeps databases dropped after the window; get_top_procedures_by_cpu shows a database created since the last snapshot** ([#5704])
+- **A failed trace-flag read no longer reads as every flag turned off** ([#5704])
 - **QUERY_HIGH_DOP counts distinct queries, not snapshot rows** ([#5704])
-- **Lite's waiting-tasks rollup picks the same blocker and resource as Darling on ties and NULL waits** ([#5704])
 - **`analyze_server` through MCP no longer tries to write the collection-caveat table, so its permission-denied error is gone** ([#5704])
 - **The managed PostgreSQL store no longer runs out of TimescaleDB background workers at start on hosts with the memory for them** ([#5704])
-- **An as_of call to get_trace_flag_changes or get_top_procedures_by_cpu no longer explains an empty result from the collector's state as of now** ([#5704])
-- **Top procedures now says when it left out databases dropped since, instead of saying nothing was recorded** ([#5704])
-- **get_waiting_tasks in Darling reports the trimmed wait type, as Lite does** ([#5704])
 - **Slack and Teams alerts show alert text as plain text** ([#5726])
-- **upgrade-darling now limits every kept rollback backup to SYSTEM and Administrators, not only the first** ([#5753])
 - **Lite housekeeping no longer holds up the collection loop** ([#5740])
 - **A Warning that worsens to Critical is delivered at once for High CPU, Deadlocks Detected, Poison Wait and Volume Free Space** ([#5715])
 - **Blocking counts one event per wait, not one per blocked-process report** ([#5705])
-- **Blocking alerts no longer fire on DMV waits when the only blocked-process reports are in excluded databases** ([#5705])
 - **CPU samples are no longer stored twice** ([#5705])
 - **FinOps "Top Databases by Avg CPU / Execution" lists the busiest database** ([#5705])
 - **Version Store shows tempdb's current size** ([#5705])
 - **Default Trace events are no longer repeated** ([#5705])
 - **Default Trace events written late are no longer lost** ([#5705])
 - **Memory tab shows the time of the peak grant** ([#5705])
-- **Alert History: Triage and Mute are the first columns** ([#5705])
-- **Deadlock panels and the blocking chart are labelled accurately** ([#5705])
-- **Labels match their values** ([#5705])
-- **A non-integer `hours` (or other count) answers 400 instead of silently using the default** ([#5705])
+- **The web dashboard's deadlock panels and blocking chart are labelled accurately** ([#5705])
+- **Web dashboard labels match their values** ([#5705])
+- **The web dashboard answers 400 to a non-integer `hours` (or other count) instead of silently using the default** ([#5705])
 - **The restart banner no longer lists an unchanged server name as a change** ([#5705])
-- **Job History no longer shows a "Last Success" time later than the run's own time** ([#5705])
-- **Plan Corrections shows one row per recommendation** ([#5705])
+- **The web Job History grid no longer shows a "Last Success" time later than the run's own time** ([#5705])
+- **The web Plan Corrections page shows one row per recommendation** ([#5705])
 - **Web pages no longer show MCP-caller wording, and a normal zero is not "a look"** ([#5705])
-- **Charts break at collection gaps, long text cells show on one line, capped panels say so, and times use one format** ([#5705])
+- **Web dashboard charts break at collection gaps, long text cells show on one line, capped panels say so, and times use one format** ([#5705])
 - **Custom Views count each Default Trace event once** ([#5742])
 - **Lite's size-triggered database reset no longer pauses collection while it compacts the month's archive** ([#5771])
 - **Lite saves webhook URLs of any length Windows allows, and says so when a save fails** ([#5772])
 - **Archive export lock** ([#5790])
-- **MCP tool count** ([#5791])
+- **MCP tool count** ([#5791], [#5722])
 - **System.Security.Cryptography.Pkcs is pinned to the patched 10.0.13** ([#5803])
 - **A release no longer publishes the Linux tarball and container image before the Windows signature checks pass** ([#5805])
 - **Query Store history for one query no longer reads its whole database** ([#5816], [#5807])
@@ -269,35 +239,19 @@ Full entries: [docs/changelog/3.11.md](docs/changelog/3.11.md)
 - **Query Store regressions read the per-interval table instead of re-sorting eight days of raw rows** ([#5826])
 - **Collection log records each scheduled analysis pass, and skipped-slot rows can name it as the cause** ([#5828])
 - **Slow-read rows record the window a read ran with, its default included** ([#5830])
-- **get_investigation_reports records the window it read on its slow-read row** ([#5845])
 - **Custom Views panels grouped by object name no longer sort a whole day of procedure statistics when the module map is current, and raw panels too large for the time limit are refused up front** ([#5832])
 - **Plan regression reads no longer re-read three open days of Query Store intervals, and on-demand calls reuse the candidates for one analysis cadence** ([#5817])
 - **A slow Query Store database no longer holds up collection** ([#5831])
-- **get_investigation_reports says when its window was cut, and the brief's field cut keeps emoji whole** ([#5850])
 - **Retention Held now fires for held retention policies on continuous aggregates** ([#5859])
 - **get_collection_health reads its week of collection history from an hourly rollup** ([#5829])
-- **The pre-push gate no longer reports GATE GREEN when its selected test classes ran nothing** ([#5870])
-- **The test map no longer selects most of both suites for a one-file test, docs or script change** ([#5877])
-- **The nightly test map no longer sends every Darling test file change to 685 classes** ([#5879])
-- **A test host for the MCP write policy no longer follows the process-wide output-format variable** ([#5880])
-- **Lite Settings: Save writes the alert cooldown it just parsed, not the shared setting re-read at write time** ([#5886])
 - **The Query Store compose rollup stops retrying a failing hour every tick** ([#5871])
-- **The rollup floor cache live test no longer fails late in the UTC day** ([#5906])
-- **The web UI smoke check reports a screenshot difference instead of failing on it** ([#5935])
-- **The Darling web UI smoke check passes again** ([#5930])
 - **PR test selection no longer falls back to the full suite when the nightly failed on an unrelated job** ([#5954])
-- **PR CI runs the Guard tests beside the shards instead of before them** ([#5952])
 - **The plan regression drill-down no longer reads two weeks of Query Store rows per server** ([#5957])
 - **The 24-hour Query Store top queries read touches fewer blocks on servers with short intervals** ([#5815], [#5882])
-- **PR CI builds the two test projects in parallel** ([#5955])
 - **Ring-buffer collectors no longer fail forever on a deadlock involving a table or index with `&` in its name** ([#5948])
-- **Query tag assign and unassign now match keys the way the resolver does** ([#6027])
-- **Darling no longer runs the capture-down read for PostgreSQL targets** ([#6042])
+- **Darling no longer checks PostgreSQL targets for missing SQL Server capture sessions** ([#6042])
 - **Module map repair runs once a day, not after every purge pass** ([#6044])
 - **PostgreSQL statement-text due check reads one server's rows through a new index** ([#6043])
-- **The investigation long-poll live test no longer races** ([#6048])
-- **Deploy follow-ups match module names in any case** ([#6009])
-- **The query-tag rule list names each rule's server and filters by server, and the map rebuilds a server that was out of a rule change** ([#5971])
 - **The docs give the right MCP tool counts, and say what a support subscription gets you** ([#6060])
 - **`--backfill-rollups` runs on Linux** ([#6071])
 - **The day-grain Query Store daily rollup fills again** ([#6070])
@@ -307,12 +261,11 @@ Full entries: [docs/changelog/3.11.md](docs/changelog/3.11.md)
 - **Query Store statement-text fetch now has a per-database time budget** ([#6102])
 - **PostgreSQL grids in the Viewer sort size, duration, age, count and percent columns by number** ([#6104])
 - **Excluded databases boxes take one name per line, so a name with a comma is no longer split in two** ([#6118])
-- **An agent's change to a monitored server is journaled as done even when the store fails to record it at first** ([#5632])
 - **Each release now ships the Docker Compose files as their own download, and the Darling README says which file each Linux shape needs** ([#6125])
 - **`get_top_queries_by_cpu` no longer says "no query stats" for a window that stored snapshots** ([#6144])
 - **PostgreSQL MCP reads use the documented status words, say when a server is offline, and name the server** ([#6145])
 - **get_memory_grants and get_resource_semaphore no longer give a time to a zero peak, and say their peaks are sampled** ([#6148])
-- **A PostgreSQL server's Vacuum tab shows several rows in every grid** ([#6142])
+- **In the Darling Viewer, a PostgreSQL server's Vacuum tab shows several rows in every grid** ([#6142])
 - **get_query_store_regressions now reports the true regression count** ([#6141])
 - **analyze_server no longer labels a configuration finding as recurring, and no longer says collection "stopped or broken" after it has resumed** ([#6152])
 - **A PostgreSQL finding's "Open in Active Queries" no longer opens SQL Server tabs** ([#6150])
@@ -321,8 +274,7 @@ Full entries: [docs/changelog/3.11.md](docs/changelog/3.11.md)
 - **A default Linux Docker Compose install needs one command for its secrets** ([#6140])
 - **Web chart axes no longer repeat labels or cut off wide ones, and the System Events CPU chart covers the whole window** ([#6166])
 - **PostgreSQL grids on the web server page keep short values in their cells** ([#6164])
-- **get_forced_plans no longer calls a working force IGNORED when SQL Server recompiles it under a new plan id, and it names a plan guide that covers a forced query** ([#6160])
-- **Alert History and Job History read every row on one clock when they list several servers** ([#6161])
+- **In the Darling Viewer and Lite, Alert History and Job History read every row on one clock when they list several servers** ([#6161])
 - **Query Store reads no longer say Query Store may be OFF before its first interval closes** ([#6187])
 - **A long install path now explains itself instead of failing every SQL Server connection with "The type initializer for 'TdsParser' threw an exception"** ([#6192])
 - **PostgreSQL monitoring connections pin search_path at sign-in** ([#6165])
@@ -341,37 +293,29 @@ Full entries: [docs/changelog/3.11.md](docs/changelog/3.11.md)
 - **A row with an empty cell no longer costs every server its first delta after a restart** ([#6212])
 - **PostgreSQL collectors now work on older PostgreSQL targets** ([#6206])
 - **PostgreSQL target connections run no type-loading query of their own first** ([#6143])
-- **kill_session on PostgreSQL refuses a connection that lacks the pinned search_path** ([#6143])
-- **A healthy Darling install no longer writes four event-log warnings an hour** ([#6219])
+- **Scheduled reports no longer log as alerts, and a failing channel no longer logs a warning every hour** ([#6219])
 - **The diagnostics bundle now finds a managed store that is starting or listening on another port, and says why when it cannot reach it** ([#6217])
 - **The web deadlock graph's process pane wraps its SQL handle note and property lines** ([#6228])
 - **A quiet server's top-queries reads say "nothing ran" instead of "unavailable"** ([#6232])
 - **The PostgreSQL Activity grids show their values when a statement or log message has many lines, and the OS CPU grid shows rounded numbers** ([#6229])
-- **The forced-plans collector no longer reads plan XML on the monitored server** ([#6221])
 - **Custom Views: a created, edited or deleted view reaches the sidebar and the list at once** ([#6243])
 - **Darling Viewer: the Fleet Overview heading is no longer covered by its filter controls, and Help > About names the build** ([#6249])
 - **A command nobody picks up within 15 minutes now expires instead of running later** ([#6251])
 - **The hourly store-size row no longer walks every database file** ([#6250])
-- **The forced-plans collector no longer takes 15 to 60 s per server on a primary** ([#6221])
 - **Plan correction and Query Store health skip a readable secondary replica** ([#6252])
-- **MCP route edits keep what a route matches and covers when it has its own destinations; quiet windows are limited; write logs name the token** ([#6241])
 - **A failed webhook's stored error now shows the HTTP status only** ([#6241])
-- **MCP dismiss, restore and quiet window fixes** ([#6241])
 - **Diagnostics bundle no longer rewrites known names inside ordinary words** ([#6258])
 - **A fleet Query Store panel reads the interval table for the servers that can use it, and raw only for the rest** ([#6115])
-- **Agent dispatch docs, starter instructions and log lines match what ships, and a setup that cannot serve an agent is warned about** ([#6273])
 - **A fresh install no longer logs a console error on Alert History, FinOps and Job History** ([#6280])
 - **A change to a server's remediation login in darling.json now reaches a server that already exists** ([#6262])
-- **A plan undo that changed the server is always journaled, and an agent change checks the agent switch again before it writes** ([#6271])
-- **An agent's force, unforce, evict or kill re-checks Level 3 and the server's own switch when it writes** ([#6271])
-- **Two agent mute or threshold changes at once no longer fail, and turning agent changes off waits for a change in progress** ([#6271])
-- **A person's plan undo and a plan force with a lost reply no longer drop their records** ([#6271])
-- **MCP can no longer turn off or delete an Off agent route, repoint a server a route is scoped to, or register a second database on a machine such a route is scoped to** ([#6282])
-- **MCP tag tools no longer change which servers an agent route covers** ([#6281])
 - **The Overview Blocking & Deadlocking lane now shows a lone deadlock or blocking event as a visible bar, and hovering it reads 1** ([#6287])
-- **Changing a server's agent action switch from the web needs a signed-in admin** ([#6275])
 - **"Sign in again" after a web dashboard session expiry now takes you to the sign-in** ([#6278])
 - **A triage link clicked in Teams, mail or another site now opens signed in** ([#6286])
+- **CPU scheduler collector counts offline CPUs and NUMA nodes correctly** ([#5657])
+- **Azure error 40615 names the firewall and your client IP** ([#5658], [#5674])
+- **A plain message when Windows is too old to start Darling and Lite** ([#5664])
+- **A web page you leave mid-read no longer logs a failure** ([#5679])
+- **Blocking snapshots no longer merge two separate waits of one pair** ([#5766])
 
 ## [3.10.0] - 2026-10-09
 
@@ -4163,56 +4107,6 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#1871]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1871
 [#1872]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1872
 
-[#1877]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1877
-[#1879]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1879
-[#1854]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1854
-[#1865]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1865
-[#1875]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1875
-[#1876]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1876
-[#1874]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1874
-[#1888]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1888
-[#1899]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1899
-[#1889]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1889
-[#1893]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1893
-[#1845]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1845
-[#1853]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1853
-[#1873]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1873
-[#1896]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1896
-[#1898]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1898
-[#1913]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1913
-[#1914]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1914
-[#1902]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1902
-[#1907]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1907
-[#1912]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1912
-[#1905]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1905
-[#1906]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1906
-[#1824]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1824
-[#1826]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1826
-[#1834]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1834
-[#1840]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1840
-[#1842]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1842
-[#1891]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1891
-[#1892]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1892
-[#1915]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1915
-[#1925]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1925
-[#1895]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1895
-[#1911]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1911
-[#1829]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1829
-[#1922]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1922
-[#1886]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1886
-[#1934]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1934
-[#1943]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1943
-[#1937]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1937
-[#1939]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1939
-[#1945]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1945
-[#1959]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1959
-[#1953]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1953
-[#1942]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1942
-[#1957]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1957
-[#1958]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1958
-[#1962]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1962
-[#1963]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1963
-[#1965]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1965
 [#110]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/110
 [#111]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/111
 [#138]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/138
@@ -4220,57 +4114,115 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#149]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/149
 [#346]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/346
 [#372]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/372
+[#1074]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1074
+[#1562]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1562
+[#1563]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1563
+[#1568]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1568
+[#1606]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1606
 [#1663]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1663
 [#1673]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1673
 [#1685]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1685
+[#1687]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1687
+[#1696]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1696
 [#1721]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1721
+[#1743]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1743
 [#1754]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1754
 [#1755]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1755
-[#1940]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1940
+[#1804]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1804
+[#1822]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1822
+[#1824]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1824
+[#1826]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1826
+[#1829]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1829
+[#1834]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1834
+[#1840]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1840
+[#1842]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1842
+[#1845]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1845
+[#1853]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1853
+[#1854]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1854
+[#1865]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1865
+[#1873]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1873
+[#1874]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1874
+[#1875]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1875
+[#1876]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1876
+[#1877]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1877
+[#1879]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1879
+[#1886]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1886
+[#1888]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1888
+[#1889]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1889
+[#1891]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1891
+[#1892]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1892
+[#1893]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1893
+[#1895]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1895
+[#1896]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1896
+[#1898]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1898
+[#1899]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1899
+[#1902]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1902
+[#1905]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1905
+[#1906]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1906
+[#1907]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1907
+[#1911]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1911
+[#1912]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1912
+[#1913]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1913
+[#1914]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1914
+[#1915]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1915
 [#1921]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1921
+[#1922]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1922
 [#1923]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1923
+[#1925]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1925
+[#1934]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1934
+[#1937]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1937
+[#1939]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1939
+[#1940]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1940
+[#1942]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1942
+[#1943]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1943
+[#1944]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1944
+[#1945]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1945
+[#1949]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1949
+[#1951]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1951
+[#1952]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1952
+[#1953]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1953
 [#1954]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1954
+[#1955]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1955
+[#1957]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1957
+[#1958]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1958
+[#1959]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1959
+[#1960]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1960
+[#1962]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1962
+[#1963]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1963
+[#1965]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1965
+[#1966]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1966
 [#1970]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1970
 [#1972]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1972
 [#1973]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1973
-[#1955]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1955
 [#1980]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1980
-[#1949]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1949
-[#1952]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1952
-[#1951]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1951
-[#1960]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1960
-[#1822]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1822
-[#1990]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1990
-[#1988]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1988
+[#1981]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1981
 [#1984]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1984
-[#1743]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1743
-[#1606]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1606
+[#1986]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1986
+[#1988]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1988
+[#1990]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1990
+[#1995]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1995
 [#1996]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1996
 [#2000]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2000
-[#1074]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1074
-[#1966]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1966
-[#1995]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/1995
+[#2005]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2005
 [#2007]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2007
 [#2008]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2008
+[#2011]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/2011
+[#2012]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2012
+[#2018]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2018
 [#2020]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2020
+[#2022]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2022
+[#2026]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2026
 [#2027]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2027
 [#2028]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2028
 [#2029]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2029
-[#2005]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2005
-[#1804]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1804
 [#2030]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2030
 [#2031]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2031
 [#2033]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2033
 [#2038]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2038
-[#2011]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/2011
-[#1986]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1986
-[#2012]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2012
-[#1568]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1568
-[#1981]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1981
-[#2022]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2022
 [#2054]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2054
 [#2058]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2058
 [#2060]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2060
+[#2061]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2061
 [#2063]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2063
 [#2064]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2064
 [#2068]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2068
@@ -4283,9 +4235,9 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#2093]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2093
 [#2097]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2097
 [#2101]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2101
+[#2102]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2102
 [#2105]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2105
 [#2107]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2107
-[#2102]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2102
 [#2108]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2108
 [#2109]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2109
 [#2111]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2111
@@ -4297,260 +4249,143 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#2129]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2129
 [#2133]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2133
 [#2136]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2136
+[#2138]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2138
 [#2143]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2143
 [#2148]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2148
+[#2150]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2150
 [#2154]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2154
 [#2157]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2157
+[#2158]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2158
+[#2159]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2159
 [#2164]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2164
-[#2210]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2210
-[#2188]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2188
-[#2191]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2191
-[#2171]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2171
-[#2170]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2170
-[#2169]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2169
+[#2165]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2165
 [#2166]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2166
 [#2167]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2167
+[#2169]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2169
+[#2170]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2170
+[#2171]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2171
+[#2181]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2181
+[#2184]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2184
+[#2185]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2185
+[#2186]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2186
+[#2187]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2187
+[#2188]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2188
+[#2189]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2189
+[#2190]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2190
+[#2191]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2191
+[#2195]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2195
+[#2197]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2197
+[#2201]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2201
+[#2203]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2203
+[#2205]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2205
+[#2210]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2210
 [#2213]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/2213
 [#2216]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2216
-[#2138]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2138
-[#2190]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2190
-[#2186]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2186
-[#2185]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2185
-[#2258]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2258
+[#2218]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2218
 [#2219]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2219
-[#2280]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2280
-[#2277]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2277
-[#2279]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2279
-[#2273]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2273
 [#2220]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2220
 [#2228]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2228
-[#2218]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2218
+[#2233]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2233
+[#2234]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2234
 [#2235]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2235
-[#2165]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2165
-[#2255]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2255
-[#2159]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2159
-[#2197]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2197
-[#2203]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2203
-[#2187]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2187
-[#2189]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2189
-[#2184]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2184
-[#2254]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2254
-[#2252]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2252
-[#2256]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2256
-[#2158]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2158
 [#2246]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2246
+[#2252]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2252
+[#2254]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2254
+[#2255]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2255
+[#2256]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2256
+[#2258]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2258
+[#2266]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2266
+[#2273]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2273
+[#2277]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2277
+[#2279]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2279
+[#2280]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2280
+[#2284]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2284
+[#2293]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2293
+[#2294]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2294
+[#2296]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2296
+[#2298]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2298
+[#2299]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2299
+[#2300]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2300
+[#2302]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2302
+[#2306]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2306
+[#2312]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2312
+[#2316]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2316
+[#2317]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2317
 [#2319]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2319
+[#2320]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2320
+[#2324]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2324
+[#2331]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2331
+[#2339]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2339
 [#2340]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2340
 [#2344]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2344
+[#2347]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2347
+[#2348]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2348
 [#2349]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2349
+[#2350]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2350
+[#2352]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2352
+[#2353]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2353
 [#2357]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2357
+[#2359]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2359
 [#2361]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2361
 [#2362]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2362
 [#2364]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2364
-[#2347]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2347
-[#2359]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2359
-[#2348]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2348
-[#2350]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2350
-[#2353]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2353
-[#2352]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2352
-[#2331]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2331
-[#2181]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2181
-[#2317]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2317
-[#2320]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2320
-[#2339]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2339
-[#2316]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2316
-[#2324]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2324
-[#2300]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2300
-[#2312]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2312
-[#2306]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2306
-[#2302]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2302
-[#2501]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2501
-[#2499]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2499
+[#2422]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2422
+[#2437]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2437
+[#2446]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2446
+[#2459]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/2459
+[#2460]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2460
+[#2465]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2465
+[#2473]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2473
+[#2475]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2475
+[#2480]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2480
+[#2481]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2481
+[#2484]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2484
+[#2485]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2485
+[#2489]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2489
+[#2490]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2490
 [#2495]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2495
+[#2499]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2499
+[#2501]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2501
 [#2506]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2506
+[#2508]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2508
 [#2511]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2511
 [#2512]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2512
 [#2515]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2515
-[#2520]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2520
-[#2525]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2525
-[#2530]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2530
-[#2539]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2539
-[#2540]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2540
-[#2508]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2508
-[#2541]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2541
-[#2542]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2542
-[#2532]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2532
 [#2518]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2518
+[#2520]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2520
+[#2524]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2524
+[#2525]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2525
+[#2529]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2529
+[#2530]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2530
+[#2532]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2532
 [#2533]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2533
 [#2535]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2535
-[#2480]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2480
-[#2489]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2489
-[#2481]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2481
-[#2437]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2437
-[#1563]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1563
-[#2475]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2475
-[#2422]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2422
-[#2460]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2460
-[#2459]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/2459
-[#2446]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2446
-[#2296]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2296
-[#2299]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2299
-[#2294]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2294
-[#2298]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2298
-[#2293]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2293
-[#2233]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2233
-[#2234]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2234
-[#2150]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2150
-[#2484]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2484
-[#2485]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2485
-[#2524]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2524
-[#2201]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2201
-[#2205]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2205
-[#2195]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2195
-[#2548]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2548
-[#2554]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2554
-[#2546]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2546
-[#2552]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2552
-[#2529]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2529
-[#2569]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2569
-[#2572]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2572
-[#2574]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2574
-[#2579]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2579
-[#2559]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2559
-[#2562]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2562
-[#2550]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2550
-[#2578]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2578
-[#2564]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2564
-[#2653]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2653
-[#2655]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2655
-[#2658]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2658
-[#2659]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2659
-[#2661]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2661
-[#2663]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2663
-[#2665]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2665
-[#2671]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2671
-[#2674]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2674
-[#2675]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2675
-[#2677]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2677
-[#2680]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2680
-[#2681]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2681
-[#2683]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2683
-[#2685]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2685
-[#2690]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2690
-[#2673]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2673
-[#2687]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2687
-[#2688]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2688
-[#2691]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2691
-[#2695]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2695
-[#2692]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2692
-[#2693]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2693
-[#2694]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2694
-[#2699]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2699
-[#2715]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2715
-[#2710]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2710
-[#2711]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2711
-[#2719]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2719
-[#2733]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2733
-[#2735]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2735
-[#2736]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2736
-[#2732]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2732
-[#2737]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2737
-[#2734]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2734
-[#2759]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2759
-[#2749]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2749
-[#2764]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2764
-[#2766]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2766
-[#2785]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2785
-[#2791]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2791
-[#2795]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2795
-[#2794]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2794
-[#2473]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2473
-[#2792]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2792
-[#1562]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1562
-[#2800]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2800
-[#2801]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2801
-[#2803]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2803
-[#2804]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2804
-[#2779]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2779
-[#2784]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2784
-[#2786]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2786
-[#2284]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2284
-[#2776]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2776
-[#2772]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2772
-[#2773]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2773
-[#2748]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2748
-[#2771]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2771
-[#2761]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2761
-[#2465]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2465
-[#2770]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/2770
-[#2768]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2768
-[#2780]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2780
-[#2781]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2781
-[#2757]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2757
-[#2755]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2755
-[#2753]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2753
-[#1687]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1687
-[#2811]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2811
-[#2816]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2816
-[#2796]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2796
-[#2809]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2809
-[#2810]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2810
-[#2813]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2813
-[#2819]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2819
-[#2822]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2822
-[#2823]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2823
-[#2826]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2826
-[#2827]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2827
-[#2839]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2839
-[#2840]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2840
-[#2846]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2846
-[#2841]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2841
-[#2845]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2845
-[#2851]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2851
-[#2854]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2854
-[#2859]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2859
-[#2855]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2855
-[#2860]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2860
-[#2871]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2871
-[#2828]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2828
-[#2837]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2837
-[#2870]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2870
-[#2884]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2884
-[#2864]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2864
-[#2874]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2874
-[#2876]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2876
-[#2797]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2797
-[#2490]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2490
-[#2898]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2898
-[#2890]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/2890
-[#2936]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2936
-[#2935]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/2935
-[#2882]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2882
-[#2888]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2888
-[#2917]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2917
-[#2918]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2918
-[#2907]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2907
-[#2924]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2924
-[#2910]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/2910
-[#2896]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2896
-[#2901]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/2901
-[#2902]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2902
-[#2894]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2894
-[#1696]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1696
-[#1944]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/1944
-[#2018]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2018
-[#2026]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2026
-[#2061]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2061
-[#2266]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2266
 [#2538]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2538
+[#2539]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2539
+[#2540]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2540
+[#2541]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2541
+[#2542]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2542
 [#2543]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2543
 [#2544]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2544
 [#2545]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2545
+[#2546]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2546
 [#2547]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2547
+[#2548]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2548
+[#2550]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2550
+[#2552]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2552
+[#2554]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2554
+[#2559]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2559
 [#2561]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2561
+[#2562]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2562
+[#2564]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2564
 [#2565]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2565
 [#2566]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2566
 [#2567]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2567
+[#2569]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2569
+[#2572]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2572
+[#2574]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2574
+[#2578]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2578
+[#2579]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2579
 [#2593]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2593
 [#2595]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2595
 [#2599]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2599
@@ -4570,26 +4405,136 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#2643]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2643
 [#2645]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2645
 [#2651]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2651
+[#2653]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2653
+[#2655]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2655
+[#2658]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2658
+[#2659]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2659
+[#2661]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2661
+[#2663]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2663
+[#2665]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2665
+[#2671]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2671
+[#2673]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2673
+[#2674]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2674
+[#2675]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2675
+[#2677]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2677
+[#2680]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2680
+[#2681]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2681
+[#2683]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2683
+[#2685]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2685
 [#2686]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2686
+[#2687]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2687
+[#2688]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2688
 [#2689]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2689
+[#2690]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2690
+[#2691]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2691
+[#2692]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2692
+[#2693]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2693
+[#2694]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2694
+[#2695]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2695
+[#2699]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2699
+[#2710]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2710
+[#2711]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2711
+[#2715]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2715
+[#2719]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2719
+[#2732]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2732
+[#2733]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2733
+[#2734]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2734
+[#2735]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2735
+[#2736]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2736
+[#2737]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2737
+[#2748]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2748
+[#2749]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2749
+[#2753]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2753
+[#2755]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2755
+[#2757]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2757
+[#2759]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2759
 [#2760]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2760
+[#2761]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2761
+[#2764]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2764
+[#2766]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2766
+[#2768]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2768
+[#2770]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/2770
+[#2771]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2771
+[#2772]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2772
+[#2773]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2773
+[#2776]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2776
+[#2779]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2779
+[#2780]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2780
+[#2781]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2781
+[#2784]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2784
+[#2785]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2785
+[#2786]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2786
+[#2791]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2791
+[#2792]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2792
+[#2794]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2794
+[#2795]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2795
+[#2796]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2796
+[#2797]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2797
+[#2800]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2800
+[#2801]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2801
+[#2803]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2803
+[#2804]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2804
+[#2809]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2809
+[#2810]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2810
+[#2811]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2811
+[#2813]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2813
+[#2816]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2816
+[#2819]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2819
+[#2822]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2822
+[#2823]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2823
+[#2826]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2826
+[#2827]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2827
+[#2828]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2828
+[#2837]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2837
+[#2839]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2839
+[#2840]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2840
+[#2841]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2841
+[#2845]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2845
+[#2846]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2846
 [#2847]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2847
+[#2851]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2851
+[#2854]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2854
+[#2855]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2855
+[#2859]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2859
+[#2860]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2860
+[#2864]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2864
+[#2870]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2870
+[#2871]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2871
+[#2874]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2874
+[#2876]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2876
+[#2880]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2880
+[#2882]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2882
+[#2884]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2884
+[#2888]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2888
+[#2890]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/2890
+[#2894]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2894
+[#2896]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2896
+[#2898]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2898
+[#2901]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/2901
+[#2902]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2902
+[#2907]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2907
+[#2910]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/2910
 [#2913]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2913
-[#2928]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2928
-[#2932]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2932
-[#2923]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2923
+[#2917]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2917
+[#2918]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2918
 [#2920]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/2920
+[#2923]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2923
+[#2924]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2924
 [#2926]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2926
-[#2951]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2951
-[#2952]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2952
-[#2931]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/2931
 [#2927]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/2927
+[#2928]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2928
 [#2929]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/2929
+[#2931]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/2931
+[#2932]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2932
 [#2933]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2933
+[#2935]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/2935
+[#2936]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2936
 [#2937]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2937
 [#2938]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/2938
 [#2940]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/2940
 [#2942]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2942
+[#2951]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2951
+[#2952]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2952
 [#2953]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2953
 [#2960]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/2960
 [#2964]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/2964
@@ -4597,7 +4542,6 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#2967]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/2967
 [#2972]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/2972
 [#2973]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/2973
-[#2880]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2880
 [#2997]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/2997
 [#3008]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3008
 [#3009]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3009
@@ -4655,6 +4599,7 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#3107]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3107
 [#3109]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3109
 [#3111]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3111
+[#3112]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3112
 [#3116]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3116
 [#3118]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3118
 [#3119]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3119
@@ -4669,7 +4614,6 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#3143]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3143
 [#3144]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3144
 [#3145]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3145
-[#3112]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3112
 [#3153]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3153
 [#3154]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3154
 [#3156]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3156
@@ -4726,26 +4670,27 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#3262]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3262
 [#3267]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3267
 [#3271]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3271
-[#3288]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3288
-[#3281]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3281
 [#3278]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3278
-[#3285]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3285
-[#3307]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3307
-[#3302]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3302
-[#3316]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3316
-[#3315]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3315
-[#3313]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3313
+[#3281]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3281
 [#3282]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3282
-[#3314]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3314
-[#3330]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3330
-[#3297]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3297
-[#3348]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3348
-[#3343]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3343
-[#3306]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3306
-[#3355]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3355
-[#3354]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3354
+[#3285]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3285
 [#3287]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3287
+[#3288]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3288
+[#3297]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3297
+[#3302]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3302
+[#3306]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3306
+[#3307]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3307
+[#3313]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3313
+[#3314]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3314
+[#3315]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3315
+[#3316]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3316
+[#3330]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3330
+[#3343]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3343
+[#3348]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3348
+[#3354]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3354
+[#3355]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3355
 [#3368]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3368
+[#3446]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3446
 [#3464]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3464
 [#3466]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3466
 [#3467]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3467
@@ -4757,19 +4702,18 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#3484]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3484
 [#3485]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3485
 [#3487]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3487
-[#3446]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3446
 [#3493]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3493
 [#3496]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3496
 [#3499]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3499
-[#3906]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3906
-[#3908]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3908
-[#3909]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3909
-[#3918]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3918
-[#3919]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3919
 [#3886]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3886
 [#3889]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3889
 [#3900]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3900
+[#3906]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3906
+[#3908]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3908
+[#3909]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3909
 [#3911]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3911
+[#3918]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3918
+[#3919]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3919
 [#3920]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3920
 [#3927]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3927
 [#3931]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3931
@@ -5008,6 +4952,7 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#4422]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4422
 [#4423]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4423
 [#4424]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4424
+[#4426]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4426
 [#4429]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4429
 [#4430]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4430
 [#4431]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4431
@@ -5017,7 +4962,6 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#4435]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4435
 [#4436]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4436
 [#4437]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4437
-[#4426]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4426
 [#4439]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4439
 [#4444]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4444
 [#4447]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4447
@@ -5162,6 +5106,7 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#4805]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4805
 [#4806]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4806
 [#4808]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4808
+[#4809]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4809
 [#4810]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4810
 [#4811]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4811
 [#4813]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4813
@@ -5198,7 +5143,6 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#4861]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4861
 [#4863]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4863
 [#4867]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4867
-[#4809]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4809
 [#4870]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4870
 [#4871]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4871
 [#4872]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4872
@@ -5316,8 +5260,8 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#5045]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5045
 [#5047]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5047
 [#5049]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5049
-[#5052]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5052
 [#5051]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5051
+[#5052]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5052
 [#5055]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5055
 [#5056]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5056
 [#5057]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5057
@@ -5513,6 +5457,7 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#5500]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5500
 [#5501]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5501
 [#5502]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5502
+[#5506]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5506
 [#5511]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5511
 [#5524]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5524
 [#5527]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5527
@@ -5534,8 +5479,8 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#5556]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5556
 [#5564]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5564
 [#5566]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5566
-[#5572]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5572
 [#5570]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5570
+[#5572]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5572
 [#5573]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5573
 [#5577]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5577
 [#5579]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5579
@@ -5552,28 +5497,24 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#5610]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5610
 [#5626]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5626
 [#5627]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5627
-[#5636]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5636
-[#5637]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5637
 [#5628]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5628
-[#5663]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5663
-[#5668]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5668
-[#5665]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5665
-[#5659]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5659
-[#5682]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5682
-[#5820]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/5820
-[#5907]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5907
-[#5908]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5908
-[#5919]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5919
-[#5920]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5920
-[#5921]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5921
-[#5922]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5922
-[#5925]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5925
-[#5926]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5926
-[#5506]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5506
 [#5631]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5631
 [#5632]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5632
+[#5636]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5636
+[#5637]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5637
 [#5641]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5641
 [#5643]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5643
+[#5657]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5657
+[#5658]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5658
+[#5659]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5659
+[#5663]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5663
+[#5664]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5664
+[#5665]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5665
+[#5668]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5668
+[#5674]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5674
+[#5679]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5679
+[#5680]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5680
+[#5682]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5682
 [#5687]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5687
 [#5688]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5688
 [#5690]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5690
@@ -5606,6 +5547,7 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#5748]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5748
 [#5753]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5753
 [#5764]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5764
+[#5766]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5766
 [#5769]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5769
 [#5771]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5771
 [#5772]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5772
@@ -5627,6 +5569,7 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#5816]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5816
 [#5817]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5817
 [#5818]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5818
+[#5820]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/5820
 [#5826]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5826
 [#5827]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5827
 [#5828]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5828
@@ -5665,6 +5608,14 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#5901]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5901
 [#5902]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5902
 [#5906]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5906
+[#5907]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5907
+[#5908]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5908
+[#5919]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5919
+[#5920]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5920
+[#5921]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5921
+[#5922]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5922
+[#5925]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5925
+[#5926]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5926
 [#5930]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5930
 [#5933]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5933
 [#5934]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5934
