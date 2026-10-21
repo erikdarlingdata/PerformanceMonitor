@@ -960,6 +960,14 @@ LIMIT 1";
         var name = c.DisplayName is null ? row.Name : (c.DisplayName.Length == 0 ? host : c.DisplayName);
 
         var isPostgres = !string.Equals(row.Engine, EngineSqlServer, StringComparison.OrdinalIgnoreCase);
+        /* #6352: a CHANGED host is held to the add rule (no named-pipe, admin or path-style host). A host sent
+           unchanged is not, so a row saved before the rule can still be edited in its other fields. */
+        if (!isPostgres && c.Host is not null && !string.Equals(c.Host, row.Host, StringComparison.Ordinal)
+            && ServerHostSetting.Refusal(c.Host) is { } hostRefusal)
+        {
+            return (null, hostRefusal);
+        }
+
         if (isPostgres && !string.Equals(auth, ServerStoreAuth.Sql, StringComparison.OrdinalIgnoreCase))
         {
             return (null, "a PostgreSQL target requires auth \"SQL\" with a username and password " +

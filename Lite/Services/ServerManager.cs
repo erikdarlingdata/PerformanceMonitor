@@ -287,10 +287,27 @@ public class ServerManager
     }
 
     /// <summary>
+    /// #6352: null when <paramref name="newHost"/> may be saved, otherwise the sentence to refuse with. A host that
+    /// SqlClient would read as a named pipe or an admin connection is refused for a NEW server
+    /// (<paramref name="existingHost"/> null) and for an edit that CHANGES the host; an edit that keeps the host it has
+    /// is not held to it, so a server saved before the rule stays editable and collected. Lite's add and edit dialogs
+    /// call this for the same answer <see cref="AddServer"/> and <see cref="UpdateServer(ServerConnection, string?, string?)"/> give.
+    /// </summary>
+    public static string? HostRefusal(string? newHost, string? existingHost) =>
+        existingHost is not null && string.Equals(newHost?.Trim(), existingHost.Trim(), StringComparison.Ordinal)
+            ? null
+            : ServerHostSetting.Refusal(newHost);
+
+    /// <summary>
     /// Adds a new server to the list.
     /// </summary>
     public void AddServer(ServerConnection server, string? username = null, string? password = null)
     {
+        if (HostRefusal(server.ServerName, null) is { } hostRefusal)
+        {
+            throw new InvalidOperationException(hostRefusal);
+        }
+
         lock (_serversLock)
         {
             if (_servers.Any(s => s.Id == server.Id))
@@ -356,6 +373,12 @@ public class ServerManager
             if (existing == null)
             {
                 throw new InvalidOperationException($"Server with ID {server.Id} not found");
+            }
+
+            /* #6352: a changed host is held to the add rule; an unchanged one is not (existing rows keep working). */
+            if (HostRefusal(server.ServerName, existing.ServerName) is { } hostRefusal)
+            {
+                throw new InvalidOperationException(hostRefusal);
             }
 
             /* #4789: an edit that changes the derived id (the name, database or read-only intent) is refused when
@@ -892,6 +915,15 @@ public class ServerManager
                    intent), in any letter case. The database is part of the identity. Several monitored
                    databases on one Azure SQL Database server share an address, and each of them is its own
                    server, so comparing the address alone dropped every sibling after the first. */
+                /* #6352: an imported entry is a new registration here, so a host SqlClient would read as a named pipe or
+                   an admin connection is not imported. It counts as skipped, and the log says which. */
+                if (HostRefusal(server.ServerName, null) is { } hostRefusal)
+                {
+                    skipped++;
+                    _logger?.LogWarning("Import Settings did not import server '{DisplayName}': {Refusal}", NameForMessage(server), hostRefusal);
+                    continue;
+                }
+
                 var existing = _servers.FirstOrDefault(s => IsSameServerIgnoringCase(s, server));
 
                 if (existing != null)

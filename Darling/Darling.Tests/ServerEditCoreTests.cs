@@ -806,4 +806,33 @@ public sealed class ServerEditCoreTests : IDisposable
         Assert.Equal("This server has a remediation or hypothetical-index login stored. Change how it is reached on the service host, in the configuration file or with --add-server.", answer["message"]!.GetValue<string>());
         Assert.Equal(Edit.EditRemediationKeptText, answer["message"]!.GetValue<string>());
     }
+
+    /* #6352: a changed host is never a named pipe, an admin connection or a path; an unchanged one stays editable. */
+    [Theory]
+    [InlineData("np:beta-01.example.test")]
+    [InlineData("admin:beta-01.example.test")]
+    [InlineData("\\\\beta-01.example.test\\pipe\\sql\\query")]
+    [InlineData("//beta-01.example.test/pipe/sql/query")]
+    public async Task AnEditThatMovesTheHostToAPipeOrAdminOrPath_IsRefusedBeforeTheProbe_AndNothingIsWritten(string host)
+    {
+        var store = new FakeStore { Row = SqlRow() };
+        var changes = new JsonObject { ["host"] = host, ["password"] = Secret }.ToJsonString();
+
+        var answer = JsonNode.Parse(await Run(store, changes))!;
+
+        Assert.Equal("invalid", answer["status"]!.GetValue<string>());
+        Assert.Contains("is not accepted", answer["message"]!.GetValue<string>(), StringComparison.Ordinal);
+        Assert.Equal(0, store.Writes);
+    }
+
+    [Fact]
+    public async Task ARowSavedWithAPipeHostBeforeTheRule_StaysEditableWhileItsHostIsLeftAlone()
+    {
+        var store = new FakeStore { Row = SqlRow(host: "np:legacy-01.example.test") };
+
+        var answer = JsonNode.Parse(await Run(store, "{\"host\":\"np:legacy-01.example.test\",\"display_name\":\"renamed\"}"))!;
+
+        Assert.Equal("updated", answer["status"]!.GetValue<string>());
+        Assert.Equal(1, store.Writes);
+    }
 }

@@ -223,6 +223,54 @@ public sealed class ServerEditPasswordRuleViewerTests
         Assert.Equal((StoredHost, StoredBlob, "Mandatory"), await StoredAsync(rig, ct));
     }
 
+    /// <summary>#6352: the Viewer's edit write refuses a host that SqlClient would read as a named pipe or an admin
+    /// connection, even with a newly entered password, and writes nothing.</summary>
+    [Theory]
+    [InlineData("np:edit-rule-moved.example.test")]
+    [InlineData("admin:edit-rule-moved.example.test")]
+    [InlineData("\\\\edit-rule-moved.example.test\\pipe\\sql\\query")]
+    public async Task AHostChangeToAPipeOrAdminOrPath_IsRefused_EvenWithANewPassword_AndNothingIsWritten(string host)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync("sql", StoredBlob, ct);
+        await using var viewer = new ViewerDataService(rig.Scratch.ConnectionString);
+
+        var refused = await Assert.ThrowsAsync<MonitoredServerHostRefusedException>(
+            () => viewer.UpsertMonitoredServerAsync(Row("sql", host, NewBlob), ct));
+        Assert.Contains("is not accepted", refused.Message, StringComparison.Ordinal);
+
+        Assert.Equal((StoredHost, StoredBlob, "Mandatory"), await StoredAsync(rig, ct));
+    }
+
+    [Fact]
+    public async Task ARowSavedWithAPipeHost_StaysEditableWhileItsHostIsLeftAlone()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync("sql", StoredBlob, ct);
+        await using (var legacy = rig.Owner.CreateCommand("UPDATE config_monitored_servers SET host = 'np:legacy.example.test' WHERE server_id = $1"))
+        {
+            legacy.Parameters.AddWithValue(ServerId);
+            await legacy.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var viewer = new ViewerDataService(rig.Scratch.ConnectionString);
+        var renamed = Row("sql", "np:legacy.example.test", StoredBlob);
+        renamed.Name = "renamed";
+        await viewer.UpsertMonitoredServerAsync(renamed, ct);
+
+        Assert.Equal(("np:legacy.example.test", StoredBlob, "Mandatory"), await StoredAsync(rig, ct));
+    }
+
+    [Fact]
+    public void TheViewerDialogsRule_AcceptsAnUnchangedHost_AndRefusesANewOrChangedOne()
+    {
+        Assert.Null(ViewerDataService.HostRefusal(new MonitoredServerRow { Host = "np:legacy" }, "np:legacy"));
+        Assert.NotNull(ViewerDataService.HostRefusal(new MonitoredServerRow { Host = "np:legacy" }, null));
+        Assert.NotNull(ViewerDataService.HostRefusal(new MonitoredServerRow { Host = "np:legacy" }, "plain"));
+        Assert.Null(ViewerDataService.HostRefusal(new MonitoredServerRow { Host = "plain" }, null));
+        Assert.Null(ViewerDataService.HostRefusal(new MonitoredServerRow { Host = "/var/run/postgresql", Engine = MonitoredServerRow.EnginePostgres }, null));
+    }
+
     [Fact]
     public async Task AHostChange_WithANewlyEnteredPassword_Saves()
     {

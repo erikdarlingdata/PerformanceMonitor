@@ -539,11 +539,23 @@ public partial class AddServerDialog : Window
             ambientFailure,
             string.IsNullOrEmpty(App.DataDirectory) ? null : System.IO.Path.Combine(App.DataDirectory, "logs"));
 
+    /// <summary>#6352: the refusal for the host in the box, or null. A server being edited keeps the host it was saved
+    /// with, so only a NEW or CHANGED host is held to the rule (see <see cref="ServerManager.HostRefusal"/>).</summary>
+    private string? HostBoxRefusal() =>
+        ServerManager.HostRefusal(ServerNameBox.Text, Title == "Edit SQL Server" ? AddedServer?.ServerName : null);
+
     private async void TestButton_Click(object sender, RoutedEventArgs e)
     {
         if (string.IsNullOrEmpty(ServerNameBox.Text.Trim()))
         {
             StatusText.Text = "Enter a server name first.";
+            return;
+        }
+
+        /* #6352: Test connects with the typed host, so a named-pipe or admin host is refused here too. */
+        if (HostBoxRefusal() is { } testHostRefusal)
+        {
+            StatusText.Text = testHostRefusal;
             return;
         }
 
@@ -594,6 +606,14 @@ public partial class AddServerDialog : Window
         if (string.IsNullOrEmpty(serverName))
         {
             StatusText.Text = "Server name is required.";
+            return;
+        }
+
+        /* #6352: refused before any connect or save: a host that SqlClient would read as a named pipe or an admin
+           connection (np:, lpc:, admin:, \host\pipe, //host). An edit that leaves the host as it was is not held to it. */
+        if (HostBoxRefusal() is { } hostRefusal)
+        {
+            StatusText.Text = hostRefusal;
             return;
         }
 
