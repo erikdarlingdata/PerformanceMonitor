@@ -174,6 +174,52 @@ public sealed class RemediationLoginSyncPlanTests
         }
     }
 
+    /// <summary>A row that keeps its host and engine but names a different port, database, read-only intent, authentication, user name,
+    /// encryption mode, certificate trust or multi-subnet setting is another connection, so it is skipped in both slots.</summary>
+    [Theory]
+    [InlineData("port")]
+    [InlineData("database")]
+    [InlineData("readOnlyIntent")]
+    [InlineData("auth")]
+    [InlineData("username")]
+    [InlineData("encryptMode")]
+    [InlineData("trust")]
+    [InlineData("multiSubnet")]
+    public void ARowThatKeepsItsHostAndEngineButChangesAnotherConnectionSettingIsSkipped(string changed)
+    {
+        var entry = Entry(1, "alpha-sql-01", "alpha_fix", Reference);
+        var row = Row(1, "alpha-sql-01", entry);
+        var identity = row.Identity;
+        row = row with
+        {
+            Identity = changed switch
+            {
+                "port" => identity with { Port = identity.Port + 1 },
+                "database" => identity with { Database = "other_db" },
+                "readOnlyIntent" => identity with { ReadOnlyIntent = !identity.ReadOnlyIntent },
+                "auth" => identity with { Auth = "sql" },
+                "username" => identity with { Username = "someone_else" },
+                "encryptMode" => identity with { EncryptMode = "Optional" },
+                "trust" => identity with { TrustServerCertificate = !identity.TrustServerCertificate },
+                "multiSubnet" => identity with { MultiSubnetFailover = !identity.MultiSubnetFailover },
+                _ => throw new ArgumentOutOfRangeException(nameof(changed)),
+            },
+        };
+        Assert.Equal(entry.Host, row.Identity.Host);
+        Assert.Equal(entry.Engine, row.Identity.Engine, ignoreCase: true);
+
+        foreach (var plan in new[]
+                 {
+                     StoreConfigProvider.PlanRemediationSync([entry], [row]),
+                     StoreConfigProvider.PlanHypotheticalIndexSync([entry], [row]),
+                 })
+        {
+            Assert.Empty(plan.Changes);
+            var skip = Assert.Single(plan.Skips);
+            Assert.Equal(StoreConfigProvider.LoginSyncSkipReason.ConnectionDiffers, skip.Reason);
+        }
+    }
+
     /// <summary>A change carries the modified_at the row had when it was read, which the write is conditional on.</summary>
     [Fact]
     public void AChangeCarriesTheModifiedAtOfTheRowItWasPlannedFrom()

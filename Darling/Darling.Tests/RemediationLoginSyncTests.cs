@@ -440,6 +440,82 @@ public sealed class RemediationLoginSyncTests
         Assert.Contains(logger.Lines, line => line.Contains("connects differently", StringComparison.Ordinal));
     }
 
+    /// <summary>A host moved by a transaction that does not touch modified_at and commits while the sync's write waits on the row lock is
+    /// not armed: PostgreSQL re-checks the write's WHERE against the new row version, so the connection columns have to be in it.</summary>
+    [Fact]
+    public async Task AHostMovedWithoutBumpingModifiedAt_WhileTheWriteWaitsOnTheRowLock_IsNotArmed()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratchStore, owner, _) = await ServerAddViewerRoleLiveTests.OpenAsync(ct);
+        await using var scratchHolder = scratchStore;
+        await using var ownerHolder = owner;
+        var logger = new CapturingLogger();
+        var provider = new StoreConfigProvider(owner, logger);
+
+        await provider.SeedIfEmptyAsync(DarlingConfig.Parse(Json(Entry("alpha-sql-01"))), ct);
+        var config = OneServer("alpha-sql-01", "alpha_fix", FirstReference);
+        logger.Lines.Clear();
+
+        await using var mover = await owner.OpenConnectionAsync(ct);
+        NpgsqlTransaction? move = null;
+        Task? commit = null;
+        try
+        {
+            await using (var connection = await owner.OpenConnectionAsync(ct))
+            {
+                await provider.SyncRemediationLoginsAsync(
+                    connection, config, ct,
+                    afterRead: async token =>
+                    {
+                        /* The move holds the row lock and leaves modified_at alone. */
+                        move = await mover.BeginTransactionAsync(token);
+                        await using (var update = new NpgsqlCommand(
+                            "UPDATE config_monitored_servers SET host = 'moved.example.test' WHERE name = 'alpha-sql-01'", mover, move))
+                        {
+                            await update.ExecuteNonQueryAsync(token);
+                        }
+
+                        /* It commits only once the sync's write is waiting on that lock. */
+                        commit = Task.Run(async () =>
+                        {
+                            var deadline = DateTime.UtcNow.AddSeconds(30);
+                            while (DateTime.UtcNow < deadline)
+                            {
+                                await using var probe = owner.CreateCommand(
+                                    "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' "
+                                    + "AND query LIKE 'UPDATE config_monitored_servers SET remediation_username%'");
+                                if (Convert.ToInt64(await probe.ExecuteScalarAsync(CancellationToken.None)) > 0)
+                                {
+                                    break;
+                                }
+
+                                await Task.Delay(50, CancellationToken.None);
+                            }
+
+                            await move.CommitAsync(CancellationToken.None);
+                        }, CancellationToken.None);
+                    });
+            }
+
+            Assert.NotNull(commit);
+            await commit!;
+        }
+        finally
+        {
+            if (move is not null && move.Connection is not null)
+            {
+                await move.DisposeAsync();
+            }
+        }
+
+        Assert.Equal((null, null), await SlotAsync(owner, "alpha-sql-01", ct));
+        Assert.Contains(logger.Lines, line => line.Contains("'alpha-sql-01' not applied: the registry row changed", StringComparison.Ordinal));
+        await using (var host = owner.CreateCommand("SELECT host FROM config_monitored_servers WHERE name = 'alpha-sql-01'"))
+        {
+            Assert.Equal("moved.example.test", (string?)await host.ExecuteScalarAsync(ct));
+        }
+    }
+
     /// <summary>One row the store refuses does not stop the next server: the failure is logged with the server name, the exception type and
     /// the SQLSTATE, and the following server in the file is written.</summary>
     [Fact]

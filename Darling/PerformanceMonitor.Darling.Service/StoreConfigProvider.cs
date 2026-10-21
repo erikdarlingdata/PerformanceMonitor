@@ -172,7 +172,7 @@ public sealed class StoreConfigProvider
     internal sealed record StoredLoginRow(int Id, string Name, string? Username, string? Secret, DateTime ModifiedAt, ServerConnectionIdentity Identity);
 
     /// <summary>One change <see cref="PlanRemediationSync"/> or <see cref="PlanHypotheticalIndexSync"/> found: the registry row to write, what it becomes, the verb for the log, and the <c>modified_at</c> the row had when it was read.</summary>
-    internal sealed record RemediationSyncChange(int ServerId, string Name, string? Username, string? Secret, string Action, DateTime ExpectedModifiedAt);
+    internal sealed record RemediationSyncChange(int ServerId, string Name, string? Username, string? Secret, string Action, DateTime ExpectedModifiedAt, ServerConnectionIdentity Identity);
 
     /// <summary>Why a sync pass left a file entry's login alone.</summary>
     internal enum LoginSyncSkipReason
@@ -289,17 +289,35 @@ public sealed class StoreConfigProvider
         {
             try
             {
-                /* The write holds only while the row still has the modified_at it was read with: an edit between the read and this
-                   statement (a moved connection, a new login) makes it match nothing, and the next start plans again. */
+                /* The write holds only while the row still has the modified_at AND the connection it was read with. modified_at alone
+                   is not enough: a raw UPDATE of the host does not bump it, and when such a transaction commits while this statement
+                   waits on the row lock, PostgreSQL re-checks the WHERE against the new row version. With the connection columns in
+                   the WHERE a moved row matches nothing, and the next start plans again. Each column is compared the way
+                   ServerConnectionIdentity.FromStoredColumns maps it (NULL becomes the empty text, 0 or false). */
                 using var write = new NpgsqlCommand(
                     $"UPDATE config_monitored_servers SET {slot.UserColumn} = $2, {slot.SecretColumn} = $3, modified_at = $4 "
-                    + "WHERE server_id = $1 AND modified_at = $5",
+                    + "WHERE server_id = $1 AND modified_at = $5 "
+                    + "AND COALESCE(host, '') = $6 AND COALESCE(port, 0) = $7 AND COALESCE(engine, '') = $8 "
+                    + "AND COALESCE(database, '') = $9 AND COALESCE(read_only_intent, false) = $10 AND COALESCE(auth, '') = $11 "
+                    + "AND COALESCE(username, '') = $12 AND COALESCE(encrypt_mode, '') = $13 "
+                    + "AND COALESCE(trust_server_certificate, false) = $14 AND COALESCE(multi_subnet_failover, false) = $15",
                     connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
                 write.Parameters.AddWithValue(change.ServerId);
                 AddNullableText(write, change.Username);
                 AddNullableText(write, change.Secret);
                 write.Parameters.AddWithValue(Naive(DateTime.UtcNow));
                 write.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = change.ExpectedModifiedAt });
+                var read = change.Identity;
+                write.Parameters.AddWithValue(read.Host ?? "");
+                write.Parameters.AddWithValue(read.Port);
+                write.Parameters.AddWithValue(read.Engine ?? "");
+                write.Parameters.AddWithValue(read.Database ?? "");
+                write.Parameters.AddWithValue(read.ReadOnlyIntent);
+                write.Parameters.AddWithValue(read.Auth ?? "");
+                write.Parameters.AddWithValue(read.Username ?? "");
+                write.Parameters.AddWithValue(read.EncryptMode ?? "");
+                write.Parameters.AddWithValue(read.TrustServerCertificate);
+                write.Parameters.AddWithValue(read.MultiSubnetFailover);
                 if (await write.ExecuteNonQueryAsync(ct) > 0)
                 {
                     _logger?.LogInformation(
@@ -437,7 +455,7 @@ public sealed class StoreConfigProvider
             }
 
             var action = heldUser is null && heldSecret is null ? "set" : "changed";
-            changes.Add(new RemediationSyncChange(row.Id, row.Name ?? string.Empty, user, secret, action, row.ModifiedAt));
+            changes.Add(new RemediationSyncChange(row.Id, row.Name ?? string.Empty, user, secret, action, row.ModifiedAt, row.Identity));
         }
 
         return new LoginSyncPlan(changes, skips);
