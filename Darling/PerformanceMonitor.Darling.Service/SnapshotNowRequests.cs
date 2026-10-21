@@ -276,10 +276,15 @@ public sealed class SnapshotNowRequests
 public sealed class PostgresSnapshotNowStore : ISnapshotNowStore
 {
     private readonly NpgsqlDataSource _postgres;
+    private readonly bool _resultThroughMcpFunction;
 
-    public PostgresSnapshotNowStore(NpgsqlDataSource postgres)
+    /// <param name="postgres">The store connection: the web host's (viewer role) or the MCP host's (mcp role).</param>
+    /// <param name="resultThroughMcpFunction">True for the <c>mcp</c> role, which holds no SELECT on <c>result_json</c> and
+    /// reads a command's result through <c>config.read_mcp_command_result</c> (#6230).</param>
+    public PostgresSnapshotNowStore(NpgsqlDataSource postgres, bool resultThroughMcpFunction = false)
     {
         _postgres = postgres;
+        _resultThroughMcpFunction = resultThroughMcpFunction;
     }
 
     public async Task<SnapshotCommandRow?> ReadLatestAsync(int serverId, CancellationToken cancellationToken)
@@ -308,9 +313,10 @@ public sealed class PostgresSnapshotNowStore : ISnapshotNowStore
 
     public async Task<SnapshotCommandState?> ReadStateAsync(long commandId, CancellationToken cancellationToken)
     {
-        await using var command = _postgres.CreateCommand(
-            "SELECT status, result_status, result_json FROM config.config_command "
-            + "WHERE command_id = $1 AND command_type = 'snapshot_now'");
+        await using var command = _postgres.CreateCommand(_resultThroughMcpFunction
+            ? "SELECT status, result_status, result_json FROM config.read_mcp_command_result($1) WHERE command_type = 'snapshot_now'"
+            : "SELECT status, result_status, result_json FROM config.config_command "
+              + "WHERE command_id = $1 AND command_type = 'snapshot_now'");
         command.CommandTimeout = 15;
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = commandId });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

@@ -150,14 +150,22 @@ public sealed class MuteAnalysisFindingScopeTests
     }
 
     [Fact]
-    public void ADisplayNameThatIsAnotherRegistrationsStorageName_DoesNotTieWithIt()
+    public void ADisplayNameThatIsAnotherRegistrationsStorageName_IsAmbiguous_BecauseAMuteIsAWrite()
     {
         var registry = new[] { Row(1, "billing", "Billing"), Row(2, "reports-box", "billing") };
 
+        /* #6230: a name that is one server's storage name and another's display name names two servers, and a mute writes a row,
+           so it is refused with both listed (a read of the same name keeps the stored name winning). */
         var scope = DarlingMcpTools.ResolveMuteScope(registry, "billing", Hash);
 
-        Assert.Null(scope.Answer);
-        Assert.Equal(1, scope.ServerId);
+        Assert.NotNull(scope.Answer);
+        Assert.Equal("ambiguous", (string)JsonNode.Parse(scope.Answer!)!["status"]!);
+        Assert.Contains("reports-box", scope.Answer!, StringComparison.Ordinal);
+
+        /* The other server's own storage name still picks it. */
+        var byStorageName = DarlingMcpTools.ResolveMuteScope(registry, "reports-box", Hash);
+        Assert.Null(byStorageName.Answer);
+        Assert.Equal(2, byStorageName.ServerId);
     }
 
     [Fact]

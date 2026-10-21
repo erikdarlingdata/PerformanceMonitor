@@ -129,7 +129,7 @@ ORDER BY server_name";
             }
 
             /* An exact tier always answers (one server, or several that share the name, which the resolver refuses). */
-            var (resolved, error) = DarlingServerResolver.ResolveOrError(servers, name);
+            var (resolved, error) = DarlingServerResolver.ResolveOrError(servers, name, NameClash.StoredNameWins);
             if (error is null)
             {
                 resolvedNames.Add(resolved.ServerName);

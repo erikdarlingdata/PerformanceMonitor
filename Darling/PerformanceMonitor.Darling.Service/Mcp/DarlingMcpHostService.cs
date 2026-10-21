@@ -1543,6 +1543,10 @@ public sealed class DarlingMcpHostService : BackgroundService
                routes serve — one reader, one shape, the zero-drift rule get_fleet_overview and /api/fleet
                established, applied to the sweep rows. */
             .WithGeminiCompatibleTools<DarlingMcpFleetSweepTools>()
+            /* The change watch read - get_change_watches (#6234) - a server's watch windows, each with its changes, its measures and
+               its result, over the same ChangeWatchStore the worker pass writes. A read of the monitoring store: the investigation
+               agent may call it. */
+            .WithGeminiCompatibleTools<DarlingMcpChangeWatchTools>()
             /* The system_health parse-on-read family — get_health_parser_cpu_tasks / _io_issues /
                _memory_broker / _memory_conditions / _memory_node_oom / _scheduler_issues /
                _severe_errors / _significant_waits / _system_health — the same names the Dashboard
@@ -1598,6 +1602,17 @@ public sealed class DarlingMcpHostService : BackgroundService
             .WithGeminiCompatibleTools<DarlingMcpCollectorRunTools>()
             /* #6231: set_quiet_window / clear_quiet_window - a mute rule with only a server scope (or none) and an end, optionally a start. */
             .WithGeminiCompatibleTools<DarlingMcpQuietWindowTools>()
+            /* #6230: pause / resume collection, disable / enable one server, set a server's excluded databases and reload the config,
+               with get_collection_state to read the result. Each runs the command plane's own plan (or the Viewer's shared exclusions
+               write) as the mcp role; the role holds UPDATE on only the paused column of config_service for it. */
+            .WithGeminiCompatibleTools<DarlingMcpCollectionStateTools>()
+            .WithGeminiCompatibleTools<DarlingMcpIncidentActionTools>()
+            .WithGeminiCompatibleTools<DarlingMcpPlanUndoTools>()
+            /* #6227: disable_collector / enable_collector / set_collector_frequency / set_collector_run_at / set_collector_retention
+               (writes, mcp.allowWrites, never offered to an investigation agent) and get_collector_schedules (a read). They run the
+               command plane's own plans on config.config_collector_schedules and config_collector_run_times; the mcp role holds the
+               narrow write grant on those two tables. */
+            .WithGeminiCompatibleTools<DarlingMcpCollectorScheduleTools>()
             /* The server-onboarding WRITE tools — add_servers (BULK) / remove_server: an MCP client can stand up
                or tear down FLEET monitoring conversationally. The service-side twin of the Viewer's Add / Add-
                Multiple dialogs: add_servers validates each entry, probes the connection IN-PROCESS (the service

@@ -481,7 +481,9 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
     /// site that passed the flag would fail none of them. This reads every write call: both in <c>remove_server</c>
     /// (it chooses what a DELETE removes), the collector toggle, and <c>mute_analysis_finding</c> in Darling and in
     /// Lite. It fails when a call passes anything beyond the registry and the name, and when a file holds a different
-    /// number of calls than listed here, so a new write call site is added to this list on purpose.</summary>
+    /// number of calls than listed here, so a new write call site is added to this list on purpose. A Darling write call also
+    /// names its storage/display clash mode, <c>NameClash.Refuse</c> (#6230): a write that left it at the default would
+    /// read as a choice nobody made.</summary>
     [Theory]
     [InlineData("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerAdminTools.cs", @"(?<!RemovalTarget )\bResolveForRemoval\(", 2)]
     [InlineData("Darling/PerformanceMonitor.Darling.Service/DarlingCliCommands.cs", @"\bResolveForRemoval\(", 1)]
@@ -498,9 +500,12 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
 
         foreach (var call in calls)
         {
+            var refuses = call.Contains("nameClash: NameClash.Refuse", StringComparison.Ordinal);
             Assert.True(
-                !call.Contains("storageNameIgnoresCase", StringComparison.Ordinal) && TopLevelArgumentCount(call) == 2,
-                $"{file}: a write call must pass only the registry and the name. Found: {call}");
+                !call.Contains("storageNameIgnoresCase", StringComparison.Ordinal)
+                && TopLevelArgumentCount(call) - (refuses ? 1 : 0) == 2
+                && (refuses || !callPattern.Contains("ResolveForRemoval", StringComparison.Ordinal)),
+                $"{file}: a write call must pass only the registry and the name, plus nameClash: NameClash.Refuse. Found: {call}");
         }
     }
 
@@ -575,14 +580,19 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
 
     /// <summary>A display name that happens to spell another registration's storage name does not tie with it.</summary>
     [Fact]
-    public void ResolveForRemoval_ADisplayNameThatIsAnotherRegistrationsStorageName_DoesNotTieWithIt()
+    public void ResolveForRemoval_ADisplayNameThatIsAnotherRegistrationsStorageName_IsAmbiguousWithBothListed()
     {
         var servers = new[] { Row(1, "sql-01", "Payments"), Row(2, "sql-02", "sql-01") };
 
         var target = DarlingMcpServerAdminTools.ResolveForRemoval(servers, "sql-01");
 
         Assert.Equal("exact", target.MatchedBy);
-        Assert.Equal(1, Assert.Single(target.Candidates).ServerId);
+        Assert.Equal(new[] { 1, 2 }, target.Candidates.Select(c => c.ServerId).OrderBy(i => i).ToArray());
+
+        /* A name that is only one registration's still picks it alone, and the read resolver's case-insensitive tier agrees. */
+        Assert.Equal(2, Assert.Single(DarlingMcpServerAdminTools.ResolveForRemoval(servers, "sql-02").Candidates).ServerId);
+        Assert.Equal(1, Assert.Single(DarlingMcpServerAdminTools.ResolveForRemoval(servers, "Payments").Candidates).ServerId);
+        Assert.Equal(2, DarlingMcpServerAdminTools.ResolveForRemoval(servers, "SQL-01", storageNameIgnoresCase: true).Candidates.Count);
     }
 
     [Theory]

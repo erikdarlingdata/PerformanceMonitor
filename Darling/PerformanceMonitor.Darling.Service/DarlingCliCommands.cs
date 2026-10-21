@@ -63,7 +63,7 @@ public enum StartupAction
 /// that validates from the CLI connects identically under the running service. Pure output formatting
 /// (<see cref="FormatProbeLine"/>) is split out so it is unit-testable without live SQL.
 /// </summary>
-public static class DarlingCliCommands
+public static partial class DarlingCliCommands
 {
     /// <summary>The verb that encrypts a SQL-auth password for darling.json (reads stdin).</summary>
     public static bool IsEncryptPasswordVerb(string arg) =>
@@ -241,6 +241,18 @@ public static class DarlingCliCommands
     public static bool IsListAlertSourcesVerb(string arg) =>
         string.Equals(arg, "--list-alert-sources", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>The <c>mcp.dataDetail</c> level of the config at <paramref name="configPath"/>, for the verbs that serve collected text (#6236).
+    /// Here, not beside the verb, because the CLI's loads of darling.json live in this file (DarlingOwnedSecretsCensusTests).</summary>
+    private static McpDataDetail ReadConfiguredDataDetail(string? configPath)
+    {
+        McpDataDetailModes.TryParse(DarlingConfig.Load(configPath).Mcp.DataDetail, out var mode);
+        return mode;
+    }
+
+    /// <summary>The verb <see cref="ExportInvestigationsAsync"/> handles: write the investigation cases that have feedback as JSON lines (#6236).</summary>
+    public static bool IsExportInvestigationsVerb(string arg) =>
+        string.Equals(arg, "--export-investigations", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>The verb <see cref="ToggleCollectorAsync"/> handles with <c>enable: true</c> — turn one collector ON in the
     /// store's schedule overrides, fleet-wide or for one server (#3752). Until this verb the only writer of that
     /// flag was the WPF Viewer's Collector Schedules window, which needs an interactive desktop and the
@@ -329,6 +341,16 @@ public static class DarlingCliCommands
     public static bool IsSetCollectorRunAtVerb(string arg) =>
         string.Equals(arg, "--set-collector-run-at", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>The verb <see cref="SetCollectorColumnAsync"/> handles for the frequency (#6227): set or clear how often one collector
+    /// runs, in minutes, fleet-wide or for one server.</summary>
+    public static bool IsSetCollectorFrequencyVerb(string arg) =>
+        string.Equals(arg, "--set-collector-frequency", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The verb <see cref="SetCollectorColumnAsync"/> handles for the retention (#6227): set or clear how many days one
+    /// collector's data is kept, fleet-wide or for one server.</summary>
+    public static bool IsSetCollectorRetentionVerb(string arg) =>
+        string.Equals(arg, "--set-collector-retention", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>The verb <see cref="DropXeSessionsAsync(string[], TextWriter, TextWriter, CancellationToken)"/> handles — drop the
     /// Extended Events sessions Darling created on a server this service still monitors (run it just before the server is
     /// removed), or with <c>--print-sql</c> print the guarded DROP statements for a server that is no longer configured (#4732).
@@ -378,9 +400,12 @@ public static class DarlingCliCommands
         || IsRotateAlertSourceVerb(arg)
         || IsRemoveAlertSourceVerb(arg)
         || IsListAlertSourcesVerb(arg)
+        || IsExportInvestigationsVerb(arg)
         || IsEnableCollectorVerb(arg)
         || IsDisableCollectorVerb(arg)
         || IsSetCollectorRunAtVerb(arg)
+        || IsSetCollectorFrequencyVerb(arg)
+        || IsSetCollectorRetentionVerb(arg)
         || IsDropXeSessionsVerb(arg)
         || IsResetPasswordKeyVerb(arg)
         || IsSelfCheckPasswordKeyVerb(arg);
@@ -468,9 +493,12 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --rotate-alert-source <name> [--config <path>]   Give a source a new password and print its connection string once. The old password stops working." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --remove-alert-source <name> [--config <path>]   Drop a source's login and remove it, along with any alerts of its that are still queued. Alerts it already sent stay in the history." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --list-alert-sources [--config <path>]           List the sources: name, created, last alert sent and alerts not yet delivered. Never shows a password." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --export-investigations <file> [--since <date>] [--until <date>] [--server <name>] [--verdict right|partly|wrong] [--force] [--config <path>]   Write the investigation cases that have feedback, one JSON object per line: the alert, the brief and evidence the agent was given, its report and the recorded verdict and note. Collected text is masked at mcp.dataDetail, as get_investigation_reports masks it. Test your own agent on them." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-collector <name> [--server <server>] [--config <path>]   Turn a collector ON in the store's schedule overrides (fleet-wide by default; --server scopes it to one server) and print the resulting schedule rows. The running service applies it within one sweep." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --disable-collector <name> [--server <server>] [--config <path>]  Turn a collector OFF the same way. Frequency/retention overrides on the row are kept; only enabled changes." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --set-collector-run-at <collector> <HH:MM|none|default> [--server <server>] [--config <path>]   Set the time of day (the monitored server's own clock) a collector that runs once a day or less often starts; none stops a fixed time, default clears the row's time so the next level applies. Fleet-wide by default; --server scopes it to one server. Only the run time changes. The running service applies it within one sweep." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --set-collector-frequency <collector> <minutes|default> [--server <server>] [--config <path>]   Set how often a collector runs, in minutes (0 = once when the server loads, at most " + CollectorScheduleDefaults.MaxFrequencyMinutes + "); default clears the row's value so the next level applies. Fleet-wide by default; --server scopes it to one server. Only the frequency is written: the enabled flag, retention and database scope on the row are kept, and a new row stores no enabled flag of its own." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --set-collector-retention <collector> <days|default> [--server <server>] [--config <path>]   Set how many days a collector's data is kept (1 to " + CollectorScheduleDefaults.MaxRetentionDays + "); default clears the row's value so the next level applies. Fleet-wide by default; --server scopes it to one server. Only the retention is written." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --drop-xe-sessions <server-name> [--dry-run] [--config <path>]   Drop the Extended Events sessions Darling created on a server this service still monitors (" + DarlingXeSessionCleanup.SessionNamesPhrase() + ", and this install's own, whichever exist). Removing a server drops only this install's own sessions, so run this just before you remove the server to drop the shared ones too. It also lists the sessions of other installs and never drops them. --dry-run lists them and drops nothing." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --drop-xe-sessions --print-sql   Print guarded DROP statements for the shared sessions, and a query that lists every install's sessions with their DROP statements, in both scopes. It connects to nothing, so use it for a server that is no longer configured or that a removal could not reach." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --backfill-rollups --dry-run   Show the plan, the disk estimate and the time budget, and change nothing.";
@@ -7107,20 +7135,21 @@ public static class DarlingCliCommands
     /// </summary>
     internal const string CollectorScheduleReadbackSql = @"
 SELECT cs.server_id, cs.collector_name, cs.frequency_minutes, cs.retention_days, cs.enabled, cs.databases,
-       COALESCE(s.display_name, s.server_name) AS server_label
+       COALESCE(s.display_name, s.server_name) AS server_label, s.server_name
 FROM config.config_collector_schedules cs
 LEFT JOIN collect.servers s ON s.server_id = cs.server_id
-WHERE lower(cs.collector_name) = lower($1)
+WHERE ($1::text IS NULL OR lower(cs.collector_name) = lower($1))
 ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
 
     /// <summary>One <c>config_collector_schedules</c> row as the verb reads it back: the service's
-    /// <see cref="ScheduleOverride"/> columns plus the registry label the operator knows the server by.</summary>
+    /// <see cref="ScheduleOverride"/> columns plus the registry label the operator knows the server by, and the storage name
+    /// (<c>ServerName</c>) the server resolver accepts, which the label ("Display (Storage)") is not.</summary>
     internal sealed record CollectorScheduleReadbackRow(
-        int? ServerId, string CollectorName, int? FrequencyMinutes, int? RetentionDays, bool Enabled,
-        IReadOnlyList<string>? Databases, string? ServerLabel);
+        int? ServerId, string CollectorName, int? FrequencyMinutes, int? RetentionDays, bool? Enabled,
+        IReadOnlyList<string>? Databases, string? ServerLabel, string? ServerName = null);
 
     internal static async Task<List<CollectorScheduleReadbackRow>> ReadCollectorScheduleRowsAsync(
-        NpgsqlDataSource postgres, string collectorName, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, string? collectorName, CancellationToken cancellationToken)
     {
         var rows = new List<CollectorScheduleReadbackRow>();
         /* The deadline is written ON the construction, as every CLI store command in this file writes it: the
@@ -7128,7 +7157,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
            so a deadline assigned a statement later would be a site it cannot certify. */
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
         await using var command = new NpgsqlCommand(CollectorScheduleReadbackSql, connection) { CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds };
-        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = collectorName });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = (object?)collectorName ?? DBNull.Value });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -7137,11 +7166,12 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
                 reader.GetString(1),
                 reader.IsDBNull(2) ? null : reader.GetInt32(2),
                 reader.IsDBNull(3) ? null : reader.GetInt32(3),
-                reader.GetBoolean(4),
+                reader.IsDBNull(4) ? null : reader.GetBoolean(4),
                 /* V125 (#3477): NULL and an empty array are different readings — keep both, as the service's
                    ReadScheduleOverridesAsync does, so the printout says which one the row carries. */
                 reader.IsDBNull(5) ? null : reader.GetFieldValue<string[]>(5),
-                reader.IsDBNull(6) ? null : reader.GetString(6)));
+                reader.IsDBNull(6) ? null : reader.GetString(6),
+                reader.IsDBNull(7) ? null : reader.GetString(7)));
         }
 
         return rows;
@@ -7158,7 +7188,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
 SELECT rt.server_id, rt.collector_name, rt.run_at_minute, COALESCE(s.display_name, s.server_name) AS server_label
 FROM config.config_collector_run_times rt
 LEFT JOIN collect.servers s ON s.server_id = rt.server_id
-WHERE lower(rt.collector_name) = lower($1)
+WHERE ($1::text IS NULL OR lower(rt.collector_name) = lower($1))
 ORDER BY rt.server_id NULLS FIRST, server_label, rt.server_id";
 
     /// <summary>One <c>config_collector_run_times</c> row as the verb reads it back, with the registry label the operator knows
@@ -7173,14 +7203,14 @@ ORDER BY rt.server_id NULLS FIRST, server_label, rt.server_id";
     /// is what is matched: lc_messages is not always English. Any other failure propagates.
     /// </summary>
     internal static async Task<List<CollectorRunTimeReadbackRow>> ReadCollectorRunTimeRowsAsync(
-        NpgsqlDataSource postgres, string collectorName, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, string? collectorName, CancellationToken cancellationToken)
     {
         var rows = new List<CollectorRunTimeReadbackRow>();
         try
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
             await using var command = new NpgsqlCommand(CollectorRunTimeReadbackSql, connection) { CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds };
-            command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = collectorName });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = (object?)collectorName ?? DBNull.Value });
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
@@ -7235,7 +7265,7 @@ ORDER BY rt.server_id NULLS FIRST, server_label, rt.server_id";
             var line = string.Format(
                 CultureInfo.InvariantCulture,
                 "  {0}: enabled={1}  frequency={2}  retention={3}",
-                scope, row.Enabled ? "true" : "false", frequency, retention);
+                scope, row.Enabled is bool en ? (en ? "true" : "false") : "(inherited)", frequency, retention);
             if (row.Databases is not null)
             {
                 line += row.Databases.Count == 0
@@ -7486,7 +7516,7 @@ ORDER BY rt.server_id NULLS FIRST, server_label, rt.server_id";
     }
 
     /// <summary>What <see cref="ResolveCollectorScopeAsync"/> decided: the schedule row a verb writes, or the exit code it stops with.</summary>
-    private readonly record struct CollectorScope(int? ServerId, string Label, int? FailureExitCode)
+    internal readonly record struct CollectorScope(int? ServerId, string Label, int? FailureExitCode, string? ServerName = null)
     {
         /// <summary>No <c>--server</c>: the fleet-wide row (<c>server_id</c> NULL).</summary>
         public static CollectorScope Fleet { get; } = new(null, "fleet-wide", null);
@@ -7502,7 +7532,7 @@ ORDER BY rt.server_id NULLS FIRST, server_label, rt.server_id";
     /// with the candidates named and "Nothing was changed." The one place either verb resolves a server, so the two cannot learn
     /// different rules.
     /// </summary>
-    private static async Task<CollectorScope> ResolveCollectorScopeAsync(NpgsqlDataSource dataSource, string? serverName, TextWriter error)
+    internal static async Task<CollectorScope> ResolveCollectorScopeAsync(NpgsqlDataSource dataSource, string? serverName, TextWriter error)
     {
         if (serverName is null)
         {
@@ -7520,7 +7550,7 @@ ORDER BY rt.server_id NULLS FIRST, server_label, rt.server_id";
             return CollectorScope.Failed(CollectorToggleExitCode.StoreUnavailable);
         }
 
-        var target = DarlingMcpServerAdminTools.ResolveForRemoval(servers, serverName);
+        var target = DarlingMcpServerAdminTools.ResolveForRemoval(servers, serverName, nameClash: NameClash.Refuse);
         if (target.Candidates.Count == 0)
         {
             /* The read resolver's miss message: the local listing (a typo is the commonest miss) plus the
@@ -7552,7 +7582,7 @@ ORDER BY rt.server_id NULLS FIRST, server_label, rt.server_id";
         var scopeLabel = string.IsNullOrEmpty(resolved.DisplayName) || resolved.DisplayName == resolved.ServerName
             ? resolved.ServerName
             : $"{resolved.DisplayName} ({resolved.ServerName})";
-        return new CollectorScope(resolved.ServerId, scopeLabel, null);
+        return new CollectorScope(resolved.ServerId, scopeLabel, null, resolved.ServerName);
     }
 
     /// <summary>
@@ -7736,6 +7766,17 @@ ORDER BY rt.server_id NULLS FIRST, server_label, rt.server_id";
     }
 
     /// <summary>
+    /// The refusal for a time of day on a collector whose interval, for the row being written, is not a whole number of days
+    /// (<see cref="CollectorRunTime.AllowsRunAt"/> over <see cref="ResolveRunAtInterval"/>), or null when the time is fine. One rule for
+    /// <c>--set-collector-run-at</c> and the MCP <c>set_collector_run_at</c> tool (#6227). Pure over the rows already read.
+    /// </summary>
+    internal static string? RunAtIntervalRefusal(string collectorName, int? serverId, IReadOnlyList<CollectorScheduleReadbackRow> rows)
+    {
+        var interval = ResolveRunAtInterval(collectorName, serverId, rows);
+        return CollectorRunTime.AllowsRunAt(interval) ? null : CollectorRunTime.IntervalRefusalMessage(collectorName, interval);
+    }
+
+    /// <summary>
     /// <c>--set-collector-run-at</c> (#4938): sets, stops or clears the time of day a once-a-day collector runs, in
     /// <c>config.config_collector_run_times</c>, fleet-wide or for one server with <c>--server</c>, and prints the rows
     /// read back from the store.
@@ -7818,10 +7859,9 @@ ORDER BY rt.server_id NULLS FIRST, server_label, rt.server_id";
                 return CollectorToggleExitCode.StoreUnavailable;
             }
 
-            var interval = ResolveRunAtInterval(collectorName, scope.ServerId, existing);
-            if (!CollectorRunTime.AllowsRunAt(interval))
+            if (RunAtIntervalRefusal(collectorName, scope.ServerId, existing) is string intervalRefusal)
             {
-                error.WriteLine(CollectorRunTime.IntervalRefusalMessage(collectorName, interval));
+                error.WriteLine(intervalRefusal);
                 error.WriteLine("Nothing was changed.");
                 return CollectorToggleExitCode.UsageOrConfig;
             }
@@ -7857,6 +7897,213 @@ ORDER BY rt.server_id NULLS FIRST, server_label, rt.server_id";
                 ? $"run at {CollectorRunTime.Format(minuteOfDay)} server time"
                 : "no fixed run time on this server";
         output.WriteLine($"  [{(cleared ? "CLEARED" : "SET")}] {collectorName} — {scope.Label} ({detail}).");
+        output.WriteLine();
+
+        return await PrintCollectorScheduleReadbackAsync(dataSource, collectorName, output, error, cancellationToken);
+    }
+
+    /* ───────────────────── --set-collector-frequency / --set-collector-retention (#6227) ───────────────────── */
+
+    private static string ColumnVerb(CollectorScheduleColumn column) =>
+        column == CollectorScheduleColumn.FrequencyMinutes ? "--set-collector-frequency" : "--set-collector-retention";
+
+    private static string ColumnValueLabel(CollectorScheduleColumn column) =>
+        column == CollectorScheduleColumn.FrequencyMinutes ? "<minutes|default>" : "<days|default>";
+
+    /// <summary>
+    /// What <c>--set-collector-frequency</c> / <c>--set-collector-retention</c> print when their arguments do not parse or the executor
+    /// refuses them: to STDOUT, as <see cref="CollectorRunAtUsageText"/> does, with the one-line refusal itself on STDERR.
+    /// </summary>
+    public static string CollectorColumnUsageText(CollectorScheduleColumn column)
+    {
+        var frequency = column == CollectorScheduleColumn.FrequencyMinutes;
+        return "Usage:" + Environment.NewLine +
+            $"  PerformanceMonitor.Darling.Service.exe {ColumnVerb(column)} <collector> {ColumnValueLabel(column)} [--server <server>] [--config <path to darling.json>]" + Environment.NewLine +
+            Environment.NewLine +
+            "<collector> is a collector name as collection health reports it." + Environment.NewLine +
+            (frequency
+                ? $"<minutes> is how often the collector runs: a whole number from 0 to {CollectorScheduleDefaults.MaxFrequencyMinutes} (one year), where 0 means once when the server loads."
+                : $"<days> is how many days the collector's data is kept: a whole number from 1 to {CollectorScheduleDefaults.MaxRetentionDays} (ten years).") + Environment.NewLine +
+            "default clears the row's value, so the next level applies again (a server's row falls back to the fleet-wide value, the fleet-wide row to the code default)." + Environment.NewLine +
+            "Without --server the change is FLEET-WIDE (the schedule row with no server); --server <server> writes that server's own row" + Environment.NewLine +
+            "instead (its display name or storage name, as the Viewer and the MCP tools show it)." + Environment.NewLine +
+            "Only this one value is written: the other columns on the row are kept, and a row the verb creates stores no enabled flag of its" + Environment.NewLine +
+            "own, so it follows the fleet-wide row and the code default." + Environment.NewLine +
+            Environment.NewLine +
+            "Collectors:" + Environment.NewLine +
+            KnownCollectorsText(_ => true);
+    }
+
+    /// <summary>
+    /// Parses <c>--set-collector-frequency</c> / <c>--set-collector-retention</c>'s trailing arguments STRICTLY, as
+    /// <see cref="TryParseCollectorRunAtArgs"/> does: exactly two bare arguments, the collector name and then the value (a number or
+    /// <c>default</c>, which the executor's plan checks, not this grammar), plus <c>--server &lt;name&gt;</c> and
+    /// <c>--config &lt;path&gt;</c> in any order. Pure.
+    /// </summary>
+    public static bool TryParseCollectorColumnArgs(
+        string verb, CollectorScheduleColumn column, string[] rest, out string? collectorName, out string? value, out string? serverName, out string? configPath, out string? errorMessage)
+    {
+        collectorName = null;
+        value = null;
+        serverName = null;
+        configPath = null;
+        errorMessage = null;
+        var label = ColumnValueLabel(column);
+
+        for (var i = 0; i < rest.Length; i++)
+        {
+            var arg = rest[i];
+            if (string.Equals(arg, "--server", StringComparison.OrdinalIgnoreCase))
+            {
+                if (i + 1 >= rest.Length || rest[i + 1].StartsWith('-'))
+                {
+                    errorMessage = $"--server needs a server name: {verb} <collector> {label} --server <display name or storage name>";
+                    return false;
+                }
+
+                serverName = rest[++i];
+                continue;
+            }
+
+            if (string.Equals(arg, "--config", StringComparison.OrdinalIgnoreCase))
+            {
+                if (i + 1 >= rest.Length || rest[i + 1].StartsWith('-'))
+                {
+                    errorMessage = $"--config needs a path: {verb} <collector> {label} --config <path to darling.json>";
+                    return false;
+                }
+
+                configPath = rest[++i];
+                continue;
+            }
+
+            /* A negative number starts with '-' but is a value, not an option: the executor's bounds refuse it in their own words. */
+            if (arg.StartsWith('-') && !int.TryParse(arg, NumberStyles.Integer, CultureInfo.InvariantCulture, out _))
+            {
+                errorMessage = $"Unknown option for {verb}: {arg}";
+                return false;
+            }
+
+            if (collectorName is null)
+            {
+                collectorName = arg;
+                continue;
+            }
+
+            if (value is null)
+            {
+                value = arg;
+                continue;
+            }
+
+            errorMessage = $"{verb} takes ONE collector name and ONE value; got '{collectorName}', '{value}' and '{arg}'.";
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(collectorName))
+        {
+            errorMessage = $"{verb} needs a collector name and a value.";
+            return false;
+        }
+
+        if (value is null)
+        {
+            errorMessage = $"{verb} needs a value: {(column == CollectorScheduleColumn.FrequencyMinutes ? "a number of minutes" : "a number of days")} or default.";
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// The store command these verbs stand in for: the <c>set_collector_frequency</c> / <c>set_collector_retention</c> row the command
+    /// plane carries for the same request, minus the queue. A value that reads as a whole number goes as a JSON number; anything else
+    /// goes as the text typed (<c>default</c> clears), which the plan checks.
+    /// </summary>
+    internal static ClaimedCommand BuildCollectorColumnCommand(CollectorScheduleColumn column, string collectorName, string value, int? serverId)
+    {
+        var frequency = column == CollectorScheduleColumn.FrequencyMinutes;
+        var args = new Dictionary<string, object?> { ["collector_name"] = collectorName };
+        args[frequency ? "frequency_minutes" : "retention_days"] =
+            int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var number) ? number : value;
+        return new ClaimedCommand(
+            CommandId: 0,
+            CommandType: frequency ? "set_collector_frequency" : "set_collector_retention",
+            TargetServerId: serverId,
+            ArgsJson: JsonSerializer.Serialize(args),
+            RequestedBy: "cli");
+    }
+
+    /// <summary>The plan the verbs execute: <see cref="DarlingCommandExecutor.ResolvePlan"/> over <see cref="BuildCollectorColumnCommand"/>,
+    /// nothing else, so the verbs own no SQL and the refusals (unknown collector, a value out of bounds) are the executor's. Pure.</summary>
+    internal static CommandPlan PlanCollectorColumn(CollectorScheduleColumn column, string collectorName, string value, int? serverId) =>
+        DarlingCommandExecutor.ResolvePlan(BuildCollectorColumnCommand(column, collectorName, value, serverId));
+
+    /// <summary>
+    /// <c>--set-collector-frequency</c> and <c>--set-collector-retention</c> (#6227): set or clear one column of the collector's row in
+    /// <c>config.config_collector_schedules</c>, fleet-wide or for one server with <c>--server</c>, and print the rows read back. The
+    /// same shape as <see cref="SetCollectorRunAtAsync"/>: strict parse, the executor's own plan checked before config or the store is
+    /// touched, the one shared store opener and server resolver, the plan executed through
+    /// <see cref="DarlingCommandExecutor.ExecuteStoreWriteAsync(NpgsqlDataSource, CommandPlan, CancellationToken)"/>, the shared read-back.
+    /// The verbs own no SQL and no bounds. Exit codes are <see cref="CollectorToggleExitCode"/>'s.
+    /// </summary>
+    /// <param name="column">Which value the verb sets.</param>
+    /// <param name="rest">The arguments AFTER the verb itself.</param>
+    public static async Task<int> SetCollectorColumnAsync(
+        CollectorScheduleColumn column, string[] rest, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+    {
+        var verb = ColumnVerb(column);
+        var frequency = column == CollectorScheduleColumn.FrequencyMinutes;
+
+        if (!TryParseCollectorColumnArgs(verb, column, rest, out var typedName, out var valueText, out var serverName, out var configPath, out var argError))
+        {
+            error.WriteLine(argError);
+            output.WriteLine(CollectorColumnUsageText(column));
+            return CollectorToggleExitCode.UsageOrConfig;
+        }
+
+        var collectorName = CanonicalCollectorName(typedName) ?? typedName!;
+        var preflight = PlanCollectorColumn(column, collectorName, valueText!, serverId: null);
+        if (preflight.Kind != CommandKind.StoreWrite)
+        {
+            error.WriteLine(preflight.FailReason ?? $"{verb}: the executor refused the request.");
+            output.WriteLine(CollectorColumnUsageText(column));
+            return CollectorToggleExitCode.UsageOrConfig;
+        }
+
+        var created = TryCreateCollectorStoreDataSource(verb, configPath, error);
+        if (created is null)
+        {
+            return CollectorToggleExitCode.UsageOrConfig;
+        }
+
+        await using var dataSource = created;
+
+        output.WriteLine();
+        output.WriteLine($"PerformanceMonitor Darling — set a collector's {(frequency ? "frequency" : "retention")} ({verb})");
+        output.WriteLine();
+
+        var scope = await ResolveCollectorScopeAsync(dataSource, serverName, error);
+        if (scope.FailureExitCode is int scopeFailure)
+        {
+            return scopeFailure;
+        }
+
+        var plan = PlanCollectorColumn(column, collectorName, valueText!, scope.ServerId);
+        try
+        {
+            await DarlingCommandExecutor.ExecuteStoreWriteAsync(dataSource, plan, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            error.WriteLine($"Could not update the control-plane store: {ex.Message}");
+            return CollectorToggleExitCode.StoreUnavailable;
+        }
+
+        var cleared = plan.SuccessStatus.Contains("cleared", StringComparison.Ordinal);
+        output.WriteLine(cleared
+            ? $"  [CLEARED] {collectorName} — {scope.Label} ({(frequency ? "frequency" : "retention")} cleared)."
+            : $"  [SET] {collectorName} — {scope.Label} ({(frequency ? "frequency" : "retention")} {valueText}{(frequency ? " minutes" : " days")}).");
         output.WriteLine();
 
         return await PrintCollectorScheduleReadbackAsync(dataSource, collectorName, output, error, cancellationToken);
@@ -8214,7 +8461,7 @@ WHERE cs.collector_name = 'long_query_completions'", connection) { CommandTimeou
                 reader.GetString(1),
                 reader.IsDBNull(2) ? null : reader.GetInt32(2),
                 reader.IsDBNull(3) ? null : reader.GetInt32(3),
-                reader.GetBoolean(4),
+                reader.IsDBNull(4) ? null : reader.GetBoolean(4),
                 reader.IsDBNull(5) ? null : reader.GetFieldValue<string[]>(5)));
         }
 

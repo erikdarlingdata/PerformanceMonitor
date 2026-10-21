@@ -1963,7 +1963,8 @@ LIMIT $1";
         double? PerServerBytes,
         DateTime? MetricTime = null,
         int SpanDays = 1,
-        bool Partial = false);
+        bool Partial = false,
+        bool SizeEstimated = false);
 
     /// <summary>
     /// The index <see cref="StoreMetricsLatestSql"/>'s skip-scan walks (#3934), created by the Tuning stage
@@ -2235,8 +2236,11 @@ ORDER BY object_kind, object_name, metric_time DESC";
                 ? delta / (double)current.EnabledServerCount.Value
                 : null;
 
+            /* #6245: the whole-store row is an estimate on most hourly sweeps and exact on one a day. A day's point is its
+               exact row when it has one, so a pair is an estimate only on a day (usually today) with no exact sweep yet. */
             growth.Add(new DailyGrowthPoint(
-                current.Day, delta, perServer, current.MetricTime, spanDays, Partial: partial));
+                current.Day, delta, perServer, current.MetricTime, spanDays, Partial: partial,
+                SizeEstimated: previous.SizeEstimated == true || current.SizeEstimated == true));
         }
 
         return growth;

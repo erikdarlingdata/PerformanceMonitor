@@ -445,6 +445,37 @@ public sealed class ServerEditLiveTests : IDisposable
     }
 
     [Fact]
+    public async Task AName_ThatIsOneServersStorageNameAndAnotherServersDisplayName_IsAmbiguous_AndNothingIsWritten()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        var ok = false;
+        try
+        {
+            /* Server 5131's storage name is the text server 5132 shows as its display name. */
+            await SeedServerAsync(rig.Owner, 5131, "ident-a", "shared-ident.example.test", "integrated", null, null, ct);
+            await SeedServerAsync(rig.Owner, 5132, "shared-ident.example.test", "ident-b.example.test", "integrated", null, null, ct);
+
+            var ambiguous = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "shared-ident.example.test", "{\"monthly_cost_usd\":1}", Reachable, TestKeyRings.Healthy, null, ct));
+            Assert.Equal("ambiguous", ambiguous["status"]!.GetValue<string>());
+            var listed = ambiguous["candidates"]!.AsArray().Select(c => c!["server"]!.GetValue<string>()).OrderBy(n => n, StringComparer.Ordinal).ToArray();
+            Assert.Equal(new[] { "ident-b.example.test", "shared-ident.example.test" }, listed);
+            Assert.Equal(2L, await ScalarAsync<long>(rig.Owner, "SELECT count(*) FROM config_monitored_servers WHERE server_id IN (5131, 5132) AND monthly_cost_usd = 7", ct));
+
+            /* An exact single match still resolves: the other server's own storage name picks it. */
+            var edited = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "ident-b.example.test", "{\"monthly_cost_usd\":1}", Reachable, TestKeyRings.Healthy, null, ct));
+            Assert.NotEqual("ambiguous", edited["status"]!.GetValue<string>());
+            Assert.Equal(1L, await ScalarAsync<long>(rig.Owner, "SELECT count(*) FROM config_monitored_servers WHERE server_id = 5132 AND monthly_cost_usd = 1", ct));
+            Assert.Equal(1L, await ScalarAsync<long>(rig.Owner, "SELECT count(*) FROM config_monitored_servers WHERE server_id = 5131 AND monthly_cost_usd = 7", ct));
+            ok = true;
+        }
+        finally
+        {
+            await DropRoleAsync(rig, ok);
+        }
+    }
+
+    [Fact]
     public async Task ASecretEdit_StoresTheProtectedSecret_AndTheMcpRoleStillCannotReadItBack()
     {
         var ct = TestContext.Current.CancellationToken;

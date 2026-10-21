@@ -111,6 +111,21 @@ public sealed class StatusBarBehaviourTests
         Assert.DoesNotContain(Items(r), i => i.StartsWith("Collection", StringComparison.Ordinal));
     }
 
+    /// <summary>M1 (#6230): a paused service collects and alerts on nothing while the runtime state still reads ok, so the fleet
+    /// roll-up carries the flag and the bar says paused, naming who and when when the store still holds them.</summary>
+    [Fact]
+    public void APausedCollection_IsShown_WithWhoAndWhenWhenTheStoreHasThem()
+    {
+        if (!TryRun("paused", out var r)) return;
+        Assert.Contains("Collection: PAUSED by erik (viewer) since 2026-10-20T10:00:00", Items(r));
+
+        if (!TryRun("pausedUnknownWho", out var unknown)) return;
+        Assert.Contains("Collection: PAUSED", Items(unknown));
+
+        if (!TryRun("notPaused", out var running)) return;
+        Assert.DoesNotContain(Items(running), i => i.StartsWith("Collection", StringComparison.Ordinal));
+    }
+
     [Fact]
     public void AFailedStoreSizeRead_NeverBreaksTheBar()
     {

@@ -22,6 +22,9 @@
   <ItemGroup>
     <!-- ServerClock: the job-history read converts each server-local run time with its server's clock. -->
     <ProjectReference Include="..\..\PerformanceMonitor.Analysis\PerformanceMonitor.Analysis.csproj" />
+    <!-- #6230: MonitoredServerExclusions holds the excluded-databases write the Viewer and the MCP tool share, and it uses
+         Alerting's ExcludedDatabaseNames bounds instead of restating them. -->
+    <ProjectReference Include="..\..\PerformanceMonitor.Alerting\PerformanceMonitor.Alerting.csproj" />
     <ProjectReference Include="..\..\PerformanceMonitor.Collectors\PerformanceMonitor.Collectors.csproj" />
     <!-- #6231: the notification route write (validation, sealing, SQL) lives here for the Viewer and the MCP tools; its bounds are NotificationRoute's. -->
     <ProjectReference Include="..\..\PerformanceMonitor.Notifications\PerformanceMonitor.Notifications.csproj" />

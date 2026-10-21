@@ -120,7 +120,7 @@ public sealed class DarlingMcpThresholdOverrideTools
                     return Refused("set_by_invalid", "set_by must be 1-64 of A-Za-z0-9._:-.");
             }
 
-            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken, NameClash.Refuse);
             if (error is not null)
                 return error;
 

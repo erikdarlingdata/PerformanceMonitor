@@ -661,8 +661,11 @@ GRANT SELECT (server_id, name, host, database, auth, username, encrypt_mode, tru
               aws_role_arn, aws_external_id_set)
     ON config.config_monitored_servers TO mcp;
 REVOKE SELECT ON config.config_command FROM mcp;
+-- (#6230) result_json is withheld from mcp: it holds the result of every command type, including the Viewer-only ones.
+--     mcp reads a command's result through config.read_mcp_command_result (created below), which answers only for the
+--     command types the MCP tools queue. The REVOKE above removes a result_json grant an earlier run made.
 GRANT SELECT (command_id, created_at, requested_by, command_type, target_server_id, status, claimed_at,
-              completed_at, result_status, result_json, service_instance)
+              completed_at, result_status, service_instance)
     ON config.config_command TO mcp;
 REVOKE SELECT ON config.config_notification FROM mcp;
 GRANT SELECT (id, smtp_host, smtp_port, smtp_use_ssl, smtp_from_address, smtp_recipients,
@@ -824,11 +827,37 @@ GRANT INSERT, UPDATE, DELETE ON config.config_mute_rules TO viewer;
 GRANT UPDATE (config_version, updated_at) ON config.config_service TO viewer;
 GRANT INSERT, UPDATE, DELETE ON config.config_mute_rules TO mcp;
 GRANT UPDATE (config_version, updated_at) ON config.config_service TO mcp;
+-- #6230: pause_collection / resume_collection queue a pause or resume command through config.request_mcp_command, so mcp holds no
+--     write on the paused column. An earlier build granted it; this revoke takes it back from an upgraded store.
+REVOKE UPDATE (paused) ON config.config_service FROM mcp;
 -- #5085: the fleet server-tag write tools run as mcp; these two single-table grants are the admin gate. Both
 --     tables are non-secret, and server_tags.id is an identity column (no sequence grant). V181 (#5750) put a
 --     statement-level reload-beacon trigger on each, so a tag write bumps config_service; the config_service column grant above covers it.
 GRANT INSERT, UPDATE, DELETE ON config.server_tags TO mcp;
 GRANT INSERT, UPDATE, DELETE ON config.server_tag_map TO mcp;
+-- #6227: the collector schedule tools (disable_collector, enable_collector, set_collector_frequency, set_collector_run_at,
+--     set_collector_retention) run as mcp and write the two non-secret schedule tables. Both carry a statement-level
+--     reload-beacon trigger that UPDATEs config_service.config_version as the caller; the column grant above covers it.
+--     The run-time table (V160) is skipped, with a warning, on a store the service has not upgraded that far.
+DO $do$
+BEGIN
+   IF pg_catalog.to_regclass('config.config_collector_schedules') IS NOT NULL THEN
+      REVOKE INSERT, UPDATE, DELETE ON config.config_collector_schedules FROM mcp;
+      GRANT INSERT (server_id, collector_name, enabled, frequency_minutes, retention_days) ON config.config_collector_schedules TO mcp;
+      GRANT UPDATE (enabled, frequency_minutes, retention_days) ON config.config_collector_schedules TO mcp;
+   ELSE
+      RAISE WARNING 'config.config_collector_schedules was not found, so its mcp grant was skipped. Run this script again after the service has upgraded the store.';
+   END IF;
+
+   IF pg_catalog.to_regclass('config.config_collector_run_times') IS NOT NULL THEN
+      REVOKE INSERT, UPDATE, DELETE ON config.config_collector_run_times FROM mcp;
+      GRANT INSERT (server_id, collector_name, run_at_minute) ON config.config_collector_run_times TO mcp;
+      GRANT UPDATE (run_at_minute) ON config.config_collector_run_times TO mcp;
+      GRANT DELETE ON config.config_collector_run_times TO mcp;
+   ELSE
+      RAISE WARNING 'config.config_collector_run_times was not found, so its mcp grant was skipped. Run this script again after the service has upgraded the store.';
+   END IF;
+END $do$;
 
 -- 3d-2. Alert History dismiss (#4843): the web dashboard's POST /api/alert-history/dismiss runs as viewer and
 --     writes `UPDATE config_alert_log SET dismissed = TRUE`. Column-level on exactly that one column, so viewer
@@ -1398,6 +1427,123 @@ GRANT EXECUTE ON FUNCTION config.create_notification_route(text, boolean, intege
 GRANT EXECUTE ON FUNCTION config.update_notification_route(integer, text[], text, boolean, integer, integer, boolean, integer) TO mcp;
 GRANT EXECUTE ON FUNCTION config.set_notification_route_destinations(integer, text[], text, text, text, text, text) TO mcp;
 COMMIT;
+
+-- #6230: the MCP incident tools queue analyze_now, purge_now, test_connect, pause and resume through this function, the only way the
+--     mcp role writes a command row. Same function, same text, as managed provisioning rebuilds on every start.
+CREATE OR REPLACE FUNCTION config.request_mcp_command(
+   p_command_type text,
+   p_server_id integer,
+   p_retention_days integer,
+   p_requested_by text)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+   v_type text := lower(btrim(COALESCE(p_command_type, '')));
+   v_args jsonb;
+   v_id bigint;
+   v_last_status text;
+   v_last_at timestamp;
+BEGIN
+   -- The only command types the mcp role may queue (#6230): the two the Viewer's pause and resume buttons queue, plus analyze_now,
+   -- purge_now and test_connect. Everything else the command plane runs (disable_server, reload, the plan and execute commands) stays
+   -- out of this function on purpose: it is the one way mcp writes a command row.
+   IF v_type NOT IN ('pause', 'resume', 'analyze_now', 'purge_now', 'test_connect') THEN
+      RAISE EXCEPTION 'That command type cannot be queued through this function.' USING ERRCODE = 'DL400';
+   END IF;
+   -- The one-request-at-a-time rule below reads the newest row of its kind with a fresh snapshot per statement. A transaction that
+   -- keeps one snapshot (REPEATABLE READ and up) could miss a row another session just queued, so it is refused.
+   IF current_setting('transaction_isolation') <> 'read committed' THEN
+      RAISE EXCEPTION 'This request must run at the READ COMMITTED isolation level.' USING ERRCODE = 'DL400';
+   END IF;
+   IF p_retention_days IS NOT NULL AND (v_type <> 'purge_now' OR p_retention_days < 1 OR p_retention_days > 3650) THEN
+      RAISE EXCEPTION 'retention_days is only for purge_now and must be 1 to 3650.' USING ERRCODE = 'DL400';
+   END IF;
+   IF v_type IN ('purge_now', 'pause', 'resume') THEN
+      IF p_server_id IS NOT NULL THEN
+         RAISE EXCEPTION 'This command takes no server.' USING ERRCODE = 'DL400';
+      END IF;
+   ELSIF p_server_id IS NULL OR NOT EXISTS (SELECT 1 FROM config.config_monitored_servers WHERE server_id = p_server_id) THEN
+      RAISE EXCEPTION 'No monitored server with that id.' USING ERRCODE = 'DL404';
+   END IF;
+   -- A connection test dials the server with its stored credentials, so it runs only against a server the service is monitoring.
+   IF v_type = 'test_connect' AND NOT EXISTS (SELECT 1 FROM config.config_monitored_servers WHERE server_id = p_server_id AND is_enabled) THEN
+      RAISE EXCEPTION 'A connection test runs only against an enabled server.' USING ERRCODE = 'DL400';
+   END IF;
+   IF v_type = 'purge_now' AND p_retention_days IS NOT NULL THEN
+      v_args := jsonb_build_object('retention_days', p_retention_days);
+   END IF;
+   -- A connection test is built HERE from the stored row. The caller supplies a server id and nothing else, so there is no
+   -- argument that carries a credential, a host or a connection string, and the password is the stored one (the service
+   -- tests it only against the server that holds it).
+   IF v_type = 'test_connect' THEN
+      SELECT jsonb_strip_nulls(jsonb_build_object(
+                'name', s.name, 'engine', s.engine, 'host', s.host, 'port', s.port, 'database', s.database,
+                'auth', s.auth, 'username', s.username, 'encryptedPassword', s.encrypted_password,
+                'readOnlyIntent', s.read_only_intent, 'trustServerCertificate', s.trust_server_certificate,
+                'encryptMode', s.encrypt_mode, 'multiSubnetFailover', s.multi_subnet_failover))
+        INTO v_args
+      FROM config.config_monitored_servers AS s
+      WHERE s.server_id = p_server_id;
+   END IF;
+   -- One request of a kind (per server where it has one) at a time, and not within 15 seconds of the last, so a holder of the
+   -- mcp login cannot fill the queue. The lock is a try-lock: a request that cannot take it at once answers busy and never waits.
+   IF NOT pg_try_advisory_xact_lock(6230, hashtext(v_type || ':' || COALESCE(p_server_id::text, ''))) THEN
+      RAISE EXCEPTION 'Another request of this kind is being queued right now (busy); try again shortly.' USING ERRCODE = 'DL423';
+   END IF;
+   SELECT c.status, c.created_at INTO v_last_status, v_last_at
+   FROM config.config_command AS c
+   WHERE c.command_type = v_type AND c.target_server_id IS NOT DISTINCT FROM p_server_id
+   ORDER BY c.command_id DESC
+   LIMIT 1;
+   IF v_last_status IN ('pending', 'in_progress') THEN
+      RAISE EXCEPTION 'The same request is already queued or running.' USING ERRCODE = 'DL409';
+   END IF;
+   IF v_last_at IS NOT NULL AND v_last_at > (now() AT TIME ZONE 'UTC') - interval '15 seconds' THEN
+      RAISE EXCEPTION 'The same request was made less than 15 seconds ago.' USING ERRCODE = 'DL429';
+   END IF;
+   -- The caller's p_requested_by is ignored (the parameter stays so an older caller still binds): every row this function queues is
+   -- stamped 'mcp', so a row cannot carry another actor's name.
+   INSERT INTO config.config_command (requested_by, command_type, target_server_id, args_json, status, created_at)
+   VALUES ('mcp', v_type, p_server_id, v_args, 'pending', (now() AT TIME ZONE 'UTC'))
+   RETURNING command_id INTO v_id;
+   RETURN v_id;
+END
+$fn$;
+REVOKE ALL ON FUNCTION config.request_mcp_command(text, integer, integer, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION config.request_mcp_command(text, integer, integer, text) FROM mcp;
+GRANT EXECUTE ON FUNCTION config.request_mcp_command(text, integer, integer, text) TO mcp;
+
+-- #6230: mcp holds no SELECT on config_command.result_json; it reads a command's status and result through
+--     config.read_mcp_command_result, which answers only for the command types the MCP tools queue. Owned by the store
+--     owner, pinned search_path, no dynamic SQL, granted to mcp only. NOT a versioned migration.
+CREATE OR REPLACE FUNCTION config.read_mcp_command_result(p_command_id bigint)
+RETURNS TABLE (
+   command_type text,
+   target_server_id integer,
+   status text,
+   requested_by text,
+   created_at timestamp,
+   claimed_at timestamp,
+   completed_at timestamp,
+   result_status text,
+   result_json jsonb)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+   SELECT c.command_type, c.target_server_id, c.status, c.requested_by, c.created_at, c.claimed_at, c.completed_at,
+          c.result_status, c.result_json
+   FROM config.config_command AS c
+   WHERE c.command_id = p_command_id
+     AND c.command_type IN ('analyze_now', 'purge_now', 'test_connect', 'pause', 'resume', 'snapshot_now');
+$fn$;
+REVOKE ALL ON FUNCTION config.read_mcp_command_result(bigint) FROM PUBLIC;
+REVOKE ALL ON FUNCTION config.read_mcp_command_result(bigint) FROM mcp;
+GRANT EXECUTE ON FUNCTION config.read_mcp_command_result(bigint) TO mcp;
 
 -- The store's own password rules for every role but the owner: a BEFORE INSERT OR UPDATE trigger on
 --     config_monitored_servers. A new or changed password that starts with env: or file: (a reference) is refused:

@@ -1344,7 +1344,13 @@ ALTER ROLE byo SET pg_stat_statements.track_utility = on;", ct);
 
             /* #5750: EVERY non-secret column, not the first, so a column a later rung adds (the route scope columns, V181) is
                proven readable by the viewer and mcp roles after the migration pass and the provisioning that follows it. */
-            foreach (var column in acl.NonSecretColumns)
+            /* #6230: the mcp role is not granted the columns DarlingManagedRoles.McpWithheldColumns names (result_json reaches it only
+               through config.read_mcp_command_result). */
+            var withheld = string.Equals(role, "mcp", StringComparison.Ordinal)
+                && DarlingManagedRoles.McpWithheldColumns.TryGetValue(acl.Table, out var withheldColumns)
+                    ? withheldColumns
+                    : Array.Empty<string>();
+            foreach (var column in acl.NonSecretColumns.Where(c => !withheld.Contains(c, StringComparer.Ordinal)))
             {
                 Assert.True(await OwnerScalarAsync<bool>(owner,
                     $"SELECT pg_catalog.has_column_privilege('{role}', 'config.{acl.Table}', '{column}', 'SELECT')", ct),

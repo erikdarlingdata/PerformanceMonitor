@@ -107,7 +107,7 @@ public sealed class ProvisionRolesAclDriftTests
                bug (a BYO viewer seat is denied a read a managed seat serves); a column in the .sql but not
                C# is the opposite — a BYO viewer reading something managed mode deliberately withholds. */
             Assert.Equal(
-                acl.NonSecretColumns.OrderBy(c => c, StringComparer.Ordinal),
+                ExpectedColumns(acl, role).OrderBy(c => c, StringComparer.Ordinal),
                 sqlColumns.OrderBy(c => c, StringComparer.Ordinal));
         }
     }
@@ -518,6 +518,12 @@ public sealed class ProvisionRolesAclDriftTests
             .Select(m => $"{m.Groups["role"].Value}.{m.Groups["setting"].Value}")
             .ToHashSet(StringComparer.Ordinal);
 
+    /// <summary>The columns <paramref name="role"/> is granted: the non-secret ones, less what the mcp role is denied (#6230).</summary>
+    private static IEnumerable<string> ExpectedColumns(ViewerSecretTableAcl acl, string role) =>
+        string.Equals(role, McpRole, StringComparison.Ordinal) && DarlingManagedRoles.McpWithheldColumns.TryGetValue(acl.Table, out var withheld)
+            ? acl.NonSecretColumns.Where(c => !withheld.Contains(c, StringComparer.Ordinal))
+            : acl.NonSecretColumns;
+
     /// <summary>
     /// The one comparison the real assertions and the meta-test share: does this .sql text's carve for
     /// <paramref name="role"/> match <see cref="DarlingManagedRoles.ViewerRestrictedConfigTables"/>
@@ -534,7 +540,7 @@ public sealed class ProvisionRolesAclDriftTests
         foreach (var acl in DarlingManagedRoles.ViewerRestrictedConfigTables)
         {
             if (!granted.TryGetValue(acl.Table, out var sqlColumns) ||
-                !sqlColumns.ToHashSet(StringComparer.Ordinal).SetEquals(acl.NonSecretColumns))
+                !sqlColumns.ToHashSet(StringComparer.Ordinal).SetEquals(ExpectedColumns(acl, role)))
             {
                 return false;
             }

@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -103,10 +104,10 @@ public static class CollectorScheduleOverlay
 
         var schedule = CollectorSchedulePresets.BuildDefaultSchedule();
 
-        ApplyScope(schedule, allOverrides.Where(o => o.ServerId is null));
+        ApplyScope(schedule, allOverrides.Where(o => o.ServerId is null), serverId is null);
         if (serverId is int sid)
         {
-            ApplyScope(schedule, allOverrides.Where(o => o.ServerId == sid));
+            ApplyScope(schedule, allOverrides.Where(o => o.ServerId == sid), true);
         }
 
         ApplyRunTimes(schedule, runTimes.Where(r => r.ServerId == serverId));
@@ -136,7 +137,7 @@ public static class CollectorScheduleOverlay
         }
     }
 
-    private static void ApplyScope(List<CollectorScheduleEditItem> schedule, IEnumerable<CollectorScheduleRow> scopeRows)
+    private static void ApplyScope(List<CollectorScheduleEditItem> schedule, IEnumerable<CollectorScheduleRow> scopeRows, bool editedScope)
     {
         foreach (var row in scopeRows)
         {
@@ -164,7 +165,16 @@ public static class CollectorScheduleOverlay
                 item.DatabasesText = FormatDatabases(row.Databases);
             }
 
-            item.Enabled = row.Enabled;
+            /* V206 (#6227): a NULL enabled is "inherit", so it leaves the value the lower layer set. On the scope being edited it
+               is remembered, so the Save writes NULL back instead of freezing what it inherits. */
+            if (row.Enabled is bool enabled)
+            {
+                item.Enabled = enabled;
+            }
+            else if (editedScope)
+            {
+                item.EnabledInherited = true;
+            }
         }
     }
 
@@ -196,21 +206,17 @@ public static class CollectorScheduleOverlay
 
         foreach (var item in edited)
         {
-            if (item.FrequencyMinutes < 0)
-            {
-                error = $"'{item.Name}': frequency (minutes) can't be negative. Use 0 to collect once on server load.";
-                return false;
-            }
-
-            if (CollectorDeltaCalculator.DeltaFrequencyError(item.Name, item.FrequencyMinutes) is string frequencyError)
+            /* #6227: the bounds are CollectorScheduleBounds', the ones the service's collector-schedule commands (and so the MCP tools)
+               refuse by, so a value this window accepts is a value they accept and the reverse. */
+            if (CollectorScheduleBounds.FrequencyError(item.Name, item.FrequencyMinutes) is string frequencyError)
             {
                 error = frequencyError;
                 return false;
             }
 
-            if (item.RetentionDays < 1)
+            if (CollectorScheduleBounds.RetentionError(item.Name, item.RetentionDays) is string retentionError)
             {
-                error = $"'{item.Name}': retention (days) must be at least 1.";
+                error = retentionError;
                 return false;
             }
 
@@ -294,7 +300,7 @@ public static class CollectorScheduleOverlay
             /* A blank scope on a fleet row writes NULL, not an empty array: at fleet level there is
                no lower layer to opt back out of, and NULL is this table's "column not overridden". */
             rows.Add(new CollectorScheduleRow(
-                null, item.Name, item.FrequencyMinutes, item.RetentionDays, item.Enabled,
+                null, item.Name, item.FrequencyMinutes, item.RetentionDays, item.EnabledInherited ? null : item.Enabled,
                 databases.Count > 0 ? databases : null));
         }
 
@@ -319,7 +325,7 @@ public static class CollectorScheduleOverlay
             /* #4938: the run time does not ride these rows (ToRunTimeChanges writes it to its own table), so this Save
                carries no run time and leaves every one as it was. */
             .Select(item => new CollectorScheduleRow(
-                serverId, item.Name, item.FrequencyMinutes, item.RetentionDays, item.Enabled,
+                serverId, item.Name, item.FrequencyMinutes, item.RetentionDays, item.EnabledInherited ? null : item.Enabled,
                 ParseDatabases(item.DatabasesText)))
             .ToList();
     }

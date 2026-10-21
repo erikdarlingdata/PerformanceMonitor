@@ -142,7 +142,7 @@ internal static class DarlingMcpInstructions
     /// are identical, so a new tool moves this or fails there.
     /// </summary>
     private const string CatalogCensus =
-        "This server exposes 223 tools. 111 are the same names Lite exposes. The remaining 112 are unique to Darling: " +
+        "This server exposes 243 tools. 111 are the same names Lite exposes. The remaining 132 are unique to Darling: " +
         "thirty-five are the PostgreSQL reads (`get_pg_*`), plus Custom Views, custom-alert-rule, alert-tuning, server/query-tag, " +
         "onboarding and investigation-wait tools, and central-store-only reads (`get_fleet_overview`, `get_ag_health` — Availability Groups — " +
         "`get_sweep_reports`, `get_store_metrics`, `get_store_log`). `get_blocking` = Lite's `get_blocked_process_reports`.";
@@ -191,7 +191,7 @@ internal static class DarlingMcpInstructions
 
         ## What this server can and cannot do
 
-        This server reads previously collected performance data. It cannot run SQL on a monitored server, kill sessions, change a monitored server's settings, alter collected data, or run ad-hoc diagnostics.
+        This server reads previously collected performance data. It cannot run SQL on a monitored server or run ad-hoc diagnostics; only the plan force, plan evict and session kill tools act on one. With writes on, purge_now deletes history older than the retention given.
 
         """ + DarlingMcpWritePolicy.InstructionsLine;
 
@@ -218,7 +218,7 @@ internal static class DarlingMcpInstructions
 
         ### Asking about a past window
 
-        Every tool below that takes `hours_back` also takes `as_of`: an ISO-8601 UTC instant that moves the window's end off "now"; `hours_back` stays the length. Use it for any past-time question, and do not substitute a wider `hours_back`: for an aggregate read a wider window is a different answer, not the same answer with more rows.
+        Every tool below that takes `hours_back` also takes `as_of`: an ISO-8601 UTC instant that moves the window's end off "now"; `hours_back` stays the length. Use it for past-time questions, not a wider `hours_back` (a different aggregate).
 
         - Accepted: full ISO-8601 with an offset, or a bare `2026-08-19` (midnight UTC). An unparseable or future `as_of` is refused, not read as "now"; an older one returns the normal `empty` / `unavailable`.
         - Latest-snapshot reads take no `as_of` — read `captured_at` / `age_seconds`. `get_pvs_stats`, `get_fleet_overview`, `get_store_metrics` never take it.
