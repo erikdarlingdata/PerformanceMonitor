@@ -84,6 +84,7 @@ public partial class AddServerDialog : Window
         DescriptionTextBox.Text = existing.Description ?? "";
         DatabaseNameBox.Text = existing.DatabaseName ?? "";
         UtilityDatabaseBox.Text = existing.UtilityDatabase ?? "";
+        QueryStoreReplicaBox.Text = existing.QueryStoreReplica ?? "";
         ReadOnlyIntentCheckBox.IsChecked = existing.ReadOnlyIntent;
         MultiSubnetFailoverCheckBox.IsChecked = existing.MultiSubnetFailover;
         MonthlyCostBox.Text = existing.MonthlyCostUsd.ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -768,6 +769,7 @@ public partial class AddServerDialog : Window
                 AddedServer.Description = DescriptionTextBox.Text.Trim();
                 AddedServer.DatabaseName = string.IsNullOrWhiteSpace(DatabaseNameBox.Text) ? null : DatabaseNameBox.Text.Trim();
                 AddedServer.UtilityDatabase = string.IsNullOrWhiteSpace(UtilityDatabaseBox.Text) ? null : UtilityDatabaseBox.Text.Trim();
+                AddedServer.QueryStoreReplica = string.IsNullOrWhiteSpace(QueryStoreReplicaBox.Text) ? null : QueryStoreReplicaBox.Text.Trim();
                 AddedServer.ReadOnlyIntent = ReadOnlyIntentCheckBox.IsChecked == true;
                 AddedServer.MultiSubnetFailover = MultiSubnetFailoverCheckBox.IsChecked == true;
                 if (decimal.TryParse(MonthlyCostBox.Text, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var editCost) && editCost >= 0)
@@ -820,6 +822,7 @@ public partial class AddServerDialog : Window
                     Description = DescriptionTextBox.Text.Trim(),
                     DatabaseName = string.IsNullOrWhiteSpace(DatabaseNameBox.Text) ? null : DatabaseNameBox.Text.Trim(),
                     UtilityDatabase = string.IsNullOrWhiteSpace(UtilityDatabaseBox.Text) ? null : UtilityDatabaseBox.Text.Trim(),
+                    QueryStoreReplica = string.IsNullOrWhiteSpace(QueryStoreReplicaBox.Text) ? null : QueryStoreReplicaBox.Text.Trim(),
                     ReadOnlyIntent = ReadOnlyIntentCheckBox.IsChecked == true,
                     MultiSubnetFailover = MultiSubnetFailoverCheckBox.IsChecked == true,
                     MonthlyCostUsd = monthlyCost,
