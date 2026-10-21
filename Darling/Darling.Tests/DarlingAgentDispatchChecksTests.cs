@@ -9,13 +9,18 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using Npgsql;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
 
+/* #1776 own-store: the one gated test here mints its own scratch database through ScratchPostgres and never touches another
+   database on the server. */
 /// <summary>
 /// #6263 (part of #5632): the setups where <c>mcp.allowInvestigations</c> is on but no agent can work, as the start-up log
 /// and <c>--validate-config</c> report them, and the connect-time remediation login lines.
@@ -46,7 +51,7 @@ public sealed class DarlingAgentDispatchChecksTests
     }
 
     [Fact]
-    public void McpOff_IsAProblem_ThatNamesTheFix()
+    public void McpOff_IsAWarning_ThatNamesTheFix()
     {
         var found = Messages(On(), enabled: false, GoodToken, null, routes: 1);
         var message = Assert.Single(found);
@@ -55,7 +60,7 @@ public sealed class DarlingAgentDispatchChecksTests
     }
 
     [Fact]
-    public void NoToken_IsAProblem_ThatNamesTheKeys()
+    public void NoToken_IsAWarning_ThatNamesTheKeys()
     {
         var message = Assert.Single(Messages(On(), enabled: true, token: "", unreadable: null, routes: 1));
         Assert.Contains("mcp.network.encryptedToken", message, StringComparison.Ordinal);
@@ -63,14 +68,14 @@ public sealed class DarlingAgentDispatchChecksTests
     }
 
     [Fact]
-    public void ShortToken_IsAProblem()
+    public void ShortToken_IsAWarning()
     {
         var message = Assert.Single(Messages(On(), enabled: true, token: "short", unreadable: null, routes: 1));
         Assert.Contains("investigation tools stay off", message, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void UnreadableToken_IsAProblem_ThatSaysWhy()
+    public void UnreadableToken_IsAWarning_ThatSaysWhy()
     {
         var message = Assert.Single(Messages(On(), enabled: true, token: "", unreadable: "the file is missing", routes: 1));
         Assert.Contains("the file is missing", message, StringComparison.Ordinal);
@@ -87,11 +92,11 @@ public sealed class DarlingAgentDispatchChecksTests
     }
 
     [Fact]
-    public void NoAgentRoute_IsAHint_NotAProblem()
+    public void NoAgentRoute_IsANote_NotAWarning()
     {
-        var hints = Messages(On(), enabled: true, GoodToken, null, routes: 0, DarlingAgentDispatchChecks.AgentDispatchSeverity.Hint);
-        Assert.Equal(DarlingAgentDispatchChecks.NoAgentRouteMessage, Assert.Single(hints));
-        Assert.Empty(Messages(On(), enabled: true, GoodToken, null, routes: 0, DarlingAgentDispatchChecks.AgentDispatchSeverity.Problem));
+        var notes = Messages(On(), enabled: true, GoodToken, null, routes: 0, DarlingAgentDispatchChecks.AgentDispatchSeverity.Note);
+        Assert.Equal(DarlingAgentDispatchChecks.NoAgentRouteMessage, Assert.Single(notes));
+        Assert.Empty(Messages(On(), enabled: true, GoodToken, null, routes: 0, DarlingAgentDispatchChecks.AgentDispatchSeverity.Warning));
     }
 
     [Fact]
@@ -119,20 +124,17 @@ public sealed class DarlingAgentDispatchChecksTests
     }
 
     [Fact]
-    public async Task ValidateConfig_Seam_ReportsProblemsOnError_AndExitsAsAProblem()
+    public async Task ValidateConfig_Seam_PrintsWarningsOnOutput_ForEveryConfigThatRanBefore()
     {
         var config = new DarlingConfig { Mcp = On(writes: true) };
         config.Mcp.Enabled = false;
         var output = new StringWriter();
-        var error = new StringWriter();
 
-        var problem = await DarlingCliCommands.ReportAgentDispatchAsync(config, output, error, TestContext.Current.CancellationToken);
+        await DarlingCliCommands.ReportAgentDispatchAsync(config, output, TestContext.Current.CancellationToken);
 
-        Assert.True(problem);
-        Assert.Contains("Agent dispatch cannot work", error.ToString(), StringComparison.Ordinal);
-        Assert.Contains(DarlingAgentDispatchChecks.WritesWinMessage, error.ToString(), StringComparison.Ordinal);
-        Assert.Contains(DarlingAgentDispatchChecks.McpOffMessage, error.ToString(), StringComparison.Ordinal);
-        Assert.Equal("", output.ToString());
+        var lines = output.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        Assert.Contains("WARNING: " + DarlingAgentDispatchChecks.WritesWinMessage, lines);
+        Assert.Contains("WARNING: " + DarlingAgentDispatchChecks.McpOffMessage, lines);
     }
 
     [Fact]
@@ -140,25 +142,69 @@ public sealed class DarlingAgentDispatchChecksTests
     {
         var config = new DarlingConfig();
         var output = new StringWriter();
-        var error = new StringWriter();
 
-        var problem = await DarlingCliCommands.ReportAgentDispatchAsync(config, output, error, TestContext.Current.CancellationToken);
+        await DarlingCliCommands.ReportAgentDispatchAsync(config, output, TestContext.Current.CancellationToken);
 
-        Assert.False(problem);
-        Assert.Equal("", output.ToString() + error.ToString());
+        Assert.Equal("", output.ToString());
     }
 
     [Fact]
-    public async Task ValidateConfig_Seam_NoToken_NamesTheKeys()
+    public async Task ValidateConfig_Seam_NoToken_WarnsAndNamesTheKeys()
     {
         var config = new DarlingConfig { Mcp = On() };
         config.Mcp.Enabled = true;
-        var error = new StringWriter();
+        var output = new StringWriter();
 
-        var problem = await DarlingCliCommands.ReportAgentDispatchAsync(config, new StringWriter(), error, TestContext.Current.CancellationToken);
+        await DarlingCliCommands.ReportAgentDispatchAsync(config, output, TestContext.Current.CancellationToken);
 
-        Assert.True(problem);
-        Assert.Contains(DarlingAgentDispatchChecks.NoTokenMessage, error.ToString(), StringComparison.Ordinal);
+        Assert.Contains("WARNING: " + DarlingAgentDispatchChecks.NoTokenMessage, output.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ValidateConfigAsync_WithAllThreeBadSetups_PrintsWarnings_AndStillExitsZero_Gated()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to run the live --validate-config exit-code test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        /* #1776 own-store: ScratchPostgres makes this class's own database. */
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            await using var switchOff = new NpgsqlCommand("UPDATE config.config_service SET mcp_enabled = FALSE WHERE id = 1", connection);
+            await switchOff.ExecuteNonQueryAsync(ct);
+        }
+
+        var root = Directory.CreateTempSubdirectory("darling-validate-dispatch-");
+        try
+        {
+            /* Investigations and writes both on, no token, MCP off (the store's switch is off): the three
+               setups that ran before this check existed. An upgrade must not start failing a validation on them. */
+            var configPath = Path.Combine(root.FullName, "darling.json");
+            await File.WriteAllTextAsync(configPath, $$"""
+                {
+                  "postgres": { "connectionString": {{JsonSerializer.Serialize(scratch.ConnectionString)}} },
+                  "mcp": { "enabled": false, "allowInvestigations": true, "allowWrites": true },
+                  "servers": [ { "name": "alpha-sql-01", "host": "alpha-sql-01" } ]
+                }
+                """);
+
+            var output = new StringWriter();
+            var error = new StringWriter();
+            var exit = await DarlingCliCommands.ValidateConfigAsync(configPath, output, error, ct);
+
+            Assert.Equal(0, exit);
+            Assert.Contains("WARNING: " + DarlingAgentDispatchChecks.WritesWinMessage, output.ToString(), StringComparison.Ordinal);
+            Assert.Contains("WARNING: " + DarlingAgentDispatchChecks.McpOffMessage, output.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("cannot work", error.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(root.FullName, recursive: true);
+        }
     }
 
     [Fact]

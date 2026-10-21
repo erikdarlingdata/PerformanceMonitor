@@ -20,20 +20,21 @@ namespace PerformanceMonitor.Darling.Service;
 /// <summary>
 /// The start-up and <c>--validate-config</c> checks for agent dispatch (#6263, part of #5632): setups where
 /// <c>mcp.allowInvestigations</c> is on but no agent can work. One pure decision, so the service log and the CLI verb
-/// say the same thing. A <see cref="AgentDispatchSeverity.Problem"/> is a setup that cannot work. A
-/// <see cref="AgentDispatchSeverity.Hint"/> is a setup that works but will open no request yet. Each message says
-/// what to change. Nothing here changes how the service starts: the tools stay off or served exactly as
-/// <see cref="DarlingMcpWritePolicy"/> decides.
+/// say the same thing. A <see cref="AgentDispatchSeverity.Warning"/> is a setup that cannot serve an agent as written. A
+/// <see cref="AgentDispatchSeverity.Note"/> is a setup that works but will open no request yet. Each message says
+/// what to change. Nothing here changes how the service starts or what <c>--validate-config</c> exits with: every one of
+/// these configs ran before this check existed (writes win and dispatch is simply not served), so an upgrade must not
+/// start failing on them. The tools stay off or served exactly as <see cref="DarlingMcpWritePolicy"/> decides.
 /// </summary>
 internal static class DarlingAgentDispatchChecks
 {
     internal enum AgentDispatchSeverity
     {
-        /// <summary>The setup cannot work as written.</summary>
-        Problem,
+        /// <summary>The setup cannot serve an agent as written. Printed as a warning; it never changes an exit code.</summary>
+        Warning,
 
         /// <summary>The setup works, but nothing will happen until the operator adds the missing piece.</summary>
-        Hint,
+        Note,
     }
 
     internal readonly record struct AgentDispatchFinding(AgentDispatchSeverity Severity, string Message);
@@ -74,12 +75,12 @@ internal static class DarlingAgentDispatchChecks
 
         if (mcp.AllowWrites)
         {
-            findings.Add(new(AgentDispatchSeverity.Problem, WritesWinMessage));
+            findings.Add(new(AgentDispatchSeverity.Warning, WritesWinMessage));
         }
 
         if (!mcpEnabled)
         {
-            findings.Add(new(AgentDispatchSeverity.Problem, McpOffMessage));
+            findings.Add(new(AgentDispatchSeverity.Warning, McpOffMessage));
         }
 
         if (!mcp.AllowWrites)
@@ -87,25 +88,25 @@ internal static class DarlingAgentDispatchChecks
             if (tokenUnreadable is not null)
             {
                 findings.Add(new(
-                    AgentDispatchSeverity.Problem,
+                    AgentDispatchSeverity.Warning,
                     "mcp.allowInvestigations is on, but the MCP bearer token could not be read (" + tokenUnreadable +
                     "), so the investigation tools stay off. Fix mcp.network.encryptedToken or mcp.network.token."));
             }
             else if (string.IsNullOrWhiteSpace(bearerToken))
             {
-                findings.Add(new(AgentDispatchSeverity.Problem, NoTokenMessage));
+                findings.Add(new(AgentDispatchSeverity.Warning, NoTokenMessage));
             }
             else if (DarlingHostBinding.DescribeTokenProblem(bearerToken) is { } tokenProblem)
             {
                 findings.Add(new(
-                    AgentDispatchSeverity.Problem,
+                    AgentDispatchSeverity.Warning,
                     "mcp.allowInvestigations is on, but the MCP bearer token " + tokenProblem +
                     ", so the investigation tools stay off. Set a longer mcp.network.encryptedToken or mcp.network.token."));
             }
 
             if (agentRouteCount == 0)
             {
-                findings.Add(new(AgentDispatchSeverity.Hint, NoAgentRouteMessage));
+                findings.Add(new(AgentDispatchSeverity.Note, NoAgentRouteMessage));
             }
         }
 
