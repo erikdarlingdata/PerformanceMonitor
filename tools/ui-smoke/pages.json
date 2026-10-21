@@ -29,11 +29,7 @@
       "expect": {
         "panels": [
           {
-            "title": "CPU Utilization",
-            "state": "data"
-          },
-          {
-            "title": "Memory",
+            "title": "Overview timeline",
             "state": "data"
           },
           {
@@ -44,6 +40,10 @@
             "title": "Analysis Findings",
             "state": "data"
           }
+        ],
+        "strips": [
+          { "key": "cpu", "state": "data" },
+          { "key": "memory", "state": "data" }
         ]
       }
     },
