@@ -36,6 +36,9 @@ export const CLOSED_CLASS = "plan-cell";
 /** What each open host is watching, so closing the panel (or drawing it again) can let go of every observer. */
 const docked = new WeakMap();
 
+/** The open panels of each row (a row can hold a History panel and a Plan panel at once), so the row is sized for all of them together. */
+const rowPanels = new WeakMap();
+
 /**
  * Where the panel sits inside the row so that it covers the wrap's visible area. All numbers are pixels: the wrap's visible
  * left edge (its box left plus its border) against the row's left edge. The panel is never wider than the row and never
@@ -58,12 +61,12 @@ export function dockPanelUnderRow(host, panel) {
   const spacer = el("div", { class: "plan-spacer", "aria-hidden": "true" });
   host.appendChild(spacer);
   host.appendChild(panel);
-  const state = { observer: null, row: null, wrap: null, onScroll: null, seen: false };
+  const state = { host, spacer, panel, observer: null, row: null, wrap: null, onScroll: null, seen: false, sized: null };
   docked.set(host, state);
   const fit = () => {
     if (docked.get(host) !== state) return;
     if (state.seen && !host.isConnected) { release(host); return; }
-    fitSpacer(host, spacer, panel);
+    fitRow(host, state);
     watchRowAndWrap(host, panel, state);
     pinPanel(host, panel);
   };
@@ -85,6 +88,12 @@ function release(host) {
   const state = docked.get(host);
   if (!state) return;
   docked.delete(host);
+  if (state.sized) {
+    const list = rowPanels.get(state.sized);
+    if (list) rowPanels.set(state.sized, list.filter((x) => x !== state));
+    /* The panels still open in that row were sized for this one too, and the row may not change height by itself, so no observer would tell them. */
+    sizeRow(state.sized);
+  }
   if (state.observer) state.observer.disconnect();
   if (state.wrap && state.onScroll) state.wrap.removeEventListener("scroll", state.onScroll);
 }
@@ -126,14 +135,46 @@ function pinPanel(host, panel) {
 }
 
 /**
- * Sizes the spacer so the row holds its own cells plus the panel: the row's height without the spacer, less what the
- * cell's own button already takes, plus the panel's height. Does nothing for a cell that is not in a row yet.
+ * Sizes the row for every panel open in it (#6359). Each open panel's cell holds a spacer; the panels are drawn over the
+ * bottom of the row, stacked in column order (the last one at the very bottom), so each spacer must make its cell the row's
+ * own height plus ALL the panels' heights. The row's own height is measured with every spacer at zero: reading it with a
+ * spacer in place counted the other panel's spacer, so two open panels made each other taller on every observer callback
+ * and the row grew without end. One panel alone sizes as before. Does nothing for a cell that is not in a row yet.
  */
-function fitSpacer(host, spacer, panel) {
+function fitRow(host, state) {
   const row = typeof host.closest === "function" ? host.closest("tr") : null;
   if (!row || !host.isConnected) return;
-  spacer.style.height = "0px";
+  if (state.sized !== row) {
+    if (state.sized) {
+      const old = rowPanels.get(state.sized);
+      if (old) rowPanels.set(state.sized, old.filter((x) => x !== state));
+    }
+    state.sized = row;
+    rowPanels.set(row, (rowPanels.get(row) || []).concat(state));
+  }
+  sizeRow(row);
+}
+
+/** Sizes every open panel's spacer in `row`, and the panels' offsets from the row's bottom. */
+function sizeRow(row) {
+  if (!row.isConnected) return;
+  const cellIndex = (s) => {
+    const td = s.host.closest("td");
+    return td ? Array.prototype.indexOf.call(row.children, td) : 0;
+  };
+  const list = (rowPanels.get(row) || [])
+    .filter((s) => docked.get(s.host) === s && s.host.isConnected && s.host.closest("tr") === row)
+    .sort((a, b) => cellIndex(a) - cellIndex(b));
+  rowPanels.set(row, list);
+  for (const s of list) s.spacer.style.height = "0px";
   const rowHeight = row.offsetHeight;
-  const own = host.offsetHeight;
-  spacer.style.height = Math.max(0, rowHeight - own) + panel.offsetHeight + "px";
+  const own = list.map((s) => s.host.offsetHeight);
+  const heights = list.map((s) => s.panel.offsetHeight);
+  const total = heights.reduce((a, b) => a + b, 0);
+  let below = total;
+  list.forEach((s, i) => {
+    below -= heights[i];
+    s.spacer.style.height = Math.max(0, rowHeight - own[i]) + total + "px";
+    s.panel.style.bottom = below + "px";
+  });
 }

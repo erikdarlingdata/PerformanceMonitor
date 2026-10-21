@@ -135,6 +135,49 @@ const scenarios = {
     out.noDb = p.render({ full_name: "dbo.usp_Ship" }).textContent;
     out.noHash = q.render({ database_name: "Orders" }).textContent;
   },
+  /* #6359: the panel's notice states the bucket width and carries none of the read's MCP parameter advice. */
+  async mcpAdviceNote() {
+    const advice = "Each point summarizes the collections in one 1-hour bucket. The automatic width gives about 24 points; pass bucket_minutes (1-1440) for another width, or narrow hours_back for finer points.";
+    respond({ ...procTrend(), bucket: "1 hour", bucket_minutes: 60, aggregate_note: advice });
+    const cell = mod.statsHistoryColumn("procedures", "srv-a", 24).render(procRow);
+    cell.byText("History").click();
+    await flush();
+    out.notices = cell.all((n) => n.className === "strip notice").map((n) => n.textContent);
+    out.queryNotices = await (async () => {
+      respond({ hours_back: 24, trend: [{ collection_time: "2026-03-04T05:00:00", avg_cpu_ms: 40 }], bucket: "per-collection", bucket_minutes: null, aggregate_note: advice });
+      const q = mod.statsHistoryColumn("queries", "srv-a", 24).render(queryRow);
+      q.byText("History").click();
+      await flush();
+      return q.all((n) => n.className === "strip notice").map((n) => n.textContent);
+    })();
+    out.widths = [mod.bucketWidthText?.({ bucket_minutes: 1 }), mod.bucketWidthText?.({ bucket_minutes: 10 }), mod.bucketWidthText?.({ bucket_minutes: 60 }), mod.bucketWidthText?.({ bucket_minutes: 360 }), mod.bucketWidthText?.({ bucket_minutes: 1440 }), mod.bucketWidthText?.({ bucket: "per-collection", bucket_minutes: null }), mod.bucketWidthText?.({})];
+  },
+  /* #6359: "Past 5 minutes" is read over the whole hour the grid ranked over. The row's History must not be cut to the 5 minutes. */
+  async fiveMinuteRange() {
+    const util = await import(pathToFileURL(scratch + "/util.js").href);
+    const endMs = Date.parse("2026-03-04T08:00:00Z");
+    util.setActiveRange({ server: "srv-a", hours: 1, startMs: endMs - 5 * 60000, endMs, asOf: "2026-03-04T08:00:00Z" });
+    /* Points 40 and 20 minutes before the end: inside the hour the grid ranked over, outside the 5 minutes picked. */
+    respond({
+      ...procTrend(), hours_back: 1,
+      trend: [
+        { time: "2026-03-04T07:20:00Z", elapsed_ms_per_second: 200, executions_per_second: 4, avg_cpu_ms: 12.5 },
+        { time: "2026-03-04T07:40:00Z", elapsed_ms_per_second: 100, executions_per_second: 2, avg_cpu_ms: 9 },
+      ],
+    });
+    const cell = mod.statsHistoryColumn("procedures", "srv-a", 1).render(procRow);
+    cell.byText("History").click();
+    await flush();
+    Object.assign(out, query(0));
+    out.empty = cell.all((n) => n.className === "strip empty").map((n) => n.textContent);
+    out.points = chartsNow().slice(-1)[0]?.points.length ?? 0;
+    out.notices = cell.all((n) => n.className === "strip notice").map((n) => n.textContent);
+    /* A range of whole hours is the same window as the grid's: no note. */
+    util.setActiveRange({ server: "srv-a", hours: 1, startMs: endMs - 3600000, endMs, asOf: "2026-03-04T08:00:00Z" });
+    out.wholeHourNote = (util.widenedWindowNote?.(1) ?? null);
+    util.setActiveRange(null);
+    out.presetNote = (util.widenedWindowNote?.(1) ?? null);
+  },
   async points() {
     out.points = mod.procedurePoints(procTrend().trend);
     out.none = mod.procedurePoints(null);

@@ -582,6 +582,39 @@ export function windowFromHours(hours) {
   return { windowStart: windowEnd - h * 3600000, windowEnd };
 }
 
+/**
+ * #6359: the window a panel draws when it reads the WHOLE hours the grid ranked over (a row's History; see readTool's
+ * `wholeWindow`): [end - hours, end], where end is the custom range's end (or now), not the exact pair the reader picked.
+ * Without a custom range it is windowFromHours's window.
+ */
+export function wholeWindowFromHours(hours) {
+  const h = Number(hours);
+  if (!isFinite(h) || h < 1) return null;
+  if (liveRange() && h === activeRange.hours) {
+    const windowEnd = activeRange.asOf ? activeRange.endMs : Date.now();
+    return { windowStart: windowEnd - h * 3600000, windowEnd };
+  }
+  return windowFromHours(hours);
+}
+
+/**
+ * #6359: the sentence a History panel owes when the window it reads is wider than the range the reader picked, or null when
+ * they are the same (a preset, or a range of whole hours). The grids rank over whole hours back from the end of the range, so
+ * "Past 5 minutes" ranks over an hour; History reads that same window (readTool's `wholeWindow`), and says so here.
+ */
+export function widenedWindowNote(hours) {
+  const range = liveRange();
+  const h = Number(hours);
+  if (!range || !isFinite(h) || h < 1 || h !== range.hours) return null;
+  if (h * 3600000 - (range.endMs - range.startMs) < 60000) return null;
+  const end = range.asOf ? range.endMs : Date.now();
+  const at = (ms) => localTime(new Date(ms).toISOString());
+  return (
+    "This history covers the window the grid ranked over, " + at(end - h * 3600000) + " to " + (range.asOf ? at(end) : "now") +
+    ", which is wider than the range you picked (" + at(range.startMs) + " to " + (range.asOf ? at(range.endMs) : "now") + ")."
+  );
+}
+
 /* ─────────────────────────── value formatters ─────────────────────────── */
 
 /* Axis tick labels (#6158). A chart's tick step is a nice 1, 2 or 5 times a power of ten, so on a small range it is 0.2 or
@@ -1139,9 +1172,11 @@ export function alertDeliveryState(a) {
   return ALERT_STATE_LABELS[a.notification_type] || null;
 }
 
-/** GET a read-only tool by its MCP name with query-string params. `signal` — see apiGet (#4191). */
-export function readTool(tool, params, signal) {
-  const plan = planCustomRange(tool, params);
+/** GET a read-only tool by its MCP name with query-string params. `signal` — see apiGet (#4191). `options.wholeWindow` (#6359): under
+ *  a custom range the read is still anchored at the range's end, but its rows are NOT cut to the exact picked pair, so a read
+ *  that answers over the whole hours the grid ranked over (a row's History) shows all of that window. */
+export function readTool(tool, params, signal, options) {
+  const plan = planCustomRange(tool, params, !!(options && options.wholeWindow));
   return apiGetJoined("/api/read/" + tool + buildQuery(withDatabaseFilter(tool, plan.params)), signal)
     .then(localizeWindowNote)
     .then((res) => finishCustomRange(res, plan));
@@ -1222,7 +1257,7 @@ export function activeRangeStamp() {
 /* Marks the retry readWithinKeptHistory sends for fewer hours, with the hours the read first asked for. */
 const NARROWED_FROM = Symbol("narrowedFrom");
 
-function planCustomRange(tool, params) {
+function planCustomRange(tool, params, wholeWindow) {
   const range = liveRange();
   const narrowedFrom = params ? params[NARROWED_FROM] : undefined;
   const asked = narrowedFrom != null ? Number(narrowedFrom) : Number(params && params.hours);
@@ -1231,6 +1266,7 @@ function planCustomRange(tool, params) {
   }
   if (READS_WITHOUT_AS_OF.has(tool)) return { params, range: null, ignored: true };
   const withEnd = range.asOf ? { ...params, as_of: range.asOf } : params;
+  if (wholeWindow) return { params: withEnd, range: null, ignored: false };
   if (narrowedFrom == null) return { params: withEnd, range, ignored: false };
   /* The kept-history retry: the same end, the hours the store keeps, and only the part of the range those hours reach. */
   const kept = Number(params.hours);

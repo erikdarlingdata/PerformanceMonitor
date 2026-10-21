@@ -119,6 +119,36 @@ public sealed class StatsHistoryBehaviourTests
     }
 
     [Fact]
+    public void TheNotice_SaysTheBucketWidth_AndNeverTheMcpParameterAdvice()
+    {
+        // #6359: the read's aggregate_note says "pass bucket_minutes (1-1440) for another width, or narrow hours_back" (a browser
+        // reader can do neither). The panel states the width from the read's bucket fields instead.
+        var r = Run("mcpAdviceNote");
+        Assert.Equal(new[] { "Each point covers 1 hour." }, r.GetProperty("notices").EnumerateArray().Select(s => s.GetString()));
+        Assert.Equal(new[] { "Each point is one collection." }, r.GetProperty("queryNotices").EnumerateArray().Select(s => s.GetString()));
+        Assert.Equal(
+            new string?[] { "covers 1 minute", "covers 10 minutes", "covers 1 hour", "covers 6 hours", "covers 1 day", "is one collection", null },
+            r.GetProperty("widths").EnumerateArray().Select(s => s.GetString()));
+    }
+
+    [Fact]
+    public void AtPast5Minutes_HistoryReadsTheWindowTheGridRankedOver_AndSaysItIsWider()
+    {
+        // #6359: the grid ranks over the whole hour; the row's History used to be cut to the 5 picked minutes and said nothing was recorded.
+        var r = Run("fiveMinuteRange");
+        Assert.Equal("1", r.GetProperty("query").GetProperty("hours").GetString());
+        Assert.Equal("2026-03-04T08:00:00Z", r.GetProperty("query").GetProperty("as_of").GetString());
+        Assert.Empty(r.GetProperty("empty").EnumerateArray());
+        Assert.Equal(2, r.GetProperty("points").GetInt32());
+        var notice = Assert.Single(r.GetProperty("notices").EnumerateArray()).GetString()!;
+        Assert.Contains("the window the grid ranked over", notice);
+        Assert.Contains("wider than the range you picked", notice);
+        // Nothing to say when the window is the picked one (a range of whole hours, or a preset).
+        Assert.Equal(JsonValueKind.Null, r.GetProperty("wholeHourNote").ValueKind);
+        Assert.Equal(JsonValueKind.Null, r.GetProperty("presetNote").ValueKind);
+    }
+
+    [Fact]
     public void ARowWithoutTheKeysTheReadNeeds_GetsADash()
     {
         var r = Run("noKey");
