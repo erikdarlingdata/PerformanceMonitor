@@ -515,8 +515,8 @@ What each grant buys you, and what breaks without it:
 | Grant | Why | If missing |
 |---|---|---|
 | `VIEW SERVER STATE` | All DMV collectors (wait stats, query stats, memory, CPU, file I/O, sessions, etc.) and the connect probe | Collection fails — this one is required |
-| `ALTER ANY EVENT SESSION` | Create/start the two XE sessions | Logged; deadlock and blocked-process collectors read zero rows (an admin can pre-create the sessions instead) |
-| `CONNECT ANY DATABASE` | The per-database collectors (`database_scoped_config`, `query_store_health`, `index_object_stats`, `database_size_stats`, `query_store_stats`) enter each database via `EXECUTE [db].sys.sp_executesql` | Databases the login cannot enter are skipped; without the grant that is every user database |
+| `ALTER ANY EVENT SESSION` | Create/start the three shared XE sessions (deadlock, blocked-process and attention) | Logged; deadlock, blocked-process and client-timeout collectors read zero rows (an admin can pre-create the sessions instead) |
+| `CONNECT ANY DATABASE` | The per-database collectors (`database_scoped_config`, `query_store_health`, `index_object_stats`, `database_size_stats`, `query_store_stats`, `query_store_forced_plans`) enter each database via `EXECUTE [db].sys.sp_executesql` | Databases the login cannot enter are skipped; without the grant that is every user database |
 | `VIEW ANY DEFINITION` | Catalog-view row visibility everywhere: `sys.tables` / `sys.indexes` / `sys.objects` for the index and object collectors, `sys.dm_db_partition_stats`, and the AG catalog views (`sys.availability_groups`, `sys.availability_replicas`) | **Silently zero rows** — catalog views hide rows rather than erroring, so missing objects look exactly like empty databases, and a real AG cluster looks identical to a server with no AGs |
 | `ALTER SETTINGS` | The `sp_configure` blocked-process-threshold bootstrap | Logged; set the threshold yourself (or via RDS Parameter Group) |
 | `ALTER TRACE` | The `default_trace_events` collector — `sys.traces` / `fn_trace_gettable` accept nothing less | `PERMISSIONS` skip in collection health; the default-trace tab stays empty |
@@ -531,19 +531,21 @@ Collectors that hit a permission error (SQL errors 229/297/300, plus 8189 from `
 
 #### Which collectors run on which platform
 
-Every collector declares its own applicability in code (`AppliesTo(CollectorTargetInfo)`), so this is not a hand-maintained per-collector list — the collectors fall into five groups, and a collector outside its supported platform is **skipped before it runs**, not failed and logged every cycle.
+Every collector declares its own applicability in code (`AppliesTo(CollectorTargetInfo)`), so this is not a hand-maintained per-collector list — the SQL Server collectors fall into seven groups, and a collector outside its supported platform is **skipped before it runs**, not failed and logged every cycle.
 
 | Runs on | Collectors | Gate |
 |---|---|---|
-| Everything | wait stats, CPU utilization, memory (stats/clerks/grants), file I/O, tempdb, latches, spinlocks, plan cache, session summary, plus blocking, deadlocks, blocked-process reports, DMV blocking snapshots, perfmon, query snapshots, procedure stats, index/object stats, long-query completions, database config/scoped-config/size, server properties, session stats, waiting tasks | no gate |
-| On-prem, Managed Instance, RDS — **not** Azure SQL DB | CPU scheduler stats, default trace events, memory pressure events, server config, system health events, trace flags | `!IsAzureSqlDb` |
+| Everything | wait stats, CPU utilization, memory (stats/clerks/grants), file I/O, tempdb, latches, spinlocks, plan cache, session summary, plus blocking, deadlocks, blocked-process reports, DMV blocking snapshots, perfmon, query snapshots, procedure stats, index/object stats, long-query completions, client timeouts (`attention`), database config/scoped-config/size, server properties, session stats, waiting tasks | no gate |
+| On-prem, Managed Instance, RDS — **not** Azure SQL DB | CPU scheduler stats, default trace events, memory pressure events, server config, system health events, trace flags, database states, Availability Group replica states, Availability Group database replica states | `!IsAzureSqlDb` |
 | On-prem and Managed Instance, needs msdb | job history | `!IsAzureSqlDb && HasMsdbAccess` |
 | On-prem and Managed Instance, needs msdb — **not** RDS | agent status, running jobs | `!IsAzureSqlDb && !IsAwsRds && HasMsdbAccess` |
-| SQL Server 2016+ (or any Azure flavour) | query stats, Query Store stats | `SqlMajorVersion >= 13 \|\| IsAzureSqlDb \|\| IsAzureManagedInstance` |
+| SQL Server 2016+ (or any Azure flavour) | query stats, Query Store stats, Query Store health, Query Store forced plans | `SqlMajorVersion >= 13 \|\| IsAzureSqlDb \|\| IsAzureManagedInstance` |
+| SQL Server 2017+ (or any Azure flavour) | plan correction (automatic tuning recommendations) | `SqlMajorVersion >= 14 \|\| IsAzureSqlDb \|\| IsAzureManagedInstance` |
+| SQL Server 2019+ (or any Azure flavour) | persistent version store stats | `SqlMajorVersion >= 15 \|\| IsAzureSqlDb \|\| IsAzureManagedInstance` |
 
 Notes:
 
-- **Azure SQL DB** is the most restricted target: the six `!IsAzureSqlDb` collectors read server-scoped DMVs or on-disk artifacts that do not exist there, and the SQL Agent collectors have no Agent to read. Nothing about that is a permission problem, so it is not reported as one.
+- **Azure SQL DB** is the most restricted target: the nine `!IsAzureSqlDb` collectors above, and job history, read server-scoped DMVs or on-disk artifacts that do not exist there, and the SQL Agent collectors have no Agent to read. Nothing about that is a permission problem, so it is not reported as one.
 - **AWS RDS** blocks direct `msdb` job reads specifically; the rest of the SQL Agent surface is unaffected.
 - **`HasMsdbAccess`** is probed per server at connect and is exactly `HAS_DBACCESS('msdb')` — *any* access to msdb, not a specific role or table grant. Losing msdb access later moves those collectors from running to skipped without an error storm. A login that can enter msdb but lacks `SELECT` on the job tables passes this probe and is caught one layer down as a `PERMISSIONS` skip instead.
 - An unknown version (`SqlMajorVersion == 0`, i.e. detection has not completed yet) is treated as capable rather than skipped, so a collector is never silently dropped because a probe was slow.
