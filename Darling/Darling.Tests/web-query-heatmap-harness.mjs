@@ -88,6 +88,13 @@ try {
     out.tableRows = tableView.every((n) => n.className === "stub-table")[0].getAttribute("data-rows");
     toggle.fire("click");
     out.gridBack = !gridView.hidden;
+  } else if (scenario === "caption") {
+    /* #6353: the legend's order sentence, per metric the control offers. */
+    out.captions = {};
+    for (const m of model.HEATMAP_METRICS) {
+      const body = page.renderHeatmapBody({ ...data, metric: m.value }, { server: "SRV1", columns: [], desc: { emptyText: "none" } });
+      out.captions[m.value] = body.every((n) => n.className && n.className.includes("qh-legend"))[0].textContent;
+    }
   } else if (scenario === "renderEmpty") {
     const body = page.renderHeatmapBody({ metric: "duration", bucket_minutes: 5, cells: [] }, { server: "SRV1", columns: [], desc: { emptyText: "none" } });
     out.tds = body.every((n) => n.tag === "td").length;

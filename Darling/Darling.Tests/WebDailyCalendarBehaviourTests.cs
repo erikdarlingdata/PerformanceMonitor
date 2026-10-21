@@ -109,6 +109,33 @@ public sealed class WebDailyCalendarBehaviourTests
     /// month they step to, a day's detail lists the service's reasons and offers its drills, and "Show as table" holds only the shown month's days.
     /// </summary>
     [Fact]
+    public void ADayAfterToday_ReadsAsNotYetHappened_NotACollectionGap_AndTodayIsTheServersUtcDay()
+    {
+        // #6353: the browser clock is already on the 22nd (UTC) while the read's to_date, the calendar's today, is the 21st.
+        var r = Run("future");
+
+        foreach (var name in new[] { "tomorrow", "lastDay" })
+        {
+            var day = r.GetProperty(name);
+            Assert.Equal("Future", day.GetProperty("band").GetString());
+            Assert.Contains("not yet", day.GetProperty("word").GetString());
+            Assert.DoesNotContain("no data", day.GetProperty("word").GetString());
+            Assert.DoesNotContain("No collection", day.GetProperty("tip").GetString());
+        }
+        Assert.Equal("NoData", r.GetProperty("today").GetProperty("band").GetString());
+        Assert.Contains("No collection recorded", r.GetProperty("today").GetProperty("tip").GetString());
+        Assert.Equal("NoData", r.GetProperty("yesterday").GetProperty("band").GetString());
+
+        var detail = r.GetProperty("futureDetail");
+        Assert.Contains("This day has not happened yet.", detail.GetProperty("text").GetString());
+        Assert.DoesNotContain("No collection this day", detail.GetProperty("text").GetString());
+        Assert.DoesNotContain("No Data", detail.GetProperty("text").GetString());
+        Assert.False(detail.GetProperty("readAsked").GetBoolean());
+        Assert.True(r.GetProperty("todayDetail").GetProperty("readAsked").GetBoolean());
+        Assert.Contains("No collection this day.", r.GetProperty("todayDetail").GetProperty("text").GetString());
+    }
+
+    [Fact]
     public void TheCalendar_DrawsBands_ShowsNoRowAsNoData_StepsMonths_AndOpensADaysDetail()
     {
         var r = Run("calendar");
@@ -119,7 +146,7 @@ public sealed class WebDailyCalendarBehaviourTests
         Assert.Equal("NoData|5/no data", oct.GetProperty("d5").GetString());      // a purged day carries band NoData
         Assert.Equal("NoData|1/no data", oct.GetProperty("d1").GetString());      // no row at all
         Assert.Equal("NoData|21/no data", oct.GetProperty("d21").GetString());
-        Assert.Equal("NoData|31/no data", oct.GetProperty("d31").GetString());
+        Assert.Equal("Future|31/not yet", oct.GetProperty("d31").GetString());   // #6353: after today is not a gap
         Assert.False(r.GetProperty("septDayInOctoberGrid").GetBoolean());
         Assert.Equal("October 2026 (UTC)", r.GetProperty("title").GetString());
         Assert.True(r.GetProperty("nextDisabledNow").GetBoolean());
