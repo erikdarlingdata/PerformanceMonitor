@@ -7643,7 +7643,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_spinlock_stats"] = R(CatLatch, "Top spinlock activity in the window.", PServer(), PHours(24), PTop(10), PAsOf()),
 
             /* ── memory grants (DarlingMcpMemoryGrantTools) ── */
-            ["get_memory_grants"] = R(CatMemoryGrants, "Active/recent memory grants.", PServer(), PHours(1), PAsOf()),
+            ["get_memory_grants"] = R(CatMemoryGrants, "Active/recent memory grants. chart=true answers the whole window as one point per bucket per resource pool instead of grants[] and window[]; bucket_minutes picks the width.", PServer(), PHours(1), PAsOf(), PBool("chart", false), PInt("bucket_minutes")),
             ["get_memory_pressure_events"] = R(CatMemoryGrants, "Memory-pressure events in the window.", PServer(), PHours(24), PAsOf()),
             ["get_resource_semaphore"] = R(CatMemoryGrants, "Resource-semaphore state over time.", PServer(), PHours(24), PAsOf()),
 
@@ -8789,7 +8789,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_spinlock_stats"] = (c, pg, an) => DarlingMcpLatchSpinlockTools.GetSpinlockStats(pg, Server(c), Hours(c, 24), Rows(c, "top", 10), as_of: AsOf(c), cancellationToken: c.RequestAborted),
 
             /* ── memory grants ── */
-            ["get_memory_grants"] = (c, pg, an) => DarlingMcpMemoryGrantTools.GetMemoryGrants(pg, Server(c), Hours(c, 1), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_memory_grants"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
+                ? DarlingMcpMemoryGrantTools.GetMemoryGrants(pg, Server(c), Hours(c, 1), AsOf(c), QueryBool(c, "chart", false), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
+                : UnparseableParam("bucket_minutes"),
             ["get_memory_pressure_events"] = (c, pg, an) => DarlingMcpMemoryGrantTools.GetMemoryPressureEvents(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_resource_semaphore"] = (c, pg, an) => DarlingMcpMemoryGrantTools.GetResourceSemaphore(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
 

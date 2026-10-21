@@ -115,6 +115,9 @@ internal static class TrendBuckets
     /// <summary><c>get_memory_trend</c>: about 200 bytes a point.</summary>
     public const int MemoryMaxPoints = 1200;
 
+    /// <summary><c>get_memory_grants</c> with <c>chart: true</c> (#6299): about 250 bytes a point, one per resource pool per bucket.</summary>
+    public const int MemoryGrantChartMaxPoints = 1000;
+
     /// <summary><c>get_perfmon_trend</c>: about 140 bytes a point.</summary>
     public const int PerfmonMaxPoints = 1800;
 

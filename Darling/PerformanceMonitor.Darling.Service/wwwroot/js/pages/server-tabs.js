@@ -41,6 +41,7 @@
 
 import { el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, metricNote, getPath, fmtMs, fmtInt, fmtRate, localTime, parseUtc, windowFromHours, daysText, dbScopeChip, dbFilteredEmptyText, sourceStrip, clampText, getActiveDatabaseFilter, queryWaitFilter, setQueryWaitFilter, waitIsLinked } from "../util.js";
 import { renderPanel, emptyHeadline, setPanelSignal, getPanelSignal, VIZ, worstFirst, newestFirst } from "../panels.js";
+import { memoryGrantChartPanels } from "./memory-grant-charts.js";
 import { activeQueriesSnapshotSlot, SNAPSHOT_ROW_CAP } from "./active-snapshots.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../charts.js";
 import { multiPicker, mergeSeriesRows } from "../multi-picker.js";
@@ -1542,8 +1543,15 @@ export const SERVER_TABS = [
          beside it told the same lie more quietly: `grants[]` rows under a window subtitle. `window[]` is not a
          series either - it is the window's aggregates per pool, which is what the read chose to store the
          deltas for - so the honest rendering is two TABLES per read, window first: "was there pressure",
-         then "is there pressure now", the reading order the read's own description gives. A per-collection
-         trend would need a read this service does not serve; drawing one instant as one is not it. */
+         then "is there pressure now", the reading order the read's own description gives.
+
+         #6299 added the per-collection trend that comment said this service did not serve: get_memory_grants
+         with `chart: true` answers one point per bucket per pool across the WHOLE window, and the two charts
+         below draw that (memory-grant-charts.js). That does not repeat #3653's mistake: the removed chart
+         drew `grants[]`, one snapshot's rows all stamped with the same instant, as a window trend; these
+         points each carry their own collection time, and a window with no snapshot draws the empty text,
+         never a line of zeros. The two tables below are unchanged. */
+      ...memoryGrantChartPanels(server, ctx),
       ...fanout("get_memory_grants", { server, hours: ctx.hours }, [
         {
           title: "Memory Grant Pressure",

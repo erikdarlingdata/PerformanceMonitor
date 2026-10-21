@@ -124,12 +124,22 @@ public sealed class DarlingMcpMemoryGrantTools
     }
 
     [ReadsLatestSnapshot(LatestSnapshotShape.Windowed)]
-    [McpServerTool(Name = "get_memory_grants"), Description("Gets resource semaphore stats: granted vs available workspace memory per resource pool, waiters, timeout/forced grant deltas, over a window ending at as_of (default 1h). TWO READS: grants[] is the NEWEST snapshot in the window (a moment: captured_at/age_seconds), one row per pool; window[] aggregates EVERY snapshot in it, per pool (peak waiters+when, peak/min memory, summed timeout/forced deltas). Read window[] for 'was there pressure', grants[] for 'is there pressure now'. No rows: unavailable (or not_collected first). <<GUIDE>> Gets resource semaphore statistics showing granted vs available workspace memory per resource pool, waiter counts, and timeout/forced grant deltas. High waiter counts or rising timeout deltas indicate memory grant pressure affecting query performance. TWO READS UNDER ONE WINDOW: grants[] is the NEWEST snapshot in the window (one row per pool, summed across its semaphores), stamped once as captured_at with age_seconds against the window's end - it is a moment, not the window. window[] aggregates EVERY snapshot in the window per pool: peak_waiter_count and peak_waiters_at (the most sessions ever seen waiting on the pool at one instant and when), peak_granted_memory_mb and peak_granted_at (the largest granted memory and when - not the time of peak waiters), min_available_memory_mb, and timeout_errors_in_window / forced_grants_in_window (the SUM of the per-interval deltas across the window). " + McpToolGuideTopics.MemoryGrantWindowReadOrder)]
-    public static async Task<string> GetMemoryGrants(
+    [McpServerTool(Name = "get_memory_grants"), Description("Gets resource semaphore stats: granted vs available workspace memory per resource pool, waiters, timeout/forced grant deltas, over a window ending at as_of (default 1h). TWO READS: grants[] is the NEWEST snapshot in the window (a moment: captured_at/age_seconds), one row per pool; window[] aggregates EVERY snapshot in it, per pool (peak waiters+when, peak/min memory, summed timeout/forced deltas). Read window[] for 'was there pressure', grants[] for 'is there pressure now'. No rows: unavailable (or not_collected first). <<GUIDE>> Gets resource semaphore statistics showing granted vs available workspace memory per resource pool, waiter counts, and timeout/forced grant deltas. High waiter counts or rising timeout deltas indicate memory grant pressure affecting query performance. TWO READS UNDER ONE WINDOW: grants[] is the NEWEST snapshot in the window (one row per pool, summed across its semaphores), stamped once as captured_at with age_seconds against the window's end - it is a moment, not the window. window[] aggregates EVERY snapshot in the window per pool: peak_waiter_count and peak_waiters_at (the most sessions ever seen waiting on the pool at one instant and when), peak_granted_memory_mb and peak_granted_at (the largest granted memory and when - not the time of peak waiters), min_available_memory_mb, and timeout_errors_in_window / forced_grants_in_window (the SUM of the per-interval deltas across the window). CHART=TRUE instead answers the whole window as a series (#6299): one point per bucket per pool (bucket_minutes picks the width, only with chart=true), each with granted/available/used/target MB, grantees, waiters and the timeout/forced-grant deltas summed in the bucket, and no grants[]/window[]. " + McpToolGuideTopics.MemoryGrantWindowReadOrder)]
+    public static Task<string> GetMemoryGrants(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 1. window[] aggregates every snapshot in these hours; grants[] is the newest snapshot in them.")] int hours_back = 1,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("true: return the window as a series (one point per bucket per pool: granted/available/used/target MB, grantees, waiters, timeout and forced-grant deltas) instead of grants[]/window[]. Default false.")] bool chart = false,
+        [Description(TrendBuckets.BucketMinutesDescription + " Only with chart=true.")] int? bucket_minutes = null,
+        CancellationToken cancellationToken = default) =>
+        GetMemoryGrants(postgres, server_name, hours_back, as_of, chart, bucket_minutes, TrendBudget.Mcp(TrendBuckets.MemoryGrantChartMaxPoints), cancellationToken);
+
+    /// <summary>get_memory_grants under an explicit <paramref name="budget"/> for its <c>chart: true</c> series (#6299): the MCP tool passes its own,
+    /// the web viewer's <c>/api/read</c> mirror passes <see cref="TrendBudget.Chart"/>. Without <paramref name="chart"/> the answer is the
+    /// original grants[]/window[] one, unchanged.</summary>
+    internal static async Task<string> GetMemoryGrants(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, bool chart, int? bucket_minutes, TrendBudget budget,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -138,10 +148,56 @@ public sealed class DarlingMcpMemoryGrantTools
         var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
 
+        if (!chart && bucket_minutes != null)
+            return McpHelpers.Refusal("bucket_minutes", "bucket_minutes only applies with chart=true; the default answer is not bucketed.");
+
+        var bucketMinutes = 0;
+        if (chart)
+        {
+            var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out bucketMinutes);
+            if (bucketError != null) return bucketError;
+        }
+
         try
         {
             var now = windowEnd;
             var windowStart = now.AddHours(-hours_back);
+            if (chart)
+            {
+                var points = await DarlingMemoryGrantReader.GetMemoryGrantChartAsync(
+                    postgres, resolved.ServerId, windowStart, now, bucketMinutes, cancellationToken);
+                /* A window with no collected snapshot is no data, never a line of zeros; a collected snapshot with no grants is a
+                   point of zeros (the viewer's own reading). */
+                if (points.Count == 0)
+                    return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "memory_grant_stats", cancellationToken)
+                        ?? McpHelpers.Status("unavailable", "No memory grant data available.");
+
+                return JsonSerializer.Serialize(new
+                {
+                    server = resolved.DisplayName,
+                    hours_back,
+                    window_start = windowStart.ToString("o"),
+                    window_end = now.ToString("o"),
+                    bucket_minutes = bucketMinutes,
+                    aggregate_note = ChartNote,
+                    entries = points.Select(p => new
+                    {
+                        collection_time = p.CollectionTime.ToString("o"),
+                        pool_id = p.PoolId,
+                        available_memory_mb = Math.Round(p.AvailableMemoryMb, 2),
+                        granted_memory_mb = Math.Round(p.GrantedMemoryMb, 2),
+                        used_memory_mb = Math.Round(p.UsedMemoryMb, 2),
+                        target_memory_mb = Math.Round(p.TargetMemoryMb, 2),
+                        max_target_memory_mb = Math.Round(p.MaxTargetMemoryMb, 2),
+                        grantee_count = p.GranteeCount,
+                        waiter_count = p.WaiterCount,
+                        timeout_error_count_delta = p.TimeoutErrorCountDelta,
+                        forced_grant_count_delta = p.ForcedGrantCountDelta,
+                        snapshots = p.Snapshots
+                    })
+                }, McpHelpers.JsonOptions);
+            }
+
             var rows = await DarlingMemoryGrantReader.GetMemoryGrantsLatestAsync(
                 postgres, resolved.ServerId, windowStart, now, cancellationToken);
             if (rows.Count == 0)
@@ -182,6 +238,12 @@ public sealed class DarlingMcpMemoryGrantTools
             return McpHelpers.FormatError("get_memory_grants", ex);
         }
     }
+
+    /// <summary>What a chart point is (#6299): the sizing MB and the grantee and waiter counts are the mean of the bucket's snapshots (readings at
+    /// an instant), the two deltas are summed (they are per-interval counts). A snapshot with no grants is a real point of zeros; a window with no
+    /// snapshot has no points at all.</summary>
+    internal const string ChartNote =
+        "Each point is one pool over one bucket: sizing MB, grantees and waiters are the mean of the bucket's snapshots, timeouts and forced grants are summed. A snapshot with no grants is a point of zeros. A restart's unrated interval counts as 0 in the deltas.";
 
     /// <summary>#6129: the window's peaks are maxima over the snapshots taken every collection interval, so a wait or grant
     /// shorter than the interval can fall between two snapshots. A peak of 0 is therefore "none sampled", not "no grant
