@@ -485,13 +485,120 @@ public sealed class DarlingWebHostGateLiveTests
         Assert.DoesNotContain(DarlingWebHostService.ReNavigationScriptBlock, body, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A navigation the person started (a click or a typed address) carries <c>Sec-Fetch-User: ?1</c>; a script
+    /// redirect, a meta refresh or a popup nobody clicked does not. The re-navigation page is for the first kind only.
+    /// </summary>
+    [Theory]
+    [InlineData(null)]
+    [InlineData("?0")]
+    [InlineData("1")]
+    [InlineData("true")]
+    public async Task ACrossSitePageRequest_NotStartedByAPerson_GetsTheSignInForm_AsBefore(string? fetchUser)
+    {
+        using var server = await BuildServer(networkMode: false, requireTokenWhenLoopbackOnly: true);
+
+        var (ctx, body) = await SendPage(server, "/triage", string.Empty, "localhost", IPAddress.Loopback, "cross-site", fetchUser: fetchUser);
+        var (_, plain) = await SendPage(server, "/triage", string.Empty, "localhost", IPAddress.Loopback, fetchSite: null, fetchMode: null, fetchDest: null, fetchUser: null);
+
+        Assert.Equal(StatusCodes.Status200OK, ctx.Response.StatusCode);
+        Assert.DoesNotContain(DarlingWebHostService.ReNavigationScriptBlock, body, StringComparison.Ordinal);
+        Assert.Equal(plain, body);
+        Assert.Contains("<form", body, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>The same click-started cross-site request does get the re-navigation page, and only a GET does.</summary>
+    [Theory]
+    [InlineData("HEAD")]
+    [InlineData("OPTIONS")]
+    public async Task ACrossSiteHeadOrOptionsRequest_NeverGetsTheReNavigationPage(string method)
+    {
+        using var server = await BuildServer(networkMode: false, requireTokenWhenLoopbackOnly: true);
+
+        var (ctx, body) = await SendPage(server, "/triage", string.Empty, "localhost", IPAddress.Loopback, "cross-site", method: method);
+        var (_, page) = await SendPage(server, "/triage", string.Empty, "localhost", IPAddress.Loopback, "cross-site");
+
+        Assert.Contains(DarlingWebHostService.ReNavigationScriptBlock, page, StringComparison.Ordinal);
+        Assert.DoesNotContain(DarlingWebHostService.ReNavigationScriptBlock, body, StringComparison.Ordinal);
+        Assert.DoesNotContain("Go to the sign-in page", body, StringComparison.Ordinal);
+        // The page's own policy (the hash of its script) is what a written page carries; neither method gets it.
+        Assert.NotEqual(DarlingWebHostService.ReNavigationPagePolicy, ctx.Response.Headers["Content-Security-Policy"].ToString());
+        Assert.Equal(DarlingWebHostService.ReNavigationPagePolicy, (await SendPage(server, "/triage", string.Empty, "localhost", IPAddress.Loopback, "cross-site")).Context.Response.Headers["Content-Security-Policy"].ToString());
+    }
+
+    /// <summary>The API is matched the way its no-store stamp is: any letter case, and the bare /api path.</summary>
+    [Theory]
+    [InlineData("/API/fleet")]
+    [InlineData("/Api/fleet")]
+    [InlineData("/api")]
+    [InlineData("/API")]
+    public async Task ACrossSiteRequestToTheApi_InAnyCase_OrTheBareApiPath_IsTheApi_NotThePage(string path)
+    {
+        using var server = await BuildServer(networkMode: false, requireTokenWhenLoopbackOnly: true);
+
+        var (ctx, body) = await SendPage(server, path, string.Empty, "localhost", IPAddress.Loopback, "cross-site");
+
+        Assert.Equal(StatusCodes.Status401Unauthorized, ctx.Response.StatusCode);
+        Assert.StartsWith("application/json", ctx.Response.ContentType, StringComparison.Ordinal);
+        Assert.Contains("\"error\"", body, StringComparison.Ordinal);
+        Assert.DoesNotContain(DarlingWebHostService.ReNavigationScriptBlock, body, StringComparison.Ordinal);
+    }
+
+    /// <summary>The sign-in flow's own callback arrives from the identity provider, a cross-site navigation: it is
+    /// handled as the sign-in flow (here the stale-attempt answer), never answered with the re-navigation page.</summary>
+    [Fact]
+    public async Task ACrossSiteOidcCallback_ReachesTheSignInFlow_NotTheReNavigationPage()
+    {
+        using var server = await BuildServer(networkMode: true, oidcClient: FakeOidcClient());
+
+        var (ctx, body) = await SendPage(server, "/auth/oidc/callback", "?code=a&state=s", ListenIp, InCidrRemote, "cross-site");
+
+        Assert.Equal(StatusCodes.Status400BadRequest, ctx.Response.StatusCode);
+        Assert.Contains("stale or was not started", body, StringComparison.Ordinal);
+        Assert.DoesNotContain(DarlingWebHostService.ReNavigationScriptBlock, body, StringComparison.Ordinal);
+    }
+
+    /// <summary>The page itself: the fallback message and a static link to the sign-in page, and the page-wide
+    /// headers (no framing, no referrer, its own browsing-context group).</summary>
+    [Fact]
+    public async Task TheReNavigationPage_CarriesTheLinkAndTheHeaders_OfEveryOtherPage()
+    {
+        using var server = await BuildServer(networkMode: false, requireTokenWhenLoopbackOnly: true);
+
+        var (ctx, body) = await SendPage(server, "/triage", "?q=1", "localhost", IPAddress.Loopback, "cross-site");
+
+        Assert.Contains(DarlingWebHostService.ReNavigationScriptBlock, body, StringComparison.Ordinal);
+        Assert.Contains("<a href='/'", body, StringComparison.Ordinal);
+        Assert.Contains("Go to the sign-in page", body, StringComparison.Ordinal);
+        Assert.Contains("Open the address again to continue.", body, StringComparison.Ordinal);
+        Assert.Equal("DENY", ctx.Response.Headers.XFrameOptions.ToString());
+        Assert.Contains("frame-ancestors 'none'", ctx.Response.Headers["Content-Security-Policy"].ToString(), StringComparison.Ordinal);
+        Assert.Equal("no-referrer", ctx.Response.Headers["Referrer-Policy"].ToString());
+        Assert.Equal("same-origin", ctx.Response.Headers["Cross-Origin-Opener-Policy"].ToString());
+    }
+
+    /// <summary>Every HTML page this host writes opens in its own browsing-context group; a JSON answer needs none.</summary>
+    [Fact]
+    public async Task TheSignInPage_CarriesTheOpenerPolicy_AndAnApiAnswerDoesNot()
+    {
+        using var server = await BuildServer(networkMode: false, requireTokenWhenLoopbackOnly: true);
+
+        var (signIn, _) = await SendPage(server, "/", string.Empty, "localhost", IPAddress.Loopback, fetchSite: null, fetchMode: null, fetchDest: null, fetchUser: null);
+        Assert.Equal("same-origin", signIn.Response.Headers["Cross-Origin-Opener-Policy"].ToString());
+
+        var (api, _) = await SendPage(server, "/api/fleet", string.Empty, "localhost", IPAddress.Loopback, fetchSite: null, fetchMode: null, fetchDest: null, fetchUser: null);
+        Assert.False(api.Response.Headers.ContainsKey("Cross-Origin-Opener-Policy"));
+    }
+
     private static async Task<(HttpContext Context, string Body)> SendPage(
         TestServer server, string path, string query, string host, IPAddress? remote, string? fetchSite,
-        string? fetchMode = "navigate", string? fetchDest = "document", string? cookie = null)
+        string? fetchMode = "navigate", string? fetchDest = "document", string? cookie = null,
+        string? fetchUser = "?1", string method = "GET")
     {
         var ctx = await server.SendAsync(c =>
         {
-            c.Request.Method = "GET";
+            c.Request.Method = method;
+            if (fetchUser is not null) c.Request.Headers["Sec-Fetch-User"] = fetchUser;
             c.Request.Path = path;
             c.Request.QueryString = new QueryString(query);
             c.Request.Headers.Host = host;

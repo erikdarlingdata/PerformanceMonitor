@@ -121,6 +121,31 @@ public sealed class DarlingWebSecurityHeadersTests
         /* Network mode answers a request with no session with the sign-in page, which sets its own policy. */
         Assert.Equal(StatusCodes.Status200OK, ctx.Response.StatusCode);
         AssertDefaultHeaders(ctx, expectDefaultPolicy: !networkMode);
+        Assert.Equal("same-origin", ctx.Response.Headers["Cross-Origin-Opener-Policy"].ToString());
+    }
+
+    /// <summary>The signed-in landing page (written after an SSO sign-in) goes through the same header middleware as every
+    /// other page: no framing, no referrer, and its own browsing-context group (#6286).</summary>
+    [Fact]
+    public async Task SignedInLandingPage_CarriesTheHeaders_IncludingTheOpenerPolicy()
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Logging.ClearProviders();
+        var app = builder.Build();
+        app.UseMiddleware<DarlingWebSecurityHeaders>(false);
+        app.Run(context => DarlingWebHostService.WriteSignedInLandingAsync(context, "/"));
+        await app.StartAsync();
+        using var server = app.GetTestServer();
+
+        var ctx = await server.SendAsync(c => { c.Request.Method = "GET"; c.Request.Path = "/"; });
+
+        Assert.StartsWith("text/html", ctx.Response.ContentType, StringComparison.Ordinal);
+        Assert.Equal("DENY", ctx.Response.Headers.XFrameOptions.ToString());
+        Assert.Contains("frame-ancestors 'none'", ctx.Response.Headers["Content-Security-Policy"].ToString(), StringComparison.Ordinal);
+        Assert.Equal("no-referrer", ctx.Response.Headers["Referrer-Policy"].ToString());
+        Assert.Equal("same-origin", ctx.Response.Headers["Cross-Origin-Opener-Policy"].ToString());
+        await app.StopAsync();
     }
 
     [Fact]
@@ -132,6 +157,7 @@ public sealed class DarlingWebSecurityHeadersTests
         Assert.Equal(StatusCodes.Status200OK, ctx.Response.StatusCode);
         Assert.StartsWith("text/html", ctx.Response.ContentType, StringComparison.Ordinal);
         AssertDefaultHeaders(ctx);
+        Assert.Equal("same-origin", ctx.Response.Headers["Cross-Origin-Opener-Policy"].ToString());
     }
 
     [Fact]
@@ -142,6 +168,7 @@ public sealed class DarlingWebSecurityHeadersTests
 
         Assert.Equal(StatusCodes.Status200OK, ctx.Response.StatusCode);
         AssertDefaultHeaders(ctx);
+        Assert.False(ctx.Response.Headers.ContainsKey("Cross-Origin-Opener-Policy"));
     }
 
     [Fact]

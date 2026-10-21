@@ -78,6 +78,9 @@ const statusbar = document.getElementById("statusbar");
 
 /* ─────────────────────────── routing ─────────────────────────── */
 
+/* RULE for every route this switch returns: a route must never write, export or confirm anything on load. A link
+   from another site can open the dashboard with a live session behind it (#6286), so a page reached by an address
+   may only read and draw; a change happens after a click on a button inside the page, never from the address. */
 function currentRoute() {
   const h = location.hash || "#/fleet";
   if (h.startsWith("#/server/")) return serverRoute(h.slice("#/server/".length));

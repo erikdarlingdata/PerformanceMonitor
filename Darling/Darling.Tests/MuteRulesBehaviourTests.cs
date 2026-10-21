@@ -176,6 +176,30 @@ public sealed class MuteRulesBehaviourTests
     }
 
     [Fact]
+    public void ALinkFillsOnlyTheFieldsTheAppsOwnLinksSend_NotTheReasonSourceStartOrExpiry()
+    {
+        if (!TryRun("linkPrefill", out var r)) return;
+
+        var parsed = r.GetProperty("parsed");
+        Assert.Equal(
+            new[] { "client_app_pattern", "database_pattern", "job_name_pattern", "metric_name", "query_text_pattern", "server_id", "server_name", "wait_type_pattern" },
+            parsed.EnumerateObject().Select(p => p.Name).Order(StringComparer.Ordinal).ToArray());
+        Assert.Equal("Sales", parsed.GetProperty("database_pattern").GetString());
+        foreach (var ignored in new[] { "reason", "external_source", "starts_at_utc", "expires_at_utc" })
+        {
+            Assert.False(parsed.TryGetProperty(ignored, out _), ignored + " was taken from the link");
+        }
+
+        // What a save would send: no reason, no source, no start, no expiry.
+        var body = r.GetProperty("body");
+        Assert.False(body.TryGetProperty("reason", out var reason) && reason.ValueKind == JsonValueKind.String && reason.GetString()!.Length > 0);
+        Assert.False(body.TryGetProperty("external_source", out var source) && source.ValueKind == JsonValueKind.String && source.GetString()!.Length > 0);
+        Assert.False(body.TryGetProperty("expires_at_utc", out var expires) && expires.ValueKind == JsonValueKind.String);
+        Assert.False(body.TryGetProperty("starts_at_utc", out var starts) && starts.ValueKind == JsonValueKind.String);
+        Assert.Equal("This form was filled in from a link. Check every field before saving.", r.GetProperty("notice").GetString());
+    }
+
+    [Fact]
     public void AnExpiredSession_IsSignInNotReadOnly_AndAnUnparseable2xxIsNotASave()
     {
         if (!TryRun("expiry", out var r)) return;

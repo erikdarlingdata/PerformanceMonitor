@@ -55,6 +55,14 @@ const scenarios = {
     parsed: j(p.parsePrefill("?server_id=7&server_name=stored-host&metric_name=High%20CPU")),
     body: j(p.formToCreateBody(p.parsePrefill("?server_id=7&server_name=stored-host&metric_name=High%20CPU"))),
   }),
+  /* #6286: a link fills only the fields the app's own links send; reason, external source, start and expiry are ignored. */
+  linkPrefill: () => {
+    const query = "?server_id=7&server_name=stored-host&metric_name=High%20CPU&database_pattern=Sales&wait_type_pattern=LCK_M_X"
+      + "&query_text_pattern=SELECT%201&job_name_pattern=Nightly&client_app_pattern=App"
+      + "&reason=Planned%20work&external_source=nagios&starts_at_utc=2026-01-01T00:00:00Z&expires_at_utc=2099-01-01T00:00:00Z";
+    const parsed = p.parsePrefill(query);
+    return { parsed: j(parsed), body: j(p.formToCreateBody(parsed)), notice: vm.runInContext("LINK_FILLED_NOTICE", context) };
+  },
   expiry: async () => {
     const out = {};
     nextResponse = { status: 401, text: JSON.stringify({ error: "Session expired" }) };

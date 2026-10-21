@@ -98,6 +98,15 @@ internal sealed class DarlingWebSecurityHeaders
             headers.XFrameOptions = "DENY";
             headers.XContentTypeOptions = "nosniff";
             headers["Referrer-Policy"] = "no-referrer";
+
+            /* An HTML page (the app shell, the sign-in page, the signed-in landing page and the re-navigation page)
+               opens in its own browsing context group, so a page on another site that opened it keeps no window
+               reference to it (#6286). Nothing here opens a popup or reads window.opener: sign-in is a full-page
+               redirect. */
+            if (headers.ContentType.ToString().StartsWith("text/html", StringComparison.OrdinalIgnoreCase))
+            {
+                headers["Cross-Origin-Opener-Policy"] = "same-origin";
+            }
             if (_sendHsts && ((HttpContext)state).Request.IsHttps)
             {
                 headers.StrictTransportSecurity = StrictTransportSecurityValue;

@@ -45,6 +45,13 @@ const STARTS = "starts_at_utc";
    the rule is keyed on the server's store id (the name is only its label). */
 const SERVER_ID = "server_id";
 const EDITABLE_KEYS = TEXT_FIELDS.map((f) => f.key).concat([STARTS, EXPIRY, SERVER_ID]);
+/* The only fields a link may fill in: the ones the app's own "Mute this alert" and "Mute similar" links send
+   (mute-context.js's mutePrefillParams, alerts.js's muteCell). The reason, the external source, the start and the
+   expiry are never taken from a link: they are typed in the form (#6286). */
+const PREFILL_KEYS = [
+  SERVER_ID, "server_name", "metric_name", "database_pattern", "wait_type_pattern",
+  "query_text_pattern", "job_name_pattern", "client_app_pattern",
+];
 
 /** A datetime-local value ("2026-08-01T10:30", local clock) to an ISO UTC string, or "" when blank/unparseable. */
 export function localInputToIso(v) {
@@ -173,11 +180,13 @@ export const deleteRule = (id) => send("DELETE", "/api/mute-rules/" + encodeURIC
 let live = null;
 let form = null;
 let lastPrefillQuery = null;
+/* Shown on a create form that was filled in from a link, so the person reads every field before saving. */
+export const LINK_FILLED_NOTICE = "This form was filled in from a link. Check every field before saving.";
 
 function parsePrefill(query) {
   const p = new URLSearchParams(query || "");
   const v = {};
-  for (const k of EDITABLE_KEYS) if (p.get(k)) v[k] = p.get(k);
+  for (const k of PREFILL_KEYS) if (p.get(k)) v[k] = p.get(k);
   return v;
 }
 
@@ -206,7 +215,7 @@ export async function renderMuteRules(main, query) {
     lastPrefillQuery = query;
     form = null;
     const values = parsePrefill(query);
-    openForm({ mode: "create", values, idName: values[SERVER_ID] ? values.server_name || "" : null });
+    openForm({ mode: "create", values, fromLink: true, idName: values[SERVER_ID] ? values.server_name || "" : null });
   } else if (form) {
     drawForm();
   }
@@ -321,6 +330,7 @@ function formNode() {
   return el("div", { class: "card mute-form" }, [
     el("h3", { text: form.mode === "create" ? "New mute rule" : "Edit mute rule" }),
     el("div", { class: "meta", text: "Alerts matching ALL filled fields are suppressed. Blank fields match anything." }),
+    form.fromLink ? el("div", { class: "strip notice", role: "note", text: LINK_FILLED_NOTICE }) : null,
     form.banner ? el("div", { class: "strip error", text: form.banner }) : null,
     form.exists ? existsNode() : null,
     ...fields,

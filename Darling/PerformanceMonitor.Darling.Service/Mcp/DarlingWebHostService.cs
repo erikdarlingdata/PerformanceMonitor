@@ -1570,7 +1570,8 @@ public sealed class DarlingWebHostService : BackgroundService
     /// same answer as the SPA's.
     /// </summary>
     internal static bool IsApiPath(string path)
-        => path.StartsWith("/api/", StringComparison.OrdinalIgnoreCase);
+        => path.Equals("/api", StringComparison.OrdinalIgnoreCase)
+            || path.StartsWith("/api/", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// PURE per-request decision, composing the sign-in flow around <see cref="DecideWebAuth"/>: the CIDR
@@ -2421,7 +2422,10 @@ public sealed class DarlingWebHostService : BackgroundService
     /// sign-in page as before: the same-origin answer to the re-navigation below is what ends the loop. When the
     /// browser also says what the request is for, only a top-level navigation counts (<c>Sec-Fetch-Mode</c>
     /// <c>navigate</c>, <c>Sec-Fetch-Dest</c> <c>document</c>), so a cross-site image or script request is not
-    /// answered with a page. Never true for a non-GET request or an /api/* call.
+    /// answered with a page. It must also be a navigation the person started (<c>Sec-Fetch-User</c> is <c>?1</c>, which a
+    /// browser sends for a click or a typed address and not for a script redirect, a meta refresh or a popup nobody
+    /// clicked), so such a navigation gets the sign-in form as it did before. Never true for a non-GET request or an
+    /// /api (or /api/*) call.
     /// </summary>
     internal static bool IsCrossSitePageNavigation(HttpRequest request)
     {
@@ -2431,6 +2435,11 @@ public sealed class DarlingWebHostService : BackgroundService
         }
 
         if (!string.Equals(request.Headers["Sec-Fetch-Site"].ToString(), "cross-site", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (!string.Equals(request.Headers["Sec-Fetch-User"].ToString(), "?1", StringComparison.Ordinal))
         {
             return false;
         }
@@ -2447,8 +2456,10 @@ public sealed class DarlingWebHostService : BackgroundService
     /// script on this site is same-site, so the Strict session cookie travels with it, as on the signed-in landing
     /// page. The script reloads rather than calling <c>location.replace(location.href)</c> because an address that
     /// carries a fragment is a same-document navigation to a script: the browser does nothing and the page stays.
-    /// The script names no address at all, so the page cannot send anyone elsewhere; and a page that is itself the
-    /// result of a reload does not reload again, so a browser that still marked the request cross-site cannot loop.
+    /// The script names no address at all, so the page cannot send anyone elsewhere. It reloads only when the page
+    /// came from an ordinary navigation; in every other case (it is itself the result of a reload, the browser gives no
+    /// navigation entry, or the script fails) it shows a message instead, so a browser that still marked the request
+    /// cross-site cannot loop. A static link to the sign-in page is always in the markup.
     /// </summary>
     internal static Task WriteReNavigationPageAsync(HttpContext context)
     {
@@ -2459,6 +2470,7 @@ public sealed class DarlingWebHostService : BackgroundService
             "<!doctype html><html lang='en'><head><meta charset='utf-8'><title>Darling Web</title>" + IconLinkHtml + "</head>"
             + "<body style='background:#181b1f;color:#E4E6EB;font-family:system-ui'>"
             + "<p id='m'>Opening the dashboard…</p>"
+            + "<p><a href='/' style='color:#2eaef1'>Go to the sign-in page</a></p>"
             + ReNavigationScriptBlock
             + "</body></html>";
         context.Response.Headers[DarlingWebSecurityHeaders.ContentSecurityPolicyHeader] = ReNavigationPagePolicy;
@@ -2466,7 +2478,7 @@ public sealed class DarlingWebHostService : BackgroundService
     }
 
     /// <summary>The re-navigation page's only inline script: constant text, so its hash does not depend on the request.</summary>
-    internal const string ReNavigationScriptBlock = "<script>var n=performance.getEntriesByType('navigation')[0];if(n&&n.type==='reload'){document.getElementById('m').textContent='Open the address again to continue.';}else{location.reload();}</script>";
+    internal const string ReNavigationScriptBlock = "<script>try{var n=performance.getEntriesByType('navigation')[0];if(n&&n.type==='navigate'){location.reload();}else{document.getElementById('m').textContent='Open the address again to continue.';}}catch(e){document.getElementById('m').textContent='Open the address again to continue.';}</script>";
 
     /// <summary>The re-navigation page's policy: the default plus the hash of <see cref="ReNavigationScriptBlock"/>.</summary>
     internal static readonly string ReNavigationPagePolicy = DarlingWebSecurityHeaders.PolicyForInlinePage(ReNavigationScriptBlock);
