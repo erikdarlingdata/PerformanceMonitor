@@ -44,6 +44,34 @@ public sealed class AgentChangeUndoLiveTests
             ["wait_type_pattern"] = null, ["job_name_pattern"] = null, ["client_app_pattern"] = null,
         }.ToJsonString();
 
+    /// <summary>#6310: the list names the server the way the registry does (display name), and a server that left the registry keeps its id with a removed hint, in the change list, its refusals and the body the web page and get_agent_changes share.</summary>
+    [Fact]
+    public async Task TheList_NamesTheServerFromTheRegistry_AndMarksAServerThatLeftIt()
+    {
+        await RunAsync(async (undo, connection, ct) =>
+        {
+            await ExecAsync(connection, "INSERT INTO collect.servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date) VALUES (7, 'host-7', 'SQL2019', TRUE, 15, now(), now())", ct);
+            await JournalChangeAsync(connection, "mute", "m1", 7, Mute("old"), Mute("agent says"), ct: ct);
+            await JournalChangeAsync(connection, "mute", "m2", 99, Mute("old"), Mute("agent says"), ct: ct);
+            await ExecAsync(connection, "INSERT INTO config.investigation_journal (event_time, server_id, event, actor, detail) VALUES (now(), 7, 'refused', 'agent:a', '{\"tool\":\"force_plan\"}'::jsonb), (now(), 99, 'refused', 'agent:a', '{\"tool\":\"force_plan\"}'::jsonb)", ct);
+
+            var read = await undo.ReadAsync(50, ct);
+            Assert.Equal("SQL2019", read.Changes.Single(c => c.ServerId == 7).ServerLabel);
+            Assert.Equal("Server 99 (removed)", read.Changes.Single(c => c.ServerId == 99).ServerLabel);
+            Assert.Equal("SQL2019", read.Refusals.Single(r => r.ServerId == 7).ServerLabel);
+            Assert.Equal("Server 99 (removed)", read.Refusals.Single(r => r.ServerId == 99).ServerLabel);
+
+            var body = PerformanceMonitor.Darling.Service.DarlingWebEndpoints.AgentChangesBody(read, canDecide: false, DateTime.UtcNow);
+            var changes = body["changes"]!.AsArray().Select(c => c!.AsObject()).ToList();
+            var named = changes.Single(c => c["server_id"]!.GetValue<int>() == 7);
+            Assert.Equal("SQL2019", named["server_name"]!.GetValue<string>());
+            Assert.False(named["server_removed"]!.GetValue<bool>());
+            var gone = changes.Single(c => c["server_id"]!.GetValue<int>() == 99);
+            Assert.Null(gone["server_name"]);
+            Assert.True(gone["server_removed"]!.GetValue<bool>());
+        });
+    }
+
     [Fact]
     public async Task MuteChangedByTheAgent_Unchanged_IsRestored_AndTheUndoIsJournaledByThePerson()
     {

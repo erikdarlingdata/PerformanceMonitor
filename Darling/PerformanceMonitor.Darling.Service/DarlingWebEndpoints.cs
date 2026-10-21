@@ -1878,7 +1878,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <summary>The most calls and refusals the Agent changes list answers.</summary>
     internal const int AgentChangesLimit = 200;
 
-    /// <summary>The list body: <c>{enabled, can_decide, changes: [{called_id, called_at_utc, request_id, server_id, actor, reason, tool, kind, detail,
+    /// <summary>The list body: <c>{enabled, can_decide, changes: [{called_id, called_at_utc, request_id, server_id, server_name (the registry's name, or "Server N (removed)"), actor, reason, tool, kind, detail,
     /// result (done, failed or unknown), result_detail, undone_at_utc, undone_by, muted_alerts, can_undo}], refusals: [...]}</c>. A call with no
     /// result row is <c>unknown</c>. <c>detail</c> goes through the journal masking helper at the web's level.</summary>
     internal static JsonObject AgentChangesBody(AgentChangesRead read, bool canDecide, DateTime nowUtc)
@@ -1893,6 +1893,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 ["called_at_utc"] = c.CalledAtUtc.ToString("o", CultureInfo.InvariantCulture),
                 ["request_id"] = c.RequestId?.ToString(),
                 ["server_id"] = c.ServerId,
+                ["server_name"] = c.ServerName, ["server_removed"] = c.ServerId is not null && c.ServerName is null,
                 ["actor"] = c.Actor,
                 ["reason"] = c.Reason,
                 ["tool"] = c.Tool,
@@ -1916,7 +1917,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             refusals.Add(new JsonObject
             {
                 ["journal_id"] = r.JournalId, ["at_utc"] = r.AtUtc.ToString("o", CultureInfo.InvariantCulture), ["request_id"] = r.RequestId?.ToString(),
-                ["server_id"] = r.ServerId, ["actor"] = r.Actor, ["code"] = r.Code, ["tool"] = r.Tool,
+                ["server_id"] = r.ServerId, ["server_name"] = r.ServerName, ["server_removed"] = r.ServerId is not null && r.ServerName is null,
+                ["actor"] = r.Actor, ["code"] = r.Code, ["tool"] = r.Tool,
             });
         }
 

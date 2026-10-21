@@ -81,4 +81,18 @@ public sealed class AgentChangesViewerTests
         Assert.False(new AgentChangeViewRow(Row(AgentChangeResult.Done, kind: "edit_server")).CanUndo);
         Assert.True(new AgentChangeViewRow(Row(AgentChangeResult.Done, ageDays: 364)).CanUndo);
     }
+
+    /// <summary>#6310: the Server column shows the registry's name, not the id; a server that left the registry keeps its id with a "(removed)" hint.</summary>
+    [Fact]
+    public void TheServerColumn_ShowsTheRegistryName_AndAnIdWithRemovedWhenTheServerIsGone()
+    {
+        var named = Row(AgentChangeResult.Done) with { ServerName = "SQL2019" };
+        Assert.Equal("SQL2019", new AgentChangeViewRow(named).Server);
+        Assert.Equal("Server 7 (removed)", new AgentChangeViewRow(Row(AgentChangeResult.Done)).Server);
+        Assert.Equal("", new AgentChangeViewRow(Row(AgentChangeResult.Done) with { ServerId = null }).Server);
+
+        var refusal = new AgentRefusalRow(1, DateTime.UtcNow, null, 7, "agent:a", "code", "tool", "SQL2019");
+        Assert.Equal("SQL2019", new AgentRefusalViewRow(refusal).Server);
+        Assert.Equal("Server 7 (removed)", new AgentRefusalViewRow(refusal with { ServerName = null }).Server);
+    }
 }

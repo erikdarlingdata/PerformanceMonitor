@@ -57,13 +57,19 @@ export function agentResultText(change) {
   return "result unknown";
 }
 
+/** The Server column (#6310): the registry's name the read sends, else the id marked removed, else empty. */
+export function agentServerText(row) {
+  if (row && typeof row.server_name === "string" && row.server_name) return row.server_name;
+  return row && Number.isInteger(row.server_id) ? "Server " + row.server_id + " (removed)" : "";
+}
+
 /** The rows of the changes grid from the list read's body. */
 export function agentChangeRows(data) {
   const changes = data && Array.isArray(data.changes) ? data.changes : [];
   return changes.map((c) => ({
     called_id: c.called_id,
     when: c.called_at_utc,
-    server: Number.isInteger(c.server_id) ? "Server " + c.server_id : "",
+    server: agentServerText(c),
     kind: agentKindText(c.kind),
     tool: c.tool || null,
     actor: c.actor,
@@ -79,7 +85,7 @@ export function agentChangeRows(data) {
 /** The refusals as rows: what an agent asked for and the code it was told. */
 export function agentRefusalRows(data) {
   const refusals = data && Array.isArray(data.refusals) ? data.refusals : [];
-  return refusals.map((r) => ({ when: r.at_utc, server: Number.isInteger(r.server_id) ? "Server " + r.server_id : "", tool: r.tool || null, actor: r.actor, code: r.code || null }));
+  return refusals.map((r) => ({ when: r.at_utc, server: agentServerText(r), tool: r.tool || null, actor: r.actor, code: r.code || null }));
 }
 
 /** An undo's answer in plain words: { message, isError, reread }. A refusal (409) keeps the store's own sentence. */

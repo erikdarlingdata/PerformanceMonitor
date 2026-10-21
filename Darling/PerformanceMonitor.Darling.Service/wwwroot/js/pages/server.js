@@ -128,6 +128,14 @@ let panelAbort = null;
    matches on), module-scoped like pageHours, and bounded by the number of servers visited in one session. */
 const lastCard = new Map();
 
+/** How long a tab click may reuse the remembered card (#6310): the 60 s poll's cadence, so a click never shows a header older than one poll. */
+export const REMEMBERED_CARD_MAX_AGE_MS = 60000;
+
+/** True when a remembered card is too old for a tab click to reuse; a card with no stamp is stale. */
+export function rememberedCardIsStale(remembered, nowMs) {
+  return !remembered || typeof remembered.at !== "number" || nowMs - remembered.at > REMEMBERED_CARD_MAX_AGE_MS;
+}
+
 /* The range the reader picked that is not one of RANGE_OPTIONS, keyed by server (module scope, so the 60s poll's rebuild keeps it and
    another server starts on the presets). Each value is `{ spec, live }`: the range as the picker names it (a length, a calendar
    period, a typed pair) and whether its end slides with now. A LIVE range keeps its meaning and slides to end at "now" on every
@@ -304,13 +312,15 @@ export function renderServer(main, server, tabId, opts) {
      the whole 66-81KB roll-up for one ~1.5KB card (#4190). The synchronous paint above already put that
      reused card on screen, so skipping the fetch here changes nothing about what a tab click shows; it only
      stops asking the store for an answer this page already has until the poll asks again. */
-  if (!remembered || isPoll) {
+  /* #6310: a remembered card is reused for a tab click only while it is young. The charts re-read on every click, so an old card
+     kept the header tiles (Deadlocks 0) behind a chart that already showed the event, for as long as the poll was slow or off. */
+  if (!remembered || isPoll || rememberedCardIsStale(remembered, Date.now())) {
     loadServerCard(server, (card, reason) => {
       /* A newer render has started since this fetch went out — everything below writes module state or mounts
          into nodes this render no longer owns, so the only correct thing to do with a stale answer is drop it. */
       if (generation !== renderGeneration) return;
 
-      if (card) lastCard.set(server, { card, reason });
+      if (card) lastCard.set(server, { card, reason, at: Date.now() });
       fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, card, reason);
       fillDatabaseFilter(dbSlot, server, card);
 

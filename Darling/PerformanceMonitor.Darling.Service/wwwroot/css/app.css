@@ -1232,6 +1232,11 @@ pre.code {
 .subtab.active { color: var(--fg); font-weight: 600; border-bottom-color: var(--accent); }
 .subtab:focus-visible { outline: 2px solid var(--muted); outline-offset: -2px; }
 
+/* #6310: the Admin bar has ten tabs, wider than a 1280 px window, and a scrolling strip showed the last one cut to "Enviro" with
+   nothing to say it scrolls. The Admin bar wraps onto a second row instead, so every tab is readable at any width. */
+.subtabs.wrap { flex-wrap: wrap; overflow-x: visible; }
+.subtabs.wrap .subtab { flex: 0 1 auto; white-space: normal; max-width: 100%; }
+
 /* The tab's honesty note sits between the tab strip and the panels — it describes what this tab does NOT do,
    so it belongs above the panels it qualifies rather than buried under them. */
 .subtabs + .strip.notice { margin-bottom: 1rem; }
