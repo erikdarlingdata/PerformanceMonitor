@@ -143,6 +143,9 @@ SELECT DISTINCT ON (source)
     detail
 FROM holders
 WHERE xmin_age IS NOT NULL
+/* #6305: age 0 is a snapshot taken this instant, holding nothing back (another Darling connection reading
+   at the same moment looked like a holder). */
+AND   xmin_age > 0
 ORDER BY source, xmin_age DESC";
 
     public override string Name => "pg_xmin_horizon";

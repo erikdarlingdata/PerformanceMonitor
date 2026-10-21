@@ -132,19 +132,22 @@ public sealed class WebPageRangeTests
     public void EveryServerTabThatDeclaresACollectorNamesARealOne_AndTheViewerAgreesOnTheSharedTabs()
     {
         var tabs = Js("pages", "server-tabs.js");
-        /* A tab's collector is declared in server-tab-reach.js (#5562 r3), by tab id, in registry order: the seven SQL Server tabs, then the
+        /* A tab's collector is declared in server-tab-reach.js (#5562 r3), by tab id, in registry order: the SQL Server tabs, then the
            two PostgreSQL ones. The label is the tab's own, from the SQL Server registry's first tab of that id. */
         var reach = Js("pages", "server-tab-reach.js");
         var declared = Regex.Matches(reach, "(?m)^  ([a-z-]+): \\{\n    collector: \"([a-z_]+)\",")
             .Select(m => (Regex.Match(tabs, "(?m)^    id: \"" + m.Groups[1].Value + "\",\n    label: \"([^\"]+)\",").Groups[1].Value, m.Groups[2].Value)).ToList();
-        Assert.Equal(9, declared.Count);
+        /* The web's own I/O Trends tab (#6296) is a SQL Server tab, so the SQL Server tabs are every declared tab but the last two. */
+        var sqlTabs = declared.Take(declared.Count - 2).ToList();
+        Assert.Equal(8, sqlTabs.Count);
         Assert.All(declared, d => Assert.NotEqual(string.Empty, d.Item1));
 
         foreach (var (_, collector) in declared)
             Assert.True(CollectorScheduleDefaults.All.ContainsKey(collector), collector + " is not a collector the schedule knows");
 
         // The SQL Server tabs the Viewer also has name the same main collector (the Viewer's table: ViewerTimeRangeWindow.MainCollectorFor).
-        foreach (var (label, collector) in declared.Take(7))
+        // I/O Trends is the web's own tab: the Viewer draws file throughput as a sub-tab of File I/O, so it has no tab of that name to agree with.
+        foreach (var (label, collector) in sqlTabs.Where(d => d.Item1 != "I/O Trends"))
         {
             var viewer = PerformanceMonitor.Darling.Viewer.ViewerTimeRangeWindow.MainCollectorFor(label);
             Assert.Equal(viewer, collector);

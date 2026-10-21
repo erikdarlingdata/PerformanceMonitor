@@ -34,8 +34,13 @@ public sealed record AgentChangeRow(
     DateTime? UndoneAtUtc,
     string? UndoneBy,
     int? MutedAlerts,
-    ForceReviewMark? ForceReview = null)
+    ForceReviewMark? ForceReview = null,
+    string? ServerName = null)
 {
+    /// <summary>What the Server column and the MCP answer show (#6310): the registry's name, or the id with "(removed)" when the server
+    /// is no longer registered; empty for a change with no server.</summary>
+    public string ServerLabel => AgentChangeServerLabel.For(ServerId, ServerName);
+
     /// <summary>The kind word the tool journaled (<c>mute</c>, <c>custom_rule</c> or <c>threshold_override</c>; <see cref="AgentChangeKinds"/>).</summary>
     public string? Kind => ReadString("kind");
 
@@ -74,7 +79,18 @@ public sealed record ForceReviewMark(int Opened, int Answered, bool Running)
 public enum AgentChangeResult { Done, Failed, Unknown }
 
 /// <summary>A journaled refusal (#5917): the gate or a tool said no.</summary>
-public sealed record AgentRefusalRow(long JournalId, DateTime AtUtc, Guid? RequestId, int? ServerId, string Actor, string? Code, string? Tool);
+public sealed record AgentRefusalRow(long JournalId, DateTime AtUtc, Guid? RequestId, int? ServerId, string Actor, string? Code, string? Tool, string? ServerName = null)
+{
+    /// <summary>The registry's name for the server, or the id with "(removed)" (#6310); empty for a refusal with no server.</summary>
+    public string ServerLabel => AgentChangeServerLabel.For(ServerId, ServerName);
+}
+
+/// <summary>The server text of an Agent changes row (#6310): the name <c>collect.servers</c> holds, the id with "(removed)" when the registry no longer has it.</summary>
+public static class AgentChangeServerLabel
+{
+    public static string For(int? serverId, string? serverName) =>
+        serverId is not int id ? "" : serverName is { Length: > 0 } name ? name : "Server " + id.ToString(System.Globalization.CultureInfo.InvariantCulture) + " (removed)";
+}
 
 /// <summary>The Agent changes list (#5917): the calls, the refusals and the switch.</summary>
 public sealed record AgentChangesRead(bool Enabled, IReadOnlyList<AgentChangeRow> Changes, IReadOnlyList<AgentRefusalRow> Refusals);
@@ -139,8 +155,9 @@ public sealed partial class AgentChangeUndo
 
     internal const string ListSql = @"
 SELECT c.journal_id, c.event_time, c.request_id, c.server_id, c.actor, c.reason, c.detail::text,
-       r.event, r.detail::text, u.event_time, u.actor
+       r.event, r.detail::text, u.event_time, u.actor, COALESCE(sv.display_name, sv.server_name)
 FROM config.investigation_journal AS c
+LEFT JOIN collect.servers AS sv ON sv.server_id = c.server_id
 LEFT JOIN LATERAL (
     SELECT x.event, x.detail FROM config.investigation_journal AS x
     WHERE x.request_id = c.request_id
@@ -160,10 +177,11 @@ LIMIT $2";
     /* A gate refusal always carries detail.tool (InvestigationRequestStore.AgentAction, DarlingAgentActionGate). The Level 1 request
        refusals (claim and submit, InvestigationRequestStore.RecordRefusalAsync) are agent-actor refusals too but refuse no change. */
     internal const string RefusalsSql = @"
-SELECT journal_id, event_time, request_id, server_id, actor, reason, detail->>'tool'
-FROM config.investigation_journal
-WHERE event = 'refused' AND actor LIKE 'agent:%' AND detail->>'tool' IS NOT NULL AND event_time >= $1
-ORDER BY event_time DESC, journal_id DESC
+SELECT j.journal_id, j.event_time, j.request_id, j.server_id, j.actor, j.reason, j.detail->>'tool', COALESCE(sv.display_name, sv.server_name)
+FROM config.investigation_journal AS j
+LEFT JOIN collect.servers AS sv ON sv.server_id = j.server_id
+WHERE j.event = 'refused' AND j.actor LIKE 'agent:%' AND j.detail->>'tool' IS NOT NULL AND j.event_time >= $1
+ORDER BY j.event_time DESC, j.journal_id DESC
 LIMIT $2";
 
     /// <summary>The alerts muted since the change on the rule's server and metric (a null on the rule matches any). The alert log
@@ -259,7 +277,8 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
             {
                 refusals.Add(new AgentRefusalRow(reader.GetInt64(0), Utc(reader.GetDateTime(1)), reader.IsDBNull(2) ? null : reader.GetGuid(2),
                     reader.IsDBNull(3) ? null : reader.GetInt32(3), reader.GetString(4),
-                    reader.IsDBNull(5) ? null : reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6)));
+                    reader.IsDBNull(5) ? null : reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6),
+                    reader.IsDBNull(7) ? null : reader.GetString(7)));
             }
         }
 
@@ -283,7 +302,7 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
                 reader.IsDBNull(8) ? null : reader.GetString(8),
                 reader.IsDBNull(9) ? null : Utc(reader.GetDateTime(9)),
                 reader.IsDBNull(10) ? null : reader.GetString(10),
-                null));
+                null, null, reader.IsDBNull(11) ? null : reader.GetString(11)));
         }
 
         return changes;

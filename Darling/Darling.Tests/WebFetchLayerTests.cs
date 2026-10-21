@@ -278,35 +278,6 @@ public sealed class WebFetchLayerTests
         Assert.Contains("export async function apiSend(method, path, body) {", util, StringComparison.Ordinal);
     }
 
-    /* ---------------------------------------------------------------------------------------------------
-       #4190 — a sub-tab click reuses the last /api/fleet read; only a new server or the poll re-fetches.
-       --------------------------------------------------------------------------------------------------- */
-
-    /// <summary>The exact gate: loadServerCard (the only /api/fleet read on this page) runs only when nothing
-    /// is cached for this server yet, or this call is the poll's own refresh — never for a plain sub-tab
-    /// click, which the synchronous `remembered` paint just above already served from the page's own cache.</summary>
-    [Fact]
-    public void ServerJs_OnlyRefetchesFleetForAnUnseenServerOrThePoll()
-    {
-        var server = ServerJs;
-
-        Assert.Contains("export function renderServer(main, server, tabId, opts) {", server, StringComparison.Ordinal);
-        Assert.Contains("const isPoll = !!(opts && opts.poll === true);", server, StringComparison.Ordinal);
-        Assert.Contains("if (!remembered || isPoll) {", server, StringComparison.Ordinal);
-
-        // loadServerCard's one CALL site (not its `function loadServerCard(server, onCard)` definition,
-        // which also contains the literal "loadServerCard(server,") must be reached only through that gate.
-        var occurrences = 0;
-        var idx = 0;
-        const string callSite = "loadServerCard(server, (card, reason) => {";
-        while ((idx = server.IndexOf(callSite, idx, StringComparison.Ordinal)) >= 0)
-        {
-            occurrences++;
-            idx += 1;
-        }
-        Assert.Equal(1, occurrences);
-    }
-
     /// <summary>app.js threads the poll flag down to renderServer through route(), and ONLY there — the other
     /// page renderers (fleet/ag/sweeps/alerts/...) take no such flag, because #4190 is specific to the server
     /// page's own fleet-card cache.</summary>

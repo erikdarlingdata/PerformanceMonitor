@@ -131,7 +131,13 @@ public partial class DrillDownCollector
                     await CollectParameterSensitiveQueries(finding, context);
 
                 if (pathKeys.Contains("PLAN_REGRESSION"))
-                    await CollectRegressedQueries(finding, context);
+                {
+                    /* #6267: the queries whose timeouts or errors rose go in alongside the cost offenders; a fact raised by
+                       failures alone has no cost offender to list. */
+                    PlanRegressionFailureRule.AddDrillDown(finding.DrillDown!, context);
+                    if (!PlanRegressionFailureRule.RaisedByFailuresAlone(context))
+                        await CollectRegressedQueries(finding, context);
+                }
 
                 // Plan analysis: for findings with top queries, analyze their cached plans
                 await CollectPlanAnalysis(finding, context);

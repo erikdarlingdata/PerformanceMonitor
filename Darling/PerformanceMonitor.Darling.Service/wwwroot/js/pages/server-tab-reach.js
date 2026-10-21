@@ -59,6 +59,12 @@ export const SQL_TAB_REACH = {
       "get_file_io_trend", "get_tempdb_trend"
     ]
   },
+  iotrends: {
+    collector: "file_io_stats",
+    reachReads: [
+      "get_server_trend"
+    ]
+  },
   queries: {
     collector: "query_stats",
     reachReads: [
@@ -88,7 +94,7 @@ export const SQL_TAB_REACH = {
   },
   health: {
     reachReads: [
-      "get_collection_log"
+      "get_collection_log", "get_server_trend"
     ]
   }
 };

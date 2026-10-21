@@ -19,6 +19,13 @@
   </head>
   <body>
     <div id="app">
+      <!-- #6315: below 768 px the sidebar leaves the page flow; this bar (hidden at wider widths) holds the button that
+           opens it as an overlay. js/narrow-nav.js owns the open state, aria-expanded and focus. -->
+      <header id="topbar">
+        <button id="nav-toggle" class="nav-toggle" type="button" aria-controls="sidebar" aria-expanded="false" aria-label="Open the menu" title="Open the menu">&#9776;</button>
+        <span class="topbar-title">Darling Web</span>
+      </header>
+      <div id="nav-backdrop" aria-hidden="true"></div>
       <aside id="sidebar">
         <div class="brand">
           <h1>Darling Web</h1>
