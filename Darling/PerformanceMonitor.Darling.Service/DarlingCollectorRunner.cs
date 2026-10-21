@@ -6049,6 +6049,16 @@ AND   collection_time >= $3", storeConnection))
         }
     }
 
+    /// <summary>#6211: the stored-hour read from the wide table: one bounded range (server, database, interval ids, partition-pruning floor on <c>first_execution_time</c>).</summary>
+    internal const string StoredHourWideSql = @"
+SELECT plan_id, query_id, runtime_stats_interval_id, execution_type_desc, replica_role, execution_count, avg_cpu_time_us, avg_duration_us,
+       avg_physical_io_reads, avg_logical_io_writes, max_query_max_used_memory, max_tempdb_space_used
+FROM collect.query_store_interval_wide
+WHERE server_id = $1
+AND   database_name = $2
+AND   first_execution_time >= $3
+AND   runtime_stats_interval_id = ANY($4)";
+
     /// <summary>
     /// #6211: the hour's rows earlier runs already stored, so the rank is over the whole database-hour (see <see cref="QueryStoreFetchSelection"/>):
     /// one row per (plan, interval, execution type, replica), the newest snapshot, for the intervals this batch names.
@@ -6110,14 +6120,7 @@ AND NOT EXISTS
         }
 
         string sql = wideCovers
-            ? @"
-SELECT plan_id, query_id, runtime_stats_interval_id, execution_type_desc, replica_role, execution_count, avg_cpu_time_us, avg_duration_us,
-       avg_physical_io_reads, avg_logical_io_writes, max_query_max_used_memory, max_tempdb_space_used
-FROM collect.query_store_interval_wide
-WHERE server_id = $1
-AND   database_name = $2
-AND   first_execution_time >= $3
-AND   runtime_stats_interval_id = ANY($4)"
+            ? StoredHourWideSql
             : @"
 SELECT DISTINCT ON (plan_id, runtime_stats_interval_id, execution_type_desc, replica_role)
        plan_id, query_id, runtime_stats_interval_id, execution_type_desc, replica_role, execution_count, avg_cpu_time_us, avg_duration_us,
