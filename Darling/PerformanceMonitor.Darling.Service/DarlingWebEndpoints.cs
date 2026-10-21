@@ -1422,7 +1422,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var stopwatch = Stopwatch.StartNew();
             try
             {
-                return Results.Json(await DarlingWebAgentSetup.AccessAsync(postgres, context.RequestAborted));
+                return Results.Json(DarlingWebAgentSetup.ForSeat(
+                    await DarlingWebAgentSetup.AccessAsync(postgres, context.RequestAborted), DarlingWebSeat.IsSignedInAdmin(context)));
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -1437,7 +1438,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             try
             {
                 return DarlingWebStatementSweep.JsonText(
-                    await DarlingWebAgentSetup.ProfilesBodyAsync(postgres, context.RequestAborted),
+                    DarlingWebAgentSetup.ForSeat(
+                        await DarlingWebAgentSetup.ProfilesBodyAsync(postgres, context.RequestAborted), DarlingWebSeat.IsSignedInAdmin(context)),
                     "/api/environment-profiles", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -1477,6 +1479,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         app.MapDelete("/api/notification-routes/{id:int}", async (HttpContext context, int id) =>
         {
             var stopwatch = Stopwatch.StartNew();
+            if (!DarlingWebSeat.IsSignedInAdmin(context))
+            {
+                return DarlingWebStatementSweep.JsonText(
+                    new JsonObject { ["error"] = DarlingWebAgentSetup.SignInMessage }, "/api/notification-routes/{id}", logger,
+                    stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
+            }
+
             try
             {
                 var (status, answer) = await DarlingWebAgentSetup.DeleteRouteAsync(
@@ -1499,6 +1508,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         HttpContext context, ILogger logger, string route,
         Func<JsonObject, string, CancellationToken, Task<(int Status, JsonNode Body)>> write)
     {
+        /* #6274: every agent setup write needs a signed-in admin. A dashboard with no sign-in stores no seat, so the default shared-token
+           seat that FromContext hands back would let any process on the host change routes and profiles with no credential. */
+        if (!DarlingWebSeat.IsSignedInAdmin(context))
+        {
+            return (StatusCodes.Status403Forbidden, new JsonObject { ["error"] = DarlingWebAgentSetup.SignInMessage });
+        }
+
         if (!IsJsonContentType(context.Request.ContentType))
         {
             return (StatusCodes.Status415UnsupportedMediaType, new JsonObject { ["error"] = "Content-Type must be application/json." });

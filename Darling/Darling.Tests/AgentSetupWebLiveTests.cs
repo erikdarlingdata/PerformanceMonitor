@@ -16,6 +16,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
@@ -77,7 +78,8 @@ public sealed class AgentSetupWebLiveTests
             new WebhookProxies(null, null, null, null), null, null, 30, ct);
 
     private static async Task WithWebRoutesAsync(
-        string managedRole, Func<NpgsqlDataSource, NpgsqlDataSource, Sender, CancellationToken, Task> body, IPasswordKeyRing? ring = null)
+        string managedRole, Func<NpgsqlDataSource, NpgsqlDataSource, Sender, CancellationToken, Task> body, IPasswordKeyRing? ring = null,
+        DarlingWebSeat? seat = null, bool signedIn = true)
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the agent setup web live tests.");
@@ -114,12 +116,46 @@ public sealed class AgentSetupWebLiveTests
             builder.Logging.ClearProviders();
             builder.Services.AddSingleton(webLogin);
             await using var app = builder.Build();
+
+            /* The host's seat step (#6274), as DarlingWebHostService runs it for a signed-in request: the resolved seat rides HttpContext.Items and
+               a read-only seat is refused every mutating request by the real DarlingWebSeat.IsRequestAllowed with the host's sentence. With
+               signedIn false nothing is stored, exactly as a loopback dashboard with no sign-in: the default seat FromContext hands back is the
+               shared token's, and only IsSignedInAdmin can tell the two apart. */
+            app.Use(async (context, next) =>
+            {
+                if (signedIn)
+                {
+                    var resolved = seat ?? DarlingWebSeat.SharedToken;
+                    context.Items[DarlingWebSeat.HttpContextItemKey] = resolved;
+                    if (!DarlingWebSeat.IsRequestAllowed(resolved, context.Request.Method, context.Request.Path.Value ?? "/"))
+                    {
+                        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                        context.Response.ContentType = "application/json; charset=utf-8";
+                        await context.Response.WriteAsync("{\"error\": \"This account has read-only access.\"}");
+                        return;
+                    }
+                }
+
+                await next(context);
+            });
             DarlingWebEndpoints.MapAll(app, webLogin, new CollectorRuntimeState(), new CapturingTestLogger(), passwordKeys: ring);
             await app.StartAsync(ct);
             using var server = app.GetTestServer();
 
             async Task<(int Status, JsonNode? Body)> Send(string method, string path, string? contentType, string? json = null)
             {
+                /* A route edit carries the modified_at the page read (#6274). These tests read it just before the send, so a test that wants a
+                   STALE one writes expected_modified_at itself, and one that wants it missing adds ?nostamp=1 to the path. */
+                if (method == "PUT" && json is not null && json.StartsWith('{') && !json.Contains("expected_modified_at", StringComparison.Ordinal)
+                    && !path.Contains("nostamp", StringComparison.Ordinal)
+                    && path.StartsWith("/api/notification-routes/", StringComparison.Ordinal)
+                    && int.TryParse(path["/api/notification-routes/".Length..], out var editedId))
+                {
+                    var current = await ScalarAsync(owner, $"SELECT to_char(modified_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.US') FROM config_notification_routes WHERE route_id = {editedId}", ct);
+                    json = "{\"expected_modified_at\":\"" + (string.IsNullOrEmpty(current) ? "2000-01-01T00:00:00" : current) + "\"" + (json.Length > 2 ? "," : "") + json[1..];
+                }
+
+                path = path.Replace("?nostamp=1", "", StringComparison.Ordinal);
                 var context = await server.SendAsync(request =>
                 {
                     request.Request.Method = method;
@@ -435,16 +471,177 @@ public sealed class AgentSetupWebLiveTests
         });
     }
 
-    /* The write gate is the host's, by method: a read-only seat (an OIDC viewer) is refused every unsafe method, so each new write
-       route is born gated; a seat that can edit passes. */
-    [Theory]
-    [InlineData("POST", "/api/notification-routes")]
-    [InlineData("PUT", "/api/notification-routes/7")]
-    [InlineData("DELETE", "/api/notification-routes/7")]
-    [InlineData("PUT", "/api/environment-profiles")]
-    public void TheHostsWriteGate_RefusesAReadOnlySeat_ThisSetupsWrites_AndLetsAnEditingSeatThrough(string method, string path)
+    /* The write gate is the host's, by method, and the setup's own gate is the signed-in admin (#6274). A read-only seat (an OIDC viewer) is
+       refused every unsafe method by the host before routing, so each new write route is born gated; this runs the four writes through the
+       host's seat step and tells the host's refusal from the handler's by its sentence, so it fails when the gate is removed. */
+    [Fact]
+    public async Task TheHostsWriteGate_RefusesAReadOnlySeat_EveryWrite_WithTheHostsSentence_AndChangesNothing()
     {
-        Assert.False(DarlingWebSeat.IsRequestAllowed(new DarlingWebSeat("viewer-person", false), method, path));
-        Assert.True(DarlingWebSeat.IsRequestAllowed(new DarlingWebSeat("admin-person", true), method, path));
+        await WithWebRoutesAsync("admin", async (owner, _, Send, ct) =>
+        {
+            var seeded = await SeedRouteAsync(owner, "performance", ct);
+            foreach (var (method, path, json) in new[]
+            {
+                ("POST", "/api/notification-routes", "{\"metric_match\":\"blocking\",\"agent_level\":3}"),
+                ("PUT", $"/api/notification-routes/{seeded}", "{\"agent_level\":3}"),
+                ("DELETE", $"/api/notification-routes/{seeded}", null),
+                ("PUT", "/api/environment-profiles", "{\"profile_text\":\"changed\"}"),
+            })
+            {
+                var answer = await Send(method, path, method == "DELETE" ? null : Json, json);
+                Assert.Equal(403, answer.Status);
+                Assert.Equal("This account has read-only access.", (string)answer.Body!["error"]!);
+            }
+
+            Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config_notification_routes WHERE agent_level IS NULL", ct));
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.agent_environment_profiles", ct));
+        }, seat: new DarlingWebSeat("viewer-person", false));
+    }
+
+    /* A loopback dashboard with no sign-in stores no seat: every write is refused for want of a signed-in admin, the access flags say the page
+       lists only, and nothing changes. A signed-in admin (the shared token's seat or an OIDC admin) writes. */
+    [Fact]
+    public async Task AgentSetup_WithoutASignedInAdmin_EveryWriteIs403_TheFlagsAreFalse_AndNothingChanges()
+    {
+        await WithWebRoutesAsync("admin", async (owner, _, Send, ct) =>
+        {
+            var seeded = await SeedRouteAsync(owner, "performance", ct);
+            await new InvestigationRequestStore(owner, 30).SaveProfileAsync(null, null, "fleet: OLTP", "tester", ct);
+            var routeBefore = await ScalarAsync(owner, $"SELECT agent_level || '|' || agent_max_per_hour || '|' || enabled || '|' || smtp_recipients || '|' || modified_at FROM config_notification_routes WHERE route_id = {seeded}", ct);
+
+            foreach (var (method, path, json) in new[]
+            {
+                ("POST", "/api/notification-routes", "{\"metric_match\":\"blocking\",\"agent_level\":3}"),
+                ("PUT", $"/api/notification-routes/{seeded}", "{\"agent_level\":3,\"agent_max_per_hour\":60}"),
+                ("PUT", $"/api/notification-routes/{seeded}", "{\"generic_webhook_url\":\"https://elsewhere.example.test/hook\"}"),
+                ("PUT", $"/api/notification-routes/{seeded}", "{\"email_recipients\":\"-\"}"),
+                ("DELETE", $"/api/notification-routes/{seeded}", null),
+                ("PUT", "/api/environment-profiles", "{\"profile_text\":\"changed\"}"),
+            })
+            {
+                var answer = await Send(method, path, method == "DELETE" ? null : Json, json);
+                Assert.Equal(403, answer.Status);
+                Assert.Equal("Sign in to the web as an admin to make this change, or use the Viewer.", (string)answer.Body!["error"]!);
+            }
+
+            var access = await Send("GET", "/api/agent-setup/access", null);
+            Assert.False((bool)access.Body!["can_edit_routes"]!);
+            Assert.False((bool)access.Body["can_edit_profiles"]!);
+            Assert.Equal(DarlingWebAgentSetup.SignInMessage, (string)access.Body["sign_in_message"]!);
+            var profiles = await Send("GET", "/api/environment-profiles", null);
+            Assert.False((bool)profiles.Body!["can_edit"]!);
+
+            Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config_notification_routes", ct));
+            Assert.Equal(routeBefore, await ScalarAsync(owner, $"SELECT agent_level || '|' || agent_max_per_hour || '|' || enabled || '|' || smtp_recipients || '|' || modified_at FROM config_notification_routes WHERE route_id = {seeded}", ct));
+            Assert.Equal("fleet: OLTP", await ScalarAsync(owner, "SELECT profile_text FROM config.agent_environment_profiles", ct));
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'route_agent_changed'", ct));
+        }, signedIn: false);
+
+        await WithWebRoutesAsync("admin", async (owner, _, Send, ct) =>
+        {
+            var access = await Send("GET", "/api/agent-setup/access", null);
+            Assert.True((bool)access.Body!["can_edit_routes"]!);
+            Assert.True((bool)access.Body["can_edit_profiles"]!);
+            Assert.Null(access.Body["sign_in_message"]);
+            Assert.Equal(200, (await Send("POST", "/api/notification-routes", Json, "{\"metric_match\":\"blocking\",\"agent_level\":1}")).Status);
+            Assert.Equal(200, (await Send("PUT", "/api/environment-profiles", Json, "{\"profile_text\":\"fleet: OLTP\"}")).Status);
+            Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config_notification_routes", ct));
+        }, seat: new DarlingWebSeat("alice", true));
+    }
+
+    /* A page that loaded before an operator changed the route must not write over the change: the edit carries the modified_at the page read,
+       and a save over a newer row is a 409 that writes nothing. The Viewer's save is the same writer. */
+    [Fact]
+    public async Task AgentRoutes_AStaleSave_Is409_AndWritesNothing_ViaTheWebAndTheSharedWriter()
+    {
+        await WithWebRoutesAsync("admin", async (owner, _, Send, ct) =>
+        {
+            var seeded = await SeedRouteAsync(owner, "performance", ct);
+            var pageRead = await ScalarAsync(owner, $"SELECT to_char(modified_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.US') FROM config_notification_routes WHERE route_id = {seeded}", ct);
+
+            /* Missing is a 400, not a pass. */
+            var missing = await Send("PUT", $"/api/notification-routes/{seeded}?nostamp=1", Json, "{\"agent_level\":1}");
+            Assert.Equal(400, missing.Status);
+
+            /* An operator turns the agent off on the route after the page loaded. */
+            await ExecAsync(owner, $"UPDATE config_notification_routes SET agent_level = 0, modified_at = (now() AT TIME ZONE 'UTC') + interval '1 second' WHERE route_id = {seeded}", ct);
+
+            var stale = await Send("PUT", $"/api/notification-routes/{seeded}", Json, $"{{\"expected_modified_at\":\"{pageRead}\",\"agent_level\":2,\"enabled\":false}}");
+            Assert.Equal(409, stale.Status);
+            Assert.Equal(NotificationRouteWriter.ConflictText, (string)stale.Body!["error"]!);
+            Assert.Equal("0|true", await ScalarAsync(owner, $"SELECT agent_level || '|' || enabled FROM config_notification_routes WHERE route_id = {seeded}", ct));
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'route_agent_changed'", ct));
+
+            /* Reloaded, the same edit goes through. */
+            Assert.Equal(200, (await Send("PUT", $"/api/notification-routes/{seeded}", Json, "{\"agent_level\":2,\"enabled\":false}")).Status);
+            Assert.Equal("2|false", await ScalarAsync(owner, $"SELECT agent_level || '|' || enabled FROM config_notification_routes WHERE route_id = {seeded}", ct));
+
+            /* The Viewer's path is the same writer: a draft whose version is old is refused; a route removed since is refused too. */
+            var stored = (await NotificationRouteWriter.ReadStoredAsync(owner, seeded, 30, ct))!;
+            await ExecAsync(owner, $"UPDATE config_notification_routes SET enabled = true, modified_at = (now() AT TIME ZONE 'UTC') + interval '2 seconds' WHERE route_id = {seeded}", ct);
+            var typed = stored.Clone();
+            typed.AgentLevel = 3;
+            var viewerSave = await Assert.ThrowsAsync<NotificationRouteRefusedException>(() => NotificationRouteWriter.SaveAsync(
+                owner, typed, stored, new WebhookProxies(null, null, null, null), null, null, 30, ct, "tester"));
+            Assert.Equal(NotificationRouteRefusalKind.Conflict, viewerSave.Kind);
+            Assert.Equal("2", await ScalarAsync(owner, $"SELECT agent_level FROM config_notification_routes WHERE route_id = {seeded}", ct));
+
+            await ExecAsync(owner, $"DELETE FROM config_notification_routes WHERE route_id = {seeded}", ct);
+            var gone = await Assert.ThrowsAsync<NotificationRouteRefusedException>(() => NotificationRouteWriter.SaveAsync(
+                owner, typed, stored, new WebhookProxies(null, null, null, null), null, null, 30, ct, "tester"));
+            Assert.Equal(NotificationRouteRefusalKind.Conflict, gone.Kind);
+        });
+    }
+
+    /* A person's change to a route's agent level, limits, scope or match is journaled with the route, the person, and the values before and
+       after, from the web and from the shared writer the Viewer saves through; a change to anything else is not. */
+    [Fact]
+    public async Task AgentRoutes_AnAgentLevelLimitOrScopeChange_WritesAJournalRow_BeforeAndAfter_ByThePerson()
+    {
+        await WithWebRoutesAsync("admin", async (owner, _, Send, ct) =>
+        {
+            var seeded = await SeedRouteAsync(owner, "performance", ct);
+
+            Assert.Equal(200, (await Send("PUT", $"/api/notification-routes/{seeded}", Json, "{\"agent_level\":3,\"agent_max_per_hour\":60}")).Status);
+            Assert.Equal($"person:alice|{seeded}|changed agent_level, agent_max_per_hour", await ScalarAsync(owner,
+                "SELECT actor || '|' || route_id || '|' || reason FROM config.investigation_journal WHERE event = 'route_agent_changed'", ct));
+            Assert.Equal("|3|20|60", await ScalarAsync(owner,
+                "SELECT coalesce(detail->'before'->>'agent_level','') || '|' || (detail->'after'->>'agent_level') || '|' || (detail->'before'->>'agent_max_per_hour') || '|' || (detail->'after'->>'agent_max_per_hour') FROM config.investigation_journal WHERE event = 'route_agent_changed'", ct));
+
+            /* The scope is part of it; an enabled flag or a destination is not. */
+            Assert.Equal(200, (await Send("PUT", $"/api/notification-routes/{seeded}", Json, $"{{\"scope_server_id\":{ServerId}}}")).Status);
+            Assert.Equal(200, (await Send("PUT", $"/api/notification-routes/{seeded}", Json, "{\"enabled\":false,\"email_recipients\":\"ops2@example.com\"}")).Status);
+            Assert.Equal("2", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'route_agent_changed'", ct));
+            Assert.Equal(ServerId.ToString(CultureInfo.InvariantCulture), await ScalarAsync(owner, "SELECT server_id FROM config.investigation_journal WHERE event = 'route_agent_changed' ORDER BY journal_id DESC LIMIT 1", ct));
+
+            /* The Viewer's writer: the same row from the same code, by the login it names. */
+            var stored = (await NotificationRouteWriter.ReadStoredAsync(owner, seeded, 30, ct))!;
+            var typed = stored.Clone();
+            typed.AgentLevel = 1;
+            await NotificationRouteWriter.SaveAsync(owner, typed, stored, new WebhookProxies(null, null, null, null), null, null, 30, ct, "bob");
+            Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'route_agent_changed' AND actor = 'person:bob' AND reason = 'changed agent_level'", ct));
+
+            /* No login, no row (the MCP tools never reach this writer with a person). */
+            var again = (await NotificationRouteWriter.ReadStoredAsync(owner, seeded, 30, ct))!;
+            var third = again.Clone();
+            third.AgentLevel = 2;
+            await NotificationRouteWriter.SaveAsync(owner, third, again, new WebhookProxies(null, null, null, null), null, null, 30, ct);
+            Assert.Equal("3", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'route_agent_changed'", ct));
+        }, seat: new DarlingWebSeat("alice", true));
+    }
+
+    /* The profile journal row is dated by the store, not the process that wrote it: a store given a clock years off still writes a row dated
+       by now() in SQL, as the Viewer's own insert did before the web shared it. */
+    [Fact]
+    public async Task EnvironmentProfiles_TheJournalRow_IsDatedByTheStoresClock_NotTheCallers()
+    {
+        await WithWebRoutesAsync("admin", async (owner, _, _, ct) =>
+        {
+            var skewed = new InvestigationRequestStore(owner, 30, () => new DateTime(2001, 1, 1, 0, 0, 0, DateTimeKind.Utc));
+            Assert.True(await skewed.SaveProfileAsync(null, null, "fleet: OLTP", "alice", ct));
+            Assert.True(await skewed.SaveProfileAsync(null, null, "   ", "alice", ct));
+            Assert.Equal("2|0", await ScalarAsync(owner,
+                "SELECT count(*) || '|' || count(*) FILTER (WHERE abs(extract(epoch FROM now() - event_time)) > 120) FROM config.investigation_journal WHERE event IN ('profile_saved', 'profile_removed')", ct));
+        });
     }
 }

@@ -141,10 +141,18 @@ public sealed partial class ViewerDataService
     /// Saves a route with its webhook destinations sealed (#5366) and returns its <c>route_id</c>. The save itself is
     /// <see cref="NotificationRouteWriter.SaveAsync"/>, the one copy the MCP route tools share (#6231). <paramref name="stored"/> is the
     /// row as read, for the values a blank box keeps; <paramref name="parent"/> is the settings row, which holds each channel's proxy.
+    /// #6274: the stored row's <c>ModifiedAtUtc</c> is the version this save expects (a route saved elsewhere since is refused, not
+    /// overwritten), and <paramref name="login"/> is the person, whose change to the route's agent level, limits, scope or match is journaled.
     /// </summary>
+    public Task<int> SaveNotificationRouteSealedAsync(
+        NotificationRouteRow typed, NotificationRouteRow? stored, NotificationRow parent, ViewerPasswordSealer? sealer,
+        string? refusal, CancellationToken cancellationToken = default) =>
+        SaveNotificationRouteSealedAsync(typed, stored, parent, sealer, refusal, null, cancellationToken);
+
+    /// <summary>The save with the person who makes it (#6274): see the overload above.</summary>
     public async Task<int> SaveNotificationRouteSealedAsync(
         NotificationRouteRow typed, NotificationRouteRow? stored, NotificationRow parent, ViewerPasswordSealer? sealer,
-        string? refusal, CancellationToken cancellationToken = default)
+        string? refusal, string? login, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(typed);
         ArgumentNullException.ThrowIfNull(parent);
@@ -166,7 +174,7 @@ public sealed partial class ViewerDataService
             return await NotificationRouteWriter.SaveAsync(
                 _dataSource, typed.ToDraft(), stored?.ToDraft(),
                 new WebhookProxies(parent.TeamsProxy, parent.SlackProxy, parent.GenericProxy, parent.PagerDutyProxy),
-                seal, refusal, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+                seal, refusal, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken, login);
         }
         catch (NotificationRouteRefusedException ex) when (ex.Kind == NotificationRouteRefusalKind.Value)
         {
@@ -453,6 +461,7 @@ public sealed class NotificationRouteRow
         AgentExpiryMinutes = AgentExpiryMinutes,
         SendResolutions = SendResolutions,
         FallbackRouteId = FallbackRouteId,
+        ModifiedAtUtc = ModifiedAtUtc == default ? null : ModifiedAtUtc,
     };
 
     public NotificationRouteRow Clone() => new()

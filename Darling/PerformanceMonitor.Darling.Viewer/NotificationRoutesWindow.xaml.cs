@@ -133,7 +133,7 @@ public partial class NotificationRoutesWindow : Window
 
         try
         {
-            await _dataService.SaveNotificationRouteSealedAsync(route, stored, parent, sealer, refusal);
+            await _dataService.SaveNotificationRouteSealedAsync(route, stored, parent, sealer, refusal, Environment.UserName, default);
         }
         catch (ViewerPasswordRefusedException ex)
         {

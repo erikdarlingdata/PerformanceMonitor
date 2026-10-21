@@ -23,6 +23,9 @@ public enum NotificationRouteRefusalKind
 {
     Validation,
     Value,
+
+    /// <summary>The route was saved or removed by someone else since the writer's screen read it (#6274); nothing was written.</summary>
+    Conflict,
 }
 
 /// <summary>A route write refused with a sentence that never carries a secret (#6231).</summary>
@@ -58,6 +61,11 @@ public sealed class NotificationRouteDraft
     public int AgentExpiryMinutes { get; set; } = NotificationRoute.DefaultAgentExpiryMinutes;
     public bool? SendResolutions { get; set; }
     public int? FallbackRouteId { get; set; }
+
+    /// <summary>When the route was last saved, as the writer's screen read it (the store's <c>modified_at</c>, UTC). On a <c>stored</c> draft
+    /// handed to <see cref="NotificationRouteWriter.SaveAsync"/> it is the version the save expects: a route saved by anyone since is refused
+    /// as a conflict instead of overwritten (#6274). Null or <c>default</c> skips the check.</summary>
+    public DateTime? ModifiedAtUtc { get; set; }
 
     public bool HasAnyDestination =>
         !string.IsNullOrWhiteSpace(TeamsUrl) || !string.IsNullOrWhiteSpace(SlackUrl)
@@ -148,7 +156,7 @@ WHERE route_id = $1";
     /// plaintext) and the address list. Only a writer with the service's login reads them.</summary>
     public const string SelectStoredSql =
         "SELECT route_id, metric_match, teams_url, slack_url, generic_url, pagerduty_routing_key, smtp_recipients, enabled, "
-        + "scope_server_id, scope_tag_id, " + AgentColumns + ", send_resolutions, fallback_route_id "
+        + "scope_server_id, scope_tag_id, " + AgentColumns + ", send_resolutions, fallback_route_id, modified_at "
         + "FROM config_notification_routes WHERE route_id = $1";
 
     /// <summary>The proxy of each webhook channel on the settings row (the row id 1 the Viewer reads).</summary>
@@ -501,6 +509,11 @@ WHERE route_id = $1";
             return null;
         }
 
+        return ReadStoredRow(reader);
+    }
+
+    private static NotificationRouteDraft ReadStoredRow(NpgsqlDataReader reader)
+    {
         return new NotificationRouteDraft
         {
             RouteId = reader.GetInt32(0),
@@ -520,6 +533,7 @@ WHERE route_id = $1";
             AgentExpiryMinutes = reader.GetInt32(14),
             SendResolutions = reader.IsDBNull(15) ? null : reader.GetBoolean(15),
             FallbackRouteId = reader.IsDBNull(16) ? null : reader.GetInt32(16),
+            ModifiedAtUtc = reader.IsDBNull(17) ? null : DateTime.SpecifyKind(reader.GetDateTime(17), DateTimeKind.Utc),
         };
     }
 
@@ -529,10 +543,16 @@ WHERE route_id = $1";
     /// sealed values, in one transaction: a refusal rolls the insert back. <paramref name="stored"/> is the row as read, for the
     /// values a blank box keeps; <paramref name="parent"/> holds each channel's proxy. Throws
     /// <see cref="NotificationRouteRefusedException"/> for every refusal; a store error propagates.
+    /// <para>#6274: an edit locks the route row first and refuses it as <see cref="NotificationRouteRefusalKind.Conflict"/> when the
+    /// row is gone or <paramref name="stored"/> carries a <see cref="NotificationRouteDraft.ModifiedAtUtc"/> that is not the row's
+    /// (a change made elsewhere since the screen loaded is not overwritten). When <paramref name="login"/> names the person saving,
+    /// a change to the route's agent level, limits, scope or match writes a <c>route_agent_changed</c> journal row, in the same
+    /// transaction, with the values before and after and the store's time.</para>
     /// </summary>
     public static async Task<int> SaveAsync(
         NpgsqlDataSource dataSource, NotificationRouteDraft typed, NotificationRouteDraft? stored, WebhookProxies parent,
-        Func<string, PasswordBinding, string>? seal, string? refusal, int timeoutSeconds, CancellationToken cancellationToken)
+        Func<string, PasswordBinding, string>? seal, string? refusal, int timeoutSeconds, CancellationToken cancellationToken,
+        string? login = null)
     {
         ArgumentNullException.ThrowIfNull(dataSource);
         ArgumentNullException.ThrowIfNull(typed);
@@ -543,9 +563,20 @@ WHERE route_id = $1";
             throw new NotificationRouteRefusedException(early, NotificationRouteRefusalKind.Validation);
         }
 
+        if (login is not null && InvestigationProfiles.ValidateLogin(login) is { } loginError)
+        {
+            throw new NotificationRouteRefusedException(loginError, NotificationRouteRefusalKind.Validation);
+        }
+
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var routeId = typed.RouteId;
+        NotificationRouteDraft? before = null;
+        if (routeId != 0)
+        {
+            before = await LockAndCheckAsync(connection, transaction, routeId, stored?.ModifiedAtUtc, timeoutSeconds, cancellationToken);
+        }
+
         if (routeId == 0)
         {
             await using var insert = new NpgsqlCommand(InsertSql, connection, transaction);
@@ -599,8 +630,94 @@ WHERE route_id = $1";
         AddNullableInt(update, resolved.ScopeTagId);                                                         // $10
         AddAgentColumns(update, resolved);                                                                   // $11-$17
         await update.ExecuteNonQueryAsync(cancellationToken);
+        if (login is not null && AgentChange(before, resolved) is { } change)
+        {
+            await InvestigationPersonJournal.InsertAsync(
+                connection, transaction, null, routeId, resolved.ScopeServerId, AgentChangedEvent,
+                InvestigationProfiles.PersonActor(login), change.Reason, change.Detail, timeoutSeconds, cancellationToken);
+        }
+
         await transaction.CommitAsync(cancellationToken);
         return routeId;
+    }
+
+    /// <summary>The journal event a person's change to a route's agent level, limits, scope or match writes (#6274).</summary>
+    public const string AgentChangedEvent = "route_agent_changed";
+
+    /// <summary>The sentence a save answers when the route changed since the writer's screen read it.</summary>
+    public const string ConflictText = "This route was changed or removed since you opened it. Reload it and make the change again.";
+
+    private const string LockSql = SelectStoredSql + " FOR UPDATE";
+
+    /// <summary>Locks the route row for the rest of the transaction and returns it as it is now. Throws a conflict when the route is gone
+    /// or its <c>modified_at</c> is not <paramref name="expected"/> (when one was given).</summary>
+    private static async Task<NotificationRouteDraft> LockAndCheckAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, int routeId, DateTime? expected, int timeoutSeconds,
+        CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(LockSql, connection, transaction);
+        command.CommandTimeout = timeoutSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            throw new NotificationRouteRefusedException(ConflictText, NotificationRouteRefusalKind.Conflict);
+        }
+
+        var row = ReadStoredRow(reader);
+        if (expected is { } want && want != default && row.ModifiedAtUtc?.Ticks != want.Ticks)
+        {
+            throw new NotificationRouteRefusedException(ConflictText, NotificationRouteRefusalKind.Conflict);
+        }
+
+        return row;
+    }
+
+    /// <summary>The reason and the before and after JSON of a change to the agent level, limits, scope or match, or null when none of them
+    /// changed. A new route (<paramref name="before"/> null) journals only when it sets an agent level.</summary>
+    private static (string Reason, string Detail)? AgentChange(NotificationRouteDraft? before, NotificationRouteDraft after)
+    {
+        if (before is null && after.AgentLevel is null)
+        {
+            return null;
+        }
+
+        var names = new List<string>();
+        void Compare(string name, object? was, object? now)
+        {
+            if (!Equals(was, now))
+            {
+                names.Add(name);
+            }
+        }
+
+        Compare("metric_match", before?.MetricMatch.Trim(), after.MetricMatch.Trim());
+        Compare("scope_server_id", before?.ScopeServerId, after.ScopeServerId);
+        Compare("scope_tag_id", before?.ScopeTagId, after.ScopeTagId);
+        Compare("agent_level", before?.AgentLevel, after.AgentLevel);
+        Compare("agent_max_per_hour", before?.AgentMaxPerHour, after.AgentMaxPerHour);
+        Compare("agent_max_per_day", before?.AgentMaxPerDay, after.AgentMaxPerDay);
+        Compare("agent_lease_minutes", before?.AgentLeaseMinutes, after.AgentLeaseMinutes);
+        Compare("agent_expiry_minutes", before?.AgentExpiryMinutes, after.AgentExpiryMinutes);
+        if (names.Count == 0)
+        {
+            return null;
+        }
+
+        static System.Text.Json.Nodes.JsonObject? Describe(NotificationRouteDraft? row) => row is null ? null : new System.Text.Json.Nodes.JsonObject
+        {
+            ["metric_match"] = row.MetricMatch.Trim(),
+            ["scope_server_id"] = row.ScopeServerId,
+            ["scope_tag_id"] = row.ScopeTagId,
+            ["agent_level"] = row.AgentLevel,
+            ["agent_max_per_hour"] = row.AgentMaxPerHour,
+            ["agent_max_per_day"] = row.AgentMaxPerDay,
+            ["agent_lease_minutes"] = row.AgentLeaseMinutes,
+            ["agent_expiry_minutes"] = row.AgentExpiryMinutes,
+        };
+
+        var detail = new System.Text.Json.Nodes.JsonObject { ["before"] = Describe(before), ["after"] = Describe(after) };
+        return ("changed " + string.Join(", ", names), detail.ToJsonString());
     }
 
     /// <summary>Whether the route holds a signing key sealed for a stored URL text other than <paramref name="newUrlText"/> (#5998).

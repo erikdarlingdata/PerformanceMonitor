@@ -28,10 +28,16 @@ namespace PerformanceMonitor.Darling.Service;
 /// stands level with the desktop Viewer here, and it shares the Viewer's code, not a copy: a route is saved and deleted by
 /// <see cref="NotificationRouteWriter"/> (the validation, the fallback check, the one transaction) and a profile by
 /// <see cref="InvestigationRequestStore.SaveProfileAsync"/> (the rules, the write and the <c>profile_saved</c> / <c>profile_removed</c> journal row).
-/// A route save writes no journal row, as the Viewer's does not; the write is logged with the seat that made it.
-/// <para>Who may write: the routes in <see cref="DarlingWebEndpoints"/> are born gated by the host's method gate (a read-only seat is refused every
-/// unsafe method), and the store decides the rest: a login with no write grant gets SQLSTATE 42501, answered 403 with a fixed sentence. The
-/// agent's token is the MCP listener's credential and is not a web credential, so it reaches none of these routes.</para>
+/// A person's change to a route's agent level, limits, scope or match writes a <c>route_agent_changed</c> journal row (before and after, the
+/// store's time), the same row the Viewer's save writes; the write is also logged with the seat that made it.
+/// <para>Who may write (#6274): only a signed-in admin (<see cref="Hosting.DarlingWebSeat.IsSignedInAdmin"/>). A dashboard with no sign-in
+/// registers no seat, so a process on the host would otherwise write as the default shared-token seat; it is refused 403 with
+/// <see cref="SignInMessage"/> and nothing is written. The routes in <see cref="DarlingWebEndpoints"/> are also born gated by the host's method
+/// gate (a read-only seat is refused every unsafe method), and the store decides the rest: a login with no write grant gets SQLSTATE 42501,
+/// answered 403 with a fixed sentence. The agent's token is the MCP listener's credential and is not a web credential, so it reaches none of
+/// these routes.</para>
+/// <para>No lost updates (#6274): an edit carries <c>expected_modified_at</c>, the route's <c>modified_at_utc</c> the page read. A route saved or
+/// removed by anyone since is refused 409 with <see cref="NotificationRouteWriter.ConflictText"/> and nothing is written.</para>
 /// <para>Destinations (the same fields the MCP route tools take, sealed by the same code): <c>teams_webhook_url</c>, <c>slack_webhook_url</c>,
 /// <c>generic_webhook_url</c> (absolute http or https URLs), <c>pagerduty_routing_key</c> and <c>email_recipients</c> (comma separated plain
 /// addresses). A webhook URL or key is sealed for the route (<see cref="DarlingMcpAlertTools.RouteSealer"/>, then
@@ -47,12 +53,16 @@ internal static class DarlingWebAgentSetup
         "This dashboard signs in to the store as the viewer role, so it cannot change agent routes or environment profiles. "
         + "Use the Viewer app, or run the web under the admin login.";
 
+    /// <summary>The 403 sentence of a write from a request that is not a signed-in admin (#6274).</summary>
+    internal const string SignInMessage = "Sign in to the web as an admin to make this change, or use the Viewer.";
+
     /// <summary>The body keys a route write accepts. Anything else is refused by name (never its value).</summary>
     private static readonly string[] s_routeKeys =
     [
         "metric_match", "enabled", "scope_server_id", "scope_tag_id", "agent_level", "agent_max_per_hour", "agent_max_per_day",
         "agent_lease_minutes", "agent_expiry_minutes", "send_resolutions", "fallback_route_id",
         "teams_webhook_url", "slack_webhook_url", "generic_webhook_url", "pagerduty_routing_key", "email_recipients",
+        "expected_modified_at",
     ];
 
     /// <summary>Whether this store login can write routes and profiles: the routes table and the profile table for INSERT and UPDATE, and the
@@ -62,7 +72,8 @@ internal static class DarlingWebAgentSetup
         await using var command = postgres.CreateCommand(@"
 SELECT has_table_privilege(current_user, 'config_notification_routes', 'INSERT')
        AND has_table_privilege(current_user, 'config_notification_routes', 'UPDATE')
-       AND has_table_privilege(current_user, 'config_notification_routes', 'DELETE'),
+       AND has_table_privilege(current_user, 'config_notification_routes', 'DELETE')
+       AND has_any_column_privilege(current_user, 'config.investigation_journal', 'INSERT'),
        has_table_privilege(current_user, 'config.agent_environment_profiles', 'INSERT')
        AND has_table_privilege(current_user, 'config.agent_environment_profiles', 'UPDATE')
        AND has_any_column_privilege(current_user, 'config.investigation_journal', 'INSERT')");
@@ -74,6 +85,27 @@ SELECT has_table_privilege(current_user, 'config_notification_routes', 'INSERT')
             ["can_edit_routes"] = !reader.IsDBNull(0) && reader.GetBoolean(0),
             ["can_edit_profiles"] = !reader.IsDBNull(1) && reader.GetBoolean(1),
         };
+    }
+
+    /// <summary>What a caller that is not a signed-in admin sees (#6274): the write flags false and the sentence that says how to get them. A
+    /// signed-in admin's answer is returned as it is.</summary>
+    internal static JsonObject ForSeat(JsonObject answer, bool signedInAdmin)
+    {
+        if (signedInAdmin)
+        {
+            return answer;
+        }
+
+        foreach (var key in new[] { "can_edit_routes", "can_edit_profiles", "can_edit" })
+        {
+            if (answer.ContainsKey(key))
+            {
+                answer[key] = false;
+            }
+        }
+
+        answer["sign_in_message"] = SignInMessage;
+        return answer;
     }
 
     /// <summary>Creates a route (<paramref name="routeId"/> null) or edits one. A body key left out keeps the saved value on an edit and
@@ -91,11 +123,21 @@ SELECT has_table_privilege(current_user, 'config_notification_routes', 'INSERT')
             NotificationRouteDraft? stored = null;
             if (routeId is { } id)
             {
+                if (body["expected_modified_at"] is not JsonValue expectedNode || expectedNode.GetValueKind() != JsonValueKind.String
+                    || !DateTime.TryParse(expectedNode.GetValue<string>(), CultureInfo.InvariantCulture,
+                        DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var expected))
+                {
+                    return Error(400, "expected_modified_at is required: send the modified_at_utc the page read for this route.");
+                }
+
                 stored = await NotificationRouteWriter.ReadStoredAsync(postgres, id, McpCommandDeadlines.ReadSeconds, ct);
                 if (stored is null)
                 {
                     return Error(404, "That route is gone.");
                 }
+
+                /* The version the page read, not the one just read: a save over a newer row is refused by the writer (#6274). */
+                stored.ModifiedAtUtc = expected;
             }
 
             var draft = stored?.Clone() ?? new NotificationRouteDraft();
@@ -107,10 +149,14 @@ SELECT has_table_privilege(current_user, 'config_notification_routes', 'INSERT')
             var proxies = await NotificationRouteWriter.ReadProxiesAsync(postgres, McpCommandDeadlines.ReadSeconds, ct);
             var (seal, refusal) = DarlingMcpAlertTools.RouteSealer(ring);
             var saved = await NotificationRouteWriter.SaveAsync(
-                postgres, draft, stored, proxies, seal, refusal, McpCommandDeadlines.ReadSeconds, ct);
+                postgres, draft, stored, proxies, seal, refusal, McpCommandDeadlines.ReadSeconds, ct, editor);
             logger.LogInformation("Web route write: {Action} route {RouteId} by {Editor}, fields {Fields}",
                 routeId is null ? "created" : "updated", saved, editor, string.Join(", ", body.Select(p => p.Key)));
             return (200, new JsonObject { ["status"] = routeId is null ? "created" : "updated", ["route_id"] = saved });
+        }
+        catch (NotificationRouteRefusedException ex) when (ex.Kind == NotificationRouteRefusalKind.Conflict)
+        {
+            return Error(409, ex.Message);
         }
         catch (NotificationRouteRefusedException ex)
         {

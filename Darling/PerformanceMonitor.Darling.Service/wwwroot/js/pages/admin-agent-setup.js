@@ -61,11 +61,13 @@ export function entriesFromRoute(r) {
     return {
       id: null, match: "", scope: "", enabled: true, level: "", perHour: AGENT_LIMIT_DEFAULTS.perHour, perDay: AGENT_LIMIT_DEFAULTS.perDay,
       lease: AGENT_LIMIT_DEFAULTS.lease, expiry: AGENT_LIMIT_DEFAULTS.expiry, resolutions: "", fallback: "",
-      saved: [], hooks: {}, removes: {}, recipients: "", recipientsWas: "",
+      saved: [], hooks: {}, removes: {}, recipients: "", recipientsWas: "", modifiedAt: null,
     };
   }
   return {
     id: r.route_id,
+    /* #6274: the version this form read; the save sends it back so a route changed elsewhere since is refused, not overwritten. */
+    modifiedAt: typeof r.modified_at_utc === "string" ? r.modified_at_utc : null,
     match: r.metric_match || "",
     scope: r.scope_server_id != null ? "s" + r.scope_server_id : r.scope_tag_id != null ? "t" + r.scope_tag_id : "",
     enabled: r.enabled !== false,
@@ -136,6 +138,7 @@ export function routePayload(entries) {
       agent_expiry_minutes: nums[3],
       send_resolutions: entries.resolutions === "" ? null : entries.resolutions === "true",
       fallback_route_id: fallback,
+      ...(entries.id != null ? { expected_modified_at: entries.modifiedAt } : {}),
     },
   };
 }
@@ -279,9 +282,10 @@ export function routeEditorNodes(options) {
 }
 
 /** The nodes for a seat that lists only. */
-export function routeListOnlyNodes() {
+/* #6274: a seat that is not a signed-in admin lists only, and the service says why in its own sentence (sign in as an admin, or use the Viewer). */
+export function routeListOnlyNodes(message) {
   const status = statusNode(routeStatus);
-  return (status ? [status] : []).concat([noticeStrip(ROUTES_LIST_ONLY)]);
+  return (status ? [status] : []).concat([noticeStrip(message || ROUTES_LIST_ONLY)]);
 }
 
 /** The Routes grid's extra columns: Agent use for everyone, Change (Edit and Delete) for an editing seat. */
@@ -311,7 +315,7 @@ export async function readAgentSetupAccess(session) {
   if (!session || session.can_edit !== true) return { routes: false, profiles: false };
   const res = await apiGet("/api/agent-setup/access");
   const d = res && res.kind === "data" ? res.data : null;
-  return { routes: !!d && d.can_edit_routes === true, profiles: !!d && d.can_edit_profiles === true };
+  return { routes: !!d && d.can_edit_routes === true, profiles: !!d && d.can_edit_profiles === true, message: d && typeof d.sign_in_message === "string" ? d.sign_in_message : null };
 }
 
 /* ───────────────────────────── Environment Profiles ───────────────────────────── */
@@ -376,7 +380,7 @@ export async function buildProfiles(body, generation, ctx) {
   const nodes = [];
   const status = statusNode(profileStatus);
   if (status) nodes.push(status);
-  nodes.push(noticeStrip(canEdit ? PROFILES_NOTE : PROFILES_LIST_ONLY));
+  nodes.push(noticeStrip(canEdit ? PROFILES_NOTE : (typeof d.sign_in_message === "string" && d.sign_in_message) || PROFILES_LIST_ONLY));
   if (canEdit) nodes.push(profileForm(profiles, fleet, d.max_length || 4000, ctx));
   const rows = profiles.map((p) => ({ ...p, scope: profileScopeText(p, fleet.servers, fleet.tags) }));
   nodes.push(rows.length

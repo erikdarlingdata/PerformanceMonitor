@@ -1232,7 +1232,7 @@ async function buildRoutes(body, generation) {
   /* A failed signing read leaves the strip out; the routes below are the page. */
   const signingNodes = signing && signing.kind === "data" ? signingStatusLines(signing.data).map((t) => noticeStrip(t)) : [];
   mount(body, [
-    ...(access.routes ? routeEditorNodes(options) : routeListOnlyNodes()),
+    ...(access.routes ? routeEditorNodes(options) : routeListOnlyNodes(access.message)),
     noticeStrip(ROUTES_NOTE),
     ...signingNodes,
     VIZ.table({ routes: rows }, {

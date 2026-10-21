@@ -35,8 +35,8 @@ public static class InvestigationProfiles
     /// <summary>The longest profile text, in characters (the V184 CHECK's twin).</summary>
     public const int MaxLength = 4000;
 
-    /// <summary>The longest login the journal actor names.</summary>
-    public const int MaxLoginLength = 128;
+    /// <summary>The longest login the journal actor names: room for a signed-in web person's subject (207 characters at most).</summary>
+    public const int MaxLoginLength = 256;
 
     /// <summary>Every environment profile: the fleet's (both scopes NULL), then per server, then per tag.</summary>
     public const string SelectSql = @"
@@ -66,7 +66,7 @@ WHERE coalesce(scope_server_id, 0) = coalesce($1::integer, 0) AND coalesce(scope
     /// <summary>The login the actor names: not blank, at most <see cref="MaxLoginLength"/> characters.</summary>
     public static string? ValidateLogin(string? login) =>
         string.IsNullOrWhiteSpace(login) ? "The viewer could not tell who you are, so it cannot record the change."
-        : login.Trim().Length > MaxLoginLength ? "The login is longer than 128 characters."
+        : login.Trim().Length > MaxLoginLength ? string.Create(CultureInfo.InvariantCulture, $"The login is longer than {MaxLoginLength} characters.")
         : null;
 
     /// <summary>The journal actor for a person: <c>person:&lt;login&gt;</c>, as the V184 journal records people.</summary>
@@ -134,8 +134,9 @@ public sealed partial class InvestigationRequestStore
                 NullableInt(scopeServerId), NullableInt(scopeTagId), P(profileText!.Trim()), P(actor));
         if (changed > 0)
         {
-            await JournalAsync(connection, transaction, Now(), null, null, scopeServerId, blank ? "profile_removed" : "profile_saved",
-                actor, InvestigationProfiles.ScopeReason(scopeServerId, scopeTagId), null, null, cancellationToken);
+            /* The store's clock, not this process's (#6274): the row is dated by now() in SQL, as the profile row is. */
+            await InvestigationPersonJournal.InsertAsync(connection, transaction, null, null, scopeServerId, blank ? "profile_removed" : "profile_saved",
+                actor, InvestigationProfiles.ScopeReason(scopeServerId, scopeTagId), null, _commandTimeoutSeconds, cancellationToken);
         }
 
         await transaction.CommitAsync(cancellationToken);
