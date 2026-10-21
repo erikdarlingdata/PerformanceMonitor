@@ -2192,7 +2192,19 @@ CREATE TRIGGER trg_agent_route_tag_guard
 ALTER TABLE config.server_tags ENABLE ALWAYS TRIGGER trg_agent_route_tag_guard;";
 
     /// <summary>
-    /// V211 (#6285, #6339): <c>collect.servers.machine_identity</c>, the name the monitored machine gives itself, written on every
+    /// V211 (#5736): the two multiples of the relative Client Timeouts bars, on the singleton <c>config_alert_settings</c> row beside the two
+    /// bars they scale. Warning is max(<c>client_timeouts_warning_per_minute</c>, <c>client_timeouts_warning_multiple</c> x the server's baseline) and
+    /// Critical is the same with the Critical pair, the baseline being the server's own p99.9 of its 3-minute average attention rate over the last 7 days.
+    /// The two existing columns keep their names and become the FLOORS (their defaults, 10 and 60, are unchanged). Two <c>integer NOT NULL</c> columns with
+    /// constant defaults (3 and 10), catalog-only, no backfill, no GRANT (the roles hold table-level privileges on the config schema) and no trigger (the
+    /// statement-level <c>trg_bump_alert_settings</c> already bumps <c>config_version</c> on any write here). The baseline itself needs no storage: the
+    /// service computes it from <c>collection_log</c> and <c>attention_events</c> and keeps it in memory for a day.
+    /// </summary>
+    private const string V211Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS client_timeouts_warning_multiple integer NOT NULL DEFAULT 3,
+    ADD COLUMN IF NOT EXISTS client_timeouts_critical_multiple integer NOT NULL DEFAULT 10;";
+    /// V212 (#6285, #6339): <c>collect.servers.machine_identity</c>, the name the monitored machine gives itself, written on every
     /// connect. For a SQL Server it is <c>SERVERPROPERTY('ServerName')</c> folded to lower case (NULL on an Azure SQL Database, which
     /// names no machine of its own); for PostgreSQL it is the cluster's <c>system_identifier</c>, a colon and the server port (NULL
     /// when the monitoring role may not call <c>pg_control_system()</c>). <c>add_servers</c> and <c>edit_server</c> over MCP compare
@@ -2201,7 +2213,7 @@ ALTER TABLE config.server_tags ENABLE ALWAYS TRIGGER trg_agent_route_tag_guard;"
     /// registration stays. No backfill: a registration fills its own on its next connect, and until then it is matched by its
     /// text alone. No view refresh: <c>collect.servers</c> is a registry, not a hypertable.
     /// </summary>
-    private const string V211Sql = @"
+    private const string V212Sql = @"
 ALTER TABLE collect.servers
     ADD COLUMN IF NOT EXISTS machine_identity text;";
 
@@ -2590,7 +2602,8 @@ $rung$;";
         new Migration(208, "mute-rule-starts-at", V208Sql),
         new Migration(209, "query-store-fetch-top-n", V209Sql),
         new Migration(210, "mcp-agent-route-tag-guard", V210Sql),
-        new Migration(211, "server-machine-identity", V211Sql),
+        new Migration(211, "client-timeouts-relative-bars", V211Sql),
+        new Migration(212, "server-machine-identity", V212Sql),
     };
 
     /// <summary>

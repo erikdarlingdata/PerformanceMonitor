@@ -171,17 +171,28 @@ public interface IAlertEngineSettings
     int RunnableQueueCriticalPerScheduler { get; }
 
     /// <summary>
-    /// Client Timeouts Warning bar (#5640): fire Warning when attentions (client cancels and timeouts) per minute, averaged over
-    /// the covered span, are at/above this. Shipped default <see cref="AttentionEvaluator.DefaultWarningPerMinute"/> (10).
-    /// Both stores apply <see cref="AttentionEvaluator.ClampBars"/> on read: at least 1, and never above the Critical bar.
+    /// Client Timeouts Warning FLOOR (#5640, #5736): fire Warning when attentions (client cancels and timeouts) per minute, averaged over
+    /// the covered span, are at/above max(this floor, <see cref="ClientTimeoutsWarningMultiple"/> x the server's baseline). Shipped default
+    /// <see cref="AttentionEvaluator.DefaultWarningPerMinute"/> (10). Both stores apply <see cref="AttentionEvaluator.ClampBars"/> on read: at least 1,
+    /// and never above the Critical floor.
     /// </summary>
     int ClientTimeoutsWarningPerMinute { get; }
 
     /// <summary>
-    /// Client Timeouts Critical bar (#5640): Critical when the rate is at/above this. Shipped default
-    /// <see cref="AttentionEvaluator.DefaultCriticalPerMinute"/> (60). Never below the Warning bar.
+    /// Client Timeouts Critical FLOOR (#5640, #5736): Critical when the rate is at/above max(this floor,
+    /// <see cref="ClientTimeoutsCriticalMultiple"/> x the server's baseline). Shipped default
+    /// <see cref="AttentionEvaluator.DefaultCriticalPerMinute"/> (60). Never below the Warning floor.
     /// </summary>
     int ClientTimeoutsCriticalPerMinute { get; }
+
+    /// <summary>Client Timeouts Warning multiple (#5736): the Warning bar is at least this many times the server's own baseline (the p99.9 of its
+    /// 3-minute average attention rate over the last 7 days). Shipped default <see cref="AttentionBaselineMath.DefaultWarningMultiple"/> (3).
+    /// At least 1, and never above the Critical multiple.</summary>
+    int ClientTimeoutsWarningMultiple { get; }
+
+    /// <summary>Client Timeouts Critical multiple (#5736): the Critical bar is at least this many times the baseline. Shipped default
+    /// <see cref="AttentionBaselineMath.DefaultCriticalMultiple"/> (10). Never below the Warning multiple.</summary>
+    int ClientTimeoutsCriticalMultiple { get; }
 
     /// <summary>Fire when a query's elapsed time is at/above this many minutes.</summary>
     int LongRunningQueryThresholdMinutes { get; }

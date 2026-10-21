@@ -843,6 +843,8 @@ public partial class SettingsWindow : Window
         AlertClientTimeoutsCheckBox.IsChecked = App.AlertClientTimeoutsEnabled;
         AlertClientTimeoutsWarningBox.Text = App.AlertClientTimeoutsWarningPerMinute.ToString();
         AlertClientTimeoutsCriticalBox.Text = App.AlertClientTimeoutsCriticalPerMinute.ToString();
+        AlertClientTimeoutsWarningMultipleBox.Text = App.AlertClientTimeoutsWarningMultiple.ToString();
+        AlertClientTimeoutsCriticalMultipleBox.Text = App.AlertClientTimeoutsCriticalMultiple.ToString();
         AlertLongRunningQueryCheckBox.IsChecked = App.AlertLongRunningQueryEnabled;
         AlertLongRunningQueryThresholdBox.Text = App.AlertLongRunningQueryThresholdMinutes.ToString();
         AlertLongRunningQueryMaxResultsBox.Text = App.AlertLongRunningQueryMaxResults.ToString();
@@ -989,6 +991,19 @@ public partial class SettingsWindow : Window
         {
             validationErrors.AddRange(timeoutErrors, AlertClientTimeoutsWarningBox);
         }
+        /* #5736: the two multiples, the same both-or-neither rule (each a whole number of at least 1, Critical never below Warning). */
+        var multipleErrors = new List<string>();
+        var (multipleWarning, multipleCritical) = ClientTimeoutsBarsInput.ValidateMultiples(
+            AlertClientTimeoutsWarningMultipleBox.Text, AlertClientTimeoutsCriticalMultipleBox.Text, multipleErrors);
+        if (multipleErrors.Count == 0)
+        {
+            App.AlertClientTimeoutsWarningMultiple = multipleWarning;
+            App.AlertClientTimeoutsCriticalMultiple = multipleCritical;
+        }
+        else
+        {
+            validationErrors.AddRange(multipleErrors, AlertClientTimeoutsWarningMultipleBox);
+        }
         App.AlertLongRunningQueryEnabled = AlertLongRunningQueryCheckBox.IsChecked == true;
         if (int.TryParse(AlertLongRunningQueryThresholdBox.Text, out var lrq) && lrq > 0)
             App.AlertLongRunningQueryThresholdMinutes = lrq;
@@ -1106,6 +1121,8 @@ public partial class SettingsWindow : Window
         root["alert_client_timeouts_enabled"] = App.AlertClientTimeoutsEnabled;
         root["alert_client_timeouts_warning_per_minute"] = App.AlertClientTimeoutsWarningPerMinute;
         root["alert_client_timeouts_critical_per_minute"] = App.AlertClientTimeoutsCriticalPerMinute;
+        root["alert_client_timeouts_warning_multiple"] = App.AlertClientTimeoutsWarningMultiple;
+        root["alert_client_timeouts_critical_multiple"] = App.AlertClientTimeoutsCriticalMultiple;
         root["alert_long_running_query_enabled"] = App.AlertLongRunningQueryEnabled;
         root["alert_long_running_query_threshold_minutes"] = App.AlertLongRunningQueryThresholdMinutes;
         root["alert_long_running_query_max_results"] = App.AlertLongRunningQueryMaxResults;
@@ -1176,6 +1193,8 @@ public partial class SettingsWindow : Window
         AlertRunnableQueueCriticalBox.Text = RunnableQueueEvaluator.DefaultCriticalPerScheduler.ToString(CultureInfo.InvariantCulture);
         AlertClientTimeoutsWarningBox.Text = AttentionEvaluator.DefaultWarningPerMinute.ToString(CultureInfo.InvariantCulture);
         AlertClientTimeoutsCriticalBox.Text = AttentionEvaluator.DefaultCriticalPerMinute.ToString(CultureInfo.InvariantCulture);
+        AlertClientTimeoutsWarningMultipleBox.Text = AttentionBaselineMath.DefaultWarningMultiple.ToString(CultureInfo.InvariantCulture);
+        AlertClientTimeoutsCriticalMultipleBox.Text = AttentionBaselineMath.DefaultCriticalMultiple.ToString(CultureInfo.InvariantCulture);
         AlertLongRunningQueryThresholdBox.Text = "30";
         AlertLongRunningQueryMaxResultsBox.Text = "5";
         AlertTempDbSpaceThresholdBox.Text = "80";
@@ -1257,7 +1276,7 @@ public partial class SettingsWindow : Window
         if (AlertRunnableQueueCheckBox.IsChecked == true)
             parts.Add($"runnable tasks per scheduler >= {AlertRunnableQueueWarningBox.Text} (critical {AlertRunnableQueueCriticalBox.Text}) over {RunnableQueueEvaluator.WindowMinutes}min");
         if (AlertClientTimeoutsCheckBox.IsChecked == true)
-            parts.Add($"client timeouts >= {AlertClientTimeoutsWarningBox.Text} per minute (critical {AlertClientTimeoutsCriticalBox.Text}) over {AttentionEvaluator.WindowMinutes}min");
+            parts.Add($"client timeouts >= max({AlertClientTimeoutsWarningBox.Text} per minute (critical {AlertClientTimeoutsCriticalBox.Text}), {AlertClientTimeoutsWarningMultipleBox.Text}x (critical {AlertClientTimeoutsCriticalMultipleBox.Text}x) the server's own baseline) over {AttentionEvaluator.WindowMinutes}min");
         if (AlertLongRunningQueryCheckBox.IsChecked == true)
             parts.Add($"queries > {AlertLongRunningQueryThresholdBox.Text}min");
         if (AlertTempDbSpaceCheckBox.IsChecked == true)
@@ -1300,6 +1319,8 @@ public partial class SettingsWindow : Window
         AlertClientTimeoutsCheckBox.IsEnabled = enabled;
         AlertClientTimeoutsWarningBox.IsEnabled = enabled;
         AlertClientTimeoutsCriticalBox.IsEnabled = enabled;
+        AlertClientTimeoutsWarningMultipleBox.IsEnabled = enabled;
+        AlertClientTimeoutsCriticalMultipleBox.IsEnabled = enabled;
         AlertLongRunningQueryCheckBox.IsEnabled = enabled;
         AlertLongRunningQueryThresholdBox.IsEnabled = enabled;
         AlertLongRunningQueryMaxResultsBox.IsEnabled = enabled;

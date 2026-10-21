@@ -846,15 +846,27 @@ public sealed class AlertsConfig
     [JsonPropertyName("clientTimeoutsEnabled")]
     public bool ClientTimeoutsEnabled { get; set; }
 
-    /// <summary>Client Timeouts Warning bar (#5640), attentions per minute over the covered span. Shipped 10. Read through
+    /// <summary>Client Timeouts Warning FLOOR (#5640, #5736), attentions per minute over the covered span. Shipped 10. The bar is the higher of this and
+    /// the Warning multiple times the server's own baseline. Read through
     /// <see cref="AttentionEvaluator.ClampBars"/>. Store column <c>client_timeouts_warning_per_minute</c> (V179).</summary>
     [JsonPropertyName("clientTimeoutsWarningPerMinute")]
     public int ClientTimeoutsWarningPerMinute { get; set; } = AttentionEvaluator.DefaultWarningPerMinute;
 
-    /// <summary>Client Timeouts Critical bar (#5640). Shipped 60. Never read below the Warning bar. Store column
+    /// <summary>Client Timeouts Critical FLOOR (#5640, #5736). Shipped 60. Never read below the Warning floor. Store column
     /// <c>client_timeouts_critical_per_minute</c> (V179).</summary>
     [JsonPropertyName("clientTimeoutsCriticalPerMinute")]
     public int ClientTimeoutsCriticalPerMinute { get; set; } = AttentionEvaluator.DefaultCriticalPerMinute;
+
+    /// <summary>Client Timeouts Warning multiple (#5736). The Warning bar is the higher of <see cref="ClientTimeoutsWarningPerMinute"/> (the floor) and
+    /// this many times the server's own baseline, the p99.9 of its 3-minute average attention rate over the last 7 days. Shipped 3. Store column
+    /// <c>client_timeouts_warning_multiple</c> (V211).</summary>
+    [JsonPropertyName("clientTimeoutsWarningMultiple")]
+    public int ClientTimeoutsWarningMultiple { get; set; } = AttentionBaselineMath.DefaultWarningMultiple;
+
+    /// <summary>Client Timeouts Critical multiple (#5736). Shipped 10. Never read below the Warning multiple. Store column
+    /// <c>client_timeouts_critical_multiple</c> (V211).</summary>
+    [JsonPropertyName("clientTimeoutsCriticalMultiple")]
+    public int ClientTimeoutsCriticalMultiple { get; set; } = AttentionBaselineMath.DefaultCriticalMultiple;
 
     [JsonPropertyName("longRunningQueryEnabled")]
     public bool LongRunningQueryEnabled { get; set; } = true;

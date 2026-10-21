@@ -136,7 +136,14 @@ public sealed class ServerEditLiveTests : IDisposable
     private static async Task<T> ScalarAsync<T>(NpgsqlDataSource source, string sql, CancellationToken ct)
     {
         await using var command = source.CreateCommand(sql);
-        return (T)Convert.ChangeType((await command.ExecuteScalarAsync(ct))!, typeof(T));
+        var value = await command.ExecuteScalarAsync(ct);
+        /* A SQL NULL is DBNull, which Convert.ChangeType turns into "" for a string, so a NULL column would read as empty text. */
+        if (value is null or DBNull)
+        {
+            return default!;
+        }
+
+        return (T)Convert.ChangeType(value, Nullable.GetUnderlyingType(typeof(T)) ?? typeof(T));
     }
 
     private static Task SeedServerAsync(
@@ -963,7 +970,7 @@ public sealed class ServerEditLiveTests : IDisposable
     private static Edit.ServerProbe ReportsIdentity(string identity) => (_, _) => Task.FromResult(
         new ConnectionProbeResult(true, 15, 3, "Enterprise", false, false, false, true, null, MachineIdentity: identity));
 
-    /// <summary>What the connect path writes (V211): the registry row of a connected server carries the name it reported.</summary>
+    /// <summary>What the connect path writes (V212): the registry row of a connected server carries the name it reported.</summary>
     private static Task SeedIdentityAsync(NpgsqlDataSource owner, int id, string name, string? identity, CancellationToken ct) =>
         ExecAsync(owner, $@"INSERT INTO collect.servers (server_id, server_name, display_name, is_enabled, created_date, modified_date, machine_identity)
             VALUES ({id}, '{name}', '{name}', TRUE, now() AT TIME ZONE 'UTC', now() AT TIME ZONE 'UTC', {(identity is null ? "NULL" : "'" + identity + "'")})

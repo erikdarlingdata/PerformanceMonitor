@@ -476,8 +476,13 @@ DROP TRIGGER IF EXISTS trg_agent_route_tag_guard ON config.server_tag_map;
 DROP TRIGGER IF EXISTS trg_agent_route_tag_guard ON config.server_tags;
 DROP FUNCTION IF EXISTS config.agent_route_tag_guard();"),
 
-        // /// V211 (#6285): the machine identity on the server registry. The column is the probe's newest sentinel. Safe on a store that never had it.
-        new(211, "hasServerMachineIdentity",
+        // V211 (#5736): the relative Client Timeouts bars' two multiples. The warning multiple column is the probe's newest sentinel. The rewind drops both,
+        // so a re-run of V211 adds them again at their defaults. Safe on a store that never had them.
+        new(211, "hasClientTimeoutsMultiples",
+            @"
+ALTER TABLE IF EXISTS config.config_alert_settings DROP COLUMN IF EXISTS client_timeouts_warning_multiple, DROP COLUMN IF EXISTS client_timeouts_critical_multiple;"),
+        // /// V212 (#6285): the machine identity on the server registry. The column is the probe's newest sentinel. Safe on a store that never had it.
+        new(212, "hasServerMachineIdentity",
             @"
 ALTER TABLE IF EXISTS collect.servers DROP COLUMN IF EXISTS machine_identity;"),
     ];

@@ -38,7 +38,7 @@ public static class DarlingObservability
        registration (same storage name, different engine) has to correct it. Internal so a pure test can pin
        the shape without a live store.
 
-       machine_identity (V211, #6285, #6339) is written on BOTH arms like engine_kind, and with NULL when the connect read none:
+       machine_identity (V212, #6285, #6339) is written on BOTH arms like engine_kind, and with NULL when the connect read none:
        what the target reports for itself is a fact about the target, so a re-pointed registration (an address that now reaches
        another machine) has to correct it, and an Azure SQL Database or a PostgreSQL role that may not call pg_control_system()
        reports none. The registry is never purged and keeps a removed registration's row, so the identity outlives the registration. */
@@ -179,7 +179,7 @@ ON CONFLICT (server_id) DO UPDATE SET
                 server.Target.Engine == CollectorTargetEngine.PostgreSql && server.Target.PostgresMajorVersion > 0
                     ? server.Target.PostgresMajorVersion
                     : (object)DBNull.Value);
-            /* The machine's own name (V211, #6285, #6339), folded to the form the add and edit tools compare. NULL when the connect
+            /* The machine's own name (V212, #6285, #6339), folded to the form the add and edit tools compare. NULL when the connect
                read none. */
             command.Parameters.AddWithValue(
                 (object?)Mcp.DarlingMcpServerAdminTools.MachineIdentityOf(server.MachineIdentity, server.EngineEdition) ?? DBNull.Value);

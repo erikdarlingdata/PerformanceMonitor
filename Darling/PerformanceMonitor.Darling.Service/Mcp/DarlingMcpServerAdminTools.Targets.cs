@@ -217,7 +217,7 @@ public sealed partial class DarlingMcpServerAdminTools
         "SELECT host, database, read_only_intent, engine, port, name, server_id FROM config_monitored_servers";
 
     /// <summary>The identity each registration, live or removed, reported on its last connect (#6285, #6339), from the registry column
-    /// the connect writes (V211). Not from <c>collect.server_properties</c>: that table's <c>server_name</c> is the registration's
+    /// the connect writes (V212). Not from <c>collect.server_properties</c>: that table's <c>server_name</c> is the registration's
     /// storage name, not what the server reports, and a retention purge deletes its rows. A registration that never connected since
     /// the column arrived, or one that reported none, is not in the answer and is matched by its text alone.</summary>
     private const string CollectedIdentitiesSql =
