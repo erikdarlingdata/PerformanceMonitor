@@ -393,6 +393,118 @@ public sealed class DarlingWebHostGateLiveTests
     }
 
     /// <summary>
+    /// #6286: a page link followed from another site (a Teams card, mail, a work item) is a cross-site top-level
+    /// navigation, so the SameSite=Strict session cookie is not sent and a live session looks signed out. A GET page
+    /// request with no valid cookie that the browser marks <c>Sec-Fetch-Site: cross-site</c> is answered with the
+    /// re-navigation page (a constant script that reloads the page's own address from this site, which carries the
+    /// cookie) instead of the sign-in form. The page takes nothing from the request: not the path, not the query.
+    /// </summary>
+    [Fact]
+    public async Task ACrossSitePageRequest_WithNoCookie_GetsTheReNavigationPage_NotTheSignInForm()
+    {
+        using var server = await BuildServer(networkMode: false, requireTokenWhenLoopbackOnly: true);
+
+        var (ctx, body) = await SendPage(server, "/triage", "?next=https%3A%2F%2Felsewhere.example%2F&q=1", "localhost", IPAddress.Loopback, "cross-site");
+
+        Assert.Equal(StatusCodes.Status200OK, ctx.Response.StatusCode);
+        Assert.Equal("text/html; charset=utf-8", ctx.Response.ContentType);
+        Assert.Contains(DarlingWebHostService.ReNavigationScriptBlock, body, StringComparison.Ordinal);
+        Assert.Equal("location.replace(location.href);", System.Text.RegularExpressions.Regex.Match(body, "<script>(.*?)</script>").Groups[1].Value);
+        Assert.Equal(DarlingWebHostService.ReNavigationPagePolicy, ctx.Response.Headers["Content-Security-Policy"].ToString());
+        Assert.Equal("no-store", ctx.Response.Headers.CacheControl.ToString());
+        Assert.Equal(0, ctx.Response.Headers.SetCookie.Count);
+        // Nothing the request carried is in the page, so it cannot send anyone elsewhere.
+        Assert.DoesNotContain("elsewhere.example", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("triage", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("<form", body, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>The loop guard: the re-navigation is same-origin, so with still no session it gets the sign-in
+    /// form, exactly the page a request with no fetch metadata at all gets.</summary>
+    [Theory]
+    [InlineData("same-origin")]
+    [InlineData("same-site")]
+    [InlineData("none")]
+    [InlineData(null)]
+    public async Task ARequestThatIsNotCrossSite_WithNoCookie_GetsTheSignInForm(string? fetchSite)
+    {
+        using var server = await BuildServer(networkMode: false, requireTokenWhenLoopbackOnly: true);
+
+        var (ctx, body) = await SendPage(server, "/triage", string.Empty, "localhost", IPAddress.Loopback, fetchSite);
+        var (_, plain) = await SendPage(server, "/triage", string.Empty, "localhost", IPAddress.Loopback, fetchSite: null, fetchMode: null, fetchDest: null);
+
+        Assert.Equal(StatusCodes.Status200OK, ctx.Response.StatusCode);
+        Assert.DoesNotContain(DarlingWebHostService.ReNavigationScriptBlock, body, StringComparison.Ordinal);
+        Assert.Equal(plain, body);
+        Assert.Contains("<form", body, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Only a top-level GET page request is answered with the page: an /api/* call keeps its 401 JSON, a
+    /// cross-site POST and a cross-site image or script request get no re-navigation page.</summary>
+    [Fact]
+    public async Task ACrossSiteRequest_ThatIsNotAPageNavigation_NeverGetsTheReNavigationPage()
+    {
+        using var server = await BuildServer(networkMode: false, requireTokenWhenLoopbackOnly: true);
+
+        var (api, apiBody) = await SendPage(server, "/api/fleet", string.Empty, "localhost", IPAddress.Loopback, "cross-site");
+        Assert.Equal(StatusCodes.Status401Unauthorized, api.Response.StatusCode);
+        Assert.Contains("\"error\"", apiBody, StringComparison.Ordinal);
+        Assert.DoesNotContain(DarlingWebHostService.ReNavigationScriptBlock, apiBody, StringComparison.Ordinal);
+
+        var (_, imageBody) = await SendPage(server, "/triage", string.Empty, "localhost", IPAddress.Loopback, "cross-site", fetchMode: "no-cors", fetchDest: "image");
+        Assert.DoesNotContain(DarlingWebHostService.ReNavigationScriptBlock, imageBody, StringComparison.Ordinal);
+
+        var post = await server.SendAsync(c =>
+        {
+            c.Request.Method = "POST";
+            c.Request.Path = "/triage";
+            c.Request.Headers.Host = "localhost";
+            c.Request.Headers["Sec-Fetch-Site"] = "cross-site";
+            c.Request.Headers["Sec-Fetch-Mode"] = "navigate";
+            c.Request.Headers["Sec-Fetch-Dest"] = "document";
+            c.Connection.RemoteIpAddress = IPAddress.Loopback;
+        });
+        var postBody = await new StreamReader(post.Response.Body).ReadToEndAsync();
+        Assert.DoesNotContain(DarlingWebHostService.ReNavigationScriptBlock, postBody, StringComparison.Ordinal);
+    }
+
+    /// <summary>A valid session cookie that does arrive on a cross-site request (a browser that does not enforce Strict)
+    /// is served as before: the gate lets it through and no re-navigation page is written.</summary>
+    [Fact]
+    public async Task ACrossSitePageRequest_WithAValidCookie_IsServedAsBefore()
+    {
+        using var server = await BuildServer(networkMode: false, requireTokenWhenLoopbackOnly: true);
+        var exchange = await PostSignIn(server, "localhost", IPAddress.Loopback, Token);
+        var setCookie = Assert.Single(exchange.Response.Headers.SetCookie) ?? string.Empty;
+        var cookie = setCookie[..setCookie.IndexOf(';')];
+
+        // A path nothing maps answers 404 once the gate lets the request through (the sign-in form or the re-navigation page is 200).
+        var (ctx, body) = await SendPage(server, "/some/unmapped/path", string.Empty, "localhost", IPAddress.Loopback, "cross-site", cookie: cookie);
+
+        Assert.Equal(StatusCodes.Status404NotFound, ctx.Response.StatusCode);
+        Assert.DoesNotContain(DarlingWebHostService.ReNavigationScriptBlock, body, StringComparison.Ordinal);
+    }
+
+    private static async Task<(HttpContext Context, string Body)> SendPage(
+        TestServer server, string path, string query, string host, IPAddress? remote, string? fetchSite,
+        string? fetchMode = "navigate", string? fetchDest = "document", string? cookie = null)
+    {
+        var ctx = await server.SendAsync(c =>
+        {
+            c.Request.Method = "GET";
+            c.Request.Path = path;
+            c.Request.QueryString = new QueryString(query);
+            c.Request.Headers.Host = host;
+            c.Connection.RemoteIpAddress = remote;
+            if (fetchSite is not null) c.Request.Headers["Sec-Fetch-Site"] = fetchSite;
+            if (fetchMode is not null) c.Request.Headers["Sec-Fetch-Mode"] = fetchMode;
+            if (fetchDest is not null) c.Request.Headers["Sec-Fetch-Dest"] = fetchDest;
+            if (cookie is not null) c.Request.Headers["Cookie"] = cookie;
+        });
+        return (ctx, await new StreamReader(ctx.Response.Body).ReadToEndAsync());
+    }
+
+    /// <summary>
     /// #5288: network mode configured, then degraded to loopback-only because the TLS certificate was refused, token
     /// resolved. The loopback-only server keeps the token-to-cookie gate (the host passes
     /// <c>requireTokenWhenLoopbackOnly</c> for exactly that start): no credential on an <c>/api/*</c> path gets 401
