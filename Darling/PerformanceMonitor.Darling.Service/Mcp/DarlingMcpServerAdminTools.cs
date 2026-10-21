@@ -246,9 +246,10 @@ public sealed partial class DarlingMcpServerAdminTools
                setting is scoped to that registration (its id, a tag of it or a tag above): the new id would sit outside
                that route. Entries of this batch have no routes yet, so they never hold each other back. The operator's
                own command and the web route pass no policy and are not held to this. */
+            List<RegisteredTarget>? held = null;
             if (policy is not null && ready.Count > 0)
             {
-                var held = await definitions.LoadTargetsAsync(cancellationToken);
+                held = await definitions.LoadTargetsAsync(cancellationToken);
                 var kept = new List<ParsedServerEntry>();
                 foreach (var entry in ready)
                 {
@@ -300,6 +301,17 @@ public sealed partial class DarlingMcpServerAdminTools
                     continue;
                 }
 
+                /* #6285: the same rule again, now the server has said what it calls itself: a short name and its full domain
+                   name, or a name and its address, reach one machine that the host text above could not tell apart. A server
+                   that reported no identity (or a registration with none collected) is held to the text match already made. */
+                var probedIdentity = MachineIdentityOf(probeResult.MachineIdentity, probeResult.EngineEdition);
+                if (policy is not null && held is not null && probedIdentity is not null
+                    && await TargetHeldRefusalAsync(held, entry, definitions.ScopedAgentRouteAsync, cancellationToken, probedIdentity: probedIdentity) is { } identityRefusal)
+                {
+                    results.Add(new ServerResult(entry.Order, entry.DisplayName, AddStatus.Collides, identityRefusal));
+                    continue;
+                }
+
                 /* #2280: the probe just asked the server which database it actually reached. If that is a
                    DIFFERENT database from the one this entry names, and some other registration already claims
                    that one, then adding this would give one real database two identities and two full copies of
@@ -330,7 +342,7 @@ public sealed partial class DarlingMcpServerAdminTools
                     var actualStorageKey = ActualStorageKeyOf(entry, probeResult.ConnectedDatabase);
                     string? heldInWrite = null;
                     HeldCheck? heldCheck = policy is null ? null : async (connection, transaction, token) =>
-                        heldInWrite = await TargetHeldRefusalInTransactionAsync(connection, transaction, entry, null, token);
+                        heldInWrite = await TargetHeldRefusalInTransactionAsync(connection, transaction, entry, null, token, probedIdentity: probedIdentity);
                     var rowsWritten = await definitions.InsertAsync(entry, encryptedPassword, actualStorageKey, heldCheck, cancellationToken);
                     if (rowsWritten > 0)
                     {

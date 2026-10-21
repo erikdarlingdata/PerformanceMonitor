@@ -52,6 +52,10 @@ public sealed class ServerRuntime
     /// </summary>
     public string? ConnectedDatabase { get; init; }
 
+    /// <summary>#6285: the machine and instance the SQL Server calls itself (<c>SERVERPROPERTY('ServerName')</c>), read by the
+    /// same detection query; null on PostgreSQL and on an Azure SQL Database, which names no machine of its own.</summary>
+    public string? MachineIdentity { get; init; }
+
     public bool HasMsdbAccess { get; init; }
 
     /// <summary>
@@ -107,7 +111,7 @@ public static class DarlingServerConnector
        depend on it (#1535). sqlserver_start_time - the one column that needs the DMV - is not read
        here (the service never surfaces a start time), so unlike Lite/Dashboard no best-effort
        start-time read is needed. Columns: 0 sql_version, 1 major_version, 2 utc_offset,
-       3 engine_edition, 4 is_aws_rds, 5 has_msdb_access, 6 connected_database (#2228).
+       3 engine_edition, 4 is_aws_rds, 5 has_msdb_access, 6 connected_database (#2228), 7 server_name (#6285).
 
        #2228 — connected_database is DB_NAME(): the database this connection ACTUALLY reached, which is not
        necessarily the one the registration names. An Initial Catalog that is absent, misspelled or overridden
@@ -127,7 +131,9 @@ SELECT /* PerformanceMonitorLite */
     CASE WHEN DB_ID('rdsadmin') IS NOT NULL THEN 1 ELSE 0 END AS is_aws_rds,
     HAS_DBACCESS(N'msdb') AS has_msdb_access,
     /* #2228: which database this connection actually landed in. Appended; see the comment above. */
-    DB_NAME() AS connected_database";
+    DB_NAME() AS connected_database,
+    /* #6285: the machine and instance the server calls itself, appended like the column above. */
+    CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')) AS server_name";
 
     /// <summary>
     /// The tripwire's verdict: the message to raise when a registration is connected to a database it does not
@@ -490,7 +496,7 @@ SELECT
 
         int majorVersion = 0, engineEdition = 0;
         bool isAwsRds = false, hasMsdbAccess = true;
-        string? connectedDatabase = null;
+        string? connectedDatabase = null, machineIdentity = null;
         if (await reader.ReadAsync(cancellationToken))
         {
             // Column indices per DetectionQueryText: 1 major_version, 3 engine_edition,
@@ -500,6 +506,9 @@ SELECT
             isAwsRds = !reader.IsDBNull(4) && reader.GetInt32(4) == 1;
             hasMsdbAccess = reader.IsDBNull(5) || reader.GetInt32(5) == 1;
             connectedDatabase = reader.IsDBNull(6) ? null : reader.GetString(6);   /* #2228 */
+            /* #6285: the server's own name, for the add and edit tools' same-machine check. An Azure SQL Database has no
+               machine of its own to name, so it reports none. */
+            machineIdentity = reader.IsDBNull(7) || engineEdition == 5 ? null : reader.GetString(7);
         }
 
         return new ServerRuntime
@@ -527,6 +536,7 @@ SELECT
             IsAwsRds = isAwsRds,
             EngineEdition = engineEdition,
             ConnectedDatabase = connectedDatabase,
+            MachineIdentity = machineIdentity,
         };
     }
 
@@ -691,6 +701,7 @@ SELECT
                 HasMsdbAccess: runtime.HasMsdbAccess,
                 Error: null,
                 ConnectedDatabase: runtime.ConnectedDatabase,
+                MachineIdentity: runtime.MachineIdentity,
                 Engine: runtime.Target.Engine,
                 PostgresMajorVersion: runtime.Target.PostgresMajorVersion,
                 PostgresVersionNum: runtime.Target.PostgresVersionNum,
@@ -816,7 +827,11 @@ public sealed record ConnectionProbeResult(
     /* #6183: the failure was SqlClient's native library not loading. No SQL Server connection can work from this
        install, so a caller that probes several servers says so once instead of once per server. Trailing and
        defaulted, like the fields above. */
-    bool SqlClientNativeLoadFailed = false)
+    bool SqlClientNativeLoadFailed = false,
+    /* #6285: the machine and instance name the SQL Server reached calls itself (SERVERPROPERTY('ServerName')), read on this
+       same connection, so add_servers and edit_server can tell one machine reached under two names. Null when the probe
+       read none: a failed connection, an Azure SQL Database, or a PostgreSQL target. Trailing and defaulted, like the fields above. */
+    string? MachineIdentity = null)
 {
     /// <summary>
     /// Rebuilds the gate's-eye view of this target, so a caller can ask which collectors would actually

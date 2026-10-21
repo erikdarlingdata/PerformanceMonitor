@@ -412,6 +412,7 @@ LIMIT 1";
         ParsedServerEntry? probedEntry = null;
         string? connectedDatabase = null;
         string? actualStorageKey = null;
+        string? probedIdentity = null;
         if (plan.NeedsProbe)
         {
             /* The MCP caller's rules, on the definition as it would be saved (the stored row with the changes applied),
@@ -435,6 +436,16 @@ LIMIT 1";
             tested = true;
             probedEntry = new ParsedServerEntry(0, plan.ProbeConfig.Name, plan.NewStorageKey, plan.ProbeConfig, null);
             connectedDatabase = probeResult.ConnectedDatabase;
+
+            /* #6285: the add rule again now the server has said what it calls itself, so a name the host text could not tie
+               to another registration (a short name against its full domain name, a name against its address) still counts. */
+            probedIdentity = MachineIdentityOf(probeResult.MachineIdentity, probeResult.EngineEdition);
+            if (enforceHeld && probedIdentity is not null
+                && await TargetHeldRefusalAsync(await loadTargets!(cancellationToken), heldEntry, agentRouteCovering!, cancellationToken, serverId, forEdit: true, probedIdentity: probedIdentity) is { } identityRefusal)
+            {
+                return Outcome(EditStatus.Refused, identityRefusal);
+            }
+
             var collision = ActualIdentityCollision(probedEntry, connectedDatabase, otherKeys);
             if (collision is not null)
             {
@@ -460,7 +471,7 @@ LIMIT 1";
         HeldCheck? heldCheck = !enforceHeld ? null : async (connection, transaction, token) =>
             await ScopedAgentRouteAsync(connection, transaction, serverId, token) is { } routeNow
                 ? CoveredServerEditText(routeNow)
-                : await TargetHeldRefusalInTransactionAsync(connection, transaction, heldEntry, serverId, token, forEdit: true);
+                : await TargetHeldRefusalInTransactionAsync(connection, transaction, heldEntry, serverId, token, forEdit: true, probedIdentity: probedIdentity);
         var write = await store.WriteAsync(serverId, row.ModifiedAt, sets, plan.AddressChanged ? plan.NewStorageKey : null, actualStorageKey, heldCheck, cancellationToken);
         switch (write.Kind)
         {

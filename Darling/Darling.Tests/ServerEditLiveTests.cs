@@ -959,4 +959,95 @@ public sealed class ServerEditLiveTests : IDisposable
             await DropRoleAsync(rig, ok);
         }
     }
+
+    private static Edit.ServerProbe ReportsIdentity(string identity) => (_, _) => Task.FromResult(
+        new ConnectionProbeResult(true, 15, 3, "Enterprise", false, false, false, true, null, MachineIdentity: identity));
+
+    /// <summary>#6285: the identity collected for a registration (the newest <c>collect.server_properties.server_name</c>) is what the server
+    /// the add reached is compared with, over MCP, while a route with an agent setting is scoped to the registration. An older snapshot, an
+    /// Azure SQL Database's and a registration with none collected are not compared; those are held to the host text alone.</summary>
+    [Fact]
+    public async Task TheAddServersTool_RefusesAnotherNameOfAMachineWhoseCollectedIdentityMatches_AndOnlyTheNewestSnapshotCounts()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        var ok = false;
+        try
+        {
+            await SeedServerAsync(rig.Owner, 7231, "alpha-91", "alpha-91", "integrated", null, null, ct);
+            await SeedServerAsync(rig.Owner, 7232, "alpha-92", "alpha-92", "integrated", null, null, ct);
+            await SeedServerAsync(rig.Owner, 7233, "azure-93", "azure-93.database.windows.net", "integrated", null, null, ct);
+            await ExecAsync(rig.Owner,
+                "INSERT INTO collect.server_properties (collection_id, collection_time, server_id, server_name, engine_edition) VALUES " +
+                "(1, now() AT TIME ZONE 'UTC' - interval '2 days', 7231, 'OLDNAME', 3)," +
+                "(2, now() AT TIME ZONE 'UTC' - interval '1 hour', 7231, 'ALPHA-91', 3)," +
+                "(3, now() AT TIME ZONE 'UTC' - interval '1 hour', 7233, 'a1b2c3d4e5f6', 5);" +
+                "INSERT INTO config.config_notification_routes (metric_match, agent_level, scope_server_id) VALUES ('Blocking', 0, 7231), ('Blocking', 0, 7232), ('Blocking', 0, 7233);", ct);
+
+            async Task<(string Status, string Detail)> AddAsync(string host, string reported)
+            {
+                var answer = Parse(await Edit.AddServersAsync(rig.Mcp, $"[{{\"host\":\"{host}\"}}]", ReportsIdentity(reported), ct,
+                    ring: TestKeyRings.Healthy, policy: DarlingMcpAddServersPolicy.Default));
+                var row = answer["results"]!.AsArray().Single()!;
+                return (row["status"]!.GetValue<string>(), row["detail"]!.GetValue<string>());
+            }
+
+            /* The newest snapshot names the machine: another name for it is refused, and nothing is written. */
+            var held = await AddAsync("10.1.2.3", "alpha-91");
+            Assert.Equal("collides", held.Status);
+            Assert.Contains("alpha-91", held.Detail, StringComparison.Ordinal);
+            Assert.Contains("(the server reports the same name for itself)", held.Detail, StringComparison.Ordinal);
+            Assert.Equal(0, await ScalarAsync<int>(rig.Owner, "SELECT count(*)::int FROM config_monitored_servers WHERE host = '10.1.2.3'", ct));
+
+            /* The older snapshot's name is not the machine's any more; a registration with none collected and an Azure SQL Database's
+               node name are held to the host text alone. */
+            Assert.Equal("added", (await AddAsync("10.1.2.4", "OLDNAME")).Status);
+            Assert.Equal("added", (await AddAsync("10.1.2.5", "alpha-92")).Status);
+            Assert.Equal("added", (await AddAsync("azure-93b.database.windows.net", "a1b2c3d4e5f6")).Status);
+
+            /* The text rule still answers for its own spelling. */
+            Assert.Equal("collides", (await AddAsync("ALPHA-91.", "unrelated")).Status);
+            ok = true;
+        }
+        finally
+        {
+            await DropRoleAsync(rig, ok);
+        }
+    }
+
+    /// <summary>#6285: edit_server applies the same identity check to the address a registration is moved to, in the write's own
+    /// transaction too: the registration being edited is not held against itself.</summary>
+    [Fact]
+    public async Task TheEditServerTool_RefusesAMoveToAnotherNameOfAHeldMachine()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        var ok = false;
+        try
+        {
+            await SeedServerAsync(rig.Owner, 7241, "alpha-95", "alpha-95", "integrated", null, null, ct);
+            await SeedServerAsync(rig.Owner, 7242, "alpha-96", "alpha-96.example.test", "integrated", null, null, ct);
+            await ExecAsync(rig.Owner,
+                "INSERT INTO collect.server_properties (collection_id, collection_time, server_id, server_name, engine_edition) VALUES " +
+                "(1, now() AT TIME ZONE 'UTC', 7241, 'ALPHA-95', 3), (2, now() AT TIME ZONE 'UTC', 7242, 'ALPHA-96', 3);" +
+                "INSERT INTO config.config_notification_routes (metric_match, agent_level, scope_server_id) VALUES ('Blocking', 0, 7241);", ct);
+
+            var refused = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "alpha-96", "{\"host\":\"10.1.2.6\"}", ReportsIdentity("alpha-95"), TestKeyRings.Healthy, null, ct,
+                policy: DarlingMcpAddServersPolicy.Default));
+            Assert.Equal("refused", refused["status"]!.GetValue<string>());
+            Assert.Contains("alpha-95", refused["message"]!.GetValue<string>(), StringComparison.Ordinal);
+            Assert.Equal("alpha-96.example.test", await ScalarAsync<string>(rig.Owner, "SELECT host FROM config_monitored_servers WHERE server_id = 7242", ct));
+
+            /* Its own collected name is not held against it, and a machine nothing holds is a plain move. */
+            var moved = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "alpha-96", "{\"host\":\"10.1.2.7\"}", ReportsIdentity("alpha-96"), TestKeyRings.Healthy, null, ct,
+                policy: DarlingMcpAddServersPolicy.Default));
+            Assert.Equal("updated", moved["status"]!.GetValue<string>());
+            Assert.Equal("10.1.2.7", await ScalarAsync<string>(rig.Owner, "SELECT host FROM config_monitored_servers WHERE server_id = 7242", ct));
+            ok = true;
+        }
+        finally
+        {
+            await DropRoleAsync(rig, ok);
+        }
+    }
 }
