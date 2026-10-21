@@ -550,9 +550,11 @@ public static partial class DarlingCliCommands
             return 1;
         }
 
+        var dispatchProblem = await ReportAgentDispatchAsync(config, output, error, cancellationToken);
+
         output.WriteLine($"Validating connectivity to {targets.Count} server(s)...");
 
-        var allReachable = true;
+        var allReachable = !dispatchProblem;
         var nativeLoadFailureSaid = false;
         foreach (var server in targets)
         {
@@ -584,6 +586,72 @@ public static partial class DarlingCliCommands
             ? "All servers reachable."
             : "One or more servers failed the connection pre-flight (see above).");
         return allReachable ? 0 : 1;
+    }
+
+    /// <summary>
+    /// The agent dispatch checks for <c>--validate-config</c> (#6263): investigations on with MCP off, with no usable token,
+    /// with writes also on, or with no agent route. Nothing is read or printed when <c>mcp.allowInvestigations</c> is off.
+    /// A setup that cannot work goes to <paramref name="error"/> and makes the verb exit 1; a hint goes to
+    /// <paramref name="output"/>. The MCP switch and the route count come from the store when it answers, else from the file.
+    /// </summary>
+    internal static async Task<bool> ReportAgentDispatchAsync(
+        DarlingConfig config, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+    {
+        if (!config.Mcp.AllowInvestigations)
+        {
+            return false;
+        }
+
+        var mcpEnabled = config.Mcp.Enabled;
+        int? agentRoutes = null;
+        if (TryBuildStoreConnectionString(config.Postgres, out var connectionString, out _)
+            && !string.IsNullOrWhiteSpace(connectionString))
+        {
+            try
+            {
+                await using var connection = new NpgsqlConnection(
+                    DarlingStoreConnection.PinSessionTimeZoneUtc(
+                        DarlingStoreConnection.WithApplicationName(connectionString, DarlingManagedPostgres.CliApplicationName)));
+                using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                budget.CancelAfter(TimeSpan.FromSeconds(ServiceCommandDeadlines.CliStoreReadSeconds));
+                await connection.OpenAsync(budget.Token);
+                await using (var toggle = new NpgsqlCommand("SELECT mcp_enabled FROM config.config_service WHERE id = 1", connection))
+                {
+                    if (await toggle.ExecuteScalarAsync(budget.Token) is bool stored)
+                    {
+                        mcpEnabled = stored;
+                    }
+                }
+
+                await using var count = new NpgsqlCommand(DarlingAgentDispatchChecks.CountAgentRoutesSql, connection);
+                agentRoutes = Convert.ToInt32(await count.ExecuteScalarAsync(budget.Token), System.Globalization.CultureInfo.InvariantCulture);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception)
+            {
+                /* The store did not answer: the file's switch stands and the route hint is skipped. */
+            }
+        }
+
+        var (token, unreadable) = DarlingAgentDispatchChecks.ResolveToken(config.Mcp);
+        var any = false;
+        foreach (var finding in DarlingAgentDispatchChecks.Evaluate(config.Mcp, mcpEnabled, token, unreadable, agentRoutes))
+        {
+            if (finding.Severity == DarlingAgentDispatchChecks.AgentDispatchSeverity.Problem)
+            {
+                error.WriteLine("Agent dispatch cannot work: " + finding.Message);
+                any = true;
+            }
+            else
+            {
+                output.WriteLine("NOTE: " + finding.Message);
+            }
+        }
+
+        return any;
     }
 
     /// <summary>

@@ -263,9 +263,7 @@ internal static class DarlingMcpWritePolicy
     internal static bool InvestigationsConflict(McpConfig mcp) => mcp.AllowInvestigations && mcp.AllowWrites;
 
     /// <summary>The one Critical line a start logs when <see cref="InvestigationsConflict"/> holds (#5632 ruling R2).</summary>
-    internal const string InvestigationConflictLine =
-        "mcp.allowInvestigations is on but mcp.allowWrites is also on: the investigation tools stay off. One bearer token " +
-        "cannot tell an agent from a person. Turn mcp.allowWrites off to serve them.";
+    internal const string InvestigationConflictLine = DarlingAgentDispatchChecks.WritesWinMessage;
 
     /// <summary>
     /// What a start offers, from <c>darling.json</c> and the bearer token the start resolved: the host and the

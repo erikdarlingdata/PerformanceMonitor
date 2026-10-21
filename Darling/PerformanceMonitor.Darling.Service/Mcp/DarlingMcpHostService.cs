@@ -208,6 +208,7 @@ public sealed class DarlingMcpHostService : BackgroundService
         /* #2389: the last control-plane-override report emitted, so a steady disagreement is stated once per
            distinct state instead of on every 5s poll tick. */
         string? lastOverrideReport = null;
+        string? lastInvestigationsOffReport = null;
         /* #5288: the last tick's enabled flag (null before the first tick), so the certificate release for a listener
            that is disabled and not running below runs once per transition to disabled, not on every poll tick - the
            same last-state shape as lastOverrideReport. */
@@ -265,6 +266,16 @@ public sealed class DarlingMcpHostService : BackgroundService
             }
 
             lastOverrideReport = overrideReport;
+
+            /* #6263: investigations on while MCP is off does nothing and used to say nothing. Once per distinct state, so a
+               steady "off" says it once per service start and a later switch-off says it again. */
+            var offReport = config.Mcp.AllowInvestigations && !toggle.Enabled ? DarlingAgentDispatchChecks.McpOffMessage : null;
+            if (offReport is not null && !string.Equals(offReport, lastInvestigationsOffReport, StringComparison.Ordinal))
+            {
+                _logger.LogWarning("{Report}", offReport);
+            }
+
+            lastInvestigationsOffReport = offReport;
 
             switch (DecideMcpAction(_app is not null, _runningPort, toggle.Enabled, toggle.Port))
             {
@@ -685,6 +696,17 @@ public sealed class DarlingMcpHostService : BackgroundService
                 DarlingStoreConnection.PinSessionTimeZoneUtc(
                     DarlingStoreConnection.WithApplicationName(storeConnectionString, DarlingManagedPostgres.McpApplicationName)));
             _appDataSource = postgres;
+
+            /* #6263: investigations served, but no route opens a request. A hint, never a refusal: the operator may add the
+               route next. One read per start; an unreadable store says nothing here. */
+            if (writes.Investigations)
+            {
+                var agentRoutes = await DarlingAgentDispatchChecks.TryCountAgentRoutesAsync(postgres, stoppingToken);
+                if (agentRoutes == 0)
+                {
+                    _logger.LogWarning("{Hint}", DarlingAgentDispatchChecks.NoAgentRouteMessage);
+                }
+            }
 
             /* serverId → connection string, keyed by the STORE's identity (review catch on #2218).
                Resolution is lazy so DPAPI decrypt runs only when a plan fetch actually needs the
