@@ -125,19 +125,7 @@ public static class MonitoredServerConnection
             throw new InvalidOperationException($"servers['{server.DisplayName}'].queryStoreReplica: {replicaRefusal}");
         }
 
-        string? password = null;
-        if (server.RequiresResolvedSecret)
-        {
-            if (!server.EncryptedPasswordDeclaredByFile && DarlingSecretSource.IsReference(server.EncryptedPassword))
-            {
-                throw new InvalidOperationException(
-                    $"servers['{server.DisplayName}'].encryptedPassword: a stored env: or file: reference is not used for a Query Store replica unless darling.json declares it. " +
-                    "Enter the password again.");
-            }
-
-            password = DarlingSecrets.ResolvePassword(server, out _, ring);
-        }
-
+        var password = DarlingSecrets.ResolveReplicaPassword(server, ring);
         var builder = new SqlConnectionStringBuilder(BuildConnectionString(server, password))
         {
             DataSource = replica,
