@@ -35,7 +35,8 @@ export const SQL_TAB_REACH = {
   cpu: {
     collector: "cpu_utilization",
     reachReads: [
-      "get_cpu_utilization", "get_server_trend", "get_top_procedures_by_cpu", "get_top_queries_by_cpu"
+      "get_cpu_utilization", "get_procedure_duration_trend", "get_query_duration_trend", "get_query_trend", "get_server_trend",
+      "get_top_procedures_by_cpu", "get_top_queries_by_cpu"
     ]
   },
   memory: {
