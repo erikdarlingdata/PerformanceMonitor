@@ -28,8 +28,9 @@ namespace PerformanceMonitor.Darling.Service;
 ///
 /// <para>The estimate is a per-server daily row count from the #5094 daily summary's built table
 /// (<c>collect.query_store_top_daily_built.source_rows</c>, a few hundred rows in all): for each server in scope its most
-/// recent built day's rows, times the length of the range the read will count, in days. A server with no built day adds
-/// nothing: with no data the guard never refuses (it fails open), and so does any fault in the lookup.</para>
+/// recent built day's rows, times the length of the range the read will count, in days. A server with no built day is counted from the
+/// collection log instead (#6115, see <see cref="PerServerRowsSql"/>); one with neither adds nothing: with no data the guard never refuses
+/// (it fails open), and so does any fault in the lookup.</para>
 ///
 /// <para>The counted range is an INPUT of <see cref="EstimateAsync"/> and <see cref="Refusal"/>, not the window: a later
 /// change that leaves only the newest hours on the wide table passes the hours the wide table will still be read for.</para>
@@ -41,27 +42,64 @@ namespace PerformanceMonitor.Darling.Service;
 internal static class QueryStoreWideReadGuard
 {
     /// <summary>
-    /// The servers in scope ($1 the scoped names, or NULL for the fleet) that have a built day, each with its most recent
-    /// built day's <c>source_rows</c>. Returns the sum and the number of servers that contributed. No <c>is_enabled</c> predicate: the
-    /// compiled wide read (ComposeCompiler.BuildFactRelation) joins <c>collect.servers</c> on <c>server_id</c> with none, so it reads a
-    /// disabled server's retained rows too, and the estimate counts the servers the read takes.
+    /// The servers in scope ($1 the scoped names, or NULL for the fleet), each with one day's rows on the wide table. A server with a built
+    /// day contributes its most recent built day's <c>source_rows</c>. Returns the sum and the number of servers that contributed. No
+    /// <c>is_enabled</c> predicate: the compiled wide read (ComposeCompiler.BuildFactRelation) joins <c>collect.servers</c> on <c>server_id</c> with none, so it
+    /// reads a disabled server's retained rows too, and the estimate counts the servers the read takes.
+    ///
+    /// <para>#6115: a server with NO built day (the copies enrolled most recently: the daily builder plans only days after a server's
+    /// coverage <c>filled_since</c>, so it has built nothing yet) used to add 0, so the estimate at 210 servers was about the estimate at 126
+    /// (85 of the 211 servers on the load-test store had no built day) and the guard let a panel through that then timed out at 60 s. It is
+    /// now counted from the collection log, the way <see cref="RawCollectorRowsSql"/> counts the raw half: the rows the Query Store collector
+    /// (<c>query_store</c>) stored over the day that ends at the server's newest log row. <c>rows_collected</c> counts stored snapshots, so
+    /// it over-counts the interval table a little and leans toward refusing. A server with neither a built day nor a log row adds 0, and
+    /// a fault in the lookup fails open (<see cref="EstimateAsync"/> returns null). $2 are the servers a split panel reads raw (NULL for none).</para>
     /// </summary>
     internal const string PerServerRowsSql = @"
-SELECT COALESCE(SUM(b.source_rows), 0)::bigint, COUNT(*)::integer
-FROM collect.servers AS s
-CROSS JOIN LATERAL
+SELECT COALESCE(SUM(t.day_rows), 0)::bigint, COUNT(*)::integer
+FROM
 (
-    SELECT d.source_rows
-    FROM collect.query_store_top_daily_built AS d
-    WHERE d.server_id = s.server_id
-    ORDER BY d.day DESC
-    LIMIT 1
-) AS b
-WHERE ($1::text[] IS NULL OR s.server_name = ANY($1))
-  AND ($2::integer[] IS NULL OR s.server_id <> ALL($2));";
+    SELECT b.source_rows AS day_rows
+    FROM collect.servers AS s
+    CROSS JOIN LATERAL
+    (
+        SELECT d.source_rows
+        FROM collect.query_store_top_daily_built AS d
+        WHERE d.server_id = s.server_id
+        ORDER BY d.day DESC
+        LIMIT 1
+    ) AS b
+    WHERE ($1::text[] IS NULL OR s.server_name = ANY($1))
+      AND ($2::integer[] IS NULL OR s.server_id <> ALL($2))
+    UNION ALL
+    SELECT l.day_rows
+    FROM collect.servers AS s
+    CROSS JOIN LATERAL
+    (
+        SELECT n.collection_time AS anchor
+        FROM collect.collection_log AS n
+        WHERE n.server_id = s.server_id
+          AND n.collector_name = '" + QueryStoreRawCollector + @"'
+        ORDER BY n.collection_time DESC
+        LIMIT 1
+    ) AS a
+    CROSS JOIN LATERAL
+    (
+        SELECT SUM(x.rows_collected)::bigint AS day_rows
+        FROM collect.collection_log AS x
+        WHERE x.server_id = s.server_id
+          AND x.collector_name = '" + QueryStoreRawCollector + @"'
+          AND x.collection_time > a.anchor - interval '1 day'
+    ) AS l
+    WHERE NOT EXISTS (SELECT 1 FROM collect.query_store_top_daily_built AS nb WHERE nb.server_id = s.server_id)
+      AND l.day_rows IS NOT NULL
+      AND ($1::text[] IS NULL OR s.server_name = ANY($1))
+      AND ($2::integer[] IS NULL OR s.server_id <> ALL($2))
+) AS t;";
 
-    /// <summary>The rows one day of the servers in scope holds on the wide table, and how many servers that sums.</summary>
-    internal readonly record struct Estimate(long DailyRows, int Servers, long RawRows = 0)
+    /// <summary>The rows one day of the servers in scope holds on the wide table, and how many servers that sums. <c>RawRows</c> and
+    /// <c>RawServers</c> (#6115) are the raw half of a split panel: the rows it reads and how many servers that is.</summary>
+    internal readonly record struct Estimate(long DailyRows, int Servers, long RawRows = 0, int RawServers = 0)
     {
         /// <summary>The wide-table rows a read over the counted range is expected to take.</summary>
         public long RowsOver(DateTime countedStart, DateTime countedEnd) => RowsOver(countedStart, countedEnd, null);
@@ -332,11 +370,13 @@ WHERE b.daily_rows IS NOT NULL
         Estimate? estimate, DateTime countedStart, DateTime countedEnd, long limit = ComposeLimits.MaxQueryStoreWideRows,
         DateTime? stampThrough = null)
     {
-        if (estimate is not { } found || found.Servers == 0)
+        /* #6115: a split panel whose wide half counts no server still has a raw half to refuse. */
+        if (estimate is not { } found || (found.Servers == 0 && found.RawServers == 0))
         {
             return null;
         }
 
+        var servers = found.Servers + found.RawServers;
         var rows = found.RowsOver(countedStart, countedEnd, stampThrough);
         if (rows <= limit)
         {
@@ -345,13 +385,13 @@ WHERE b.daily_rows IS NOT NULL
 
         if (stampThrough is not null)
         {
-            return $"This panel reads too much Query Store history to finish inside the time limit ({Servers(found.Servers)}, {Window(countedEnd - countedStart)}). "
+            return $"This panel reads too much Query Store history to finish inside the time limit ({Servers(servers)}, {Window(countedEnd - countedStart)}). "
                 + "Choose fewer servers or a shorter window.";
         }
 
         var million = (rows / 1_000_000d).ToString("0.#", CultureInfo.InvariantCulture);
         var limitMillion = (limit / 1_000_000d).ToString("0.#", CultureInfo.InvariantCulture);
-        return $"This panel needs about {million} million Query Store rows ({Servers(found.Servers)}, {Window(countedEnd - countedStart)}), "
+        return $"This panel needs about {million} million Query Store rows ({Servers(servers)}, {Window(countedEnd - countedStart)}), "
             + $"over the limit of {limitMillion} million. Choose fewer servers or a shorter window.";
     }
 
@@ -382,7 +422,7 @@ WHERE b.daily_rows IS NOT NULL
         }
 
         var raw = await EstimateRawAsync(postgres, null, serverScope, QueryStoreRawCollector, rawCountedStart, countedEnd, logger, cancellationToken, rawServerIds);
-        return raw is { } rawFound ? found with { RawRows = rawFound.Rows } : found;
+        return raw is { } rawFound ? found with { RawRows = rawFound.Rows, RawServers = rawFound.Servers } : found;
     }
 
     /// <summary>
