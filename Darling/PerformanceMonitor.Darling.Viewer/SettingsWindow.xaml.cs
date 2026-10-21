@@ -440,6 +440,8 @@ public partial class SettingsWindow : Window
         var pausing = !_paused;
         PauseResumeButton.IsEnabled = false;
         PauseResumeButton.Content = pausing ? "Pausing..." : "Resuming...";
+        /* The pause waits for an agent change in progress to finish, up to a minute (#5632). */
+        CollectionStatusText.Text = "Status: waiting for an agent change in progress to finish, if there is one...";
         try
         {
             var result = pausing

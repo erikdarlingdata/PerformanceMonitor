@@ -250,6 +250,7 @@ public sealed class DarlingMcpPlanForceTools
             /* 6: the write, journaled. */
             PlanForceState? after = null;
             var afterNotRead = false;
+            RemediationResult? unknown = null;
             var changed = new ServerChangeSignal();
             try
             {
@@ -266,6 +267,14 @@ public sealed class DarlingMcpPlanForceTools
                         /* The executor says the server accepted the write: from here the store's journal never says failed (#5632, step 13). */
                         if (written.Wrote)
                             changed.MarkServerChanged();
+                        if (written.Outcome == RemediationOutcome.Unknown)
+                        {
+                            /* The write was sent and its reply was lost, or the call was cancelled while it ran: neither done nor failed (#5632), as for a kill. */
+                            changed.MarkOutcomeUnknown();
+                            unknown = written;
+                            return null;
+                        }
+
                         if (written.Outcome != RemediationOutcome.Done || !written.Wrote)
                             throw new PlanForceWriteException(written.Message, Answer(written.Outcome == RemediationOutcome.Refused ? "refused" : "failed",
                                 written.Reason, written.Message, new { dry_run = false, statement, before = beforeState }));
@@ -287,6 +296,15 @@ public sealed class DarlingMcpPlanForceTools
                 var result = await store.RunAgentActionAsync(new AgentActionCall(tool, kind, action!, target), hooks, ct);
                 if (result.Refusal is { } refused)
                     return DarlingAgentActionGate.RefusalAnswer(refused);
+                if (result.OutcomeUnknown && unknown is not null)
+                {
+                    /* A force whose reply was lost may still have taken effect: read the plan again, and when it is forced, journal action_done late so the
+                       post-force checks run. A read that fails or shows it not forced leaves the call as it is, with no result row. */
+                    if (force && result.CalledId is long unknownCalled)
+                        await RecordUnknownForceTookEffectAsync(store, executor, permit, logger, action!, resolved.ServerId, unknownCalled, statement, query_id, plan_id);
+                    return Answer("outcome_unknown", null, unknown.Message, new { dry_run = false, statement, before = beforeState, journal_id = result.CalledId });
+                }
+
                 return WithWarnings(Answer("done", null,
                     $"Plan {plan_id} was {(force ? "forced" : "unforced")} for query {query_id} in {beforeState.Database}. Check with get_forced_plans.",
                     new { dry_run = false, statement, before = beforeState, after, undo = AgentPlanUndoBuilder.For(force, resolved.ServerName, beforeState.Database, query_id, plan_id, beforeState.ForcedPlan?.PlanId, beforeState.ForcedPlan?.ForcingType), journal_id = result.CalledId }),
@@ -300,6 +318,34 @@ public sealed class DarlingMcpPlanForceTools
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError(tool, ex);
+        }
+    }
+
+    /// <summary>How long the read after a force with an unknown outcome may take. It has its own token: the call's may be the one that fired.</summary>
+    private static readonly TimeSpan UnknownForceReadTimeout = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// A forward force was sent and its reply was lost (#5632): the plan may be forced, and a force with no <c>action_done</c> gets no post-force
+    /// checks. Reads the plan's state again with a fresh token (on the executor's own connection, which is a fresh one per call) and, when the plan is
+    /// forced now, journals <c>action_done</c> marked <c>recorded_late</c>, as for a force the store could not record. Best effort: a read or a
+    /// write that fails, or a plan that is not forced, leaves the call with no result row, which reads as "result unknown".
+    /// </summary>
+    private static async Task RecordUnknownForceTookEffectAsync(InvestigationRequestStore store, SqlServerRemediationExecutor executor, ServerActionPermit permit,
+        ILogger logger, AgentAction action, int serverId, long calledId, string statement, long queryId, long planId)
+    {
+        try
+        {
+            using var fresh = new CancellationTokenSource(UnknownForceReadTimeout);
+            var read = await executor.ReadPlanStateAsync(permit, queryId, planId, fresh.Token);
+            if (read.State is not { } state || state.RequestedPlan is not { IsForced: true })
+                return;
+            var after = JsonSerializer.Serialize(new { statement, state, message = "The reply to the force was lost; the plan was found forced when the server was read again." });
+            await store.RecordForceTookEffectAsync(action.RequestId, serverId, action.AgentId, calledId, after,
+                "The reply to the force was lost; the plan was found forced when the server was read again.");
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning("The state read after the force of plan {PlanId} for query {QueryId} with an unknown outcome failed: {Message}", planId, queryId, ex.Message);
         }
     }
 
@@ -869,6 +915,12 @@ public sealed class DarlingMcpPlanForceTools
             {
                 var answer = await DecideAndRunAsync(session, owner, logger, confirm, shownStatement, ct);
                 await session.CommitAsync(ct);
+                /* The server took the undo and the store's insert or commit failed (#5632, step 13): the session recorded it late, or could not. The
+                   answer says so; it is never an error for a change that was made. */
+                if (answer.Status == PlanUndoAnswer.Undone && session.JournalMissing)
+                    return answer with { Message = answer.Message + " The change was made on the server, but the store could not record it. The agent changes list may still offer it for undo." };
+                if (answer.Status == PlanUndoAnswer.Undone && session.RecordedLate)
+                    return answer with { Message = answer.Message + " The store recorded it late." };
                 return answer;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -878,6 +930,10 @@ public sealed class DarlingMcpPlanForceTools
             }
         }
     }
+
+    /// <summary>What a person is told when an undo's write was sent and its reply was lost (#5632): our own words, never the server's.</summary>
+    internal const string UndoOutcomeUnknownWords =
+        "The undo was sent to the server, but its reply was lost, so the plan may or may not have changed. Nothing was recorded as undone. Check the plan's current state in Query Store before you try again; the change stays on the list, and a second try reads the server first.";
 
     private static async Task<PlanUndoAnswer> DecideAndRunAsync(AgentChangeUndo.PlanUndoSession session, NpgsqlDataSource? owner, ILogger logger,
         bool confirm, string? shownStatement, CancellationToken ct)
@@ -947,14 +1003,38 @@ public sealed class DarlingMcpPlanForceTools
         var written = step.Force
             ? await executor.ForcePlanAsync(stepPermit, facts.QueryId, step.PlanId, dryRun: false, ct)
             : await executor.UnforcePlanAsync(stepPermit, facts.QueryId, step.PlanId, dryRun: false, ct);
+        if (written.Outcome == RemediationOutcome.Unknown)
+        {
+            /* The write was sent and its reply was lost, or the call was cancelled while it ran (#5632): the plan may have changed. It is not
+               journaled as undone (the server did not confirm it) or refused (it was not): the attempt is an action_called row with no result,
+               as for a kill, so a possible change by a person shows in the Agent changes list as "result unknown" and not only in the service log.
+               The change stays offered for undo, and the server-state check on the next try decides whether the undo still applies. */
+            logger.LogWarning("The undo of plan change {CalledId} was sent, but its outcome is unknown: {Message}", facts.CalledId, written.Message);
+            await session.RecordOutcomeUnknownAsync(statement);
+            return new PlanUndoAnswer(PlanUndoAnswer.OutcomeUnknown, RemediationResult.Reasons.OutcomeUnknown, UndoOutcomeUnknownWords, statement, stateNode);
+        }
+
         if (written.Outcome != RemediationOutcome.Done || !written.Wrote)
         {
             await session.RecordRefusalAsync(written.Reason ?? "write_failed", ct);
             return new PlanUndoAnswer(written.Outcome == RemediationOutcome.Refused ? PlanUndoAnswer.RefusedStatus : PlanUndoAnswer.Failed, written.Reason, written.Message, statement, stateNode);
         }
 
-        var after = await executor.ReadPlanStateAsync(stepPermit, facts.QueryId, step.PlanId, ct);
-        var afterNode = after.State is null ? null : JsonSerializer.SerializeToNode(after.State);
+        /* The executor says the server accepted the write: from here a store failure is recorded late, never lost (#5632, step 13). */
+        await session.MarkServerChangedAsync(statement, stateNode, step.RestoredAs);
+
+        /* The read after the write is a warning when it fails, not an error for a change that was made. */
+        JsonNode? afterNode = null;
+        try
+        {
+            var after = await executor.ReadPlanStateAsync(stepPermit, facts.QueryId, step.PlanId, ct);
+            afterNode = after.State is null ? null : JsonSerializer.SerializeToNode(after.State);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning("The state read after undoing plan change {CalledId} failed: {Message}", facts.CalledId, ex.Message);
+        }
+
         await session.JournalUndoneAsync(statement, stateNode, afterNode, step.RestoredAs, ct);
         return new PlanUndoAnswer(PlanUndoAnswer.Undone, null, step.DoneWords, statement, stateNode, afterNode, step.RestoredAs, facts.CalledId, session.Actor);
     }

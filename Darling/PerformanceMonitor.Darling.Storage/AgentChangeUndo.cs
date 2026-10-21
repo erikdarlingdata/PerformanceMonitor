@@ -362,6 +362,10 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
         return await command.ExecuteScalarAsync(cancellationToken) is not bool on || on;
     }
 
+    /// <summary>What a person is told when the switch waited for an agent change in progress and that change did not finish in time.</summary>
+    public const string SwitchWaitTimedOutMessage =
+        "Waiting for an agent change in progress to finish took longer than 60 seconds, so the switch was not changed. Try again.";
+
     /// <summary>Turns every agent change on or off at once and journals <c>agent_actions_switched</c> by <c>person:&lt;login&gt;</c>, in one
     /// transaction. Off makes the gate refuse <c>actions_off</c>; nothing in flight is undone.</summary>
     public async Task SetEnabledAsync(bool enabled, string login, CancellationToken cancellationToken = default)
@@ -375,7 +379,17 @@ VALUES (1, $1, now() AT TIME ZONE 'UTC', $2)
 ON CONFLICT (id) DO UPDATE SET agent_actions_enabled = EXCLUDED.agent_actions_enabled,
     updated_at = EXCLUDED.updated_at, updated_by = EXCLUDED.updated_by", P(enabled), PText(actor)))
         {
-            await command.ExecuteNonQueryAsync(cancellationToken);
+            /* An agent change in progress holds the service row until its remote work ends (at most AgentActionRemoteWorkSeconds), and this
+               write waits for it. The wait must outlast that work, or the switch gives up exactly when a slow server makes it matter (#5632). */
+            command.CommandTimeout = Math.Max(_commandTimeoutSeconds, InvestigationRequestStore.AgentOffSwitchWaitSeconds);
+            try
+            {
+                await command.ExecuteNonQueryAsync(cancellationToken);
+            }
+            catch (Exception ex) when (ex is NpgsqlException { InnerException: TimeoutException } || ex is PostgresException { SqlState: PostgresErrorCodes.QueryCanceled })
+            {
+                throw new TimeoutException(SwitchWaitTimedOutMessage, ex);
+            }
         }
 
         await JournalAsync(connection, transaction, "agent_actions_switched", actor, null, null,
@@ -752,7 +766,7 @@ ORDER BY journal_id DESC LIMIT 1",
         return await command.ExecuteScalarAsync(cancellationToken) is string text ? JsonNode.Parse(text) as JsonObject ?? new JsonObject() : null;
     }
 
-    private async Task JournalAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, string journalEvent, string actor,
+    private async Task JournalAsync(NpgsqlConnection connection, NpgsqlTransaction? transaction, string journalEvent, string actor,
         Guid? requestId, int? serverId, string detailJson, CancellationToken cancellationToken)
     {
         await using var command = Command(connection, transaction, InvestigationRequestStore.AgentActionJournalSql,
