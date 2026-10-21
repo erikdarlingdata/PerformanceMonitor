@@ -37,9 +37,9 @@ public sealed class QueryStoreSplitPanelLiveTests
     {
         "{\"source\":\"query_store_stats\",\"measure\":\"qs_executions\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"server\"],\"viz\":\"table\"}",
         "{\"source\":\"query_store_stats\",\"measure\":\"qs_executions\",\"aggregate\":\"sum\",\"viz\":\"stat\"}",
-        "{\"source\":\"query_store_stats\",\"measure\":\"qs_total_cpu_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}",
+        "{\"source\":\"query_store_stats\",\"ratio\":\"qs_total_cpu_us\",\"timeBucket\":\"hour\",\"viz\":\"line\"}",
         "{\"source\":\"query_store_stats\",\"measure\":\"qs_max_duration_us\",\"aggregate\":\"max\",\"topN\":5,\"groupBy\":[\"query_hash\"],\"timeBucket\":\"hour\",\"viz\":\"line\"}",
-        "{\"source\":\"query_store_stats\",\"measure\":\"qs_avg_duration_us\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"table\"}",
+        "{\"source\":\"query_store_stats\",\"ratio\":\"qs_avg_duration_us\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"table\"}",
     };
 
     private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
