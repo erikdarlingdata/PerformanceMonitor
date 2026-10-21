@@ -249,20 +249,7 @@ public sealed partial class ViewerDataService
     /// chunk on (#4229); the floor lets it skip every chunk older than the window, without being able to
     /// drop a row (an event is collected after it happens).
     /// </summary>
-    public const string BlockingPairRowsSql = $"""
-        SELECT
-            {PgBlockingPairRowQuery.LeadingColumns},
-            blocked_sql_text, blocking_sql_text,
-            {PgBlockingPairRowQuery.IdentityColumns},
-            contentious_object,
-            {PgBlockingPairRowQuery.TrailingIdentityColumns}
-        FROM v_blocked_process_reports
-        WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
-        AND   collection_time >= $4
-        {PgBlockingPairRowQuery.SpidFilter}
-        ORDER BY event_time DESC
-        LIMIT 5000
-        """;
+    public const string BlockingPairRowsSql = PgBlockingPairRowQuery.WindowRowsSql;
 
     /// <summary>
     /// Recent blocked-process events for one server — XE-preferred with the always-on DMV
