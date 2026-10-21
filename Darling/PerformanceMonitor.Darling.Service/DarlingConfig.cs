@@ -2470,6 +2470,17 @@ public sealed class MonitoredServer
     [JsonPropertyName("multiSubnetFailover")]
     public bool MultiSubnetFailover { get; set; }
 
+    /// <summary>
+    /// #6254: where Query Store is read from instead of this server, a host (<c>host,port</c> allowed) or an availability group
+    /// listener name. Empty, the default, reads it from the server itself. SQL Server only; the replica connection is
+    /// <see cref="MonitoredServerConnection.BuildQueryStoreReplicaConnectionString"/>. It is
+    /// the last field of <see cref="ConnectionIdentity"/>: a change of it is a change of how the server is reached, and it is bound
+    /// into a sealed password (<see cref="SecretBinding"/>) only when it is set, so a change of it needs the password again and no
+    /// stored password is sent to a replica host nobody entered it for.
+    /// </summary>
+    [JsonPropertyName("queryStoreReplica")]
+    public string? QueryStoreReplica { get; set; }
+
     [JsonPropertyName("excludedDatabases")]
     public List<string> ExcludedDatabases { get; set; } = new();
 
@@ -2745,7 +2756,8 @@ public sealed class MonitoredServer
     /// </summary>
     [JsonIgnore]
     internal ServerConnectionIdentity ConnectionIdentity => StoredIdentity ?? ServerConnectionIdentity.FromStoredColumns(
-        Host, Port, Engine, Database, ReadOnlyIntent, Auth, Username, EncryptMode, TrustServerCertificate, MultiSubnetFailover);
+        Host, Port, Engine, Database, ReadOnlyIntent, Auth, Username, EncryptMode, TrustServerCertificate, MultiSubnetFailover,
+        QueryStoreReplica);
 
     /// <summary>The binding a sealed <c>encryptedPassword</c> must have been sealed for.</summary>
     [JsonIgnore]

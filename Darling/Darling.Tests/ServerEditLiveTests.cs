@@ -115,6 +115,7 @@ public sealed class ServerEditLiveTests : IDisposable
 
         /* The edit write is a function (#5240) the provisioning batch creates and grants: the real one, EXECUTE for this role. */
         await ExecAsync(owner, DarlingManagedRoles.BuildEditMonitoredServerFunctionSql("config"), ct);
+        await ExecAsync(owner, DarlingManagedRoles.BuildEditMonitoredServerSeventeenWrapperSql("config"), ct);
         await ExecAsync(owner, DarlingManagedRoles.BuildEditMonitoredServerLegacyWrapperSql("config"), ct);
         await ExecAsync(owner, $"GRANT EXECUTE ON FUNCTION config.edit_monitored_server({DarlingManagedRoles.EditMonitoredServerSignature}) TO {role}", ct);
         await ExecAsync(owner, $"GRANT EXECUTE ON FUNCTION config.edit_monitored_server({DarlingManagedRoles.EditMonitoredServerLegacySignature}) TO {role}", ct);
@@ -167,7 +168,7 @@ public sealed class ServerEditLiveTests : IDisposable
             reader.IsDBNull(2) ? null : reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetString(3),
             !reader.IsDBNull(4) && reader.GetBoolean(4), reader.IsDBNull(5) ? null : reader.GetString(5),
             reader.IsDBNull(6) ? null : reader.GetString(6), reader.IsDBNull(7) ? null : reader.GetString(7),
-            !reader.IsDBNull(8) && reader.GetBoolean(8), !reader.IsDBNull(9) && reader.GetBoolean(9));
+            !reader.IsDBNull(8) && reader.GetBoolean(8), !reader.IsDBNull(9) && reader.GetBoolean(9), null);
         return ring.Open(reader.GetString(10), PasswordBinding.ForServer(identity));
     }
 
@@ -312,7 +313,7 @@ public sealed class ServerEditLiveTests : IDisposable
             await ExecAsync(rig.Mcp, "UPDATE config_monitored_servers SET name = 'alpha-92b', is_enabled = TRUE, excluded_databases = ARRAY['model'] WHERE server_id = 5192", ct);
             var columns = await ScalarAsync<string>(rig.Owner,
                 "SELECT string_agg(attname, ',' ORDER BY attname) FROM pg_attribute WHERE attrelid = 'config.config_monitored_servers'::regclass "
-                + "AND attnum > 0 AND NOT attisdropped AND attname NOT IN ('aws_role_arn', 'aws_external_id', 'aws_external_id_set', 'hypothetical_index_username', 'hypothetical_index_encrypted_password')", ct);
+                + "AND attnum > 0 AND NOT attisdropped AND attname NOT IN ('aws_role_arn', 'aws_external_id', 'aws_external_id_set', 'hypothetical_index_username', 'hypothetical_index_encrypted_password', 'query_store_replica')", ct);
             Assert.Equal(
                 string.Join(',', DarlingManagedRoles.McpMonitoredServerUpdateColumns.Split(',', StringSplitOptions.TrimEntries).Order(StringComparer.Ordinal)),
                 columns);

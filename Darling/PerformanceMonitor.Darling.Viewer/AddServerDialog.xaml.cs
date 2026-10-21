@@ -408,7 +408,7 @@ public partial class AddServerDialog : Window
         var database = string.IsNullOrWhiteSpace(DatabaseNameBox.Text) ? null : DatabaseNameBox.Text.Trim();
         var form = ServerConnectionIdentity.FromStoredColumns(
             ServerNameBox.Text.Trim(), port, _existing.Engine, database, ReadOnlyIntentCheckBox.IsChecked == true, auth, username,
-            GetSelectedEncryptMode(), TrustCertCheckBox.IsChecked == true, MultiSubnetFailoverCheckBox.IsChecked == true);
+            GetSelectedEncryptMode(), TrustCertCheckBox.IsChecked == true, MultiSubnetFailoverCheckBox.IsChecked == true, null /* #6254: the Viewer reads and writes the Query Store replica in the darling-setting-ui part */);
         var stored = ViewerPasswordSealer.IdentityOf(_existing);
         return ServerConnectionIdentity.Differ(form, stored);
     }

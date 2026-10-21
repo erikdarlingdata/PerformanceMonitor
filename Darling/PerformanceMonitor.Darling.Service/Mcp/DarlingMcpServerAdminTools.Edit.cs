@@ -1020,9 +1020,9 @@ LIMIT 1";
         }
 
         var connectionChanged = ServerConnectionIdentity.Differ(
-            ServerConnectionIdentity.FromStoredColumns(host, port, row.Engine, database, readOnly, auth, username, encryptMode, trust, multi),
+            ServerConnectionIdentity.FromStoredColumns(host, port, row.Engine, database, readOnly, auth, username, encryptMode, trust, multi, row.QueryStoreReplica),
             ServerConnectionIdentity.FromStoredColumns(row.Host, row.Port, row.Engine, row.Database, row.ReadOnlyIntent, row.Auth, row.Username,
-                row.EncryptMode, row.TrustServerCertificate, row.MultiSubnetFailover));
+                row.EncryptMode, row.TrustServerCertificate, row.MultiSubnetFailover, row.QueryStoreReplica));
 
         if (secretMode && c.Password is null && (authSwitched || connectionChanged))
         {
@@ -1106,6 +1106,9 @@ LIMIT 1";
             Port = port,
             AwsRoleArn = newRole,
             AwsExternalId = c.AwsExternalId,
+            /* #6254: the row's Query Store replica rides with the definition, so a password sealed here is sealed for the replica the
+               row holds (PasswordBinding.ForServer). An edit that names a new replica is the next part's. */
+            QueryStoreReplica = row.QueryStoreReplica,
         };
 
         /* Whether the running service drops and re-opens its connection: the worker's own comparison, over the held
@@ -1117,6 +1120,7 @@ LIMIT 1";
             TrustServerCertificate = row.TrustServerCertificate, ReadOnlyIntent = row.ReadOnlyIntent,
             MultiSubnetFailover = row.MultiSubnetFailover, Engine = row.Engine, Port = row.Port,
             AwsRoleArn = row.AwsRoleArn, AwsExternalId = row.AwsExternalIdSet ? "stored" : null,
+            QueryStoreReplica = row.QueryStoreReplica,
         };
         var after = new MonitoredServer
         {
@@ -1128,6 +1132,7 @@ LIMIT 1";
             /* #5452: the role and the external ID are part of the definition the worker compares, so a role-only edit
                reconnects under the new role. The stored ID cannot be read, so it differs by a marker: a typed one
                is "changed", a cleared one (or a cleared role) is none, and an untouched one stays "stored". */
+            QueryStoreReplica = row.QueryStoreReplica,
             AwsRoleArn = newRole,
             AwsExternalId = newRole is null ? null : c.HasAwsExternalId ? (c.AwsExternalId is null ? null : "changed") : (row.AwsExternalIdSet ? "stored" : null),
         };
@@ -1150,7 +1155,7 @@ LIMIT 1";
     internal sealed record ServerEditRow(
         int ServerId, string Name, string Host, int Port, string? Database, bool ReadOnlyIntent, string Engine, string Auth,
         string? Username, string EncryptMode, bool TrustServerCertificate, bool MultiSubnetFailover, decimal MonthlyCostUsd,
-        DateTime ModifiedAt, string? AwsRoleArn = null, bool AwsExternalIdSet = false);
+        DateTime ModifiedAt, string? AwsRoleArn = null, bool AwsExternalIdSet = false, string? QueryStoreReplica = null);
 
     /// <summary><c>Occupied</c>: another definition holds the address the edit moves to. <c>ActualOccupied</c>: another
     /// definition holds the storage key the probe's connected database gives (#5240), the refusal
@@ -1187,7 +1192,8 @@ LIMIT 1";
     /// <summary>The columns <see cref="ReadEditRowSql"/> reads, and the only ones an edit may name in a SET list.</summary>
     internal const string ReadEditRowSql = @"
 SELECT server_id, name, host, port, database, read_only_intent, engine, auth, username, encrypt_mode,
-       trust_server_certificate, multi_subnet_failover, monthly_cost_usd, modified_at, aws_role_arn, aws_external_id_set
+       trust_server_certificate, multi_subnet_failover, monthly_cost_usd, modified_at, aws_role_arn, aws_external_id_set,
+       query_store_replica
 FROM config_monitored_servers WHERE server_id = $1";
 
     internal const string OtherServersSql =
@@ -1271,7 +1277,8 @@ FROM config_monitored_servers WHERE server_id = $1";
                 reader.IsDBNull(8) ? null : reader.GetString(8), reader.IsDBNull(9) ? "Mandatory" : reader.GetString(9),
                 !reader.IsDBNull(10) && reader.GetBoolean(10), !reader.IsDBNull(11) && reader.GetBoolean(11),
                 reader.IsDBNull(12) ? 0m : reader.GetDecimal(12), reader.GetDateTime(13),
-                reader.IsDBNull(14) ? null : reader.GetString(14), !reader.IsDBNull(15) && reader.GetBoolean(15));
+                reader.IsDBNull(14) ? null : reader.GetString(14), !reader.IsDBNull(15) && reader.GetBoolean(15),
+                reader.IsDBNull(16) ? null : reader.GetString(16));
         }
 
         public async Task<List<string>> LoadOtherStorageKeysAsync(int serverId, CancellationToken cancellationToken)
