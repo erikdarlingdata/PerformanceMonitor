@@ -16,7 +16,7 @@
  * Every label is drawn as text (el's text path). The picker is a native select, so it is as usable at 375 px as the other pickers.
  */
 
-import { el, mount, readTool, loadingStrip, localTime, parseUtc } from "../util.js";
+import { el, mount, readToolWithinKeptHistory, loadingStrip, localTime, parseUtc } from "../util.js";
 import { getPanelSignal, setPanelSignal } from "../panels.js";
 import { SNAPSHOT_LATEST, SNAPSHOT_ALL, snapshotPick, setSnapshotPick } from "../snapshot-pick.js";
 
@@ -134,7 +134,9 @@ export function activeQueriesSnapshotSlot(server, ctx, wait, extraParams, drawTa
       try {
         const params = { server, hours: ctx.hours, limit: SNAPSHOT_LIST_CAP, snapshots_only: true, ...extraParams };
         if (wait) params.wait_type = wait;
-        res = await readTool("get_active_queries", params, mine.signal);
+        /* The grid's own rule (util.js readWithinKeptHistory): a window longer than the history the server keeps is asked again
+           at the hours it keeps, so the list and the grid read the same window (#6302). */
+        res = await readToolWithinKeptHistory("get_active_queries", params, mine.signal);
       } catch (e) {
         res = { kind: "error" };
       }

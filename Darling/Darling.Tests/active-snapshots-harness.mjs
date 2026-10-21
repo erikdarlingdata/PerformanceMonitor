@@ -69,8 +69,12 @@ const rowsAt = (time, n) =>
 const asks = [];
 const answerFor = (name, q) => {
   if (name !== "get_active_queries") return {};
-  const ask = { limit: q.get("limit"), collection_time: q.get("collection_time"), snapshots_only: q.get("snapshots_only"), wait_type: q.get("wait_type") };
+  const ask = { limit: q.get("limit"), collection_time: q.get("collection_time"), snapshots_only: q.get("snapshots_only"), wait_type: q.get("wait_type"), hours: q.get("hours") };
   asks.push(ask);
+  /* "kept": the server keeps 168 hours, so a longer window is refused the way every ranged read is (util.js readWithinKeptHistory). */
+  if (scenario === "kept" && Number(q.get("hours")) > 168) {
+    return { __status: 400, status: "invalid", message: "hours_back value '" + q.get("hours") + "' exceeds maximum of 168 hours (7 days). Use a smaller value." };
+  }
   if (q.get("snapshots_only") === "true") {
     if (scenario === "listEmpty") return { status: "empty", message: "No active query snapshots found in the requested time range." };
     return { server: "a", hours_back: 1, total_snapshot_times: 3, snapshot_times_returned: 3, truncated: false, snapshots: SNAPSHOTS };
@@ -85,7 +89,9 @@ const answerFor = (name, q) => {
 globalThis.fetch = async (url) => {
   const u = new URL(String(url), "http://viewer.test");
   const name = u.pathname.replace("/api/read/", "");
-  return { status: 200, ok: true, text: async () => JSON.stringify(answerFor(name, u.searchParams)) };
+  const body = answerFor(name, u.searchParams);
+  const status = body && body.__status ? body.__status : 200;
+  return { status, ok: status === 200, text: async () => JSON.stringify(body) };
 };
 process.on("unhandledRejection", () => {});
 
@@ -109,7 +115,7 @@ const flush = async () => { for (let i = 0; i < 25; i++) await new Promise((r) =
 const draw = async () => {
   const tab = modules.tabs.SERVER_TABS.find((t) => t.id === "queries");
   const root = new FakeNode("main");
-  modules.util.mount(root, tab.build("a", { hours: 1, label: "last 1 hour" }));
+  modules.util.mount(root, tab.build("a", scenario === "kept" ? { hours: 720, label: "last 30 days" } : { hours: 1, label: "last 1 hour" }));
   await flush();
   return root;
 };
@@ -136,7 +142,7 @@ const choose = async (root, value) => {
 };
 
 const out = {};
-if (scenario === "default" || scenario === "listEmpty") {
+if (scenario === "default" || scenario === "listEmpty" || scenario === "kept") {
   out.first = report(await draw());
 } else if (scenario === "pick") {
   const root = await draw();

@@ -131,6 +131,19 @@ public sealed class ActiveQueriesSnapshotPickerBehaviourTests
     }
 
     [Fact]
+    public void AWindowLongerThanTheHistoryTheServerKeeps_AsksTheSnapshotListAgainAtTheKeptHours()
+    {
+        var first = Run("kept").GetProperty("first");
+        string?[] HoursOf(Func<JsonElement, bool> pick) =>
+            first.GetProperty("asks").EnumerateArray().Where(pick).Select(a => a.GetProperty("hours").GetString()).ToArray();
+
+        // The list and the newest snapshot's rows are each refused at 720 hours and asked again at 168, as every ranged read is.
+        Assert.Equal(new string?[] { "720", "168" }, HoursOf(a => a.GetProperty("snapshots_only").GetString() == "true"));
+        Assert.Equal(new string?[] { "720", "168" }, HoursOf(a => a.GetProperty("collection_time").GetString() == Newest));
+        Assert.Equal("latest", first.GetProperty("selected").GetString());
+    }
+
+    [Fact]
     public void AWaitFilter_NarrowsTheSnapshotListToo()
     {
         var first = Run("wait").GetProperty("first");
