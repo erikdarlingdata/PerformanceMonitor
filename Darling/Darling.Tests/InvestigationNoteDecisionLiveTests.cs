@@ -254,7 +254,7 @@ WHERE event = 'note_rejected' AND actor = 'person:tester' AND request_id = '{rej
             var approved = await Send("PUT", $"/api/investigation-notes/{firstId}/approve", "application/json");
             Assert.Equal(200, approved.Status);
             Assert.Equal("approved", (string)approved.Body!["status"]!);
-            Assert.Equal("web", (string)approved.Body["decided_by"]!);
+            Assert.Equal("person:web", (string)approved.Body["decided_by"]!);
 
             var rejected = await Send("PUT", $"/api/investigation-notes/{secondId}/reject", "application/json");
             Assert.Equal(200, rejected.Status);
@@ -267,10 +267,10 @@ WHERE event = 'note_rejected' AND actor = 'person:tester' AND request_id = '{rej
             Assert.Equal(404, (await Send("PUT", "/api/investigation-notes/999999999/approve", "application/json")).Status);
 
             Assert.Equal(0, (int)(await Send("GET", "/api/investigation-notes/pending", null)).Body!["notes_returned"]!);
-            Assert.Equal("approved|web,rejected|web", await ScalarAsync(owner,
+            Assert.Equal("approved|person:web,rejected|person:web", await ScalarAsync(owner,
                 "SELECT string_agg(state || '|' || decided_by, ',' ORDER BY note_id) FROM config.investigation_notes", ct));
             Assert.Equal("2", await ScalarAsync(owner,
-                "SELECT count(*) FROM config.investigation_journal WHERE event IN ('note_approved', 'note_rejected') AND actor = 'web'", ct));
+                "SELECT count(*) FROM config.investigation_journal WHERE event IN ('note_approved', 'note_rejected') AND actor = 'person:web'", ct));
         });
     }
 

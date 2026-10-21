@@ -1250,7 +1250,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// host runs on whatever login it was given, the <c>viewer</c> role on a managed or compose store), 400 when the store's
     /// <c>decided_by</c> rule refuses the seat's name (<see cref="InvestigationNoteRules.ValidateDecidedBy"/>), a fixed-sentence 500 or 503
     /// for any other store failure. The decision is stamped as every web write is: the seat's <see cref="DarlingWebSeat.EditorPrincipal"/>
-    /// (the signed-in subject, else <c>web</c>). The list body goes through the statement sweep (#4348) like every other body that carries text an agent wrote.
+    /// (the signed-in subject, else <c>web</c>) shaped as <c>person:&lt;name&gt;</c>, as the Viewer stamps a decision. The list body goes through the statement sweep (#4348) like every other body that carries text an agent wrote.
     /// </summary>
     private static void MapInvestigationNotes(WebApplication app, InvestigationRequestStore notes, ILogger logger)
     {
@@ -1428,9 +1428,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// show whole; the list says so (<c>truncated</c>), and deciding the oldest shows the rest.</summary>
     internal const int PendingNotesLimit = 200;
 
-    /// <summary>Who a note decision is stamped as: the seat's <see cref="DarlingWebSeat.EditorPrincipal"/>, the convention every web
-    /// write path stamps its <c>updated_by</c> with (the signed-in subject, else <c>web</c> for the shared token).</summary>
-    internal static string NoteDecider(DarlingWebSeat seat) => seat.EditorPrincipal;
+    /// <summary>Who a note decision is stamped as: <c>person:&lt;signed-in name&gt;</c>, the seat's <see cref="DarlingWebSeat.EditorPrincipal"/>
+    /// shaped by <see cref="InvestigationPersonWrites.PersonActor"/> as the Viewer and the web's own person writes record a person (#6265).
+    /// The signed-in subject, else <c>web</c> for the shared token, so that token's decision is <c>person:web</c>.</summary>
+    internal static string NoteDecider(DarlingWebSeat seat) => InvestigationPersonWrites.PersonActor(seat.EditorPrincipal);
 
     /// <summary>The list body: <c>{notes_returned, truncated, notes: [{note_id, server_id, server_name, metric_name, family,
     /// story_path_hash, note_text, author, source_request_id, proposed_at_utc, expires_at_utc}]}</c>, oldest proposal first.
@@ -1537,7 +1538,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
 
             var stopwatch = Stopwatch.StartNew();
-            var login = NoteDecider(DarlingWebSeat.FromContext(context));
+            var login = DarlingWebSeat.FromContext(context).EditorPrincipal;
             try
             {
                 /* #5632 step 9: a plan force or unforce is undone by the service's plan force code, which reads the server first. The first request
@@ -1587,7 +1588,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
 
             var stopwatch = Stopwatch.StartNew();
-            var login = NoteDecider(DarlingWebSeat.FromContext(context));
+            var login = DarlingWebSeat.FromContext(context).EditorPrincipal;
             try
             {
                 if (JsonNode.Parse(await ReadBodyAsync(context)) is not JsonObject body || body["enabled"] is not JsonValue flag || !flag.TryGetValue(out bool enabled))

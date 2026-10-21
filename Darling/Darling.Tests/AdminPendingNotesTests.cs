@@ -128,11 +128,11 @@ public sealed class AdminPendingNotesTests
     }
 
     [Fact]
-    public void ADecisionIsStampedAsEveryWebWriteIs_TheSignedInSubjectOrTheWebConstant()
+    public void ADecisionIsStampedAsAPerson_TheSignedInSubjectOrTheWebConstant()
     {
-        Assert.Equal("web", DarlingWebEndpoints.NoteDecider(new DarlingWebSeat(null, true)));
-        Assert.Equal("erik@example.com", DarlingWebEndpoints.NoteDecider(new DarlingWebSeat("erik@example.com", true)));
-        Assert.Equal(new DarlingWebSeat("erik@example.com", true).EditorPrincipal, DarlingWebEndpoints.NoteDecider(new DarlingWebSeat("erik@example.com", true)));
+        /* #6265: the Viewer stamps person:<login>; the web's approve and reject stamp the same shape, not the bare name. */
+        Assert.Equal("person:web", DarlingWebEndpoints.NoteDecider(new DarlingWebSeat(null, true)));
+        Assert.Equal("person:erik@example.com", DarlingWebEndpoints.NoteDecider(new DarlingWebSeat("erik@example.com", true)));
     }
 
     /* #5903 round 1: a subject the store's one rule refuses answers a sentence the route turns into a 400, never a 500. */
