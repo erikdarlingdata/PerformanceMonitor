@@ -254,6 +254,8 @@ export function dailyHealthCalendar({ server, initial, read, renderTable, openDa
     if (!selected || monthOfDay(selected) === null || !sameMonth(monthOfDay(selected), view) || asTable) return swap(detail);
     const iso = selected;
     const title = el("h4", { class: "daycal-detail-title", text: DAY_NAMES[new Date(iso + "T00:00:00Z").getUTCDay()] + ", " + iso + " (UTC)" });
+    /* #6353: a day after the calendar's today has not happened, which is not a gap: no read, no "No Data", no reason for one. */
+    if (iso > todayIso) return swap(detail, title, el("div", { class: "daycal-band band-Future", text: "Not yet" }), el("div", { class: "muted", text: "This day has not happened yet." }));
     swap(detail, title, el("div", { class: "muted", text: "Loading the day..." }));
     const mine = generation;
     const res = await read("get_daily_summary", { server, summary_date: iso });
@@ -294,8 +296,10 @@ export function dailyHealthCalendar({ server, initial, read, renderTable, openDa
           if (day === null) return el("div", { class: "daycal-cell daycal-pad", role: "gridcell" });
           const iso = isoDay(view.year, view.month0, day);
           const row = entry.byDay.get(day);
-          const c = cellOf(row);
-          const tip = iso + " (UTC): " + c.word + (row && row.data_note ? ". " + row.data_note : c.band === "NoData" && !row ? ". No collection recorded for this day." : "");
+          /* #6353: after the calendar's today a day has not happened (ISO days compare as text): not "no data", not a collection gap. */
+          const future = iso > todayIso;
+          const c = future ? { band: "Future", word: "not yet" } : cellOf(row);
+          const tip = future ? iso + " (UTC): not yet. This day has not happened." : iso + " (UTC): " + c.word + (row && row.data_note ? ". " + row.data_note : c.band === "NoData" && !row ? ". No collection recorded for this day." : "");
           return el("button", {
             type: "button",
             role: "gridcell",

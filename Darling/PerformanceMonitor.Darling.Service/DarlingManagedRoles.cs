@@ -3072,6 +3072,18 @@ BEGIN
       RETURN;
    END;
 
+   -- A registration moved to another address no longer vouches for the machine it reached before (#6340 round 2, N2): the machine
+   -- identity the last connect stored (collect.servers.machine_identity, V212) belongs to the old address, so it is cleared here and the
+   -- next connect writes the new one. A store that predates V212 has no such column; the edit is not held up by that.
+   IF v_host IS DISTINCT FROM v_old_host OR v_port IS DISTINCT FROM v_old_port
+      OR v_database IS DISTINCT FROM v_old_database OR v_read_only_intent IS DISTINCT FROM v_old_read_only_intent THEN
+      BEGIN
+         UPDATE {PgSchemaGenerator.CollectSchema}.servers SET machine_identity = NULL WHERE server_id = p_server_id;
+      EXCEPTION WHEN undefined_column OR undefined_table THEN
+         NULL;
+      END;
+   END IF;
+
    outcome := 'saved';
    RETURN NEXT;
 END;

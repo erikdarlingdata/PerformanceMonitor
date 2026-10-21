@@ -160,6 +160,7 @@ public sealed partial class DarlingMcpServerAdminTools
         "<<GUIDE>>" +
         "SERVING: edit_server is served only when the operator sets mcp.allowServerAdmin (with mcp.allowWrites), like add_servers and remove_server. A change that points Windows authentication at a connection whose server identity is not verified (trust_server_certificate true, or encrypt_mode Optional) is refused as add_servers refuses it, with nothing probed or saved. " +
         "A change to where the server connects (host, port, database or read_only_intent) is answered refused while a route with an agent setting (Off included) is scoped to the server, by its id, one of its tags or a tag above one (a route with no scope does not count): that is changed in the Viewer or on the web dashboard. The display name and the other settings stay open. " +
+        "The machine is also recognised by the name its server reports for itself (a SQL Server's own name, a PostgreSQL cluster's identifier and port), so one machine reached under another host name is held the same way, and so is a change to another connection field that reaches it, and two machines that report the same name (cloned images, containers sharing a hostname, a PostgreSQL replica and its primary) are treated as one machine: register those in the Viewer or on the web dashboard. " +
         "Changes ONLY the fields named in changes_json, a JSON object. Keys: display_name, host, port (PostgreSQL), " +
         "database, read_only_intent, auth (\"Windows\", \"SQL\", \"ServicePrincipal\", \"ManagedIdentity\"), username, " +
         "password, encrypt_mode, trust_server_certificate, multi_subnet_failover, monthly_cost_usd, " +
@@ -395,8 +396,10 @@ LIMIT 1";
            another registration holds while a route with an agent setting is scoped to that one: this registration would sit outside
            that route. The registration being edited is left out of the comparison. */
         var heldEntry = new ParsedServerEntry(0, plan.ProbeConfig.Name, plan.NewStorageKey, plan.ProbeConfig, null);
-        var enforceHeld = plan.AddressChanged && agentRouteCovering is not null && loadTargets is not null;
-        if (enforceHeld
+        /* #6285 round 1 (L1): the rule also runs for a change to another connection field (multi_subnet_failover can reach another
+           address with the same host text), but then only by the identity the server reports, not the text. */
+        var enforceHeld = plan.ConnectionChanged && agentRouteCovering is not null && loadTargets is not null;
+        if (enforceHeld && plan.AddressChanged
             && await TargetHeldRefusalAsync(await loadTargets!(cancellationToken), heldEntry, agentRouteCovering!, cancellationToken, serverId, forEdit: true) is { } heldRefusal)
         {
             return Outcome(EditStatus.Refused, heldRefusal);
@@ -412,6 +415,8 @@ LIMIT 1";
         ParsedServerEntry? probedEntry = null;
         string? connectedDatabase = null;
         string? actualStorageKey = null;
+        string? probedIdentity = null;
+        var identityUnread = false;
         if (plan.NeedsProbe)
         {
             /* The MCP caller's rules, on the definition as it would be saved (the stored row with the changes applied),
@@ -435,6 +440,17 @@ LIMIT 1";
             tested = true;
             probedEntry = new ParsedServerEntry(0, plan.ProbeConfig.Name, plan.NewStorageKey, plan.ProbeConfig, null);
             connectedDatabase = probeResult.ConnectedDatabase;
+
+            /* #6285: the add rule again now the server has said what it calls itself, so a name the host text could not tie
+               to another registration (a short name against its full domain name, a name against its address) still counts. */
+            probedIdentity = MachineIdentityOf(probeResult.MachineIdentity, probeResult.EngineEdition);
+            identityUnread = PostgresIdentityUnread(probeResult, probedIdentity);
+            if (enforceHeld && (probedIdentity is not null || identityUnread)
+                && await TargetHeldRefusalAsync(await loadTargets!(cancellationToken), heldEntry, agentRouteCovering!, cancellationToken, serverId, forEdit: true, probedIdentity: probedIdentity, textMatch: plan.AddressChanged, postgresIdentityUnread: identityUnread) is { } identityRefusal)
+            {
+                return Outcome(EditStatus.Refused, identityRefusal);
+            }
+
             var collision = ActualIdentityCollision(probedEntry, connectedDatabase, otherKeys);
             if (collision is not null)
             {
@@ -458,9 +474,9 @@ LIMIT 1";
         /* The same two checks again inside the write's transaction, under the identity lock: a route set up during the probe is seen
            before the row changes. */
         HeldCheck? heldCheck = !enforceHeld ? null : async (connection, transaction, token) =>
-            await ScopedAgentRouteAsync(connection, transaction, serverId, token) is { } routeNow
+            plan.AddressChanged && await ScopedAgentRouteAsync(connection, transaction, serverId, token) is { } routeNow
                 ? CoveredServerEditText(routeNow)
-                : await TargetHeldRefusalInTransactionAsync(connection, transaction, heldEntry, serverId, token, forEdit: true);
+                : await TargetHeldRefusalInTransactionAsync(connection, transaction, heldEntry, serverId, token, forEdit: true, probedIdentity: probedIdentity, textMatch: plan.AddressChanged, postgresIdentityUnread: identityUnread);
         var write = await store.WriteAsync(serverId, row.ModifiedAt, sets, plan.AddressChanged ? plan.NewStorageKey : null, actualStorageKey, heldCheck, cancellationToken);
         switch (write.Kind)
         {
@@ -914,6 +930,8 @@ LIMIT 1";
         public string NewStorageKey { get; set; } = "";
         public string NewName { get; set; } = "";
         public bool AddressChanged { get; set; }
+        /// <summary>Any connection field differs from the stored row (host, port, database, intent, login, encryption, multi-subnet failover). An address change is one.</summary>
+        public bool ConnectionChanged { get; set; }
         public bool NeedsProbe { get; set; }
         public bool Reconnects { get; set; }
         public string? PlaintextSecret { get; set; }
@@ -1098,6 +1116,7 @@ LIMIT 1";
             Set("password", NpgsqlDbType.Text, null, true);
         }
 
+        plan.ConnectionChanged = connectionChanged;
         plan.NeedsProbe = plan.Sets.Count > 0 && (connectionChanged || plan.PlaintextSecret is not null);
         plan.ProbeConfig = new MonitoredServer
         {

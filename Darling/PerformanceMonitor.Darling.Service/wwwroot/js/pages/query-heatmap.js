@@ -114,7 +114,7 @@ export function renderHeatmapBody(data, opts) {
       el("span", { class: "qh-cell qh-swatch qh-empty", "aria-hidden": "true" }),
       el("span", { text: " none   1 " }),
       ...swatches,
-      el("span", { text: " " + grid.max.toLocaleString("en-US") + " queries (log scale). Each column is " + grid.binMinutes + " minutes; the slowest queries are at the top." }),
+      el("span", { text: " " + grid.max.toLocaleString("en-US") + " queries (log scale). Each column is " + grid.binMinutes + " minutes; " + metric.top + " are at the top." }),
     ]);
     gridView = el("div", { class: "qh-grid-view" }, [legend, el("div", { class: "qh-wrap" }, [table]), detail]);
   }

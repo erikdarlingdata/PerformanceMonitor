@@ -159,6 +159,7 @@ public sealed partial class DarlingMcpServerAdminTools
         "A new database or read_only_intent on a machine (engine, host and port) another registration already holds is added as usual, " +
         "unless a route with an agent setting is scoped to that registration (its id, one of its tags or a tag above one; a route with no scope does not count) " +
         "- a removed registration included. Then the entry is refused as status \"collides\" and names that registration, because the route is tied to it. Register the other database in the Viewer or on the web dashboard. " +
+        "The machine is also recognised by the name its server reports for itself (a SQL Server's own name, a PostgreSQL cluster's identifier and port), so one machine reached under another host name is held the same way, and two machines that report the same name (cloned images, containers sharing a hostname, a PostgreSQL replica and its primary) are treated as one machine: register those in the Viewer or on the web dashboard. " +
         "A SQL password or service-principal client secret is sealed with the service's password key before it is " +
         "stored, and is never returned. password is the password itself: a value that starts with env: or file: is " +
         "rejected as \"invalid\", because references are set in the configuration file. " +
@@ -246,9 +247,10 @@ public sealed partial class DarlingMcpServerAdminTools
                setting is scoped to that registration (its id, a tag of it or a tag above): the new id would sit outside
                that route. Entries of this batch have no routes yet, so they never hold each other back. The operator's
                own command and the web route pass no policy and are not held to this. */
+            List<RegisteredTarget>? held = null;
             if (policy is not null && ready.Count > 0)
             {
-                var held = await definitions.LoadTargetsAsync(cancellationToken);
+                held = await definitions.LoadTargetsAsync(cancellationToken);
                 var kept = new List<ParsedServerEntry>();
                 foreach (var entry in ready)
                 {
@@ -300,6 +302,18 @@ public sealed partial class DarlingMcpServerAdminTools
                     continue;
                 }
 
+                /* #6285: the same rule again, now the server has said what it calls itself: a short name and its full domain
+                   name, or a name and its address, reach one machine that the host text above could not tell apart. A server
+                   that reported no identity (or a registration with none collected) is held to the text match already made. */
+                var probedIdentity = MachineIdentityOf(probeResult.MachineIdentity, probeResult.EngineEdition);
+                var identityUnread = PostgresIdentityUnread(probeResult, probedIdentity);
+                if (policy is not null && held is not null && (probedIdentity is not null || identityUnread)
+                    && await TargetHeldRefusalAsync(held, entry, definitions.ScopedAgentRouteAsync, cancellationToken, probedIdentity: probedIdentity, postgresIdentityUnread: identityUnread) is { } identityRefusal)
+                {
+                    results.Add(new ServerResult(entry.Order, entry.DisplayName, AddStatus.Collides, identityRefusal));
+                    continue;
+                }
+
                 /* #2280: the probe just asked the server which database it actually reached. If that is a
                    DIFFERENT database from the one this entry names, and some other registration already claims
                    that one, then adding this would give one real database two identities and two full copies of
@@ -330,7 +344,7 @@ public sealed partial class DarlingMcpServerAdminTools
                     var actualStorageKey = ActualStorageKeyOf(entry, probeResult.ConnectedDatabase);
                     string? heldInWrite = null;
                     HeldCheck? heldCheck = policy is null ? null : async (connection, transaction, token) =>
-                        heldInWrite = await TargetHeldRefusalInTransactionAsync(connection, transaction, entry, null, token);
+                        heldInWrite = await TargetHeldRefusalInTransactionAsync(connection, transaction, entry, null, token, probedIdentity: probedIdentity, postgresIdentityUnread: identityUnread);
                     var rowsWritten = await definitions.InsertAsync(entry, encryptedPassword, actualStorageKey, heldCheck, cancellationToken);
                     if (rowsWritten > 0)
                     {
