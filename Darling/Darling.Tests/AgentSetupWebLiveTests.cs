@@ -7,8 +7,10 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -75,7 +77,7 @@ public sealed class AgentSetupWebLiveTests
             new WebhookProxies(null, null, null, null), null, null, 30, ct);
 
     private static async Task WithWebRoutesAsync(
-        string managedRole, Func<NpgsqlDataSource, NpgsqlDataSource, Sender, CancellationToken, Task> body)
+        string managedRole, Func<NpgsqlDataSource, NpgsqlDataSource, Sender, CancellationToken, Task> body, IPasswordKeyRing? ring = null)
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the agent setup web live tests.");
@@ -112,7 +114,7 @@ public sealed class AgentSetupWebLiveTests
             builder.Logging.ClearProviders();
             builder.Services.AddSingleton(webLogin);
             await using var app = builder.Build();
-            DarlingWebEndpoints.MapAll(app, webLogin, new CollectorRuntimeState(), new CapturingTestLogger());
+            DarlingWebEndpoints.MapAll(app, webLogin, new CollectorRuntimeState(), new CapturingTestLogger(), passwordKeys: ring);
             await app.StartAsync(ct);
             using var server = app.GetTestServer();
 
@@ -198,6 +200,116 @@ public sealed class AgentSetupWebLiveTests
     }
 
     [Fact]
+    public async Task AgentRoutes_Destinations_AreSealedAndNeverShown_KeptOnOmit_ClearedOnDash_AndARefusedValueIsNotEchoed()
+    {
+        const string TeamsUrl = "https://teams.example.test/webhook/teams-secret-token";
+        const string SlackUrl = "https://hooks.example.test/services/T000/B000/slack-secret-token";
+        const string GenericUrl = "https://generic.example.test/in/generic-secret-token";
+        const string RoutingKey = "pagerduty-secret-routing-key-0001";
+        using var key = PasswordPrivateKey.Generate();
+        var ring = DarlingPasswordKey.FromPrivateKey(key);
+        await WithWebRoutesAsync("admin", async (owner, _, Send, ct) =>
+        {
+            async Task<string> Stored(int id, string column) => await ScalarAsync(owner, $"SELECT {column} FROM config_notification_routes WHERE route_id = {id}", ct) ?? "";
+            async Task<System.Text.Json.JsonElement> PageRoute(int id) =>
+                System.Text.Json.JsonDocument.Parse(await DarlingMcpAlertTools.GetNotificationRoutes(owner, ct)).RootElement
+                    .GetProperty("routes").EnumerateArray().Single(r => r.GetProperty("route_id").GetInt32() == id);
+
+            /* Set: all five destinations on a create. Each webhook is stored sealed for the route (it opens to what was sent) and the
+               answer carries no value. */
+            var created = await Send("POST", "/api/notification-routes", Json,
+                $"{{\"metric_match\":\"blocking\",\"teams_webhook_url\":\"{TeamsUrl}\",\"slack_webhook_url\":\"{SlackUrl}\",\"generic_webhook_url\":\"{GenericUrl}\",\"pagerduty_routing_key\":\"{RoutingKey}\",\"email_recipients\":\"ops@example.com, oncall@example.com\"}}");
+            Assert.Equal(200, created.Status);
+            var id = (int)created.Body!["route_id"]!;
+            foreach (var secret in new[] { TeamsUrl, SlackUrl, GenericUrl, RoutingKey })
+            {
+                Assert.DoesNotContain(secret, created.Body.ToJsonString(), StringComparison.Ordinal);
+            }
+
+            var proxies = await NotificationRouteWriter.ReadProxiesAsync(owner, 30, ct);
+            var where = PasswordBinding.WebhookRouteRow(id);
+            Assert.Equal(TeamsUrl, ring.Open(await Stored(id, "teams_url"), PasswordBinding.ForWebhook("teams", where, proxies.TeamsProxy, null)));
+            Assert.Equal(SlackUrl, ring.Open(await Stored(id, "slack_url"), PasswordBinding.ForWebhook("slack", where, proxies.SlackProxy, null)));
+            Assert.Equal(GenericUrl, ring.Open(await Stored(id, "generic_url"), PasswordBinding.ForWebhook("generic", where, proxies.GenericProxy, null)));
+            Assert.Equal(RoutingKey, ring.Open(await Stored(id, "pagerduty_routing_key"), PasswordBinding.ForWebhook("pagerduty", where, proxies.PagerDutyProxy, null)));
+            Assert.Equal("ops@example.com, oncall@example.com", await Stored(id, "smtp_recipients"));
+
+            /* The page's read says which destinations are set, and shows no webhook value (the recipients are shown, as the read always shows them). */
+            var pageText = await DarlingMcpAlertTools.GetNotificationRoutes(owner, ct);
+            foreach (var secret in new[] { TeamsUrl, SlackUrl, GenericUrl, RoutingKey, "teams-secret-token", "slack-secret-token", "generic-secret-token", "secret-routing-key" })
+            {
+                Assert.DoesNotContain(secret, pageText, StringComparison.Ordinal);
+            }
+
+            var route = await PageRoute(id);
+            Assert.Equal(new[] { "Teams", "Slack", "Generic", "PagerDuty", "Email" }, route.GetProperty("configured_channels").EnumerateArray().Select(c => c.GetString()).ToArray());
+            Assert.Equal("ops@example.com, oncall@example.com", route.GetProperty("smtp_recipients").GetString());
+
+            /* Omit keeps: an edit that names no destination, or names one blank or null, leaves every saved value byte for byte. */
+            string[] columns = ["teams_url", "slack_url", "generic_url", "pagerduty_routing_key", "smtp_recipients"];
+            async Task<string> Snapshot()
+            {
+                var parts = new List<string>();
+                foreach (var column in columns)
+                {
+                    parts.Add(await Stored(id, column));
+                }
+
+                return string.Join("|", parts);
+            }
+
+            var before = await Snapshot();
+            Assert.Equal(200, (await Send("PUT", $"/api/notification-routes/{id}", Json, "{\"enabled\":false}")).Status);
+            Assert.Equal(200, (await Send("PUT", $"/api/notification-routes/{id}", Json, "{\"agent_level\":1,\"teams_webhook_url\":\"  \",\"slack_webhook_url\":null,\"email_recipients\":\"\"}")).Status);
+            Assert.Equal(before, await Snapshot());
+            Assert.Equal("false", await Stored(id, "enabled::text"));
+
+            /* A new value replaces only its own destination. */
+            var replaced = "https://teams.example.test/webhook/replacement-token";
+            Assert.Equal(200, (await Send("PUT", $"/api/notification-routes/{id}", Json, $"{{\"teams_webhook_url\":\"{replaced}\"}}")).Status);
+            Assert.Equal(replaced, ring.Open(await Stored(id, "teams_url"), PasswordBinding.ForWebhook("teams", where, proxies.TeamsProxy, null)));
+            Assert.Equal(before.Split('|')[1], await Stored(id, "slack_url"));
+
+            /* An explicit - clears that destination only. */
+            Assert.Equal(200, (await Send("PUT", $"/api/notification-routes/{id}", Json, "{\"slack_webhook_url\":\"-\",\"email_recipients\":\"-\",\"pagerduty_routing_key\":\"-\"}")).Status);
+            Assert.Equal("", await Stored(id, "slack_url"));
+            Assert.Equal("", await Stored(id, "smtp_recipients"));
+            Assert.Equal("", await Stored(id, "pagerduty_routing_key"));
+            Assert.NotEqual("", await Stored(id, "teams_url"));
+            Assert.NotEqual("", await Stored(id, "generic_url"));
+            Assert.Equal(new[] { "Teams", "Generic" }, (await PageRoute(id)).GetProperty("configured_channels").EnumerateArray().Select(c => c.GetString()).ToArray());
+
+            /* A refused value is named by its field and never echoed, and nothing is written. */
+            var snapshot = await Snapshot();
+            foreach (var (json, contains, secret) in new[]
+            {
+                ("{\"teams_webhook_url\":\"ftp://secret-host.example/secret-token\"}", "Teams webhook URL", "secret-token"),
+                ("{\"slack_webhook_url\":\"not-a-url-secret-token\"}", "Slack webhook URL", "secret-token"),
+                ("{\"generic_webhook_url\":\"http://169.254.169.254/latest/secret-token\"}", "generic webhook URL", "secret-token"),
+                ("{\"email_recipients\":\"Secret Name <secret-person@example.com>\"}", "plain addresses", "secret-person"),
+                ("{\"teams_webhook_url\":12345}", "teams_webhook_url must be text", "12345"),
+            })
+            {
+                var refused = await Send("PUT", $"/api/notification-routes/{id}", Json, json);
+                Assert.Equal(400, refused.Status);
+                Assert.Contains(contains, (string)refused.Body!["error"]!, StringComparison.Ordinal);
+                Assert.DoesNotContain(secret, refused.Body.ToJsonString(), StringComparison.Ordinal);
+                Assert.Equal(snapshot, await Snapshot());
+            }
+
+            /* The stored sealed text is not a value a caller may send back, and the create of a refused value leaves no route behind. */
+            var sealedText = await Stored(id, "teams_url");
+            var sealedBack = await Send("PUT", $"/api/notification-routes/{id}", Json, $"{{\"slack_webhook_url\":\"{sealedText}\"}}");
+            Assert.Equal(400, sealedBack.Status);
+            Assert.DoesNotContain(sealedText, sealedBack.Body!.ToJsonString(), StringComparison.Ordinal);
+            var routesBefore = await ScalarAsync(owner, "SELECT count(*) FROM config_notification_routes", ct);
+            Assert.Equal(400, (await Send("POST", "/api/notification-routes", Json, "{\"metric_match\":\"deadlocks\",\"teams_webhook_url\":\"ftp://x.example/secret-token\"}")).Status);
+            Assert.Equal(routesBefore, await ScalarAsync(owner, "SELECT count(*) FROM config_notification_routes", ct));
+            Assert.Equal(snapshot, await Snapshot());
+        }, ring);
+    }
+
+    [Fact]
     public async Task AgentRoutes_RefuseWhatTheViewerRefuses_WithTheSharedSentence_AndWriteNothing()
     {
         await WithWebRoutesAsync("admin", async (owner, _, Send, ct) =>
@@ -225,15 +337,6 @@ public sealed class AgentSetupWebLiveTests
             await Refused("PUT", $"/api/notification-routes/{seeded}", $"{{\"fallback_route_id\":{seeded}}}", "its own fallback");
             await Refused("POST", "/api/notification-routes", "{\"metric_match\":\"blocking\",\"agent_level\":\"one\"}", "agent_level must be a whole number");
             await Refused("POST", "/api/notification-routes", "{\"metric_match\":\"blocking\",\"agent_level\":1,\"agent_max_per_hour\":1.5}", "agent_max_per_hour must be a whole number");
-
-            /* A body that names a webhook, key or address is refused by name; the value is never echoed. */
-            foreach (var key in new[] { "teams_url", "slack_url", "generic_url", "pagerduty_routing_key", "smtp_recipients" })
-            {
-                var answer = await Send("PUT", $"/api/notification-routes/{seeded}", Json, $"{{\"{key}\":\"https://hooks.example.com/secret-value\"}}");
-                Assert.Equal(400, answer.Status);
-                Assert.DoesNotContain("secret-value", answer.Body!.ToJsonString(), StringComparison.Ordinal);
-                Assert.Contains("desktop Viewer", (string)answer.Body["error"]!, StringComparison.Ordinal);
-            }
 
             await Refused("POST", "/api/notification-routes", "{\"metric_match\":\"blocking\",\"agent_level\":1,\"bogus\":1}", "Unknown field");
 
@@ -265,7 +368,9 @@ public sealed class AgentSetupWebLiveTests
             foreach (var (method, path, json) in new[]
             {
                 ("POST", "/api/notification-routes", "{\"metric_match\":\"blocking\",\"agent_level\":1}"),
+                ("POST", "/api/notification-routes", "{\"metric_match\":\"blocking\",\"teams_webhook_url\":\"https://teams.example.test/hook\",\"email_recipients\":\"a@example.com\"}"),
                 ("PUT", $"/api/notification-routes/{seeded}", "{\"agent_level\":1}"),
+                ("PUT", $"/api/notification-routes/{seeded}", "{\"slack_webhook_url\":\"https://hooks.example.test/slack\"}"),
                 ("DELETE", $"/api/notification-routes/{seeded}", null),
                 ("PUT", "/api/environment-profiles", "{\"profile_text\":\"changed\"}"),
             })
@@ -279,7 +384,7 @@ public sealed class AgentSetupWebLiveTests
             Assert.Equal("", await ScalarAsync(owner, $"SELECT agent_level FROM config_notification_routes WHERE route_id = {seeded}", ct));
             Assert.Equal("fleet: OLTP", await ScalarAsync(owner, "SELECT profile_text FROM config.agent_environment_profiles", ct));
             Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event LIKE 'profile_%'", ct));
-        });
+        }, DarlingPasswordKey.FromPrivateKey(PasswordPrivateKey.Generate()));
     }
 
     [Fact]

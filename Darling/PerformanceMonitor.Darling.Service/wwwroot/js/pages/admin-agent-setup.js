@@ -14,8 +14,10 @@
      PUT    /api/environment-profiles        {scope_server_id?, scope_tag_id?, profile_text}; blank text removes the scope's profile
      GET    /api/agent-setup/access          {can_edit_routes, can_edit_profiles}: whether the store login holds the write grants
    Editing shows only when the session can make changes AND the store login holds the grants; the viewer role (managed and compose
-   stores) lists only, and a write the store refuses anyway answers 403 with its own sentence, which is shown as it came. A route's
-   webhook URLs, routing keys and email addresses are never set or shown here: they stay in the desktop Viewer.
+   stores) lists only, and a write the store refuses anyway answers 403 with its own sentence, which is shown as it came. A route's own
+   destinations are set here as the MCP route tools set them: a webhook URL or routing key is sealed by the service and never shown (the
+   form says only whether one is saved, from configured_channels); a box left blank keeps what the route has, "Remove" sends "-". The email
+   recipients are shown, as the routes read shows them.
    Self-contained: admin.js hands this file its helpers. */
 
 import { VIZ } from "../panels.js";
@@ -35,8 +37,16 @@ export const ROUTES_LIST_ONLY =
   "This dashboard signs in to the store as the viewer role (managed and compose stores), so routes are listed only. " +
   "To add, edit or delete a route, use the Viewer app, or run the web under the admin login.";
 export const ROUTES_EDITING_NOTE =
-  "Add, edit and delete a route's agent channel, match and scope here. Webhook URLs, keys and email addresses are never shown or set " +
-  "on this page: a route edited here keeps the ones it has, and they are set in the desktop Settings window.";
+  "Add, edit and delete a route's agent channel, match, scope and destinations here. A webhook URL or key is sealed when saved and never " +
+  "shown again: a box left blank keeps the saved one, and Remove deletes it. Email recipients are shown and edited as plain text.";
+
+/** The webhook destinations a route can carry: the body field, the label, the box key and the name configured_channels uses. */
+export const WEBHOOK_DESTINATIONS = [
+  { field: "teams_webhook_url", label: "Teams webhook URL", key: "teams", channel: "Teams" },
+  { field: "slack_webhook_url", label: "Slack webhook URL", key: "slack", channel: "Slack" },
+  { field: "generic_webhook_url", label: "Generic webhook URL", key: "generic", channel: "Generic" },
+  { field: "pagerduty_routing_key", label: "PagerDuty routing key", key: "pagerduty", channel: "PagerDuty" },
+];
 
 /** The Agent use column: how much of an agent route's limits its alerts have used, or null where the route sends no requests. */
 export function routeUseText(r) {
@@ -51,6 +61,7 @@ export function entriesFromRoute(r) {
     return {
       id: null, match: "", scope: "", enabled: true, level: "", perHour: AGENT_LIMIT_DEFAULTS.perHour, perDay: AGENT_LIMIT_DEFAULTS.perDay,
       lease: AGENT_LIMIT_DEFAULTS.lease, expiry: AGENT_LIMIT_DEFAULTS.expiry, resolutions: "", fallback: "",
+      saved: [], hooks: {}, removes: {}, recipients: "", recipientsWas: "",
     };
   }
   return {
@@ -65,7 +76,29 @@ export function entriesFromRoute(r) {
     expiry: String(r.agent_expiry_minutes ?? AGENT_LIMIT_DEFAULTS.expiry),
     resolutions: r.send_resolutions === true ? "true" : r.send_resolutions === false ? "false" : "",
     fallback: r.fallback_route_id != null ? String(r.fallback_route_id) : "",
+    saved: Array.isArray(r.configured_channels) ? r.configured_channels : [],
+    hooks: {},
+    removes: {},
+    recipients: typeof r.smtp_recipients === "string" ? r.smtp_recipients : "",
+    recipientsWas: typeof r.smtp_recipients === "string" ? r.smtp_recipients : "",
   };
+}
+
+/** The destination fields to send: a typed webhook value, "-" for one marked Remove, a changed recipient list ("-" when it was emptied).
+    A box left alone sends nothing, so the service keeps what the route has. */
+export function destinationPayload(entries) {
+  const out = {};
+  const hooks = entries.hooks || {};
+  const removes = entries.removes || {};
+  for (const d of WEBHOOK_DESTINATIONS) {
+    const typed = String(hooks[d.key] || "").trim();
+    if (typed !== "") out[d.field] = typed;
+    else if (removes[d.key] === true) out[d.field] = "-";
+  }
+  const now = String(entries.recipients || "").trim();
+  const was = String(entries.recipientsWas || "").trim();
+  if (now !== was) out.email_recipients = now === "" ? "-" : now;
+  return out;
 }
 
 /** The request body for the entries. The service applies the rules (the same ones as the Viewer); this only turns the boxes into
@@ -91,6 +124,7 @@ export function routePayload(entries) {
   const scope = String(entries.scope || "");
   return {
     payload: {
+      ...destinationPayload(entries),
       metric_match: String(entries.match).trim(),
       enabled: entries.enabled === true,
       scope_server_id: scope.startsWith("s") ? Number(scope.slice(1)) : null,
@@ -179,13 +213,41 @@ function routeForm(options) {
   };
   const enabled = el("input", { type: "checkbox", "data-field": "enabled" });
   enabled.checked = entries.enabled;
+  /* The webhook boxes never hold a saved value (the page is never given one): a box is for a NEW value, and Remove is for a saved one. */
+  const hookBoxes = {};
+  const removeBoxes = {};
+  const hookFields = WEBHOOK_DESTINATIONS.map((d) => {
+    const isSaved = entries.saved.includes(d.channel);
+    const box = el("input", {
+      type: "password", class: "tag-input", autocomplete: "off", "data-field": d.key + "Hook",
+      placeholder: isSaved ? "saved - leave blank to keep" : "none",
+    });
+    box.value = (entries.hooks && entries.hooks[d.key]) || "";
+    hookBoxes[d.key] = box;
+    const parts = [el("span", { class: "mute-label", text: d.label + (isSaved ? " (saved):" : " (none):") }), box];
+    if (isSaved) {
+      const remove = el("input", { type: "checkbox", "data-field": d.key + "Remove" });
+      remove.checked = !!(entries.removes && entries.removes[d.key]);
+      removeBoxes[d.key] = remove;
+      parts.push(remove, el("span", { text: " Remove" }));
+    }
+    return el("label", { class: "tag-field" }, parts);
+  });
+  const recipients = text("recipients", entries.recipients, { placeholder: "name@example.com, other@example.com" });
   const read = () => {
-    const e = { id: entries.id, enabled: enabled.checked };
+    const e = {
+      id: entries.id, enabled: enabled.checked, saved: entries.saved, recipientsWas: entries.recipientsWas, hooks: {}, removes: {},
+    };
     for (const k of Object.keys(controls)) e[k] = controls[k].value;
+    for (const d of WEBHOOK_DESTINATIONS) {
+      e.hooks[d.key] = hookBoxes[d.key].value;
+      e.removes[d.key] = removeBoxes[d.key] ? removeBoxes[d.key].checked : false;
+    }
+    e.recipients = recipients.value;
     return e;
   };
   const sync = () => { routeEntries = read(); };
-  for (const c of [...Object.values(controls), enabled]) c.addEventListener("input", sync);
+  for (const c of [...Object.values(controls), enabled, recipients, ...Object.values(hookBoxes), ...Object.values(removeBoxes)]) c.addEventListener("input", sync);
   const save = el("button", {
     class: "btn primary", type: "button", "data-action": "save-route", text: entries.id == null ? "Add route" : "Save route " + entries.id,
     onClick: () => sendRoute("save", read(), options.repaint),
@@ -195,6 +257,7 @@ function routeForm(options) {
     field("Requests per hour:", controls.perHour), field("Requests per day:", controls.perDay),
     field("Lease minutes:", controls.lease), field("Expiry minutes:", controls.expiry),
     field("Send resolutions:", controls.resolutions), field("Fallback route:", controls.fallback),
+    ...hookFields, field("Email recipients:", recipients),
     el("label", { class: "tag-field" }, [enabled, el("span", { text: " Enabled" })]), save,
   ];
   if (entries.id != null) {

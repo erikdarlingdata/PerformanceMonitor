@@ -1188,7 +1188,7 @@ async function submitEdit() {
 
 const ROUTES_NOTE =
   "Destinations (webhook URLs, keys) are never reported by the service; only the names of the channels a " +
-  "route sets are shown. Add, edit and test of the destinations stay in the desktop Settings window.";
+  "route sets are shown. Testing a destination stays in the desktop Settings window.";
 
 /* #5998: the signing status of the generic webhook, in sentences. GET /api/webhook-signing answers presence and dates only (never a
    key): whether a key is set, whether a rotation is in its window and when it ends, and when the last rotation began. The store

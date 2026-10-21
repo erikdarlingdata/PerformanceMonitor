@@ -32,8 +32,12 @@ namespace PerformanceMonitor.Darling.Service;
 /// <para>Who may write: the routes in <see cref="DarlingWebEndpoints"/> are born gated by the host's method gate (a read-only seat is refused every
 /// unsafe method), and the store decides the rest: a login with no write grant gets SQLSTATE 42501, answered 403 with a fixed sentence. The
 /// agent's token is the MCP listener's credential and is not a web credential, so it reaches none of these routes.</para>
-/// <para>A route's webhook URLs, routing key and email addresses are not set here and are never read or answered: an edit carries the saved ones
-/// forward untouched, and a body that names one is refused. Set those in the desktop Viewer.</para>
+/// <para>Destinations (the same fields the MCP route tools take, sealed by the same code): <c>teams_webhook_url</c>, <c>slack_webhook_url</c>,
+/// <c>generic_webhook_url</c> (absolute http or https URLs), <c>pagerduty_routing_key</c> and <c>email_recipients</c> (comma separated plain
+/// addresses). A webhook URL or key is sealed for the route (<see cref="DarlingMcpAlertTools.RouteSealer"/>, then
+/// <see cref="NotificationRouteWriter.SaveAsync"/>) and never answered: the page learns only whether each is saved, from the route read's
+/// <c>configured_channels</c>. A field left out, null or blank keeps what the route has; <c>-</c> removes it. A refused value is named by its
+/// field and never echoed.</para>
 /// </summary>
 internal static class DarlingWebAgentSetup
 {
@@ -43,21 +47,13 @@ internal static class DarlingWebAgentSetup
         "This dashboard signs in to the store as the viewer role, so it cannot change agent routes or environment profiles. "
         + "Use the Viewer app, or run the web under the admin login.";
 
-    private const string DestinationsMessage =
-        "Webhook URLs, routing keys and email addresses are not set from the web. Set them in the desktop Viewer; a route edited here keeps the ones it has.";
-
-    private const string DestinationsKeptMessage =
-        "This route holds a webhook saved before webhooks were sealed. Open it in the desktop Viewer and save it there once.";
-
     /// <summary>The body keys a route write accepts. Anything else is refused by name (never its value).</summary>
     private static readonly string[] s_routeKeys =
     [
         "metric_match", "enabled", "scope_server_id", "scope_tag_id", "agent_level", "agent_max_per_hour", "agent_max_per_day",
         "agent_lease_minutes", "agent_expiry_minutes", "send_resolutions", "fallback_route_id",
+        "teams_webhook_url", "slack_webhook_url", "generic_webhook_url", "pagerduty_routing_key", "email_recipients",
     ];
-
-    private static readonly string[] s_destinationKeys =
-        ["teams_url", "slack_url", "generic_url", "pagerduty_routing_key", "smtp_recipients"];
 
     /// <summary>Whether this store login can write routes and profiles: the routes table and the profile table for INSERT and UPDATE, and the
     /// journal for INSERT. The viewer role cannot, and the page then lists only.</summary>
@@ -83,13 +79,8 @@ SELECT has_table_privilege(current_user, 'config_notification_routes', 'INSERT')
     /// <summary>Creates a route (<paramref name="routeId"/> null) or edits one. A body key left out keeps the saved value on an edit and
     /// takes the Viewer's default on a create.</summary>
     internal static async Task<(int Status, JsonNode Body)> SaveRouteAsync(
-        NpgsqlDataSource postgres, ILogger logger, int? routeId, JsonObject body, string editor, CancellationToken ct)
+        NpgsqlDataSource postgres, ILogger logger, int? routeId, JsonObject body, string editor, IPasswordKeyRing ring, CancellationToken ct)
     {
-        if (body.Select(p => p.Key).Any(k => s_destinationKeys.Contains(k, StringComparer.Ordinal)))
-        {
-            return Error(400, DestinationsMessage);
-        }
-
         if (body.Select(p => p.Key).FirstOrDefault(k => !s_routeKeys.Contains(k, StringComparer.Ordinal)) is { } unknown)
         {
             return Error(400, "Unknown field: " + (unknown.Length > 40 ? unknown[..40] : unknown) + ".");
@@ -108,14 +99,15 @@ SELECT has_table_privilege(current_user, 'config_notification_routes', 'INSERT')
             }
 
             var draft = stored?.Clone() ?? new NotificationRouteDraft();
-            if (ApplyBody(draft, body) is { } bodyError)
+            if ((ApplyBody(draft, body) ?? ApplyDestinations(draft, body)) is { } bodyError)
             {
                 return Error(400, bodyError);
             }
 
             var proxies = await NotificationRouteWriter.ReadProxiesAsync(postgres, McpCommandDeadlines.ReadSeconds, ct);
+            var (seal, refusal) = DarlingMcpAlertTools.RouteSealer(ring);
             var saved = await NotificationRouteWriter.SaveAsync(
-                postgres, draft, stored, proxies, seal: null, DestinationsKeptMessage, McpCommandDeadlines.ReadSeconds, ct);
+                postgres, draft, stored, proxies, seal, refusal, McpCommandDeadlines.ReadSeconds, ct);
             logger.LogInformation("Web route write: {Action} route {RouteId} by {Editor}, fields {Fields}",
                 routeId is null ? "created" : "updated", saved, editor, string.Join(", ", body.Select(p => p.Key)));
             return (200, new JsonObject { ["status"] = routeId is null ? "created" : "updated", ["route_id"] = saved });
@@ -276,6 +268,48 @@ SELECT has_table_privilege(current_user, 'config_notification_routes', 'INSERT')
         if (hasDay) draft.AgentMaxPerDay = perDay ?? NotificationRoute.DefaultAgentMaxPerDay;
         if (hasLease) draft.AgentLeaseMinutes = lease ?? NotificationRoute.DefaultAgentLeaseMinutes;
         if (hasExpiry) draft.AgentExpiryMinutes = expiry ?? NotificationRoute.DefaultAgentExpiryMinutes;
+        return null;
+    }
+
+    /// <summary>Puts the body's destinations on the draft (the MCP route tools' fields). A field left out, null or blank keeps what the draft holds
+    /// (an edit's saved value, a create's none); <c>-</c> removes it. The sentence of the first field that is not text, or that is saved text
+    /// instead of a value, or null. A value is shaped, sealed and checked by <see cref="NotificationRouteWriter.SaveAsync"/>, which never echoes it.</summary>
+    private static string? ApplyDestinations(NotificationRouteDraft draft, JsonObject body)
+    {
+        (string Key, string Label, Action<string> Set, bool Webhook)[] fields =
+        [
+            ("teams_webhook_url", "Teams webhook URL", v => draft.TeamsUrl = v, true),
+            ("slack_webhook_url", "Slack webhook URL", v => draft.SlackUrl = v, true),
+            ("generic_webhook_url", "generic webhook URL", v => draft.GenericUrl = v, true),
+            ("pagerduty_routing_key", "PagerDuty routing key", v => draft.PagerDutyRoutingKey = v, true),
+            ("email_recipients", "email recipients", v => draft.SmtpRecipients = v == NotificationRouteWriter.ClearMarker ? "" : v, false),
+        ];
+        foreach (var (key, label, set, webhook) in fields)
+        {
+            if (!body.ContainsKey(key) || body[key] is null)
+            {
+                continue;
+            }
+
+            if (body[key] is not JsonValue node || node.GetValueKind() != JsonValueKind.String)
+            {
+                return key + " must be text.";
+            }
+
+            var text = node.GetValue<string>().Trim();
+            if (text.Length == 0)
+            {
+                continue;
+            }
+
+            if (webhook && PasswordSeal.IsSealed(text))
+            {
+                return $"The {label} must be the value itself, not saved text.";
+            }
+
+            set(text);
+        }
+
         return null;
     }
 
