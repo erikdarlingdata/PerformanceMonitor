@@ -9,6 +9,7 @@
 using System;
 using System.Globalization;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -40,12 +41,21 @@ public sealed class PlanRegressionFailureRunsLiveTests
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     [Fact]
-    public Task ARisingTimeoutOrErrorRate_RaisesTheFact_WhenCostIsFlat_OnTheWideTable() => RunAsync(wideCovered: true);
+    public Task ARisingTimeoutOrErrorRate_RaisesTheFact_WhenCostIsFlat_OnTheWideTable() => RunAsync(wideCovered: true, costFactor: null);
 
     [Fact]
-    public Task ARisingTimeoutOrErrorRate_RaisesTheFact_WhenCostIsFlat_OnTheRawFallback() => RunAsync(wideCovered: false);
+    public Task ARisingTimeoutOrErrorRate_RaisesTheFact_WhenCostIsFlat_OnTheRawFallback() => RunAsync(wideCovered: false, costFactor: null);
 
-    private static async Task RunAsync(bool wideCovered)
+    /// <summary>A plan whose cost regressed 3x AND a query whose timeouts rose: the fact carries both sets of metadata and
+    /// keeps the larger value, which here is the failures' (<see cref="PlanRegressionFailureRule.ValueHigh"/>, 6, over 3).</summary>
+    [Fact]
+    public Task ACostRegressionAndAFailureRise_KeepBothSetsOfMetadata_AndTheLargerValue_FailuresLarger() => RunAsync(wideCovered: true, costFactor: 3);
+
+    /// <summary>The same with the cost regressed 12x: the larger value is the cost factor's, 12, over the failures' 6.</summary>
+    [Fact]
+    public Task ACostRegressionAndAFailureRise_KeepBothSetsOfMetadata_AndTheLargerValue_CostLarger() => RunAsync(wideCovered: true, costFactor: 12);
+
+    private static async Task RunAsync(bool wideCovered, double? costFactor)
     {
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #6267 failure-runs test.");
@@ -76,22 +86,22 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         };
 
         long id = 7000;
-        async Task W(string type, DateTime first, long queryId, long executions)
+        async Task W(string type, DateTime first, long queryId, long executions, long? planId = null, long avgCpuUs = 1_000)
         {
             id++;
             var row = new QueryStoreCollector.Row
             {
                 DatabaseName = Db,
                 QueryId = queryId,
-                PlanId = queryId * 10,
+                PlanId = planId ?? queryId * 10,
                 ExecutionTypeDesc = type,
                 FirstExecutionTime = first,
                 LastExecutionTime = first.AddMinutes(30),
                 QueryHash = "0x" + queryId.ToString("X8", CultureInfo.InvariantCulture),
-                QueryPlanHash = "0x" + queryId.ToString("X8", CultureInfo.InvariantCulture),
+                QueryPlanHash = "0x" + (planId ?? queryId).ToString("X8", CultureInfo.InvariantCulture),
                 QueryText = "SELECT " + queryId.ToString(CultureInfo.InvariantCulture),
                 ExecutionCount = executions,
-                AvgCpuTimeUs = 1_000,
+                AvgCpuTimeUs = avgCpuUs,
                 AvgDurationUs = 2_000,
                 IsForcedPlan = false,
                 ForceFailureCount = 0,
@@ -133,6 +143,14 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         await W("Exception", b2, 16, 84);
         await W("Exception", r2, 16, 5);
 
+        /* 20 (only when a cost regression is asked for): a cheap plan in the baseline and a costlier one now, both with the
+           executions and the CPU the cost read needs (25 runs a plan, 10 seconds of CPU in the newer plan). */
+        if (costFactor is { } factor)
+        {
+            await W("Regular", b1, 20, 100, planId: 201, avgCpuUs: 100_000);
+            await W("Regular", r2, 20, 100, planId: 202, avgCpuUs: (long)(100_000 * factor));
+        }
+
         await QueryStoreIntervalWideBelowFloorLiveTests.SeedQueryStoreLogAsync(connection, ServerId, end.AddDays(-20), end, null, null, ct);
         if (wideCovered)
         {
@@ -150,7 +168,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         var facts = await new PgFactCollector(postgres).CollectFactsAsync(pass);
         var fact = Assert.Single(facts, f => f.Key == "PLAN_REGRESSION");
 
-        Assert.Equal(PlanRegressionFailureRule.ValueHigh, fact.Value);
+        Assert.Equal(costFactor is { } f ? Math.Max(f, PlanRegressionFailureRule.ValueHigh) : PlanRegressionFailureRule.ValueHigh, fact.Value);
         Assert.Equal(2, fact.Metadata["failure_offender_count"]);
         Assert.Equal(1, fact.Metadata["timeout_offender_count"]);
         Assert.Equal(10, fact.Metadata["worst_timeout_query_id"]);
@@ -160,9 +178,53 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         Assert.Equal(13, fact.Metadata["worst_error_query_id"]);
         Assert.Equal(5, fact.Metadata["worst_error_recent_runs"]);
 
-        /* No plan's cost regressed, so the fact carries no cost figure and names no cost offender. */
-        Assert.Equal(0, fact.Metadata["offender_count"]);
-        Assert.False(fact.Metadata.ContainsKey("worst_regression_factor"));
-        Assert.Empty(pass.PlanRegressionOffenders ?? []);
+        /* The cost figures are there only when a plan's cost regressed, and then they are query 20's. */
+        if (costFactor is { } expectedFactor)
+        {
+            Assert.Equal(1, fact.Metadata["offender_count"]);
+            Assert.Equal(expectedFactor, fact.Metadata["worst_regression_factor"], 3);
+            Assert.Equal(20, fact.Metadata["worst_query_id"]);
+            Assert.Equal(new PlanRegressionOffender(Db, 20), Assert.Single(pass.PlanRegressionOffenders!));
+        }
+        else
+        {
+            Assert.Equal(0, fact.Metadata["offender_count"]);
+            Assert.False(fact.Metadata.ContainsKey("worst_regression_factor"));
+            Assert.Empty(pass.PlanRegressionOffenders ?? []);
+        }
+
+        /* The drill-down lists the failing queries next to the cost offender (#6267): query 10 and query 13 with their recent
+           and baseline counts, and the cost row only when a plan's cost regressed. A drill-down that lists the cost offenders
+           alone leaves both failure-only queries out. */
+        var finding = new AnalysisFinding
+        {
+            RootFactKey = "PLAN_REGRESSION",
+            StoryPath = "PLAN_REGRESSION",
+            PathKeys = ["PLAN_REGRESSION"],
+            Severity = 1.0,
+        };
+        await new PgDrillDownCollector(postgres).EnrichFindingsAsync([finding], pass);
+        Assert.NotNull(finding.DrillDown);
+        var failureRows = JsonSerializer.SerializeToElement(finding.DrillDown![PlanRegressionFailureRule.DrillDownKey]).EnumerateArray().ToList();
+        Assert.Equal([10L, 13L], failureRows.Select(r => r.GetProperty("query_id").GetInt64()).Order());
+        var timeouts = failureRows.Single(r => r.GetProperty("query_id").GetInt64() == 10);
+        Assert.Equal(4, timeouts.GetProperty("recent_timeouts").GetInt64());
+        Assert.Equal(0, timeouts.GetProperty("baseline_timeouts").GetInt64());
+        Assert.True(timeouts.GetProperty("timeouts_rose").GetBoolean());
+        Assert.False(timeouts.GetProperty("errors_rose").GetBoolean());
+        var errors = failureRows.Single(r => r.GetProperty("query_id").GetInt64() == 13);
+        Assert.Equal(5, errors.GetProperty("recent_errors").GetInt64());
+        Assert.Equal(0, errors.GetProperty("baseline_errors").GetInt64());
+        Assert.True(errors.GetProperty("errors_rose").GetBoolean());
+        if (costFactor is null)
+        {
+            /* A fact raised by failures alone: no cost row, and the cost read is not run over "every query". */
+            Assert.False(finding.DrillDown.ContainsKey("regressed_queries"));
+        }
+        else
+        {
+            var cost = Assert.Single(JsonSerializer.SerializeToElement(finding.DrillDown["regressed_queries"]).EnumerateArray());
+            Assert.Equal(20, cost.GetProperty("query_id").GetInt64());
+        }
     }
 }

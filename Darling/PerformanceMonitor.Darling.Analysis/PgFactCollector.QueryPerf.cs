@@ -769,6 +769,7 @@ ORDER BY c.regression_factor DESC";
         /* #3902: cleared first, so a read that fails below leaves "not known" for the drill-down rather
            than a list some earlier pass stamped on a reused context. */
         context.PlanRegressionOffenders = null;
+        context.PlanRegressionFailures = null;
         context.PlanRegressionReadsIntervalTable = null;
         context.PlanRegressionWindowStart = null;
 
@@ -1056,6 +1057,7 @@ ORDER BY c.regression_factor DESC";
             }
 
             context.PlanRegressionOffenders = offenders;
+            context.PlanRegressionFailures = failures;
 
             /* #5448: M is recorded only now, after the read has succeeded. A read that threw leaves "not known" (null), as the
                AnalysisContext doc says, so the drill-down does not start at an edge no fact read from. */

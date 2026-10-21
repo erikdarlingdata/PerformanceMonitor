@@ -7,7 +7,9 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
@@ -50,34 +52,7 @@ public sealed class PlanRegressionFailureRunsTests : IClassFixture<SharedDuckDbF
     [Fact]
     public async Task ARisingTimeoutOrErrorRate_RaisesTheFact_WhenCostIsFlat()
     {
-        var b1 = PeriodEnd.AddDays(-5);
-        var b2 = PeriodEnd.AddDays(-3);
-        var r2 = PeriodEnd.AddHours(-5);
-        var r3 = PeriodEnd.AddHours(-3);
-
-        /* Every query runs the SAME plan at the SAME cost before and during the recent window: no plan's cost regressed. */
-        foreach (var q in new long[] { 10, 11, 12, 13, 16 })
-        {
-            await SeedAsync("Regular", b1, q, 100);
-            await SeedAsync("Regular", r2, q, 100);
-        }
-
-        /* 10: timeouts 0 -> 4 recent: flagged, HIGH (the baseline had none). */
-        await SeedAsync("Aborted", r2, 10, 2);
-        await SeedAsync("Aborted", r3, 10, 2);
-        /* 11: 80 baseline timeouts (about 0.26 an hour) and 3 recent (0.125 an hour): the rate fell, not flagged. */
-        await SeedAsync("Aborted", b1, 11, 40);
-        await SeedAsync("Aborted", b2, 11, 40);
-        await SeedAsync("Aborted", r2, 11, 3);
-        /* 12: two recent timeouts, below the minimum: not flagged. */
-        await SeedAsync("Aborted", r2, 12, 2);
-        /* 13: errors 0 -> 5 recent: flagged. */
-        await SeedAsync("Exception", r2, 13, 2);
-        await SeedAsync("Exception", r3, 13, 3);
-        /* 16: 168 baseline errors (about 0.54 an hour) and 5 recent (0.21 an hour): not flagged. */
-        await SeedAsync("Exception", b1, 16, 84);
-        await SeedAsync("Exception", b2, 16, 84);
-        await SeedAsync("Exception", r2, 16, 5);
+        await SeedScenarioAsync(costFactor: null);
 
         var pass = new AnalysisContext
         {
@@ -140,8 +115,132 @@ public sealed class PlanRegressionFailureRunsTests : IClassFixture<SharedDuckDbF
         Assert.DoesNotContain("force the historically", block.Remediation, StringComparison.Ordinal);
     }
 
+    /// <summary>The scenario of the tests above: queries 10 and 13 with a timeout or error rise, 11, 12 and 16 near misses, every
+    /// query on one plan at one cost. With <paramref name="costFactor"/>, query 20 also runs a cheap plan in the baseline and a
+    /// plan that costs that many times more now.</summary>
+    private async Task SeedScenarioAsync(double? costFactor)
+    {
+        var b1 = PeriodEnd.AddDays(-5);
+        var b2 = PeriodEnd.AddDays(-3);
+        var r2 = PeriodEnd.AddHours(-5);
+        var r3 = PeriodEnd.AddHours(-3);
+
+        /* Every query runs the SAME plan at the SAME cost before and during the recent window: no plan's cost regressed. */
+        foreach (var q in new long[] { 10, 11, 12, 13, 16 })
+        {
+            await SeedAsync("Regular", b1, q, 100);
+            await SeedAsync("Regular", r2, q, 100);
+        }
+
+        /* 10: timeouts 0 -> 4 recent: flagged, HIGH (the baseline had none). */
+        await SeedAsync("Aborted", r2, 10, 2);
+        await SeedAsync("Aborted", r3, 10, 2);
+        /* 11: 80 baseline timeouts (about 0.26 an hour) and 3 recent (0.125 an hour): the rate fell, not flagged. */
+        await SeedAsync("Aborted", b1, 11, 40);
+        await SeedAsync("Aborted", b2, 11, 40);
+        await SeedAsync("Aborted", r2, 11, 3);
+        /* 12: two recent timeouts, below the minimum: not flagged. */
+        await SeedAsync("Aborted", r2, 12, 2);
+        /* 13: errors 0 -> 5 recent: flagged. */
+        await SeedAsync("Exception", r2, 13, 2);
+        await SeedAsync("Exception", r3, 13, 3);
+        /* 16: 168 baseline errors (about 0.54 an hour) and 5 recent (0.21 an hour): not flagged. */
+        await SeedAsync("Exception", b1, 16, 84);
+        await SeedAsync("Exception", b2, 16, 84);
+        await SeedAsync("Exception", r2, 16, 5);
+
+        if (costFactor is { } factor)
+        {
+            await SeedAsync("Regular", b1, 20, 100, planId: 201, avgCpuUs: 100_000);
+            await SeedAsync("Regular", r2, 20, 100, planId: 202, avgCpuUs: (long)(100_000 * factor));
+        }
+    }
+
+    private static AnalysisContext NewPass() => new()
+    {
+        ServerId = ServerId,
+        ServerName = ServerName,
+        TimeRangeStart = PeriodEnd.AddHours(-1),
+        TimeRangeEnd = PeriodEnd,
+    };
+
+    private async Task<AnalysisFinding> DrillDownAsync(AnalysisContext pass)
+    {
+        var finding = new AnalysisFinding
+        {
+            RootFactKey = "PLAN_REGRESSION",
+            StoryPath = "PLAN_REGRESSION",
+            PathKeys = ["PLAN_REGRESSION"],
+            Severity = 1.0,
+        };
+        await new DrillDownCollector(_duckDb).EnrichFindingsAsync([finding], pass);
+        return finding;
+    }
+
+    [Theory]
+    [InlineData(3.0, 6.0)]
+    [InlineData(12.0, 12.0)]
+    public async Task ACostRegressionAndAFailureRise_KeepBothSetsOfMetadata_AndTheLargerValue(double costFactor, double expectedValue)
+    {
+        await SeedScenarioAsync(costFactor);
+
+        var pass = NewPass();
+        var facts = await new DuckDbFactCollector(_duckDb).CollectFactsAsync(pass);
+        var fact = Assert.Single(facts, f => f.Key == "PLAN_REGRESSION");
+
+        /* The fact keeps the larger of the cost factor and the failures' value (6), and carries both sets of figures. */
+        Assert.Equal(expectedValue, fact.Value);
+        Assert.Equal(1, fact.Metadata["offender_count"]);
+        Assert.Equal(costFactor, fact.Metadata["worst_regression_factor"], 3);
+        Assert.Equal(20, fact.Metadata["worst_query_id"]);
+        Assert.Equal(2, fact.Metadata["failure_offender_count"]);
+        Assert.Equal(10, fact.Metadata["worst_timeout_query_id"]);
+        Assert.Equal(13, fact.Metadata["worst_error_query_id"]);
+
+        /* The drill-down lists the cost offender and the failing queries side by side. */
+        var finding = await DrillDownAsync(pass);
+        Assert.NotNull(finding.DrillDown);
+        var cost = Assert.Single(JsonSerializer.SerializeToElement(finding.DrillDown!["regressed_queries"]).EnumerateArray());
+        Assert.Equal(20, cost.GetProperty("query_id").GetInt64());
+        Assert.Equal([10L, 13L], FailureRows(finding).Select(r => r.GetProperty("query_id").GetInt64()).Order());
+    }
+
+    /// <summary>A fact raised by failures alone: the drill-down names the queries whose timeouts or errors rose, with their
+    /// recent and baseline counts, and does not fall back to listing cost rows for "every query" (#6267). A drill-down that
+    /// lists cost offenders only leaves both of these queries out.</summary>
+    [Fact]
+    public async Task TheDrillDown_ListsTheFailureOnlyQueries_WithTheirRecentAndBaselineCounts()
+    {
+        await SeedScenarioAsync(costFactor: null);
+
+        var pass = NewPass();
+        await new DuckDbFactCollector(_duckDb).CollectFactsAsync(pass);
+        var finding = await DrillDownAsync(pass);
+
+        Assert.NotNull(finding.DrillDown);
+        var rows = FailureRows(finding);
+        Assert.Equal([10L, 13L], rows.Select(r => r.GetProperty("query_id").GetInt64()).Order());
+
+        var timeouts = rows.Single(r => r.GetProperty("query_id").GetInt64() == 10);
+        Assert.Equal(Database, timeouts.GetProperty("database").GetString());
+        Assert.True(timeouts.GetProperty("timeouts_rose").GetBoolean());
+        Assert.False(timeouts.GetProperty("errors_rose").GetBoolean());
+        Assert.Equal(4, timeouts.GetProperty("recent_timeouts").GetInt64());
+        Assert.Equal(0, timeouts.GetProperty("baseline_timeouts").GetInt64());
+
+        var errors = rows.Single(r => r.GetProperty("query_id").GetInt64() == 13);
+        Assert.True(errors.GetProperty("errors_rose").GetBoolean());
+        Assert.Equal(5, errors.GetProperty("recent_errors").GetInt64());
+        Assert.Equal(0, errors.GetProperty("baseline_errors").GetInt64());
+
+        Assert.False(finding.DrillDown!.ContainsKey("regressed_queries"));
+    }
+
+    private static List<JsonElement> FailureRows(AnalysisFinding finding) =>
+        [.. JsonSerializer.SerializeToElement(finding.DrillDown![PlanRegressionFailureRule.DrillDownKey]).EnumerateArray()];
+
     /// <summary>One interval of one query and outcome, one snapshot. Its last execution is 30 minutes after its first.</summary>
-    private async Task SeedAsync(string type, DateTime firstExec, long queryId, long executions)
+    private async Task SeedAsync(string type, DateTime firstExec, long queryId, long executions, long? planId = null, long avgCpuUs = 1000)
     {
         using var readLock = _duckDb.AcquireReadLock();
         if (_seedConn is null)
@@ -159,21 +258,22 @@ INSERT INTO query_store_stats
      query_hash, execution_count, avg_cpu_time_us, avg_duration_us,
      query_plan_hash, is_forced_plan, force_failure_count,
      runtime_stats_interval_id, interval_start_time_utc, replica_role, query_text, avg_rowcount)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 1000, 2000, $13, false, 0, $14, $9, NULL, 'SELECT 1', NULL)";
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $15, 2000, $13, false, 0, $14, $9, NULL, 'SELECT 1', NULL)";
         cmd.Parameters.Add(new DuckDBParameter { Value = id });
         cmd.Parameters.Add(new DuckDBParameter { Value = firstExec.AddMinutes(40) });
         cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = ServerName });
         cmd.Parameters.Add(new DuckDBParameter { Value = Database });
         cmd.Parameters.Add(new DuckDBParameter { Value = queryId });
-        cmd.Parameters.Add(new DuckDBParameter { Value = queryId * 10 });
+        cmd.Parameters.Add(new DuckDBParameter { Value = planId ?? queryId * 10 });
         cmd.Parameters.Add(new DuckDBParameter { Value = type });
         cmd.Parameters.Add(new DuckDBParameter { Value = firstExec });
         cmd.Parameters.Add(new DuckDBParameter { Value = firstExec.AddMinutes(30) });
         cmd.Parameters.Add(new DuckDBParameter { Value = "0xQH" + queryId });
         cmd.Parameters.Add(new DuckDBParameter { Value = executions });
-        cmd.Parameters.Add(new DuckDBParameter { Value = "0xPH" + queryId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = "0xPH" + (planId ?? queryId) });
         cmd.Parameters.Add(new DuckDBParameter { Value = id });
+        cmd.Parameters.Add(new DuckDBParameter { Value = avgCpuUs });
         await cmd.ExecuteNonQueryAsync();
     }
 }

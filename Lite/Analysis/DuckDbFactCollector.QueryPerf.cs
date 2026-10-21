@@ -313,6 +313,7 @@ ORDER BY worker_ratio DESC";
         /* #3902: cleared first, so a read that fails below leaves "not known" for the drill-down rather
            than a list some earlier pass stamped on a reused context. */
         context.PlanRegressionOffenders = null;
+        context.PlanRegressionFailures = null;
 
         try
         {
@@ -602,6 +603,7 @@ LIMIT 100";
             }
 
             context.PlanRegressionOffenders = offenders;
+            context.PlanRegressionFailures = failures;
 
             if (offenderCount == 0 && failures.Count == 0) return;
 

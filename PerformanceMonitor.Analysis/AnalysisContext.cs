@@ -247,6 +247,15 @@ public class AnalysisContext
     public IReadOnlyList<PlanRegressionOffender>? PlanRegressionOffenders { get; set; }
 
     /// <summary>
+    /// The queries whose timeouts (Aborted runs) or errors (Exception runs) rose, as the PLAN_REGRESSION fact read them
+    /// this pass (#6267), stamped by the fact collector after that read. Null until then, and null when the read failed.
+    /// The regressed-queries drill-down lists them next to the cost offenders. A pass with failures and no cost offender
+    /// has an empty <see cref="PlanRegressionOffenders"/>, which the cost drill-down reads as "every query": it checks
+    /// this list first, so a fact raised by failures alone does not list cost rows it never reported.
+    /// </summary>
+    public IReadOnlyList<PlanRegressionFailureRule.Failure>? PlanRegressionFailures { get; set; }
+
+    /// <summary>
     /// Which source the PLAN_REGRESSION fact read this pass on Darling (#3953): true for the latest-snapshot interval
     /// table, false for the raw Query Store slice, null when the fact did not decide (it did not run, or this is
     /// Lite, which has no such table). The regressed-queries drill-down reads the SAME source, so it can always

@@ -61,25 +61,25 @@ public static class QueryStoreRegressionBaseline
 {
     /// <summary>The cost gate (#5506 keeps today's): a query qualifies for <c>cost</c> when its Regular CPU per execution is
     /// more than this percent above its baseline.</summary>
-    public const int CostGatePercent = 25;
+    public const int CostGatePercent = PerformanceMonitor.Common.QueryStoreRegressionRules.CostGatePercent;
 
     /// <summary>A rise in timeouts or errors qualifies when the recent per-hour rate is at least this many times the baseline's
     /// (#5506). A nonzero recent rate where the baseline had none qualifies whatever the multiple.</summary>
-    public const int FailureRateMultiple = PerformanceMonitor.Analysis.PlanRegressionFailureRule.RateMultiple;
+    public const int FailureRateMultiple = PerformanceMonitor.Common.QueryStoreRegressionRules.FailureRateMultiple;
 
     /// <summary>A rise in timeouts or errors needs at least this many such runs in the recent window (#5506), so one stray
     /// timeout on a quiet query does not flag it.</summary>
-    public const int FailureMinRecentRuns = PerformanceMonitor.Analysis.PlanRegressionFailureRule.MinRecentRuns;
+    public const int FailureMinRecentRuns = PerformanceMonitor.Common.QueryStoreRegressionRules.FailureMinRecentRuns;
 
     /// <summary>A timeouts-only or errors-only row is HIGH when its rate is at least this many times the baseline's (or the
     /// baseline had none), MEDIUM otherwise (#5506). Cost rows keep the duration bands; a failure row never gets CRITICAL,
     /// which stays the band of a duration more than doubled.</summary>
-    public const int FailureHighMultiple = PerformanceMonitor.Analysis.PlanRegressionFailureRule.HighMultiple;
+    public const int FailureHighMultiple = PerformanceMonitor.Common.QueryStoreRegressionRules.FailureHighMultiple;
 
     /// <summary>Rows with no cost rise (timeouts or errors only) may take at most this share of the row cap, as
     /// <c>cap / FailureShareDivisor</c>, so a flood of error rows cannot push every cost row past the cap (#5506). Cost rows
     /// take the rest, and either side takes what the other leaves free.</summary>
-    public const int FailureShareDivisor = 3;
+    public const int FailureShareDivisor = PerformanceMonitor.Common.QueryStoreRegressionRules.FailureShareDivisor;
 
     /// <summary>The partial index predicate and the read's predicate for the rows that are not Regular (#5506). The same text
     /// in both places, so the planner can match the read to the background partial index

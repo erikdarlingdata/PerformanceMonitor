@@ -21,22 +21,23 @@ namespace PerformanceMonitor.Analysis;
 /// <para>The rule is #6260's, for the regressions read. A group rises when its per-hour rate in the recent window is at
 /// least <see cref="RateMultiple"/> times the baseline's (or any at all where the baseline had none) with at least
 /// <see cref="MinRecentRuns"/> runs in the recent window. The recent window is the last <see cref="RecentHours"/> hours of
-/// the pass, the baseline the rest of the 14-day window. Darling's <c>QueryStoreRegressionBaseline</c> takes its three gate
-/// constants from here, so the regressions read and the fact cannot drift.</para>
+/// the pass, the baseline the rest of the 14-day window. The three gate constants take their values from
+/// <c>PerformanceMonitor.Common.QueryStoreRegressionRules</c>, the one home Darling's <c>QueryStoreRegressionBaseline</c> and Lite's
+/// regressions read also use, so the regressions reads and the fact cannot drift.</para>
 /// </summary>
 public static class PlanRegressionFailureRule
 {
     /// <summary>A rise in timeouts or errors needs at least this many such runs in the recent window, so one stray timeout on a
     /// quiet query does not flag it.</summary>
-    public const int MinRecentRuns = 3;
+    public const int MinRecentRuns = PerformanceMonitor.Common.QueryStoreRegressionRules.FailureMinRecentRuns;
 
     /// <summary>A rise qualifies when the recent per-hour rate is at least this many times the baseline's. A nonzero recent rate
     /// where the baseline had none qualifies whatever the multiple.</summary>
-    public const int RateMultiple = 2;
+    public const int RateMultiple = PerformanceMonitor.Common.QueryStoreRegressionRules.FailureRateMultiple;
 
     /// <summary>A rise is HIGH when its rate is at least this many times the baseline's (or the baseline had none), MEDIUM
     /// otherwise.</summary>
-    public const int HighMultiple = 5;
+    public const int HighMultiple = PerformanceMonitor.Common.QueryStoreRegressionRules.FailureHighMultiple;
 
     /// <summary>The recent window, in hours.</summary>
     public const int RecentHours = 24;
@@ -51,6 +52,12 @@ public static class PlanRegressionFailureRule
     /// <summary>The fact's <see cref="Fact.Value"/> when only failures rose and none is HIGH: scores 0.5625.</summary>
     public const double ValueMedium = 3.0;
 
+    /// <summary>How many failing queries the drill-down lists, the worst by recent failed runs first.</summary>
+    public const int DrillDownLimit = 10;
+
+    /// <summary>The drill-down key the failing queries go under, next to <c>regressed_queries</c>.</summary>
+    public const string DrillDownKey = "failure_queries";
+
     /// <summary>One query whose timeouts or errors rose.</summary>
     public sealed record Failure(
         string DatabaseName,
@@ -63,6 +70,46 @@ public static class PlanRegressionFailureRule
         bool ErrorsRise,
         bool TimeoutsHigh,
         bool ErrorsHigh);
+
+    /// <summary>
+    /// True when the fact the pass raised came from failures alone: it has failing queries and no cost offender. The
+    /// regressed-queries (cost) drill-down reads an empty offender list as "every query", which here would list cost rows
+    /// the fact never reported, so it is skipped for such a pass (#6267).
+    /// </summary>
+    public static bool RaisedByFailuresAlone(AnalysisContext context) =>
+        context.PlanRegressionFailures is { Count: > 0 } && context.PlanRegressionOffenders is not { Count: > 0 };
+
+    /// <summary>
+    /// Adds the <see cref="DrillDownKey"/> rows to a PLAN_REGRESSION finding's drill-down: the queries whose timeouts or
+    /// errors rose, as the fact read them this pass, with their recent and baseline counts of each (#6267). Nothing is
+    /// added when the fact found none or its failure read failed. The counts are runs, never logical reads.
+    /// </summary>
+    public static void AddDrillDown(Dictionary<string, object> drillDown, AnalysisContext context)
+    {
+        if (context.PlanRegressionFailures is not { Count: > 0 } failures)
+        {
+            return;
+        }
+
+        drillDown[DrillDownKey] = failures
+            .OrderByDescending(f => f.RecentTimeouts + f.RecentErrors)
+            .ThenBy(f => f.DatabaseName, System.StringComparer.Ordinal)
+            .ThenBy(f => f.QueryId)
+            .Take(DrillDownLimit)
+            .Select(f => (object)new
+            {
+                database = f.DatabaseName,
+                query_id = f.QueryId,
+                timeouts_rose = f.TimeoutsRise,
+                recent_timeouts = f.RecentTimeouts,
+                baseline_timeouts = f.BaselineTimeouts,
+                errors_rose = f.ErrorsRise,
+                recent_errors = f.RecentErrors,
+                baseline_errors = f.BaselineErrors,
+                recent_hours = RecentHours
+            })
+            .ToList();
+    }
 
     /// <summary>
     /// Writes the failure figures onto the PLAN_REGRESSION fact's metadata and returns the value the failures alone would
