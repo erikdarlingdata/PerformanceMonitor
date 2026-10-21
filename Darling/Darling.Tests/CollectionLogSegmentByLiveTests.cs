@@ -180,7 +180,7 @@ public sealed class CollectionLogSegmentByLiveTests
     {
         var baseConnectionString = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString, ct, plainPostgres: true);
         using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await BuildUpgradedLogAsync(connection, scratch.ConnectionString, "collector_name", ct);
@@ -213,7 +213,7 @@ public sealed class CollectionLogSegmentByLiveTests
     {
         var baseConnectionString = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString, ct, plainPostgres: true);
         using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await BuildUpgradedLogAsync(connection, scratch.ConnectionString, "collector_name", ct);
@@ -254,7 +254,7 @@ public sealed class CollectionLogSegmentByLiveTests
     {
         var baseConnectionString = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString, ct, plainPostgres: true);
         using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await BuildUpgradedLogAsync(connection, scratch.ConnectionString, "collector_name", ct);
@@ -309,7 +309,7 @@ public sealed class CollectionLogSegmentByLiveTests
     {
         var baseConnectionString = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString, ct, plainPostgres: true);
         using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await BuildUpgradedLogAsync(connection, scratch.ConnectionString, HeldCollectorColumn, ct);
@@ -352,7 +352,7 @@ public sealed class CollectionLogSegmentByLiveTests
     {
         var baseConnectionString = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString, ct, plainPostgres: true);
         using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await BuildUpgradedLogAsync(connection, scratch.ConnectionString, "collector_name", ct);
@@ -444,6 +444,9 @@ public sealed class CollectionLogSegmentByLiveTests
     /// other than <c>collector_name</c> renames that column BEFORE the conversion, which is how the failure test makes
     /// the new segmentby name a column the store does not have.
     /// </summary>
+    /* Callers create their scratch store with plainPostgres: true (#6317): this helper replays the store history in order (migrate on plain PostgreSQL, then
+       the extension, then the legacy server_id-only hypertable). A store that had TimescaleDB before its migrations ran would already hold collection_log
+       as a hypertable with its compression policy, which is not the store these tests upgrade. */
     private static async Task BuildUpgradedLogAsync(NpgsqlConnection connection, string connectionString, string collectorColumn, CancellationToken ct)
     {
         await PgMigrations.MigrateAsync(connection, ct);
