@@ -88,11 +88,12 @@ public sealed class DarlingQueryStoreRegressionsSurfaceAndSqlTests
     {
         var sql = DarlingQueryStoreRegressionReader.QueryStoreRegressionsSql;
 
-        /* Both arms, not one: deduping only the recent side compares a deduped number to an inflated one. */
-        Assert.Equal(2, CountOf(sql, "ROW_NUMBER() OVER"));
-        Assert.Equal(2, CountOf(sql, "PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role"));
+        /* #5506: ONE dedupe over the whole span, then both sides split by the interval's last_execution_time, so an interval
+           that crosses the window start is counted on one side only. */
+        Assert.Equal(1, CountOf(sql, "ROW_NUMBER() OVER"));
+        Assert.Equal(1, CountOf(sql, "PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role"));
+        Assert.Equal(1, CountOf(sql, "ORDER BY collection_time DESC, execution_count DESC"));
         Assert.Equal(2, CountOf(sql, "WHERE rn = 1"));
-        Assert.Equal(2, CountOf(sql, "ORDER BY collection_time DESC, execution_count DESC"));
     }
 
     /// <summary>
@@ -108,10 +109,11 @@ public sealed class DarlingQueryStoreRegressionsSurfaceAndSqlTests
            is the assertion that fails against the pre-#4217 shape (the grid's twin,
            ViewerQueryStoreRegressionsTests.RegressionsSql_SplitsBaselineBeforeWindow_RecentInWindow_OverTheBaseTable,
            already carries it for the viewer's copy; this reader's own copy was uncovered). */
-        Assert.Contains("collection_time >= $6", sql, StringComparison.Ordinal);  /* baseline: window start minus BaselineLookbackDays */
-        Assert.Contains("collection_time < $2", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
+        Assert.Contains("collection_time >= $6", sql, StringComparison.Ordinal);  /* the span: window start minus BaselineLookbackDays */
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
+        /* #5506: the two sides split on the interval's last_execution_time at the window start, the day the daily totals row by. */
+        Assert.Contains("last_execution_time < $2", sql, StringComparison.Ordinal);
+        Assert.Contains("last_execution_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("FROM query_store_stats", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("v_query_store_stats", sql, StringComparison.Ordinal);
     }
@@ -147,7 +149,7 @@ public sealed class DarlingQueryStoreRegressionsSurfaceAndSqlTests
             Assert.Contains(band, sql, StringComparison.Ordinal);
 
         /* Every percent divides through NULLIF, so a zero baseline yields NULL rather than a division error. */
-        Assert.Equal(7, CountOf(sql, "NULLIF("));
+        Assert.Equal(10, CountOf(sql, "NULLIF("));
 
         /* The cap is the one deliberate change from the viewer, and it is a bound parameter rather than the
            viewer's hardcoded 50 — the gate and the ranking above are what keep the two surfaces agreeing. */

@@ -192,7 +192,7 @@ public sealed class McpZeroIsAMeasurementTests
         Assert.Contains("severity = r.DurationRegressionPercent is null ? null : r.Severity", body, StringComparison.Ordinal);
 
         /* #3898 D3 re-point: the head (DescriptionOf) now carries this guardrail in its own leaner words -
-           "duration_regression_percent and io_regression_percent are null, not 0%, when their baseline is 0"
+           "duration_regression_percent and severity are null, not 0%, when their baseline is 0"
            and "additional_duration_ms is the ranking key" - because the field-name-level detail below does not
            fit the 620-char head budget alongside the tool's other guardrails (empty/unavailable/not_collected).
            The literal field name and phrasing stay in the tail, which get_tool_guide serves in full. */
@@ -580,7 +580,7 @@ public sealed class McpZeroIsAMeasurementLivePostgresTests
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     [Fact]
-    public async Task ARegressionWithNoBaselineReads_StaysNull_AndSaysWhy()
+    public async Task ARegressionWithNoBaselineDuration_StaysNull_AndSaysWhy()
     {
         var cs = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live #3541 A12 regression test.");
@@ -597,38 +597,42 @@ public sealed class McpZeroIsAMeasurementLivePostgresTests
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
 
-            /* Query 1: baseline read NOTHING (0 logical reads), recent reads 50,000 — the largest possible
-               I/O regression, and the row the shipped reader published as io_regression_percent 0. CPU
-               regressed 100% so it passes the gate. Query 2: every side defined. */
-            await SeedQueryStoreAsync(connection, ct, HoursAgo(30), queryId: 1, intervalId: 1, executions: 10, avgDurationUs: 1_000, avgCpuUs: 500, avgReads: 0);
-            await SeedQueryStoreAsync(connection, ct, MinutesAgo(30), queryId: 1, intervalId: 2, executions: 10, avgDurationUs: 2_000, avgCpuUs: 1_000, avgReads: 50_000);
-            await SeedQueryStoreAsync(connection, ct, HoursAgo(30), queryId: 2, intervalId: 3, executions: 10, avgDurationUs: 1_000, avgCpuUs: 500, avgReads: 100);
-            await SeedQueryStoreAsync(connection, ct, MinutesAgo(30), queryId: 2, intervalId: 4, executions: 10, avgDurationUs: 3_000, avgCpuUs: 1_000, avgReads: 200);
+            /* Query 1: baseline duration 0, recent 1.5 ms - a duration regression with no denominator, the row the shipped
+               reader published as 0 ("no change"). CPU regressed 100% so it passes the gate. Query 2: every side defined.
+               The 30-hours-ago rows sit in the baseline whichever hour the test runs (#5506: the split is by
+               last_execution_time, which the seed sets to the collection time). */
+            await SeedQueryStoreAsync(connection, ct, HoursAgo(30), queryId: 1, intervalId: 1, executions: 10, avgDurationUs: 0, avgCpuUs: 500, avgReads: 0);
+            await SeedQueryStoreAsync(connection, ct, MinutesAgo(30), queryId: 1, intervalId: 2, executions: 10, avgDurationUs: 1_500, avgCpuUs: 1_000, avgReads: 0);
+            await SeedQueryStoreAsync(connection, ct, HoursAgo(30), queryId: 2, intervalId: 3, executions: 10, avgDurationUs: 1_000, avgCpuUs: 500, avgReads: 0);
+            await SeedQueryStoreAsync(connection, ct, MinutesAgo(30), queryId: 2, intervalId: 4, executions: 10, avgDurationUs: 3_000, avgCpuUs: 1_000, avgReads: 0);
 
             var root = JsonDocument.Parse(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, hours_back: 24)).RootElement;
             Assert.Equal(2, root.GetProperty("regression_count").GetInt32());
 
             var rows = root.GetProperty("regressions").EnumerateArray().ToDictionary(r => r.GetProperty("query_id").GetInt64());
 
-            var noBaselineReads = rows[1];
-            Assert.Equal(JsonValueKind.Null, noBaselineReads.GetProperty("io_regression_percent").ValueKind);
-            Assert.Equal(0, noBaselineReads.GetProperty("baseline_reads").GetDouble());
-            Assert.Equal(50_000, noBaselineReads.GetProperty("recent_reads").GetDouble());
-            var notes = noBaselineReads.GetProperty("undefined_percents").EnumerateArray().Select(n => n.GetString()!).ToArray();
+            var noBaselineDuration = rows[1];
+            Assert.Equal(JsonValueKind.Null, noBaselineDuration.GetProperty("duration_regression_percent").ValueKind);
+            Assert.Equal(0, noBaselineDuration.GetProperty("baseline_duration_ms").GetDouble());
+            Assert.Equal(1.5, noBaselineDuration.GetProperty("recent_duration_ms").GetDouble());
+            var notes = noBaselineDuration.GetProperty("undefined_percents").EnumerateArray().Select(n => n.GetString()!).ToArray();
             Assert.Single(notes);
-            Assert.Contains("io_regression_percent is null: no_baseline", notes[0], StringComparison.Ordinal);
+            Assert.Contains("duration_regression_percent is null: no_baseline", notes[0], StringComparison.Ordinal);
             Assert.Contains("NOT 0% change", notes[0], StringComparison.Ordinal);
-            /* The other two ratios exist and are unaffected; severity is banded from the duration ratio. */
-            Assert.Equal(100.0, noBaselineReads.GetProperty("duration_regression_percent").GetDouble(), 6);
-            Assert.Equal(100.0, noBaselineReads.GetProperty("cpu_regression_percent").GetDouble(), 6);
-            Assert.Equal("HIGH", noBaselineReads.GetProperty("severity").GetString());   /* 100% duration: > 50, not > 100 */
+            /* The CPU ratio exists and is unaffected; severity is banded from the duration ratio, so it is null too. */
+            Assert.Equal(100.0, noBaselineDuration.GetProperty("cpu_regression_percent").GetDouble(), 6);
+            Assert.Equal(JsonValueKind.Null, noBaselineDuration.GetProperty("severity").ValueKind);
 
             var defined = rows[2];
-            Assert.Equal(100.0, defined.GetProperty("io_regression_percent").GetDouble(), 6);
+            Assert.Equal(200.0, defined.GetProperty("duration_regression_percent").GetDouble(), 6);
             Assert.Equal(JsonValueKind.Null, defined.GetProperty("undefined_percents").ValueKind);
+            /* #5506: logical reads are no longer part of the answer. */
+            Assert.False(defined.TryGetProperty("io_regression_percent", out _));
+            Assert.False(defined.TryGetProperty("baseline_reads", out _));
+            Assert.False(defined.TryGetProperty("recent_reads", out _));
 
-            /* The ranking key is the absolute delta, defined for both — query 2's 20 ms × 10 outranks
-               query 1's 10 ms × 10, whatever their ratios. */
+            /* The ranking key is the absolute delta, defined for both — query 2's 2 ms × 10 outranks
+               query 1's 1.5 ms × 10, whatever their ratios. */
             var order = root.GetProperty("regressions").EnumerateArray().Select(r => r.GetProperty("query_id").GetInt64()).ToArray();
             Assert.Equal(new long[] { 2, 1 }, order);
 

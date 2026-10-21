@@ -561,10 +561,10 @@ public sealed class ViewerQueryStoreRegressionsTests
         /* #4217: the baseline is a fixed BaselineLookbackDays window ending at the window start, not
            "everything before the window" — this is the assertion that fails against the pre-#4217 shape,
            which had no lower bound on the baseline arm at all. */
-        Assert.Contains("collection_time >= $5", sql, StringComparison.Ordinal);  /* baseline: window start minus BaselineLookbackDays */
-        Assert.Contains("collection_time < $2", sql, StringComparison.Ordinal);   /* baseline: up to the window start */
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);  /* recent: window start */
-        Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);  /* recent: window end */
+        Assert.Contains("collection_time >= $5", sql, StringComparison.Ordinal);  /* the span: window start minus BaselineLookbackDays */
+        Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);  /* window end */
+        Assert.Contains("last_execution_time < $2", sql, StringComparison.Ordinal);   /* #5506: baseline: up to the window start */
+        Assert.Contains("last_execution_time >= $2", sql, StringComparison.Ordinal);  /* recent: from the window start */
         Assert.Contains("GROUP BY database_name, query_id", sql, StringComparison.Ordinal);
         /* Darling windows the split on collection_time — the Dashboard TVF's server_last_execution_time is
            the server's LOCAL wall clock in Darling's store and must not be windowed against UTC bounds. */
@@ -610,9 +610,9 @@ public sealed class ViewerQueryStoreRegressionsTests
         var sql = ViewerDataService.QueryStoreRegressionsSql;
         Assert.Contains("CAST(SUM(execution_count) AS bigint)", sql, StringComparison.Ordinal);
         Assert.Contains("CAST(COUNT(DISTINCT plan_id) AS integer)", sql, StringComparison.Ordinal);
-        /* µs → ms on duration + CPU; reads stay raw pages (matching the Dashboard TVF units). */
-        Assert.Contains("AVG(CAST(avg_duration_us AS double precision)) / 1000.0", sql, StringComparison.Ordinal);
-        Assert.Contains("AVG(CAST(avg_cpu_time_us AS double precision)) / 1000.0", sql, StringComparison.Ordinal);
+        /* #5506: µs → ms on duration + CPU, weighted per execution (the summed cost over the summed executions). */
+        Assert.Contains("SUM(CAST(avg_duration_us AS numeric) * execution_count) AS double precision) / NULLIF(SUM(execution_count), 0) / 1000.0", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(CAST(avg_cpu_time_us AS numeric) * execution_count) AS double precision) / NULLIF(SUM(execution_count), 0) / 1000.0", sql, StringComparison.Ordinal);
         /* #1319 global database filter, the same guarded ANY() idiom as the sibling reads ($4 here). */
         Assert.Contains("$4::text[] IS NULL OR database_name = ANY($4)", sql, StringComparison.Ordinal);
     }

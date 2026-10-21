@@ -71,10 +71,10 @@ public sealed class ViewerQueryStoreRegressionsDataStartTests : IDisposable
         Assert.Contains("DataWindowFloor.GetForServerAsync(", source, StringComparison.Ordinal);
         /* Both arms read the raw table, so there is no rollup floor to ask: the baseline arm starts at $5 and the recent arm at $2. */
         var sql = ViewerDataService.QueryStoreRegressionsSql;
-        Assert.Equal(2, Matches(sql, @"FROM query_store_stats\b"));
+        Assert.Equal(1, Matches(sql, @"FROM query_store_stats\b"));
         Assert.DoesNotMatch(@"query_store_stats_\w+", sql);
         Assert.Contains("collection_time >= $5", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
+        Assert.Contains("last_execution_time >= $2", sql, StringComparison.Ordinal);
     }
 
     /* The top 50 are ranked by added duration, not by time, so the rows say nothing about how far back the comparison reached and
