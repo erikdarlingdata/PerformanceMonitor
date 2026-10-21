@@ -150,7 +150,8 @@ const scenarios = {
       await flush();
       return q.all((n) => n.className === "strip notice").map((n) => n.textContent);
     })();
-    out.widths = [mod.bucketWidthText?.({ bucket_minutes: 1 }), mod.bucketWidthText?.({ bucket_minutes: 10 }), mod.bucketWidthText?.({ bucket_minutes: 60 }), mod.bucketWidthText?.({ bucket_minutes: 360 }), mod.bucketWidthText?.({ bucket_minutes: 1440 }), mod.bucketWidthText?.({ bucket: "per-collection", bucket_minutes: null }), mod.bucketWidthText?.({})];
+    const util = await import(pathToFileURL(scratch + "/util.js").href);
+    out.widths = [util.bucketWidthText?.({ bucket_minutes: 1 }), util.bucketWidthText?.({ bucket_minutes: 10 }), util.bucketWidthText?.({ bucket_minutes: 60 }), util.bucketWidthText?.({ bucket_minutes: 360 }), util.bucketWidthText?.({ bucket_minutes: 1440 }), util.bucketWidthText?.({ bucket: "per-collection", bucket_minutes: null }), util.bucketWidthText?.({})];
   },
   /* #6359: "Past 5 minutes" is read over the whole hour the grid ranked over. The row's History must not be cut to the 5 minutes. */
   async fiveMinuteRange() {

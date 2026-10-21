@@ -197,6 +197,43 @@ export function metricNote(text) {
 }
 
 /**
+ * What one point of a bucketed trend covers, from the read's own `bucket_minutes` / `bucket` fields: "covers 1 hour",
+ * "is one collection", or null when the read states neither (#6359).
+ */
+export function bucketWidthText(d) {
+  const minutes = d && typeof d.bucket_minutes === "number" && d.bucket_minutes > 0 ? d.bucket_minutes : null;
+  if (minutes !== null) {
+    if (minutes % 1440 === 0) return "covers " + (minutes === 1440 ? "1 day" : minutes / 1440 + " days");
+    if (minutes % 60 === 0) return "covers " + (minutes === 60 ? "1 hour" : minutes / 60 + " hours");
+    return "covers " + (minutes === 1 ? "1 minute" : minutes + " minutes");
+  }
+  return d && d.bucket === "per-collection" ? "is one collection" : null;
+}
+
+/**
+ * The sentence a chart owes its reader about what a point is (#6359), said from the read's own width fields in the page's
+ * words. The payload's `aggregate_note` is written for an MCP caller (it names `peak_*` fields and says to pass a
+ * `bucket_minutes`), so no panel prints it. `kind` is what the PANEL's read returns, never read from the note's text:
+ * "summed" for counts, waits and I/O (a bucket the window cuts short holds smaller counts; rates are true rates over the
+ * time it covers), "level" for CPU, memory, tempdb and other gauges (each point averages the samples in its bucket), or
+ * omitted when only the width is worth saying. One collection per point needs neither fact. Null when the read states no width.
+ */
+export function chartNoteText(data, kind) {
+  const width = bucketWidthText(data);
+  if (!width) return null;
+  if (width === "is one collection") return "Each point is one collection.";
+  if (kind === "level") return "Each point " + width + " and is the average of the samples in it.";
+  const sentence = "Each point " + width + ".";
+  return kind === "summed" ? sentence + " A bucket the window cuts short holds smaller counts; rates are true rates over the time the bucket covers." : sentence;
+}
+
+/** The note line under a chart for a trend read (see chartNoteText), or null when the read states no width. */
+export function chartNote(data, kind) {
+  const text = chartNoteText(data, kind);
+  return text ? el("div", { class: "mp-metric-note", text }) : null;
+}
+
+/**
  * Rewrites every UTC instant inside a sentence (a server message, a status line, a note, an alert body) into the grids'
  * local-time format (#5644 W20): "stored at 2026-10-09T14:37:35.0158630", "since 2026-10-12T19:18:38Z", "until
  * 2026-10-11 12:48:52Z" (the alert text's space-separated form) and "2026-10-12 23:13:00 UTC" printed raw UTC beside grids

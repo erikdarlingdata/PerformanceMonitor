@@ -20,7 +20,7 @@
  * An open panel is kept at module scope under its row's key, so the page's 60 s rebuild draws it again without a second read. The
  * entry remembers the window it was read for, and a rebuild under a different window reads it again. Every string is drawn as text.
  */
-import { el, readTool, wholeWindowFromHours, widenedWindowNote, activeRangeStamp } from "../util.js";
+import { el, readTool, wholeWindowFromHours, widenedWindowNote, activeRangeStamp, chartNoteText } from "../util.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "../charts.js";
 import { dockPanelUnderRow, undockPanel } from "../plan-row.js";
 
@@ -120,17 +120,6 @@ function chartFor(kind, key, data, hours, axis, metric) {
   );
 }
 
-/** What one point is, from the read's own fields: "is one collection", "covers 1 hour", "covers 10 minutes"; null when it names none. */
-export function bucketWidthText(d) {
-  const minutes = d && typeof d.bucket_minutes === "number" && d.bucket_minutes > 0 ? d.bucket_minutes : null;
-  if (minutes !== null) {
-    if (minutes % 1440 === 0) return "covers " + (minutes === 1440 ? "1 day" : minutes / 1440 + " days");
-    if (minutes % 60 === 0) return "covers " + (minutes === 60 ? "1 hour" : minutes / 60 + " hours");
-    return "covers " + (minutes === 1 ? "1 minute" : minutes + " minutes");
-  }
-  return d && d.bucket === "per-collection" ? "is one collection" : null;
-}
-
 function panelFor(kind, key, state, hours, onMetric) {
   if (state.phase === "loading") return el("div", { class: "plan-panel stats-history" }, [strip("loading", "Loading the history...")]);
   const r = state.result;
@@ -151,9 +140,9 @@ function panelFor(kind, key, state, hours, onMetric) {
     );
   }
   /* #6359: the facts only. The read's own `aggregate_note` is written for an MCP caller ("pass bucket_minutes (1-1440) for
-     another width, or narrow hours_back"), advice a browser reader cannot act on, so the panel says the bucket width itself. */
-  const width = bucketWidthText(d);
-  if (width) notes.push("Each point " + width + ".");
+     another width, or narrow hours_back"), advice a browser reader cannot act on, so the panel says what a point covers itself (util.js chartNoteText). */
+  const width = chartNoteText(d, "summed");
+  if (width) notes.push(width);
   const parts = [notes.length ? strip("notice", notes.join(" ")) : null];
   if (kind === "procedures") {
     const select = el("select", { class: "stats-history-metric", "aria-label": "Metric" }, PROCEDURE_METRICS.map((m) => el("option", { value: m.value, text: m.label })));

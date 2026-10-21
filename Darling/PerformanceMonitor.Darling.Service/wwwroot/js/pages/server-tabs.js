@@ -39,7 +39,7 @@
  * touches innerHTML.
  */
 
-import { el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, metricNote, getPath, fmtMs, fmtInt, fmtRate, localTime, parseUtc, windowFromHours, daysText, dbScopeChip, dbFilteredEmptyText, sourceStrip, clampText, getActiveDatabaseFilter, queryWaitFilter, setQueryWaitFilter, waitIsLinked } from "../util.js";
+import { el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, chartNote, chartNoteText, getPath, fmtMs, fmtInt, fmtRate, localTime, parseUtc, windowFromHours, daysText, dbScopeChip, dbFilteredEmptyText, sourceStrip, clampText, getActiveDatabaseFilter, queryWaitFilter, setQueryWaitFilter, waitIsLinked } from "../util.js";
 import { renderPanel, emptyHeadline, setPanelSignal, getPanelSignal, VIZ, worstFirst, newestFirst } from "../panels.js";
 import { memoryGrantChartPanels } from "./memory-grant-charts.js";
 import { activeQueriesSnapshotSlot, SNAPSHOT_ROW_CAP } from "./active-snapshots.js";
@@ -693,7 +693,9 @@ async function drawQueryTrend(slot, server, ctx, query) {
      plan-hash columns simply go blank, and a blank column reads as "nothing to see" rather than "not measured
      here". */
   const notes = [];
-  if (trend.data.aggregate_note) notes.push(trend.data.aggregate_note);
+  /* #6359: what a point covers, from the read's own width fields: its `aggregate_note` is written for an MCP caller. */
+  const pointNote = chartNoteText(trend.data, "summed");
+  if (pointNote) notes.push(pointNote);
   /* #3653 item 17: the window floor is `window_truncated` — the page dialect's `truncated` (a limit biting,
      which this read has none of) is a different fact with the opposite remedy, and the two used to share a
      spelling. Reading the old key here would silently drop this notice: undefined is falsy. */
@@ -4332,7 +4334,7 @@ export function serverTrendPanel(server, ctx, kind) {
         unit: spec.unit,
         ...windowFromHours(res.keptHours || ctx.hours),
       }, "server-trend|" + server + "|" + spec.metric, chartZoomScope(ctx.hours)),
-      typeof res.data.aggregate_note === "string" && res.data.aggregate_note ? metricNote(res.data.aggregate_note) : null,
+      chartNote(res.data, "level"),
     ]);
   })();
   return panel;
@@ -4350,6 +4352,9 @@ const SERIES_TRENDS = {
     title: "File I/O Throughput",
     subtitle: "read and write MB/s per file",
     seriesKey: "file_label",
+    /* #6359: what chartNote says besides the width: "summed" for a rate over summed bytes. The latency and longest-run
+       specs below are ratios and extremes, where the smaller-counts fact does not apply, so they say the width only. */
+    noteKind: "summed",
     emptyText: "No file I/O samples in this window.",
     emptyWins: true,
     note: "One line per file, the five that moved the most bytes in the window.",
@@ -4427,7 +4432,7 @@ export function seriesTrendPanel(server, ctx, kind) {
       notes.length ? noticeStrip(notes.join(" ")) : null,
       ...spec.charts.flatMap(draw),
       el("div", { class: "mp-metric-note", text: spec.note }),
-      typeof res.data.aggregate_note === "string" && res.data.aggregate_note ? metricNote(res.data.aggregate_note) : null,
+      chartNote(res.data, spec.noteKind),
     ]);
   })();
   return panel;
@@ -4531,7 +4536,7 @@ export async function drawClerkTrends(slot, server, ctx, checked) {
       unit: "MB",
       ...windowFromHours(trend.keptHours || ctx.hours),
     }, "clerk-trend|" + server, chartZoomScope(ctx.hours)),
-    typeof trend.data.aggregate_note === "string" && trend.data.aggregate_note ? metricNote(trend.data.aggregate_note) : null,
+    chartNote(trend.data, "level"),
   ]);
 }
 
@@ -4656,7 +4661,7 @@ export async function drawNamedTrends(slot, server, ctx, kind, checked) {
       ...windowFromHours(trend.keptHours || ctx.hours),
     }, kind + "-trend|" + server, chartZoomScope(ctx.hours)),
     el("div", { class: "mp-metric-note", text: spec.note }),
-    typeof trend.data.aggregate_note === "string" && trend.data.aggregate_note ? metricNote(trend.data.aggregate_note) : null,
+    chartNote(trend.data, "summed"),
   ]);
 }
 
@@ -4699,7 +4704,7 @@ export function sessionStatsTrendPanel(server, ctx) {
         ...windowFromHours(res.keptHours || ctx.hours),
       }, "server-trend|" + server + "|session_stats", chartZoomScope(ctx.hours)),
       top.length ? el("div", { class: "mp-metric-note", text: "Top in the newest bucket: " + top.join("; ") + "." }) : null,
-      typeof res.data.aggregate_note === "string" && res.data.aggregate_note ? metricNote(res.data.aggregate_note) : null,
+      chartNote(res.data, "level"),
     ]);
   })();
   return panel;

@@ -124,7 +124,9 @@ public sealed class StatsHistoryBehaviourTests
         // #6359: the read's aggregate_note says "pass bucket_minutes (1-1440) for another width, or narrow hours_back" (a browser
         // reader can do neither). The panel states the width from the read's bucket fields instead.
         var r = Run("mcpAdviceNote");
-        Assert.Equal(new[] { "Each point covers 1 hour." }, r.GetProperty("notices").EnumerateArray().Select(s => s.GetString()));
+        Assert.Equal(
+            new[] { "Each point covers 1 hour. A bucket the window cuts short holds smaller counts; rates are true rates over the time the bucket covers." },
+            r.GetProperty("notices").EnumerateArray().Select(s => s.GetString()));
         Assert.Equal(new[] { "Each point is one collection." }, r.GetProperty("queryNotices").EnumerateArray().Select(s => s.GetString()));
         Assert.Equal(
             new string?[] { "covers 1 minute", "covers 10 minutes", "covers 1 hour", "covers 6 hours", "covers 1 day", "is one collection", null },
