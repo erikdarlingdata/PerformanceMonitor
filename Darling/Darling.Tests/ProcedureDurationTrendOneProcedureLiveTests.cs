@@ -53,6 +53,14 @@ public sealed class ProcedureDurationTrendOneProcedureLiveTests
             await PlantAsync(connection, ct, serverId, serverName, at, A, "dbo", "usp_Two", 5_000);
             await PlantAsync(connection, ct, serverId, serverName, at, A, "", "usp_Bare", 1_000);
             await PlantAsync(connection, ct, serverId, serverName, at, B, "dbo", "usp_One", 7_000);
+            /* #5638: the collection's per-database totals rows (the sums of the rows above; no procedure columns), as the collector's
+               writer leaves them. The totals table cannot answer for one procedure, so that read must take its rows from procedure_stats. */
+            foreach (var (db, elapsed, executions, rows) in new[] { (A, 9_000L, 30L, 3L), (B, 7_000L, 10L, 1L) })
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    "INSERT INTO collect.procedure_stats_totals (server_id, collection_time, database_name, total_elapsed_time, total_execution_count, row_count, max_sample_interval_seconds) VALUES ($1, $2, $3, $4, $5, $6, 3600)",
+                    serverId, DarlingMcpTestData.TruncateToSeconds(at), db, elapsed, executions, rows);
+            }
 
             var budget = TrendBudget.Mcp(TrendBuckets.DurationMaxPoints);
             async Task<string> Read(DatabaseFilter databases, string? procedure) =>
@@ -73,6 +81,11 @@ public sealed class ProcedureDurationTrendOneProcedureLiveTests
             var one = JsonDocument.Parse(await Read(DatabaseFilter.One(A), "dbo.usp_One")).RootElement;
             Assert.Equal("dbo.usp_One", one.GetProperty("procedure_name").GetString());
             Assert.Equal(A, one.GetProperty("database_name").GetString());
+            /* avg_cpu_ms: the bucket's worker time over its executions (3000 us weight over 10 executions), only on the one-procedure form. */
+            Assert.Equal(3_000 / 1000.0 / 10, one.GetProperty("trend").EnumerateArray().Last().GetProperty("avg_cpu_ms").GetDouble(), 9);
+            Assert.Equal(7_000 / 1000.0 / 10, JsonDocument.Parse(await Read(DatabaseFilter.One(B), "dbo.usp_One")).RootElement
+                .GetProperty("trend").EnumerateArray().Last().GetProperty("avg_cpu_ms").GetDouble(), 9);
+            Assert.False(wholeDatabase.GetProperty("trend").EnumerateArray().Last().TryGetProperty("avg_cpu_ms", out _));
 
             /* A name nothing ran under in the window is an empty answer that still says which procedure it was asked about, never a 0 line. */
             var missing = JsonDocument.Parse(await Read(DatabaseFilter.One(A), "dbo.usp_NoSuch")).RootElement;
@@ -89,7 +102,7 @@ public sealed class ProcedureDurationTrendOneProcedureLiveTests
                 Assert.Equal("invalid", refused.GetProperty("status").GetString());
                 Assert.Equal("procedure_name", refused.GetProperty("hints").GetProperty("parameter").GetString());
             }
-        }, DurationTrendDatabaseFilterLiveTests.Cleanup);
+        }, DurationTrendDatabaseFilterLiveTests.Cleanup + "; DELETE FROM collect.procedure_stats_totals WHERE server_id = {0}");
 
     /// <summary>
     /// The hourly rollup tier (a TimescaleDB scratch store; the window's raw rows are purged after the interval rollup refreshes, so
@@ -180,6 +193,10 @@ public sealed class ProcedureDurationTrendOneProcedureLiveTests
             Assert.Equal(5_000 * PerSecond, RateAt(await Read(A, "dbo.usp_Two"), hourOne), 9);
             Assert.Equal(7_000 * PerSecond, RateAt(await Read(B, "dbo.usp_One"), hourOne), 9);
             Assert.Equal("dbo.usp_One", one.GetProperty("procedure_name").GetString());
+            /* The rollup carries worker time too: its hour's avg_cpu_ms is that procedure's worker time over its executions only. */
+            Assert.Equal(3_000 / 1000.0 / 10, one.GetProperty("trend").EnumerateArray()
+                .First(p => DateTime.Parse(p.GetProperty("time").GetString()!, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind) == hourOne)
+                .GetProperty("avg_cpu_ms").GetDouble(), 9);
             Assert.Equal("empty", (await Read(A, "dbo.usp_NoSuch")).GetProperty("status").GetString());
 
             bodySucceeded = true;

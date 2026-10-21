@@ -613,7 +613,7 @@ public sealed class DarlingMcpTrendTools
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
-        [Description("One procedure, by the full_name get_top_procedures_by_cpu returns (e.g. dbo.usp_ProcessOrder). Case-sensitive. Needs database_name. Omit for all procedures.")] string? procedure_name = null,
+        [Description("One procedure, by the full_name get_top_procedures_by_cpu returns (e.g. dbo.usp_ProcessOrder). Case-sensitive. Needs database_name. Adds avg_cpu_ms per point. Omit for all procedures.")] string? procedure_name = null,
         [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         CancellationToken cancellationToken = default) =>
         GetProcedureDurationTrend(postgres, server_name, hours_back, as_of, bucket_minutes, DatabaseFilter.One(database_name), TrendBudget.Mcp(TrendBuckets.DurationMaxPoints), procedure_name, cancellationToken);
@@ -693,14 +693,42 @@ public sealed class DarlingMcpTrendTools
                     new BucketChoice(bucketMinutes, bucket_minutes is not null, budget.AutoPoints), databases, cancellationToken), procedureName);
             }
 
-            return WithProcedureEcho(SerializeTrend(resolved.DisplayName, hours_back, result.Points,
+            var serialized = SerializeTrend(resolved.DisplayName, hours_back, result.Points,
                 DescribeRoute(result, now, new BucketChoice(bucketMinutes, bucket_minutes is not null, budget.AutoPoints)),
-                await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, startUtc, now, cancellationToken), databases), procedureName);
+                await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, startUtc, now, cancellationToken), databases);
+            if (procedureName is null)
+            {
+                return serialized;
+            }
+
+            /* #6303: one procedure also carries avg_cpu_ms per point (the Viewer's procedure history draws it); the all-procedures
+               payload is unchanged. */
+            return WithProcedureEcho(WithAvgCpu(serialized, await DarlingTrendReader.GetProcedureAvgCpuAsync(
+                postgres, resolved.ServerId, startUtc, now, route, bucketMinutes, databases, procedureName, cancellationToken)), procedureName);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_procedure_duration_trend", ex);
         }
+    }
+
+    /// <summary>#6303: adds <c>avg_cpu_ms</c> (the bucket's worker time over its executions) to each point of a one-procedure trend, by the
+    /// point's <c>time</c>. A point whose bucket executed nothing carries null, never 0.</summary>
+    private static string WithAvgCpu(string json, Dictionary<string, double> avgCpuMsByBucket)
+    {
+        if (System.Text.Json.Nodes.JsonNode.Parse(json) is not System.Text.Json.Nodes.JsonObject payload
+            || payload["trend"] is not System.Text.Json.Nodes.JsonArray trend)
+        {
+            return json;
+        }
+
+        foreach (var point in trend.OfType<System.Text.Json.Nodes.JsonObject>())
+        {
+            var time = point["time"]?.GetValue<string>();
+            point["avg_cpu_ms"] = time is not null && avgCpuMsByBucket.TryGetValue(time, out var avg) ? avg : null;
+        }
+
+        return payload.ToJsonString(McpHelpers.JsonOptions);
     }
 
     /// <summary>#6303: puts <c>procedure_name</c> beside <c>database_name</c> in a procedure trend's answer, data or empty, so a reader sees

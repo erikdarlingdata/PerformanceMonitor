@@ -66,7 +66,7 @@ public sealed class StatsHistoryBehaviourTests
         Assert.Equal("dbo.usp_Ship", q.GetProperty("procedure_name").GetString());
         Assert.Equal("24", q.GetProperty("hours").GetString());
         Assert.Equal(1, r.GetProperty("fetches").GetInt32());
-        Assert.Equal(new[] { "Avg Duration (ms)", "Duration (ms/s)", "Executions (per second)" },
+        Assert.Equal(new[] { "Avg Duration (ms)", "Avg CPU (ms)", "Duration (ms/s)", "Executions (per second)" },
             r.GetProperty("options").EnumerateArray().Select(o => o.GetString()));
         Assert.DoesNotContain("reads", r.GetProperty("options").GetRawText(), System.StringComparison.OrdinalIgnoreCase);
 
@@ -78,6 +78,10 @@ public sealed class StatsHistoryBehaviourTests
         Assert.Equal(50, points[0].GetProperty("avg_elapsed_ms").GetDouble());
         Assert.Equal(JsonValueKind.Null, points[1].GetProperty("avg_elapsed_ms").ValueKind);
         Assert.Equal(JsonValueKind.Null, points[2].GetProperty("avg_elapsed_ms").ValueKind);
+        // The read's avg_cpu_ms is drawn as it came; a point without it (no executions) is a gap, not a 0.
+        Assert.Equal(12.5, points[0].GetProperty("avg_cpu_ms").GetDouble());
+        Assert.Equal(JsonValueKind.Null, points[1].GetProperty("avg_cpu_ms").ValueKind);
+        Assert.Equal(JsonValueKind.Null, points[2].GetProperty("avg_cpu_ms").ValueKind);
 
         // Picking another metric redraws from the data already read, with no second read.
         Assert.Equal(new[] { "executions_per_second" }, r.GetProperty("afterPick").GetProperty("series").EnumerateArray().Select(s => s.GetString()));

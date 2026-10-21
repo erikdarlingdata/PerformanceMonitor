@@ -475,7 +475,25 @@ public static class DurationTrendRouting
         var matched = withDatabaseFilter ? ", matched_rows" : "";
         var idleMatched = withDatabaseFilter ? ", CAST(0 AS bigint)" : "";
 
-        return $"""
+        /* #6303: the totals table holds one row per (collection, database) and has no procedure columns, so a read of ONE procedure
+           cannot use it. With the procedure filter the raw rows are read for the whole window (the totals are a copy of their sums,
+           and the rows are kept), which is the read #3897 ran before #5638; off, the text is unchanged. */
+        var storedCte = withProcedureFilter
+            ? $"""
+        stored AS
+        (
+            SELECT
+                collection_time,
+                {sums}
+                MAX(sample_interval_seconds) AS max_interval_seconds
+            FROM procedure_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2 - INTERVAL '{maxGap} seconds'
+            AND   collection_time <= $3
+            GROUP BY collection_time
+        ),
+"""
+            : $"""
         totals_floor AS
         (
             SELECT COALESCE(MIN(collection_time), 'infinity'::timestamp) AS floor_time
@@ -505,6 +523,10 @@ public static class DurationTrendRouting
             AND   collection_time <= $3
             GROUP BY collection_time
         ),
+""";
+
+        return $"""
+        {storedCte}
         runs AS
         (
             SELECT
@@ -739,6 +761,48 @@ public static class DurationTrendRouting
                 MIN(bucket) AS first_collection_time,
                 0 AS unrated_collections
             FROM {source}{windowHasRows}
+            GROUP BY 1
+            ORDER BY 1
+            """;
+    }
+
+    /// <summary>
+    /// #6303: the average CPU per execution of ONE procedure, in the same buckets as <see cref="BuildBucketedRawTrendSql"/> (raw) or
+    /// <see cref="BuildBucketedHourlyTrendSql"/> (hourly: <paramref name="hourlyFromClause"/> is the route's relation). A bucket's
+    /// figure is its summed worker time over its summed executions (never an average of averages), NULL when nothing executed in it.
+    /// Both tiers carry worker time; the hourly rollup carries no spills or reads columns of the Viewer's other series, so this is
+    /// the only extra series. Rows with stored interval 0 (restart) are left out on both tiers, as the hourly rollup leaves them out.
+    /// $1 server_id, $2/$3 window (naive UTC), $4 database filter, $5 the procedure's name, $6 the bucket width in minutes.
+    /// </summary>
+    public static string BuildProcedureAvgCpuSql(bool hourly, string hourlyFromClause)
+    {
+        var match = $"($4::text[] IS NULL OR database_name = ANY($4)) AND {ProcedureFullNameMatchSql}";
+        var bucketStart = $"GREATEST(date_bin(CAST($6 AS integer) * INTERVAL '1 minute', {(hourly ? "bucket" : "collection_time")}, {TrendBucketSql.OriginSql}), $2)";
+        if (!hourly)
+        {
+            return $"""
+                SELECT {bucketStart} AS bucket_start,
+                       SUM(delta_worker_time) / 1000.0 / NULLIF(SUM(delta_execution_count), 0) AS avg_cpu_ms
+                FROM procedure_stats
+                WHERE server_id = $1
+                AND   collection_time >= $2
+                AND   collection_time <= $3
+                AND   sample_interval_seconds IS DISTINCT FROM 0
+                AND   {match}
+                GROUP BY 1
+                ORDER BY 1
+                """;
+        }
+
+        ArgumentException.ThrowIfNullOrWhiteSpace(hourlyFromClause);
+        return $"""
+            SELECT {bucketStart} AS bucket_start,
+                   SUM(worker_time_sum) / 1000.0 / NULLIF(SUM(execution_count_sum), 0) AS avg_cpu_ms
+            FROM {hourlyFromClause}
+            WHERE server_id = $1
+            AND   bucket >= $2
+            AND   bucket < $3
+            AND   {match}
             GROUP BY 1
             ORDER BY 1
             """;

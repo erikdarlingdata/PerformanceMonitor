@@ -1347,6 +1347,37 @@ internal static class DarlingTrendReader
             procedureFullName);
 
     /// <summary>
+    /// #6303: the average CPU per execution (ms) of ONE procedure per bucket, in the buckets of the one-procedure
+    /// <see cref="GetProcedureDurationTrendAsync(NpgsqlDataSource, int, DateTime, DateTime, DurationTrendRoute, int, DatabaseFilter, string, CancellationToken)"/>,
+    /// keyed by the bucket start's round-trip text (the key the trend's <c>time</c> field carries). A bucket in which nothing executed is
+    /// absent, never 0.
+    /// </summary>
+    public static async Task<Dictionary<string, double>> GetProcedureAvgCpuAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, DurationTrendRoute route,
+        int bucketMinutes, DatabaseFilter databases, string procedureFullName, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(route);
+        await using var command = postgres.CreateCommand(
+            DurationTrendRouting.BuildProcedureAvgCpuSql(route.Tier != RetentionTier.Raw, route.HourlyFromClauseOrDefault));
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
+        command.Parameters.Add(databases.Parameter());
+        DarlingMcpReadParameters.AddText(command, procedureFullName);
+        DarlingMcpReadParameters.AddInt(command, bucketMinutes);
+        var byBucket = new Dictionary<string, double>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            if (!reader.IsDBNull(1))
+            {
+                byBucket[reader.GetDateTime(0).ToString("o")] = Convert.ToDouble(reader.GetValue(1));
+            }
+        }
+
+        return byBucket;
+    }
+
+    /// <summary>
     /// The shared body of the two routed reads: pick the tier's SQL, read the three-column point shape, and
     /// describe what came back. One method so the query and procedure trends cannot drift in how they
     /// route, read, or describe coverage.

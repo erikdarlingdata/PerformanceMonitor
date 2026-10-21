@@ -73,8 +73,8 @@ const queryRow = { database_name: "Orders", query_hash: "0xABC" };
 const procTrend = () => ({
   server: "srv-a", hours_back: 24, database_name: "Orders", procedure_name: "dbo.usp_Ship", window_truncated: false,
   trend: [
-    { time: "2026-03-04T05:00:00Z", elapsed_ms_per_second: 200, executions_per_second: 4 },
-    { time: "2026-03-04T06:00:00Z", elapsed_ms_per_second: null, executions_per_second: null },
+    { time: "2026-03-04T05:00:00Z", elapsed_ms_per_second: 200, executions_per_second: 4, avg_cpu_ms: 12.5 },
+    { time: "2026-03-04T06:00:00Z", elapsed_ms_per_second: null, executions_per_second: null, avg_cpu_ms: null },
     { time: "2026-03-04T07:00:00Z", elapsed_ms_per_second: 10, executions_per_second: 0 },
   ],
 });
