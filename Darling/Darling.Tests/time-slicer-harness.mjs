@@ -65,6 +65,15 @@ const answerFor = (name, params) => {
   if (name === "get_top_procedures_by_cpu") {
     return { server: "a", hours_back: 24, tier_used: "raw", procedures: [{ database_name: "db1", full_name: "dbo.p1", execution_count: 3, total_cpu_ms: 4, total_logical_reads: 9 }] };
   }
+  /* One procedure's own history (the History button's read, and the strip overlay): the two rates and the average CPU the read returns. */
+  if (name === "get_procedure_duration_trend" && params.get("procedure_name")) {
+    return { trend: [2, 8, 14].map((h, i) => ({ time: iso(START + h * HOUR), elapsed_ms_per_second: 40 * (i + 1), executions_per_second: 2, avg_cpu_ms: 7 * (i + 1) })) };
+  }
+  if (name === "get_blocking_trend" || name === "get_deadlock_trend") {
+    return { trend: [1, 7, 13, 19].map((h, i) => ({ time: iso(START + h * HOUR), count: 2 + i })) };
+  }
+  if (name === "get_blocking") return { events: [{ event_time: iso(END - 3 * HOUR), database_name: "db1", blocked_session_id: 55, blocking_session_id: 51 }] };
+  if (name === "get_deadlocks") return { deadlocks: [{ event_time: iso(END - 3 * HOUR), database_name: "db1" }] };
   if (name === "get_query_duration_trend" || name === "get_procedure_duration_trend") {
     return { trend: [0, 6, 12, 18].map((h, i) => ({ time: iso(START + h * HOUR), value: 10 + i * 5 })) };
   }
@@ -95,6 +104,8 @@ globalThis.fetch = async (url) => {
     as_of: u.searchParams.get("as_of"),
     hash: u.searchParams.get("query_hash"),
     query_id: u.searchParams.get("query_id"),
+    database_name: u.searchParams.get("database_name"),
+    procedure_name: u.searchParams.get("procedure_name"),
     snapshots_only: u.searchParams.get("snapshots_only"),
     collection_time: u.searchParams.get("collection_time"),
   });
@@ -234,6 +245,73 @@ out.queriesReset = {
   activeGrid: lastAsk("get_active_queries", (a) => !a.snapshots_only),
   store: lastAsk("get_query_store_top"),
 };
+
+/* 11. The Blocking tab (a server of its own) draws two strips, the blocked process report counts and the deadlock counts, each from the trend the tab
+   already reads. A drag on EITHER narrows the Blocking and Deadlocks grids, the deadlock graphs and the report XML together. */
+asks.length = 0;
+const broot = await draw(ctxOf(), "blocking", "c");
+const blockingReads = ["get_blocking", "get_deadlocks", "get_deadlock_detail", "get_blocked_process_xml"];
+out.blockingTab = {
+  slicers: byClass(broot, "slicer").map((n) => n.attrs["data-slicer"]),
+  stripsDrawn: byClass(broot, "slicer-line").length > 0 && byClass(broot, "slicer-line").every((n) => (n.attrs.d || "").startsWith("M")),
+  trendReads: ["get_blocking_trend", "get_deadlock_trend"].map((n) => asks.filter((a) => a.name === n && !a.as_of).length),
+  grids: Object.fromEntries(blockingReads.map((n) => [n, lastAsk(n)])),
+};
+asks.length = 0;
+await drag(broot, 250, 500, "Deadlocks");
+out.blockingDragged = { grids: Object.fromEntries(blockingReads.map((n) => [n, lastAsk(n)])), expectedAsOf: new Date(START + 12 * HOUR).toISOString() };
+asks.length = 0;
+byClass(slicerOf(broot, "Blocked process reports"), "slicer-reset")[0].fire("click", {});
+await flush();
+out.blockingReset = { grids: Object.fromEntries(blockingReads.map((n) => [n, lastAsk(n)])) };
+
+/* 12. Picking a Top Procedures row overlays THAT procedure's own history (get_procedure_duration_trend limited to it) over the page range. */
+asks.length = 0;
+const proot = await draw(ctxOf(), "cpu", "d");
+asks.length = 0;
+const procRow = all(proot).find((n) => n.tag === "tr" && n.attrs["aria-pressed"] === "false" && /dbo\.p1/.test(n.textContent));
+procRow.fire("click", { target: new FakeNode("button") });
+await flush();
+const procButtonPicked = asks.some((a) => a.name === "get_procedure_duration_trend");
+procRow.fire("click", {});
+await flush();
+const procStrip = slicerOf(proot, "Procedure duration");
+out.procedureOverlay = {
+  buttonPicked: procButtonPicked,
+  ask: lastAsk("get_procedure_duration_trend", (a) => a.procedure_name),
+  path: byClass(procStrip, "slicer-overlay")[0].attrs.d || "",
+  note: byClass(procStrip, "slicer-overlay-note")[0].textContent,
+  selected: / row-selected/.test(" " + procRow.className),
+};
+
+/* 13. A History button reads the grid's EFFECTIVE window: the page range while nothing is narrowed, the narrowed window (hours and as_of) while a
+   selection is held. A query's and a procedure's button each read their own history. */
+const historyOf = async (root, rowText, name, filter = () => true) => {
+  const tr = all(root).find((n) => n.tag === "tr" && rowText.test(n.textContent));
+  const button = all(tr).find((n) => n.tag === "button" && n.textContent === "History");
+  asks.length = 0;
+  button.fire("click", {});
+  await flush();
+  button.fire("click", {});
+  await flush();
+  return lastAsk(name, filter);
+};
+const hroot = await draw(ctxOf(), "cpu", "e");
+out.historyWhole = {
+  queries: await historyOf(hroot, /select 1/, "get_query_trend", (a) => a.hash === "0x1"),
+  procedures: await historyOf(hroot, /dbo\.p1/, "get_procedure_duration_trend", (a) => a.procedure_name),
+};
+await drag(hroot, 250, 500);
+out.historyNarrowed = {
+  queries: await historyOf(hroot, /select 1/, "get_query_trend", (a) => a.hash === "0x1"),
+  procedures: await historyOf(hroot, /dbo\.p1/, "get_procedure_duration_trend", (a) => a.procedure_name),
+  expectedAsOf: new Date(START + 12 * HOUR).toISOString(),
+};
+
+/* 14. The Query Store History button follows the narrowing the same way. */
+const sroot = await draw(ctxOf(), "queries", "f");
+await drag(sroot, 250, 500, "Query Store duration");
+out.storeHistoryNarrowed = { ask: await historyOf(sroot, /select qs/, "get_query_store_query_history"), expectedAsOf: new Date(START + 12 * HOUR).toISOString() };
 
 console.log(JSON.stringify(out));
 process.exit(0);

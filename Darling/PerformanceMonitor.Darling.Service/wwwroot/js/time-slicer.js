@@ -129,6 +129,19 @@ export function windowParams(params, w) {
 }
 
 /**
+ * What a History button reads (#6301): the grid's EFFECTIVE window. `w` is the context the grid was built from (the page context, or its
+ * narrowed form while the time slicer holds a selection) or bare hours. Returns the `hours` to read, the extra read parameters (`as_of` while
+ * narrowed, so the history ends where the selection does), a `stamp` part that tells a read made for another window from this one, and the
+ * chart `axis` ({ windowStart, windowEnd }) for a narrowed window, or null where the caller's own clock-based axis applies.
+ */
+export function historyWindow(w) {
+  const ctx = typeof w === "number" ? { hours: w } : w || {};
+  if (!ctx.narrowed) return { hours: ctx.hours, extra: {}, stamp: "", axis: null };
+  const end = Date.parse(ctx.asOf);
+  return { hours: ctx.hours, extra: { as_of: ctx.asOf }, stamp: "@" + ctx.asOf, axis: { windowStart: end - ctx.hours * HOUR_MS, windowEnd: end } };
+}
+
+/**
  * One pointer move of a drag, in fractions (0..1) of the range. `mode`: "new" (from `anchor` to `cur`), "move" (the whole selection by
  * `cur - anchor`), "start" or "end" (that edge to `cur`). `sel` is `{ a, b }` as the drag began; `minFrac` the narrowest selection.
  */

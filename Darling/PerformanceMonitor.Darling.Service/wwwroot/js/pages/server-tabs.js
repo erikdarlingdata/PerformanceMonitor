@@ -44,7 +44,7 @@ import { renderPanel, emptyHeadline, setPanelSignal, getPanelSignal, VIZ, worstF
 import { memoryGrantChartPanels } from "./memory-grant-charts.js";
 import { activeQueriesSnapshotSlot, SNAPSHOT_ROW_CAP, SNAPSHOT_LIST_CAP } from "./active-snapshots.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../charts.js";
-import { statsHistoryColumn } from "./stats-history.js";
+import { statsHistoryColumn, historyTarget, procedurePoints } from "./stats-history.js";
 import { multiPicker, mergeSeriesRows } from "../multi-picker.js";
 import { pgPlanColumn } from "./pg-plan-viewer.js";
 import { READ_FIELDS } from "../read-fields.js";
@@ -627,7 +627,7 @@ function topQueriesCard(server, ctx, ranking, picker, w = ctx, onRow = null) {
     const parts = [
       VIZ.table(res.data, {
         rowsKey: "queries",
-        columns: [...TOP_QUERY_COLUMNS, planColumn(server), statsHistoryColumn("queries", server, ctx.hours)],
+        columns: [...TOP_QUERY_COLUMNS, planColumn(server), statsHistoryColumn("queries", server, w)],
         groups: TOP_QUERY_GROUPS.groups,
         defaultGroups: TOP_QUERY_GROUPS.defaultGroups,
         ...(onRow ? { onRow } : {}),
@@ -925,7 +925,7 @@ function compareDrawn(kind, cmp, ranking, title, picker, signal, plain) {
  * A Top Queries or Top Procedures card (`kind` "queries" or "procedures") with its ranking selector, under a time slicer (#6301).
  * `build(ranking, picker, w, onRow)` draws the card for the current pick and puts `picker` under its title; `w` is the window the grid reads
  * (the page range, or the slicer's selection while one is held) and `onRow` the row pick that overlays that row's timeline on the slicer
- * (queries only: the web has no per-procedure trend read, so a procedure row has no timeline to overlay). A pick stores the choice at module
+ * (queries, procedures and Query Store). A pick stores the choice at module
  * scope and draws the card again, so the title ("Top Queries by Duration") and the rows follow it. Each draw aborts the one before it, as the
  * Collection Log slot does. A slicer release stores the narrowed window at page scope (time-slicer.js) and every card on screen for the
  * server draws its grid again for it; the strip itself is not redrawn, so a sort pick or a slice never reads the strip's activity again.
@@ -973,18 +973,17 @@ function rankedCard(kind, build, cmp = null) {
 }
 
 /* The slicer panel over a card's grid slot, and the card drawing again when ANY card narrows the page for this server (#6301). */
-function mountSliced(slot, gridSlot, slicer, cmp, draw) {
-  if (slicer && slicer.node) {
+function mountSliced(slot, gridSlot, slicer, cmp, draw, follow = false) {
+  /* `follow`: a grid with no strip of its own (a slicer for another grid narrows it too) still draws again when the page narrows. */
+  if ((slicer && slicer.node) || (follow && cmp)) {
     const off = onSliceChange((server) => {
       if (slot.isConnected === false) return off();
       if (server !== cmp.server) return;
-      slicer.follow();
+      if (slicer) slicer.follow();
       draw();
     });
-    mount(slot, [el("div", { class: "panel card span-2 slicer-panel" }, [slicer.node]), gridSlot]);
-  } else {
-    mount(slot, [gridSlot]);
   }
+  mount(slot, slicer && slicer.node ? [el("div", { class: "panel card span-2 slicer-panel" }, [slicer.node]), gridSlot] : [gridSlot]);
 }
 
 /**
@@ -993,11 +992,27 @@ function mountSliced(slot, gridSlot, slicer, cmp, draw) {
  * history on the strip (null for Active Queries). `compare` hands the Compare picker the narrowed window, as the ranked cards do.
  */
 function slicedTagCard(kind, cmp, build, compare = false) {
+  return slicedSlot(kind, cmp, true, (w, slicer) =>
+    tagFilteredCard(kind, (picker) => build(picker, w, slicer ? slicer.onRow(null) : null), compare ? { server: cmp.server, ctx: w } : null)
+  );
+}
+
+/**
+ * A plain grid under a time slicer, or following one (#6301 slice 2b): the Blocking page's Blocking and Deadlocks tables. `kind` picks the strip
+ * ("blocking" or "deadlocks"); `strip` false draws the grid with no strip of its own, narrowed all the same by a selection made on another
+ * strip of the page for this server. `build(w)` returns the panel for `w`, the page range or the selection.
+ */
+function slicedPanel(kind, cmp, build, strip = true) {
+  return slicedSlot(kind, cmp, strip, (w) => build(w));
+}
+
+/* The slot every sliced grid shares: the strip (when `strip`) over a grid slot that draws again, aborting the draw before it, whenever the page narrows. */
+function slicedSlot(kind, cmp, strip, drawCard) {
   const slot = el("div", {}, []);
   slot.style.display = "contents";
   const gridSlot = el("div", {}, []);
   gridSlot.style.display = "contents";
-  const slicer = rankedSlicer(kind, cmp);
+  const slicer = strip ? rankedSlicer(kind, cmp) : null;
   let drawing = null;
   const draw = () => {
     if (drawing) drawing.abort();
@@ -1007,11 +1022,11 @@ function slicedTagCard(kind, cmp, build, compare = false) {
     if (outer) outer.addEventListener("abort", () => mine.abort(), { once: true });
     const w = effectiveContext(cmp.server, cmp.ctx);
     setPanelSignal(mine.signal);
-    const card = tagFilteredCard(kind, (picker) => build(picker, w, slicer ? slicer.onRow(null) : null), compare ? { server: cmp.server, ctx: w } : null);
+    const card = drawCard(w, slicer);
     setPanelSignal(outer);
     mount(gridSlot, [card]);
   };
-  mountSliced(slot, gridSlot, slicer, cmp, draw);
+  mountSliced(slot, gridSlot, slicer, cmp, draw, true);
   draw();
   return slot;
 }
@@ -1029,12 +1044,21 @@ const OVERLAY_METRICS = {
   executions: { key: "execution_count", label: "executions" },
   reads: { key: "avg_cpu_ms", label: "avg CPU ms" },
 };
+/* The same, for get_procedure_duration_trend (#6301 slice 2b), through procedurePoints (stats-history.js): average elapsed is derived there from the two rates. */
+const PROCEDURE_OVERLAY_METRICS = {
+  cpu: { key: "avg_cpu_ms", label: "avg CPU ms" },
+  duration: { key: "avg_elapsed_ms", label: "avg elapsed ms" },
+  executions: { key: "executions_per_second", label: "executions/s" },
+  reads: { key: "avg_cpu_ms", label: "avg CPU ms" },
+};
 
 /**
  * What each slicer charts on its strip, and what a row pick overlays on it (#6301). The strip reads once over the PAGE range, whatever the
  * grid below holds:
  *   queries     get_query_duration_trend; a row overlays get_query_trend for that query.
- *   procedures  get_procedure_duration_trend; no row overlay (the web has no per-procedure trend read).
+ *   procedures  get_procedure_duration_trend; a row overlays the same read limited to that procedure (the History button's read).
+ *   blocking    get_blocking_trend, reports per bucket; no row overlay.
+ *   deadlocks   get_deadlock_trend, deadlocks per bucket; no row overlay.
  *   active      the snapshot list of get_active_queries (snapshots_only), sessions per snapshot; no row overlay.
  *   querystore  get_query_store_duration_trend; a row overlays get_query_store_query_history for that query's plan, the read the grid's
  *               own History button opens.
@@ -1042,6 +1066,10 @@ const OVERLAY_METRICS = {
 function stripOf(kind, server, ctx) {
   if (kind === "active") {
     return { title: "Active queries", tool: "get_active_queries", params: { server, hours: ctx.hours, limit: SNAPSHOT_LIST_CAP, snapshots_only: true }, rows: (d) => d.snapshots, time: "collection_time", value: "row_count" };
+  }
+  if (kind === "blocking" || kind === "deadlocks") {
+    const blocking = kind === "blocking";
+    return { title: blocking ? "Blocked process reports" : "Deadlocks", tool: blocking ? "get_blocking_trend" : "get_deadlock_trend", params: { server, hours: ctx.hours }, rows: (d) => d.trend, time: "time", value: "count" };
   }
   if (kind === "querystore") {
     return { title: "Query Store duration", tool: "get_query_store_duration_trend", params: { server, hours: ctx.hours }, rows: (d) => d.trend, time: "time", value: "value" };
@@ -1065,6 +1093,20 @@ function overlayOf(kind, server, ctx) {
         if (trend.kind !== "data" || !trend.data) return null;
         const points = (Array.isArray(trend.data.trend) ? trend.data.trend : []).map((r) => ({ t: timeOf(r.collection_time), v: Number(r[metric.key]) }));
         return { points, label: row.database_name + " · " + truncate(row.query_text || "(no statement text captured)", 40) + " (" + metric.label + ")" };
+      },
+    };
+  }
+  if (kind === "procedures") {
+    return {
+      /* get_procedure_duration_trend limited to one procedure keys on the database and the grid's own full_name, as the History button does. */
+      eligible: (row) => !!historyTarget("procedures", row),
+      key: (row) => row.database_name + "|" + row.full_name,
+      read: async (row, ranking, signal) => {
+        const metric = PROCEDURE_OVERLAY_METRICS[ranking] || PROCEDURE_OVERLAY_METRICS.cpu;
+        const trend = await readToolWithinKeptHistory("get_procedure_duration_trend", { server, hours: ctx.hours, ...historyTarget("procedures", row) }, signal);
+        if (trend.kind !== "data" || !trend.data) return null;
+        const points = procedurePoints(trend.data.trend).map((p) => ({ t: timeOf(p.time), v: p[metric.key] == null ? NaN : Number(p[metric.key]) }));
+        return { points, label: row.database_name + " · " + truncate(row.full_name, 40) + " (" + metric.label + ")" };
       },
     };
   }
@@ -1152,7 +1194,7 @@ function rankedSlicer(kind, cmp) {
         if (!overlay.eligible(row)) return;
         const key = overlay.key(row);
         tr.style.cursor = "pointer";
-        tr.setAttribute("title", "Overlay this query's timeline on the time slicer");
+        tr.setAttribute("title", kind === "procedures" ? "Overlay this procedure's timeline on the time slicer" : "Overlay this query's timeline on the time slicer");
         pickable(tr, (e) => {
           if (e && e.type === "click" && selectionInside(tr)) return;
           if (overlayPicks.get(pickKey) === key) {
@@ -1554,7 +1596,7 @@ export const SERVER_TABS = [
           "get_top_queries_by_cpu",
           rankedParams(windowParams({ server, hours: w.hours, top: 20, detail: "full" }, w), ranking, "queries"),
           "queries",
-          [...TOP_QUERY_COLUMNS, planColumn(server), statsHistoryColumn("queries", server, ctx.hours)],
+          [...TOP_QUERY_COLUMNS, planColumn(server), statsHistoryColumn("queries", server, w)],
           w.label,
           "No query stats in this window. Delta-based collection needs at least two cycles (~30 minutes) before it reports non-zero values.",
           2,
@@ -1569,20 +1611,24 @@ export const SERVER_TABS = [
         ),
         { server, ctx }
       ),
-      rankedCard("procedures", (ranking, picker, w) =>
+      rankedCard("procedures", (ranking, picker, w, onRow) =>
         table(
           "Top Procedures by " + topRankingLabel(ranking),
           "get_top_procedures_by_cpu",
           rankedParams(windowParams({ server, hours: w.hours, top: 20, detail: "full" }, w), ranking, "procedures"),
           "procedures",
-          [...TOP_PROC_COLUMNS, procedurePlanColumn(server), statsHistoryColumn("procedures", server, ctx.hours)],
+          [...TOP_PROC_COLUMNS, procedurePlanColumn(server), statsHistoryColumn("procedures", server, w)],
           w.label,
           "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes).",
           2,
           "truncation_note",
           null,
           TOP_PROC_GROUPS,
-          picker
+          picker,
+          null,
+          null,
+          false,
+          onRow
         ),
         { server, ctx }
       ),
@@ -1714,35 +1760,41 @@ export const SERVER_TABS = [
         emptyText: DEADLOCKS_EMPTY_TEXT,
         emptyWins: true,
       }),
-      table(
-        "Blocking",
-        "get_blocking",
-        { server, hours: ctx.hours, limit: 30 },
-        "events",
-        [...BLOCKING_COLUMNS, ...blockingPlanColumns(server), blockChainColumn(server)],
-        ctx.label,
-        "No blocking events in this window.",
-        2,
-        "separately_monitored_note",
-        null,
-        BLOCKING_GROUPS
+      /* #6301 slice 2b: the Blocking and Deadlocks grids sit under a time slicer each (the strips are the two trends' own counts, read once over the
+         page range), and a drag on either narrows both grids, the graphs and the report XML for this server together. */
+      slicedPanel("blocking", { server, ctx }, (w) =>
+        table(
+          "Blocking",
+          "get_blocking",
+          windowParams({ server, hours: w.hours, limit: 30 }, w),
+          "events",
+          [...BLOCKING_COLUMNS, ...blockingPlanColumns(server), blockChainColumn(server)],
+          w.label,
+          "No blocking events in this window.",
+          2,
+          "separately_monitored_note",
+          null,
+          BLOCKING_GROUPS
+        )
       ),
-      table(
-        "Deadlocks",
-        "get_deadlocks",
-        { server, hours: ctx.hours, limit: 20 },
-        "deadlocks",
-        [...DEADLOCK_COLUMNS, deadlockPlanColumn(server)],
-        ctx.label,
-        DEADLOCKS_EMPTY_TEXT,
-        2,
-        "separately_monitored_note",
-        null,
-        null,
-        null,
-        null,
-        null,
-        true
+      slicedPanel("deadlocks", { server, ctx }, (w) =>
+        table(
+          "Deadlocks",
+          "get_deadlocks",
+          windowParams({ server, hours: w.hours, limit: 20 }, w),
+          "deadlocks",
+          [...DEADLOCK_COLUMNS, deadlockPlanColumn(server)],
+          w.label,
+          DEADLOCKS_EMPTY_TEXT,
+          2,
+          "separately_monitored_note",
+          null,
+          null,
+          null,
+          null,
+          null,
+          true
+        )
       ),
       /* #2484: the Current Waits tab the viewer has and the browser did not. ONE read, two panels --
          via fanout, not two line() calls, because the tab must not fetch the same read twice (there is
@@ -1813,15 +1865,21 @@ export const SERVER_TABS = [
           emptyWins: true,
         },
       ]),
-      deadlockGraphsPanel(server, ctx),
-      table(
-        "Blocked Process Reports",
-        "get_blocked_process_xml",
-        { server, hours: ctx.hours, limit: 5 },
-        "reports",
-        BPR_COLUMNS,
-        ctx.label,
-        "No blocked-process report XML in this window. The report is only written when the blocked process threshold is configured on the target."
+      slicedPanel("deadlocks", { server, ctx }, (w) => deadlockGraphsPanel(server, w), false),
+      slicedPanel(
+        "blocking",
+        { server, ctx },
+        (w) =>
+          table(
+            "Blocked Process Reports",
+            "get_blocked_process_xml",
+            windowParams({ server, hours: w.hours, limit: 5 }, w),
+            "reports",
+            BPR_COLUMNS,
+            w.label,
+            "No blocked-process report XML in this window. The report is only written when the blocked process threshold is configured on the target."
+          ),
+        false
       ),
       table(
         "Object Contention",
@@ -1976,25 +2034,29 @@ export const SERVER_TABS = [
          mean two fetches of get_top_queries_by_cpu for one page's worth of the same twenty rows. */
       topQueriesPanel(server, ctx),
       /* #4231: same `truncation_note` disclosure as the CPU tab's plain tables. */
-      rankedCard("procedures", (ranking, picker, w) =>
+      rankedCard("procedures", (ranking, picker, w, onRow) =>
         table(
           "Top Procedures by " + topRankingLabel(ranking),
           "get_top_procedures_by_cpu",
           rankedParams(windowParams({ server, hours: w.hours, top: 20, detail: "full" }, w), ranking, "procedures"),
           "procedures",
-          [...TOP_PROC_COLUMNS, procedurePlanColumn(server), statsHistoryColumn("procedures", server, ctx.hours)],
+          [...TOP_PROC_COLUMNS, procedurePlanColumn(server), statsHistoryColumn("procedures", server, w)],
           w.label,
           "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes).",
           2,
           "truncation_note",
           null,
           TOP_PROC_GROUPS,
-          picker
+          picker,
+          null,
+          null,
+          false,
+          onRow
         ),
         { server, ctx }
       ),
-      /* #6301: under the time slicer. The grid reads the slicer's window (`w`); the History button on a row still reads that query's history
-         over the page range (`ctx.hours`), the context the row's plans are read in, and a row pick overlays the same history on the strip. */
+      /* #6301: under the time slicer. The grid reads the slicer's window (`w`), the History button on a row reads that same window, and a row pick
+         overlays that query's history on the strip. */
       slicedTagCard(
         "querystore",
         { server, ctx },
@@ -2004,7 +2066,7 @@ export const SERVER_TABS = [
             "get_query_store_top",
             withTagPick(windowParams({ server, hours: w.hours, top: 20 }, w), "querystore"),
             "queries",
-            [...QUERY_STORE_COLUMNS, queryStorePlanColumn(server), queryStoreHistoryColumn(server, ctx.hours)],
+            [...QUERY_STORE_COLUMNS, queryStorePlanColumn(server), queryStoreHistoryColumn(server, w)],
             w.label,
             "No Query Store rows in this window.",
             2,
@@ -4306,7 +4368,7 @@ function deadlockGraphsPanel(server, ctx) {
   const panel = table(
     "Deadlock Graphs",
     "get_deadlock_detail",
-    { server, hours: ctx.hours, limit: 5 },
+    windowParams({ server, hours: ctx.hours, limit: 5 }, ctx),
     "deadlocks",
     deadlockXmlColumns(server, scope),
     ctx.label,

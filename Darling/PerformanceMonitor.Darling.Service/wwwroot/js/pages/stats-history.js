@@ -23,6 +23,7 @@
 import { el, readTool, windowFromHours, activeRangeStamp } from "../util.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "../charts.js";
 import { dockPanelUnderRow, undockPanel } from "../plan-row.js";
+import { historyWindow } from "../time-slicer.js";
 
 /* key -> { phase: "loading" | "done", stamp, window, metric, result: { kind: "data" | "none" | "error", ... } } */
 const open = new Map();
@@ -62,15 +63,18 @@ export function historyTarget(kind, row) {
 }
 
 const keyOf = (kind, server, target) => [kind, server, target.database_name, target.procedure_name || target.query_hash].join("|");
-const stampOf = (hours) => hours + "@" + activeRangeStamp();
+const stampOf = (w) => historyWindow(w).hours + "@" + activeRangeStamp() + historyWindow(w).stamp;
+/* The chart axis a read was made for: the narrowed window while the time slicer holds a selection (#6301), the preset's or custom range's otherwise. */
+const axisOf = (w) => historyWindow(w).axis || windowFromHours(historyWindow(w).hours);
 
-async function load(kind, key, server, target, hours, stamp) {
+async function load(kind, key, server, target, w, stamp) {
+  const { hours, extra } = historyWindow(w);
   let res;
   try {
     res =
       kind === "procedures"
-        ? await readTool("get_procedure_duration_trend", { server, hours, ...target })
-        : await readTool("get_query_trend", { server, hours, ...target });
+        ? await readTool("get_procedure_duration_trend", { server, hours, ...extra, ...target })
+        : await readTool("get_query_trend", { server, hours, ...extra, ...target });
   } catch (e) {
     res = { kind: "error", message: e && e.message ? e.message : String(e) };
   }
@@ -150,7 +154,8 @@ function panelFor(kind, key, state, hours, onMetric) {
  * needs gets a dash. `kind` is "queries" or "procedures". The key is synthetic, so the column is never sorted, filtered, exported
  * or copied.
  */
-export function statsHistoryColumn(kind, server, hours) {
+export function statsHistoryColumn(kind, server, w) {
+  const hours = historyWindow(w).hours;
   return {
     key: kind + "_history",
     label: "History",
@@ -175,10 +180,10 @@ export function statsHistoryColumn(kind, server, hours) {
             draw();
             return;
           }
-          const stamp = stampOf(hours);
-          open.set(key, { phase: "loading", stamp, window: windowFromHours(hours), metric: PROCEDURE_METRICS[0].value, redraw: draw });
+          const stamp = stampOf(w);
+          open.set(key, { phase: "loading", stamp, window: axisOf(w), metric: PROCEDURE_METRICS[0].value, redraw: draw });
           draw();
-          load(kind, key, server, target, hours, stamp);
+          load(kind, key, server, target, w, stamp);
         });
         host.appendChild(button);
         if (state) {
@@ -188,10 +193,10 @@ export function statsHistoryColumn(kind, server, hours) {
       };
       /* A rebuild under another window (a new preset or range) reads the open panel again. */
       const kept = open.get(key);
-      if (kept && kept.stamp !== stampOf(hours)) {
-        const stamp = stampOf(hours);
-        open.set(key, { phase: "loading", stamp, window: windowFromHours(hours), metric: kept.metric, redraw: draw });
-        load(kind, key, server, target, hours, stamp);
+      if (kept && kept.stamp !== stampOf(w)) {
+        const stamp = stampOf(w);
+        open.set(key, { phase: "loading", stamp, window: axisOf(w), metric: kept.metric, redraw: draw });
+        load(kind, key, server, target, w, stamp);
       } else if (kept) kept.redraw = draw;
       draw();
       return host;

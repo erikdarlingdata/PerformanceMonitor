@@ -21,6 +21,7 @@ import { el, readTool, fmtMs, localTime, windowFromHours, activeRangeStamp, wind
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "../charts.js";
 import { planSourceCell } from "./plan-viewer.js";
 import { dockPanelUnderRow, undockPanel } from "../plan-row.js";
+import { historyWindow } from "../time-slicer.js";
 
 /* key -> { phase: "loading" | "done", stamp, window, result: { kind: "data" | "none" | "error", ... } }. `window` is the chart's
    axis ({ windowStart, windowEnd } or null), taken when the read was made so a redraw later keeps the axis the data was read for. */
@@ -38,7 +39,9 @@ let sweptGeneration = 0;
    does not carry (a standalone server has no replica role) joins as nothing. */
 const keyOf = (server, row) => [server, row.database_name, row.query_id, row.plan_id, row.execution_type_desc, row.replica_role].join("|");
 /* The window a read was made for: the preset hours and the page's custom range, so a changed window reads again. */
-const stampOf = (hours) => hours + "@" + activeRangeStamp();
+const stampOf = (w) => historyWindow(w).hours + "@" + activeRangeStamp() + historyWindow(w).stamp;
+/* The chart axis a read was made for: the narrowed window while the time slicer holds a selection (#6301), the preset's or custom range's otherwise. */
+const axisOf = (w) => historyWindow(w).axis || windowFromHours(historyWindow(w).hours);
 
 /* A draw whose cell has left the page is dropped here instead of being drawn into detached DOM: every rebuild renders a
    fresh cell per row, and the old cell's draw would otherwise stay in the set for as long as the page lives (#5234).
@@ -97,7 +100,8 @@ export function classifyHistoryRead(res) {
   return { kind: "none", message: text || "No history was found for this query in the window.", note: emptyWindowNote(res.hints) };
 }
 
-async function load(key, server, row, hours, stamp) {
+async function load(key, server, row, w, stamp) {
+  const { hours, extra } = historyWindow(w);
   let res;
   try {
     res = await readTool("get_query_store_query_history", {
@@ -105,6 +109,7 @@ async function load(key, server, row, hours, stamp) {
       database_name: row.database_name,
       query_id: row.query_id,
       hours,
+      ...extra,
     });
   } catch (e) {
     res = { kind: "error", message: e && e.message ? e.message : String(e) };
@@ -117,17 +122,17 @@ async function load(key, server, row, hours, stamp) {
   redraw(key);
 }
 
-function toggle(server, row, hours) {
+function toggle(server, row, w) {
   const key = keyOf(server, row);
   if (openHistories.has(key)) {
     openHistories.delete(key);
     redraw(key);
     return;
   }
-  const stamp = stampOf(hours);
-  openHistories.set(key, { phase: "loading", stamp, window: windowFromHours(hours) });
+  const stamp = stampOf(w);
+  openHistories.set(key, { phase: "loading", stamp, window: axisOf(w) });
   redraw(key);
-  return load(key, server, row, hours, stamp);
+  return load(key, server, row, w, stamp);
 }
 
 const cell = (text, cls) => el("td", { class: cls || null, text: text == null ? "—" : String(text) });
@@ -205,7 +210,8 @@ function panelFor(key, server, hours) {
  * column is never sorted, filtered, exported or copied. The page calls this once per grid build, so each call starts a new
  * generation of cells for the redraw set.
  */
-export function queryStoreHistoryColumn(server, hours) {
+export function queryStoreHistoryColumn(server, w) {
+  const hours = historyWindow(w).hours;
   generation += 1;
   return {
     key: "query_store_history",
@@ -216,10 +222,10 @@ export function queryStoreHistoryColumn(server, hours) {
       const host = el("div", { class: "plan-cell" });
       /* A rebuild under another window (a new preset or range) reads the open panel again. */
       const open = openHistories.get(key);
-      if (open && open.stamp !== stampOf(hours)) {
-        const stamp = stampOf(hours);
-        openHistories.set(key, { phase: "loading", stamp, window: windowFromHours(hours) });
-        load(key, server, row, hours, stamp);
+      if (open && open.stamp !== stampOf(w)) {
+        const stamp = stampOf(w);
+        openHistories.set(key, { phase: "loading", stamp, window: axisOf(w) });
+        load(key, server, row, w, stamp);
       }
       const draw = () => {
         while (host.firstChild) host.removeChild(host.firstChild);
@@ -231,7 +237,7 @@ export function queryStoreHistoryColumn(server, hours) {
           "aria-expanded": isOpen ? "true" : "false",
           title: "Show this query's history, plan by plan",
         });
-        button.addEventListener("click", () => toggle(server, row, hours));
+        button.addEventListener("click", () => toggle(server, row, w));
         host.appendChild(button);
         if (isOpen) dockPanelUnderRow(host, panelFor(key, server, hours));
         else undockPanel(host);

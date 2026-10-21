@@ -201,4 +201,86 @@ public sealed class TimeSlicerBehaviourTests
         Assert.Equal(("24", null), Ask(other.GetProperty("queries")));
         Assert.StartsWith("Whole range", other.GetProperty("readout").GetString());
     }
+
+    private static readonly string[] BlockingReads = ["get_blocking", "get_deadlocks", "get_deadlock_detail", "get_blocked_process_xml"];
+
+    /// <summary>The Blocking tab draws a strip over the Blocking grids and one over the Deadlocks grids, each from the trend the tab already reads once.</summary>
+    [Fact]
+    public void TheBlockingTab_HasTwoStrips_FromItsOwnTrendReads()
+    {
+        var tab = Page().GetProperty("blockingTab");
+        Assert.Equal(["Blocked process reports", "Deadlocks"], tab.GetProperty("slicers").EnumerateArray().Select(e => e.GetString()).ToArray());
+        Assert.True(tab.GetProperty("stripsDrawn").GetBoolean());
+        Assert.Equal([1, 1], tab.GetProperty("trendReads").EnumerateArray().Select(e => e.GetInt32()).ToArray());
+        foreach (var read in BlockingReads)
+        {
+            Assert.Equal(("24", null), Ask(tab.GetProperty("grids").GetProperty(read)));
+        }
+    }
+
+    /// <summary>A drag on the Deadlocks strip narrows the Blocking and Deadlocks grids, the deadlock graphs and the report XML to the same window.</summary>
+    [Fact]
+    public void DraggingABlockingStrip_NarrowsEveryBlockingAndDeadlockGrid()
+    {
+        var dragged = Page().GetProperty("blockingDragged");
+        var expectedAsOf = dragged.GetProperty("expectedAsOf").GetString();
+        foreach (var read in BlockingReads)
+        {
+            Assert.Equal(("6", expectedAsOf), Ask(dragged.GetProperty("grids").GetProperty(read)));
+        }
+    }
+
+    /// <summary>Reset on the Blocking strip puts the page range back for every one of those grids.</summary>
+    [Fact]
+    public void ResetOnTheBlockingTab_RestoresThePageRange()
+    {
+        var reset = Page().GetProperty("blockingReset");
+        foreach (var read in BlockingReads)
+        {
+            Assert.Equal(("24", null), Ask(reset.GetProperty("grids").GetProperty(read)));
+        }
+    }
+
+    /// <summary>Picking a Top Procedures row overlays THAT procedure's own history (get_procedure_duration_trend limited to it) on the strip; a click on a button in the row is not a pick.</summary>
+    [Fact]
+    public void PickingAProcedureRow_OverlaysThatProceduresHistory()
+    {
+        var overlay = Page().GetProperty("procedureOverlay");
+        var ask = overlay.GetProperty("ask");
+        Assert.False(overlay.GetProperty("buttonPicked").GetBoolean(), "a click on a button inside the row is the button's, not a pick");
+        Assert.Equal("dbo.p1", ask.GetProperty("procedure_name").GetString());
+        Assert.Equal("db1", ask.GetProperty("database_name").GetString());
+        Assert.Equal(("24", null), Ask(ask));
+        Assert.StartsWith("M", overlay.GetProperty("path").GetString());
+        Assert.Contains("dbo.p1", overlay.GetProperty("note").GetString());
+        Assert.True(overlay.GetProperty("selected").GetBoolean());
+    }
+
+    /// <summary>With nothing narrowed a History button reads what the grid ranked over: the page range, no end of its own.</summary>
+    [Fact]
+    public void AHistoryButton_ReadsThePageRange_WhileNothingIsNarrowed()
+    {
+        var whole = Page().GetProperty("historyWhole");
+        Assert.Equal(("24", null), Ask(whole.GetProperty("queries")));
+        Assert.Equal(("24", null), Ask(whole.GetProperty("procedures")));
+    }
+
+    /// <summary>With a narrowing held, the Top Queries and Top Procedures History buttons read the narrowed window (its hours and its end), not the page range.</summary>
+    [Fact]
+    public void AHistoryButton_ReadsTheNarrowedWindow_WhileASelectionIsHeld()
+    {
+        var narrowed = Page().GetProperty("historyNarrowed");
+        var expectedAsOf = narrowed.GetProperty("expectedAsOf").GetString();
+        Assert.Equal(("6", expectedAsOf), Ask(narrowed.GetProperty("queries")));
+        Assert.Equal(("6", expectedAsOf), Ask(narrowed.GetProperty("procedures")));
+    }
+
+    /// <summary>The Query Store History button reads the narrowed window the same way.</summary>
+    [Fact]
+    public void TheQueryStoreHistoryButton_ReadsTheNarrowedWindow()
+    {
+        var narrowed = Page().GetProperty("storeHistoryNarrowed");
+        Assert.Equal("7", narrowed.GetProperty("ask").GetProperty("query_id").GetString());
+        Assert.Equal(("6", narrowed.GetProperty("expectedAsOf").GetString()), Ask(narrowed.GetProperty("ask")));
+    }
 }
