@@ -43,7 +43,7 @@ public sealed class QueryStoreRegressionsIntervalTableLiveTests
 
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
-    private static async Task SeedAsync(NpgsqlDataSource postgres, DateTime baselineStart, DateTime start, CancellationToken ct)
+    private static async Task SeedAsync(NpgsqlDataSource postgres, DateTime baselineStart, DateTime start, CancellationToken ct, string db = Db, long intervalBase = 9000)
     {
         var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
         var context = new CollectorContext { ServerId = ServerId, ServerName = "qsreg-host", CollectionTime = DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc), Deltas = new CollectorDeltaCalculator() };
@@ -57,10 +57,10 @@ public sealed class QueryStoreRegressionsIntervalTableLiveTests
             EngineEdition = 3,
         };
 
-        long intervalId = 9000;
+        long intervalId = intervalBase;
         QueryStoreCollector.Row Row(long queryId, long planId, string outcome, DateTime first, long executions, long cpuUs, long durationUs) => new()
         {
-            DatabaseName = Db,
+            DatabaseName = db,
             QueryId = queryId,
             PlanId = planId,
             ExecutionTypeDesc = outcome,
@@ -324,5 +324,77 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
             var viewerRows = await viewer.GetQueryStoreRegressionsAsync(ServerId, start, end, [Db], cancellationToken: ct);
             Assert.Equal(raw, viewerRows.Select(Describe).ToList());
         }
+    }
+
+    /// <summary>
+    /// #5506: the label comes from a keyed lookup of collect.query_store_text per output row. Three databases on one server
+    /// share query_id 10. Two hold different text, the third holds none and falls back to the aggregate's sample. Each row
+    /// must carry its own database's label, on the MCP read and the viewer's grid, so a lookup that dropped the database
+    /// from its key would hand one database's text to another.
+    /// </summary>
+    [Fact]
+    public async Task SharedQueryIdAcrossDatabases_EachRowCarriesItsOwnText_AndAMissingTextFallsBackToTheSample()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5809 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        await QueryStoreIntervalWideBelowFloorLiveTests.ExecAsync(connection, @"
+INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date)
+VALUES (@server_id, 'qsreg', 'qsreg', TRUE, 16, now(), now())
+ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
+
+        var start = LiveClock.Now().AddHours(-24);
+        start = start.AddTicks(-(start.Ticks % TimeSpan.TicksPerSecond));
+        var baselineStart = start.AddDays(-DarlingQueryStoreRegressionReader.BaselineLookbackDays);
+        string[] dbs = ["qsRegA", "qsRegB", "qsRegC"];
+        for (var i = 0; i < dbs.Length; i++)
+        {
+            await SeedAsync(postgres, baselineStart, start, ct, dbs[i], 9000 + (i * 100));
+        }
+
+        var end = LiveClock.Now();
+        var realNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        end = end > realNow ? end : realNow;
+        end = end.AddTicks(-(end.Ticks % TimeSpan.TicksPerSecond)).AddSeconds(1);
+        await QueryStoreIntervalWideBelowFloorLiveTests.SeedQueryStoreLogAsync(connection, ServerId, baselineStart.AddDays(-5), end, null, null, ct);
+        await QueryStoreIntervalWideBelowFloorLiveTests.ForceFilledSinceAsync(connection, baselineStart.AddDays(-3), ct);
+
+        /* Text for A and B only, whatever the write path stored: database C has none, so it keeps the sample. */
+        await using (var del = new NpgsqlCommand("DELETE FROM collect.query_store_text WHERE server_id = $1", connection))
+        {
+            del.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ServerId });
+            await del.ExecuteNonQueryAsync(ct);
+        }
+
+        foreach (var (db, text) in new[] { (dbs[0], "text from database A"), (dbs[1], "text from database B") })
+        {
+            await using var ins = new NpgsqlCommand(
+                "INSERT INTO collect.query_store_text (server_id, database_name, query_id, query_sql_text, last_seen) VALUES ($1, $2, 10, $3, now())", connection);
+            ins.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ServerId });
+            ins.Parameters.Add(new NpgsqlParameter<string> { TypedValue = db });
+            ins.Parameters.Add(new NpgsqlParameter<string> { TypedValue = text });
+            await ins.ExecuteNonQueryAsync(ct);
+        }
+
+        var filter = DatabaseFilter.Of(dbs);
+        var served = await DarlingQueryStoreRegressionReader.ReadQueryStoreRegressionsAsync(
+            postgres, ServerId, start, end, filter, 50, baselineStart, ct);
+        Assert.Equal("interval_table", served.Source);
+        var labels = served.Rows.ToDictionary(r => r.DatabaseName, r => r.QueryTextSample);
+        Assert.Equal(3, labels.Count);
+        Assert.Equal("text from database A", labels[dbs[0]]);
+        Assert.Equal("text from database B", labels[dbs[1]]);
+        Assert.Equal("SELECT 10", labels[dbs[2]]);
+
+        await using var viewer = new ViewerDataService(scratch.ConnectionString);
+        var viewerRows = await viewer.GetQueryStoreRegressionsAsync(ServerId, start, end, dbs, cancellationToken: ct);
+        var viewerLabels = viewerRows.ToDictionary(r => r.DatabaseName, r => r.QueryTextSample);
+        Assert.Equal(labels, viewerLabels);
     }
 }
