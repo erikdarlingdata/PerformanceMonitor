@@ -133,6 +133,46 @@ public sealed class ViewerImportServerIdCollisionLiveTests
         }
     }
 
+    /// <summary>#6352: Import Settings pushes a local viewer-servers.json into the SHARED store, so an entry whose host is a
+    /// named pipe, admin or path-style one is skipped and counted, and the plain entry still lands.</summary>
+    [Fact]
+    public async Task ImportFromStore_SkipsAndCountsAPipeOrAdminHost_AndImportsThePlainOne()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The import reads the viewer's Windows-only stores.");
+        var baseConnectionString = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live import pins.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var directory = Directory.CreateTempSubdirectory("darling-import-host-").FullName;
+        var bodySucceeded = false;
+        try
+        {
+            await MigrateStoreAsync(scratch, ct);
+            await using var viewer = new ViewerDataService(scratch.ConnectionString);
+
+            var (source, profiles) = NewRegistry(directory, "source");
+            source.AddServer(Entry("np:attacker.example.test", "Pipe"), null, null);
+            source.AddServer(Entry("admin:attacker.example.test", "Admin"), null, null);
+            source.AddServer(Entry("other01", "Other"), null, null);
+
+            var result = await ViewerServerMigration.ImportFromStoreAsync(source, profiles, viewer, ct);
+
+            Assert.Equal(1, result.Imported);
+            Assert.Equal(2, result.Refused);
+            var rows = await viewer.GetMonitoredServersAsync(ct);
+            Assert.Equal("other01", Assert.Single(rows).Host);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => await Task.CompletedTask);
+            await scratch.DisposeAsync();
+            try { Directory.Delete(directory, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
     [Fact]
     public async Task Migrate_RefusesADifferentServerAtTheId_ImportsTheRest_AndStillWritesTheMarker()
     {

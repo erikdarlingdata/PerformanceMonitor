@@ -670,6 +670,7 @@ public sealed class CollectionCycleReaderCensusTests
         ["PgMigrations.cs::V108Sql"] = "one-time, frozen DDL and data rewrite, never a reader",
         ["PgMigrations.cs::V109Sql"] = "one-time, frozen DDL and data rewrite, never a reader",
         ["PgMigrations.cs::V110Sql"] = "one-time, frozen DDL and data rewrite, never a reader",
+        ["PgMigrations.cs::V213Sql"] = "one-time, frozen DDL (adds read_source and re-creates the log view), never a reader",
         ["TimescaleSupport.cs::CreateCollectionHealthHourlySql"] = "the collection_health_hourly aggregate definition: it groups by collector_name, so the extra group is harmless, and a changed definition would force a drop and rebuild; the readers filter instead (CollectionHealthRollupSupport)",
         ["ViewerDataService.CollectionHealth.cs::RecentCollectionLogSql"] = "the Viewer's raw collection-log grid, by design",
     };

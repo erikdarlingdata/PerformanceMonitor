@@ -99,6 +99,39 @@ public sealed class PlanRowBehaviourTests
     }
 
     [Fact]
+    public void HistoryAndPlanOpenOnOneRow_SettleAtFixedHeight_PanelsStacked()
+    {
+        // #6359: a row of 60 px with a History panel of 100 px and a Plan panel of 150 px. Before the fix each panel's spacer
+        // counted the other's, so the observers fed each other and the row grew on every callback (3,060 px and rising).
+        var r = Run("twoPanelsOneRow");
+        Assert.Equal(60, r.GetProperty("closedRow").GetInt32());
+        // History alone: the row's own height plus the panel, the panel on the row's bottom.
+        Assert.Equal(160, r.GetProperty("historyAlone").GetInt32());
+        Assert.Equal("0px", r.GetProperty("historyAloneBottom").GetString());
+        // Both open: the row's own height plus both panels, and the observers fall quiet within a few rounds.
+        Assert.True(r.GetProperty("rounds").GetInt32() < 12, "the observers never settled");
+        Assert.Equal(310, r.GetProperty("both").GetInt32());
+        // The Plan panel (the later column) is at the bottom; the History panel sits directly above it, not under it.
+        Assert.Equal("150px", r.GetProperty("historyBottom").GetString());
+        Assert.Equal("0px", r.GetProperty("planBottom").GetString());
+        Assert.Equal(310, r.GetProperty("afterMore").GetInt32());
+        // The Plan panel loads taller: the row follows by exactly the difference and History stays above it.
+        Assert.Equal(380, r.GetProperty("planGrew").GetInt32());
+        Assert.Equal("220px", r.GetProperty("historyBottomAfterGrow").GetString());
+        // Closing Plan gives its room back; History is on the bottom again.
+        Assert.Equal(160, r.GetProperty("afterPlanClosed").GetInt32());
+        Assert.Equal("0px", r.GetProperty("historyBottomAfterClose").GetString());
+    }
+
+    [Fact]
+    public void OnePanelAlone_SizesTheRowAsItAlwaysHas()
+    {
+        var r = Run("onePanelAlone");
+        Assert.Equal(160, r.GetProperty("height").GetInt32());
+        Assert.Equal("0px", r.GetProperty("bottom").GetString());
+    }
+
+    [Fact]
     public void ClosingAPanel_LeavesNoObserver_AndRedrawingNeverStacksThem()
     {
         var r = Run("observerLifecycle");

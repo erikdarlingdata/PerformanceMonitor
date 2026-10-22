@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -60,6 +62,25 @@ ON CONFLICT (server_id) DO UPDATE SET
     machine_identity = CASE WHEN EXCLUDED.machine_identity IS NULL AND servers.server_name = EXCLUDED.server_name AND servers.engine_kind = EXCLUDED.engine_kind
                             THEN servers.machine_identity ELSE EXCLUDED.machine_identity END;";
 
+    /* The identity the registry holds for this registration BEFORE the connect's upsert (#6351). An upsert cannot hand back the
+       value it overwrote, so it is read right before; the connect path is single-threaded per server, so nothing writes between. */
+    internal const string PriorMachineIdentitySql = "SELECT machine_identity FROM servers WHERE server_id = $1";
+
+    /* The OTHER enabled registrations holding this identity (#6351). Worked out on read, never stored: when the address moves back the
+       overlap is simply gone. NULL never matches (the parameter is never NULL here, and `=` on NULL is not true). */
+    internal const string SameMachinePeersSql = @"
+SELECT COALESCE(NULLIF(p.display_name, ''), p.server_name)
+FROM servers p
+WHERE p.machine_identity = $2 AND p.server_id <> $1 AND p.is_enabled
+ORDER BY p.server_name;";
+
+    /// <summary>The one service log line per identity change that lands on a machine another enabled registration already holds
+    /// (#6351). Says what the overlap means for notification routes, which scope by registration.</summary>
+    internal static string SameMachineWarning(string registration, IReadOnlyList<string> peers) =>
+        $"Registration '{registration}' now reports the same machine as {string.Join(", ", peers.Select(p => $"'{p}'"))}. "
+        + "An address can start reaching another machine (an availability group listener failing over, a DNS change). "
+        + "An agent-scoped notification route on one of these registrations does not cover the other.";
+
     /* Mirror the DESIRED config (config.config_monitored_servers) onto the OBSERVED registry
        (collect.servers) for the two fields the viewer/FinOps read straight off collect.servers: is_enabled
        and monthly_cost_usd. A disabled server drops out of the collection loop and stops upserting, so without
@@ -95,8 +116,8 @@ WHERE s.is_enabled
       (SELECT 1 FROM config.config_monitored_servers c WHERE c.server_id = s.server_id);";
 
     private const string InsertCollectionLogSql = @"
-INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms, fanout_item_count, slowest_item, slowest_item_ms, sql_open_ms, sql_drain_ms, watermark_ms, drain_rows_read, drain_bytes_read, drain_last_read_ms, target_session_id, sweep_peer_max_ms, plan_fetch_probe_ms, plan_fetch_target_ms, plan_fetch_write_ms, plan_fetch_ids_attempted, plan_fetch_probe_ids, text_fetch_probe_ms, text_fetch_target_ms, text_fetch_write_ms, text_fetch_ids_attempted, text_fetch_probe_ids)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32);";
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms, fanout_item_count, slowest_item, slowest_item_ms, sql_open_ms, sql_drain_ms, watermark_ms, drain_rows_read, drain_bytes_read, drain_last_read_ms, target_session_id, sweep_peer_max_ms, plan_fetch_probe_ms, plan_fetch_target_ms, plan_fetch_write_ms, plan_fetch_ids_attempted, plan_fetch_probe_ids, text_fetch_probe_ms, text_fetch_target_ms, text_fetch_write_ms, text_fetch_ids_attempted, text_fetch_probe_ids, read_source)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33);";
 
     /* The fleet-sentinel server_id the daily retention purge writes its run-record under. collection_log's
        server_id is NOT NULL and Collection Health reads per real server_id, but the purge is fleet-wide (per
@@ -146,6 +167,16 @@ ON CONFLICT (server_id) DO UPDATE SET
         try
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            /* #6351: what the registry held before, so a connect that CHANGES the identity can be told from one that restates it. */
+            string? priorIdentity;
+            using (var prior = new NpgsqlCommand(PriorMachineIdentitySql, connection))
+            {
+                prior.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+                prior.Parameters.AddWithValue(server.ServerId);
+                priorIdentity = await prior.ExecuteScalarAsync(cancellationToken) as string;
+            }
+
+            var machineIdentity = Mcp.DarlingMcpServerAdminTools.MachineIdentityOf(server.MachineIdentity, server.EngineEdition);
             using var command = new NpgsqlCommand(UpsertServerSql, connection);
             command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
             command.Parameters.AddWithValue(server.ServerId);
@@ -185,9 +216,29 @@ ON CONFLICT (server_id) DO UPDATE SET
                     : (object)DBNull.Value);
             /* The machine's own name (V212, #6285, #6339), folded to the form the add and edit tools compare. NULL when the connect
                read none. */
-            command.Parameters.AddWithValue(
-                (object?)Mcp.DarlingMcpServerAdminTools.MachineIdentityOf(server.MachineIdentity, server.EngineEdition) ?? DBNull.Value);
+            command.Parameters.AddWithValue((object?)machineIdentity ?? DBNull.Value);
             await command.ExecuteNonQueryAsync(cancellationToken);
+
+            /* #6351: a connect that reads an identity stores exactly that value (the upsert keeps the old one only when none was read),
+               so a changed identity is the one that differs from the value read before. One warning per change, never per cycle: this
+               runs at connect only, and the next connect that restates the value finds it equal and stays quiet. No refusal, no alert:
+               a failover is normal. */
+            if (machineIdentity is not null && !string.Equals(priorIdentity, machineIdentity, StringComparison.Ordinal))
+            {
+                var peers = new List<string>();
+                using (var overlap = new NpgsqlCommand(SameMachinePeersSql, connection))
+                {
+                    overlap.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+                    overlap.Parameters.AddWithValue(server.ServerId);
+                    overlap.Parameters.AddWithValue(machineIdentity);
+                    using var peerReader = await overlap.ExecuteReaderAsync(cancellationToken);
+                    while (await peerReader.ReadAsync(cancellationToken))
+                        peers.Add(peerReader.GetString(0));
+                }
+
+                if (peers.Count > 0)
+                    logger?.LogWarning("{Message}", SameMachineWarning(server.Config.DisplayName, peers));
+            }
         }
         catch (Exception ex)
         {
@@ -265,10 +316,11 @@ ON CONFLICT (server_id) DO UPDATE SET
         FetchPhaseCost? fetchPhases,
         int? sweepPeerMaxMs,
         ILogger? logger,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? readSource = null)
         => WriteCollectionLogRowAsync(postgres, server, collectorName, DateTime.UtcNow, status, rowsCollected,
             (int)(sqlMs + storageMs), (int)sqlMs, (int)storageMs, errorMessage, fanout, phases, drain, fetchPhases,
-            sweepPeerMaxMs, logger, cancellationToken);
+            sweepPeerMaxMs, logger, cancellationToken, readSource);
 
     /// <summary>
     /// #5735: records the collection slots a server's loop stepped over as one <c>collection_log</c> row, through the
@@ -334,7 +386,8 @@ ON CONFLICT (server_id) DO UPDATE SET
         FetchPhaseCost? fetchPhases,
         int? sweepPeerMaxMs,
         ILogger? logger,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? readSource = null)
     {
         try
         {
@@ -437,6 +490,8 @@ ON CONFLICT (server_id) DO UPDATE SET
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = textFetch.HasValue ? textFetch.Value.WriteMs : (object)DBNull.Value });
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = textFetch.HasValue ? textFetch.Value.IdsAttempted : (object)DBNull.Value });
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = textFetch.HasValue ? textFetch.Value.ProbeIds : (object)DBNull.Value });
+            /* #6254: which host the run's Query Store reads came from; NULL for every other row and when no replica is set. */
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)readSource ?? DBNull.Value });
             await command.ExecuteNonQueryAsync(cancellationToken);
             return true;
         }
@@ -539,6 +594,7 @@ ON CONFLICT (server_id) DO UPDATE SET
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // text_fetch_write_ms
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // text_fetch_ids_attempted
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // text_fetch_probe_ids
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = DBNull.Value }); // read_source
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
         catch (Exception ex)
@@ -647,6 +703,7 @@ ON CONFLICT (server_id) DO UPDATE SET
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // text_fetch_write_ms
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // text_fetch_ids_attempted
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // text_fetch_probe_ids
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = DBNull.Value }); // read_source
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
         catch (Exception ex)

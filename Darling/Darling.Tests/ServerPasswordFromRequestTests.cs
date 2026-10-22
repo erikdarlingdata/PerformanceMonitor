@@ -301,7 +301,7 @@ public sealed class ServerPasswordFromRequestTests : IDisposable
         var row = store.Row;
         var binding = PasswordBinding.ForServer(ServerConnectionIdentity.FromStoredColumns(
             row.Host, row.Port, row.Engine, row.Database, row.ReadOnlyIntent, row.Auth, row.Username, row.EncryptMode,
-            row.TrustServerCertificate, row.MultiSubnetFailover));
+            row.TrustServerCertificate, row.MultiSubnetFailover, null));
         Assert.Equal(Typed, TestKeyRings.Healthy.Open(store.StoredSecret!, binding));
         Assert.Equal(Typed, probe.Last!.Password);
         Assert.DoesNotContain(Typed, answer, StringComparison.Ordinal);
@@ -437,7 +437,7 @@ public sealed class ServerPasswordFromRequestTests : IDisposable
 
     /// <summary>The stored row the tested server (<see cref="Tested"/>) matches on every setting.</summary>
     private static ServerConnectionIdentity StoredRow(string host, int port = 0) =>
-        ServerConnectionIdentity.FromStoredColumns(host, port, "sqlserver", null, false, "sql", "monitor", "Mandatory", false, false);
+        ServerConnectionIdentity.FromStoredColumns(host, port, "sqlserver", null, false, "sql", "monitor", "Mandatory", false, false, null);
 
     private sealed class StoredAddresses
     {

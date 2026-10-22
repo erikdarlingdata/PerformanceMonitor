@@ -63,6 +63,7 @@ public sealed class UnpooledDropConnectionCensusTests
         ["QueryStatsDeferredPlanFetchLiveTests.cs"] = "T-SQL against SQL Server (SINGLE_USER, then DROP DATABASE [name]).",
         ["RemediationLiveSqlTests.cs"] = "T-SQL against the local test SQL Server (SINGLE_USER, then DROP DATABASE [name]); SQL Server has no backend pool shared with a TimescaleDB job.",
         ["PlanForceToolLiveTests.cs"] = "T-SQL against the local test SQL Server (SINGLE_USER, then DROP DATABASE [name]); the scratch store it also makes is dropped by ScratchPostgres.",
+        ["QueryStoreReplicaReadsLiveSqlTests.cs"] = "T-SQL against the local test SQL Server (SINGLE_USER, then DROP DATABASE [name]); SQL Server has no backend pool shared with a TimescaleDB job.",
         ["ForcedPlanCollectorNoXmlLiveTests.cs"] = "T-SQL against the local test SQL Server (SINGLE_USER, then DROP DATABASE [name]); SQL Server has no backend pool shared with a TimescaleDB job.",
         ["ReadableSecondaryQueryStoreGateLiveTests.cs"] = "T-SQL against the local test SQL Server (SINGLE_USER, then DROP DATABASE [name]); SQL Server has no backend pool shared with a TimescaleDB job.",
         ["ForcedPlanVariantLiveTests.cs"] = "T-SQL against the local test SQL Server (SINGLE_USER, then DROP DATABASE [name]); the scratch store it also makes is dropped by ScratchPostgres.",

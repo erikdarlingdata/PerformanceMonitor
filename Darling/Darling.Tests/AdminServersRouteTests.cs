@@ -12,6 +12,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 using static Darling.Tests.RepoFile;
 
@@ -41,8 +42,11 @@ public sealed class AdminServersRouteTests
         var sql = DarlingAdminServersReader.AdminServersSql;
         Assert.Contains("FROM config.config_monitored_servers c", sql, StringComparison.Ordinal);
         Assert.Contains("LEFT JOIN servers s ON s.server_id = c.server_id", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("WHERE", sql.Replace("WHERE cl.server_id", ""), StringComparison.Ordinal);
-        Assert.DoesNotContain("is_enabled", sql.Replace("c.is_enabled,", ""), StringComparison.Ordinal);
+        /* The same-machine column (#6351) is a correlated subquery over the OTHER enabled registrations; it filters its own peers, not the
+           configured rows this grid lists, so it is set aside here. */
+        var listing = sql.Replace(DarlingDataReader.SameMachineAsColumnSql, "");
+        Assert.DoesNotContain("WHERE", listing.Replace("WHERE cl.server_id", ""), StringComparison.Ordinal);
+        Assert.DoesNotContain("is_enabled", listing.Replace("c.is_enabled,", ""), StringComparison.Ordinal);
         Assert.DoesNotContain("$", sql, StringComparison.Ordinal);
     }
 
@@ -97,7 +101,7 @@ public sealed class AdminServersRouteTests
         /* server_id is the one key that is not a grid column (#5240): the web Edit action sends it to the by-id read and the
            edit route. It is a plain id, not a credential, and both routes check the seat before they use it. */
         Assert.Equal(
-            new[] { "added", "auth", "display_name", "engine", "freshness", "last_collected", "monthly_cost", "monthly_cost_usd", "read_only", "server_id", "server_name", "status", "version" },
+            new[] { "added", "auth", "display_name", "engine", "freshness", "last_collected", "monthly_cost", "monthly_cost_usd", "read_only", "same_machine_as", "server_id", "server_name", "status", "version" },
             keys.OrderBy(k => k, StringComparer.Ordinal).ToArray());
     }
 

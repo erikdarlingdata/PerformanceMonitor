@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Linq;
 using PerformanceMonitor.Common;
 using Xunit;
@@ -276,5 +277,17 @@ public sealed class BulkServerListParserTests
         var parsed = Assert.Single(result.Servers);
         Assert.Equal("sql01,1433", parsed.ServerName);
         Assert.Null(parsed.DisplayName);
+    }
+
+    /// <summary>#6352: a pasted server name that SqlClient would read as a named pipe or an admin connection is a line
+    /// error, as the single-server dialogs refuse it; the ordinary forms on the same paste still parse.</summary>
+    [Fact]
+    public void ANamedPipeOrAdminOrPathServerName_IsALineError_AndTheOtherLinesStillParse()
+    {
+        var result = BulkServerListParser.Parse("np:sql01\nadmin:sql02,Dac\n\\\\sql03\\pipe\\sql\\query\n//sql04/pipe\nsql05,2433\ntcp:sql06\n[fe80::1]\n");
+
+        Assert.Equal(new[] { 1, 2, 3, 4 }, result.Errors.Select(e => e.LineNumber).ToArray());
+        Assert.All(result.Errors, e => Assert.Contains("is not accepted", e.Message, StringComparison.Ordinal));
+        Assert.Equal(new[] { "sql05,2433", "tcp:sql06", "[fe80::1]" }, result.Servers.Select(s => s.ServerName).ToArray());
     }
 }

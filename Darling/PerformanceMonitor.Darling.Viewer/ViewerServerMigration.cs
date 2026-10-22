@@ -152,6 +152,17 @@ public sealed class ViewerServerMigration
                 continue;
             }
 
+            /* #6352: Import Settings pushes whatever a local viewer-servers.json holds into the SHARED store, so a host
+               SqlClient would read as a named pipe or an admin connection is skipped and counted here (a hand-edited or
+               pre-rule file can carry one). AddMonitoredServerAsync stays unchecked: the registry migration above
+               goes through it, and an existing registration is not blocked. */
+            if (ViewerDataService.HostRefusal(row, null) is { } hostRefusal)
+            {
+                ViewerLogger.Warn("ViewerServerMigration", $"Not imported: server '{row.Name}': {hostRefusal}");
+                total = total with { Refused = total.Refused + 1 };
+                continue;
+            }
+
             var result = await dataService.AddMonitoredServerAsync(row, cancellationToken);
             total = Record(total, row, result);
         }
@@ -371,4 +382,8 @@ public sealed class ViewerServerMigration
 /// What an import into the monitored store did (#4789): the servers it added, and the servers it refused because a
 /// DIFFERENT server already holds their id. The same server again (already in the store) is neither.
 /// </summary>
-public readonly record struct ViewerServerImportResult(int Imported, int Collided);
+public readonly record struct ViewerServerImportResult(int Imported, int Collided)
+{
+    /// <summary>The servers an Import Settings run left out because their host is a named pipe, admin or path-style one (#6352).</summary>
+    public int Refused { get; init; }
+}

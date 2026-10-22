@@ -536,7 +536,7 @@ try {
       server_count: 2,
       servers: [
         { server_name: "alpha", display_name: "Alpha", engine: "sqlserver", version: "SQL Server 2022", freshness: "Online", status: "Enabled", auth: "Windows",
-          monthly_cost: "$1,234", monthly_cost_usd: 1234, added: "2025-12-31T00:00:00.0000000", read_only: false, last_collected: "2026-01-01T00:00:00Z", password: "SECRET-PW" },
+          monthly_cost: "$1,234", monthly_cost_usd: 1234, added: "2025-12-31T00:00:00.0000000", read_only: false, last_collected: "2026-01-01T00:00:00Z", password: "SECRET-PW", same_machine_as: "Peer-One, Peer-Two" },
         { server_name: "bravo", display_name: "Bravo", engine: "postgres", version: "PostgreSQL 18", freshness: "AwaitingFirstCollection", status: "Disabled", auth: "SQL Server",
           monthly_cost: null, monthly_cost_usd: 0, added: "2026-01-02T00:00:00.0000000", read_only: false, last_collected: null },
       ],

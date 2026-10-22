@@ -50,8 +50,8 @@ public sealed class ServerEditPasswordRuleViewerTests
     /// form's host trimmed of spaces as the dialog trims it) to a form that changes only the host and port.</summary>
     private static bool ViewerMoves(string storedHost, int storedPort, string newHost, int newPort) =>
         ServerConnectionIdentity.Differ(
-            ServerConnectionIdentity.FromStoredColumns(newHost.Trim(' '), newPort, null, null, false, null, null, null, false, false),
-            ServerConnectionIdentity.FromStoredColumns(storedHost, storedPort, null, null, false, null, null, null, false, false));
+            ServerConnectionIdentity.FromStoredColumns(newHost.Trim(' '), newPort, null, null, false, null, null, null, false, false, null),
+            ServerConnectionIdentity.FromStoredColumns(storedHost, storedPort, null, null, false, null, null, null, false, false, null));
 
     [Theory]
     [InlineData("edit-rule.example.test", 0, "edit-rule.example.test", 0, false)]
@@ -221,6 +221,88 @@ public sealed class ServerEditPasswordRuleViewerTests
             () => viewer.UpsertMonitoredServerAsync(Row("sql", StoredHost, StoredBlob, port: 5433), ct));
 
         Assert.Equal((StoredHost, StoredBlob, "Mandatory"), await StoredAsync(rig, ct));
+    }
+
+    /// <summary>#6352: the Viewer's edit write refuses a host that SqlClient would read as a named pipe or an admin
+    /// connection, even with a newly entered password, and writes nothing.</summary>
+    [Theory]
+    [InlineData("np:edit-rule-moved.example.test")]
+    [InlineData("admin:edit-rule-moved.example.test")]
+    [InlineData("\\\\edit-rule-moved.example.test\\pipe\\sql\\query")]
+    public async Task AHostChangeToAPipeOrAdminOrPath_IsRefused_EvenWithANewPassword_AndNothingIsWritten(string host)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync("sql", StoredBlob, ct);
+        await using var viewer = new ViewerDataService(rig.Scratch.ConnectionString);
+
+        var refused = await Assert.ThrowsAsync<MonitoredServerHostRefusedException>(
+            () => viewer.UpsertMonitoredServerAsync(Row("sql", host, NewBlob), ct));
+        Assert.Contains("is not accepted", refused.Message, StringComparison.Ordinal);
+
+        Assert.Equal((StoredHost, StoredBlob, "Mandatory"), await StoredAsync(rig, ct));
+    }
+
+    [Fact]
+    public async Task ARowSavedWithAPipeHost_StaysEditableWhileItsHostIsLeftAlone()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync("sql", StoredBlob, ct);
+        await using (var legacy = rig.Owner.CreateCommand("UPDATE config_monitored_servers SET host = 'np:legacy.example.test' WHERE server_id = $1"))
+        {
+            legacy.Parameters.AddWithValue(ServerId);
+            await legacy.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var viewer = new ViewerDataService(rig.Scratch.ConnectionString);
+        var renamed = Row("sql", "np:legacy.example.test", StoredBlob);
+        renamed.Name = "renamed";
+        await viewer.UpsertMonitoredServerAsync(renamed, ct);
+
+        Assert.Equal(("np:legacy.example.test", StoredBlob, "Mandatory"), await StoredAsync(rig, ct));
+    }
+
+    /// <summary>#6352: the upsert writes <c>engine = EXCLUDED.engine</c>, so a stored PostgreSQL row that holds a host the
+    /// SQL Server rule refuses must have it checked when the save turns the row into a SQL Server one. Two saves got
+    /// through before: {postgres, "np:x"} then {sqlserver, "np:x"}.</summary>
+    [Fact]
+    public async Task APostgresRowSavedWithAPipeHost_IsRefused_WhenTheSaveTurnsItIntoASqlServerRow()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync("sql", StoredBlob, ct);
+        var viewer = new ViewerDataService(rig.Scratch.ConnectionString);
+        await using var _ = viewer;
+        var asPostgres = Row("sql", "np:attacker.example.test", NewBlob);
+        asPostgres.Engine = MonitoredServerRow.EnginePostgres;
+        await viewer.UpsertMonitoredServerAsync(asPostgres, ct);
+
+        var asSqlServer = Row("sql", "np:attacker.example.test", NewBlob);
+        asSqlServer.Engine = MonitoredServerRow.EngineSqlServer;
+        await Assert.ThrowsAsync<MonitoredServerHostRefusedException>(() => viewer.UpsertMonitoredServerAsync(asSqlServer, ct));
+
+        await using var command = rig.Owner.CreateCommand("SELECT engine FROM config_monitored_servers WHERE server_id = $1");
+        command.Parameters.AddWithValue(ServerId);
+        Assert.Equal(MonitoredServerRow.EnginePostgres, (string?)await command.ExecuteScalarAsync(ct));
+    }
+
+    [Fact]
+    public void AStoredHostThatDiffersOnlyByWhitespace_IsNotTheSameHost_AndAStoredPostgresRowHasNoSqlServerHostToKeep()
+    {
+        var pipe = new MonitoredServerRow { Host = "np:attacker" };
+        Assert.NotNull(ViewerDataService.HostRefusal(pipe, "\u00A0np:attacker"));
+        Assert.NotNull(ViewerDataService.HostRefusal(pipe, " np:attacker"));
+        Assert.Null(ViewerDataService.HostRefusal(pipe, "np:attacker", MonitoredServerRow.EngineSqlServer));
+        Assert.NotNull(ViewerDataService.HostRefusal(pipe, "np:attacker", MonitoredServerRow.EnginePostgres));
+        Assert.NotNull(ViewerDataService.HostRefusal(pipe, "np:attacker", "aurora"));
+    }
+
+    [Fact]
+    public void TheViewerDialogsRule_AcceptsAnUnchangedHost_AndRefusesANewOrChangedOne()
+    {
+        Assert.Null(ViewerDataService.HostRefusal(new MonitoredServerRow { Host = "np:legacy" }, "np:legacy"));
+        Assert.NotNull(ViewerDataService.HostRefusal(new MonitoredServerRow { Host = "np:legacy" }, null));
+        Assert.NotNull(ViewerDataService.HostRefusal(new MonitoredServerRow { Host = "np:legacy" }, "plain"));
+        Assert.Null(ViewerDataService.HostRefusal(new MonitoredServerRow { Host = "plain" }, null));
+        Assert.Null(ViewerDataService.HostRefusal(new MonitoredServerRow { Host = "/var/run/postgresql", Engine = MonitoredServerRow.EnginePostgres }, null));
     }
 
     [Fact]

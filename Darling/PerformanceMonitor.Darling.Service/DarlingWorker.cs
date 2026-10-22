@@ -7401,6 +7401,7 @@ LIMIT 1";
         && a.TrustServerCertificate == b.TrustServerCertificate
         && a.ReadOnlyIntent == b.ReadOnlyIntent
         && a.MultiSubnetFailover == b.MultiSubnetFailover
+        && !QueryStoreReplicaSetting.Differ(a.QueryStoreReplica, b.QueryStoreReplica)
         && a.Port == b.Port
         && a.TargetEngine == b.TargetEngine
         && a.AwsRoleKey == b.AwsRoleKey
@@ -16291,11 +16292,12 @@ LIMIT 1";
     private async Task LogRunAsync(
         ServerLoopState server, ServerRuntime runtime, string collectorName, string status, int rowsCollected,
         long sqlMs, long storageMs, string? errorMessage, FanoutCost? fanout, ServerPhaseCost? phases,
-        DrainForensics? drain, FetchPhaseCost? fetchPhases, int? sweepPeerMaxMs, ILogger? logger, CancellationToken cancellationToken)
+        DrainForensics? drain, FetchPhaseCost? fetchPhases, int? sweepPeerMaxMs, ILogger? logger, CancellationToken cancellationToken,
+        string? readSource = null)
     {
         await DarlingObservability.LogCollectionAsync(
             _postgres!, runtime, collectorName, status, rowsCollected, sqlMs, storageMs, errorMessage, fanout, phases, drain,
-            fetchPhases, sweepPeerMaxMs, logger, cancellationToken);
+            fetchPhases, sweepPeerMaxMs, logger, cancellationToken, readSource);
         RecordRunForBackoff(server, runtime, collectorName, status, errorMessage);
     }
 
@@ -16674,7 +16676,8 @@ LIMIT 1";
 
             await LogRunAsync(
                 server, runtime, collectorName, status, result.Rows, result.SqlMs, result.StorageMs, result.Note,
-                result.Fanout, result.ServerPhases, result.Drain, result.FetchPhases, peerMaxAtDispatchMs, _logger, cancellationToken);
+                result.Fanout, result.ServerPhases, result.Drain, result.FetchPhases, peerMaxAtDispatchMs, _logger, cancellationToken,
+                readSource: result.ReadSource);
 
             /* #2864 item 3: fold THIS run into the body's peer high-water mark, AFTER its own row is
                written so a collector is never its own peer. The mark answers the question that took

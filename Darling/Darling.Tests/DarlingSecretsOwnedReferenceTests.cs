@@ -420,7 +420,7 @@ public sealed class DarlingSecretsOwnedReferenceTests : IDisposable
 
         /* The edit goes through the store's edit function (the real one, from the shared builder). */
         await using (var function = owner.CreateCommand(
-            DarlingManagedRoles.BuildEditMonitoredServerFunctionSql("config") + DarlingManagedRoles.BuildEditMonitoredServerLegacyWrapperSql("config")))
+            DarlingManagedRoles.BuildEditMonitoredServerFunctionSql("config") + DarlingManagedRoles.BuildEditMonitoredServerSeventeenWrapperSql("config") + DarlingManagedRoles.BuildEditMonitoredServerLegacyWrapperSql("config")))
         {
             await function.ExecuteNonQueryAsync(ct);
         }

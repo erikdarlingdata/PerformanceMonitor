@@ -270,6 +270,9 @@ public sealed class AlertNotebookTableCatalogTests
         ["get_database_sizes.size_note"] = "AzureSiblingDatabaseSize.RowNoteKey",
         // #5249: the gated rows are built by the helper the tool calls (anonymous-object member `message`).
         ["get_collection_health.message"] = "DarlingGatedCollectorRows.AppendAsync(",
+        // #6254: read_source is added to the serialized payload by the shared helpers the two tools call (a key written into the JSON, not an object member).
+        ["get_collection_health.read_source"] = "McpHelpers.WithCollectorReadSource(",
+        ["get_collection_log.read_source"] = "WithReadSource(",
     };
 
     /// <summary>The text from <paramref name="start"/> to the next marker (or the end).</summary>

@@ -191,19 +191,20 @@ export function planComparison(kind, currentRes, baselineRes) {
 /* ─────────── the picker ─────────── */
 
 /* Every grid on the page that offers the picker: a pick redraws all of those still on the page, so the one pick is the pick of
-   all three. Entries whose slot the page threw away (a tab switch, a rebuild) are dropped as they are met. */
-const drawers = new Set();
+   all three. Entries whose slot the page threw away (a tab switch, a rebuild) are dropped as they are met. One entry per slot: a grid under
+   the time slicer builds its Compare control again on every slice, and the latest draw is the one that counts (#6301 review). */
+const drawers = new Map();
 
 /** The Compare select. `draw` redraws the grid it sits in; `slot` is that grid's holder, to tell when the page has dropped it. */
 export function compareControl(draw, slot) {
   const entry = { draw, slot };
-  drawers.add(entry);
+  drawers.set(slot || entry, entry);
   const sel = el("select", { class: "range-select-inline", "aria-label": "Compare" }, COMPARE_OPTIONS.map((o) => el("option", { value: o.value, text: o.label })));
   sel.value = comparePick.value;
   sel.addEventListener("change", () => {
     comparePick.value = sel.value;
-    for (const d of [...drawers]) {
-      if (d.slot && d.slot.isConnected === false) drawers.delete(d);
+    for (const [key, d] of [...drawers]) {
+      if (d.slot && d.slot.isConnected === false) drawers.delete(key);
       else d.draw();
     }
   });
@@ -255,7 +256,9 @@ export function compareCard(o) {
   const { panel, body } = o.shell(o.title, o.subtitle, 2, KINDS[o.kind].read, null, o.picker);
   const holder = el("div", { style: "grid-column: 1 / -1" }, [panel]);
   (async () => {
-    const asOf = comparisonAsOf(o.pick, windowEndMs(o.server));
+    /* #6301: a narrowed window names its own end (`endMs`); otherwise the page's window ends where windowEndMs says. */
+    const windowEnd = Number.isFinite(o.endMs) ? o.endMs : windowEndMs(o.server);
+    const asOf = comparisonAsOf(o.pick, windowEnd);
     const [currentRes, baselineRes] = await Promise.all([
       readToolWithinKeptHistory(KINDS[o.kind].read, o.params, o.signal),
       readToolWithinKeptHistory(KINDS[o.kind].read, { ...o.params, as_of: asOf }, o.signal),
@@ -281,7 +284,7 @@ export function compareCard(o) {
       }
       return;
     }
-    const end = windowEndMs(o.server) - compareShiftMs(o.pick);
+    const end = windowEnd - compareShiftMs(o.pick);
     const hours = Number(o.params.hours) || 0;
     const grid = o.viz.table({ rows: plan.rows }, { rowsKey: "rows", columns: deltaColumns(o.kind), emptyText: NO_COMPARISON_DATA + "." });
     mount(body, [

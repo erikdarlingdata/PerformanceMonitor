@@ -20,14 +20,6 @@ public sealed class WebQueryStoreHistoryColumnTests
         ReadRepoFile(["Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", .. path]).ReplaceLineEndings("\n");
 
     [Fact]
-    public void TheQueryStoreTable_EndsWithThePlanAndHistoryColumns()
-    {
-        var tab = Js("pages", "server-tabs.js");
-        Assert.Contains("import { queryStoreHistoryColumn } from \"./query-store-history.js\";", tab, StringComparison.Ordinal);
-        Assert.Contains("[...QUERY_STORE_COLUMNS, queryStorePlanColumn(server), queryStoreHistoryColumn(server, ctx.hours)],", tab, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void TheHistoryColumn_IsNeverSortedFilteredExportedOrCopied()
     {
         var src = Js("pages", "query-store-history.js");

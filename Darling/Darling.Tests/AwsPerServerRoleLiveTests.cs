@@ -325,6 +325,7 @@ public sealed class AwsPerServerRoleLiveTests
         {
             await using var owner = await OpenOwnerAsync(scratch, ct);
             await ExecAsync(owner, DarlingManagedRoles.BuildEditMonitoredServerFunctionSql("config"), ct);
+            await ExecAsync(owner, DarlingManagedRoles.BuildEditMonitoredServerSeventeenWrapperSql("config"), ct);
             await ExecAsync(owner, DarlingManagedRoles.BuildEditMonitoredServerLegacyWrapperSql("config"), ct);
             await InsertServerAsync(owner, 8401, null, null, ct);
 
@@ -388,6 +389,7 @@ public sealed class AwsPerServerRoleLiveTests
         {
             await using var owner = await OpenOwnerAsync(scratch, ct);
             await ExecAsync(owner, DarlingManagedRoles.BuildEditMonitoredServerFunctionSql("config"), ct);
+            await ExecAsync(owner, DarlingManagedRoles.BuildEditMonitoredServerSeventeenWrapperSql("config"), ct);
             await ExecAsync(owner, DarlingManagedRoles.BuildEditMonitoredServerLegacyWrapperSql("config"), ct);
             await InsertServerAsync(owner, 8501, Role, External, ct);
 
@@ -413,8 +415,8 @@ public sealed class AwsPerServerRoleLiveTests
                 $"SELECT outcome FROM config.edit_monitored_server(8501, '{token}'::timestamp, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)", ct));
             Assert.Equal($"{Role} | {External} | true", await StoredAsync(owner, 8501, ct));
 
-            /* The two functions are two signatures of one name, and the wrapper is the definer-pinned one. */
-            Assert.Equal("2", await TextAsync(owner,
+            /* The 18-argument function and its two wrappers are three signatures of one name, and each is the definer-pinned one. */
+            Assert.Equal("3", await TextAsync(owner,
                 "SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'config' AND p.proname = 'edit_monitored_server'", ct));
             Assert.Equal("True", await TextAsync(owner,
                 "SELECT bool_and(prosecdef AND proconfig @> ARRAY['search_path=pg_catalog, pg_temp']) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
@@ -444,12 +446,14 @@ public sealed class AwsPerServerRoleLiveTests
         {
             await using var owner = await OpenOwnerAsync(scratch, ct);
             await ExecAsync(owner, DarlingManagedRoles.BuildEditMonitoredServerFunctionSql("config"), ct);
+            await ExecAsync(owner, DarlingManagedRoles.BuildEditMonitoredServerSeventeenWrapperSql("config"), ct);
             await ExecAsync(owner, DarlingManagedRoles.BuildEditMonitoredServerLegacyWrapperSql("config"), ct);
             await InsertServerAsync(owner, 8701, Role, External, ct);
 
             /* The edit-only login the web host uses: EXECUTE on both signatures, and no right on the table itself. */
             login = await CreateLoginRoleAsync(owner, ct);
             await ExecAsync(owner, $"GRANT EXECUTE ON FUNCTION config.edit_monitored_server({DarlingManagedRoles.EditMonitoredServerSignature}) TO {login}", ct);
+            await ExecAsync(owner, $"GRANT EXECUTE ON FUNCTION config.edit_monitored_server({DarlingManagedRoles.EditMonitoredServerSeventeenSignature}) TO {login}", ct);
             await ExecAsync(owner, $"GRANT EXECUTE ON FUNCTION config.edit_monitored_server({DarlingManagedRoles.EditMonitoredServerLegacySignature}) TO {login}", ct);
             await using var role = await OpenAsRoleAsync(scratch, login, ct);
 

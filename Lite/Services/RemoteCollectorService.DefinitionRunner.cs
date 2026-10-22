@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Data;
 using System.Data.Common;
 using System.Diagnostics;
+using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -714,6 +715,19 @@ public partial class RemoteCollectorService
                 ? await CreateConnectionAsync(server, cancellationToken)
                 : new SqlConnection();
 
+            /* #6254, #6279: Query Store reads from a readable replica, and the look-back for a database a capturing
+               secondary feeds. With no replica set nothing opens, except that a database with a capturing
+               secondary still gets the look-back and the ship guard. Azure SQL Database never reaches this arm
+               (it runs per database) and never reads a replica. */
+            var isQueryStore = string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal);
+            var qsState = isQueryStore ? QueryStoreStateFor(serverId) : null;
+            var replicaConfigured = isQueryStore && !target.IsAzureSqlDb && !string.IsNullOrWhiteSpace(server.QueryStoreReplica);
+            context.QueryStoreReplicaConfigured = replicaConfigured;
+            if (qsState is not null)
+            {
+                await SeedQueryStoreTrackerAsync(serverId, qsState, collectionTime, cancellationToken);
+            }
+
             var enumerationPlan = definition.BuildEnumerationQuery(context);
             if (enumerationPlan is not null)
             {
@@ -722,6 +736,7 @@ public partial class RemoteCollectorService
                    SqlException is skipped with a warning, matching the original collectors. */
                 var listSlice = Stopwatch.StartNew();
                 EnumerationOutcome enumeration;
+                IReadOnlyList<QueryStorePrimaryDatabaseState> primaryFacts = Array.Empty<QueryStorePrimaryDatabaseState>();
                 /* Enumeration always uses the host default timeout, matching the originals —
                    the per-collector override applies only to the heavy per-item commands. */
                 using (var enumerationCommand = CreateCollectorCommand(enumerationPlan, sqlConnection, CommandTimeoutSeconds))
@@ -733,6 +748,12 @@ public partial class RemoteCollectorService
                        enumeration could not probe. Both hosts route through it so the item read, the
                        failure read, and the note wording cannot drift. */
                     enumeration = await EnumeratedCollectorDriver.ReadEnumerationAsync(enumerationReader, cancellationToken);
+
+                    /* #6254: the third result set (each database's flush interval), present only with a replica set. */
+                    if (replicaConfigured)
+                    {
+                        primaryFacts = await QueryStoreCollector.ReadPrimaryFactsAsync(enumerationReader, cancellationToken);
+                    }
                 }
                 sqlMs += listSlice.ElapsedMilliseconds;
 
@@ -764,7 +785,19 @@ public partial class RemoteCollectorService
                     try
                     {
                         using var probeCommand = CreateCollectorCommand(probePlan, sqlConnection, 10);
-                        var probeResult = await probeCommand.ExecuteScalarAsync(cancellationToken);
+                        object? probeResult;
+                        if (replicaConfigured && ServerReaderOverrideForTests is { } probeOverride)
+                        {
+                            /* A test's reader seam answers the version probe too, when a replica is set (#6254): the
+                               routing compares the two sides' versions. Every other run keeps the command below. */
+                            using var probeReader = probeOverride(probePlan);
+                            probeResult = await probeReader.ReadAsync(cancellationToken) ? probeReader.GetValue(0) : null;
+                        }
+                        else
+                        {
+                            probeResult = await probeCommand.ExecuteScalarAsync(cancellationToken);
+                        }
+
                         if (probeResult is not null && probeResult != DBNull.Value)
                         {
                             context.EnumerationProbeResult = probeResult;
@@ -777,6 +810,93 @@ public partial class RemoteCollectorService
                     }
                 }
                 sqlMs += probeSlice.ElapsedMilliseconds;
+
+                /* #6254: the replica side. A failure to open, enumerate or probe it is `replica_unavailable` for every
+                   database this run (the primary reads all of them); it is never an error of the run. */
+                var replicaSlice = Stopwatch.StartNew();
+                using var replicaConnection = replicaConfigured
+                    ? await TryOpenQueryStoreReplicaAsync(server, cancellationToken)
+                    : null;
+                var replicaUnavailable = replicaConfigured && replicaConnection is null;
+                var primaryMajor = 0;
+                var replicaMajor = 0;
+                IReadOnlyList<QueryStoreReplicaDatabaseState> replicaDatabases = Array.Empty<QueryStoreReplicaDatabaseState>();
+                IReadOnlyDictionary<string, QueryStoreAgRedoState> primaryRedo = new Dictionary<string, QueryStoreAgRedoState>();
+                IReadOnlyDictionary<string, QueryStoreAgRedoState> replicaRedo = new Dictionary<string, QueryStoreAgRedoState>();
+
+                async Task<T> ReadOnAsync<T>(bool onReplica, CollectorQuery query, int timeoutSeconds, Func<DbDataReader, Task<T>> read, CancellationToken ct)
+                {
+                    var readerOverride = onReplica ? ReplicaReaderOverrideForTests : ServerReaderOverrideForTests;
+                    using var command = CreateCollectorCommand(query, onReplica ? replicaConnection! : sqlConnection, timeoutSeconds);
+                    using var reader = readerOverride is { } supplied ? supplied(query) : await command.ExecuteReaderAsync(ct);
+                    return await read(reader);
+                }
+
+                if (replicaConfigured)
+                {
+                    try
+                    {
+                        primaryMajor = context.EnumerationProbeResult is null
+                            ? 0
+                            : Convert.ToInt32(context.EnumerationProbeResult, CultureInfo.InvariantCulture);
+                        primaryRedo = await ReadOnAsync(false, QueryStoreCollector.BuildRedoStateQuery(), 10,
+                            reader => QueryStoreCollector.ReadRedoStatesAsync(reader, cancellationToken), cancellationToken);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        _logger?.LogDebug("Query Store redo read on the primary of '{Server}' failed; no database is treated as availability-group: {Error}",
+                            server.DisplayName, ex.Message);
+                    }
+
+                    if (replicaConnection is not null)
+                    {
+                        try
+                        {
+                            var replicaPlan = QueryStoreCollector.Instance.BuildReplicaEnumerationQuery(context)
+                                ?? throw new InvalidOperationException("No replica enumeration for this target.");
+                            var replicaEnumeration = await ReadOnAsync(true, replicaPlan, CommandTimeoutSeconds,
+                                reader => QueryStoreCollector.ReadReplicaEnumerationAsync(reader, cancellationToken), cancellationToken);
+                            replicaDatabases = replicaEnumeration.Databases;
+                            replicaMajor = await ReadOnAsync(true, new CollectorQuery(QueryStoreCollector.ProductVersionProbeText), 10,
+                                async reader => await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0)
+                                    ? Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture)
+                                    : 0, cancellationToken);
+                            replicaRedo = await ReadOnAsync(true, QueryStoreCollector.BuildRedoStateQuery(), 10,
+                                reader => QueryStoreCollector.ReadRedoStatesAsync(reader, cancellationToken), cancellationToken);
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            replicaUnavailable = true;
+                            _logger?.LogWarning("Query Store replica '{Replica}' of '{Server}' could not be enumerated; every database reads the primary this run: {Error}",
+                                server.QueryStoreReplica, server.DisplayName, ex.Message);
+                        }
+                    }
+                    else
+                    {
+                        _logger?.LogWarning("Query Store replica '{Replica}' of '{Server}' could not be opened; every database reads the primary this run.",
+                            server.QueryStoreReplica, server.DisplayName);
+                    }
+                }
+
+                sqlMs += replicaSlice.ElapsedMilliseconds;
+
+                var decisions = new Dictionary<string, QueryStoreRouteDecision>(StringComparer.OrdinalIgnoreCase);
+                var itemReads = new Dictionary<string, QueryStoreItemRead>(StringComparer.OrdinalIgnoreCase);
+                string? currentItem = null;
+                qsState?.Guard.RetainDatabases(items);
+
+                QueryStoreRoutingInput RoutingInputFor(string item, bool unavailable) => new(
+                    item,
+                    replicaConfigured,
+                    target.IsAzureSqlDb,
+                    unavailable || replicaUnavailable,
+                    primaryMajor,
+                    replicaMajor,
+                    primaryFacts.FirstOrDefault(f => string.Equals(f.Name, item, StringComparison.OrdinalIgnoreCase)),
+                    replicaDatabases.FirstOrDefault(f => string.Equals(f.Name, item, StringComparison.OrdinalIgnoreCase)),
+                    primaryRedo.GetValueOrDefault(item),
+                    replicaRedo.GetValueOrDefault(item),
+                    qsState!.Tracker.HasCapturingSecondary(item, collectionTime));
 
                 var itemTimeout = definition.CommandTimeoutSecondsOverride ?? CommandTimeoutSeconds;
 
@@ -791,6 +911,126 @@ public partial class RemoteCollectorService
                    15-minute refresh window on a cycle that captured nothing. Mirrors Darling. */
                 var stagedOpenIntervalStamps = new Dictionary<string, string>(StringComparer.Ordinal);
 
+                /* One database's cutoff, hole records and open-interval decision for the given routing decision (null for every
+                   collector but query_store). Also the retry on the primary after a replica read fails (#6254). */
+                async Task PrepareItemAsync(string item, QueryStoreRouteDecision? decision, CancellationToken ct)
+                {
+                    /* #2344: bound the read for the ONE collector whose value is clamped on the
+                       next line. Name-guarded rather than applied to every enumerating definition:
+                       a ring-buffer source whose legitimate catch-up spans days must keep reading
+                       its whole history, so the clamp and the bound travel together. */
+                    var readFloor = string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
+                        ? WatermarkPolicy.ReadFloor(collectionTime)
+                        : null;
+                    var raw = await GetLastCollectedTimeForDatabaseAsync(
+                        serverId, definition.TargetTable, definition.WatermarkColumn!,
+                        definition.PerDatabaseWatermarkColumn!, item, ct, readFloor);
+                    /* #6254: the cutoff is decided on the RAW watermark. With no look-back (every read but a replica read, a
+                       primary fallback in an availability group of a server with a replica set, and a database a capturing
+                       secondary feeds) this is ClampCatchup and its hole exactly as before. */
+                    var cutoff = QueryStoreReplicaRouting.ComputeCutoff(
+                        raw, collectionTime, decision?.LookBack ?? TimeSpan.Zero, qsState?.Guard.WasCut(item) ?? false);
+                    var clamped = cutoff.Cutoff;
+                    if (cutoff.ClampFired)
+                    {
+                        _logger?.LogWarning(
+                            "{Collector} on '{Server}' database [{Database}] catch-up clamped to {Hours}h (stored watermark {Raw:o} is older) — a bounded, logged history hole.",
+                            definition.Name, server.DisplayName, item, WatermarkPolicy.MaxCatchup.TotalHours, raw!.Value);
+
+                        /* #2058: the clamp opens a hole (raw, clamped) the live path never
+                           revisits — record it for the backfill worker, merged wider with any
+                           hole already pending. Name-guarded like the Azure site. */
+                        if (clamped.HasValue
+                            && string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+                        {
+                            await RecordQueryStoreBackfillHoleAsync(serverId, item, cutoff.HoleFrom ?? raw!.Value, cutoff.HoleTo ?? clamped.Value, ct);
+                        }
+                    }
+
+                    /* #2111 adaptive shrink — see Darling's twin; the skipped range rides the
+                       same hole records the clamp writes, deferred to the trickle, never
+                       dropped. Success resets the count via onItemComplete. */
+                    var failures = ConsecutiveQueryStoreItemFailures(serverId, item);
+                    if (failures > 0
+                        && string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+                    {
+                        var span = QueryStoreBackfillState.AdaptiveSpan(WatermarkPolicy.MaxCatchup, failures);
+                        var tighterFloor = collectionTime - span;
+                        if (clamped is DateTime current)
+                        {
+                            if (current < tighterFloor)
+                            {
+                                _logger?.LogWarning(
+                                    "query_store on '{Server}' database [{Database}] adaptive catch-up shrink: {Failures} consecutive failed cycles — window narrowed to {Minutes:F0}m; the skipped range rides the backfill hole.",
+                                    server.DisplayName, item, failures, span.TotalMinutes);
+                                await RecordQueryStoreBackfillHoleAsync(serverId, item, current, tighterFloor, ct);
+                                clamped = tighterFloor;
+                            }
+                        }
+                        else
+                        {
+                            /* Never-succeeded database (null watermark): tighten the 60-minute
+                               first-run fallback the same way — the review catch; see Darling's
+                               twin. No hole: pre-watermark history is the tail's job. */
+                            _logger?.LogWarning(
+                                "query_store on '{Server}' database [{Database}] adaptive first-contact shrink: {Failures} consecutive failed cycles — first-run window narrowed to {Minutes:F0}m.",
+                                server.DisplayName, item, failures, span.TotalMinutes);
+                            clamped = tighterFloor;
+                        }
+                    }
+
+                    context.Watermark = clamped;
+
+                    /* #2312: decide per database whether this cycle reads the OPEN interval. The
+                       stamp is only STAGED here — it lands in PendingState from onItemComplete,
+                       after this item's read and flush actually succeeded, so a per-item fault
+                       (which this driver swallows by design) re-includes next time instead of
+                       spending the refresh window on a cycle that captured nothing. Mirrors
+                       Darling. */
+                    if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+                    {
+                        if (decision is { IncludeOpenIntervalEveryRun: true })
+                        {
+                            /* #6254: a replica read takes the open interval every run and stages NO stamp, so a later primary
+                               fallback is not made to skip the open interval on top of a replica snapshot. */
+                            context.IncludeOpenInterval = true;
+                            context.StageQueryStoreOpenIntervalStamp = false;
+                            stagedOpenIntervalStamps.Remove(QueryStoreOpenIntervalState.KeyFor(item));
+                        }
+                        else
+                        {
+                            var includeOpen = QueryStoreOpenIntervalState.ShouldIncludeOpenInterval(
+                                context.State, item, collectionTime);
+                            context.IncludeOpenInterval = includeOpen;
+                            context.StageQueryStoreOpenIntervalStamp = true;
+                            if (includeOpen)
+                            {
+                                stagedOpenIntervalStamps[QueryStoreOpenIntervalState.KeyFor(item)] =
+                                    QueryStoreOpenIntervalState.Format(collectionTime);
+                            }
+                        }
+                    }
+                }
+
+                /* #6254: after a database's write succeeded (or when it had nothing to write): commit the ship guard, record
+                   whether the read was cut by the row cap or byte budget, and open the (W - L, W) hole a cut look-back
+                   read leaves, because the next read starts at W. */
+                async Task FinishQueryStoreLookBackItemAsync(string item, CancellationToken ct)
+                {
+                    if (qsState is null || !itemReads.Remove(item, out var read) || !read.Decision.UsesLookBack)
+                    {
+                        return;
+                    }
+
+                    qsState.Guard.Commit(item, read.NewWatermark, read.Decision.LookBack);
+                    qsState.Guard.MarkCut(item, read.Cut);
+                    if (read.Cut && read.NewWatermark is DateTime cutWatermark)
+                    {
+                        var (holeFrom, holeTo) = QueryStoreReplicaRouting.CutHole(cutWatermark, read.Decision.LookBack);
+                        await RecordQueryStoreBackfillHoleAsync(serverId, item, holeFrom, holeTo, ct);
+                    }
+                }
+
                 var driverResult = await EnumeratedCollectorDriver.RunAsync<TRow>(
                     items,
                     /* Per-database watermark refresh + the catch-up clamp, computed INSIDE the loop —
@@ -801,111 +1041,127 @@ public partial class RemoteCollectorService
                         ? null
                         : async (item, ct) =>
                         {
-                            /* #2344: bound the read for the ONE collector whose value is clamped on the
-                               next line. Name-guarded rather than applied to every enumerating definition:
-                               a ring-buffer source whose legitimate catch-up spans days must keep reading
-                               its whole history, so the clamp and the bound travel together. */
-                            var readFloor = string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
-                                ? WatermarkPolicy.ReadFloor(collectionTime)
-                                : null;
-                            var raw = await GetLastCollectedTimeForDatabaseAsync(
-                                serverId, definition.TargetTable, definition.WatermarkColumn!,
-                                definition.PerDatabaseWatermarkColumn!, item, ct, readFloor);
-                            var clamped = WatermarkPolicy.ClampCatchup(raw, collectionTime);
-                            if (raw.HasValue && clamped != raw)
+                            QueryStoreRouteDecision? decision = null;
+                            if (isQueryStore)
                             {
-                                _logger?.LogWarning(
-                                    "{Collector} on '{Server}' database [{Database}] catch-up clamped to {Hours}h (stored watermark {Raw:o} is older) — a bounded, logged history hole.",
-                                    definition.Name, server.DisplayName, item, WatermarkPolicy.MaxCatchup.TotalHours, raw.Value);
-
-                                /* #2058: the clamp opens a hole (raw, clamped) the live path never
-                                   revisits — record it for the backfill worker, merged wider with any
-                                   hole already pending. Name-guarded like the Azure site. */
-                                if (clamped.HasValue
-                                    && string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
-                                {
-                                    await RecordQueryStoreBackfillHoleAsync(serverId, item, raw.Value, clamped.Value, ct);
-                                }
+                                decision = QueryStoreReplicaRouting.Decide(RoutingInputFor(item, false));
+                                decisions[item] = decision;
                             }
 
-                            /* #2111 adaptive shrink — see Darling's twin; the skipped range rides the
-                               same hole records the clamp writes, deferred to the trickle, never
-                               dropped. Success resets the count via onItemComplete. */
-                            var failures = ConsecutiveQueryStoreItemFailures(serverId, item);
-                            if (failures > 0
-                                && string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
-                            {
-                                var span = QueryStoreBackfillState.AdaptiveSpan(WatermarkPolicy.MaxCatchup, failures);
-                                var tighterFloor = collectionTime - span;
-                                if (clamped is DateTime current)
-                                {
-                                    if (current < tighterFloor)
-                                    {
-                                        _logger?.LogWarning(
-                                            "query_store on '{Server}' database [{Database}] adaptive catch-up shrink: {Failures} consecutive failed cycles — window narrowed to {Minutes:F0}m; the skipped range rides the backfill hole.",
-                                            server.DisplayName, item, failures, span.TotalMinutes);
-                                        await RecordQueryStoreBackfillHoleAsync(serverId, item, current, tighterFloor, ct);
-                                        clamped = tighterFloor;
-                                    }
-                                }
-                                else
-                                {
-                                    /* Never-succeeded database (null watermark): tighten the 60-minute
-                                       first-run fallback the same way — the review catch; see Darling's
-                                       twin. No hole: pre-watermark history is the tail's job. */
-                                    _logger?.LogWarning(
-                                        "query_store on '{Server}' database [{Database}] adaptive first-contact shrink: {Failures} consecutive failed cycles — first-run window narrowed to {Minutes:F0}m.",
-                                        server.DisplayName, item, failures, span.TotalMinutes);
-                                    clamped = tighterFloor;
-                                }
-                            }
-
-                            context.Watermark = clamped;
-
-                            /* #2312: decide per database whether this cycle reads the OPEN interval. The
-                               stamp is only STAGED here — it lands in PendingState from onItemComplete,
-                               after this item's read and flush actually succeeded, so a per-item fault
-                               (which this driver swallows by design) re-includes next time instead of
-                               spending the refresh window on a cycle that captured nothing. Mirrors
-                               Darling. */
-                            if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
-                            {
-                                var includeOpen = QueryStoreOpenIntervalState.ShouldIncludeOpenInterval(
-                                    context.State, item, collectionTime);
-                                context.IncludeOpenInterval = includeOpen;
-                                if (includeOpen)
-                                {
-                                    stagedOpenIntervalStamps[QueryStoreOpenIntervalState.KeyFor(item)] =
-                                        QueryStoreOpenIntervalState.Format(collectionTime);
-                                }
-                            }
+                            await PrepareItemAsync(item, decision, ct);
                         },
                     readItem: async (item, ct) =>
                     {
                         var batch = new List<TRow>();
                         context.DropStagedItemState();
-                        var itemPlan = definition.BuildPerItemQuery(item, context);
-                        using var itemCommand = CreateCollectorCommand(itemPlan, sqlConnection, itemTimeout);
-                        /* #5813: the per-database budget on this one statement, open through drain (null for every
-                           collector but query_store). A timed-out read ships nothing, so this database's DuckDB
-                           watermark stays and the next pass reads from it; the driver moves on to the next database. */
-                        using var readBudget = QueryStoreReadBudget.Start(definition.Name, QueryStoreReadBudgetSpan, ct);
-                        var readToken = readBudget?.Token ?? ct;
-                        try
+                        currentItem = item;
+
+                        /* One read of this database's statement on the given connection (the replica's or the primary's). */
+                        async Task ReadOnceAsync(bool onReplica)
                         {
-                            using var itemReader = ServerReaderOverrideForTests is { } itemOverride
-                                ? itemOverride(itemPlan)
-                                : await itemCommand.ExecuteReaderAsync(readToken);
-                            await definition.ReadItemAsync(item, itemReader, batch, context, readToken);
+                            var itemPlan = definition.BuildPerItemQuery(item, context);
+                            using var itemCommand = CreateCollectorCommand(itemPlan, onReplica ? replicaConnection! : sqlConnection, itemTimeout);
+                            /* #5813: the per-database budget on this one statement, open through drain (null for every
+                               collector but query_store). A timed-out read ships nothing, so this database's DuckDB
+                               watermark stays and the next pass reads from it; the driver moves on to the next database. */
+                            using var readBudget = QueryStoreReadBudget.Start(definition.Name, QueryStoreReadBudgetSpan, ct);
+                            var readToken = readBudget?.Token ?? ct;
+                            try
+                            {
+                                var itemOverride = onReplica ? ReplicaReaderOverrideForTests : ServerReaderOverrideForTests;
+                                using var itemReader = itemOverride is not null
+                                    ? itemOverride(itemPlan)
+                                    : await itemCommand.ExecuteReaderAsync(readToken);
+                                await definition.ReadItemAsync(item, itemReader, batch, context, readToken);
+                            }
+                            catch (Exception ex) when (ex is not OutOfMemoryException && QueryStoreReadBudget.Expired(readBudget, ct))
+                            {
+                                throw new QueryStoreReadTimeoutException(item, QueryStoreReadBudgetSpan, ex);
+                            }
                         }
-                        catch (Exception ex) when (ex is not OutOfMemoryException && QueryStoreReadBudget.Expired(readBudget, ct))
+
+                        decisions.TryGetValue(item, out var decision);
+                        if (decision is { Source: QueryStoreReadSource.Replica })
                         {
-                            throw new QueryStoreReadTimeoutException(item, QueryStoreReadBudgetSpan, ex);
+                            try
+                            {
+                                await ReadOnceAsync(true);
+                            }
+                            catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException and not QueryStoreReadTimeoutException)
+                            {
+                                /* #6254: this database's replica read failed mid-run. Retry it on the primary in the same
+                                   run, with the primary's own cutoff, and count the failure toward nothing. */
+                                _logger?.LogWarning("Query Store replica read of [{Database}] on '{Server}' failed; reading the primary this run: {Error}",
+                                    item, server.DisplayName, ex.Message);
+                                batch.Clear();
+                                context.DropStagedItemState();
+                                decision = QueryStoreReplicaRouting.FallbackAfterReplicaReadFailure(RoutingInputFor(item, true));
+                                decisions[item] = decision;
+                                await PrepareItemAsync(item, decision, ct);
+                                await ReadOnceAsync(false);
+                            }
+                        }
+                        else
+                        {
+                            await ReadOnceAsync(false);
+                        }
+
+                        if (isQueryStore && decision is not null && (object)batch is List<QueryStoreCollector.Row> qsRows)
+                        {
+                            /* The tracker sees the whole read, before the ship guard filters it, so a capturing
+                               secondary is noticed on every path including a server with no replica set (#6279). */
+                            qsState!.Tracker.Observe(item, qsRows, collectionTime);
+
+                            DateTime? newWatermark = null;
+                            foreach (var row in qsRows)
+                            {
+                                if (newWatermark is null || row.LastExecutionTime > newWatermark)
+                                {
+                                    newWatermark = row.LastExecutionTime;
+                                }
+                            }
+
+                            var cut = (definition.PerItemRowCountWarnThreshold is int rowCap && qsRows.Count >= rowCap)
+                                || context.PerItemTextBudgetExceeded;
+                            itemReads[item] = new QueryStoreItemRead(decision, newWatermark, cut);
+
+                            if (decision.UsesLookBack)
+                            {
+                                var shipped = qsState.Guard.Filter(item, qsRows);
+                                qsRows.Clear();
+                                qsRows.AddRange(shipped);
+                                if (qsRows.Count == 0)
+                                {
+                                    /* Nothing to write, so nothing to wait for: the guard commits now. */
+                                    await FinishQueryStoreLookBackItemAsync(item, ct);
+                                }
+                            }
                         }
 
                         return batch;
                     },
-                    writeBatch: (batch, ct) => Task.FromResult(WriteBatch(duckConnection, definition, batch, serverId, context.ServerName, collectionTime, context)),
+                    writeBatch: async (batch, ct) =>
+                    {
+                        try
+                        {
+                            WriteBatch(duckConnection, definition, batch, serverId, context.ServerName, collectionTime, context);
+                        }
+                        catch
+                        {
+                            /* #6254: a failed write commits nothing to the ship guard, so the rows ship next run. */
+                            if (currentItem is not null)
+                            {
+                                qsState?.Guard.Discard(currentItem);
+                            }
+
+                            throw;
+                        }
+
+                        if (currentItem is not null)
+                        {
+                            await FinishQueryStoreLookBackItemAsync(currentItem, ct);
+                        }
+                    },
                     onItemComplete: (item, batchCount, itemSqlMs, itemStorageMs) =>
                     {
                         /* #2472: the per-database cost the blended collection_log row cannot carry.
@@ -917,7 +1173,11 @@ public partial class RemoteCollectorService
                            the member to the full catch-up width on its next cycle. */
                         if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                         {
-                            OnQueryStoreItemSucceeded(serverId, item);
+                            /* #6254: a replica read says nothing about the primary's contention, so it resets no count. */
+                            if (!decisions.TryGetValue(item, out var completed) || completed.FailureCountsTowardShrink)
+                            {
+                                OnQueryStoreItemSucceeded(serverId, item);
+                            }
 
                             /* #2312: NOW the open-interval stamp may land — this hook only fires after
                                the item's read and flush both succeeded. Remove, not read: a stamp left
@@ -971,7 +1231,8 @@ public partial class RemoteCollectorService
                         /* #2111: stamp the yield-to-live signal (any database's live failure vouches
                            for the whole replica being contended) + the per-database adaptive-shrink
                            count. */
-                        if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+                        if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
+                            && (!decisions.TryGetValue(item, out var failedDecision) || failedDecision.FailureCountsTowardShrink))
                         {
                             OnQueryStoreItemFailed(serverId, item);
                         }
@@ -1006,6 +1267,9 @@ public partial class RemoteCollectorService
                    classifies the cycle from the real exception (PERMISSIONS / transient / ERROR). Mirrors
                    Darling's runner. */
                 telemetry.HostNote = EnumeratedCollectorDriver.MergeNotes(telemetry.HostNote, driverResult.PartialFailureNote);
+
+                /* #6254: where this run read Query Store (null with no replica set). */
+                telemetry.ReadSource = QueryStoreReplicaRouting.Summarize(decisions.Values, replicaConfigured);
 
                 if (driverResult.AllItemsFailed)
                 {
