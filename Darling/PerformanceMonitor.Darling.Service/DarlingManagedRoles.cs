@@ -2486,13 +2486,17 @@ $fn$;
 REVOKE ALL ON FUNCTION {config}.update_known_pattern({UpdateKnownPatternSignature}) FROM PUBLIC;
 CREATE OR REPLACE FUNCTION {config}.delete_known_pattern(p_id bigint)
 RETURNS boolean
-LANGUAGE sql
+LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $fn$
-   WITH gone AS (
-      DELETE FROM {config}.config_known_patterns WHERE id = p_id RETURNING 1)
-   SELECT EXISTS (SELECT 1 FROM gone);
+DECLARE
+   v_rows bigint;
+BEGIN
+   DELETE FROM {config}.config_known_patterns WHERE id = p_id;
+   GET DIAGNOSTICS v_rows = ROW_COUNT;
+   RETURN v_rows > 0;
+END;
 $fn$;
 REVOKE ALL ON FUNCTION {config}.delete_known_pattern(bigint) FROM PUBLIC;";
 

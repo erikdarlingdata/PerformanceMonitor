@@ -1236,7 +1236,7 @@ GRANT EXECUTE ON FUNCTION config.edit_monitored_server(integer, timestamp, text[
 -- #6334: the known-pattern entries' writes. The web editor (viewer) and the Viewer (admin) write config.config_known_patterns only
 --     through these three functions; no role holds a direct INSERT/UPDATE/DELETE on the table, and mcp gets neither the functions nor a write
 --     (no MCP tool writes an entry: they are operator-written context). Same functions, same text, as managed provisioning rebuilds on every
---     start. The reads need no grant: the schema-wide SELECT covers the table. The table exists from V214, so re-run this script after upgrading.
+--     start. The reads need no grant: the schema-wide SELECT covers the table. The table exists from V214, so re-run this script after upgrading. All three bodies are plpgsql (late-bound) so the script also runs on a store that has not reached V214 yet; a LANGUAGE sql body would fail the CREATE there.
 CREATE OR REPLACE FUNCTION config.insert_known_pattern(
    p_server_id integer,
    p_metric_name text,
@@ -1300,13 +1300,17 @@ $fn$;
 REVOKE ALL ON FUNCTION config.update_known_pattern(bigint, integer, text, time, text, integer, text, timestamp, text) FROM PUBLIC;
 CREATE OR REPLACE FUNCTION config.delete_known_pattern(p_id bigint)
 RETURNS boolean
-LANGUAGE sql
+LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $fn$
-   WITH gone AS (
-      DELETE FROM config.config_known_patterns WHERE id = p_id RETURNING 1)
-   SELECT EXISTS (SELECT 1 FROM gone);
+DECLARE
+   v_rows bigint;
+BEGIN
+   DELETE FROM config.config_known_patterns WHERE id = p_id;
+   GET DIAGNOSTICS v_rows = ROW_COUNT;
+   RETURN v_rows > 0;
+END;
 $fn$;
 REVOKE ALL ON FUNCTION config.delete_known_pattern(bigint) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION config.insert_known_pattern(integer, text, time, text, integer, text, text, timestamp) TO admin, viewer;
