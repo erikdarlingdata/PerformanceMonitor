@@ -40,6 +40,9 @@ public sealed class SystemHealthEventFileLiveSqlTests
         "Set DARLING_TEST_SQL (and, for SQL auth, DARLING_TEST_SQL_USER / DARLING_TEST_SQL_PASSWORD) to run the live system_health event_file tests.";
 
     /// <summary>An old cutoff: every event in the file is newer than it.</summary>
+    /// <summary>A cap no read reaches, for the reference reads the capped ones are compared with.</summary>
+    private const int Uncapped = 1_000_000;
+
     private static readonly DateTime s_longAgo = DateTime.UtcNow.AddYears(-5);
 
     private sealed record Server(SqlConnection Connection, int Major, string CurrentFile, string FilePattern);
@@ -233,7 +236,7 @@ AND   xet.target_name = N'event_file';", connection))
         var server = await OpenAsync();
         await using var connection = server.Connection;
 
-        var full = await RunPassAsync(server, state: null, watermark: s_longAgo);
+        var full = await RunPassAsync(server, state: null, watermark: s_longAgo, maxEvents: Uncapped);
         Assert.SkipWhen(full.Rows.Count < 20, "The current system_health file holds too few events to bookmark in.");
 
         /* Bookmark in the middle of the file: the buffer of the row half-way through, with that row's time as the watermark. */
@@ -244,7 +247,7 @@ AND   xet.target_name = N'event_file';", connection))
                 SystemHealthEventsCollector.FormatBookmark(middle.EventTime!.Value, middle.SourceOffset!.Value, middle.SourceFile!),
         };
 
-        var resumed = await RunPassAsync(server, state, watermark: middle.EventTime!.Value);
+        var resumed = await RunPassAsync(server, state, watermark: middle.EventTime!.Value, maxEvents: Uncapped);
 
         Assert.Null(Measured(resumed.Context, "event_file_fallback"));
         Assert.All(resumed.Rows, row =>
@@ -381,7 +384,7 @@ AND   xet.target_name = N'event_file';", connection))
         /* The uncapped read is the truth: no event was stored more often than the file holds it (two events can be
            identical, so this counts per key rather than asking for distinct rows), and the buffer the cap cut did not
            lose the events after it. */
-        var uncapped = (await RunPassAsync(server, state: null, watermark: s_longAgo, maxEvents: 1_000_000)).Rows;
+        var uncapped = (await RunPassAsync(server, state: null, watermark: s_longAgo, maxEvents: Uncapped)).Rows;
         var holds = uncapped.GroupBy(KeyOf, StringComparer.Ordinal).ToDictionary(g => g.Key, g => g.Count(), StringComparer.Ordinal);
         foreach (var group in seen.GroupBy(KeyOf, StringComparer.Ordinal))
         {
@@ -442,7 +445,7 @@ ORDER BY fs.size_in_bytes DESC;", connection);
 
         /* The version the connected server reports picks the batch; on 2017+ the 2016 batch (no timestamp_utc) must run too,
            and both must read the same events. */
-        var own = await RunPassAsync(server, state: null, watermark: s_longAgo);
+        var own = await RunPassAsync(server, state: null, watermark: s_longAgo, maxEvents: Uncapped);
         Assert.Null(Measured(own.Context, "event_file_fallback"));
         Assert.Equal(
             server.Major >= SystemHealthEventsCollector.TimestampUtcMajorVersion,
@@ -451,18 +454,20 @@ ORDER BY fs.size_in_bytes DESC;", connection);
 
         if (server.Major >= SystemHealthEventsCollector.TimestampUtcMajorVersion)
         {
-            var asOld = await RunPassAsync(server, state: null, watermark: s_longAgo, asMajor: 13);
+            var asOld = await RunPassAsync(server, state: null, watermark: s_longAgo, maxEvents: Uncapped, asMajor: 13);
             Assert.Null(Measured(asOld.Context, "event_file_fallback"));
-            Assert.Equal(Keys(own.Rows), Keys(asOld.Rows));
+            /* The file keeps growing between the reads, so compare what both could see: events up to the first read's newest. */
+            var bound = own.Rows.Max(r => r.EventTime!.Value);
+            Assert.Equal(Keys(own.Rows), Keys(asOld.Rows.Where(r => r.EventTime <= bound)));
 
             /* A watermark inside the file: the timestamp_utc filter before the XML cast and the XML time filter agree. */
             Assert.SkipWhen(own.Rows.Count < 20, "The current system_health file holds too few events to cut a watermark in.");
             var cut = own.Rows[own.Rows.Count / 2].EventTime!.Value;
-            var newer = await RunPassAsync(server, state: null, watermark: cut);
-            var newerOld = await RunPassAsync(server, state: null, watermark: cut, asMajor: 13);
+            var newer = await RunPassAsync(server, state: null, watermark: cut, maxEvents: Uncapped);
+            var newerOld = await RunPassAsync(server, state: null, watermark: cut, maxEvents: Uncapped, asMajor: 13);
             Assert.NotEmpty(newer.Rows);
             Assert.All(newer.Rows, row => Assert.True(row.EventTime > cut));
-            Assert.Equal(Keys(newer.Rows), Keys(newerOld.Rows));
+            Assert.Equal(Keys(newer.Rows.Where(r => r.EventTime <= bound)), Keys(newerOld.Rows.Where(r => r.EventTime <= bound)));
         }
     }
 }

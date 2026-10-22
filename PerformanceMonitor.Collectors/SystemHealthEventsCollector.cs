@@ -148,14 +148,14 @@ public sealed class SystemHealthEventsCollector : CollectorDefinitionBase<System
     }
 
     /// <summary>
-    /// The most events one pass reads from the event_file target. 3,000 is measured, not guessed: on the sql2019 test
-    /// server a pass over the start of a 99 MB file (the largest backlog, the slowest events: a bookmark at the first buffer
-    /// of a file holding 253,000 of them) read 9,950 events in 13.6 s, about 1.4 ms an event, file read and XML cast
-    /// together. 3,000 events is about 4 s there, so a pass stays well under Lite's 30 second command timeout and Darling's
-    /// 60 even on a server several times slower (a read that outruns the timeout is cancelled by the client, which
-    /// skips the batch's CATCH and saves no state, so the same read would repeat every interval). A pass that reads this
-    /// many keeps its bookmark and rows, and the next pass continues from there. A server writes a few hundred of these
-    /// events an hour, so the cap only ever matters for a backlog (a long outage, a first read of a large file).
+    /// The most events one pass reads from the event_file target. 3,000 is measured, not guessed. On the sql2019 test
+    /// server a pass that starts at the first buffer of a 99 MB file (253,000 events, the largest backlog it can meet) took
+    /// 13.6 s for 9,950 events and 9.1 s for 2,999: about 6 s to open the big file plus about 0.7 ms an event, file read and
+    /// XML cast together. So 3,000 is the worst case at about 9 s, three times under Lite's 30 second command timeout and
+    /// six under Darling's 60 (a file at the session's default 5 MB is about a second). A read that outruns the timeout
+    /// is cancelled by the client, which skips the batch's CATCH and saves no state, so the same read would repeat every
+    /// interval. A pass that reads this many keeps its bookmark and rows, and the next pass continues from there. A server
+    /// writes a few hundred of these events an hour, so the cap only ever matters for a backlog.
     /// </summary>
     public const int MaxEventsPerPass = 3_000;
 
