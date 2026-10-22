@@ -119,10 +119,10 @@ VALUES ($1, $2, $3, $4, 45, 30, TRUE, 'email', NULL, FALSE, FALSE, NULL, NULL)",
         // Security review of #6334: at metadataOnly the operator's note is withheld in both reads the tools make (the host filter masks
         // created_by by key name, so this checks the note, which only the tool can mask).
         var metadataOnly = new McpDataDetailSetting(McpDataDetail.MetadataOnly);
-        var withheldList = await DarlingMcpKnownPatternTools.GetKnownPatterns(dataSource, dataDetail: metadataOnly, cancellationToken: ct);
+        var withheldList = await DarlingMcpKnownPatternTools.GetKnownPatterns(dataSource, maskSetting: metadataOnly, cancellationToken: ct);
         Assert.DoesNotContain("nightly index job", withheldList, StringComparison.Ordinal);
         Assert.Contains(McpDataDetailMasker.WithheldText, withheldList, StringComparison.Ordinal);
-        var withheldAlerts = await DarlingMcpAlertTools.GetAlertHistory(dataSource, ServerName, 240, 50, dataDetail: metadataOnly, cancellationToken: ct);
+        var withheldAlerts = await DarlingMcpAlertTools.GetAlertHistory(dataSource, ServerName, 240, 50, maskSetting: metadataOnly, cancellationToken: ct);
         Assert.DoesNotContain("nightly index job", withheldAlerts, StringComparison.Ordinal);
         Assert.DoesNotContain("blocking is known on this fleet", withheldAlerts, StringComparison.Ordinal);
 

@@ -47,7 +47,7 @@ public sealed class DarlingMcpKnownPatternTools
         [Description("Server name or display name: this server's entries plus those for every server. Omit for all entries.")] string? server_name = null,
         [Description("Only entries for this alert metric (matched ignoring case) plus those for every metric. Omit for all.")] string? metric_name = null,
         [Description("Include entries whose expiry has passed. Default false.")] bool include_expired = false,
-        McpDataDetailSetting? dataDetail = null,
+        McpDataDetailSetting? maskSetting = null,
         CancellationToken cancellationToken = default)
     {
         int? serverId = null;
@@ -80,7 +80,7 @@ public sealed class DarlingMcpKnownPatternTools
                     new { configured_count = all.Count });
             }
 
-            return Reply(list, now, McpDataDetailMasker.ForAnswer(dataDetail?.Mode ?? McpDataDetail.Full));
+            return Reply(list, now, McpDataDetailMasker.ForAnswer(maskSetting?.Mode ?? McpDataDetail.Full));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

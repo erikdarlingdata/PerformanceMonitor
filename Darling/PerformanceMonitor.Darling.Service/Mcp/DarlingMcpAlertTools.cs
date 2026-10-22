@@ -91,7 +91,7 @@ public sealed partial class DarlingMcpAlertTools
         [Description("Only alerts with this metric name (e.g. 'High CPU', 'Blocking Detected'), matched exactly, ignoring case. Omit for every metric.")] string? metric_name = null,
         [Description("Only alerts of this family: self-monitor, reports, agent-jobs, performance or external. Omit for every family.")] string? family = null,
         [Description("Add streak_days to each row: days in a row (up to 7) this metric fired at this time of day before the alert, muted fires counting. Default false: rows are unchanged.")] bool include_streak = false,
-        McpDataDetailSetting? dataDetail = null,
+        McpDataDetailSetting? maskSetting = null,
         CancellationToken cancellationToken = default)
     {
         /* #5562 ruling R8: the alert table keeps 90 days and the read is capped by its row limit (DarlingAlertReader LIMIT), so it reaches the retention. */
@@ -152,7 +152,7 @@ public sealed partial class DarlingMcpAlertTools
 
             /* #6334: the known-pattern entries, loaded ONCE for the page and matched in memory (no query per row). */
             var knownPatterns = await DarlingMcpKnownPatternTools.LoadForAlertsAsync(postgres, cancellationToken);
-            var knownMasker = McpDataDetailMasker.ForAnswer(dataDetail?.Mode ?? McpDataDetail.Full);
+            var knownMasker = McpDataDetailMasker.ForAnswer(maskSetting?.Mode ?? McpDataDetail.Full);
 
             IEnumerable<object> alerts = page.Select<DarlingAlertReader.AlertHistoryReadRow, object>(r =>
             {
