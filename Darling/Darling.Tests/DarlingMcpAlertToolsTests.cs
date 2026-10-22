@@ -1636,6 +1636,24 @@ public sealed class SetMuteRuleEnabledTests
             System.Globalization.CultureInfo.InvariantCulture,
             System.Globalization.DateTimeStyles.RoundtripKind);
 
+    /// <summary>#6403: updated and unchanged both carry the previous value and the call that puts it back; running that call restores the rule.</summary>
+    [Theory]
+    [InlineData(true, false, "updated")]
+    [InlineData(false, false, "unchanged")]
+    public async Task TheAnswer_CarriesThePreviousValue_AndAnUndoThatRestoresIt(bool before, bool sent, string status)
+    {
+        var store = StoreWith(enabled: before);
+
+        var answer = JsonNode.Parse(await DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, RuleId, sent))!;
+        Assert.Equal(status, (string)answer["status"]!);
+        Assert.Equal(before, (bool)answer["previous"]!["enabled"]!);
+        Assert.Equal("set_mute_rule_enabled", (string)answer["undo"]!["tool"]!);
+
+        var arguments = answer["undo"]!["arguments"]!;
+        await DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, (string)arguments["rule_id"]!, (bool)arguments["enabled"]!);
+        Assert.Equal(before, store.Row(RuleId)!.Enabled);
+    }
+
     /* ---------------- the instrument ---------------- */
 
     [Fact]

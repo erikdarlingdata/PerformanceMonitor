@@ -759,7 +759,7 @@ public sealed partial class DarlingMcpAlertTools
     };
 
     [McpServerTool(Name = "set_notification_route_enabled"), Description(
-        "Enables or disables a notification route by route_id, WITHOUT deleting it. Changes shared alert configuration the service delivers on: a disabled route is skipped at resolution as if it did not exist, so its alerts fall to the next level (family route, then parent channels). Reversible: re-enabling restores it exactly. Returns updated (route as stored), unchanged (already that value, safe to retry), or not_found. Cannot author or re-point a route; that is Settings-window only." +
+        "Enables or disables a notification route by route_id, WITHOUT deleting it. Changes shared alert configuration the service delivers on: a disabled route is skipped at resolution as if it did not exist, so its alerts fall to the next level (family route, then parent channels). Reversible: re-enabling restores it exactly. Returns updated (route as stored), unchanged (already that value, safe to retry), or not_found; updated and unchanged carry previous {enabled} and undo (the call that sets the previous value back). Cannot author or re-point a route; that is Settings-window only." +
         "<<GUIDE>>" +
         "Enables or disables a notification route by its route_id (from get_notification_routes) WITHOUT deleting it. " +
         "A disabled route is skipped at resolution exactly as if it did not exist, so the alerts it matched fall to " +
@@ -795,7 +795,13 @@ public sealed partial class DarlingMcpAlertTools
 
             if (existing.Enabled == enabled)
             {
-                return JsonSerializer.Serialize(new { status = "unchanged", route = RoutePayload(existing) }, McpHelpers.JsonOptions);
+                return JsonSerializer.Serialize(new
+                {
+                    status = "unchanged",
+                    route = RoutePayload(existing),
+                    previous = new { enabled = existing.Enabled },
+                    undo = UndoCall("set_notification_route_enabled", new { route_id, enabled = existing.Enabled }),
+                }, McpHelpers.JsonOptions);
             }
 
             if (await store.SetEnabledAsync(route_id, enabled) == 0)
@@ -807,7 +813,13 @@ public sealed partial class DarlingMcpAlertTools
 
             /* Re-read AFTER the write, so the reported row is the stored one (set_mute_rule_enabled's rule). */
             var stored = (await store.LoadSummariesAsync()).FirstOrDefault(r => r.RouteId == route_id);
-            return JsonSerializer.Serialize(new { status = "updated", route = stored is null ? null : RoutePayload(stored) }, McpHelpers.JsonOptions);
+            return JsonSerializer.Serialize(new
+            {
+                status = "updated",
+                route = stored is null ? null : RoutePayload(stored),
+                previous = new { enabled = existing.Enabled },
+                undo = UndoCall("set_notification_route_enabled", new { route_id, enabled = existing.Enabled }),
+            }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
         {
@@ -824,7 +836,7 @@ public sealed partial class DarlingMcpAlertTools
         "of those to the 'Investigation Not Picked Up' self-alert. Pass a fallback_route_id to set it, or omit it to clear. " +
         "A route cannot be its own fallback and the fallback must be an existing route: either is refused with " +
         "{status:\"invalid\"}. Returns {status:\"updated\", route:{...}} with the route AS STORED, {status:\"unchanged\", route:{...}} " +
-        "when it already holds that value, or {status:\"not_found\"}. An agent route (agent_level 1 or more) is " +
+        "when it already holds that value (both carry previous {fallback_route_id} and undo, the call that sets the previous fallback back), or {status:\"not_found\"}. An agent route (agent_level 1 or more) is " +
         "{status:\"refused\"}: it is changed in the Viewer. Deleting the fallback route clears the reference.")]
     public static async Task<string> SetNotificationRouteFallback(
         NpgsqlDataSource postgres,
@@ -853,12 +865,24 @@ public sealed partial class DarlingMcpAlertTools
 
             if (existing.FallbackRouteId == fallback_route_id)
             {
-                return JsonSerializer.Serialize(new { status = "unchanged", route = RoutePayload(existing) }, McpHelpers.JsonOptions);
+                return JsonSerializer.Serialize(new
+                {
+                    status = "unchanged",
+                    route = RoutePayload(existing),
+                    previous = new { fallback_route_id = existing.FallbackRouteId },
+                    undo = FallbackUndo(route_id, existing.FallbackRouteId),
+                }, McpHelpers.JsonOptions);
             }
 
             await store.SetFallbackAsync(route_id, fallback_route_id);
             var stored = (await store.LoadSummariesAsync()).FirstOrDefault(r => r.RouteId == route_id);
-            return JsonSerializer.Serialize(new { status = "updated", route = stored is null ? null : RoutePayload(stored) }, McpHelpers.JsonOptions);
+            return JsonSerializer.Serialize(new
+            {
+                status = "updated",
+                route = stored is null ? null : RoutePayload(stored),
+                previous = new { fallback_route_id = existing.FallbackRouteId },
+                undo = FallbackUndo(route_id, existing.FallbackRouteId),
+            }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
         {
@@ -1670,7 +1694,7 @@ public sealed partial class DarlingMcpAlertTools
         "actually has. And between the delete taking effect and the create taking effect, every alert the " +
         "rule was suppressing is delivered. NEITHER direction changes created_at_utc. Returns " +
         "{status:\"updated\", mute_rule:{...}} with the rule AS STORED, {status:\"unchanged\", mute_rule:{...}} " +
-        "when the rule already holds that value (so a retry is safe and costs no write), or " +
+        "when the rule already holds that value (so a retry is safe and costs no write); both carry previous {enabled} and undo (the call that sets the previous value back), or " +
         "{status:\"not_found\"} when no rule has that id. The running service applies the change on its next " +
         "collection sweep, when the write's config_version bump makes it reload its mute cache — so a " +
         "matching alert already mid-flight can still be delivered once after a disable, and one can still be " +
@@ -1728,7 +1752,13 @@ public sealed partial class DarlingMcpAlertTools
             if (existing.Enabled == enabled)
             {
                 return JsonSerializer.Serialize(
-                    new { status = "unchanged", mute_rule = BuildMuteRulePayload(existing) },
+                    new
+                    {
+                        status = "unchanged",
+                        mute_rule = BuildMuteRulePayload(existing),
+                        previous = new { enabled = existing.Enabled },
+                        undo = UndoCall("set_mute_rule_enabled", new { rule_id = ruleId, enabled = existing.Enabled }),
+                    },
                     McpHelpers.JsonOptions);
             }
 
@@ -1745,7 +1775,13 @@ public sealed partial class DarlingMcpAlertTools
             }
 
             return JsonSerializer.Serialize(
-                new { status = "updated", mute_rule = BuildMuteRulePayload(stored) },
+                new
+                {
+                    status = "updated",
+                    mute_rule = BuildMuteRulePayload(stored),
+                    previous = new { enabled = existing.Enabled },
+                    undo = UndoCall("set_mute_rule_enabled", new { rule_id = ruleId, enabled = existing.Enabled }),
+                },
                 McpHelpers.JsonOptions);
         }
         catch (Exception ex)
@@ -2274,6 +2310,18 @@ public sealed partial class DarlingMcpAlertTools
     /// the whole point of keeping it: <c>delivery.cooldown_minutes</c> is what the tool reports, and this is
     /// what every existing config file, Settings window and hand-written UPDATE already calls it.</summary>
     internal const string DeliveryCooldownColumn = "email_cooldown_minutes";
+
+    /// <summary>
+    /// The undo a write answer carries (#6403): the tool and arguments that put the change back, the same <c>{tool, arguments}</c>
+    /// shape the collection-state, schedule and plan tools answer with.
+    /// </summary>
+    internal static object UndoCall(string tool, object arguments) => new { tool, arguments };
+
+    /// <summary>The undo of set_notification_route_fallback: the same tool with the previous fallback, or with none when there was none (omitting it clears).</summary>
+    private static object FallbackUndo(int routeId, int? previousFallback) =>
+        previousFallback is { } id
+            ? UndoCall("set_notification_route_fallback", new { route_id = routeId, fallback_route_id = id })
+            : UndoCall("set_notification_route_fallback", new { route_id = routeId });
 
     private static string? Trimmed(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
