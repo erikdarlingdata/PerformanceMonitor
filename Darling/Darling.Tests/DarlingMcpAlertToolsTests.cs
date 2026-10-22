@@ -65,6 +65,7 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         "get_alert_settings",
         "get_mute_rules",
         "get_notification_routes",
+        "purge_expired_mute_rules",
         "restore_alert_history",
         "set_mute_rule_enabled",
         "set_notification_route_enabled",
@@ -1392,6 +1393,7 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     [InlineData("set_mute_rule_enabled", "enabled,rule_id")]
     [InlineData("update_mute_rule", "changes_json,rule_id")]
     [InlineData("get_notification_routes", "")]
+    [InlineData("purge_expired_mute_rules", "")]
     [InlineData("set_notification_route_enabled", "enabled,route_id")]
     [InlineData("set_notification_route_fallback", "route_id")]
     [InlineData("delete_notification_route", "route_id")]

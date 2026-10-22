@@ -68,7 +68,7 @@ export const MCP_ACTION_TOOL_NAMES = [
   "delete_server_tag", "describe_custom_view_catalog", "disable_collector", "disable_server", "dismiss_alert_history", "edit_server",
   "enable_collector", "enable_server", "evict_cached_plan", "find_database", "force_query_store_plan", "kill_session",
   "list_custom_alert_rules", "list_custom_alert_templates", "list_custom_views", "list_investigation_requests", "list_query_tag_rules",
-  "list_query_tags", "list_servers", "merge_deadlock_signatures", "mute_analysis_finding", "pause_collection", "purge_now",
+  "list_query_tags", "list_servers", "merge_deadlock_signatures", "mute_analysis_finding", "pause_collection", "purge_expired_mute_rules", "purge_now",
   "reload_config", "remove_server", "restore_alert_history", "resume_collection", "run_collectors_now", "run_custom_view_panel",
   "set_alert_threshold_override", "set_collector_frequency", "set_collector_retention", "set_collector_run_at", "set_mute_rule_enabled",
   "set_notification_route_enabled", "set_notification_route_fallback", "set_quiet_window", "set_server_action", "set_server_excluded_databases",
