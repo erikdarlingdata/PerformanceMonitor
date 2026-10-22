@@ -671,8 +671,9 @@
                         </Grid>
                     </TabItem>
                     <!-- Active Queries (Lite ServerTab.xaml:283-403): the hourly slicer + ~26-column
-                         snapshot grid. "Latest Snapshot" re-reads the newest STORED batch (no live SQL —
-                         Erik's decision); the Query Plan buttons open the stored plan through the
+                         snapshot grid. "Latest Snapshot" sends a snapshot_now command so the service captures a fresh
+                         batch, then re-reads the newest STORED batch (a read-only seat skips the command and only
+                         re-reads, no live SQL from the viewer); the Query Plan buttons open the stored plan through the
                          OpenPlanTab partial hook the plan-host wave implements. -->
                     <TabItem Header="Active Queries">
                         <Grid>
@@ -3878,11 +3879,24 @@
                      control command. Placed on Collection Health (the store-health tab) rather than a
                      per-server toolbar because the purge is fleet-wide over the shared store tables. A
                      read-only viewer seat can't enqueue commands, so the handler shows an explanation. -->
-                <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
-                    <Button x:Name="PurgeNowButton" Content="Purge Now..." Click="PurgeNow_Click"
-                            Padding="12,4" Margin="0,0,8,0" VerticalAlignment="Center"/>
-                    <TextBlock x:Name="PurgeNowIndicator" Text="" FontSize="12"
-                               Foreground="DarkGoldenrod" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                <!-- #6382: "Run all collectors now" and (in the Health Summary grid) a per-collector "Run now", the web's #5941 pair.
+                     Both send a snapshot_now command for this server; the status line carries the web's result text. -->
+                <StackPanel Grid.Row="0" Margin="0,0,0,8">
+                    <StackPanel Orientation="Horizontal">
+                        <Button x:Name="PurgeNowButton" Content="Purge Now..." Click="PurgeNow_Click"
+                                Padding="12,4" Margin="0,0,8,0" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="PurgeNowIndicator" Text="" FontSize="12"
+                                   Foreground="DarkGoldenrod" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                        <Button x:Name="RunAllCollectorsButton" Content="Run all collectors now" Click="RunAllCollectors_Click"
+                                ToolTip="Runs every enabled collector for this server once, now. Disabled collectors are skipped. Schedules do not change."
+                                Padding="12,4" Margin="0,0,8,0" VerticalAlignment="Center"/>
+                        <TextBlock Text="Runs every enabled collector once. This puts extra load on the monitored server; use Run now on one collector in the table below to run just that one."
+                                   FontSize="12" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" TextWrapping="Wrap"/>
+                    </StackPanel>
+                    <TextBlock x:Name="CollectorRunIndicator" Text="" FontSize="12" TextWrapping="Wrap" Margin="0,4,0,0"
+                               Foreground="DarkGoldenrod" FontWeight="SemiBold" Visibility="Collapsed"/>
                 </StackPanel>
                 <!-- #5735: the collection slots the loop stepped over in the last 24 h. Always shown, so a reader sees at once whether
                      collection has been falling behind; the all-clear says so plainly, and a failed read says it could not be read. -->
@@ -3909,6 +3923,15 @@
                         <DataGrid x:Name="CollectionHealthGrid" Style="{StaticResource DarkGrid}"
                                   MouseDoubleClick="CollectionHealthGrid_MouseDoubleClick">
                             <DataGrid.Columns>
+                                <DataGridTemplateColumn Header="Run now" Width="85" CanUserSort="False">
+                                    <DataGridTemplateColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <Button Content="Run now" Click="RunCollectorNow_Click"
+                                                    ToolTip="Runs this collector once, now, even if it is disabled. Its schedule and enabled state do not change."
+                                                    HorizontalAlignment="Center" VerticalAlignment="Center" Padding="8,2"/>
+                                        </DataTemplate>
+                                    </DataGridTemplateColumn.CellTemplate>
+                                </DataGridTemplateColumn>
                                 <DataGridTextColumn Binding="{Binding CollectorName}" Width="180">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollectorName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Collector" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>

@@ -7,7 +7,7 @@
  */
 
 /* Admin: a window onto what the desktop's Manage Servers, Notification Routes and Settings windows show.
-   Seven tabs (the first three each one existing read):
+   Ten tabs (the first three each one existing read):
      Servers             GET /api/admin/servers (every configured server, enabled or not)
      Notification Routes get_notification_routes
      Alert Settings      get_alert_settings
@@ -16,7 +16,10 @@
      Practice Scores     GET /api/investigation-practice-scores (#5918: how each agent did on practice requests), and Start (#6265)
      Pending Notes       GET /api/investigation-notes/pending, with Approve and Reject (#5903), and Write a note (#6265)
      Threshold Overrides GET /api/threshold-overrides, with Save, Edit and Remove under an admin store login (#5916)
-   Routes and Settings change nothing. The Servers tab also lets a sign-in that can make changes edit one server in place
+     Agent changes       what agents changed and were refused, with Undo and the switch that turns agent changes off (#5917)
+     Server actions      GET /api/server-actions, with the per-server action switches an admin store login can change (#6269)
+     Environment Profiles GET /api/environment-profiles, edited as in the Viewer (#6264)
+   Alert Settings changes nothing; Notification Routes edits the agent channel for a sign-in that can make changes (#6264). The Servers tab also lets a sign-in that can make changes edit one server in place
    (#5240): an Edit button on each row opens a form above the grid, filled from GET /api/admin/servers/{id}.
    The active tab rides in the hash (#/admin/<tab>) and in module scope, so the 60 s repaint keeps it.
    Every cell is an allow-listed column or a key the settings read emits; a route row's destinations are never

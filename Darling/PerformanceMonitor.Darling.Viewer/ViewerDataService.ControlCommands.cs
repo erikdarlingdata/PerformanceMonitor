@@ -62,6 +62,12 @@ public sealed partial class ViewerDataService
     public Task<CommandResult?> RequestSnapshotNowAsync(int serverId, CancellationToken cancellationToken = default) =>
         RunCommandAsync(CommandSnapshotNow, serverId, argsJson: null, RequestedBy(), ImperativeCommandTimeout, cancellationToken);
 
+    /// <summary>Enqueues a <c>snapshot_now</c> for one server and waits for the terminal result (#6382: the Collection Health tab's "Run all
+    /// collectors now" and per-collector "Run now"). <paramref name="collectors"/> null or empty is the run-all form (every enabled
+    /// collector); a list runs only those, each even when disabled, the same argument the web's route sends (#5941). Returns null on timeout.</summary>
+    public Task<CommandResult?> RequestCollectorRunAsync(int serverId, System.Collections.Generic.IReadOnlyList<string>? collectors, CancellationToken cancellationToken = default) =>
+        RunCommandAsync(CommandSnapshotNow, serverId, ViewerCollectorRun.BuildArgs(collectors), RequestedBy(), ImperativeCommandTimeout, cancellationToken);
+
     /// <summary>Enqueues an <c>analyze_now</c> for one server (force an analysis pass now) and waits for the
     /// terminal result. Returns null on timeout.</summary>
     public Task<CommandResult?> RequestAnalyzeNowAsync(int serverId, CancellationToken cancellationToken = default) =>
