@@ -44,8 +44,9 @@ namespace PerformanceMonitor.Common;
 /// drift into refusing differently, and a tool added tomorrow is covered the day it is registered.</para>
 ///
 /// <para><b>What it refuses, and what it deliberately does not.</b> Only a key that is NOT a property of the
-/// tool's advertised schema. An OMITTED optional parameter is not an unknown key and never was — the guard
-/// reads the keys that arrived, never the ones that did not, so optionality and null handling are untouched.
+/// tool's advertised schema. An OMITTED optional parameter is not an unknown key and never was — the unknown-key
+/// check reads the keys that arrived, so optionality and null handling are untouched. (An omitted REQUIRED
+/// parameter is a separate arm, <c>RefuseMissingRequired</c>, which names it; see below.)
 /// A declared parameter that some code path ignores is likewise not unknown: the schema is the contract, not
 /// the reachability of a branch. Protocol metadata (<c>_meta</c>, the progress token) travels in
 /// <c>CallToolRequestParams</c> SIBLINGS of <c>Arguments</c>, not inside it, so this reads only the

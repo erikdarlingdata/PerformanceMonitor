@@ -1297,7 +1297,10 @@ public sealed partial class DarlingMcpAlertTools
                 /* Bare column names, unqualified, even though two tables are now in play: this array is a
                    consumer API and qualifying the existing entries would redefine every one of them. No
                    writable column name appears on both tables, so a bare name is still unambiguous --
-                   asserted, not assumed, by WritableColumnNames_DoNotCollideAcrossTheTwoTables. */
+                   asserted, not assumed, by WritableColumnNames_DoNotCollideAcrossTheTwoTables. The one
+                   exception is the cooldown, reported as delivery.cooldown_minutes (#6455): that is the name
+                   DeliveryCooldownColumn's doc and Darling/README.md already gave it, so the code was the part
+                   that was wrong. */
                 updated_fields = updates.Select(u => UpdatedFieldName(u.Column)).ToArray(),
                 /* #3653: always present, usually empty — a caller branching on it should not have to probe
                    for the key. Non-empty only when a field was written that nothing consults (today:

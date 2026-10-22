@@ -52,6 +52,8 @@ public sealed class McpWriteToolWordingTests
     [InlineData("12.5")]
     [InlineData("-5")]
     [InlineData("99999999999999999999999")]
+    [InlineData("0")]
+    [InlineData("0x0000000000000000")]
     public async Task AssignQueryTag_RefusesAHashThatIsNotHexadecimal(string hash)
     {
         /* The refusal comes before the first store call, so a data source that cannot connect is enough. */
@@ -70,7 +72,7 @@ public sealed class McpWriteToolWordingTests
     [InlineData("42")]
     public void AHashTheTraceOrTheDmvsStore_IsAccepted(string hash)
     {
-        Assert.True(DarlingMcpQueryTagTools.IsHashText(hash));
+        Assert.True(PerformanceMonitor.Common.QueryHashIdentity.IsAssignableHash(hash));
     }
 
     [Fact]
