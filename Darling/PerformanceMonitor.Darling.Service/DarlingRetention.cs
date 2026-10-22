@@ -781,10 +781,10 @@ public static class DarlingRetention
                 /* #2150: query_store statement text, same shape and same direction of margin as the two
                    above — it must outlive the facts that reference it, because text retired early reads as a
                    statement that never had text rather than as one whose text expired. */
-                var queryTextCutoff = utcNow.AddDays(-(widestFactRetentionDays + QueryStoreTextStore.PruneMarginDays));
+                var tablesLeftBefore = walPacer?.Yield?.TablesLeft ?? 0;
                 if (queryTextPruneGate is null || queryTextPruneGate.IsDue())
                 {
-                    var tablesLeftBefore = walPacer?.Yield?.TablesLeft ?? 0;
+                    var queryTextCutoff = utcNow.AddDays(-(widestFactRetentionDays + QueryStoreTextStore.PruneMarginDays));
                     var queryTextDeleted = await PurgeOneAsync(
                         postgres, QueryStoreTextStore.TableName,
                         UnorderedRowCappedDeleteSql(
