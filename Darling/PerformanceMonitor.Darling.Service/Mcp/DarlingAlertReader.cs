@@ -727,4 +727,18 @@ WHERE id = 1";
 
         return new AlertConfigurationRead(settings, delivery);
     }
+
+    /// <summary>
+    /// The same two-table read over a transaction the CALLER owns (#6403): update_alert_settings reads what its sent fields hold
+    /// inside its own write transaction, after it has locked the rows it is about to update, so the <c>previous</c> it reports is
+    /// exactly what the write replaced. The single-table reads stay private; this and the entry point above are the only ways in.
+    /// </summary>
+    public static async Task<AlertConfigurationRead> GetAlertConfigurationAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, CancellationToken cancellationToken = default)
+    {
+        var settings = await ReadAlertSettingsAsync(connection, transaction, cancellationToken);
+        var delivery = await ReadDeliveryAsync(connection, transaction, cancellationToken);
+
+        return new AlertConfigurationRead(settings, delivery);
+    }
 }

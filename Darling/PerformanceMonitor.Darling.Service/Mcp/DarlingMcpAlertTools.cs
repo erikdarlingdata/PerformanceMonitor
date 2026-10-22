@@ -1272,17 +1272,32 @@ public sealed partial class DarlingMcpAlertTools
                reads modified_at -- it is in no viewer projection, no payload and no decision -- and bumping it
                on config_notification would mean granting mcp UPDATE on a SECOND column of a table holding
                bearer secrets, to maintain a value with no reader. */
-            /* #6403: the settings as they stand before the write, one snapshot over both tables, so the answer can name what each sent
-               field held and carry the call that puts them back. */
-            var (settingsBefore, cooldownBefore) = await DarlingAlertReader.GetAlertConfigurationAsync(postgres);
+            await using var connection = await postgres.OpenConnectionAsync();
+            await using var transaction = await connection.BeginTransactionAsync();
+
+            /* #6403: the settings as they stand before the write, read INSIDE this transaction after the rows it updates are locked
+               (fixed table order, the same as the writes below), so `previous` is exactly what the write replaced: a concurrent
+               update_alert_settings waits on the lock rather than landing between this read and the UPDATE. A read in its own
+               transaction before this one would not hold that. */
+            foreach (var table in WritableTables)
+            {
+                if (!updates.Any(u => string.Equals(u.Table, table, StringComparison.Ordinal)))
+                {
+                    continue;
+                }
+
+                var lockSql = $"SELECT id FROM {table} WHERE id = 1 FOR UPDATE";
+                await using var lockCommand = new NpgsqlCommand(lockSql, connection) { Transaction = transaction };
+                lockCommand.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                await lockCommand.ExecuteScalarAsync();
+            }
+
+            var (settingsBefore, cooldownBefore) = await DarlingAlertReader.GetAlertConfigurationAsync(connection, transaction);
             var previous = settingsBefore is null || cooldownBefore is null
                 ? new JsonObject()
                 : AlertSettingsPreviousFields(
                     JsonSerializer.SerializeToNode(BuildAlertSettingsPayload(settingsBefore, cooldownBefore), McpHelpers.JsonOptions),
                     updates);
-
-            await using var connection = await postgres.OpenConnectionAsync();
-            await using var transaction = await connection.BeginTransactionAsync();
 
             foreach (var table in WritableTables)
             {

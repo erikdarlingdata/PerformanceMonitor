@@ -194,6 +194,41 @@ public sealed class ToolUndoAnswersLiveTests
         });
     }
 
+    /// <summary>
+    /// #6403: <c>previous</c> is what the write REPLACED, not what the row held a moment before. Another writer holds the settings row
+    /// while update_alert_settings runs; the tool waits on the row, then reads and writes after that writer commits, so the answer
+    /// names the other writer's value and its undo restores it. A pre-write read taken before the transaction would name the old one.
+    /// </summary>
+    [Fact]
+    public async Task UpdateAlertSettings_PreviousIsReadUnderTheRowLock_SoAConcurrentWriteIsNotMissed()
+    {
+        await RunAsync(async (source, connection, ct) =>
+        {
+            const string read = "SELECT cpu_threshold_percent FROM config_alert_settings WHERE id = 1";
+            var original = await ScalarAsync(connection, read, ct);
+            Assert.NotEqual("61", original);
+
+            await using var other = await connection.BeginTransactionAsync(ct);
+            await using (var hold = new NpgsqlCommand("UPDATE config_alert_settings SET cpu_threshold_percent = 61 WHERE id = 1", connection, other))
+            {
+                await hold.ExecuteNonQueryAsync(ct);
+            }
+
+            var pending = DarlingMcpAlertTools.UpdateAlertSettings(source, "{\"cpu\":{\"threshold_percent\":77}}");
+            await Task.Delay(1500, ct);
+            Assert.False(pending.IsCompleted, "the update should wait for the row the other writer holds");
+            await other.CommitAsync(ct);
+
+            var updated = Parse(await pending);
+            Assert.Equal("updated", (string)updated["status"]!);
+            Assert.Equal(61, (int)updated["previous"]!["cpu"]!["threshold_percent"]!);
+            var arguments = UndoOf(updated, "update_alert_settings");
+
+            await DarlingMcpAlertTools.UpdateAlertSettings(source, Text(arguments, "settings_json")!);
+            Assert.Equal("61", await ScalarAsync(connection, read, ct));
+        });
+    }
+
     [Fact]
     public async Task SetAlertThresholdOverride_AnswersWithAnUndo_ThatClearsANewOverride_AndRestoresAPreviousOne()
     {
