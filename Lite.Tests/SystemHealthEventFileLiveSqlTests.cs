@@ -39,15 +39,20 @@ public sealed class SystemHealthEventFileLiveSqlTests
     private const string SkipMessage =
         "Set DARLING_TEST_SQL (and, for SQL auth, DARLING_TEST_SQL_USER / DARLING_TEST_SQL_PASSWORD) to run the live system_health event_file tests.";
 
-    /// <summary>An old cutoff: every event in the file is newer than it.</summary>
     /// <summary>A cap no read reaches, for the reference reads the capped ones are compared with.</summary>
     private const int Uncapped = 1_000_000;
 
+    /// <summary>An old cutoff: every event in the file is newer than it.</summary>
     private static readonly DateTime s_longAgo = DateTime.UtcNow.AddYears(-5);
 
     private sealed record Server(SqlConnection Connection, int Major, string CurrentFile, string FilePattern);
 
     private sealed record Pass(List<SystemHealthEventsCollector.Row> Rows, CollectorContext Context, TimeSpan Elapsed);
+
+    /// <summary>One pass of a chain: the watermark it read past, whether it read from a bookmark, where its bookmark ended.</summary>
+    private sealed record ChainPass(DateTime Watermark, bool FromBookmark, string? EndFile, long EndOffset, int Rows);
+
+    private sealed record Chain(List<SystemHealthEventsCollector.Row> Seen, List<ChainPass> Passes);
 
     private static string? ConnectionString()
     {
@@ -204,13 +209,17 @@ AND   xet.target_name = N'event_file';", connection))
         return ex.Number;
     }
 
-    [Fact]
-    public async Task AFirstRead_WithNoBookmark_ReadsTheCurrentFileOnly_InFileOrder_AndLeavesABookmark()
+    [Theory]
+    [InlineData(null)]
+    [InlineData(13)]
+    public async Task AFirstRead_WithNoBookmark_ReadsTheCurrentFileOnly_InFileOrder_AndLeavesABookmark(int? asMajor)
     {
         var server = await OpenAsync();
         await using var connection = server.Connection;
 
-        var pass = await RunPassAsync(server, state: null, watermark: s_longAgo);
+        /* The 2016 batch too: its read with no bookmark is capped like every other read (a current file of more than
+           MaxEventsPerPass events used to be read whole). */
+        var pass = await RunPassAsync(server, state: null, watermark: s_longAgo, asMajor: asMajor);
 
         Assert.SkipWhen(pass.Rows.Count == 0, "The current system_health file holds none of the six captured events yet.");
         Assert.All(pass.Rows, row => Assert.Equal(server.CurrentFile, row.SourceFile, ignoreCase: true));
@@ -318,7 +327,8 @@ AND   xet.target_name = N'event_file';", connection))
         var stale = SystemHealthEventsCollector.FormatBookmark(future, 98304, MissingFileInDirectoryOf(server.CurrentFile));
         var state = new Dictionary<string, string>(StringComparer.Ordinal) { [SystemHealthEventsCollector.BookmarkStateKey] = stale };
 
-        var pass = await RunPassAsync(server, state, watermark: future);
+        /* Uncapped: a current-file read the cap stops would leave its scan position as the new bookmark instead. */
+        var pass = await RunPassAsync(server, state, watermark: future, maxEvents: Uncapped);
 
         Assert.Empty(pass.Rows);
         Assert.Equal(0, Measured(pass.Context, "event_file_events"));
@@ -342,56 +352,182 @@ AND   xet.target_name = N'event_file';", connection))
         Assert.DoesNotContain(SystemHealthEventsCollector.BookmarkStateKey, quiet.Context.PendingState.Keys);
     }
 
-    [Fact]
-    public async Task TheCap_HoldsEachPassToTheCap_AndTheNextPassContinuesWithoutRepeatingAnEvent()
+    private static int ComparePosition(string file, long offset, string otherFile, long otherOffset)
     {
-        var server = await OpenAsync();
-        await using var connection = server.Connection;
+        var byFile = string.Compare(file, otherFile, StringComparison.OrdinalIgnoreCase);
+        return byFile != 0 ? byFile : offset.CompareTo(otherOffset);
+    }
 
-        var full = await RunPassAsync(server, state: null, watermark: s_longAgo);
-        Assert.SkipWhen(full.Rows.Count < 40, "The current system_health file holds too few events to chain capped passes over.");
+    private static (string File, long Offset) PositionOf(SystemHealthEventsCollector.Row row) =>
+        (row.SourceFile!, row.SourceOffset!.Value);
 
-        /* The same file, a cap of 200 events a pass: each pass keeps its rows and its bookmark, and the next one goes on from
-           it, the way the host feeds the stored watermark and the state back. */
-        const int Cap = 200;
+    /// <summary>
+    /// Capped passes chained the way the host runs them: each pass gets the state the last one left and the stored watermark
+    /// (the newest event stored, never below the one the chain started from), until a pass returns nothing and moves no
+    /// bookmark. A pass holds to the cap, except one that read a single buffer whole.
+    /// </summary>
+    private static async Task<Chain> ChainAsync(Server server, DateTime watermark, int cap, int? asMajor)
+    {
         var seen = new List<SystemHealthEventsCollector.Row>();
+        var passes = new List<ChainPass>();
+        var elapsed = TimeSpan.Zero;
         Dictionary<string, string>? state = null;
-        DateTime? watermark = s_longAgo;
         string? previousBookmark = null;
-        var passes = 0;
+        string? endFile = null;
+        long endOffset = 0;
 
-        while (passes < 400)
+        while (passes.Count < 400)
         {
-            var pass = await RunPassAsync(server, state, watermark, maxEvents: Cap);
-            passes++;
-            Assert.True(pass.Rows.Count <= Cap, $"pass {passes} returned {pass.Rows.Count} rows against a cap of {Cap}");
-            if (pass.Rows.Count == 0)
+            var fromBookmark = state is not null && SystemHealthEventsCollector.TryUseBookmark(state, watermark) is not null;
+            var pass = await RunPassAsync(server, state, watermark, maxEvents: cap, asMajor: asMajor);
+            elapsed += pass.Elapsed;
+            var number = passes.Count + 1;
+            Assert.True(
+                pass.Rows.Count <= cap || pass.Rows.Select(PositionOf).Distinct().Count() == 1,
+                $"pass {number} returned {pass.Rows.Count} rows from more than one buffer against a cap of {cap}");
+            Assert.Null(Measured(pass.Context, "event_file_fallback"));
+            Assert.Null(Measured(pass.Context, "event_file_buffer_cut"));
+
+            pass.Context.PendingState.TryGetValue(SystemHealthEventsCollector.BookmarkStateKey, out var bookmark);
+            var moved = bookmark is not null && !string.Equals(bookmark, previousBookmark, StringComparison.Ordinal);
+            if (moved)
             {
+                var parts = bookmark!.Split('|', 3);
+                endOffset = long.Parse(parts[1], CultureInfo.InvariantCulture);
+                endFile = parts[2];
+            }
+
+            passes.Add(new ChainPass(watermark, fromBookmark, endFile, endOffset, pass.Rows.Count));
+            if (!moved)
+            {
+                Assert.True(pass.Rows.Count == 0, $"pass {number} returned {pass.Rows.Count} rows and left the bookmark where it was");
                 break;
             }
 
             seen.AddRange(pass.Rows);
-            var bookmark = pass.Context.PendingState[SystemHealthEventsCollector.BookmarkStateKey];
-            Assert.NotEqual(previousBookmark, bookmark);
             previousBookmark = bookmark;
             state = StateFrom(pass.Context);
-            watermark = seen.Max(r => r.EventTime!.Value);
+            if (pass.Rows.Count > 0)
+            {
+                var newest = pass.Rows.Max(r => r.EventTime!.Value);
+                watermark = newest > watermark ? newest : watermark;
+            }
         }
 
-        TestContext.Current.SendDiagnosticMessage($"chained capped passes: {passes} passes, {seen.Count} events");
-        Assert.True(passes > 1, "the cap never bound, so the chain proved nothing");
+        TestContext.Current.SendDiagnosticMessage(
+            $"chained capped passes (cap {cap}, major {asMajor?.ToString(CultureInfo.InvariantCulture) ?? "own"}): {passes.Count} passes, {seen.Count} events, {elapsed.TotalSeconds:0.0} s");
+        return new Chain(seen, passes);
+    }
 
-        /* The uncapped read is the truth: no event was stored more often than the file holds it (two events can be
-           identical, so this counts per key rather than asking for distinct rows), and the buffer the cap cut did not
-           lose the events after it. */
-        var uncapped = (await RunPassAsync(server, state: null, watermark: s_longAgo, maxEvents: Uncapped)).Rows;
-        var holds = uncapped.GroupBy(KeyOf, StringComparer.Ordinal).ToDictionary(g => g.Key, g => g.Count(), StringComparer.Ordinal);
-        foreach (var group in seen.GroupBy(KeyOf, StringComparer.Ordinal))
+    /// <summary>
+    /// The chain stored exactly the events it must have, compared with an uncapped read of the same file taken before it
+    /// (events written after that read are left out on both sides). Each event belongs to the first pass whose bookmark
+    /// reached its buffer (the last pass takes the rest), and is stored when it is newer than that pass's watermark, or at
+    /// it on a read from a bookmark, which keeps the cutoff inclusive. The one loss the design accepts is an event older
+    /// than the newest event stored from the buffers before it; nothing else may be missing or stored twice.
+    /// </summary>
+    private static void AssertChainStoredExactly(List<SystemHealthEventsCollector.Row> reference, Chain chain)
+    {
+        var end = reference.Select(PositionOf).Aggregate((a, b) => ComparePosition(a.File, a.Offset, b.File, b.Offset) >= 0 ? a : b);
+        var expected = reference.Where(row =>
         {
-            Assert.True(holds.TryGetValue(group.Key, out var held) && group.Count() <= held, "an event was stored more often than the file holds it");
-        }
+            var (file, offset) = PositionOf(row);
+            var pass = chain.Passes.FirstOrDefault(p => p.EndFile is not null && ComparePosition(file, offset, p.EndFile, p.EndOffset) <= 0)
+                ?? chain.Passes[^1];
+            return pass.FromBookmark ? row.EventTime >= pass.Watermark : row.EventTime > pass.Watermark;
+        });
+        var stored = chain.Seen.Where(row => ComparePosition(row.SourceFile!, row.SourceOffset!.Value, end.File, end.Offset) <= 0);
 
-        Assert.True(seen.Count >= uncapped.Count * 0.99, $"the chained capped passes read {seen.Count} of the uncapped read's {uncapped.Count} events");
+        Assert.Equal(Keys(expected), Keys(stored));
+    }
+
+    [Fact]
+    public async Task TheCap_HoldsEachPassToTheCap_AndTheChainedPassesStoreExactlyTheEventsTheFileHolds()
+    {
+        var server = await OpenAsync();
+        await using var connection = server.Connection;
+
+        var reference = (await RunPassAsync(server, state: null, watermark: s_longAgo, maxEvents: Uncapped)).Rows;
+        Assert.SkipWhen(reference.Count < 40, "The current system_health file holds too few events to chain capped passes over.");
+
+        /* A cap of 200, or one under the fullest buffer's event count (not below 50), so a pass meets a buffer that holds
+           more events than the cap: that buffer is read whole, not cut where the cap fell. */
+        var fullest = reference.GroupBy(PositionOf).Max(g => g.Count());
+        var cap = Math.Clamp(fullest - 1, 50, 200);
+        var chain = await ChainAsync(server, s_longAgo, cap, asMajor: null);
+
+        Assert.True(chain.Passes.Count > 2, "the cap never bound, so the chain proved nothing");
+        AssertChainStoredExactly(reference, chain);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(13)]
+    public async Task AFirstRead_WithAWatermarkMidFile_StopsAtTheCap_AndTheChainMovesPastTheOlderEvents(int? asMajor)
+    {
+        var server = await OpenAsync();
+        await using var connection = server.Connection;
+        Assert.SkipWhen(
+            asMajor is null && server.Major < SystemHealthEventsCollector.TimestampUtcMajorVersion,
+            "The server's own batch is the 2016 batch, which the asMajor: 13 case runs.");
+
+        const int Cap = 200;
+        var reference = (await RunPassAsync(server, state: null, watermark: s_longAgo, maxEvents: Uncapped, asMajor: asMajor)).Rows;
+        Assert.SkipWhen(reference.Count < 4 * Cap, "The current system_health file holds too few events to put a watermark past two caps' worth.");
+
+        /* The watermark: the newest event in the buffers up to the middle of the file, so at least two caps' worth of
+           events, the first pass's among them, are at or before it. */
+        var middle = PositionOf(reference[(reference.Count / 2) - 1]);
+        var watermark = reference
+            .Where(r => ComparePosition(r.SourceFile!, r.SourceOffset!.Value, middle.File, middle.Offset) <= 0)
+            .Max(r => r.EventTime!.Value);
+
+        var chain = await ChainAsync(server, watermark, Cap, asMajor);
+
+        /* The first read with no bookmark counts the older events toward the cap (2016 has no timestamp_utc; on 2017+ the
+           time test sits in the CASE, not in the WHERE inside the TOP), so it stops after Cap raw events with no row to
+           store, and still moves the bookmark past them. */
+        Assert.Equal(0, chain.Passes[0].Rows);
+        Assert.NotNull(chain.Passes[0].EndFile);
+        Assert.Contains(chain.Passes, p => p.Rows > 0);
+        AssertChainStoredExactly(reference, chain);
+    }
+
+    [Fact]
+    public async Task ABufferHoldingMoreEventsThanTheCap_IsReadWhole_AndOneBeyondTenTimesTheCapIsCutAndRecorded()
+    {
+        var server = await OpenAsync();
+        await using var connection = server.Connection;
+
+        /* The fullest buffer that has an earlier buffer to bookmark: a pass from that bookmark starts at it. */
+        var reference = (await RunPassAsync(server, state: null, watermark: s_longAgo, maxEvents: Uncapped)).Rows;
+        var buffers = reference.GroupBy(PositionOf).ToList();
+        var fullest = buffers.Skip(1).OrderByDescending(g => g.Count()).FirstOrDefault();
+        Assert.SkipWhen(fullest is null || fullest.Count() < 2, "The current system_health file has no later buffer holding two or more of the captured events.");
+        var before = buffers[buffers.IndexOf(fullest!) - 1].Key;
+        var state = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [SystemHealthEventsCollector.BookmarkStateKey] = SystemHealthEventsCollector.FormatBookmark(s_longAgo, before.Offset, before.File),
+        };
+
+        /* A cap one under the buffer's count: every capped event is in that buffer, so it is read again and kept whole, and
+           the bookmark moves to it. */
+        var whole = await RunPassAsync(server, state, s_longAgo, maxEvents: fullest!.Count() - 1);
+        Assert.Equal(Keys(fullest!), Keys(whole.Rows));
+        Assert.Null(Measured(whole.Context, "event_file_buffer_cut"));
+        var moved = SystemHealthEventsCollector.TryUseBookmark(whole.Context.PendingState, DateTime.MaxValue);
+        Assert.NotNull(moved);
+        Assert.Equal(fullest.Key.File, moved.Value.File, ignoreCase: true);
+        Assert.Equal(fullest.Key.Offset, moved.Value.Offset);
+
+        /* A cap whose tenfold is still under the buffer's count: the pass keeps the events it read, all from that buffer,
+           and records the cut. */
+        Assert.SkipWhen(fullest.Count() <= 10, "The fullest buffer holds too few events to outgrow ten times a cap of one.");
+        var cutCap = (fullest.Count() - 1) / 10;
+        var cut = await RunPassAsync(server, state, s_longAgo, maxEvents: cutCap);
+        Assert.Equal(cutCap * 10, cut.Rows.Count);
+        Assert.All(cut.Rows, row => Assert.Equal(fullest.Key.Offset, row.SourceOffset));
+        Assert.Equal(1, Measured(cut.Context, "event_file_buffer_cut"));
     }
 
     [Fact]

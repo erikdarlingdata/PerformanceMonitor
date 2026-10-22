@@ -63,11 +63,12 @@ namespace PerformanceMonitor.Collectors;
 /// the same <c>event_time</c> watermark, so a pass reads only the buffers written since the last one and stores no
 /// event twice. With no usable bookmark the read is the current file alone. Every read is capped at
 /// <see cref="MaxEventsPerPass"/> events, so one pass stays under the host's command timeout (a read the client cancels
-/// saves no state and would repeat every interval); a pass that hits the cap keeps its rows and bookmark and the next one
-/// continues. Anything that stops the file read (no event_file target, a permission refusal, Managed Instance or RDS, an
-/// error) drops back to the ring buffer exactly as before, truncation measurement included. The run records
-/// <c>event_file_events</c> for a file read, <c>event_file_fallback</c> for the fallback, and <c>event_file_error</c>
-/// (the SQL Server error number) next to it when an error caused it.</para>
+/// saves no state and would repeat every interval); a pass that hits the cap keeps its rows and moves the bookmark to the
+/// last buffer it scanned, even when every event there was older than the watermark, and the next one continues. Anything
+/// that stops the file read (no event_file target, a permission refusal, Managed Instance or RDS, an error) drops back to
+/// the ring buffer exactly as before, truncation measurement included. The run records <c>event_file_events</c> for a
+/// file read, <c>event_file_fallback</c> for the fallback, <c>event_file_error</c> (the SQL Server error number) next to
+/// it when an error caused it, and <c>event_file_buffer_cut</c> when one buffer held more than ten times the cap.</para>
 /// </summary>
 public sealed class SystemHealthEventsCollector : CollectorDefinitionBase<SystemHealthEventsCollector.Row>
 {
@@ -104,6 +105,9 @@ public sealed class SystemHealthEventsCollector : CollectorDefinitionBase<System
 
     /// <summary>The error number (<c>ERROR_NUMBER()</c>) that stopped the file read, recorded next to <see cref="EventFileFallbackMeasurement"/>. Written only when an error caused the fallback.</summary>
     internal const string EventFileErrorMeasurement = "event_file_error";
+
+    /// <summary>1 on a pass where one buffer held more events than ten times the cap: the pass kept the events it read and the bookmark skips the rest of that buffer. Written only then.</summary>
+    internal const string EventFileBufferCutMeasurement = "event_file_buffer_cut";
 
     public override IReadOnlyList<string> StateKeys { get; } = new[] { BookmarkStateKey };
 
@@ -168,16 +172,61 @@ public sealed class SystemHealthEventsCollector : CollectorDefinitionBase<System
        CONVERT(datetime2(7), x.timestamp_utc) on purpose: a plain x.timestamp_utc > @cutoff is pushed down into the
        function, where on sql2019 it returns NO rows at all (measured: 0 of 4,718 events against a cutoff years in the
        past), while the CONVERT form is evaluated on the rows the function returns and gives the right count. The
-       predicate drops events older than the cutoff before the XML cast, which is the expensive step. */
-    private const string TimestampUtcFilterSql = @"AND   CONVERT(datetime2(7), x.timestamp_utc) > @read_cutoff";
+       predicate drops events older than the cutoff before the XML cast, which is the expensive step.
 
-    /* 2016: no timestamp_utc, so the first N raw events can all be older than the cutoff. Only a read from a bookmark
-       (attempt 1) starts at newer buffers, so only it takes the cap before the cast; the current-file read with no
-       bookmark (attempt 2) reads the file's events whole and relies on the file being small (the session's default
-       is 5 MB per file). */
-    private const string ReadCapSql2016 = @"CASE WHEN @attempt = 1 THEN @max_events ELSE 9223372036854775807 END";
+       Only the read from a bookmark (attempt 1) filters in the WHERE, where the TOP counts only newer events: the
+       buffers after a bookmark are mostly newer than the watermark. The current-file read with no bookmark (attempt 2)
+       can meet a whole file of older events (a first connect, a lost bookmark), and a filter inside the TOP made it read
+       the whole file before it found @max_events newer ones (a 99 MB file took 23 s idle, about double under load). So
+       there the time test moves into the CASE that keeps event_data: older events still count toward the cap but keep no
+       text, and are deleted before the XML cast. timestamp_utc reads correctly inside a CASE (measured). */
+    private const string TimestampUtcWhereSql =
+        @"AND   (@attempt = 2 OR CONVERT(datetime2(7), x.timestamp_utc) > @read_cutoff)";
 
-    private const string ReadCapSql2017 = @"@max_events";
+    private const string TimestampUtcCaseSql =
+        @"AND CONVERT(datetime2(7), x.timestamp_utc) > @read_cutoff";
+
+    /* One read of the raw events, capped at @read_top in file order BEFORE the XML cast. @keep_file / @keep_offset, when
+       set, keep the text of that one buffer's events only (the re-read of a buffer the cap cut, below). */
+    private static string RawReadSql(bool hasTimestampUtc) => $@"
+        INSERT
+            @raw_events
+        (
+            source_file,
+            source_offset,
+            event_data
+        )
+        SELECT TOP (@read_top)
+            source_file = x.file_name,
+            source_offset = x.file_offset,
+            event_data =
+                CASE
+                    WHEN
+                    (
+                         @keep_file IS NULL
+                      OR
+                      (
+                           x.file_name = @keep_file
+                       AND x.file_offset = @keep_offset
+                      )
+                    )
+                    {(hasTimestampUtc ? TimestampUtcCaseSql : string.Empty)}
+                    THEN x.event_data
+                END
+        FROM sys.fn_xe_file_target_read_file(@read_path, NULL, @read_file, @read_offset) AS x
+        WHERE x.object_name IN
+              (
+                  N'sp_server_diagnostics_component_result',
+                  N'error_reported',
+                  N'memory_broker_ring_buffer_recorded',
+                  N'memory_node_oom_ring_buffer_recorded',
+                  N'scheduler_monitor_system_health_ring_buffer_recorded',
+                  N'wait_info'
+              )
+        {(hasTimestampUtc ? TimestampUtcWhereSql : string.Empty)}
+        OPTION(RECOMPILE);
+
+        SET @raw_rows = @@ROWCOUNT;";
 
     /* On-prem / Azure MI / AWS RDS: the built-in system_health session. #6441: the event_file target is read first,
        because the ring buffer's XML is cut at about 4 MB and keeps the OLDEST events (see the class doc); the ring
@@ -198,11 +247,16 @@ public sealed class SystemHealthEventsCollector : CollectorDefinitionBase<System
 
        Each read is capped at @max_events raw events, taken in file order BEFORE the XML cast (measured: the function
        streams, so a TOP stops it early, but a TOP over the cast rows does not: that plan read the whole 99 MB file in 50
-       seconds whatever the TOP). When the cap is hit the last buffer read is dropped (the bookmark skips a whole buffer,
-       so a buffer cut in the middle would lose its remaining events), the pass keeps what it has, and the next pass
-       continues from the new bookmark. A read from the bookmark uses the cutoff inclusively (the bookmark's own buffer
-       is skipped by position, so an event that shares the watermark's time in a later buffer is not lost); the
-       current-file read keeps it exclusive. */
+       seconds whatever the TOP). That holds on every version and both attempts. When the cap is hit the last buffer read
+       is dropped (the bookmark skips a whole buffer, so a buffer cut in the middle would lose its remaining events), the
+       pass keeps what it has, and the next pass continues from the new bookmark. When every capped event is in one
+       buffer there is no earlier buffer to keep, so that buffer is read again with ten times the cap and only its own
+       events kept (the stream is in file order, so they come first); a buffer that fills even that is kept as far as it
+       was read and recorded as event_file_buffer_cut. A capped read also returns its scan position, the last buffer it
+       kept: when every event there is older than the cutoff no row carries it, and the host still moves the bookmark to
+       it, or the next pass would read the same old events again and never get past them. A read from the bookmark uses
+       the cutoff inclusively (the bookmark's own buffer is skipped by position, so an event that shares the watermark's
+       time in a later buffer is not lost); the current-file read keeps it exclusive. */
     private static string BuildQueryText(bool hasTimestampUtc) => $@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
@@ -217,7 +271,7 @@ DECLARE
 (
     source_file nvarchar(260) NOT NULL,
     source_offset bigint NOT NULL,
-    event_data nvarchar(max) NOT NULL
+    event_data nvarchar(max) NULL
 );
 
 DECLARE
@@ -246,9 +300,15 @@ DECLARE
     @read_offset bigint,
     @read_cutoff datetime2(7),
     @read_cap bigint,
+    @read_top bigint,
     @raw_rows bigint,
     @last_file nvarchar(260),
     @last_offset bigint,
+    @keep_file nvarchar(260),
+    @keep_offset bigint,
+    @scan_file nvarchar(260),
+    @scan_offset bigint,
+    @buffer_cut bit = 0,
     @attempt integer;
 
 {RingBufferXml.DeclareSql}
@@ -315,41 +375,23 @@ BEGIN
                 THEN DATEADD(NANOSECOND, -100, CONVERT(datetime2(7), @cutoff_time))
                 ELSE CONVERT(datetime2(7), @cutoff_time)
             END,
-        @read_cap = {(hasTimestampUtc ? ReadCapSql2017 : ReadCapSql2016)};
+        @read_cap = @max_events,
+        @read_top = @max_events,
+        @keep_file = NULL,
+        @keep_offset = NULL,
+        @scan_file = NULL,
+        @scan_offset = NULL,
+        @buffer_cut = 0;
 
     BEGIN TRY
         DELETE @raw_events;
         DELETE @file_events;
 
-        INSERT
-            @raw_events
-        (
-            source_file,
-            source_offset,
-            event_data
-        )
-        SELECT TOP (@read_cap)
-            source_file = x.file_name,
-            source_offset = x.file_offset,
-            event_data = x.event_data
-        FROM sys.fn_xe_file_target_read_file(@read_path, NULL, @read_file, @read_offset) AS x
-        WHERE x.object_name IN
-              (
-                  N'sp_server_diagnostics_component_result',
-                  N'error_reported',
-                  N'memory_broker_ring_buffer_recorded',
-                  N'memory_node_oom_ring_buffer_recorded',
-                  N'scheduler_monitor_system_health_ring_buffer_recorded',
-                  N'wait_info'
-              )
-        {(hasTimestampUtc ? TimestampUtcFilterSql : string.Empty)}
-        OPTION(RECOMPILE);
+{RawReadSql(hasTimestampUtc)}
 
-        SET @raw_rows = @@ROWCOUNT;
-
-        /* The cap cut the read somewhere. Drop the last buffer read (unless it is all there is), so the bookmark
-           the pass leaves is a buffer whose events were all read. */
-        IF @raw_rows >= @read_cap
+        /* The cap cut the read somewhere. Drop the last buffer read, so the bookmark the pass leaves is a buffer whose
+           events were all read. */
+        IF @raw_rows >= @read_top
         BEGIN
             SELECT TOP (1)
                 @last_file = r.source_file,
@@ -374,7 +416,55 @@ BEGIN
                 WHERE r.source_file = @last_file
                 AND   r.source_offset = @last_offset;
             END;
+            ELSE
+            BEGIN
+                /* Every capped event is in one buffer, and the bookmark would skip the rest of it. Read it again with
+                   ten times the cap, keeping only its events; a buffer that fills even that is kept as far as it was
+                   read and recorded. */
+                SELECT
+                    @keep_file = @last_file,
+                    @keep_offset = @last_offset,
+                    @read_top = @read_cap * 10;
+
+                DELETE @raw_events;
+
+{RawReadSql(hasTimestampUtc)}
+
+                IF  @raw_rows >= @read_top
+                AND NOT EXISTS
+                    (
+                        SELECT
+                            1/0
+                        FROM @raw_events AS r
+                        WHERE r.source_file <> @keep_file
+                        OR    r.source_offset <> @keep_offset
+                    )
+                BEGIN
+                    SET @buffer_cut = 1;
+                END;
+
+                DELETE
+                    r
+                FROM @raw_events AS r
+                WHERE r.source_file <> @keep_file
+                OR    r.source_offset <> @keep_offset;
+            END;
+
+            /* The scan position: the last buffer kept, whether or not any of its events is newer than the cutoff. */
+            SELECT TOP (1)
+                @scan_file = r.source_file,
+                @scan_offset = r.source_offset
+            FROM @raw_events AS r
+            ORDER BY
+                r.source_file DESC,
+                r.source_offset DESC;
         END;
+
+        /* Events the CASE kept no text for: older than the cutoff, or outside the buffer a re-read keeps. */
+        DELETE
+            r
+        FROM @raw_events AS r
+        WHERE r.event_data IS NULL;
 
         INSERT
             @file_events
@@ -483,13 +573,17 @@ BEGIN
 END;
 
 /* #6441: whether SQL Server truncated the buffer's XML (ring-buffer path only, all NULL on the file path), then which
-   source answered, the error that stopped a file read (NULL when none did), and whether the bookmark was refused as
-   unusable. Read by ReadAsync after the event rows. */
+   source answered, the error that stopped a file read (NULL when none did), whether the bookmark was refused as
+   unusable, the scan position of a capped file read (NULL when the cap did not bind), and whether a buffer was cut.
+   Read by ReadAsync after the event rows. */
 SELECT
     {RingBufferXml.TruncationColumnsSql},
     event_file_read = @event_file_ok,
     event_file_error = CASE WHEN @event_file_ok = 0 THEN @event_file_error END,
-    bookmark_refused = @bookmark_refused;";
+    bookmark_refused = @bookmark_refused,
+    scan_file = CASE WHEN @event_file_ok = 1 THEN @scan_file END,
+    scan_offset = CASE WHEN @event_file_ok = 1 THEN @scan_offset END,
+    event_file_buffer_cut = CASE WHEN @event_file_ok = 1 THEN @buffer_cut END;";
 
     private static readonly string s_queryTextXmlTime = BuildQueryText(hasTimestampUtc: false);
 
@@ -525,16 +619,16 @@ SELECT
 
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
-        /* Use the most recent event_time from the host store as the cutoff, or fall back to
-           CollectorContext.EventFallbackWindow on first run (mirrors DeadlocksCollector). */
-        var cutoffTime = context.Watermark ?? context.CollectionTime - CollectorContext.EventFallbackWindow;
+        var cutoffTime = CutoffOf(context);
 
         /* #6441: the event_file bookmark, used only while it is not ahead of the stored watermark. */
         var bookmark = TryUseBookmark(context.State, cutoffTime);
 
         /* #6441: SQL Server 2017+ gets the batch that filters on timestamp_utc before the XML cast. An unknown version (0)
-           takes the 2016 batch: naming a column the server lacks fails the whole batch, which is worse than a slower read. */
-        var text = context.Target.SqlMajorVersion >= TimestampUtcMajorVersion
+           takes the 2016 batch: naming a column the server lacks fails the whole batch, which is worse than a slower read.
+           Managed Instance runs the current engine but reports a low ProductMajorVersion (see
+           QueryStoreHealthCollector.HasWaitStatsCaptureMode), so it is matched by its edition. */
+        var text = context.Target.SqlMajorVersion >= TimestampUtcMajorVersion || context.Target.IsAzureManagedInstance
             ? s_queryTextTimestampUtc
             : s_queryTextXmlTime;
 
@@ -546,6 +640,14 @@ SELECT
             new("@max_events", MaxEventsPerPass, CollectorParameterType.Int32),
         });
     }
+
+    /// <summary>
+    /// The cutoff a pass reads past: the most recent event_time in the host store, or <see cref="CollectorContext.EventFallbackWindow"/>
+    /// back on a first run (mirrors DeadlocksCollector). <see cref="ReadAsync"/> stamps it on a bookmark at a scan position
+    /// no stored row carries.
+    /// </summary>
+    private static DateTime CutoffOf(CollectorContext context) =>
+        context.Watermark ?? context.CollectionTime - CollectorContext.EventFallbackWindow;
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
     {
@@ -564,6 +666,8 @@ SELECT
 
         var hasSource = reader.FieldCount >= 5;
         var bookmarkRefused = false;
+        string? scanFile = null;
+        long? scanOffset = null;
         string? lastFile = null;
         long? lastOffset = null;
         DateTime? newestTime = null;
@@ -630,14 +734,39 @@ SELECT
             }
 
             bookmarkRefused = reader.FieldCount > 5 && !reader.IsDBNull(5) && reader.GetBoolean(5);
+
+            /* The scan position of a capped file read: the last buffer it kept, NULL when the cap did not bind. */
+            if (reader.FieldCount > 7 && !reader.IsDBNull(6) && !reader.IsDBNull(7))
+            {
+                scanFile = reader.GetString(6);
+                scanOffset = reader.GetInt64(7);
+            }
+
+            if (reader.FieldCount > 8 && !reader.IsDBNull(8) && reader.GetBoolean(8))
+            {
+                context.Measure(EventFileBufferCutMeasurement, 1);
+            }
         }
 
         /* Resume the next pass at the last buffer this pass read. A pass that read nothing new keeps the
            bookmark it started from; the next pass starts past it all the same. The exception is a bookmark the server
            refused as unusable (its file is gone, its offset is not a buffer start: 25717 / 25722, proved live) when
            nothing replaced it: it is dropped, so the next pass does not try a dead bookmark first for ever. An empty
-           value reads back as no bookmark (TryUseBookmark). */
-        if (newestTime is { } bookmarkTime && lastFile is not null && lastOffset is { } bookmarkOffset)
+           value reads back as no bookmark (TryUseBookmark).
+
+           A capped read whose last buffers held only events older than the cutoff (or that returned no row at all) moves
+           the bookmark to its scan position instead, or the next pass would read the same old events and stall there. The
+           time it carries is the newest stored, or the cutoff when nothing was: every event it skips is at or before the
+           cutoff, so TryUseBookmark accepts it next pass and nothing newer is skipped. */
+        if (scanFile is not null
+            && scanOffset is { } scanAt
+            && (lastFile is null
+                || string.CompareOrdinal(scanFile, lastFile) > 0
+                || (string.Equals(scanFile, lastFile, StringComparison.Ordinal) && scanAt > lastOffset)))
+        {
+            context.PendingState[BookmarkStateKey] = FormatBookmark(newestTime ?? CutoffOf(context), scanAt, scanFile);
+        }
+        else if (newestTime is { } bookmarkTime && lastFile is not null && lastOffset is { } bookmarkOffset)
         {
             context.PendingState[BookmarkStateKey] = FormatBookmark(bookmarkTime, bookmarkOffset, lastFile);
         }

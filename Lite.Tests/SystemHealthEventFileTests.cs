@@ -56,8 +56,13 @@ public sealed class SystemHealthEventFileTests
         new object[] { time, type, "<event name=\"" + type + "\"/>", DBNull.Value, DBNull.Value };
 
     private static object[] Trailer(
-        bool truncated, long hidden, object age, bool fileRead, object? error = null, bool bookmarkRefused = false) =>
-        new object[] { truncated, hidden, age, fileRead, error ?? DBNull.Value, bookmarkRefused };
+        bool truncated, long hidden, object age, bool fileRead, object? error = null, bool bookmarkRefused = false,
+        string? scanFile = null, long? scanOffset = null, bool bufferCut = false) =>
+        new object[]
+        {
+            truncated, hidden, age, fileRead, error ?? DBNull.Value, bookmarkRefused,
+            (object?)scanFile ?? DBNull.Value, (object?)scanOffset ?? DBNull.Value, bufferCut,
+        };
 
     [Fact]
     public async Task AFileRead_LeavesTheBookmarkOfTheNewestEvent_AndCountsTheEvents()
@@ -194,8 +199,11 @@ public sealed class SystemHealthEventFileTests
     [InlineData(14, true)]
     [InlineData(15, true)]
     [InlineData(17, true)]
-    public void TheTimestampUtcBatch_IsChosenFrom2017_AndThe2016BatchNeverNamesTheColumn(int major, bool expectsTimestampUtc)
+    [InlineData(12, true, true)]
+    public void TheTimestampUtcBatch_IsChosenFrom2017_AndThe2016BatchNeverNamesTheColumn(
+        int major, bool expectsTimestampUtc, bool managedInstance = false)
     {
+        /* Managed Instance runs the current engine but reports a low ProductMajorVersion, so it is matched by edition. */
         /* Naming sys.fn_xe_file_target_read_file's timestamp_utc on 2016 fails the whole batch (the column is not there). */
         var context = MakeContext();
         var query = SystemHealthEventsCollector.Instance.BuildQuery(new CollectorContext
@@ -204,7 +212,7 @@ public sealed class SystemHealthEventFileTests
             ServerName = context.ServerName,
             CollectionTime = context.CollectionTime,
             Deltas = new RecordingCollectorDeltaCalculator(),
-            Target = new CollectorTargetInfo { SqlMajorVersion = major },
+            Target = new CollectorTargetInfo { SqlMajorVersion = major, IsAzureManagedInstance = managedInstance },
         });
 
         Assert.Equal(expectsTimestampUtc, query.Text.Contains("timestamp_utc", StringComparison.Ordinal));
@@ -344,5 +352,74 @@ public sealed class SystemHealthEventFileTests
         Assert.Equal(fromRing.SqlCpuUtilization, fromFile.SqlCpuUtilization);
         Assert.Equal(4, fromFile.SpinlockBackoffs);
         Assert.Equal("CLEAN", fromFile.State);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ACappedPass_WhoseEventsWereAllOlderThanTheCutoff_MovesTheBookmarkToItsScanPosition_AtTheCutoff(bool hasWatermark)
+    {
+        /* #6441 round 2: the cap bound, and every event it kept was at or before the cutoff, so no row came back. The
+           bookmark still moves to the last buffer the read kept, stamped with the cutoff, or the next pass would read the
+           same old events again for ever. */
+        var context = MakeContext(watermark: hasWatermark ? s_watermark : null);
+        using var reader = FakeCollectorDataReader.WithResultSets(
+            Array.Empty<object[]>(),
+            new[] { Trailer(false, 0, DBNull.Value, true, scanFile: FileA, scanOffset: 81_920) });
+
+        var rows = await SystemHealthEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Empty(rows);
+        var cutoff = hasWatermark ? s_watermark : context.CollectionTime - CollectorContext.EventFallbackWindow;
+        Assert.Equal(
+            SystemHealthEventsCollector.FormatBookmark(cutoff, 81_920, FileA),
+            context.PendingState[SystemHealthEventsCollector.BookmarkStateKey]);
+        /* The next pass, at the same cutoff, accepts it. */
+        Assert.Equal((FileA, 81_920L), SystemHealthEventsCollector.TryUseBookmark(context.PendingState, cutoff));
+    }
+
+    [Theory]
+    [InlineData(FileA, 6_000_000L, FileA, 6_000_000L)]
+    [InlineData(FileA, 6_090_112L, FileA, 6_090_112L)]
+    [InlineData(FileB, 1_024L, FileB, 1_024L)]
+    [InlineData(FileA, 4_096L, FileA, 6_000_000L)]
+    public async Task ACappedPass_LeavesTheBookmarkAtTheLaterOfItsLastRowAndItsScanPosition_WithTheNewestTime(
+        string scanFile, long scanOffset, string expectedFile, long expectedOffset)
+    {
+        /* Rows end at FileA offset 6,000,000. A scan position past it (later in FileA, or in a later file) moves the bookmark
+           there; one at or before it leaves the bookmark at the last row's buffer. The time is the newest stored. */
+        var context = MakeContext(watermark: s_watermark);
+        var newest = s_watermark.AddMinutes(4);
+        using var reader = FakeCollectorDataReader.WithResultSets(
+            new[]
+            {
+                FileRow(s_watermark.AddMinutes(1), "error_reported", FileA, 4_096),
+                FileRow(newest, "wait_info", FileA, 6_000_000),
+            },
+            new[] { Trailer(false, 0, DBNull.Value, true, scanFile: scanFile, scanOffset: scanOffset) });
+
+        await SystemHealthEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Equal(
+            SystemHealthEventsCollector.FormatBookmark(newest, expectedOffset, expectedFile),
+            context.PendingState[SystemHealthEventsCollector.BookmarkStateKey]);
+    }
+
+    [Fact]
+    public async Task ABufferCut_IsRecorded_AndThePassKeepsItsRowsAndBookmark()
+    {
+        var context = MakeContext(watermark: s_watermark);
+        var newest = s_watermark.AddMinutes(2);
+        using var reader = FakeCollectorDataReader.WithResultSets(
+            new[] { FileRow(newest, "wait_info", FileA, 4_096) },
+            new[] { Trailer(false, 0, DBNull.Value, true, scanFile: FileA, scanOffset: 4_096, bufferCut: true) });
+
+        var rows = await SystemHealthEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Single(rows);
+        Assert.Equal(1, Measured(context, "event_file_buffer_cut"));
+        Assert.Equal(
+            SystemHealthEventsCollector.FormatBookmark(newest, 4_096, FileA),
+            context.PendingState[SystemHealthEventsCollector.BookmarkStateKey]);
     }
 }
