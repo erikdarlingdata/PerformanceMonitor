@@ -1280,7 +1280,12 @@ jobs:
             --report "$env:MAP_OUT\coverage.xml" --reportFormat OpenCover `
             --callContext "[Fact]" --callContext "[Theory]" --methodpoint `
             --assemblyFilter "^(?!PerformanceMonitor|Darling|Lite)" 2>&1 | Tee-Object -FilePath "$env:MAP_OUT\altcover-instrument.log" | Select-Object -Last 15
-          if ($LASTEXITCODE -ne 0) { throw "altcover instrumentation failed ($LASTEXITCODE)" }
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            # The last 15 lines are only the stack trace. The exception line, which names what failed, comes before it.
+            Select-String -Path "$env:MAP_OUT\altcover-instrument.log" -Pattern 'Unhandled exception|Exception:' | Select-Object -First 5 | ForEach-Object { $_.Line }
+            throw "altcover instrumentation failed ($code)"
+          }
 
       # One runner invocation per chunk. A failing test is a fact about the tests, not about the map: the
       # step never fails on a test exit code, and each chunk's report is kept (a later chunk's report may

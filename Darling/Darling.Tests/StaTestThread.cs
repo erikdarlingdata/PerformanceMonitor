@@ -91,7 +91,15 @@ internal static class StaTestThread
     /// Runs a dispatcher frame until an application-idle operation runs, for at most <paramref name="limit"/>. When the limit passes
     /// the test fails alone, saying what it waited for and how many dispatcher operations ran meanwhile, and the shared thread stays usable.
     /// </summary>
-    internal static void WaitForIdle(Dispatcher dispatcher, TimeSpan limit, DispatcherPriority idlePriority = DispatcherPriority.ApplicationIdle)
+    internal static void WaitForIdle(Dispatcher dispatcher, TimeSpan limit) => WaitForIdle(dispatcher, limit, DispatcherPriority.ApplicationIdle);
+
+    /// <summary>
+    /// <see cref="WaitForIdle(Dispatcher, TimeSpan)"/> at a chosen <paramref name="idlePriority"/>. An overload, not an optional
+    /// parameter: an optional <see cref="DispatcherPriority"/> stores a constant of a WindowsBase type in this method's metadata, and
+    /// the nightly test map's AltCover (Mono.Cecil) cannot resolve WindowsBase when it rewrites the assembly. It failed every test-map
+    /// shard from nightly 569 on with "Failed to resolve System.Windows.Threading.DispatcherPriority".
+    /// </summary>
+    internal static void WaitForIdle(Dispatcher dispatcher, TimeSpan limit, DispatcherPriority idlePriority)
     {
         var frame = new DispatcherFrame();
         var idle = false;
