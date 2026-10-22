@@ -39,13 +39,13 @@
                 <DataGrid.Columns>
                     <DataGridTextColumn Header="Server" Binding="{Binding ServerDisplay}" Width="120"/>
                     <DataGridTextColumn Header="Metric" Binding="{Binding MetricDisplay}" Width="130"/>
-                    <DataGridTextColumn Header="Time" Binding="{Binding TimeDisplay}" Width="60"/>
+                    <DataGridTextColumn Header="Time" Binding="{Binding TimeDisplay}" SortMemberPath="TimeOfDaySortKey" Width="60"/>
                     <DataGridTextColumn Header="Zone" Binding="{Binding ZoneDisplay}" Width="120"/>
                     <DataGridTextColumn Header="Window" Binding="{Binding WindowMinutes}" Width="65"/>
                     <DataGridTextColumn Header="Note" Binding="{Binding Note}" Width="*"/>
                     <DataGridTextColumn Header="Created by" Binding="{Binding CreatedBy}" Width="110"/>
                     <DataGridTextColumn Header="Edited by" Binding="{Binding UpdatedDisplay}" Width="170"/>
-                    <DataGridTextColumn Header="Expires" Binding="{Binding ExpiresDisplay}" Width="130"/>
+                    <DataGridTextColumn Header="Expires" Binding="{Binding ExpiresDisplay}" SortMemberPath="ExpiresSortUtc" Width="130"/>
                 </DataGrid.Columns>
             </DataGrid>
             <TextBlock x:Name="NoPatternsMessage"

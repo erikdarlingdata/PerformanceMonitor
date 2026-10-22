@@ -117,6 +117,12 @@ public sealed class KnownPatternRow
 
     public string TimeDisplay => Entry.TimeOfDay is { } time ? time.ToString("HH:mm", CultureInfo.InvariantCulture) : "(any)";
 
+    /// <summary>
+    /// What the Time column sorts by: the entry's clock time as a DateTime on a fixed date, or null for "(any)" (which sorts first, as its text did).
+    /// The date is meaningless; only the clock time is compared, in the entry's own zone, which is how the column reads.
+    /// </summary>
+    public DateTime? TimeOfDaySortKey => Entry.TimeOfDay is { } time ? DateTime.MinValue.Date + time.ToTimeSpan() : null;
+
     public string ZoneDisplay => Entry.TimeOfDay is null ? "" : Entry.TimeZone ?? "UTC";
 
     public int WindowMinutes => Entry.WindowMinutes;
@@ -129,6 +135,9 @@ public sealed class KnownPatternRow
     public string UpdatedDisplay => Entry.UpdatedBy is null && Entry.UpdatedAtUtc is null
         ? ""
         : (Entry.UpdatedBy ?? "") + (Entry.UpdatedAtUtc is { } edited ? ", " + edited.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " UTC" : "");
+
+    /// <summary>What the Expires column sorts by: the UTC expiry, with "Never" as the latest value (it sorted after every date as text).</summary>
+    public DateTime ExpiresSortUtc => Entry.ExpiresAtUtc ?? DateTime.MaxValue;
 
     public string ExpiresDisplay => Entry.ExpiresAtUtc is { } at
         ? at.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " UTC"
