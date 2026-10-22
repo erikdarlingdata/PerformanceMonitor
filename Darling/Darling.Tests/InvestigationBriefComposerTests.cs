@@ -570,11 +570,12 @@ public sealed class InvestigationBriefComposerTests
     [Fact]
     public void KnownPatterns_NoteIsMaskedAsFreeText_AndCreatedByAsALogin()
     {
-        var match = new InvestigationKnownPatternMatch("Blocking", 7, "The job runs WHERE id = 55443322 every night", LoginCanary);
+        var match = new InvestigationKnownPatternMatch("Blocking", 7, "The job runs WHERE id = 55443322 every night", LoginCanary, LoginCanary + "-editor");
 
         var full = Brief(Sources(knownPatterns: new[] { match }))["known_patterns"]![0]!;
         Assert.Contains("55443322", (string?)full["note"], StringComparison.Ordinal);
         Assert.Equal(LoginCanary, (string?)full["created_by"]);
+        Assert.Equal(LoginCanary + "-editor", (string?)full["updated_by"]);
 
         var masked = Brief(Sources(knownPatterns: new[] { match }), McpDataDetail.MaskLiterals)["known_patterns"]![0]!;
         Assert.DoesNotContain("55443322", (string?)masked["note"], StringComparison.Ordinal);
@@ -582,6 +583,7 @@ public sealed class InvestigationBriefComposerTests
 
         var metadataOnly = Brief(Sources(knownPatterns: new[] { match }), McpDataDetail.MetadataOnly)["known_patterns"]![0]!;
         Assert.NotEqual(LoginCanary, (string?)metadataOnly["created_by"]);
+        Assert.DoesNotContain(LoginCanary, (string?)metadataOnly["updated_by"] ?? "", StringComparison.Ordinal);
     }
 
     /* ---- masking under all three levels ---- */
