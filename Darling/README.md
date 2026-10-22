@@ -1463,6 +1463,8 @@ The notable rungs are below. For the **complete** current schema, read `Darling/
 
 All timestamps in the store are **naive-UTC** `timestamp` columns — the product-wide cross-store contract (Lite's DuckDB does the same).
 
+To back up, restore or move the store, see [Back up, restore and move the store](../docs/darling-store-backup.md).
+
 ### Reading the store directly (plan XML is compressed)
 
 The store is deliberately queryable — it is documented PostgreSQL with named tables, and people build
