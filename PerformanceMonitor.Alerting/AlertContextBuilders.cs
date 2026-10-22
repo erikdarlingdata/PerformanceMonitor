@@ -773,6 +773,12 @@ public static class AlertContextBuilders
                 $"estimated from {finding.SampledEvents:N0} sampled events: {finding.JudgedCount / finding.CoveredMinutes:N1} per minute is not muted")));
         }
 
+        if (finding.ExcludedSamples > 0)
+        {
+            reading.Fields.Add(("Excluded", string.Create(CultureInfo.InvariantCulture,
+                $"{finding.ExcludedSamples:N0} of {finding.SampledEvents:N0} sampled events came from SSMS IntelliSense cancelling its own metadata queries; they are left out of the rate judged")));
+        }
+
         if (finding.Bars is not null)
         {
             reading.Fields.Add(("Bar", AttentionEvaluator.BarSentence(finding)));
