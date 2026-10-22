@@ -463,7 +463,7 @@ stays loopback-only), then restart the service:
 ```
 
 To make a token, use [the PowerShell one-liner in the README](../Darling/README.md#mcp-endpoint-assistant-over-the-lan). On Windows keep it in `encryptedToken`.
-`web.network.token` also takes the token itself, an `env:NAME` or a `file:PATH`; the references are for the
+`web.network.token` also takes the token itself, an `env:NAME` or a `file:PATH`. The references are for the
 compose and Linux setups. To serve local browsers with no token instead, set `"allowTokenlessLoopback": true` in
 the `web` block. The dashboard then serves reads only, and every start logs a line saying so.
 
@@ -798,7 +798,7 @@ Get-NetTCPConnection -State Listen | Where-Object LocalPort -eq 5152
 
 Then register it. **MCP needs a bearer token on loopback too.** Before you turn it on, add a `network` block
 with only a token to `mcp` (`"encryptedToken": "<output of --encrypt-password>"`, or `"token"` with the token
-itself, an `env:NAME` or a `file:PATH`) and restart the service. On Windows use `encryptedToken`; the references
+itself, an `env:NAME` or a `file:PATH`) and restart the service. On Windows use `encryptedToken`. The references
 are for the compose and Linux setups. To make a token, use [the PowerShell one-liner in the README](../Darling/README.md#mcp-endpoint-assistant-over-the-lan). With no token an
 enabled MCP server does not start, and the service log names these settings. To serve local clients with no
 token instead, set `"allowTokenlessLoopback": true` in the `mcp` block. The write and investigation tools then
