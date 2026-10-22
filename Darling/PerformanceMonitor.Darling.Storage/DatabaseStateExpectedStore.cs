@@ -25,7 +25,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// </summary>
 public static class DatabaseStateExpectedStore
 {
-    /// <summary>The state tokens the Viewer's editor offers, including the <c>(ignore)</c> opt-out.</summary>
+    /// <summary>The state tokens the Viewer's editor and the MCP set tool offer, including the <c>(ignore)</c> opt-out. The editor builds its dropdown from this list, so the two cannot drift.</summary>
     public static readonly IReadOnlyList<string> StandardStates =
     [
         DatabaseStateTokens.Online, DatabaseStateTokens.Offline, DatabaseStateTokens.Restoring,
@@ -68,12 +68,12 @@ AND   EXISTS (
     /// database with none has NULL expected columns).</summary>
     public const string ReadSql = @"
 WITH latest AS (
-    SELECT ds.database_name, CASE WHEN ds.is_in_standby THEN 'STANDBY' ELSE ds.state_desc END AS eff
+    SELECT ds.collection_time, ds.database_name, CASE WHEN ds.is_in_standby THEN 'STANDBY' ELSE ds.state_desc END AS eff
     FROM collect.database_states ds
     WHERE ds.server_id = $1
     AND   ds.collection_time = (SELECT MAX(collection_time) FROM collect.database_states WHERE server_id = $1)
 )
-SELECT l.database_name, l.eff, e.expected_state, e.is_user_override
+SELECT l.database_name, l.eff, e.expected_state, e.is_user_override, l.collection_time
 FROM latest l
 LEFT JOIN config.database_state_expected e
   ON  e.server_id = $1
@@ -146,7 +146,7 @@ RETURNING expected_state, is_user_override";
         Create(dataSource, ClearSql, timeoutSeconds, serverId, databaseName, null);
 
     /// <summary>One database of the latest snapshot: its current effective state and expectation (null when none).</summary>
-    public sealed record Row(string DatabaseName, string CurrentState, string? ExpectedState, bool IsUserOverride);
+    public sealed record Row(string DatabaseName, string CurrentState, string? ExpectedState, bool IsUserOverride, DateTime CapturedAt);
 
     /// <summary>Reads the latest snapshot's databases with their expectations. Writes nothing.</summary>
     public static async Task<List<Row>> ReadAsync(
@@ -161,7 +161,8 @@ RETURNING expected_state, is_user_override";
                 reader.IsDBNull(0) ? "" : reader.GetString(0),
                 reader.IsDBNull(1) ? "" : reader.GetString(1),
                 reader.IsDBNull(2) ? null : reader.GetString(2),
-                !reader.IsDBNull(3) && reader.GetBoolean(3)));
+                !reader.IsDBNull(3) && reader.GetBoolean(3),
+                reader.GetDateTime(4)));
         }
 
         return rows;

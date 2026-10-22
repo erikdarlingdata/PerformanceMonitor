@@ -40,10 +40,11 @@ public sealed class DarlingMcpDatabaseStateTools
     private const string IgnoreToken = "IGNORE";
     private const int MaxRows = 500;
 
+    [ReadsLatestSnapshot(LatestSnapshotShape.Stamped)]
     [McpServerTool(Name = "get_database_state_expectations"), Description(
         "Lists one server's databases with the state each is in now and the state the Database State alert expects it to be in: expected_state, whether a person set it (is_user_override), and status (as_expected, deviating, ignored, or pending when no baseline is learned yet). The Viewer's database state override editor shows the same. " +
         "<<GUIDE>>" +
-        "Reads the latest collected snapshot for the server and the expectations stored beside it; it writes nothing. database_name narrows the list to one database. " +
+        "Reads the latest collected snapshot for the server and the expectations stored beside it; it writes nothing. LATEST IS A TIME: current_state and status describe the newest snapshot, not now - captured_at is the instant it was collected, so a deviating or as_expected verdict is as of that stamp. database_name narrows the list to one database. " +
         "At most 500 databases are returned (truncated says when more exist). allowed_states lists the values set_database_state_expected accepts. " +
         "An expected_state of (ignore) means the alert never fires for that database. A database with no expectation is pending: the service learns a baseline from its next observation, " +
         "unless the state is an integrity or transient one (SUSPECT, RECOVERY_PENDING, EMERGENCY, RESTORING, RECOVERING), which stays pending. " +
@@ -80,6 +81,9 @@ public sealed class DarlingMcpDatabaseStateTools
             {
                 server = resolved.DisplayName,
                 server_id = resolved.ServerId,
+                /* #6545: the instant of the snapshot current_state and status were read from (the census's one stamp spelling). Every
+                   row comes from the same snapshot, so the first row's stamp is the snapshot's. */
+                captured_at = DateTime.SpecifyKind(rows[0].CapturedAt, DateTimeKind.Utc).ToString("o"),
                 allowed_states = AllowedStates(),
                 truncated = rows.Count > MaxRows,
                 databases = rows.Take(MaxRows).Select(r => new

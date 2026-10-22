@@ -91,6 +91,13 @@ public sealed class DatabaseStateExpectationsMcpLiveTests
             Assert.All(databases, d => Assert.Equal("pending", (string)d!["status"]!));
             Assert.Contains("IGNORE", first["allowed_states"]!.AsArray().Select(v => (string)v!));
 
+            /* #6545: a latest-snapshot read says when the snapshot was taken. The seed's collection_time is "now" in UTC, and the stamp
+               is a UTC instant (trailing Z), not the host's local reading of a timestamp without a zone. */
+            var capturedAt = (string)first["captured_at"]!;
+            Assert.EndsWith("Z", capturedAt, StringComparison.Ordinal);
+            Assert.InRange(
+                Math.Abs((DateTimeOffset.UtcNow - DateTimeOffset.Parse(capturedAt, System.Globalization.CultureInfo.InvariantCulture)).TotalMinutes), 0, 10);
+
             /* Set: an override, with no previous and an undo that clears. */
             var set = Parse(await DarlingMcpDatabaseStateTools.SetDatabaseStateExpected(mcp, server, "Sales", "online", cancellationToken: ct));
             Assert.Equal("set", (string)set["status"]!);
