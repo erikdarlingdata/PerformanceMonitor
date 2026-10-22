@@ -23,7 +23,7 @@ export const SQL_TAB_REACH = {
     collector: "cpu_utilization",
     reachReads: [
       "get_analysis_findings", "get_blocking_trend", "get_cpu_utilization", "get_deadlock_trend",
-      "get_file_io_trend", "get_memory_trend"
+      "get_file_io_trend", "get_memory_trend", "get_server_trend"
     ]
   },
   waits: {
@@ -35,7 +35,8 @@ export const SQL_TAB_REACH = {
   cpu: {
     collector: "cpu_utilization",
     reachReads: [
-      "get_cpu_utilization", "get_server_trend", "get_top_procedures_by_cpu", "get_top_queries_by_cpu"
+      "get_cpu_utilization", "get_procedure_duration_trend", "get_query_duration_trend", "get_query_trend", "get_server_trend",
+      "get_top_procedures_by_cpu", "get_top_queries_by_cpu"
     ]
   },
   memory: {
@@ -57,6 +58,12 @@ export const SQL_TAB_REACH = {
     collector: "file_io_stats",
     reachReads: [
       "get_file_io_trend", "get_tempdb_trend"
+    ]
+  },
+  iotrends: {
+    collector: "file_io_stats",
+    reachReads: [
+      "get_server_trend"
     ]
   },
   queries: {
@@ -88,7 +95,7 @@ export const SQL_TAB_REACH = {
   },
   health: {
     reachReads: [
-      "get_collection_log"
+      "get_collection_log", "get_server_trend"
     ]
   }
 };

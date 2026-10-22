@@ -39,6 +39,14 @@ namespace PerformanceMonitor.Darling.Storage;
 public static class DurationTrendRouting
 {
     /// <summary>
+    /// #6303: the predicate that picks ONE procedure out of a procedure rollup or <c>procedure_stats</c>, on the name the Top
+    /// Procedures grid shows (its <c>full_name</c>: <c>schema.object</c>, or the bare object when the schema is empty). One
+    /// text parameter, so the name never needs splitting on a dot a procedure name may itself hold. Case-sensitive, as the grid's
+    /// own filter is.
+    /// </summary>
+    public const string ProcedureFullNameMatchSql = "COALESCE(NULLIF(schema_name, '') || '.', '') || object_name = $5";
+
+    /// <summary>
     /// The seconds in one hourly-rollup bucket, as the SQL literal the hourly-tier duration trends divide by.
     /// A string because a constant interpolated string admits only string constants; pinned equal to
     /// <see cref="TimescaleSupport.HourlyBucket"/> by DarlingMcpTrendToolsTests so the two cannot drift.
@@ -441,9 +449,12 @@ public static class DurationTrendRouting
     /// applied inside the sums as in <see cref="RawCollectionsCte"/>, and an idle point carries <c>matched_rows</c> 0. Ends in a
     /// CTE named <c>raw</c> with the query grain's columns. $1 server_id, $2/$3 window (naive UTC).</para>
     /// </summary>
-    private static string ProcedureCollectionsCte(bool withDatabaseFilter)
+    private static string ProcedureCollectionsCte(bool withDatabaseFilter, bool withProcedureFilter)
     {
-        const string match = "$4::text[] IS NULL OR database_name = ANY($4)";
+        /* #6303: with the procedure filter the database clause is parenthesized and ANDed with the procedure's name ($5); off, the text is unchanged. */
+        var match = withProcedureFilter
+            ? $"($4::text[] IS NULL OR database_name = ANY($4)) AND {ProcedureFullNameMatchSql}"
+            : "$4::text[] IS NULL OR database_name = ANY($4)";
         var maxGap = CollectorDeltaCalculator.DefaultMaxGapSeconds;
         var sums = withDatabaseFilter
             ? $"COALESCE(SUM(delta_elapsed_time) FILTER (WHERE {match}), 0) / 1000.0 AS total_elapsed_ms,\n"
@@ -464,36 +475,58 @@ public static class DurationTrendRouting
         var matched = withDatabaseFilter ? ", matched_rows" : "";
         var idleMatched = withDatabaseFilter ? ", CAST(0 AS bigint)" : "";
 
+        /* #6303: the totals table holds one row per (collection, database) and has no procedure columns, so a read of ONE procedure
+           cannot use it. With the procedure filter the raw rows are read for the whole window (the totals are a copy of their sums,
+           and the rows are kept), which is the read #3897 ran before #5638; off, the text is unchanged. */
+        var storedCte = withProcedureFilter
+            ? $"""
+stored AS
+(
+    SELECT
+        collection_time,
+        {sums}
+        MAX(sample_interval_seconds) AS max_interval_seconds
+    FROM procedure_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2 - INTERVAL '{maxGap} seconds'
+    AND   collection_time <= $3
+    GROUP BY collection_time
+),
+"""
+            : $"""
+totals_floor AS
+(
+    SELECT COALESCE(MIN(collection_time), 'infinity'::timestamp) AS floor_time
+    FROM {ProcedureStatsTotals.Table}
+    WHERE server_id = $1
+),
+stored AS
+(
+    SELECT
+        collection_time,
+        {sums}
+        MAX(sample_interval_seconds) AS max_interval_seconds
+    FROM procedure_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2 - INTERVAL '{maxGap} seconds'
+    AND   collection_time <= $3
+    AND   collection_time < (SELECT floor_time FROM totals_floor)
+    GROUP BY collection_time
+    UNION ALL
+    SELECT
+        collection_time,
+        {totalsSums}
+        MAX(max_sample_interval_seconds) AS max_interval_seconds
+    FROM {ProcedureStatsTotals.Table}
+    WHERE server_id = $1
+    AND   collection_time >= $2 - INTERVAL '{maxGap} seconds'
+    AND   collection_time <= $3
+    GROUP BY collection_time
+),
+""";
+
         return $"""
-        totals_floor AS
-        (
-            SELECT COALESCE(MIN(collection_time), 'infinity'::timestamp) AS floor_time
-            FROM {ProcedureStatsTotals.Table}
-            WHERE server_id = $1
-        ),
-        stored AS
-        (
-            SELECT
-                collection_time,
-                {sums}
-                MAX(sample_interval_seconds) AS max_interval_seconds
-            FROM procedure_stats
-            WHERE server_id = $1
-            AND   collection_time >= $2 - INTERVAL '{maxGap} seconds'
-            AND   collection_time <= $3
-            AND   collection_time < (SELECT floor_time FROM totals_floor)
-            GROUP BY collection_time
-            UNION ALL
-            SELECT
-                collection_time,
-                {totalsSums}
-                MAX(max_sample_interval_seconds) AS max_interval_seconds
-            FROM {ProcedureStatsTotals.Table}
-            WHERE server_id = $1
-            AND   collection_time >= $2 - INTERVAL '{maxGap} seconds'
-            AND   collection_time <= $3
-            GROUP BY collection_time
-        ),
+        {storedCte}
         runs AS
         (
             SELECT
@@ -593,14 +626,19 @@ public static class DurationTrendRouting
     /// one the bucketing actually merged (see <c>ViewerDataService.QueryTrends.cs</c>'s bucketed reader).
     /// $1 server_id, $2/$3 window (naive UTC), [$4 database filter], the last $ the bucket width in minutes.</para>
     /// </summary>
-    public static string BuildBucketedRawTrendSql(string rawTable, bool withDatabaseFilter)
+    public static string BuildBucketedRawTrendSql(string rawTable, bool withDatabaseFilter, bool withProcedureFilter = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(rawTable);
+        /* #6303: one procedure of procedure_stats, by $5 (ProcedureFullNameMatchSql); the width moves to $6. Only the database-filtered procedure read takes it. */
+        if (withProcedureFilter && (!withDatabaseFilter || rawTable != "procedure_stats"))
+        {
+            throw new ArgumentException("A procedure filter is a database-filtered read of procedure_stats.", nameof(withProcedureFilter));
+        }
 
-        var widthParam = withDatabaseFilter ? "$5" : "$4";
+        var widthParam = withProcedureFilter ? "$6" : withDatabaseFilter ? "$5" : "$4";
         /* #5449: procedure_stats stores no row for a cycle in which nothing ran, so its collections are read through the
            collector's runs (ProcedureCollectionsCte); every other table stores every cycle and reads its own rows. */
-        var collections = rawTable == "procedure_stats" ? ProcedureCollectionsCte(withDatabaseFilter) : RawCollectionsCte(rawTable, withDatabaseFilter);
+        var collections = rawTable == "procedure_stats" ? ProcedureCollectionsCte(withDatabaseFilter, withProcedureFilter) : RawCollectionsCte(rawTable, withDatabaseFilter);
         /* #5414 M1: every bucket is read over EVERY collection in it. Round 2: whether the chosen databases had any
            row at all is decided once, for the whole window (the tool's empty), and never per bucket: a bucket the
            databases were quiet in is a measured 0 and a bucket the store covered, and dropping it made it read missing
@@ -656,14 +694,21 @@ public static class DurationTrendRouting
     /// (a SUCCESS run of the collector, no raw row) count as zero work, so a quiet hour is in the bucket's seconds as it is on a
     /// store that kept the idle rows; off, the text is unchanged.
     /// </summary>
-    public static string BuildBucketedHourlyTrendSql(string hourlyView, bool withDatabaseFilter = false, bool coverIdleHours = false)
+    public static string BuildBucketedHourlyTrendSql(string hourlyView, bool withDatabaseFilter = false, bool coverIdleHours = false, bool withProcedureFilter = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(hourlyView);
+        /* #6303: one procedure of the procedure rollups (they group by schema_name, object_name): $5 the name, the width $6. */
+        if (withProcedureFilter && (!withDatabaseFilter || !coverIdleHours))
+        {
+            throw new ArgumentException("A procedure filter is a database-filtered read of a procedure rollup.", nameof(withProcedureFilter));
+        }
 
         /* #5414 M1: the filter goes inside the aggregates, so an hour where the chosen databases had no rollup row
            still counts (zero work) in the bucket's hour count; matched_rows decides empty, once for the whole window
            (round 2: never per bucket, so a quiet bucket reads 0 and not missing). */
-        const string match = "$4::text[] IS NULL OR database_name = ANY($4)";
+        var match = withProcedureFilter
+            ? $"($4::text[] IS NULL OR database_name = ANY($4)) AND {ProcedureFullNameMatchSql}"
+            : "$4::text[] IS NULL OR database_name = ANY($4)";
         var sums = withDatabaseFilter
             ? $"COALESCE(SUM(elapsed_time_sum) FILTER (WHERE {match}), 0) / 1000.0 AS elapsed_ms,\n"
               + $"                    COALESCE(SUM(execution_count_sum) FILTER (WHERE {match}), 0) AS executions,\n"
@@ -673,7 +718,7 @@ public static class DurationTrendRouting
         var windowHasRows = withDatabaseFilter
             ? "\n            WHERE EXISTS (SELECT 1 FROM hourly WHERE matched_rows > 0)"
             : "";
-        var widthParam = withDatabaseFilter ? "$5" : "$4";
+        var widthParam = withProcedureFilter ? "$6" : withDatabaseFilter ? "$5" : "$4";
 
         /* #5449: procedure rollups hold no row for an hour in which no procedure worked, so the hours the bucket divides by (COUNT(*)
            of the rollup's hours in it) leave out the idle ones and a wider bucket reads high where an older store, which kept the
@@ -716,6 +761,48 @@ public static class DurationTrendRouting
                 MIN(bucket) AS first_collection_time,
                 0 AS unrated_collections
             FROM {source}{windowHasRows}
+            GROUP BY 1
+            ORDER BY 1
+            """;
+    }
+
+    /// <summary>
+    /// #6303: the average CPU per execution of ONE procedure, in the same buckets as <see cref="BuildBucketedRawTrendSql"/> (raw) or
+    /// <see cref="BuildBucketedHourlyTrendSql"/> (hourly: <paramref name="hourlyFromClause"/> is the route's relation). A bucket's
+    /// figure is its summed worker time over its summed executions (never an average of averages), NULL when nothing executed in it.
+    /// Both tiers carry worker time; the hourly rollup carries no spills or reads columns of the Viewer's other series, so this is
+    /// the only extra series. Rows with stored interval 0 (restart) are left out on both tiers, as the hourly rollup leaves them out.
+    /// $1 server_id, $2/$3 window (naive UTC), $4 database filter, $5 the procedure's name, $6 the bucket width in minutes.
+    /// </summary>
+    public static string BuildProcedureAvgCpuSql(bool hourly, string hourlyFromClause)
+    {
+        var match = $"($4::text[] IS NULL OR database_name = ANY($4)) AND {ProcedureFullNameMatchSql}";
+        var bucketStart = $"GREATEST(date_bin(CAST($6 AS integer) * INTERVAL '1 minute', {(hourly ? "bucket" : "collection_time")}, {TrendBucketSql.OriginSql}), $2)";
+        if (!hourly)
+        {
+            return $"""
+                SELECT {bucketStart} AS bucket_start,
+                       SUM(delta_worker_time) / 1000.0 / NULLIF(SUM(delta_execution_count), 0) AS avg_cpu_ms
+                FROM procedure_stats
+                WHERE server_id = $1
+                AND   collection_time >= $2
+                AND   collection_time <= $3
+                AND   sample_interval_seconds IS DISTINCT FROM 0
+                AND   {match}
+                GROUP BY 1
+                ORDER BY 1
+                """;
+        }
+
+        ArgumentException.ThrowIfNullOrWhiteSpace(hourlyFromClause);
+        return $"""
+            SELECT {bucketStart} AS bucket_start,
+                   SUM(worker_time_sum) / 1000.0 / NULLIF(SUM(execution_count_sum), 0) AS avg_cpu_ms
+            FROM {hourlyFromClause}
+            WHERE server_id = $1
+            AND   bucket >= $2
+            AND   bucket < $3
+            AND   {match}
             GROUP BY 1
             ORDER BY 1
             """;

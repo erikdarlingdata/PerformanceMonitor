@@ -87,6 +87,30 @@ public sealed class PlanRegressionInputsAdviceTests
         return advice!;
     }
 
+    // ---- #6305: sub-millisecond per-execution CPU ----
+
+    [Fact]
+    public void SubMillisecondCpuPerExecution_IsShownInMicroseconds_NeverRoundedToZeroMs()
+    {
+        var advice = Compose("PLAN_REGRESSION", PlanRegression(new Dictionary<string, double>
+        {
+            ["latest_cpu_per_exec_us"] = 455,
+            ["best_cpu_per_exec_us"] = 21,
+            ["worst_regression_factor"] = 21.7,
+        }));
+
+        Assert.Contains("(455 us vs 21 us of CPU per execution)", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("0 ms", advice.Investigation, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MillisecondCpuPerExecution_KeepsItsMillisecondForm()
+    {
+        var advice = Compose("PLAN_REGRESSION", PlanRegression());
+
+        Assert.Contains("(120 ms vs 10 ms of CPU per execution)", advice.Investigation, StringComparison.Ordinal);
+    }
+
     // ---- basis 0, 1 and 2 on PLAN_REGRESSION ----
 
     [Fact]

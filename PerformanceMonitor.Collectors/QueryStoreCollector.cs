@@ -52,7 +52,7 @@ namespace PerformanceMonitor.Collectors;
 /// whichever the engine emitted first — a grid could show an in-memory sliver in place of the interval's
 /// total. The emitted row SHAPE is untouched by that change; only the row COUNT per interval is.</para>
 /// </summary>
-public sealed class QueryStoreCollector : CollectorDefinitionBase<QueryStoreCollector.Row>
+public sealed partial class QueryStoreCollector : CollectorDefinitionBase<QueryStoreCollector.Row>
 {
     public static QueryStoreCollector Instance { get; } = new();
 
@@ -169,7 +169,7 @@ DECLARE
    as the enumeration's SECOND result set — the driver's probe-failure contract — because the FIRST one
    is the item list the runners collect from. */
 DECLARE
-    @probe_failures TABLE (name sysname, error_text nvarchar(4000));
+    @probe_failures TABLE (name sysname, error_text nvarchar(4000));/*FACTS_DECLARE*/
 
 DECLARE
     @db sysname,
@@ -246,7 +246,7 @@ BEGIN
         SET @exec_sp = QUOTENAME(@db) + N'.sys.sp_executesql';
 
         INSERT @result (name)
-        EXECUTE @exec_sp @sql;
+        EXECUTE @exec_sp @sql;/*FACTS_READ*/
     END TRY
     BEGIN CATCH
         /* The failure modes this catches are ordinary and per-database (mid-restore, an AG failover
@@ -278,7 +278,7 @@ SELECT /* PerformanceMonitorLite */
     error_text
 FROM @probe_failures
 ORDER BY
-    name;";
+    name;/*FACTS_RESULT*/";
 
     /// <summary>
     /// The eligibility gate the Azure per-database path runs against the CURRENT database before the
@@ -518,6 +518,12 @@ END;
         var (exclusionClause, exclusionParameters) = DatabaseScopeFilter.BuildEnumerationPredicate(context, "d.name");
         var text = OnPremDatabaseListQueryText
             .Replace("/*EXCLUSION_FILTER*/", exclusionClause, StringComparison.Ordinal);
+
+        /* #6254: the per-database flush interval the routing and the look-back need, read inside the probe loop
+           that already visits every database. Off (the placeholders vanish, today's text byte for byte) unless the
+           server has a replica set; the first two result sets keep their contract either way. A capturing
+           secondary (#6279) is not read here: the tracker detects it from the rows the payload read returns. */
+        text = ApplyEnumerationFacts(text, context);
 
         return new CollectorQuery(text, exclusionParameters);
     }
@@ -767,7 +773,33 @@ END;
            qst.query_sql_text inline; Darling drops it (text arrives via the separate by-ids fetch). */
         string queryTextJoin = context.FetchQueryTextSeparately
             ? ""
-            : "JOIN sys.query_store_query_text AS qst\n  ON qst.query_text_id = qsq.query_text_id\n";
+            : "JOIN #pm_qs_text AS qst\n  ON qst.query_text_id = qsq.query_text_id\n";
+
+        /* The text temp is a heap on purpose: a clustered index on it would rebuild the nvarchar(max) text a second time in tempdb (measured, in
+           the PR for #6257), and the shipping SELECT's hash join does not need one. The id-keyed temps below stay indexed because they hold no text. */
+        /* #6257: the staging side of the same gate. The text view is read (into its own temp, from the staged queries' text ids) only when the
+           payload ships the text inline, exactly as the join above is present only then. */
+        string queryTextStage = context.FetchQueryTextSeparately
+            ? ""
+            : @"
+SELECT /* PerformanceMonitorLite */
+    qst.query_text_id,
+    qst.query_sql_text
+INTO #pm_qs_text
+FROM sys.query_store_query_text AS qst
+WHERE EXISTS
+(
+    SELECT
+        1/0
+    FROM #pm_qs_query AS qsq
+    WHERE qsq.query_text_id = qst.query_text_id
+)
+OPTION(RECOMPILE, HASH JOIN);
+";
+
+        /* #6257: the version-gated plan columns the staged plan temp must carry for the shipping SELECT's fragments (planForcingCol, planTypeCol),
+           each with a leading comma because either may be empty. */
+        string planStageCols = (isNew ? ",\n    qsp.plan_forcing_type_desc" : "") + (hasPlanType ? ",\n    qsp.plan_type_desc" : "");
 
         /* The replica-attribution column + its join (see hasReplicaAttribution above). Selected after every
            version-gated column, so pre-2022 targets read the nvarchar(1) NULL placeholder at the same
@@ -1008,6 +1040,77 @@ HAVING
     {intervalHaving}
 OPTION(RECOMPILE);
 
+/* #6257: every other Query Store view is staged into its OWN temp table, each read ONCE with its own predicate, and the shipping SELECT
+   joins only temp tables. Joining two sys.query_store_* views in one statement made a primary merge each view's in-memory data inside
+   the join, which took 20 s where the same work in separate statements took well under a second (#6221, #6253), and a small or read-only
+   Query Store does not show it. The chain is the one the old join walked, slice to plan to query to text: plans by the slice's plan ids,
+   queries by those plans' query ids, text by those queries' text ids, intervals by the slice's interval ids. HASH JOIN on the three TVF-backed
+   views, for the reason the by-ids fetches carry it (#2791): the optimizer has only a fixed guess for the in-memory half, and a nested loop
+   would re-run it once per slice row. (PlanCorrectionCollector stages the same views with no join hint, from a short list of recommendations. This slice can
+   hold thousands of plan ids, which is the case #2791 measured.) The replica view stays a direct LEFT JOIN in the shipping SELECT: it holds a few role rows and has no
+   in-memory half to merge. The clustered indexes are NOT unique on purpose. The old join would have repeated a row if a view ever
+   returned one id twice, so the staged copy repeats it too, where a primary key would turn that into error 2627 and lose the database's cycle. */
+DROP TABLE IF EXISTS #pm_qs_interval;
+DROP TABLE IF EXISTS #pm_qs_plan;
+DROP TABLE IF EXISTS #pm_qs_query;
+DROP TABLE IF EXISTS #pm_qs_text;
+
+SELECT /* PerformanceMonitorLite */
+    qsrsi.runtime_stats_interval_id,
+    qsrsi.start_time,
+    qsrsi.end_time
+INTO #pm_qs_interval
+FROM sys.query_store_runtime_stats_interval AS qsrsi
+WHERE EXISTS
+(
+    SELECT
+        1/0
+    FROM #pm_qs_slice AS qsrs
+    WHERE qsrs.runtime_stats_interval_id = qsrsi.runtime_stats_interval_id
+)
+OPTION(RECOMPILE);
+
+CREATE CLUSTERED INDEX c ON #pm_qs_interval (runtime_stats_interval_id);
+
+SELECT /* PerformanceMonitorLite */
+    qsp.plan_id,
+    qsp.query_id,
+    qsp.is_forced_plan,
+    qsp.force_failure_count,
+    qsp.last_force_failure_reason_desc,
+    qsp.compatibility_level,
+    qsp.query_plan_hash{planStageCols}
+INTO #pm_qs_plan
+FROM sys.query_store_plan AS qsp
+WHERE EXISTS
+(
+    SELECT
+        1/0
+    FROM #pm_qs_slice AS qsrs
+    WHERE qsrs.plan_id = qsp.plan_id
+)
+OPTION(RECOMPILE, HASH JOIN);
+
+CREATE CLUSTERED INDEX c ON #pm_qs_plan (plan_id);
+
+SELECT /* PerformanceMonitorLite */
+    qsq.query_id,
+    qsq.query_text_id,
+    qsq.object_id,
+    qsq.query_hash
+INTO #pm_qs_query
+FROM sys.query_store_query AS qsq
+WHERE EXISTS
+(
+    SELECT
+        1/0
+    FROM #pm_qs_plan AS qsp
+    WHERE qsp.query_id = qsq.query_id
+)
+OPTION(RECOMPILE, HASH JOIN);
+
+CREATE CLUSTERED INDEX c ON #pm_qs_query (query_id);
+{queryTextStage}
 SELECT /* PerformanceMonitorLite */ TOP ({MaxRowsPerDatabase}) WITH TIES
     query_id = qsq.query_id,
     plan_id = qsp.plan_id,
@@ -1067,15 +1170,23 @@ SELECT /* PerformanceMonitorLite */ TOP ({MaxRowsPerDatabase}) WITH TIES
     interval_start_time_utc = CONVERT(datetime2, qsrsi.start_time AT TIME ZONE 'UTC'),
     interval_end_time_utc = CONVERT(datetime2, qsrsi.end_time AT TIME ZONE 'UTC')
 FROM #pm_qs_slice AS qsrs
-JOIN sys.query_store_plan AS qsp
+JOIN #pm_qs_plan AS qsp
   ON qsp.plan_id = qsrs.plan_id
-JOIN sys.query_store_query AS qsq
+JOIN #pm_qs_query AS qsq
   ON qsq.query_id = qsp.query_id
-{queryTextJoin}LEFT JOIN sys.query_store_runtime_stats_interval AS qsrsi
+{queryTextJoin}LEFT JOIN #pm_qs_interval AS qsrsi
   ON qsrsi.runtime_stats_interval_id = qsrs.runtime_stats_interval_id
 {replicaJoin}
 ORDER BY qsrs.last_execution_time {shipOrder}
-OPTION(RECOMPILE);";
+OPTION(RECOMPILE);
+
+/* The shipping SELECT is the batch's only result set, so these trailing drops add none. A pooled connection keeps its temps until reset, and
+   #pm_qs_text holds the slice's query text, which would sit in tempdb on a small Azure SQL DB tier. The leading drops stay for a batch that was cut short. */
+DROP TABLE IF EXISTS #pm_qs_text;
+DROP TABLE IF EXISTS #pm_qs_query;
+DROP TABLE IF EXISTS #pm_qs_plan;
+DROP TABLE IF EXISTS #pm_qs_interval;
+DROP TABLE IF EXISTS #pm_qs_slice;";
     }
 
     /// <summary>
@@ -1432,10 +1543,15 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
            SET NOCOUNT ON so the SELECT INTO emits no result set. #temp is scoped to this sp_executesql and
            dropped at the end. ROWS UNBOUNDED PRECEDING for the same per-row-cut reason as the plan fetch.
 
-           HASH JOIN for the same reason as the plan fetch (#2791), and this one is a two-view join written
-           out in the open: sys.query_store_query and sys.query_store_query_text are BOTH TVF-backed unions
-           over their in-memory halves, driven by an IN list, which is exactly the shape that put the plan
-           fetch on the inner side of a loop 512 times over. The plan fetch is the variant that carries the
+           #6257: this used to join sys.query_store_query to sys.query_store_query_text in ONE statement. Each
+           view is now read once, into its own temp table, with its own predicate (the id list for queries, the
+           staged queries' text ids for text), and the byte-budget statement joins only the temps. The text's
+           byte length is measured once, in the staging read, so the budget statement never touches the LOB
+           for anything but the passthrough.
+
+           HASH JOIN for the same reason as the plan fetch (#2791): sys.query_store_query and
+           sys.query_store_query_text are BOTH TVF-backed unions over their in-memory halves, which is exactly
+           the shape that put the plan fetch on the inner side of a loop 512 times over. The plan fetch is the variant that carries the
            OMEGA measurement; this one is the same defect treated the same way, and that distinction is stated
            rather than blurred - the join-strategy change and the identical-rowset property are verified
            here, the 60s->0.5s number is not this statement's and is not claimed for it.
@@ -1448,12 +1564,27 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
 SELECT /* PerformanceMonitorLite */
     query_id = qsq.query_id,
     query_hash = CONVERT(varchar(64), qsq.query_hash, 1),
-    query_sql_text = qst.query_sql_text
-INTO #text_fetch
+    query_text_id = qsq.query_text_id
+INTO #text_fetch_query
 FROM sys.query_store_query AS qsq
-JOIN sys.query_store_query_text AS qst
-  ON qst.query_text_id = qsq.query_text_id
 WHERE qsq.query_id IN ({idList})
+OPTION(RECOMPILE, HASH JOIN);
+
+CREATE CLUSTERED INDEX c ON #text_fetch_query (query_text_id);
+
+SELECT /* PerformanceMonitorLite */
+    query_text_id = qst.query_text_id,
+    query_sql_text = qst.query_sql_text,
+    text_bytes = COALESCE(DATALENGTH(qst.query_sql_text), 0)
+INTO #text_fetch_text
+FROM sys.query_store_query_text AS qst
+WHERE EXISTS
+(
+    SELECT
+        1/0
+    FROM #text_fetch_query AS q
+    WHERE q.query_text_id = qst.query_text_id
+)
 OPTION(RECOMPILE, HASH JOIN);
 
 SELECT /* PerformanceMonitorLite */
@@ -1463,18 +1594,21 @@ SELECT /* PerformanceMonitorLite */
 FROM
 (
     SELECT
-        query_id = t.query_id,
-        query_hash = t.query_hash,
+        query_id = q.query_id,
+        query_hash = q.query_hash,
         query_sql_text = t.query_sql_text,
-        text_bytes = COALESCE(DATALENGTH(t.query_sql_text), 0),
-        running_bytes = SUM(COALESCE(DATALENGTH(t.query_sql_text), 0)) OVER (ORDER BY t.query_id ROWS UNBOUNDED PRECEDING)
-    FROM #text_fetch AS t
+        text_bytes = t.text_bytes,
+        running_bytes = SUM(t.text_bytes) OVER (ORDER BY q.query_id ROWS UNBOUNDED PRECEDING)
+    FROM #text_fetch_query AS q
+    JOIN #text_fetch_text AS t
+      ON t.query_text_id = q.query_text_id
 ) AS b
 WHERE b.running_bytes - b.text_bytes < {budget}
 ORDER BY b.query_id
 OPTION(RECOMPILE);
 
-DROP TABLE #text_fetch;";
+DROP TABLE #text_fetch_text;
+DROP TABLE #text_fetch_query;";
 
         var escapedBody = body.Replace("'", "''", StringComparison.Ordinal);
 

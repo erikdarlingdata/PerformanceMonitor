@@ -27,9 +27,10 @@ Full entries: [docs/changelog/3.11.md](docs/changelog/3.11.md)
 
 ### Important
 
-- **Upgrading from 3.10 runs the Darling store migrations V174 through V210 on the service's first start**
-- **Upgrading Lite from 3.10 moves its DuckDB schema from version 67 to 77 on the first start**
-- **Self-managed stores: re-run `provision-roles.sql` after upgrading** ([#6066])
+- **Upgrading from 3.10 runs the Darling store migrations V174 through V214 on the service's first start**
+- **Upgrading Lite from 3.10 moves its DuckDB schema from version 67 to 78 on the first start**
+- **Self-managed stores: re-run `provision-roles.sql` after upgrading** ([#6066], [#6254], [#6383], [#6334])
+- **A remote SQL Server reachable only over a named pipe no longer connects from the Darling service or Lite** ([#6352])
 
 ### Added
 
@@ -69,6 +70,7 @@ Full entries: [docs/changelog/3.11.md](docs/changelog/3.11.md)
 - **CI can set aside a test that dev's own latest push broke, for up to 72 hours, on pull requests that do not reach it** ([#5942])
 - **Run all collectors now, or one collector now, for a server** ([#5941])
 - **Client Timeouts measurement scripts** ([#5736])
+- **Client Timeouts bars are now relative to each server's own normal rate** ([#5736])
 - **Alert recurrence in investigation briefs** ([#6000])
 - **Query tag rule MCP tools** ([#5982])
 - **Lite has a query-tag store** ([#5989])
@@ -103,7 +105,7 @@ Full entries: [docs/changelog/3.11.md](docs/changelog/3.11.md)
 - **Darling collects each database's forced plans** ([#5632], [#6221])
 - **Four small MCP read fixes for agents** ([#6074])
 - **Darling ranks queries by aborted and failed executions** ([#6073])
-- **Level 3 routes, and a per-server switch for each server action, each starting off** ([#5632], [#6271], [#6282], [#6281], [#6275])
+- **Level 3 routes, and a per-server switch for each server action, each starting off** ([#5632], [#6271], [#6282], [#6281], [#6275], [#6285], [#6339])
 - **Darling says whether each forced plan works** ([#5632], [#6160], [#6221])
 - **Darling says who drove the load on a server** ([#6072])
 - **Agents can force and unforce a Query Store plan on SQL Server** ([#5632], [#6207])
@@ -129,6 +131,23 @@ Full entries: [docs/changelog/3.11.md](docs/changelog/3.11.md)
 - **An MCP client can create and edit notification routes and dismiss alert history** ([#6231])
 - **MCP route tools set a route's own destinations** ([#6241])
 - **The web dashboard can create, edit and delete agent routes and edit environment profiles** ([#6264])
+- **The web dashboard charts file I/O throughput, tempdb size and I/O, and collector duration** ([#6296], [#6297], [#6298])
+- **The web dashboard compares Top Queries, Top Procedures and Query Store with an earlier period** ([#6300])
+- **The web Blocking page shows the lead-blocker tree of a blocked process report** ([#6292])
+- **The web System Events tab charts the corruption and contention counters** ([#6295])
+- **The web Active Queries tab picks a stored snapshot** ([#6302])
+- **Alerts show how many days in a row they fired at the same time of day** ([#6261])
+- **The web server page shows the Daily Health Calendar as a month calendar** ([#6294])
+- **The web dashboard draws the Query Heatmap as a colour grid** ([#6293])
+- **The web Memory tab charts memory grant sizing and activity, and `get_memory_grants` can return the same series** ([#6299])
+- **The web dashboard opens a per-row history for Top Queries and Top Procedures** ([#6303])
+- **The web Overview draws five strips on one time axis** ([#6291])
+- **Read Query Store from a readable replica, and stop losing late rows from a capturing secondary** ([#6254], [#6279])
+- **The Viewer's Collection Health tab can run collectors now** ([#6382])
+- **Darling MCP can now undo a finding mute with `unmute_analysis_finding`** ([#6383])
+- **The web narrows its grids with a time-range slicer** ([#6301])
+- **Registrations that report the same machine are now flagged** ([#6351])
+- **Known-pattern notes show beside the alerts they match** ([#6334])
 
 ### Changed
 
@@ -157,6 +176,8 @@ Full entries: [docs/changelog/3.11.md](docs/changelog/3.11.md)
 - **PR CI runs the Guard tests beside the shards instead of before them** ([#5952])
 - **PR CI builds the two test projects in parallel** ([#5955])
 - **Darling alerts run on their own 30 second beat and show how old their newest sample is** ([#5680])
+- **Lite's Query Store regressions now show timeouts and errors beside cost, and no longer report logical reads** ([#6308])
+- **The PLAN_REGRESSION drill-down reads closed days from the per-day totals** ([#5794])
 
 ### Fixed
 
@@ -312,6 +333,18 @@ Full entries: [docs/changelog/3.11.md](docs/changelog/3.11.md)
 - **A plain message when Windows is too old to start Darling and Lite** ([#5664])
 - **A web page you leave mid-read no longer logs a failure** ([#5679])
 - **Blocking snapshots no longer merge two separate waits of one pair** ([#5766])
+- **Default trace events no longer time out on small servers** ([#6311])
+- **Azure SQL Database: a connection outage is no longer logged as a missing XE session, and master is no longer a failed database** ([#6312])
+- **MCP answers no longer misstate sub-millisecond CPU, the monitor's own xmin, the tag window minimum or a two-session move** ([#6305])
+- **The Admin Agent changes list names the server, Admin tabs wrap, and the server page header stays current** ([#6310])
+- **The web dashboard's sidebar no longer takes 260 px of a phone-width window** ([#6315])
+- **The plan regression finding now also catches queries whose runs time out or fail** ([#6309])
+- **The Query Store collector no longer joins Query Store views in one statement** ([#6257])
+- **A server's host can no longer send Windows credentials over a named pipe** ([#6352])
+- **The service and Lite no longer follow a mirroring partner a monitored server names** ([#6365])
+- **The default trace collector no longer logs a spurious "unexpected end of trace file" error on SQL Server on Linux** ([#6381])
+- **File I/O no longer invents reads and writes on Azure SQL Database Hyperscale** ([#6438])
+- **Lite's Top Queries by CPU no longer ranks the whole procedure archive** ([#6096])
 
 ## [3.10.0] - 2026-10-09
 
@@ -5552,6 +5585,7 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#5790]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5790
 [#5791]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5791
 [#5792]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5792
+[#5794]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/5794
 [#5795]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5795
 [#5799]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5799
 [#5800]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/5800
@@ -5680,6 +5714,7 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#6073]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/6073
 [#6074]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/6074
 [#6081]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/6081
+[#6096]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6096
 [#6098]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6098
 [#6102]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/6102
 [#6103]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/6103
@@ -5750,7 +5785,10 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#6250]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/6250
 [#6251]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/6251
 [#6252]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6252
+[#6254]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6254
+[#6257]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6257
 [#6258]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/6258
+[#6261]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6261
 [#6262]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/6262
 [#6264]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/6264
 [#6265]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/6265
@@ -5758,8 +5796,39 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#6273]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/6273
 [#6275]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/6275
 [#6278]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/6278
+[#6279]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6279
 [#6280]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/6280
 [#6281]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/6281
 [#6282]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/6282
+[#6285]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6285
 [#6286]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/6286
 [#6287]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/6287
+[#6291]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6291
+[#6292]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6292
+[#6293]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6293
+[#6294]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6294
+[#6295]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6295
+[#6296]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6296
+[#6297]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6297
+[#6298]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6298
+[#6299]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6299
+[#6300]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6300
+[#6301]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6301
+[#6302]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6302
+[#6303]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6303
+[#6305]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6305
+[#6308]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/6308
+[#6309]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/6309
+[#6310]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6310
+[#6311]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/6311
+[#6312]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6312
+[#6315]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6315
+[#6334]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6334
+[#6339]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6339
+[#6351]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6351
+[#6352]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6352
+[#6365]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6365
+[#6381]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6381
+[#6382]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6382
+[#6383]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6383
+[#6438]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6438

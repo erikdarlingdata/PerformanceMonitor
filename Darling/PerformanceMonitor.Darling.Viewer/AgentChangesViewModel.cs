@@ -119,7 +119,7 @@ public sealed class AgentChangeViewRow
 
     public string WhenDisplay => Row.CalledAtUtc.ToLocalTime().ToString("g", CultureInfo.CurrentCulture);
 
-    public string Server => Row.ServerId is int id ? "Server " + id.ToString(CultureInfo.InvariantCulture) : "";
+    public string Server => Row.ServerLabel;
 
     /// <summary>The kind word, in plain words for the two plan force kinds (#5632) and as journaled for the rest.</summary>
     public string Kind => Row.Kind switch
@@ -178,7 +178,7 @@ public sealed class AgentRefusalViewRow
 
     public string WhenDisplay => Row.AtUtc.ToLocalTime().ToString("g", CultureInfo.CurrentCulture);
 
-    public string Server => Row.ServerId is int id ? "Server " + id.ToString(CultureInfo.InvariantCulture) : "";
+    public string Server => Row.ServerLabel;
 
     public string Tool => Row.Tool ?? "";
 

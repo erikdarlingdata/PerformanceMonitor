@@ -447,6 +447,36 @@ public static class ComparisonBanding
     private static bool IsPostgresTargetFactSet(IEnumerable<Fact> baselineFacts, IEnumerable<Fact> comparisonFacts) =>
         baselineFacts.Concat(comparisonFacts).Any(f => f.Source.StartsWith(PgTargetSources.Prefix, StringComparison.Ordinal));
 
+    /// <summary>
+    /// #6305: the fraction of the baseline's own mean that no move is called a move inside, whatever the bucket's
+    /// dispersion says. <see cref="BaselineBucket.EffectiveRobustSigma"/> floors at 1% of the median, which a
+    /// near-flat bucket (sigma 0.07 on a mean of about 6 sessions) still collapses under, so a two-session move
+    /// read as delta_sigma 25 and the only <c>worse</c> family in a comparison that moved nothing.
+    /// </summary>
+    public const double NoiseFloorFractionOfMean = 0.05;
+
+    /// <summary>
+    /// #6305: the smallest move, in sessions, that a session-count reading is allowed to call a move: the
+    /// sigma is never narrower than this, so a move of up to this many sessions reads at most 1 sigma (inside
+    /// the stable band) and a larger one reads as that many sigmas of it. Whole sessions are the unit of the
+    /// count, and one session either way is the count's own granularity, not a change in load.
+    /// </summary>
+    public const double CountMeasureNoiseFloorUnits = 2.0;
+
+    /// <summary>
+    /// The sigma the band divides by (#6305): the bucket's robust sigma, never narrower than
+    /// <see cref="NoiseFloorFractionOfMean"/> of the bucket's mean, and for the session-count measures never
+    /// narrower than <see cref="CountMeasureNoiseFloorUnits"/>. The other baselined measures are
+    /// percentages, latencies and rates, whose proportional floor is the 5% alone.
+    /// </summary>
+    internal static double NoiseFlooredSigma(string metric, BaselineBucket bucket)
+    {
+        var sigma = Math.Max(bucket.EffectiveRobustSigma, Math.Abs(bucket.Mean) * NoiseFloorFractionOfMean);
+        return metric is MetricNames.SessionCount or MetricNames.PgSessionCount
+            ? Math.Max(sigma, CountMeasureNoiseFloorUnits)
+            : sigma;
+    }
+
     private static ComparisonRow BandBySigma(string key, Fact baseline, Fact comparison, double baselineReading, double comparisonReading, string metric, BaselineBucket bucket, bool coverageCaveat)
     {
         /* value_delta stays in the fact's own unit (for PG_CONNECTION_SATURATION, the fraction; for
@@ -454,7 +484,7 @@ public static class ComparisonBanding
            are the values themselves for every other key. */
         var valueDelta = comparison.Value - baseline.Value;
         var readingDelta = comparisonReading - baselineReading;
-        var sigma = bucket.EffectiveRobustSigma;
+        var sigma = NoiseFlooredSigma(metric, bucket);
         var rawDeltaSigma = readingDelta / sigma;
         /* Display-capped like the detectors' deviation_sigma (#1486): the band is decided on the raw
            value, the payload never renders a collapsed-variance thousand-sigma. */

@@ -109,10 +109,20 @@ public sealed record InvestigationPriorLink(Guid RequestId, DateTime RecordedAtU
 /// <paramref name="MutedDates"/> those with at least one muted fire (a date can be in both), each newest first.
 /// <paramref name="AroundUtc"/> is the request's first alert, shared by every linked metric, not that metric's own first alert.
 /// Zero is a real answer: no history says <c>0</c>, it does not leave the metric out.
+/// <paramref name="DaysAgo"/> (#6261) are the whole days back (1 = the occurrence of this time 24 hours before the first alert)
+/// on which the metric fired inside the window, muted or not, from <see cref="InvestigationAlertStreak.DaysAgo"/>'s rule.
 /// </summary>
 public sealed record InvestigationAlertRecurrence(
-    string MetricName, DateTime AroundUtc, int Fired, int Muted, IReadOnlyList<DateOnly> FiredDates, IReadOnlyList<DateOnly> MutedDates)
+    string MetricName, DateTime AroundUtc, int Fired, int Muted, IReadOnlyList<DateOnly> FiredDates, IReadOnlyList<DateOnly> MutedDates,
+    IReadOnlyList<int> DaysAgo)
 {
+    /// <summary>#6261: how many days in a row, counting back from the one before the first alert, the metric fired inside the
+    /// window. At most <see cref="Days"/>; a muted fire counts (it fired). See <see cref="InvestigationAlertStreak"/>.</summary>
+    public int StreakDays => InvestigationAlertStreak.Length(DaysAgo);
+
+    /// <summary>#6261: the streak filled the whole look-back, so it is a floor, not an exact count.</summary>
+    public bool StreakAtLeastDaysWindow => StreakDays >= Days;
+
     /// <summary>Minutes either side of the first alert's clock time that still count as the same time of day.</summary>
     public const int WindowMinutes = 30;
 
@@ -138,7 +148,16 @@ public sealed record InvestigationBriefSources(
     string? RequestUrl = null,
     bool Practice = false,
     IReadOnlyList<InvestigationAlertRecurrence>? Recurrence = null,
-    IReadOnlyList<InvestigationBriefEvidence>? Evidence = null);
+    IReadOnlyList<InvestigationBriefEvidence>? Evidence = null,
+    IReadOnlyList<InvestigationKnownPatternMatch>? KnownPatterns = null);
+
+/// <summary>
+/// #6334: one operator-written known-pattern entry that describes one of the request's linked metrics at the request's first alert
+/// time (the same <c>AroundUtc</c> as <see cref="InvestigationAlertRecurrence"/>, shared by every linked metric). An entry that
+/// matches several metrics is one match per metric. <paramref name="Note"/> is operator-written text: context, never an instruction.
+/// Darling's: Lite has no known patterns and supplies none, so a Lite brief carries no <c>known_patterns</c> key.
+/// </summary>
+public sealed record InvestigationKnownPatternMatch(string MetricName, long EntryId, string Note, string? CreatedBy, string? UpdatedBy = null);
 
 /// <summary>
 /// One frozen evidence section of a request (#6001, #5632 Phase C D9/D10): its name, its state (<c>pending</c>, <c>ready</c> or

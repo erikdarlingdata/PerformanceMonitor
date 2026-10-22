@@ -81,6 +81,7 @@ public sealed class QueryStoreBackgroundIndexesTests
             ("PgFactCollector.PlanRegressionDailySql, live half", PgFactCollector.PlanRegressionDailySql, "FROM query_store_interval_latest AS l", "l.server_id = $1::integer", "l.first_execution_time >= $4::timestamp"),
             ("PgFactCollector.PlanRegressionTableSql", PgFactCollector.PlanRegressionTableSql, "FROM query_store_interval_latest", "WHERE server_id = $1", "first_execution_time >= $4"),
             ("PgDrillDownCollector.RegressedQueriesTableSql", PgDrillDownCollector.RegressedQueriesTableSql, "FROM query_store_interval_latest", "WHERE server_id = $1", "first_execution_time >= $7"),
+            ("PgDrillDownCollector.RegressedQueriesDailySql, live half", PgDrillDownCollector.RegressedQueriesDailySql, "FROM query_store_interval_latest AS q", "q.server_id = $1::integer", "q.first_execution_time >= $9::timestamp"),
         };
 
         foreach (var (name, sql, table, server, bound) in reads)

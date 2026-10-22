@@ -389,7 +389,10 @@ VALUES ({collectionId}, TIMESTAMP '{t}', {ServerId}, 'srv', 'db_odd', {queryId},
         var actual = await new LocalDataService(duckDb).GetQueryStoreRegressionsAsync(ServerId, 24, 50, asOfUtc: _anchor);
 
         Assert.True(oracle.Count >= 5);
-        AssertSameRows(oracle, actual);
+        /* #6268: the old read is an oracle for WHICH rows come back and for their text, not for the cost figures: the new read
+           weights the baseline by execution count, counts Regular runs only, and no longer reports logical reads, so those columns
+           are ignored here and pinned by QueryStoreRegressionsRunTypesTests instead. */
+        AssertSameRows(oracle, actual, ignoredColumns: ["baseline_duration_ms", "recent_duration_ms", "duration_regression_percent", "baseline_cpu_ms", "recent_cpu_ms", "cpu_regression_percent", "baseline_reads", "recent_reads", "io_regression_percent", "additional_duration_ms", "severity"]);
         Assert.Contains(actual, r => r.QueryTextSample.Length > 0);
     }
 

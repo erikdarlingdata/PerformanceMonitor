@@ -42,7 +42,7 @@ public sealed class AdminPageTests
     }
 
     [Theory]
-    [InlineData("SERVER_COLUMNS", new[] { "display_name", "server_name", "auth", "engine", "version", "status", "freshness", "monthly_cost", "read_only", "added", "last_collected" })]
+    [InlineData("SERVER_COLUMNS", new[] { "display_name", "server_name", "auth", "engine", "version", "status", "freshness", "monthly_cost", "read_only", "added", "last_collected", "same_machine_as" })]
     [InlineData("ROUTE_COLUMNS", new[] { "route_id", "enabled", "metric_match", "match_kind", "family", "applies_to", "status", "channels", "agent", "resolutions", "smtp_recipients", "modified_at_utc" })]
     [InlineData("SETTING_COLUMNS", new[] { "setting", "value" })]
     public void EachTab_DeclaresItsColumnKeys(string name, string[] keys)
@@ -145,7 +145,7 @@ public sealed class AdminPageTests
     {
         var page = Page();
         Assert.Contains("  client_timeouts: \"Client timeouts\",", page);
-        Assert.Contains("  client_timeouts: [\"enabled\", \"warning_per_minute\", \"critical_per_minute\"],", page);
+        Assert.Contains("  client_timeouts: [\"enabled\", \"warning_per_minute\", \"critical_per_minute\", \"warning_multiple\", \"critical_multiple\"],", page);
         var sections = page.IndexOf("export const SETTING_SECTIONS = [", StringComparison.Ordinal);
         Assert.True(page.IndexOf("\"runnable_queue\", \"client_timeouts\"", sections, StringComparison.Ordinal) > sections);
     }

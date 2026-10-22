@@ -112,7 +112,7 @@ public sealed class DurationTrendDatabaseFilterLiveTests
                 /* A repeated name and a blank one are one name, and the public method's answer is the All one. */
                 Assert.Equal(2_000 * perSecond, LastRate(await Read(Of(B, B, " ")))!.Value, 9);
                 Assert.Equal(LastRate(all), LastRate(procedures
-                    ? await DarlingMcpTrendTools.GetProcedureDurationTrend(postgres, serverName, 24, null, null, null, ct)
+                    ? await DarlingMcpTrendTools.GetProcedureDurationTrend(postgres, serverName, 24, null, null, null, null, ct)
                     : await DarlingMcpTrendTools.GetQueryDurationTrend(postgres, serverName, 24, null, null, null, ct)));
             }
 

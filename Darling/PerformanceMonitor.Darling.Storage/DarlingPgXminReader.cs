@@ -75,6 +75,11 @@ public static class DarlingPgXminReader
             w.samples
         FROM latest AS l
         JOIN window_stats AS w ON w.source = l.source
+        /* #6305: a latest row at age 0 is not a holder. The collector stores only the OLDEST holder per source,
+           so its newest row at age 0 means nothing in that source was holding the horizon back then. Rows
+           stored by an older build carry the monitor's own collecting session at age 0 and read here as a
+           holder with the "old snapshot / idle in transaction" remedy. */
+        WHERE l.xmin_age > 0
         ORDER BY l.xmin_age DESC
         """;
 

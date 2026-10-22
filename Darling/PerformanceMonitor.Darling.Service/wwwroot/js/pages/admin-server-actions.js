@@ -110,11 +110,32 @@ export function serverActionOutcome(res) {
 let status = null;
 let busy = false;
 let pending = null;
+/* Every switch button on screen (#6310). A click while another change is in flight used to hit `if (busy) return;` and vanish with no
+   message (4 of 5 back-to-back off/on cycles lost a click). Now the buttons are disabled the moment a change starts, so a click can
+   never be taken and dropped, and a "Saving" line shows until the answer is in; a button drawn mid-save is born disabled. */
+const switchButtons = new Set();
+
+function setBusy(value) {
+  busy = value;
+  for (const b of switchButtons) b.disabled = value;
+}
+
+/** The saving line a person reads while a change is in flight. */
+export const SAVING_SWITCH = "Saving the switch change. The switches are locked until it finishes.";
+
+/** A button of this tab: disabled while a change is in flight, and tracked so the next change disables it at once. */
+function switchButton(props) {
+  const b = el("button", props);
+  b.disabled = busy;
+  switchButtons.add(b);
+  return b;
+}
 
 /** Build the tab. `ctx` carries admin.js's own helpers: { getSession, failure, isCurrent(generation), repaint() }. */
 export async function buildServerActions(body, generation, ctx) {
   const res = await apiGet("/api/server-actions");
   if (!ctx.isCurrent(generation)) return;
+  switchButtons.clear();
   const nodes = [];
   if (status) nodes.push(status.isError ? errorStrip(status.message) : noticeStrip(status.message));
   if (pending) nodes.push(warningPanel(pending, ctx));
@@ -126,7 +147,7 @@ export async function buildServerActions(body, generation, ctx) {
   /* The on/off control sits before Note, so it stays on screen at 1280 px beside a long note. */
   const changeColumn = {
     key: "change", label: "Change", csv: false, copy: false,
-    render: (row) => (row ? el("button", {
+    render: (row) => (row ? switchButton({
       class: "btn", type: "button", text: row.enabled ? "Turn off" : "Turn on...",
       "aria-label": (row.enabled ? "Turn off " : "Turn on ") + row.action + " on " + row.server_name,
       onClick: () => (row.enabled ? change(row, false, ctx) : ask(row, ctx)),
@@ -153,23 +174,25 @@ function warningPanel(p, ctx) {
     el("p", { class: "mute-label", text: "Turn on: " + row.action + " on " + row.server_name }),
     el("p", { text: serverActionWarning(row.server_name, row.action_key) }),
     el("div", { class: "row-actions" }, [
-      el("button", { class: "btn primary", type: "button", text: "Turn it on", onClick: () => change(row, true, ctx) }),
-      el("button", { class: "btn", type: "button", text: "Cancel", onClick: () => { pending = null; ctx.repaint(); } }),
+      switchButton({ class: "btn primary", type: "button", text: "Turn it on", onClick: () => change(row, true, ctx) }),
+      switchButton({ class: "btn", type: "button", text: "Cancel", onClick: () => { pending = null; ctx.repaint(); } }),
     ]),
   ]);
 }
 
 async function change(row, enabled, ctx) {
   if (busy) return;
-  busy = true;
+  setBusy(true);
   pending = null;
+  status = { message: SAVING_SWITCH, isError: false };
+  ctx.repaint();
   try {
     const out = serverActionOutcome(await apiWrite("PUT", "/api/servers/" + encodeURIComponent(row.server_id) + "/actions/" + encodeURIComponent(row.action_key), { enabled }));
     if (out.message) status = { message: out.message, isError: out.isError };
   } catch (e) {
     status = { message: "Could not change the switch: " + (e && e.message ? e.message : String(e)), isError: true };
   } finally {
-    busy = false;
+    setBusy(false);
   }
   ctx.repaint();
 }

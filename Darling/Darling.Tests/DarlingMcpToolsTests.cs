@@ -52,7 +52,7 @@ public sealed class DarlingMcpToolsTests
 {
     /* ---------------- ungated: tool-surface pin ---------------- */
 
-    /// <summary>The six-tool analysis surface, ordinal-sorted — the same names Lite's and the
+    /// <summary>The seven-tool analysis surface, ordinal-sorted — the same names Lite's and the
     /// Dashboard's McpAnalysisTools register, so MCP clients see one consistent product.</summary>
     private static readonly string[] SharedAnalysisToolSurface =
     {
@@ -61,11 +61,12 @@ public sealed class DarlingMcpToolsTests
         "compare_analysis",
         "get_analysis_facts",
         "get_analysis_findings",
-        "mute_analysis_finding"
+        "mute_analysis_finding",
+        "unmute_analysis_finding"
     };
 
     [Fact]
-    public void ToolSurface_ExactlyTheSixSharedAnalysisTools()
+    public void ToolSurface_ExactlyTheSevenSharedAnalysisTools()
     {
         var toolMethods = typeof(DarlingMcpTools)
             .GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance)

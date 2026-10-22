@@ -461,10 +461,10 @@ public sealed class DarlingManagedRolesTests
            pinned separately by BuildProvisioningSql_McpRole_GrantsCustomViewsWrite_LikeViewer; it does not widen
            either schema-wide claim below. */
         Assert.Contains("GRANT INSERT ON collect.analysis_findings TO mcp;", sql, StringComparison.Ordinal);
-        Assert.Contains("GRANT INSERT ON config.analysis_muted TO mcp;", sql, StringComparison.Ordinal);
+        /* analysis_muted: INSERT for mute_analysis_finding and DELETE for unmute_analysis_finding (#6383). */
+        Assert.Contains("GRANT INSERT, DELETE ON config.analysis_muted TO mcp;", sql, StringComparison.Ordinal);
 
-        /* No DELETE on analysis_muted (no MCP unmute tool) and no schema-wide write for mcp. */
-        Assert.DoesNotContain("DELETE ON config.analysis_muted TO mcp", sql, StringComparison.Ordinal);
+        /* No schema-wide write for mcp. */
         Assert.DoesNotContain("INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA config TO mcp", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA collect TO mcp", sql, StringComparison.Ordinal);
 

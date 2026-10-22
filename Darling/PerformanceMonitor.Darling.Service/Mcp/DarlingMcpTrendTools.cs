@@ -613,9 +613,10 @@ public sealed class DarlingMcpTrendTools
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
+        [Description("One procedure, by the full_name get_top_procedures_by_cpu returns (e.g. dbo.usp_ProcessOrder). Case-sensitive. Needs database_name. Adds avg_cpu_ms per point. Omit for all procedures.")] string? procedure_name = null,
         [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         CancellationToken cancellationToken = default) =>
-        GetProcedureDurationTrend(postgres, server_name, hours_back, as_of, bucket_minutes, DatabaseFilter.One(database_name), TrendBudget.Mcp(TrendBuckets.DurationMaxPoints), cancellationToken);
+        GetProcedureDurationTrend(postgres, server_name, hours_back, as_of, bucket_minutes, DatabaseFilter.One(database_name), TrendBudget.Mcp(TrendBuckets.DurationMaxPoints), procedure_name, cancellationToken);
 
     /// <summary>get_procedure_duration_trend under an explicit <paramref name="budget"/> (#3897) — the query
     /// trend's twin, over the procedure pair.</summary>
@@ -625,10 +626,27 @@ public sealed class DarlingMcpTrendTools
         GetProcedureDurationTrend(postgres, server_name, hours_back, as_of, bucket_minutes, DatabaseFilter.All, budget, cancellationToken);
 
     /// <summary>get_procedure_duration_trend over a SET of databases (#5244): the query trend's twin, over the procedure pair.</summary>
+    internal static Task<string> GetProcedureDurationTrend(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, int? bucket_minutes, DatabaseFilter databases,
+        TrendBudget budget, CancellationToken cancellationToken = default) =>
+        GetProcedureDurationTrend(postgres, server_name, hours_back, as_of, bucket_minutes, databases, budget, null, cancellationToken);
+
+    /// <summary>
+    /// get_procedure_duration_trend for ONE procedure (#6303): <paramref name="procedureName"/> is the schema-qualified name the Top
+    /// Procedures grid shows (<c>full_name</c>), read inside the chosen database. Null is the read every other overload runs, and its
+    /// payload is unchanged; with a name the payload also echoes <c>procedure_name</c> beside <c>database_name</c>. A name without exactly
+    /// one database is refused: two databases can each hold a procedure of that name, and the series would sum them.
+    /// </summary>
     internal static async Task<string> GetProcedureDurationTrend(
         NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, int? bucket_minutes, DatabaseFilter databases,
-        TrendBudget budget, CancellationToken cancellationToken = default)
+        TrendBudget budget, string? procedureName, CancellationToken cancellationToken = default)
     {
+        procedureName = string.IsNullOrWhiteSpace(procedureName) ? null : procedureName;
+        if (procedureName is not null && databases.Names.Count != 1)
+        {
+            return McpHelpers.Refusal("procedure_name", "procedure_name needs database_name set to exactly one database: the same procedure name can exist in several, and the series would add them together.");
+        }
+
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
@@ -656,31 +674,74 @@ public sealed class DarlingMcpTrendTools
                 bucketMinutes = TrendBuckets.OnHourlyTier(bucket_minutes, bucketMinutes);
             }
 
-            var result = await DarlingTrendReader.GetProcedureDurationTrendAsync(postgres, resolved.ServerId, startUtc, now, route, bucketMinutes, databases, cancellationToken);
+            var result = procedureName is null
+                ? await DarlingTrendReader.GetProcedureDurationTrendAsync(postgres, resolved.ServerId, startUtc, now, route, bucketMinutes, databases, cancellationToken)
+                : await DarlingTrendReader.GetProcedureDurationTrendAsync(postgres, resolved.ServerId, startUtc, now, route, bucketMinutes, databases, procedureName, cancellationToken);
 
             if (result.Points.Count == 0)
             {
                 var gated = McpHelpers.WithDatabase(await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "procedure_stats", cancellationToken), databases.Describe());
                 if (gated != null)
                 {
-                    return gated;
+                    return WithProcedureEcho(gated, procedureName);
                 }
 
-                return await EmptyRoutedTrendAsync(
+                return WithProcedureEcho(await EmptyRoutedTrendAsync(
                     DarlingTrendReader.HasAnyProcedureStatAsync(postgres, resolved.ServerId, cancellationToken),
                     postgres, resolved.ServerId, resolved.DisplayName, hours_back, startUtc, now, route, "stored-procedure",
                     "Check that collection is running and that the server is enabled. A server that genuinely runs no stored procedures also lands here, and that is a real answer rather than a fault.",
-                    new BucketChoice(bucketMinutes, bucket_minutes is not null, budget.AutoPoints), databases, cancellationToken);
+                    new BucketChoice(bucketMinutes, bucket_minutes is not null, budget.AutoPoints), databases, cancellationToken), procedureName);
             }
 
-            return SerializeTrend(resolved.DisplayName, hours_back, result.Points,
+            var serialized = SerializeTrend(resolved.DisplayName, hours_back, result.Points,
                 DescribeRoute(result, now, new BucketChoice(bucketMinutes, bucket_minutes is not null, budget.AutoPoints)),
                 await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, startUtc, now, cancellationToken), databases);
+            if (procedureName is null)
+            {
+                return serialized;
+            }
+
+            /* #6303: one procedure also carries avg_cpu_ms per point (the Viewer's procedure history draws it); the all-procedures
+               payload is unchanged. */
+            return WithProcedureEcho(WithAvgCpu(serialized, await DarlingTrendReader.GetProcedureAvgCpuAsync(
+                postgres, resolved.ServerId, startUtc, now, route, bucketMinutes, databases, procedureName, cancellationToken)), procedureName);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_procedure_duration_trend", ex);
         }
+    }
+
+    /// <summary>#6303: adds <c>avg_cpu_ms</c> (the bucket's worker time over its executions) to each point of a one-procedure trend, by the
+    /// point's <c>time</c>. A point whose bucket executed nothing carries null, never 0.</summary>
+    private static string WithAvgCpu(string json, Dictionary<string, double> avgCpuMsByBucket)
+    {
+        if (System.Text.Json.Nodes.JsonNode.Parse(json) is not System.Text.Json.Nodes.JsonObject payload
+            || payload["trend"] is not System.Text.Json.Nodes.JsonArray trend)
+        {
+            return json;
+        }
+
+        foreach (var point in trend.OfType<System.Text.Json.Nodes.JsonObject>())
+        {
+            var time = point["time"]?.GetValue<string>();
+            point["avg_cpu_ms"] = time is not null && avgCpuMsByBucket.TryGetValue(time, out var avg) ? avg : null;
+        }
+
+        return payload.ToJsonString(McpHelpers.JsonOptions);
+    }
+
+    /// <summary>#6303: puts <c>procedure_name</c> beside <c>database_name</c> in a procedure trend's answer, data or empty, so a reader sees
+    /// which procedure it was limited to. No name leaves the payload byte-for-byte as it was.</summary>
+    private static string WithProcedureEcho(string json, string? procedureName)
+    {
+        if (procedureName is null || System.Text.Json.Nodes.JsonNode.Parse(json) is not System.Text.Json.Nodes.JsonObject payload)
+        {
+            return json;
+        }
+
+        payload.Insert(payload.ContainsKey("database_name") ? payload.IndexOf("database_name") + 1 : payload.Count, "procedure_name", procedureName);
+        return payload.ToJsonString(McpHelpers.JsonOptions);
     }
 
     [McpServerTool(Name = "get_query_store_duration_trend"), Description("Gets a time-series of Query Store duration and executions per second, summed across every query, each interval counted once, at the hour it ran. not_collected: engine cannot run Query Store. unavailable: never sampled here. empty: quiet on Lite always; on Darling, empty can also be a rollup coverage gap (window predates the corrected rollup, run --backfill-rollups). Only a point that stored no interval end and has no earlier point to rate against has null rates, never 0 (unrated_points, unrated_note says why). window_truncated marks the retention floor, not a page cut. <<GUIDE>> Gets a time-series of Query Store duration per second and executions per second over time, summed across every query. hours_back reaches 2160 (90 days), served from the hourly rollup past the raw tier's four days. Where get_query_duration_trend reads the plan cache and loses everything an eviction or a restart takes with it, this reads Query Store, which persists per interval - so it is the series that survives a failover and the one to reach for when a regression is older than the cache. Each interval is counted once, at the hour the work ran. A rollup point (an hourly bucket the corrected rollup has materialized) is rated over its bucket width, so every rollup point is rated, the window's first bucket included; a raw point (a Query Store interval placed at its start, or a legacy row at its collection time) is rated over its own stored interval, its end minus its start. A raw point with no stored end (a row collected before the end was recorded, and every legacy row) falls back to the gap since the PREVIOUS point, so only such a point, when it is first in the window and has no previous one to difference against, carries null rates: unknowable, never reported as 0 (unrated_points counts them, unrated_note says why)." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]

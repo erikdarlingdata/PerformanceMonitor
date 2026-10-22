@@ -44,6 +44,16 @@ SELECT aws_role_arn, aws_external_id
 FROM config_monitored_servers
 WHERE aws_role_arn IS NOT NULL OR aws_external_id IS NOT NULL";
 
+    /// <summary>
+    /// The registry's Query Store replica (#6254, store version 213), for the name set: a host (or listener name) set through the
+    /// Viewer, the web dashboard or MCP lives only in the store, so a bundle that seeded darling.json alone would show it in clear.
+    /// A store older than 211 has no such column; that read adds nothing instead of refusing the bundle.
+    /// </summary>
+    internal const string RegistryReplicaSql = @"
+SELECT query_store_replica
+FROM config_monitored_servers
+WHERE query_store_replica IS NOT NULL";
+
     /// <summary>Both spellings the collected-data tables use for a server, for the name set.</summary>
     internal const string CollectServersSql = @"
 SELECT server_id, server_name, display_name
@@ -363,6 +373,7 @@ SELECT to_regclass('collect.store_statement_history') IS NOT NULL AND to_regclas
     internal sealed record NameSourceSql(
         string Registry = RegistryNamesSql,
         string RegistryAws = RegistryAwsSql,
+        string RegistryReplica = RegistryReplicaSql,
         string Servers = CollectServersSql,
         string Roles = StoreRolesSql,
         string Databases = StoreDatabasesSql,
@@ -409,6 +420,14 @@ SELECT to_regclass('collect.store_statement_history') IS NOT NULL AND to_regclas
         }, ct, missingColumnIsEmpty: true))
         {
             failedNameSource ??= "config_monitored_servers (aws role)";
+        }
+
+        if (!await TryReadAsync(postgres, sql.RegistryReplica, reader =>
+        {
+            aliaser.AddName(AliasKind.Host, QueryStoreReplicaSetting.Normalize(reader.GetString(0)));
+        }, ct, missingColumnIsEmpty: true))
+        {
+            failedNameSource ??= "config_monitored_servers (query store replica)";
         }
 
         /* Servers by id first so the alias order follows server_id; display names share their server's alias. */

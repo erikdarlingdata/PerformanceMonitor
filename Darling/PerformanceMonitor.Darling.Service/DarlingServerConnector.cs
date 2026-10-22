@@ -52,6 +52,11 @@ public sealed class ServerRuntime
     /// </summary>
     public string? ConnectedDatabase { get; init; }
 
+    /// <summary>#6285: the machine and instance the SQL Server calls itself (<c>SERVERPROPERTY('ServerName')</c>), read by the
+    /// same detection query; null on an Azure SQL Database, which names no machine of its own. #6339: on PostgreSQL, the cluster's
+    /// <c>system_identifier</c>, a colon and the server port, or null when the role may not read it.</summary>
+    public string? MachineIdentity { get; init; }
+
     public bool HasMsdbAccess { get; init; }
 
     /// <summary>
@@ -107,7 +112,7 @@ public static class DarlingServerConnector
        depend on it (#1535). sqlserver_start_time - the one column that needs the DMV - is not read
        here (the service never surfaces a start time), so unlike Lite/Dashboard no best-effort
        start-time read is needed. Columns: 0 sql_version, 1 major_version, 2 utc_offset,
-       3 engine_edition, 4 is_aws_rds, 5 has_msdb_access, 6 connected_database (#2228).
+       3 engine_edition, 4 is_aws_rds, 5 has_msdb_access, 6 connected_database (#2228), 7 server_name (#6285).
 
        #2228 — connected_database is DB_NAME(): the database this connection ACTUALLY reached, which is not
        necessarily the one the registration names. An Initial Catalog that is absent, misspelled or overridden
@@ -127,7 +132,9 @@ SELECT /* PerformanceMonitorLite */
     CASE WHEN DB_ID('rdsadmin') IS NOT NULL THEN 1 ELSE 0 END AS is_aws_rds,
     HAS_DBACCESS(N'msdb') AS has_msdb_access,
     /* #2228: which database this connection actually landed in. Appended; see the comment above. */
-    DB_NAME() AS connected_database";
+    DB_NAME() AS connected_database,
+    /* #6285: the machine and instance the server calls itself, appended like the column above. */
+    CONVERT(nvarchar(128), SERVERPROPERTY('ServerName')) AS server_name";
 
     /// <summary>
     /// The tripwire's verdict: the message to raise when a registration is connected to a database it does not
@@ -169,6 +176,15 @@ SELECT /* PerformanceMonitorLite */
                "under two identities. Check this server's Initial Catalog / database setting in the Viewer's " +
                "Manage Servers, or the 'database' field for it in darling.json.";
     }
+
+    /// <summary>
+    /// #6254: the connection string for the server's Query Store replica, null when none is set. The same secret resolution as
+    /// <see cref="ResolveConnectionString"/>; the builder is <see cref="MonitoredServerConnection.BuildQueryStoreReplicaConnectionString"/>.
+    /// </summary>
+    public static string? ResolveQueryStoreReplicaConnectionString(MonitoredServer config, bool isAzureSqlDatabase, ILogger? logger = null) =>
+        /* The builder takes the replica from the identity the password seal opens with and resolves the password itself (a stored
+           reference only when darling.json declares it), and returns null for an Azure SQL Database. */
+        MonitoredServerConnection.BuildQueryStoreReplicaConnectionString(config, isAzureSqlDatabase);
 
     public static string ResolveConnectionString(MonitoredServer config, ILogger? logger = null)
     {
@@ -490,7 +506,7 @@ SELECT
 
         int majorVersion = 0, engineEdition = 0;
         bool isAwsRds = false, hasMsdbAccess = true;
-        string? connectedDatabase = null;
+        string? connectedDatabase = null, machineIdentity = null;
         if (await reader.ReadAsync(cancellationToken))
         {
             // Column indices per DetectionQueryText: 1 major_version, 3 engine_edition,
@@ -500,6 +516,9 @@ SELECT
             isAwsRds = !reader.IsDBNull(4) && reader.GetInt32(4) == 1;
             hasMsdbAccess = reader.IsDBNull(5) || reader.GetInt32(5) == 1;
             connectedDatabase = reader.IsDBNull(6) ? null : reader.GetString(6);   /* #2228 */
+            /* #6285: the server's own name, for the add and edit tools' same-machine check. An Azure SQL Database has no
+               machine of its own to name, so it reports none. */
+            machineIdentity = reader.IsDBNull(7) || engineEdition == 5 ? null : reader.GetString(7);
         }
 
         return new ServerRuntime
@@ -527,6 +546,7 @@ SELECT
             IsAwsRds = isAwsRds,
             EngineEdition = engineEdition,
             ConnectedDatabase = connectedDatabase,
+            MachineIdentity = machineIdentity,
         };
     }
 
@@ -608,6 +628,10 @@ SELECT
 
         var isAurora = await ProbeAuroraAsync(connection, cancellationToken, logger);
 
+        /* #6339: which cluster this is, for the add and edit tools' same-machine check. After the facts the collectors depend on,
+           and on its own statement, so a role that may not read it costs nothing but the identity. */
+        var machineIdentity = await ProbePostgresIdentityAsync(connection, logger, cancellationToken, isAurora);
+
         /* #3604: the wait-tier decision's second fact. Probed AFTER Aurora-ness and independently of it —
            an Aurora cluster cannot load the module, so the answer there is false by construction, but the
            gate reads the two facts separately and the sweep varies them separately. */
@@ -651,11 +675,57 @@ SELECT
             StorageName = storageName,
             ServerId = config.ServerId,
             ConnectedDatabase = connectedDatabase,
+            MachineIdentity = machineIdentity,
             /* #3830: on the runtime rather than on Target, because nothing dispatches on it - it feeds one
                fault sentence - and CollectorTargetInfo is the type whose facts the engine-capability sweep
                has to vary or fix. */
             PgStatStatementsExtension = statementsExtension,
         };
+    }
+
+    /// <summary>
+    /// #6339: what identifies the PostgreSQL cluster this session reached, as <c>system_identifier</c>, a colon and the port the
+    /// server listens on (<c>pg_control_system()</c> and the <c>port</c> setting), so one cluster reached under two host names reads
+    /// as one machine while two clusters on a host (a different identifier, or a different port) do not. Null when the role may not
+    /// call <c>pg_control_system()</c> (a managed service can refuse it): the caller then matches by host text alone. Never throws
+    /// except for cancellation, and never fails the connect. Standalone statement outside any transaction, so a refusal leaves the
+    /// session usable. Streaming replicas of one primary share its identifier and usually its port, so they read as one cluster.
+    /// </summary>
+    internal const string PostgresIdentityQueryText = @"
+SELECT s.system_identifier::text AS system_identifier,
+       pg_catalog.current_setting('port') AS port
+FROM pg_catalog.pg_control_system() AS s";
+
+    internal static async Task<string?> ProbePostgresIdentityAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken, bool isAurora = false)
+    {
+        /* #6340 round 2 (N4): none on Aurora. No AWS documentation shows system_identifier to be unique per Aurora cluster (the control
+           file is virtual there, and one report has RDS instances sharing one), so a value that two clusters could share would only
+           make the add and edit tools refuse unrelated clusters. The host-text match decides there. */
+        if (isAurora)
+        {
+            return null;
+        }
+
+        try
+        {
+            using var command = new NpgsqlCommand(PostgresIdentityQueryText, connection) { CommandTimeout = 30 };
+            using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0) && !reader.IsDBNull(1))
+            {
+                return reader.GetString(0) + ":" + reader.GetString(1);
+            }
+
+            return null;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger?.LogDebug("pg_control_system() is not readable on this target ({Message}); it is matched by host text alone", ex.Message);
+            return null;
+        }
     }
 
     /// <summary>
@@ -677,6 +747,9 @@ SELECT
         {
             var runtime = await ConnectAsync(config, logger, cancellationToken);
             var isPostgres = runtime.Target.Engine == CollectorTargetEngine.PostgreSql;
+            /* #6254: a server with a Query Store replica is tested on both connections, so a replica that cannot be reached shows now
+               and not as a collection that quietly reads the primary. Its failure is a warning: the primary answered. */
+            var (replicaHost, replicaError) = await ProbeQueryStoreReplicaAsync(config, runtime.Target.IsAzureSqlDb, logger, cancellationToken);
             return new ConnectionProbeResult(
                 Success: true,
                 MajorVersion: runtime.Target.SqlMajorVersion,
@@ -691,12 +764,15 @@ SELECT
                 HasMsdbAccess: runtime.HasMsdbAccess,
                 Error: null,
                 ConnectedDatabase: runtime.ConnectedDatabase,
+                MachineIdentity: runtime.MachineIdentity,
                 Engine: runtime.Target.Engine,
                 PostgresMajorVersion: runtime.Target.PostgresMajorVersion,
                 PostgresVersionNum: runtime.Target.PostgresVersionNum,
                 IsAurora: runtime.Target.IsAurora,
                 IsInRecovery: runtime.Target.IsInRecovery,
-                HasPgWaitSamplingExtension: runtime.Target.HasPgWaitSamplingExtension);
+                HasPgWaitSamplingExtension: runtime.Target.HasPgWaitSamplingExtension,
+                QueryStoreReplica: replicaHost,
+                QueryStoreReplicaError: replicaError);
         }
         catch (OperationCanceledException)
         {
@@ -718,6 +794,70 @@ SELECT
                 Error: SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ex.Message,
                 SqlClientNativeLoadFailed: SqlClientNativeLoadFailure.IsMatch(ex));
         }
+    }
+
+    /// <summary>
+    /// #6254: opens the server's Query Store replica connection the way collection opens it: the string comes from
+    /// <see cref="ResolveQueryStoreReplicaConnectionString"/> (the same builder: the replica host, <c>ApplicationIntent=ReadOnly</c>,
+    /// the server's login and authentication) and the connection is the SQL Server target provider's own <see cref="SqlConnection"/>.
+    /// Returns <c>(null, null)</c> for a server with no replica, a PostgreSQL target or an Azure SQL Database, <c>(host, null)</c> when the
+    /// replica opened, and <c>(host, error)</c> when it did not (a refused login, an unreachable host, a password the builder would not
+    /// release). Never throws except for cancellation. <paramref name="createConnection"/> is a test seam; null opens a SqlConnection.
+    /// </summary>
+    internal static async Task<(string? Host, string? Error)> ProbeQueryStoreReplicaAsync(
+        MonitoredServer config, bool isAzureSqlDatabase, ILogger? logger, CancellationToken cancellationToken,
+        Func<string, System.Data.Common.DbConnection>? createConnection = null)
+    {
+        if (config.IsPostgres || isAzureSqlDatabase
+            || PerformanceMonitor.Darling.Storage.QueryStoreReplicaSetting.Normalize(config.ConnectionIdentity.QueryStoreReplica) is not { } host)
+        {
+            return (null, null);
+        }
+
+        try
+        {
+            var connectionString = ResolveQueryStoreReplicaConnectionString(config, isAzureSqlDatabase, logger);
+            if (connectionString is null)
+            {
+                return (null, null);
+            }
+
+            await using var connection = createConnection is null ? new SqlConnection(connectionString) : createConnection(connectionString);
+            await connection.OpenAsync(cancellationToken);
+            return (host, null);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            return (host, SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// #6254: the one line a connection test says about the Query Store replica, or null when the probed server has none.
+    /// <paramref name="revealError"/> says whether the driver's text may be shown (the CLI and the Viewer, the operator's own
+    /// surfaces, as for the primary); a caller that must not echo it (MCP and web replies) gets a fixed sentence and logs the text.
+    /// A failing replica is a warning: collection reads the primary, and the line says so.
+    /// </summary>
+    public static string? DescribeQueryStoreReplica(ConnectionProbeResult probe, bool revealError = true)
+    {
+        ArgumentNullException.ThrowIfNull(probe);
+        if (string.IsNullOrEmpty(probe.QueryStoreReplica))
+        {
+            return null;
+        }
+
+        if (string.IsNullOrEmpty(probe.QueryStoreReplicaError))
+        {
+            return $"Query Store replica {probe.QueryStoreReplica}: connected.";
+        }
+
+        return revealError
+            ? $"Query Store replica {probe.QueryStoreReplica}: could not connect ({probe.QueryStoreReplicaError}). Collection reads Query Store from the primary until it can."
+            : $"Query Store replica {probe.QueryStoreReplica}: could not connect. Collection reads Query Store from the primary until it can. The service log has the details.";
     }
 
     /// <summary>
@@ -816,7 +956,16 @@ public sealed record ConnectionProbeResult(
     /* #6183: the failure was SqlClient's native library not loading. No SQL Server connection can work from this
        install, so a caller that probes several servers says so once instead of once per server. Trailing and
        defaulted, like the fields above. */
-    bool SqlClientNativeLoadFailed = false)
+    bool SqlClientNativeLoadFailed = false,
+    /* #6285: the machine and instance name the SQL Server reached calls itself (SERVERPROPERTY('ServerName')), read on this
+       same connection, so add_servers and edit_server can tell one machine reached under two names. Null when the probe
+       read none: a failed connection, an Azure SQL Database, or a PostgreSQL role that may not read the cluster identity (#6339). Trailing and defaulted, like the fields above. */
+    string? MachineIdentity = null,
+    /* #6254: the Query Store replica host the test also opened, and the error when it would not open. Null host: the server has no
+       replica (or is a PostgreSQL target or an Azure SQL Database). A set error leaves Success alone, because collection reads
+       the primary when the replica cannot be reached. Trailing and defaulted, like the fields above. */
+    string? QueryStoreReplica = null,
+    string? QueryStoreReplicaError = null)
 {
     /// <summary>
     /// Rebuilds the gate's-eye view of this target, so a caller can ask which collectors would actually

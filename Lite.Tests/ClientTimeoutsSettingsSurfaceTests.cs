@@ -215,7 +215,7 @@ public sealed class ClientTimeoutsSettingsSurfaceTests
             var group = JsonDocument.Parse(json).RootElement.GetProperty("client_timeouts");
 
             Assert.Equal(
-                new[] { "enabled", "warning_per_minute", "critical_per_minute" },
+                new[] { "enabled", "warning_per_minute", "critical_per_minute", "warning_multiple", "critical_multiple" },
                 group.EnumerateObject().Select(p => p.Name).ToArray());
             Assert.True(group.GetProperty("enabled").GetBoolean());
             Assert.Equal(12, group.GetProperty("warning_per_minute").GetInt32());

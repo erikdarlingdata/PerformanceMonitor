@@ -26,7 +26,7 @@ public sealed class DarlingCliSealKeyTests
         new("host-example", FileKey.PublicKey.KeyId, state, note, DateTime.UtcNow);
 
     private static readonly PasswordBinding Binding = PasswordBinding.ForServer(
-        ServerConnectionIdentity.FromStoredColumns("sql-example", 0, "sqlserver", null, false, "sql", "monitor", "Mandatory", false, false));
+        ServerConnectionIdentity.FromStoredColumns("sql-example", 0, "sqlserver", null, false, "sql", "monitor", "Mandatory", false, false, null));
 
     [Fact]
     public void AKeyFileThatMatchesThePublishedKey_IsUsed_AndOpensWhatItSeals()

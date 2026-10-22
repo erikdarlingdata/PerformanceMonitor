@@ -1060,6 +1060,49 @@ public sealed class DarlingAnalysisService
     }
 
     /// <summary>
+    /// Removes the mute registered for <paramref name="storyPathHash"/> in one scope: one server
+    /// (<paramref name="serverId"/>), or the all-servers scope when it is null or the sentinel 0 (#6383). It reuses the
+    /// viewer's own two store calls, <see cref="PgFindingStore.GetMutedStoriesAsync"/> to find the registry rows and
+    /// <see cref="PgFindingStore.UnmuteStoryAsync"/> to delete each by <c>mute_id</c>, so there is one delete statement.
+    /// The scope match is exact: a per-server mute is not removed by the all-servers call and a global mute is not
+    /// removed by naming a server (the store read returns both, so the rows are filtered here). Rows are matched by
+    /// <c>story_path_hash</c> case-sensitively, the way the mute filter does; a duplicate row in the scope (the
+    /// registry has no unique key, see <see cref="PgFindingStore.MuteStorySql"/>) is removed too, so the pattern is
+    /// really reported again.
+    /// </summary>
+    public async Task<UnmuteWriteResult> UnmuteFindingAsync(int? serverId, string storyPathHash)
+    {
+        var global = serverId is null or 0;
+        var rows = await _findingStore.GetMutedStoriesAsync(serverId ?? 0);
+        var removed = new List<MutedStory>();
+        var failed = 0;
+        foreach (var row in rows)
+        {
+            if (!string.Equals(row.StoryPathHash, storyPathHash, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var inScope = global ? row.ServerId is null or 0 : row.ServerId == serverId;
+            if (!inScope)
+            {
+                continue;
+            }
+
+            if (await _findingStore.UnmuteStoryAsync(row.MuteId))
+            {
+                removed.Add(row);
+            }
+            else
+            {
+                failed++;
+            }
+        }
+
+        return new UnmuteWriteResult(removed, failed);
+    }
+
+    /// <summary>
     /// How many stored findings carry <paramref name="storyPathHash"/> for one server (or fleet-wide when
     /// <paramref name="serverId"/> is null / the all-servers sentinel 0) — the mute verb's <c>matched_now</c>
     /// disclosure (#3541 A14). A pass-through to <see cref="PgFindingStore.CountStoredFindingsAsync"/>; see its

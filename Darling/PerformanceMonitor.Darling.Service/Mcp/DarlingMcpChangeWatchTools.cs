@@ -48,7 +48,10 @@ public sealed class DarlingMcpChangeWatchTools
         "Reads the change watch windows (config.change_watches) for SQL Server and PostgreSQL targets. A SQL Server change is a server, database or " +
         "database-scoped setting, a trace flag, or a forced or unforced Query Store plan; a PostgreSQL change is a server setting, a per-database " +
         "or per-role setting, or an extension install, drop or version change. Every change Darling records opens a watch of 60 " +
-        "minutes for its server, or extends the open one; when the window ends, the watch is evaluated and closes. Each watch lists its " +
+        "minutes for its server, or extends the open one; when the window ends, the watch is evaluated and closes. Darling looks for " +
+        "changes once an hour per server, so a change may be recorded up to an hour after it happened. The window still runs from the " +
+        "change's own time, and a later change inside the window is still added before the watch is evaluated. Because of that delay a " +
+        "watch is often due as soon as it is recorded, so an open watch is rarely seen. Each watch lists its " +
         "changes (time, kind, database, query id and what changed), and a closed watch lists its measures: total wait time per second, " +
         "average CPU and each query whose average duration at least doubled with 10 or more executions in both windows, each with the " +
         "hour before, the watch window and the same window a week earlier. result says how it closed: flat (nothing moved), " +

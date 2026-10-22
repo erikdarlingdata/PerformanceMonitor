@@ -150,6 +150,7 @@ public sealed class DarlingMcpWritePolicyTests
         Assert.Contains("create_mute_rule", served);
         Assert.Contains("delete_custom_view", served);
         Assert.Contains("mute_analysis_finding", served);
+        Assert.Contains("unmute_analysis_finding", served);
         Assert.DoesNotContain("add_servers", served);
         Assert.DoesNotContain("remove_server", served);
     }
@@ -393,6 +394,7 @@ public sealed class DarlingMcpWritePolicyTests
     [InlineData("/", "create_mute_rule", "{}")]
     [InlineData("/", "edit_server", "{\"server_name\":\"alpha\",\"changes_json\":\"{}\"}")]
     [InlineData("/", "add_servers", "{\"servers_json\":\"[]\"}")]
+    [InlineData("/", "unmute_analysis_finding", "{\"story_path_hash\":\"abc\"}")]
     [InlineData("/core", "create_mute_rule", "{}")]
     [InlineData("/core", "edit_server", "{\"server_name\":\"alpha\",\"changes_json\":\"{}\"}")]
     [InlineData("/", "create_query_tag", "{\"name\":\"Reports\"}")]

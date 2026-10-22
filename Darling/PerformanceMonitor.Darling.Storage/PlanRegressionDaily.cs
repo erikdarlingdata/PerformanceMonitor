@@ -37,6 +37,9 @@ namespace PerformanceMonitor.Darling.Storage;
 /// </summary>
 public static class PlanRegressionDaily
 {
+    /// <summary>The per-day totals table, as its siblings spell theirs (<c>QueryStoreTextStore.TableName</c>).</summary>
+    public const string TableName = "collect.plan_regression_daily";
+
     /// <summary>The window PLAN_REGRESSION describes, in days; also how far back the builder fills closed days.</summary>
     public const int WindowDays = 14;
 

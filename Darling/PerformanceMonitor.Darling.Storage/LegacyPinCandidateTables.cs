@@ -22,6 +22,13 @@ public static class LegacyPinCandidateTables
     /// <summary>The store schema version of the rung that creates the table and records the values (V167).</summary>
     public const int RungVersion = 167;
 
+    /// <summary>The connection columns the candidate table records, in the order <see cref="ServerConnectionIdentity.StoredColumns"/>
+    /// lists them without <c>query_store_replica</c>, which V213 (#6254) added to the server table after this record was taken.
+    /// A recorded value was sealed, or pinned, for a connection with no Query Store replica, so the pin step reads these columns
+    /// and passes no replica; a live row that has one then no longer matches its record and its password is entered again.</summary>
+    public const string ConnectionColumns = "host, port, engine, database, read_only_intent, auth, username, " +
+        "encrypt_mode, trust_server_certificate, multi_subnet_failover";
+
     /// <summary>
     /// The table, its two owner-only triggers and row-level security. The triggers are made before
     /// <see cref="CaptureSql"/> runs, so the table is never writable by anyone else, not even for the moment between

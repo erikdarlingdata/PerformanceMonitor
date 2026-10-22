@@ -243,7 +243,7 @@ public sealed class DarlingMcpQueryStoreHistoryTools
 
             var plan = await QueryStoreIntervalWide.ResolveReadAsync(
                 connection, serverId, start, end, end, DarlingDataReader.QueryStoreTopMinWindow,
-                McpCommandDeadlines.ReadSeconds, ReadScope.Current?.Logger, cancellationToken);
+                McpCommandDeadlines.ReadSeconds, ReadScope.Current?.Logger, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow, cancellationToken);
             if (!plan.UseTable)
             {
                 if (plan.DecisionFailed) ReadScope.Note(ReadFallback.GateFailed);

@@ -318,7 +318,8 @@ ORDER BY server_id, queryid, database_id, user_id, toplevel, collection_time DES
             var serverId = reader.GetInt32(0);
             var dbName = reader.IsDBNull(1) ? "" : reader.GetString(1);
             var fileName = reader.IsDBNull(2) ? "" : reader.GetString(2);
-            var deltaKey = $"{dbName}|{fileName}";
+            /* The collector's own key function, so the seed and the collector cannot drift (#6438). */
+            var deltaKey = FileIoStatsCollector.DeltaKey(dbName, fileName);
             var ts = reader.IsDBNull(11) ? (DateTime?)null : reader.GetDateTime(11);
             Seed(serverId, "file_io_reads", deltaKey, reader.IsDBNull(3) ? 0 : reader.GetInt64(3), ts);
             Seed(serverId, "file_io_writes", deltaKey, reader.IsDBNull(4) ? 0 : reader.GetInt64(4), ts);

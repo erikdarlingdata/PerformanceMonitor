@@ -128,6 +128,14 @@ let panelAbort = null;
    matches on), module-scoped like pageHours, and bounded by the number of servers visited in one session. */
 const lastCard = new Map();
 
+/** How long a tab click may reuse the remembered card (#6310): the 60 s poll's cadence, so a click never shows a header older than one poll. */
+export const REMEMBERED_CARD_MAX_AGE_MS = 60000;
+
+/** True when a remembered card is too old for a tab click to reuse; a card with no stamp is stale. */
+export function rememberedCardIsStale(remembered, nowMs) {
+  return !remembered || typeof remembered.at !== "number" || nowMs - remembered.at > REMEMBERED_CARD_MAX_AGE_MS;
+}
+
 /* The range the reader picked that is not one of RANGE_OPTIONS, keyed by server (module scope, so the 60s poll's rebuild keeps it and
    another server starts on the presets). Each value is `{ spec, live }`: the range as the picker names it (a length, a calendar
    period, a typed pair) and whether its end slides with now. A LIVE range keeps its meaning and slides to end at "now" on every
@@ -207,7 +215,13 @@ export function rangeContext(nowMs = Date.now()) {
       const times = localTime(new Date(range.startMs).toISOString()) + " to " + (range.live ? "now" : localTime(new Date(range.endMs).toISOString()));
       const picked = custom.spec.kind === "relative" || custom.spec.kind === "calendar" ? specName(custom.spec).toLowerCase() : "custom";
       const named = cut ? "last " + reachText(reach) + " of " + picked : picked;
-      return { hours: w.hours, label: named + ": " + times + rounded, custom: true };
+      /* #6301: the exact pair and a key that changes when the range does, for the time slicer on the Top Queries and Top Procedures cards. */
+      const endMs = range.live ? nowMs : range.endMs;
+      /* The key names the range the reader PICKED (resolved.range), not this tab's cut of it: tabs with different reach must share one key, or
+         a tab switch would drop the narrowing (the held window is clamped to each tab's reach instead). */
+      const pickedRange = resolved.range;
+      const pickedKey = "custom:" + (pickedRange.live ? "live:" + (pickedRange.endMs - pickedRange.startMs) : pickedRange.startMs + "-" + pickedRange.endMs);
+      return { hours: w.hours, label: named + ": " + times + rounded, custom: true, startMs: range.startMs, endMs, rangeKey: pickedKey };
     }
   }
   setActiveRange(null);
@@ -220,7 +234,7 @@ export function rangeContext(nowMs = Date.now()) {
     const unresolved = resolveSpec(custom.spec, nowMs, browserZone());
     if (!unresolved.ok) return { hours: opt.hours, label: specName(custom.spec).toLowerCase() + " cannot be read yet (" + unresolved.error.message + "); showing " + opt.label };
   }
-  return { hours: opt.hours, label: opt.label };
+  return { hours: opt.hours, label: opt.label, startMs: nowMs - opt.hours * HOUR_MS, endMs: nowMs, rangeKey: "preset:" + held.hours };
 }
 
 /** The sentence for a range the reader picked that is longer than the tab on screen reads, or null when the tab takes all of it. The
@@ -304,13 +318,15 @@ export function renderServer(main, server, tabId, opts) {
      the whole 66-81KB roll-up for one ~1.5KB card (#4190). The synchronous paint above already put that
      reused card on screen, so skipping the fetch here changes nothing about what a tab click shows; it only
      stops asking the store for an answer this page already has until the poll asks again. */
-  if (!remembered || isPoll) {
+  /* #6310: a remembered card is reused for a tab click only while it is young. The charts re-read on every click, so an old card
+     kept the header tiles (Deadlocks 0) behind a chart that already showed the event, for as long as the poll was slow or off. */
+  if (!remembered || isPoll || rememberedCardIsStale(remembered, Date.now())) {
     loadServerCard(server, (card, reason) => {
       /* A newer render has started since this fetch went out — everything below writes module state or mounts
          into nodes this render no longer owns, so the only correct thing to do with a stale answer is drop it. */
       if (generation !== renderGeneration) return;
 
-      if (card) lastCard.set(server, { card, reason });
+      if (card) lastCard.set(server, { card, reason, at: Date.now() });
       fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, card, reason);
       fillDatabaseFilter(dbSlot, server, card);
 

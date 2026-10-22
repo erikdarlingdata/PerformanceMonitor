@@ -74,6 +74,7 @@ internal static class DarlingMcpWritePolicy
         "edit_server",
         "set_server_action",
         "mute_analysis_finding",
+        "unmute_analysis_finding",
         "create_mute_rule",
         "update_mute_rule",
         "delete_mute_rule",
@@ -165,6 +166,7 @@ internal static class DarlingMcpWritePolicy
     {
         "update_alert_settings",
         "mute_analysis_finding",
+        "unmute_analysis_finding",
         "delete_notification_route",
         "set_notification_route_enabled",
         "set_notification_route_fallback",
@@ -209,6 +211,7 @@ internal static class DarlingMcpWritePolicy
         "remove_server",
         "edit_server",
         "set_server_action",
+        "undo_plan_change",
     };
 
     internal static bool IsWrite(string toolName) => WriteTools.Contains(toolName);

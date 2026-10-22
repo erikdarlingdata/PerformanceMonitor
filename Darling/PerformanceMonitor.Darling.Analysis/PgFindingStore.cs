@@ -69,6 +69,13 @@ public enum MuteRegistration
 public sealed record MuteWriteResult(MuteRegistration Registration, string? StoryPath);
 
 /// <summary>
+/// What one <c>unmute_analysis_finding</c> call did (#6383): the registry rows it removed (each with the story path,
+/// reason and date the mute carried, so the answer can say what was undone and rebuild the mute call) and how many
+/// deletes the store refused or failed. A failure is counted, not thrown, because the store's writes log and swallow.
+/// </summary>
+public sealed record UnmuteWriteResult(IReadOnlyList<MutedStory> Removed, int Failed);
+
+/// <summary>
 /// Persists analysis findings to Darling's Postgres store (the V4 <c>analysis_findings</c> /
 /// <c>analysis_muted</c> tables) and checks for muted story hashes — the write side of the
 /// analysis pipeline, ported with the DASHBOARD twin's method surface and semantics
@@ -820,8 +827,11 @@ ORDER BY local_bucket, story_path_hash";
     /// retention sweep — lifetimes with no per-pass budget and no wedged analysis to abandon — so
     /// its store calls take no pass token. Threading one here would mean inventing a caller that
     /// does not exist.</para>
+    ///
+    /// <para>Returns <c>false</c> when the delete failed (logged, not thrown, like the store's other writes), so the MCP
+    /// <c>unmute_analysis_finding</c> tool (#6383) can say the mute is still in force instead of reporting a removal.</para>
     /// </summary>
-    public async Task UnmuteStoryAsync(long muteId)
+    public async Task<bool> UnmuteStoryAsync(long muteId)
     {
         try
         {
@@ -829,10 +839,12 @@ ORDER BY local_bucket, story_path_hash";
             using var command = new NpgsqlCommand(UnmuteStorySql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             command.Parameters.AddWithValue(muteId);
             await command.ExecuteNonQueryAsync();
+            return true;
         }
         catch (Exception ex)
         {
             _logger?.LogError("[PgFindingStore] UnmuteStoryAsync failed: {Message}", ex.Message);
+            return false;
         }
     }
 

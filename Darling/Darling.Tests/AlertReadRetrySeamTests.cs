@@ -472,8 +472,9 @@ public sealed class AlertReadRetrySeamTests
            in them is idempotent by construction. The thirteenth is #5641's Runnable Queue sample read
            (GetRunnableQueueSamplesAsync), a forwarder over a private Core sibling like the other twelve and
            seamed under "runnable queue", the name the engine's catch arm records; the per-forwarder loop and
-           the name check below cover it without a roster entry. */
-        Assert.Equal(14, forwarders.Count);
+           the name check below cover it without a roster entry. The fifteenth is #5736's Client Timeouts baseline
+           read (GetAttentionBaselineAsync), seamed under "client timeouts". */
+        Assert.Equal(15, forwarders.Count);
 
         /* No public read is left in the old self-executing shape. The control below proves this pattern
            can match, so its silence here is a real absence. */
@@ -515,8 +516,11 @@ public sealed class AlertReadRetrySeamTests
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToList();
 
-        Assert.Equal(14, seamNames.Count);
-        Assert.Equal(seamNames.Count, seamNames.Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(15, seamNames.Count);
+        /* One name is shared on purpose (#5736): the Client Timeouts window read and its baseline read both fail into the engine's one
+           "client timeouts" catch arm, so both are counted under that name. Every other name stays one read. */
+        Assert.Equal(new[] { "client timeouts" },
+            seamNames.GroupBy(n => n, StringComparer.Ordinal).Where(g => g.Count() > 1).Select(g => g.Key).ToArray());
 
         var engine = RepoFile.ReadRepoFile("PerformanceMonitor.Alerting", "AlertEngine.cs");
         var engineNames = Regex.Matches(engine, @"RecordReadFailure\([^,]+,\s*""(?<name>[^""]+)""")

@@ -24,8 +24,8 @@ namespace Darling.Tests;
 /// when the interval table answers. A field sample counted two floor reads per call; the call path issues one. This
 /// runs the tool once inside a capturing <see cref="ReadScope"/>, the same per-statement capture the slow-read log
 /// uses, and counts the statements it executed by the hash of their text: one read-gate floor read
-/// (<see cref="QueryStoreIntervalWide.PlainTableFloorSql"/>), one legacy-row probe on the raw table
-/// (<see cref="QueryStoreIntervalWide.HasLegacyRowSql"/>), one wide-table read
+/// (<see cref="QueryStoreIntervalWide.PlainTableFloorSql"/>), no legacy-row probe on the raw table
+/// (<see cref="QueryStoreIntervalWide.HasLegacyRowSql"/>, which the top read does not ask for), one wide-table read
 /// (<see cref="DarlingDataReader.QueryStoreTopTableSql"/>), and no raw read. A change that runs the gate twice,
 /// re-runs the read per fill round, or falls through to raw after the table answered fails here.
 /// </summary>
@@ -39,7 +39,7 @@ public sealed class QueryStoreTopCallStatementsLiveTests
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     [Fact]
-    public async Task OneDefaultCall_ReadsTheFloorOnce_ProbesRawOnce_AndReadsTheWideTableOnce()
+    public async Task OneDefaultCall_ReadsTheFloorOnce_NeverProbesLegacyRows_AndReadsTheWideTableOnce()
     {
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5815 live test.");
@@ -77,7 +77,7 @@ public sealed class QueryStoreTopCallStatementsLiveTests
         int Count(string sql) => seen.Count(t => t.Hash == StatementLabel.Hash(sql));
         var listing = string.Join(" | ", seen.Select(t => t.Label));
         Assert.True(Count(QueryStoreIntervalWide.PlainTableFloorSql) == 1, $"floor reads: {Count(QueryStoreIntervalWide.PlainTableFloorSql)}; statements: {listing}");
-        Assert.True(Count(QueryStoreIntervalWide.HasLegacyRowSql) == 1, $"legacy probes: {Count(QueryStoreIntervalWide.HasLegacyRowSql)}; statements: {listing}");
+        Assert.True(Count(QueryStoreIntervalWide.HasLegacyRowSql) == 0, $"legacy probes: {Count(QueryStoreIntervalWide.HasLegacyRowSql)}; statements: {listing}");
         Assert.True(Count(QueryStoreIntervalWide.ReadSourceInputsSql) == 1, $"gate input reads: {Count(QueryStoreIntervalWide.ReadSourceInputsSql)}; statements: {listing}");
         Assert.True(Count(DarlingDataReader.QueryStoreTopTableSql) == 1, $"wide-table reads: {Count(DarlingDataReader.QueryStoreTopTableSql)}; statements: {listing}");
         Assert.True(Count(DarlingDataReader.QueryStoreTopSql) == 0, $"raw reads: {Count(DarlingDataReader.QueryStoreTopSql)}; statements: {listing}");

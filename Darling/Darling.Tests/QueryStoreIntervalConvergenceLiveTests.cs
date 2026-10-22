@@ -711,7 +711,10 @@ public sealed class QueryStoreIntervalConvergenceLiveTests
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        /* Plain PostgreSQL on purpose (#6317): the race is built from core PostgreSQL's lock queue (a session already holding ACCESS SHARE
+           on the parent drops the partition ahead of the queued product DROP). With TimescaleDB loaded the same two sessions deadlock
+           (40P01, reproduced) instead of the second one winning, so the scenario this test builds does not exist there. */
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, plainPostgres: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
         await using var other = await OpenStoreAsync(scratch, ct);
         var logger = new ListLogger();
@@ -745,5 +748,64 @@ public sealed class QueryStoreIntervalConvergenceLiveTests
         Assert.Equal(QueryStoreIntervalPartitions.StepOutcome.Done, result.Outcome);
         Assert.False(await ExistsAsync(connection, Wide.Legacy, ct));
         Assert.False(logger.HasAtLeast(LogLevel.Warning), logger.Dump());
+    }
+
+    [Fact]
+    public async Task ADropThatDeadlocksWithAnotherSessionUnderTimescaleDb_RetriesNextPass_InsteadOfFailing()
+    {
+        /* #6317: the same race as above on the default store, which production always has with TimescaleDB loaded. There the second
+           session's DROP and the product's queued DROP wait on each other (40P01) instead of the second one winning the queue. The
+           product's step must not throw: it is the deadlock victim (RetryLater) or it won (Done), and the next pass finishes the job.
+           The other session's deadlock_timeout is long and the product's is the default 1 s, so the product's detector runs first
+           and aborts the product's session, not the rival: the victim is fixed, the test does not pass by luck. */
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        Assert.True(scratch.TimescaleEnabled, "this test needs TimescaleDB on; on plain PostgreSQL it would pass without testing the deadlock");
+        await using var connection = await OpenStoreAsync(scratch, ct);
+        await using var other = await OpenStoreAsync(scratch, ct);
+        var logger = new ListLogger();
+
+        await PromoteAsync(connection, Wide, Now.AddDays(-30), logger, ct);
+        Assert.True(await ExistsAsync(connection, Wide.Legacy, ct));
+
+        await ExecAsync(other, "SET deadlock_timeout = '4s'", ct);
+        await using var hold = await other.BeginTransactionAsync(ct);
+        await ExecAsync(other, $"LOCK TABLE ONLY {Wide.Parent} IN ACCESS SHARE MODE", ct);
+
+        var product = QueryStoreIntervalPartitions.DropExpiredAsync(connection, Wide, Now, logger, ct);
+
+        var waitUntil = DateTime.UtcNow.AddSeconds(3);
+        long waiting = 0;
+        while (waiting == 0 && DateTime.UtcNow < waitUntil)
+        {
+            await Task.Delay(50, ct);
+            waiting = await CountAsync(other, "SELECT count(*) FROM pg_locks WHERE NOT granted AND database = (SELECT oid FROM pg_database WHERE datname = current_database())", ct);
+        }
+
+        Assert.True(waiting > 0, "the product's DROP never queued behind the first one");
+        Assert.False(product.IsCompleted, "the product's DROP did not wait for the lock");
+
+        /* The rival's DROP is not awaited here: when it deadlocks with the product's, it waits until the product's session is aborted. */
+        var rival = ExecAsync(other, $"DROP TABLE {Wide.Legacy}", ct);
+        var result = await product;
+        await rival;
+        await hold.CommitAsync(ct);
+
+        Assert.True(
+            result.Outcome is QueryStoreIntervalPartitions.StepOutcome.Done or QueryStoreIntervalPartitions.StepOutcome.RetryLater,
+            $"{result.Outcome}: {result.Detail}");
+        Assert.False(await ExistsAsync(connection, Wide.Legacy, ct));
+        if (result.Outcome == QueryStoreIntervalPartitions.StepOutcome.RetryLater)
+        {
+            Assert.Contains("deadlock", result.Detail, StringComparison.Ordinal);
+            var next = await QueryStoreIntervalPartitions.DropExpiredAsync(connection, Wide, Now, logger, ct);
+            Assert.True(
+                next.Outcome is QueryStoreIntervalPartitions.StepOutcome.Done or QueryStoreIntervalPartitions.StepOutcome.NothingToDo,
+                $"{next.Outcome}: {next.Detail}");
+        }
+
+        Assert.False(logger.Lines.Any(l => l.Level > LogLevel.Warning), logger.Dump());
     }
 }

@@ -208,6 +208,11 @@
             <CheckBox x:Name="MultiSubnetFailoverCheckBox" Content="Multi-subnet fai_lover (for AG listeners and FCIs)"
                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,6,0,0"
                       ToolTip="Sets MultiSubnetFailover=true. Connects to all IPs in parallel during failover. Recommended for AG listeners and failover cluster instances spanning multiple subnets."/>
+            <StackPanel x:Name="QueryStoreReplicaPanel" Orientation="Horizontal" Margin="0,6,0,0">
+                <TextBlock Text="QS replica:" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Width="110"/>
+                <TextBox x:Name="QueryStoreReplicaBox" Width="250"
+                         ToolTip="Optional. A readable secondary (host or host,port) or an availability group listener to read Query Store statistics from instead of this server. Same login and password. Leave empty to read Query Store from this server. Not used on Azure SQL Database."/>
+            </StackPanel>
             <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
                 <TextBlock Text="Monthly Cost ($):" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Width="110"/>
                 <TextBox x:Name="MonthlyCostBox" Width="100" TextAlignment="Right" Text="0"

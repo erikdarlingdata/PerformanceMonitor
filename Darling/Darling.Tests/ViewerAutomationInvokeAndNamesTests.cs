@@ -37,12 +37,7 @@ public sealed class ViewerAutomationInvokeAndNamesTests
         }
     }
 
-    private static void Pump(Dispatcher dispatcher)
-    {
-        var frame = new DispatcherFrame();
-        dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(() => frame.Continue = false));
-        Dispatcher.PushFrame(frame);
-    }
+    private static void Pump(Dispatcher dispatcher) => StaTestThread.WaitForIdle(dispatcher, StaTestThread.IdleLimit);
 
     [Fact]
     public void InvokingASidebarRow_SelectsItAndRunsTheOpenMethod_TheSameOneDoubleClickAndEnterRun()

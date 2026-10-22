@@ -97,10 +97,12 @@ public static class DarlingWebEndpoints
     internal static readonly IReadOnlySet<string> WebOnlyReadNames = new HashSet<string>(StringComparer.Ordinal)
     {
         "get_alert_details",
+        "get_overview_baselines",
+        "get_block_chain",
     };
 
     /// <summary>The tool names deliberately absent from the <c>/api/read/*</c> 1:1 read surface. <c>analyze_server</c>
-    /// makes a live monitored-server connection; <c>mute_analysis_finding</c> writes; the <c>analyze_*_plan</c> family
+    /// makes a live monitored-server connection; <c>mute_analysis_finding</c> and <c>unmute_analysis_finding</c> (#6383) write; the <c>analyze_*_plan</c> family
     /// is the compute-heavy plan-analysis phase-2 work; the Custom Views tools (#1599) are served by their OWN
     /// richer web endpoints (<c>/api/views</c> CRUD + <c>/api/compose/run</c> + the <c>/api/catalog</c> compose
     /// vocabulary that <c>describe_custom_view_catalog</c> mirrors), not a <c>/api/read/{tool}</c> query-string mirror;
@@ -125,6 +127,7 @@ public static class DarlingWebEndpoints
     {
         "analyze_server",
         "mute_analysis_finding",
+        "unmute_analysis_finding",
         "analyze_query_plan",
         "analyze_procedure_plan",
         "analyze_query_store_plan",
@@ -690,6 +693,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         MapCustomViews(app, postgres, logger, readLatencyRecorder, readAdmission);
         MapCustomAlerts(app, postgres, logger, readAdmission, readLatencyRecorder);
         MapMuteRules(app, postgres, logger);
+        DarlingKnownPatternRoutes.Map(app, postgres, logger);
         MapInvestigationNotes(app, new InvestigationRequestStore(postgres, McpCommandDeadlines.ReadSeconds), logger);
         MapThresholdOverrides(app, postgres, logger);
         MapAgentSetup(app, postgres, logger, passwordKeys);
@@ -1878,7 +1882,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <summary>The most calls and refusals the Agent changes list answers.</summary>
     internal const int AgentChangesLimit = 200;
 
-    /// <summary>The list body: <c>{enabled, can_decide, changes: [{called_id, called_at_utc, request_id, server_id, actor, reason, tool, kind, detail,
+    /// <summary>The list body: <c>{enabled, can_decide, changes: [{called_id, called_at_utc, request_id, server_id, server_name (the registry's name, or "Server N (removed)"), actor, reason, tool, kind, detail,
     /// result (done, failed or unknown), result_detail, undone_at_utc, undone_by, muted_alerts, can_undo}], refusals: [...]}</c>. A call with no
     /// result row is <c>unknown</c>. <c>detail</c> goes through the journal masking helper at the web's level.</summary>
     internal static JsonObject AgentChangesBody(AgentChangesRead read, bool canDecide, DateTime nowUtc)
@@ -1893,6 +1897,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 ["called_at_utc"] = c.CalledAtUtc.ToString("o", CultureInfo.InvariantCulture),
                 ["request_id"] = c.RequestId?.ToString(),
                 ["server_id"] = c.ServerId,
+                ["server_name"] = c.ServerName, ["server_removed"] = c.ServerId is not null && c.ServerName is null,
                 ["actor"] = c.Actor,
                 ["reason"] = c.Reason,
                 ["tool"] = c.Tool,
@@ -1916,7 +1921,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             refusals.Add(new JsonObject
             {
                 ["journal_id"] = r.JournalId, ["at_utc"] = r.AtUtc.ToString("o", CultureInfo.InvariantCulture), ["request_id"] = r.RequestId?.ToString(),
-                ["server_id"] = r.ServerId, ["actor"] = r.Actor, ["code"] = r.Code, ["tool"] = r.Tool,
+                ["server_id"] = r.ServerId, ["server_name"] = r.ServerName, ["server_removed"] = r.ServerId is not null && r.ServerName is null,
+                ["actor"] = r.Actor, ["code"] = r.Code, ["tool"] = r.Tool,
             });
         }
 
@@ -5894,8 +5900,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// may read <c>collect.query_store_interval_wide</c> (V145) instead of deduping raw — decided here, in the
     /// runner, BEFORE <see cref="ComposeCompiler.Compile"/> runs, because the compiler stays pure and never
     /// opens a connection. Reuses the pure <see cref="QueryStoreIntervalWide.UseTable"/> decision (through
-    /// <see cref="QueryStoreIntervalWide.ReadsTableAsync"/>, which also runs clause 6 — no legacy row in the
-    /// window — and the literal-end-before-applied_through refusal) for EVERY server in scope: a fleet panel
+    /// <see cref="QueryStoreIntervalWide.ReadsTableAsync"/>, which also applies the literal-end-before-applied_through
+    /// refusal; clause 6, the legacy-row probe, is not asked for here, because the composed panels read the newest snapshot per interval) for EVERY server in scope: a fleet panel
     /// (null/empty <paramref name="serverScope"/>) must pass for every server the store has rows for, or the
     /// hybrid would silently under-read a server whose table coverage lags. Any fault, a schema below V145, or
     /// a refused clause on any server in scope makes the whole panel raw — every input here leans toward raw,
@@ -5983,7 +5989,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
                 var plan = await QueryStoreIntervalWide.ResolveReadAsync(
                     connection, serverId, start, end, literalWindowEnd, ComposeQueryStoreWideMinWindow,
-                    McpCommandDeadlines.ReadSeconds, ReadScope.Current?.Logger, cancellationToken, storeWide);
+                    McpCommandDeadlines.ReadSeconds, ReadScope.Current?.Logger, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow, cancellationToken, storeWide: storeWide);
                 if (!plan.UseTable)
                 {
                     if (plan.DecisionFailed)
@@ -7489,12 +7495,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_analysis_findings"] = R(CatAnalysis, "Persisted analysis findings for a server.", PServer(), PHours(24), PAsOf(), PLimit(MaxRowLimit), PBool("include_drilldown", false), PBool("full_text", true)),
 
             /* ── sessions (DarlingMcpSessionTools) ── */
-            ["get_active_queries"] = R(CatSessions, "Currently-active queries, optionally blocking-only.", PServer(), PHours(1), PDatabases(), PBool("blocking_only", false), PText("wait_type"), PLimit(50), PAsOf(), PText("tag")),
+            ["get_active_queries"] = R(CatSessions, "Currently-active queries, optionally blocking-only.", PServer(), PHours(1), PDatabases(), PBool("blocking_only", false), PText("wait_type"), PLimit(50), PAsOf(), PText("tag"), PText("collection_time"), PBool("snapshots_only", false)),
             ["get_session_stats"] = R(CatSessions, "Session-level summary counters for a server.", PServer()),
             ["get_waiting_tasks"] = R(CatSessions, "Tasks currently waiting, with wait type and duration.", PServer(), PHours(1), PLimit(30), PDatabases(), PAsOf()),
 
             /* ── alerts / mute rules (DarlingMcpAlertTools) ── */
-            ["get_alert_history"] = R(CatAlerts, "Recent fired-alert history for a server, newest first and bounded by limit. Excludes operator-dismissed alerts unless include_dismissed is true (dismissed_excluded_count says how many the default hid).", PServer(), PHours(24), PLimit(50), PAsOf(), PBool("include_dismissed", false), PText("metric_name"), PText("family")),
+            ["get_alert_history"] = R(CatAlerts, "Recent fired-alert history for a server, newest first and bounded by limit. Excludes operator-dismissed alerts unless include_dismissed is true (dismissed_excluded_count says how many the default hid). include_streak adds streak_days to each row: days in a row this metric fired at this time of day before the alert, muted fires counting.", PServer(), PHours(24), PLimit(50), PAsOf(), PBool("include_dismissed", false), PText("metric_name"), PText("family"), PBool("include_streak", false)),
             ["get_alert_settings"] = R(CatAlerts, "The current alert-settings configuration."),
             /* #5241: a web-only read (no MCP tool behind it, see WebOnlyReadNames): one alert's advice and fix script,
                fetched when its Analysis row is first expanded. The key is the page's own row identity. */
@@ -7511,6 +7517,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             /* ── blocking / deadlocks (DarlingMcpBlockingTools) ── */
             ["get_blocked_process_xml"] = R(CatBlocking, "Blocked-process-report XML captures.", PServer(), PHours(24), PLimit(5), PDatabases(), PAsOf()),
+            /* #6292: a web-only read (no MCP tool behind it, see WebOnlyReadNames): the lead-blocker tree of one blocked-process row,
+               fetched when the row's Block chain action is used. The key is the page's own row identity. */
+            ["get_block_chain"] = R(CatBlocking, "The lead-blocker tree of one blocked-process row: the lead blocker at the root and the sessions it blocks under it, built from the blocked-process reports and DMV blocking snapshots within five minutes of the row, exactly as the desktop viewer builds it.", PServer(), PReqText("event_time"), PReqInt("blocked_spid"), PInt("blocked_ecid", 0)),
             ["get_blocking"] = R(CatBlocking, "Blocking chains observed in the window.", PServer(), PHours(24), PLimit(30), PDatabases(), PAsOf()),
             ["get_blocking_trend"] = R(CatBlocking, "Blocking-event counts over time.", PServer(), PHours(24), PDatabases(), PAsOf()),
             ["get_deadlock_detail"] = R(CatBlocking, "Deadlock graph detail for recent deadlocks.", PServer(), PHours(24), PLimit(5), PBool("full_graph", true), PAsOf()),
@@ -7530,6 +7539,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_query_store_health"] = R(CatConfig, "Per-database Query Store health: actual vs desired state, readonly_reason, storage vs cap, and the two capture modes (query_capture_mode ALL / AUTO / CUSTOM / NONE, wait_stats_capture_mode ON / OFF; null on a pre-rung row or a pre-2017 engine).", PServer(), PDatabases()),
             ["get_server_config_changes"] = R(CatConfig, "Server-configuration changes over time.", PServer(), PHours(168), PAsOf()),
             ["get_trace_flag_changes"] = R(CatConfig, "Trace-flag changes over time.", PServer(), PHours(168), PAsOf()),
+            ["get_known_patterns"] = R(CatConfig, "The operator-written known-pattern entries (a note on a recurring alert pattern); get_alert_history rows carry the matches.", PServer(), PText("metric_name")),
             ["get_change_watches"] = R(CatConfig, "A server's change watches, open and closed: each recorded change opens a 60 minute watch, with its changes, measures and result.", PServer(), PText("state"), PLimit(20)),
 
             /* ── core data reads (DarlingMcpDataTools + long-query / fleet tools) ── */
@@ -7609,13 +7619,16 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_perfmon_trend"] = R(CatTrends, "One perfmon counter over time (requires counter_name).", PReqText("counter_name"), PServer(), PHours(24), PAsOf(), PInt("bucket_minutes")),
             /* #3653 item 17: the four reads below disclose the WINDOW floor as window_truncated (beside
                effective_start / effective_hours_back) — not the page dialect's truncated, which they never had. */
-            ["get_procedure_duration_trend"] = R(CatTrends, "Stored-procedure elapsed ms/sec + executions/sec over time; window_truncated says the tier did not hold the whole window.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes"), PDatabases()),
+            ["get_procedure_duration_trend"] = R(CatTrends, "Stored-procedure elapsed ms/sec + executions/sec over time, or one procedure's with procedure_name (its full_name from the Top Procedures grid, plus one database_name); window_truncated says the tier did not hold the whole window.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes"), PDatabases(), PText("procedure_name")),
             ["get_query_duration_trend"] = R(CatTrends, "Query elapsed ms/sec + executions/sec over time (per-interval rates, not percentiles); window_truncated says the tier did not hold the whole window.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes"), PDatabases()),
             ["get_query_store_duration_trend"] = R(CatTrends, "Query Store duration ms/sec + executions/sec over time; window_truncated says the tier did not hold the whole window.", PServer(), PHours(24), PAsOf(), PDatabases()),
             ["get_query_trend"] = R(CatTrends, "One query's metrics over time (requires query_hash + database_name); window_truncated says the tier did not hold the whole window.", PReqText("query_hash"), PReqText("database_name"), PServer(), PHours(24), PAsOf()),
 
             /* ── health / overview (DarlingMcpHealthTools / DarlingMcpFleetTools) ── */
             ["get_server_summary"] = R(CatOverview, "A one-shot health summary for a server.", PServer()),
+            /* #6291: a web-only read (no MCP tool behind it, see WebOnlyReadNames): the four baselines (CPU, waits per second, I/O latency, blocking)
+               at the window start that the Overview strips draw their bands and anomaly markers from. Keyed by the window start the page draws. */
+            ["get_overview_baselines"] = R(CatOverview, "The four baselines the Overview strips draw their band and anomaly markers from (CPU, waits per second, I/O latency, blocking): each bucket's mean and effective standard deviation at the window start, null where there is not enough history.", PServer(), PReqText("window_start")),
             ["get_daily_summary"] = R(CatOverview, "The daily health summary (optionally for a specific date).", PServer(), PText("summary_date")),
             ["get_daily_summary_range"] = R(CatOverview, "One daily health summary per collected day over a span of days - the Performance Calendar's month grid.", PServer(), PInt("days_back", 30), PAsOf()),
             ["get_fleet_overview"] = R(CatOverview, "The banded cross-server fleet roll-up.", PHours(DefaultFleetHours), PTextDefault("detail", "summary"), PBool("worst_only", false), PText("band")),
@@ -7637,7 +7650,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_spinlock_stats"] = R(CatLatch, "Top spinlock activity in the window.", PServer(), PHours(24), PTop(10), PAsOf()),
 
             /* ── memory grants (DarlingMcpMemoryGrantTools) ── */
-            ["get_memory_grants"] = R(CatMemoryGrants, "Active/recent memory grants.", PServer(), PHours(1), PAsOf()),
+            ["get_memory_grants"] = R(CatMemoryGrants, "Active/recent memory grants. chart=true answers the whole window as one point per bucket per resource pool instead of grants[] and window[]; bucket_minutes picks the width.", PServer(), PHours(1), PAsOf(), PBool("chart", false), PInt("bucket_minutes")),
             ["get_memory_pressure_events"] = R(CatMemoryGrants, "Memory-pressure events in the window.", PServer(), PHours(24), PAsOf()),
             ["get_resource_semaphore"] = R(CatMemoryGrants, "Resource-semaphore state over time.", PServer(), PHours(24), PAsOf()),
 
@@ -8471,7 +8484,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             /* ── sessions ── */
             ["get_active_queries"] = (c, pg, an) => DatabaseNames(c) is { } databases
-                ? DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), databases, QueryBool(c, "blocking_only", false), Str(c, "wait_type"), Rows(c, "limit", 50), 2000, AsOf(c), logger, c.RequestAborted, tag: Str(c, "tag"))
+                ? DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), databases, QueryBool(c, "blocking_only", false), Str(c, "wait_type"), Rows(c, "limit", 50), 2000, AsOf(c), logger, c.RequestAborted, tag: Str(c, "tag"), collectionTime: Str(c, "collection_time"), snapshotsOnly: QueryBool(c, "snapshots_only", false))
                 : DatabaseNamesRefusal(c),
             ["get_session_stats"] = (c, pg, an) => DarlingMcpSessionTools.GetSessionStats(pg, Server(c), c.RequestAborted),
             ["get_waiting_tasks"] = (c, pg, an) => DatabaseNames(c) is { } databases
@@ -8479,7 +8492,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 : DatabaseNamesRefusal(c),
 
             /* ── alerts / mute rules ── */
-            ["get_alert_history"] = (c, pg, an) => DarlingMcpAlertTools.GetAlertHistory(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), include_dismissed: QueryBool(c, "include_dismissed", false), metric_name: Str(c, "metric_name"), family: Str(c, "family"), cancellationToken: c.RequestAborted),
+            ["get_alert_history"] = (c, pg, an) => DarlingMcpAlertTools.GetAlertHistory(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), include_dismissed: QueryBool(c, "include_dismissed", false), metric_name: Str(c, "metric_name"), family: Str(c, "family"), include_streak: QueryBool(c, "include_streak", false), cancellationToken: c.RequestAborted),
             ["get_alert_details"] = (c, pg, an) => First(c, "server_id") is null ? MissingParam("server_id")
                 : !RequireText(c, "metric_name", out var detailsMetric) ? MissingParam("metric_name")
                 : !RequireText(c, "alert_time", out var detailsTime) ? MissingParam("alert_time")
@@ -8517,6 +8530,14 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_blocking"] = (c, pg, an) => DatabaseNames(c) is { } databases
                 ? DarlingMcpBlockingTools.GetBlocking(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), null, false, AsOf(c), databases, DarlingMcpBlockingTools.WebSqlTextPreviewLength, registryState, logger, c.RequestAborted)
                 : DatabaseNamesRefusal(c),
+            /* #6292: the web-only Block chain read. A key that is present but unreadable is refused, never defaulted; an omitted ecid is 0, as the
+               grid carries it. The tree is the Viewer's own, built by the shared reconstruction. */
+            ["get_block_chain"] = (c, pg, an) => !RequireText(c, "event_time", out var chainEventTime)
+                ? MissingParam("event_time")
+                : !OptionalInt(c, "blocked_spid", out var chainSpid) ? UnparseableParam("blocked_spid")
+                : chainSpid is null ? MissingParam("blocked_spid")
+                : !OptionalInt(c, "blocked_ecid", out var chainEcid) ? UnparseableParam("blocked_ecid")
+                : DarlingWebBlockChain.GetBlockChain(pg, Server(c), chainEventTime, chainSpid.Value, chainEcid ?? 0, c.RequestAborted),
             ["get_blocking_trend"] = (c, pg, an) => DatabaseNames(c) is { } databases
                 ? DarlingMcpBlockingTools.GetBlockingTrend(pg, Server(c), Hours(c, 24), AsOf(c), databases, c.RequestAborted)
                 : DatabaseNamesRefusal(c),
@@ -8557,6 +8578,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 ? DarlingMcpConfigHistoryTools.GetQueryStoreHealth(pg, Server(c), databases, c.RequestAborted)
                 : DatabaseNamesRefusal(c),
             ["get_server_config_changes"] = (c, pg, an) => DarlingMcpConfigHistoryTools.GetServerConfigChanges(pg, Server(c), Hours(c, 168), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_known_patterns"] = (c, pg, an) => DarlingMcpKnownPatternTools.GetKnownPatterns(pg, Server(c), Str(c, "metric_name"), cancellationToken: c.RequestAborted),
             ["get_change_watches"] = (c, pg, an) => DarlingMcpChangeWatchTools.GetChangeWatches(pg, Server(c), Str(c, "state"), Rows(c, "limit", 20), c.RequestAborted),
             ["get_trace_flag_changes"] = (c, pg, an) => DarlingMcpConfigHistoryTools.GetTraceFlagChanges(pg, Server(c), Hours(c, 168), as_of: AsOf(c), cancellationToken: c.RequestAborted),
 
@@ -8731,7 +8753,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 : MissingParam("counter_name"),
             ["get_procedure_duration_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
                 ? (DatabaseNames(c) is { } databases
-                    ? DarlingMcpTrendTools.GetProcedureDurationTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, databases, TrendBudget.Chart, cancellationToken: c.RequestAborted)
+                    ? DarlingMcpTrendTools.GetProcedureDurationTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, databases, TrendBudget.Chart, Str(c, "procedure_name"), c.RequestAborted)
                     : DatabaseNamesRefusal(c))
                 : UnparseableParam("bucket_minutes"),
             ["get_query_duration_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
@@ -8750,6 +8772,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             /* ── health / overview ── */
             ["get_server_summary"] = (c, pg, an) => DarlingMcpHealthTools.GetServerSummary(pg, Server(c), registryState, logger, c.RequestAborted),
+            /* #6291: the web-only Overview baselines read. A key that is present but unreadable is refused, never defaulted. */
+            ["get_overview_baselines"] = (c, pg, an) => !RequireText(c, "window_start", out var baselineWindowStart)
+                ? MissingParam("window_start")
+                : DarlingWebOverviewBaselines.GetOverviewBaselines(pg, an, Server(c), baselineWindowStart, c.RequestAborted),
             ["get_daily_summary"] = (c, pg, an) => DarlingMcpHealthTools.GetDailySummary(pg, Server(c), Str(c, "summary_date"), registryState, logger, c.RequestAborted),
             ["get_daily_summary_range"] = (c, pg, an) => DarlingMcpHealthTools.GetDailySummaryRange(pg, Server(c), QueryInt(c, "days_back", null, 30), AsOf(c), registryState, logger, c.RequestAborted),
             ["get_fleet_overview"] = (c, pg, an) => DarlingMcpFleetTools.GetFleetOverview(pg, Hours(c, DefaultFleetHours), Str(c, "detail") ?? "summary", QueryBool(c, "worst_only", false), Str(c, "band"), registryState: registryState, logger: logger, cancellationToken: c.RequestAborted),
@@ -8775,7 +8801,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_spinlock_stats"] = (c, pg, an) => DarlingMcpLatchSpinlockTools.GetSpinlockStats(pg, Server(c), Hours(c, 24), Rows(c, "top", 10), as_of: AsOf(c), cancellationToken: c.RequestAborted),
 
             /* ── memory grants ── */
-            ["get_memory_grants"] = (c, pg, an) => DarlingMcpMemoryGrantTools.GetMemoryGrants(pg, Server(c), Hours(c, 1), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_memory_grants"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
+                ? DarlingMcpMemoryGrantTools.GetMemoryGrants(pg, Server(c), Hours(c, 1), AsOf(c), QueryBool(c, "chart", false), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
+                : UnparseableParam("bucket_minutes"),
             ["get_memory_pressure_events"] = (c, pg, an) => DarlingMcpMemoryGrantTools.GetMemoryPressureEvents(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_resource_semaphore"] = (c, pg, an) => DarlingMcpMemoryGrantTools.GetResourceSemaphore(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
 

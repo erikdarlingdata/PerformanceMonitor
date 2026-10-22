@@ -144,7 +144,9 @@ public sealed partial class DarlingMcpServerAdminTools
         "read_only_intent (bool, default false); multi_subnet_failover (bool, default false); aws_role_arn (optional, " +
         "PostgreSQL on Amazon RDS or Aurora only: the IAM role ARN to assume, such as " +
         "arn:aws:iam::123456789012:role/darling-monitor; accepted only if darling.json's allowedAwsRoles lists it) and " +
-        "aws_external_id (optional, write-only, needs aws_role_arn). Servers are processed " +
+        "aws_external_id (optional, write-only, needs aws_role_arn); query_store_replica (optional, SQL Server only: a " +
+        "readable secondary as host or host,port, or an availability group listener, to read Query Store from instead of " +
+        "the server; same login; empty = off; not used on Azure SQL Database). Servers are processed " +
         "IN ORDER, one at a time. A case-variant or exact duplicate of an already-monitored server (or an earlier " +
         "entry in the same array) is skipped as status \"duplicate\". A server that fails to connect is recorded as " +
         "status \"connection_failed\" and does NOT stop the rest of the batch. If saving an entry fails, that entry " +
@@ -159,6 +161,7 @@ public sealed partial class DarlingMcpServerAdminTools
         "A new database or read_only_intent on a machine (engine, host and port) another registration already holds is added as usual, " +
         "unless a route with an agent setting is scoped to that registration (its id, one of its tags or a tag above one; a route with no scope does not count) " +
         "- a removed registration included. Then the entry is refused as status \"collides\" and names that registration, because the route is tied to it. Register the other database in the Viewer or on the web dashboard. " +
+        "The machine is also recognised by the name its server reports for itself (a SQL Server's own name, a PostgreSQL cluster's identifier and port), so one machine reached under another host name is held the same way, and two machines that report the same name (cloned images, containers sharing a hostname, a PostgreSQL replica and its primary) are treated as one machine: register those in the Viewer or on the web dashboard. " +
         "A SQL password or service-principal client secret is sealed with the service's password key before it is " +
         "stored, and is never returned. password is the password itself: a value that starts with env: or file: is " +
         "rejected as \"invalid\", because references are set in the configuration file. " +
@@ -246,9 +249,10 @@ public sealed partial class DarlingMcpServerAdminTools
                setting is scoped to that registration (its id, a tag of it or a tag above): the new id would sit outside
                that route. Entries of this batch have no routes yet, so they never hold each other back. The operator's
                own command and the web route pass no policy and are not held to this. */
+            List<RegisteredTarget>? held = null;
             if (policy is not null && ready.Count > 0)
             {
-                var held = await definitions.LoadTargetsAsync(cancellationToken);
+                held = await definitions.LoadTargetsAsync(cancellationToken);
                 var kept = new List<ParsedServerEntry>();
                 foreach (var entry in ready)
                 {
@@ -300,6 +304,18 @@ public sealed partial class DarlingMcpServerAdminTools
                     continue;
                 }
 
+                /* #6285: the same rule again, now the server has said what it calls itself: a short name and its full domain
+                   name, or a name and its address, reach one machine that the host text above could not tell apart. A server
+                   that reported no identity (or a registration with none collected) is held to the text match already made. */
+                var probedIdentity = MachineIdentityOf(probeResult.MachineIdentity, probeResult.EngineEdition);
+                var identityUnread = PostgresIdentityUnread(probeResult, probedIdentity);
+                if (policy is not null && held is not null && (probedIdentity is not null || identityUnread)
+                    && await TargetHeldRefusalAsync(held, entry, definitions.ScopedAgentRouteAsync, cancellationToken, probedIdentity: probedIdentity, postgresIdentityUnread: identityUnread) is { } identityRefusal)
+                {
+                    results.Add(new ServerResult(entry.Order, entry.DisplayName, AddStatus.Collides, identityRefusal));
+                    continue;
+                }
+
                 /* #2280: the probe just asked the server which database it actually reached. If that is a
                    DIFFERENT database from the one this entry names, and some other registration already claims
                    that one, then adding this would give one real database two identities and two full copies of
@@ -330,11 +346,13 @@ public sealed partial class DarlingMcpServerAdminTools
                     var actualStorageKey = ActualStorageKeyOf(entry, probeResult.ConnectedDatabase);
                     string? heldInWrite = null;
                     HeldCheck? heldCheck = policy is null ? null : async (connection, transaction, token) =>
-                        heldInWrite = await TargetHeldRefusalInTransactionAsync(connection, transaction, entry, null, token);
+                        heldInWrite = await TargetHeldRefusalInTransactionAsync(connection, transaction, entry, null, token, probedIdentity: probedIdentity, postgresIdentityUnread: identityUnread);
                     var rowsWritten = await definitions.InsertAsync(entry, encryptedPassword, actualStorageKey, heldCheck, cancellationToken);
                     if (rowsWritten > 0)
                     {
-                        results.Add(new ServerResult(entry.Order, entry.DisplayName, AddStatus.Added, DescribeProbe(probeResult)));
+                        results.Add(new ServerResult(entry.Order, entry.DisplayName, AddStatus.Added,
+                            DescribeProbe(probeResult, QueryStoreReplicaReply(entry.ProbeConfig, probeResult, logger, revealConnectError,
+                                entry.PlaintextPassword, entry.ProbeConfig.AwsExternalId))));
                     }
                     else if (rowsWritten == InsertKeyClaimed)
                     {
@@ -1014,6 +1032,14 @@ ORDER BY d.host, d.database";
             return (null, Invalid(engineError));
         }
 
+        /* #6352: a SQL Server host that SqlClient would read as a named pipe or an admin connection is refused before any
+           probe. The web add route and the command-line add run this same entry check. A PostgreSQL host is not read
+           that way (a leading slash there is a Unix socket directory), so it is not held to the rule. */
+        if (engine == EngineSqlServer && ServerHostSetting.Refusal(host) is { } hostRefusal)
+        {
+            return (null, Invalid(hostRefusal));
+        }
+
         /* The same rule DarlingConfig.Validate enforces for a file entry, enforced here so the two onboarding
            paths cannot disagree: PostgreSQL has no integrated-auth path, and defaulting auth to Windows means
            an entry that just says {"host": ..., "engine": "postgres"} would otherwise be accepted and then
@@ -1060,8 +1086,20 @@ ORDER BY d.host, d.database";
             return (null, Invalid(awsListRefusal));
         }
 
+        if (obj["query_store_replica"] is not null && TryGetString(obj, "query_store_replica") is null)
+        {
+            return (null, Invalid("query_store_replica must be text."));
+        }
+
+        var queryStoreReplica = QueryStoreReplicaSetting.Normalize(TryGetString(obj, "query_store_replica"));
+        if (QueryStoreReplicaRefusal(queryStoreReplica, engine) is { } replicaError)
+        {
+            return (null, Invalid(replicaError));
+        }
+
         var probeConfig = new MonitoredServer
         {
+            QueryStoreReplica = queryStoreReplica,
             AwsRoleArn = awsRole,
             AwsExternalId = awsExternalId,
             Name = displayName,
@@ -1257,8 +1295,8 @@ INSERT INTO config_monitored_servers (
     server_id, name, host, database, auth, username, encrypted_password, encrypt_mode,
     trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases,
     monthly_cost_usd, capture_plans, alert_delivery_mode_override, engine, port, is_enabled, created_at, modified_at,
-    aws_role_arn, aws_external_id)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL, NULL, $15, $16, TRUE, $14, $14, $17, $18)
+    aws_role_arn, aws_external_id, query_store_replica)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL, NULL, $15, $16, TRUE, $14, $14, $17, $18, $19)
 ON CONFLICT (server_id) DO NOTHING";
 
     /// <summary>
@@ -1413,9 +1451,35 @@ ON CONFLICT (server_id) DO NOTHING";
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = config.Port });                                                // $16
         AddNullableText(command, config.AwsRoleArn);                                                                                  // $17
         AddNullableText(command, config.AwsRoleArn is null ? null : config.AwsExternalId);                                            // $18
+        AddNullableText(command, QueryStoreReplicaSetting.Normalize(config.QueryStoreReplica));                                       // $19 (#6254)
         var written = await command.ExecuteNonQueryAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         return written;
+    }
+
+    /// <summary>Why a Query Store replica is refused, or null when it may be set (#6254, shared by add_servers and edit_server): it
+    /// is for a SQL Server target, a name of at most 255 characters with no control character (it becomes a host in a
+    /// connection string).</summary>
+    internal static string? QueryStoreReplicaRefusal(string? replica, string engine)
+    {
+        if (replica is null)
+        {
+            return null;
+        }
+
+        if (!string.Equals(engine, EngineSqlServer, StringComparison.Ordinal))
+        {
+            return "query_store_replica is for SQL Server servers only.";
+        }
+
+        if (replica.Length > 255 || replica.Any(c => char.IsControl(c) || char.IsSurrogate(c)))
+        {
+            return "query_store_replica must be a host name, host,port or listener name of at most 255 characters.";
+        }
+
+        /* A protocol prefix (np:, lpc:, admin:) or a UNC-looking value is a connection the service would open with its own
+           credentials to a machine the caller names (a named pipe over SMB): refused for every auth mode. */
+        return QueryStoreReplicaSetting.Refusal(replica);
     }
 
     /// <summary>The <c>server_id</c> an entry is stored under: the deterministic hash of its storage key, the same
@@ -1677,8 +1741,31 @@ ON CONFLICT (server_id) DO NOTHING";
     /// <summary>The probed facts for an <c>added</c> server, from the same describer the
     /// <c>--test-connection</c> CLI line uses (<see cref="DarlingServerConnector.DescribeProbeFacts"/>), so the
     /// two cannot drift and a PostgreSQL target reads as one here too.</summary>
-    private static string DescribeProbe(ConnectionProbeResult probe) =>
-        $"Connected — {DarlingServerConnector.DescribeProbeFacts(probe)}.";
+    private static string DescribeProbe(ConnectionProbeResult probe, string? replicaLine = null) =>
+        $"Connected — {DarlingServerConnector.DescribeProbeFacts(probe)}." + (replicaLine is null ? "" : " " + replicaLine);
+
+    /// <summary>
+    /// #6254: what an add or an edit says about the Query Store replica its connection test also opened, or null when the server has
+    /// none. A replica that would not open is a note and never a refusal: the primary answered, the server is saved, and collection reads
+    /// Query Store from the primary. The reply carries a fixed sentence (the driver's text goes to the service log, redacted and bounded,
+    /// as <see cref="ConnectFailureReply"/> does); only the <c>--add-server</c> verb (<paramref name="revealError"/>) shows the driver's text.
+    /// </summary>
+    internal static string? QueryStoreReplicaReply(
+        MonitoredServer server, ConnectionProbeResult probe, ILogger? logger, bool revealError, params string?[] secrets)
+    {
+        var line = DarlingServerConnector.DescribeQueryStoreReplica(probe, revealError: false);
+        if (line is null || string.IsNullOrEmpty(probe.QueryStoreReplicaError))
+        {
+            return line;
+        }
+
+        var driverText = RedactEditSecret(probe.QueryStoreReplicaError, secrets);
+        logger?.LogWarning("Query Store replica test for {Target} failed: {DriverText}",
+            Hosting.DarlingHttpRefusalLog.Sanitize(probe.QueryStoreReplica, 512), Hosting.DarlingHttpRefusalLog.Sanitize(driverText, 512));
+        return revealError
+            ? DarlingServerConnector.DescribeQueryStoreReplica(probe with { QueryStoreReplicaError = driverText }, revealError: true)
+            : line;
+    }
 
     /// <summary>The canonical <c>engine</c> values, as written to the store.</summary>
     internal const string EngineSqlServer = "sqlserver";

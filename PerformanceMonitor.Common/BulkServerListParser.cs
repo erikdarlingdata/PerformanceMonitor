@@ -109,6 +109,14 @@ public static class BulkServerListParser
                 continue;
             }
 
+            // #6352: a server name SqlClient would read as a named pipe or an admin connection is a line error,
+            // like the single-server dialogs refuse it, so the bulk paste cannot save what they would not.
+            if (ServerHostSetting.Refusal(fields[0]) is { } hostRefusal)
+            {
+                errors.Add(new BulkServerParseError(lineNumber, rawText, hostRefusal));
+                continue;
+            }
+
             // Rules 5/6: absent or empty (incl. INTERIOR-empty) display/database fields → null.
             var serverName = fields[0];
             var displayName = count >= 2 && fields[1].Length > 0 ? fields[1] : null;

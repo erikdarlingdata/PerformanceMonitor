@@ -633,6 +633,33 @@ public sealed class CollectorContext
     public bool IncludeOpenInterval { get; set; } = true;
 
     /// <summary>
+    /// Whether the server's <c>query_store_replica</c> setting is set (#6254). The query_store enumeration reads
+    /// each database's flush interval only then; with it false the enumeration is today's. Set once per run by the host, before <see cref="QueryStoreCollector.BuildEnumerationQuery"/>.
+    /// </summary>
+    public bool QueryStoreReplicaConfigured { get; set; }
+
+    /// <summary>
+    /// Which connection this item's query_store read goes to (#6254): the primary (default, today's read) or the
+    /// readable replica. Set PER ITEM from the routing decision (<see cref="QueryStoreReplicaRouting.Decide"/>), like
+    /// <see cref="Watermark"/>. The read itself is the same statement on either connection.
+    /// </summary>
+    public QueryStoreReadSource QueryStoreReadSource { get; set; } = QueryStoreReadSource.Primary;
+
+    /// <summary>
+    /// L, the look-back this item's cutoff already includes (#6254, #6279); zero when the read keeps today's
+    /// cutoff. Set per item from <see cref="QueryStoreRouteDecision.LookBack"/>. A nonzero value also means the
+    /// item's rows go through <see cref="QueryStoreShipGuard"/>.
+    /// </summary>
+    public TimeSpan QueryStoreLookBack { get; set; }
+
+    /// <summary>
+    /// Whether this item's read may stage the <c>qsowm:</c> open-interval stamp (#2312). True by default; false
+    /// for a replica read (<see cref="QueryStoreRouteDecision.StageOpenIntervalStamp"/>), which always includes the
+    /// open interval and must not start the primary's 30-minute throttle (#6254).
+    /// </summary>
+    public bool StageQueryStoreOpenIntervalStamp { get; set; } = true;
+
+    /// <summary>
     /// When true (the default — today's behavior), the default_trace_events collector records
     /// Object:Created/Altered/Deleted schema-change (DDL) events; when false its
     /// <c>@include_object_ddl</c> gate drops that entire slice while leaving every other curated

@@ -258,7 +258,18 @@ public sealed class DefaultTraceEventsCollector : CollectorDefinitionBase<Defaul
        sys.traces stays in the FROM: its is_default/status predicate is what keeps fn_trace_gettable from
        being invoked at all on a server whose default trace is off, and max_files still comes from it.
        READ UNCOMMITTED like every collector; OPTION(RECOMPILE) because the cutoff selectivity varies
-       wildly between the all-history first run and the tiny steady-state windows. */
+       wildly between the all-history first run and the tiny steady-state windows.
+
+       NO ORDER BY, and MAXDOP 1 (#6304). fn_trace_gettable carries no row-count statistics: the optimizer
+       guesses 80,000 rows of ~2 KB each, so an ORDER BY became a Sort asking for a 57-75 MB memory grant to
+       return the dozens of rows the trace really holds (MaxUsedMemory 2 MB). On a server whose workspace
+       memory is smaller than that (the 1 GB test VMs: the query workspace was 85 MB) the request queued on
+       RESOURCE_SEMAPHORE at 15 ms of CPU until the host's 60 s command timeout, and the cycle failed with
+       "Execution Timeout Expired" and no rows. Whether the grant was available at that moment decided the
+       whole run, which is why runs were either fast or 60 s. Without the Sort the grant is the hash join's
+       1.5 MB, and the rows come back in file order; ReadAsync puts them newest-first on the host, which has
+       the memory. Serial because one trace read has nothing to spread across threads and a parallel plan
+       adds exchange buffers to the request. */
     /* Parsed once — the template is re-formatted every collection cycle (CA1863). */
     private static readonly System.Text.CompositeFormat QueryTemplateFormat =
         System.Text.CompositeFormat.Parse(QueryTemplate);
@@ -290,6 +301,50 @@ SET @trace_continues =
         ELSE 0
     END;
 
+/*#6381: SQL Server on Linux answers a read of the ACTIVE trace file with Msg 568 ('Encountered an error or an
+  unexpected end of trace file') while the server is growing that file: it extends it in 1 MB steps, and for 5-7 seconds
+  at each step the read cannot reach a clean end of file (measured on two SQL Server 2022 Linux containers: 4 windows in
+  15 minutes, none longer than 7.2 s, each clearing by itself; a collector polling every few minutes lands in one about
+  1 run in 80, which is what the lab logged). The read goes into a table variable (a temp table writes Object:Created/Deleted rows into the very trace file being read, which makes the file grow, and so the window, more often) inside TRY...CATCH and ONLY Msg 568 is
+  retried, up to 5 more times 2 s apart (10 s, past the longest window), on the server, where nothing has reached the
+  client yet: a retry in the host would double the rows already streamed, and an error that lands before the first row
+  never reaches ReadAsync at all. A 568 that outlasts the retries, and every other error, is re-thrown unchanged: a trace
+  file that is missing (Msg 19049), not a trace file (19050) or really corrupt still fails the cycle.*/
+DECLARE
+    @read_attempt tinyint = 1;
+
+DECLARE
+    @default_trace_events table
+    (
+        event_time datetime NULL,
+        event_name nvarchar(128) NULL,
+        event_class int NULL,
+        spid int NULL,
+        database_name nvarchar(256) NULL,
+        database_id int NULL,
+        login_name nvarchar(256) NULL,
+        host_name nvarchar(256) NULL,
+        application_name nvarchar(256) NULL,
+        object_name nvarchar(256) NULL,
+        filename nvarchar(256) NULL,
+        integer_data int NULL,
+        integer_data_2 int NULL,
+        text_data nvarchar(max) NULL,
+        session_login_name nvarchar(256) NULL,
+        error_number int NULL,
+        severity int NULL,
+        state int NULL,
+        event_sequence bigint NULL,
+        duration_us bigint NULL,
+        end_time datetime NULL
+    );
+
+WHILE @read_attempt <= 6
+BEGIN
+    BEGIN TRY
+        DELETE @default_trace_events;
+
+INSERT @default_trace_events
 SELECT /* PerformanceMonitorLite */
     event_time = ft.StartTime,
     event_name = te.name,
@@ -304,7 +359,7 @@ SELECT /* PerformanceMonitorLite */
     filename = ft.FileName,
     integer_data = ft.IntegerData,
     integer_data_2 = ft.IntegerData2,
-    text_data = ft.TextData,
+    text_data = CONVERT(nvarchar(max), ft.TextData),
     session_login_name = ft.SessionLoginName,
     error_number = ft.Error,
     severity = ft.Severity,
@@ -404,9 +459,25 @@ AND
         )
     )
 )
-ORDER BY
-    ft.StartTime DESC
-OPTION(RECOMPILE);
+OPTION(RECOMPILE, MAXDOP 1);
+
+        SET @read_attempt = 7; /*read through: leave the loop*/
+    END TRY
+    BEGIN CATCH
+        IF ERROR_NUMBER() <> 568
+        OR @read_attempt >= 6
+        BEGIN
+            THROW;
+        END;
+
+        SET @read_attempt = @read_attempt + 1;
+        WAITFOR DELAY '00:00:02';
+    END CATCH;
+END;
+
+SELECT /* PerformanceMonitorLite */
+    *
+FROM @default_trace_events;
 
 SELECT /* PerformanceMonitorLite */
     current_trace_path = @current_trace_path,
@@ -609,6 +680,11 @@ SELECT /* PerformanceMonitorLite */
                 traceStart = reader.GetDateTime(1);
             }
         }
+
+        /* Newest first, as the query's ORDER BY ft.StartTime DESC used to deliver. The server no longer sorts: that
+           Sort asked for a memory grant a small server could not give, and the cycle timed out waiting for it (#6304).
+           The host sorts the rows it already holds. A stable sort, so events of one tick stay in file order. */
+        rows = rows.OrderByDescending(static row => row.EventTime).ToList();
 
         RecordTraceSequence(rows, traceStart, context);
         return DropStoredWatermarkTickRows(rows, context);

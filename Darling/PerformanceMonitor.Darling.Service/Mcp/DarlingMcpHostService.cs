@@ -19,6 +19,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Npgsql;
@@ -85,7 +86,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// store; on any other store as <c>postgres.mcpConnectionString</c>, or as the owner with a startup warning when
 /// that is unset (<see cref="DarlingStoreLogins"/>, #3914). As mcp it is NOT the superuser owner, so a token-holder (or a
 /// future/buggy tool) reaches only the viewer read surface plus the <c>analysis_findings</c> /
-/// <c>analysis_muted</c> INSERTs the tools persist, never the <c>config_command</c> service-credential
+/// <c>analysis_muted</c> INSERT and DELETE the mute tools persist, never the <c>config_command</c> service-credential
 /// pivot or the carved secret columns. It also gets its own <see cref="DarlingAnalysisService"/>. Store
 /// migration + role provisioning are the WORKER's job; the <c>mcp</c>-role credential is written AFTER
 /// migration (later than the owner's), so the first-boot poll budget tolerates the delay. The plan fetcher
@@ -162,6 +163,7 @@ public sealed class DarlingMcpHostService : BackgroundService
         _slowReads = slowReads;
         _readAdmission = readAdmission;
         _logger = logger;
+        PgKnownPatternStore.UseSharedLogger(logger);
         _state = state;
         _registryState = registryState;
         _baselineCache = baselineCache ?? new BaselineCache();
@@ -1194,6 +1196,11 @@ public sealed class DarlingMcpHostService : BackgroundService
            off unless the host passes the one built from darling.json. */
         services.AddSingleton<DarlingMcpAddServersPolicy>(addServers ?? DarlingMcpAddServersPolicy.Default);
 
+        /* #6334: get_known_patterns and get_alert_history mask the operator's note at the served mcp.dataDetail level, so the level
+           is a service parameter of those tools. The real host registers its setting before this runs (Start), and TryAdd leaves it
+           be; anywhere else the level is full, as the host filter passes through. */
+        services.TryAddSingleton(new McpDataDetailSetting(McpDataDetail.Full));
+
         /* #5915: the Level 2 mute and custom-rule tools read the served policy through this seat, so under the investigations
            arm they go through the agent_action gate and under the writes arm they write as before. A service parameter, so a
            client cannot supply it. */
@@ -1572,6 +1579,8 @@ public sealed class DarlingMcpHostService : BackgroundService
                its result, over the same ChangeWatchStore the worker pass writes. A read of the monitoring store: the investigation
                agent may call it. */
             .WithGeminiCompatibleTools<DarlingMcpChangeWatchTools>()
+            /* The known-pattern read - get_known_patterns (#6334) - the operator-written entries that get_alert_history rows carry the matches of. */
+            .WithGeminiCompatibleTools<DarlingMcpKnownPatternTools>()
             /* The system_health parse-on-read family — get_health_parser_cpu_tasks / _io_issues /
                _memory_broker / _memory_conditions / _memory_node_oom / _scheduler_issues /
                _severe_errors / _significant_waits / _system_health — the same names the Dashboard

@@ -74,6 +74,24 @@ public sealed class WebDatabaseFilterPickerBehaviourTests
         Assert.Equal("false", r.GetProperty("expandedAfterNavigation").GetString());
     }
 
+    /// <summary>
+    /// #4190 / #6310: the server page re-reads /api/fleet only for an unseen server, for the poll, or for a remembered card older than
+    /// 60 s. A tab click on a fresh card reuses it. Replaces the source-text pin
+    /// <c>WebFetchLayerTests.ServerJs_OnlyRefetchesFleetForAnUnseenServerOrThePoll</c>.
+    /// </summary>
+    [Fact]
+    public void ServerPage_RefetchesTheFleetCardOnlyForAnUnseenServerThePollOrAnOldCard()
+    {
+        var r = Run("fleetRefetch");
+
+        Assert.Equal(1, r.GetProperty("afterUnseen").GetInt32());
+        Assert.Equal(1, r.GetProperty("afterFreshClick").GetInt32());
+        Assert.Equal(2, r.GetProperty("afterPoll").GetInt32());
+        Assert.Equal(3, r.GetProperty("afterOldClick").GetInt32());
+        // The old-card refetch re-stamped the card, so the next click is fresh again.
+        Assert.Equal(3, r.GetProperty("afterClickOnRefreshedCard").GetInt32());
+    }
+
     [Fact]
     public void APostgreSqlServer_GetsNoPicker_AndNoFilter()
     {

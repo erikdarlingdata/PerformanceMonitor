@@ -514,6 +514,7 @@ ORDER BY h.collector_name";
         }
 
         var items = await TimedReadAsync("GetCollectionHealthAsync", timer => ReadCollectionHealthAsync(serverId, timer, cancellationToken));
+        await ApplyReadSourceAsync(items, serverId, cancellationToken);
 
         if (allowMemo)
         {
@@ -534,6 +535,58 @@ ORDER BY h.collector_name";
     /// reports. A read that ended in <see cref="OperationCanceledException"/> reports as cancelled (one plain line), not as
     /// a slow method.
     /// </summary>
+    /// <summary>
+    /// #6254: the newest Query Store run's <c>read_source</c> on this server in the trailing 7 days. The newest run, not the newest run that
+    /// had one, so a server whose Query Store replica setting was turned off stops showing a source as soon as its runs stop writing one.
+    /// </summary>
+    internal const string CollectionHealthReadSourceSql = @"
+SELECT read_source
+FROM v_collection_log
+WHERE server_id = $1
+AND   collector_name = 'query_store'
+AND   collection_time >= $2
+ORDER BY collection_time DESC, log_id DESC
+LIMIT 1";
+
+    /// <summary>
+    /// #6254: stamps the Query Store row with <see cref="CollectionHealthReadSourceSql"/>'s value, before the rows are memoized. Null everywhere
+    /// with the setting off, and then no row changes. A failed read leaves the rows unstamped: the view answers without the extra note.
+    /// A cancellation is not swallowed.
+    /// </summary>
+    private async Task ApplyReadSourceAsync(List<CollectorHealthRow> rows, int serverId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var connection = await OpenConnectionAsync(timer: null, cancellationToken);
+            using var command = connection.CreateCommand();
+            command.CommandText = CollectionHealthReadSourceSql;
+            command.Parameters.Add(new DuckDBParameter { Value = serverId });
+            command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-7) });
+            ApplyReadSource(rows, await command.ExecuteScalarAsync(cancellationToken) as string);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            System.Diagnostics.Trace.TraceWarning($"#6254 collection health could not read the Query Store read source for server {serverId}; it is shown without one: {ex.GetType().Name}");
+        }
+    }
+
+    /// <summary>#6254: puts <paramref name="readSource"/> on the <c>query_store</c> row. Blank or null changes nothing. Pure, so a test needs no store.</summary>
+    internal static void ApplyReadSource(IEnumerable<CollectorHealthRow> rows, string? readSource)
+    {
+        if (string.IsNullOrWhiteSpace(readSource))
+        {
+            return;
+        }
+
+        foreach (var row in rows)
+        {
+            if (string.Equals(row.CollectorName, "query_store", StringComparison.Ordinal))
+            {
+                row.ReadSource = readSource;
+            }
+        }
+    }
+
     private async Task<T> TimedReadAsync<T>(string readName, Func<ReadPhaseTimer, Task<T>> read)
     {
         var timer = new ReadPhaseTimer();
@@ -780,7 +833,8 @@ SELECT
     rows_collected,
     status,
     error_message,
-    server_name
+    server_name,
+    read_source
 FROM v_collection_log
 WHERE server_id = $1
 AND   collection_time >= $2
@@ -819,7 +873,8 @@ LIMIT $4";
                 RowsCollected = reader.IsDBNull(5) ? null : (int?)Convert.ToInt32(reader.GetValue(5)),
                 Status = reader.GetString(6),
                 ErrorMessage = reader.IsDBNull(7) ? null : reader.GetString(7),
-                ServerName = reader.IsDBNull(8) ? null : reader.GetString(8)
+                ServerName = reader.IsDBNull(8) ? null : reader.GetString(8),
+                ReadSource = reader.IsDBNull(9) ? null : reader.GetString(9)
             });
         }
 
@@ -948,7 +1003,8 @@ SELECT
     rows_collected,
     status,
     error_message,
-    server_name
+    server_name,
+    read_source
 FROM v_collection_log
 WHERE server_id IN ({string.Join(",", serverIds)})
 AND   collection_time >= $1
@@ -980,7 +1036,8 @@ LIMIT $3";
                 RowsCollected = reader.IsDBNull(5) ? null : (int?)Convert.ToInt32(reader.GetValue(5)),
                 Status = reader.GetString(6),
                 ErrorMessage = reader.IsDBNull(7) ? null : reader.GetString(7),
-                ServerName = reader.IsDBNull(8) ? null : reader.GetString(8)
+                ServerName = reader.IsDBNull(8) ? null : reader.GetString(8),
+                ReadSource = reader.IsDBNull(9) ? null : reader.GetString(9)
             });
         }
 
@@ -1009,7 +1066,8 @@ SELECT
     rows_collected,
     status,
     error_message,
-    server_name
+    server_name,
+    read_source
 FROM v_collection_log
 WHERE server_id = $1
 AND   collector_name = $2
@@ -1036,7 +1094,8 @@ ORDER BY collection_time DESC";
                 RowsCollected = reader.IsDBNull(5) ? null : (int?)Convert.ToInt32(reader.GetValue(5)),
                 Status = reader.GetString(6),
                 ErrorMessage = reader.IsDBNull(7) ? null : reader.GetString(7),
-                ServerName = reader.IsDBNull(8) ? null : reader.GetString(8)
+                ServerName = reader.IsDBNull(8) ? null : reader.GetString(8),
+                ReadSource = reader.IsDBNull(9) ? null : reader.GetString(9)
             });
         }
 
@@ -1075,6 +1134,14 @@ public class CollectionLogRow
     public int? RowsCollected { get; set; }
     public string Status { get; set; } = "";
     public string? ErrorMessage { get; set; }
+
+    /// <summary>#6254: where this run's Query Store rows were read from (for example <c>replica 12, primary 2</c>), or null: every run of a server with the
+    /// replica setting off, every collector but Query Store, and every run stored before the column existed.</summary>
+    public string? ReadSource { get; set; }
+
+    /// <summary>#6254: the grids' message cell, <see cref="ErrorMessage"/> with the run's read source after it when it has one. Identical to
+    /// <see cref="ErrorMessage"/> (blank for none) when it has none. Shared wording with the health views' Note column.</summary>
+    public string MessageFormatted => CollectorHealthClassifier.FormatRunMessage(ErrorMessage, ReadSource);
 
     /// <summary>
     /// The clock of the server this run belongs to (#4766), stamped by the tab or window that lists it; null (a row
@@ -1522,6 +1589,10 @@ public class CollectorHealthRow
     /// identically. Never feeds <see cref="HealthStatus"/>.
     /// </summary>
     public string NoteFormatted =>
-        CollectorHealthClassifier.FormatCollectionNote(LastNote, NoteCount, TotalRuns, CollectorName, TargetHasUserDatabases, RecoveredNote);
+        CollectorHealthClassifier.FormatCollectionNote(LastNote, NoteCount, TotalRuns, CollectorName, TargetHasUserDatabases, RecoveredNote, ReadSource);
+
+    /// <summary>#6254: where the newest Query Store run read its rows from (for example <c>replica 12, primary 2</c>), shown in the Note column.
+    /// Null for every collector but Query Store and for every server with the replica setting off. Informational only: it never feeds <see cref="HealthStatus"/>.</summary>
+    public string? ReadSource { get; set; }
 }
 

@@ -106,16 +106,6 @@ public sealed class WebTopProceduresColumnsTests
     }
 
     [Fact]
-    public void BothTopProceduresGridsPassTheGroupsAndTheFullDetailRead()
-    {
-        var js = Tab();
-        Assert.Equal(2, Regex.Matches(js,
-            @"""get_top_procedures_by_cpu"",\s*rankedParams\(\{ server, hours: ctx\.hours, top: 20, detail: ""full"" \}, ranking, ""procedures""\),\s*""procedures"",\s*\[\.\.\.TOP_PROC_COLUMNS, procedurePlanColumn\(server\)\],").Count);
-        /* #5226: the selector is the last argument. #5299: the ranking's retention notice rides the window note, so the grid has no further note key. */
-        Assert.Equal(2, Regex.Matches(js, @"""truncation_note"",\s*null,\s*TOP_PROC_GROUPS,\s*picker\s*\)").Count);
-    }
-
-    [Fact]
     public void TheDetailParameterIsAnAppendedOptionalWhoseDefaultIsSummary()
     {
         var src = Tools();

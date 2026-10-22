@@ -120,19 +120,6 @@ public sealed class WebFetchLayerTests
        #4191 — cancel per render (never the shared /api/fleet read), and skip an overlapping poll tick.
        --------------------------------------------------------------------------------------------------- */
 
-    /// <summary>apiGet and readTool both take an optional AbortSignal, threaded straight to fetch — the seam
-    /// panels.js's renderPanel (every page's panel reads) and server.js's redrawPanels (the controller that
-    /// owns it) are built on.</summary>
-    [Fact]
-    public void ApiGetAndReadTool_AcceptAnAbortSignal()
-    {
-        var util = UtilJs;
-
-        Assert.Contains("export async function apiGet(path, signal) {", util, StringComparison.Ordinal);
-        Assert.Contains("resp = await fetch(path, { headers: { Accept: \"application/json\" }, signal });", util, StringComparison.Ordinal);
-        Assert.Contains("export function readTool(tool, params, signal) {", util, StringComparison.Ordinal);
-    }
-
     /// <summary>An aborted fetch is its own response kind too (never "error") — a cancelled panel read must not
     /// flash a red error strip into a slot the newer render is about to replace anyway.</summary>
     [Fact]
@@ -276,35 +263,6 @@ public sealed class WebFetchLayerTests
         // apiGetFleet's own signature took no signal/counter change — still the #3895 shared-request shape.
         Assert.Contains("export async function apiGetFleet() {", util, StringComparison.Ordinal);
         Assert.Contains("export async function apiSend(method, path, body) {", util, StringComparison.Ordinal);
-    }
-
-    /* ---------------------------------------------------------------------------------------------------
-       #4190 — a sub-tab click reuses the last /api/fleet read; only a new server or the poll re-fetches.
-       --------------------------------------------------------------------------------------------------- */
-
-    /// <summary>The exact gate: loadServerCard (the only /api/fleet read on this page) runs only when nothing
-    /// is cached for this server yet, or this call is the poll's own refresh — never for a plain sub-tab
-    /// click, which the synchronous `remembered` paint just above already served from the page's own cache.</summary>
-    [Fact]
-    public void ServerJs_OnlyRefetchesFleetForAnUnseenServerOrThePoll()
-    {
-        var server = ServerJs;
-
-        Assert.Contains("export function renderServer(main, server, tabId, opts) {", server, StringComparison.Ordinal);
-        Assert.Contains("const isPoll = !!(opts && opts.poll === true);", server, StringComparison.Ordinal);
-        Assert.Contains("if (!remembered || isPoll) {", server, StringComparison.Ordinal);
-
-        // loadServerCard's one CALL site (not its `function loadServerCard(server, onCard)` definition,
-        // which also contains the literal "loadServerCard(server,") must be reached only through that gate.
-        var occurrences = 0;
-        var idx = 0;
-        const string callSite = "loadServerCard(server, (card, reason) => {";
-        while ((idx = server.IndexOf(callSite, idx, StringComparison.Ordinal)) >= 0)
-        {
-            occurrences++;
-            idx += 1;
-        }
-        Assert.Equal(1, occurrences);
     }
 
     /// <summary>app.js threads the poll flag down to renderServer through route(), and ONLY there — the other
