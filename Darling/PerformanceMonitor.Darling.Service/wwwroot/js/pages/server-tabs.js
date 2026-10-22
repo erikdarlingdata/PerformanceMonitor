@@ -59,7 +59,7 @@ import { activePlanColumns, blockingPlanColumns, deadlockPlanColumn, planColumn,
 import { queryStoreHistoryColumn } from "./query-store-history.js";
 import { queryHeatmapCard } from "./query-heatmap.js";
 import { dailyHealthCalendar } from "./daily-calendar.js";
-import { systemEventsChartSpecs } from "./system-events-charts.js";
+import { systemEventsChartSpecs, COUNTERS_INTRO, counterChartsDrawn } from "./system-events-charts.js";
 import { comparePick, compareControl, compareCard, COMPARE_TOP } from "./top-compare.js";
 import { SQL_TAB_REACH, POSTGRES_TAB_REACH, withTabReach } from "./server-tab-reach.js";
 import { bloatVerdict, droppabilityVerdict, costFigure, lastScanNoteWord, fillfactorNoteWord, toastNoteWord, indexSkipWord } from "../pg-grid-text.js";
@@ -214,7 +214,9 @@ function hidesPanel(spec, res, shell, key) {
   return true;
 }
 
-function fanout(read, params, specs) {
+/* `intro` (#6439): an optional `{ text, when }`. An empty full-width slot is put before the panels and gets the notice only once the
+   read's data passes `when(data)`, so a sentence about what the cards below draw is shown only when they draw it. */
+function fanout(read, params, specs, intro = null) {
   for (const spec of specs) {
     if ((spec.viz === "table" || spec.viz === "line") && !spec.emptyText) {
       throw new Error("fanout(" + spec.title + "): a data panel must explain its own empty state.");
@@ -225,8 +227,12 @@ function fanout(read, params, specs) {
   specs.forEach((s, i) => {
     if (s.hideWhenNoRows && !panelHadRows.get(keys[i])) shells[i].panel.style.display = "none";
   });
+  const introNode = intro ? el("div", { class: "panel-intro" }, []) : null;
   (async () => {
     const res = await readToolWithinKeptHistory(read, params);
+    if (introNode && res.kind === "data" && intro.when(res.data)) {
+      mount(introNode, [noticeStrip(intro.text)]);
+    }
     specs.forEach((spec, i) => {
       const body = shells[i].body;
       if (hidesPanel(spec, res, shells[i], keys[i])) return;
@@ -254,7 +260,7 @@ function fanout(read, params, specs) {
       }
     });
   })();
-  return shells.map((s) => s.panel);
+  return introNode ? [introNode, ...shells.map((s) => s.panel)] : shells.map((s) => s.panel);
 }
 
 /** The most waits the Wait Stats chart draws at once: one read each, and the palette has ten colors. */
@@ -2380,8 +2386,7 @@ export const SERVER_TABS = [
     id: "events",
     label: "System Events",
     note:
-      "These are the system_health session and default trace, parsed on read. The corruption and contention " +
-      "counters are charted below (each point is the largest value in its time bucket); the raw parsed rows follow.",
+      "These are the system_health session and default trace, parsed on read.",
     build: (server, ctx) => [
       /* The CPU chart reads the whole window as time buckets (chart: true, #6158); a limit of 50 drew only the newest
          few hours of a day. The entries table below keeps the newest-rows read. */
@@ -2399,7 +2404,7 @@ export const SERVER_TABS = [
         },
         /* The Corruption and Contention Events charts (#6295), off the same fetch. */
         ...systemEventsChartSpecs(ctx.label),
-      ]),
+      ], { text: COUNTERS_INTRO, when: counterChartsDrawn }),
       ...fanout("get_health_parser_system_health", { server, hours: ctx.hours, limit: 50 }, [
         {
           title: "system_health Entries",

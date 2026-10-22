@@ -638,6 +638,43 @@ public sealed class ServerEditRouteTests
         }
     }
 
+    /// <summary>#6440: the second of two releases of one slot must not return before the first has really freed the
+    /// gate. The handler's release and the core's own continuation race; if the loser returned at once, the handler
+    /// sent its answer while the winner, preempted after claiming the slot, had not freed the gate, and the client's
+    /// next edit was refused with 429.</summary>
+    [Fact]
+    public async Task ASecondRelease_DoesNotReturnUntilTheFirstHasFreedTheGate()
+    {
+        using var gate = new SemaphoreSlim(1, 1);
+        Assert.True(gate.Wait(0));
+        using var firstIsClaimingTheSlot = new ManualResetEventSlim(false);
+        using var secondHasReturned = new ManualResetEventSlim(false);
+        var gateCountWhenTheSecondReturned = -1;
+        var slot = new DarlingWebEndpoints.SingleReleaseSlot(gate, beforeFree: () =>
+        {
+            firstIsClaimingTheSlot.Set();
+            /* The first release is parked between claiming the slot and freeing the gate. A correct second release is
+               stuck behind it, so this wait runs out; one that returned early would record a held gate. */
+            secondHasReturned.Wait(TimeSpan.FromMilliseconds(300));
+        });
+
+        var first = Task.Run(slot.Release, TestContext.Current.CancellationToken);
+        firstIsClaimingTheSlot.Wait(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var second = Task.Run(() =>
+        {
+            slot.Release();
+            Volatile.Write(ref gateCountWhenTheSecondReturned, gate.CurrentCount);
+            secondHasReturned.Set();
+        }, TestContext.Current.CancellationToken);
+
+        await Task.WhenAll(first, second).WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        Assert.Equal(1, Volatile.Read(ref gateCountWhenTheSecondReturned));
+        Assert.Equal(1, gate.CurrentCount);
+
+        slot.Release();
+        Assert.Equal(1, gate.CurrentCount);
+    }
+
     [Fact]
     public async Task AnEditThatOutlivesTheTimeout_Answers503_KeepsTheSlotForAddAndEdit_AndFreesItOnce_WhenItFinishes()
     {

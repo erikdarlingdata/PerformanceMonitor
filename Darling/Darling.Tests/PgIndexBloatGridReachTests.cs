@@ -535,7 +535,7 @@ public sealed class PgIndexBloatGridReachTests
         Assert.Contains("rowsKey: \"install_census\"", block, StringComparison.Ordinal);
 
         /* The mechanism behind that noteKey, in fanout's own body. */
-        var composite = tabs.IndexOf("function fanout(read, params, specs)", StringComparison.Ordinal);
+        var composite = tabs.IndexOf("function fanout(read, params, specs", StringComparison.Ordinal);
 
         Assert.True(composite > 0, "fanout is gone - remap this pin rather than deleting it");
 
