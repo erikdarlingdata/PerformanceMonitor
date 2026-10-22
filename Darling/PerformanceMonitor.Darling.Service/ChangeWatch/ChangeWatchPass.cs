@@ -61,6 +61,12 @@ public sealed partial class ChangeWatchPass
     /// </summary>
     public static readonly TimeSpan DetectLookback = DetectInterval + DetectInterval;
 
+    /// <summary>
+    /// #6234: how long a target whose detect failed waits before it is tried again. A detect that fails on every run (a read that always throws)
+    /// would otherwise cost a full detect and a warning on every sweep tick, which is the cost <see cref="DetectInterval"/> removes.
+    /// </summary>
+    public static readonly TimeSpan FailedDetectBackoff = TimeSpan.FromMinutes(5);
+
     /* #6234 PostgreSQL pass: every enabled target, with its engine kind: a PostgreSQL target reads its own change sources
        (ChangeWatchPass.Postgres.cs) and is evaluated by its own readers. */
     private const string ServersSql = "SELECT s.server_id, s.server_name, s.engine_kind FROM servers AS s WHERE s.is_enabled";
@@ -153,6 +159,9 @@ WHERE after.hit IS NULL
     /* #6234: when each target's last detect was read (the pass clock at its start), by server id. In memory on purpose: a restart detects every target at once, which costs one read per target and cannot miss a change. */
     private readonly ConcurrentDictionary<int, DateTime> _lastDetected = new();
 
+    /* #6234: when each target's last detect failed (the pass clock at its start), by server id. A failed target waits FailedDetectBackoff before it is tried again. */
+    private readonly ConcurrentDictionary<int, DateTime> _lastFailed = new();
+
     /// <param name="readSource">The store's read connection (the collected tables and the registry).</param>
     /// <param name="store">The watch tables.</param>
     /// <param name="dispatch">The shared dispatch core the alert path uses: its route, agent gate and store call open the request.</param>
@@ -203,18 +212,55 @@ WHERE after.hit IS NULL
     /// <summary>One detect pass and one evaluate pass. A failure on one server is logged and the others go on.</summary>
     public async Task RunOnceAsync(CancellationToken cancellationToken = default)
     {
+        /* #6234: a target whose open watch is due is detected first, whatever its hourly gate says. A change is recorded up to DetectInterval
+           after it happened, so a second change inside the window may not be recorded yet when the window ends. This read records it and extends
+           the watch, as the detect on every tick did. A change after the window is deferred by RecordAsync and opens a new watch below. */
+        await DetectAsync(await DueOpenWatchServersAsync(cancellationToken), cancellationToken);
+
         /* #6239 round 3, M4: a due watch is evaluated BEFORE detection, so a change found after its window ended opens a new watch and never stretches the old one. */
         await EvaluateDueAsync(cancellationToken);
-        await DetectAsync(cancellationToken);
+        await DetectAsync(null, cancellationToken);
+    }
+
+    /* #6234: the servers with an open watch whose window has ended, with that window's end. Only open ones: a watch already claimed for evaluation can no longer be extended. */
+    private async Task<IReadOnlyDictionary<int, DateTime>> DueOpenWatchServersAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            return (await _store.DueAsync(cancellationToken)).Where(w => w.State == "open")
+                .GroupBy(w => w.ServerId).ToDictionary(g => g.Key, g => g.Max(w => w.WindowEndsUtc));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("Change watch: the due watches could not be read before evaluation: {Message}", ex.Message);
+            return new Dictionary<int, DateTime>();
+        }
     }
 
     /// <summary>
     /// Records the changes of every target (SQL Server and PostgreSQL) that has not been detected for <see cref="DetectInterval"/>, opening or extending its
     /// watch. A target detected less than that long ago is skipped without a read of its marks or its sources. A target whose detect failed, or whose changes
-    /// were deferred behind an open watch that is due, is not counted as detected and is tried again on the next call, as it was before the interval.
+    /// were deferred behind an open watch, keeps its marks. A deferred target is not counted as detected and is read again on the next call (the watch that
+    /// held it back is due, so it is evaluated first). A failed target is tried again once <see cref="FailedDetectBackoff"/> has passed.
     /// </summary>
-    public async Task DetectAsync(CancellationToken cancellationToken = default)
+    public Task DetectAsync(CancellationToken cancellationToken = default) => DetectAsync(null, cancellationToken);
+
+    /// <summary>
+    /// <see cref="DetectAsync(CancellationToken)"/> for every target, or, when <paramref name="only"/> is set, only for those targets and without the
+    /// <see cref="DetectInterval"/> gate (#6234: a target whose open watch is due, by the end of that watch's window). Such a target is skipped when its last
+    /// detect was at or after that end, as every change up to the end has then been read, so the read happens once per due watch. An empty set reads nothing.
+    /// </summary>
+    private async Task DetectAsync(IReadOnlyDictionary<int, DateTime>? only, CancellationToken cancellationToken)
     {
+        if (only is { Count: 0 })
+        {
+            return;
+        }
+
         var servers = new List<(int Id, string Name, bool Postgres)>();
         await using (var command = _readSource.CreateCommand(ServersSql))
         {
@@ -234,9 +280,27 @@ WHERE after.hit IS NULL
             _lastDetected.TryRemove(known, out _);
         }
 
+        foreach (var known in _lastFailed.Keys.Where(k => !enabled.Contains(k)).ToList())
+        {
+            _lastFailed.TryRemove(known, out _);
+        }
+
         foreach (var (id, name, postgres) in servers)
         {
-            if (_lastDetected.TryGetValue(id, out var last) && end - last < DetectInterval)
+            var hasLast = _lastDetected.TryGetValue(id, out var last);
+            if (_lastFailed.TryGetValue(id, out var failed) && end - failed < FailedDetectBackoff)
+            {
+                continue;
+            }
+
+            if (only is not null)
+            {
+                if (!only.TryGetValue(id, out var windowEnds) || (hasLast && last >= windowEnds))
+                {
+                    continue;
+                }
+            }
+            else if (hasLast && end - last < DetectInterval)
             {
                 continue;
             }
@@ -283,14 +347,18 @@ WHERE after.hit IS NULL
 
                 if (deferred)
                 {
-                    /* A change after the open watch's window waits for that watch to be evaluated: the marks stay, the target is not counted as detected, and the next pass (a tick, as the watch is evaluated first) reads it again. */
+                    /* A change after the open watch's window waits for that watch to be evaluated: the marks stay, and a later pass reads it again. */
                     _logger.LogDebug("A change on {Server} is after its open watch's window; it is recorded once that watch has been evaluated", name);
+                    /* #6234: a deferred change is after a window end and at or before now, so the watch holding it back is already due and is evaluated
+                       on this run or the next. The target is not counted as detected, so the next detect reads the change again at once and opens its watch. */
+                    _lastDetected.TryRemove(id, out _);
                     continue;
                 }
 
                 /* Only after the changes are recorded: a failed read or record leaves the marks, and the next pass reads the same rows again. */
                 await _store.SetMarksAsync(id, sources.ToDictionary(s => s, _ => end - MarkSlack, StringComparer.Ordinal), cancellationToken);
                 _lastDetected[id] = end;
+                _lastFailed.TryRemove(id, out _);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -298,7 +366,8 @@ WHERE after.hit IS NULL
             }
             catch (Exception ex)
             {
-                _logger.LogWarning("Change detection failed for {Server}; it is tried again next pass: {Message}", name, ex.Message);
+                _lastFailed[id] = end;
+                _logger.LogWarning("Change detection failed for {Server}; it is tried again in {Minutes} minutes: {Message}", name, (int)FailedDetectBackoff.TotalMinutes, ex.Message);
             }
         }
     }

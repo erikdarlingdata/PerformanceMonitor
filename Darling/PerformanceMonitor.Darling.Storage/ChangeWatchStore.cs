@@ -230,20 +230,28 @@ CREATE INDEX IF NOT EXISTS idx_query_store_forced_plans_markers
 
         var watchId = Guid.Empty;
         DateTime windowEnds = default;
+        DateTime firstChangeAt = default;
         await using (var command = Command(connection, transaction,
-            "SELECT watch_id, window_ends_at FROM config.change_watches WHERE server_id = $1 AND state = 'open' FOR UPDATE", serverId))
+            "SELECT watch_id, window_ends_at, first_change_at FROM config.change_watches WHERE server_id = $1 AND state = 'open' FOR UPDATE", serverId))
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
             if (await reader.ReadAsync(cancellationToken))
             {
                 watchId = reader.GetGuid(0);
                 windowEnds = Utc(reader.GetDateTime(1));
+                firstChangeAt = Utc(reader.GetDateTime(2));
             }
         }
 
         var deferred = false;
         if (watchId == Guid.Empty)
         {
+            /* #6234: one read can now hold an hour of changes. Only the ones a watch opened by the first would have taken in, one at a time, open it; the rest
+               are deferred and open their own watch once this one is evaluated, as they did when every change was read within a tick. */
+            var firstChange = Utc(fresh.Min(c => c.ChangeTimeUtc));
+            var opening = Joining(fresh, firstChange + Window, firstChange);
+            deferred = opening.Count < fresh.Count;
+            fresh = opening;
             var first = Utc(fresh.Min(c => c.ChangeTimeUtc));
             var last = Utc(fresh.Max(c => c.ChangeTimeUtc));
             watchId = Guid.NewGuid();
@@ -254,7 +262,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)", watchId, serverId, serverName, now, first,
         }
         else
         {
-            var joining = fresh.Where(c => Utc(c.ChangeTimeUtc) <= windowEnds).ToList();
+            var joining = Joining(fresh, windowEnds, firstChangeAt);
             deferred = joining.Count < fresh.Count;
             fresh = joining;
             if (fresh.Count == 0)
@@ -285,6 +293,33 @@ ON CONFLICT (server_id, change_key) DO NOTHING",
 
         await transaction.CommitAsync(cancellationToken);
         return new ChangeWatchRecordResult(watchId, deferred);
+    }
+
+    /// <summary>
+    /// #6234: the changes, oldest first, that a watch ending at <paramref name="windowEnds"/> takes in when they are recorded one at a time: a change joins
+    /// when it is at or before the window's end, and each one that joins moves the end to <see cref="Window"/> after it, never past <see cref="MaxSpan"/>
+    /// from the watch's first change. The first change that does not join, and every later one, is deferred.
+    /// </summary>
+    internal static List<ChangeWatchChange> Joining(IEnumerable<ChangeWatchChange> changes, DateTime windowEnds, DateTime firstChange)
+    {
+        var joined = new List<ChangeWatchChange>();
+        var end = Utc(windowEnds);
+        var first = Utc(firstChange);
+        foreach (var change in changes.OrderBy(c => c.ChangeTimeUtc))
+        {
+            var at = Utc(change.ChangeTimeUtc);
+            if (at > end)
+            {
+                break;
+            }
+
+            joined.Add(change);
+            first = at < first ? at : first;
+            var grown = at + Window > end ? at + Window : end;
+            end = grown < first + MaxSpan ? grown : first + MaxSpan;
+        }
+
+        return joined;
     }
 
     /// <summary>The detection sources a server has a high-water mark for.</summary>

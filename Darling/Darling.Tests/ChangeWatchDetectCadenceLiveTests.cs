@@ -34,6 +34,12 @@ public sealed class ChangeWatchDetectCadenceLiveTests
     private static async Task<IReadOnlyDictionary<string, DateTime>> MarksAsync(Harness h, int serverId, CancellationToken ct) =>
         await h.Store.GetMarksAsync(serverId, ct);
 
+    private static async Task<object?> ScalarAsync(NpgsqlConnection c, string sql, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, c);
+        return await command.ExecuteScalarAsync(ct);
+    }
+
     [Fact]
     public async Task ChangesBetweenTwoHourlyDetects_AreFoundAtTheNextOne_AndEachIsRecordedExactlyOnce()
     {
@@ -158,6 +164,111 @@ public sealed class ChangeWatchDetectCadenceLiveTests
 
             Assert.Equal(0, await CountAsync(h.Connection, "SELECT count(*) FROM config.change_watches WHERE state = 'open'", ct));
             Assert.Equal(1, await CountAsync(h.Connection, "SELECT count(*) FROM config.change_watches WHERE state = 'closed'", ct));
+        });
+    }
+
+    [Fact]
+    public async Task ASecondChangeInsideTheWindow_FoundAfterTheFirstDetect_JoinsTheFirstWatchBeforeItIsEvaluated()
+    {
+        await RunAsync(false, async (h, ct) =>
+        {
+            await AddServerAsync(h.Connection, ct);
+
+            /* The store's clock is h.Now, so the scenario runs in the past and its last run is at h.Now: t0 is 71 minutes before. */
+            var t0 = h.Now.AddMinutes(-71);
+            var clock = t0;
+            var pass = h.NewPassAt(() => clock);
+            await ServerConfigAsync(h.Connection, t0.AddMinutes(-30), Dop, 4, ct);
+            await ServerConfigAsync(h.Connection, t0.AddMinutes(-5), Dop, 4, ct);
+            await pass.RunOnceAsync(ct);
+
+            /* Change A at +10 is recorded by the hourly detect at +61: its watch's window ends at +70. */
+            await ServerConfigAsync(h.Connection, t0.AddMinutes(10), Dop, 2, ct);
+            clock = t0.AddMinutes(61);
+            await pass.RunOnceAsync(ct);
+            Assert.Equal(1, await CountAsync(h.Connection, "SELECT count(*) FROM config.change_watch_changes", ct));
+            Assert.Equal(t0.AddMinutes(70), DateTime.SpecifyKind(
+                (DateTime)(await ScalarAsync(h.Connection, "SELECT window_ends_at FROM config.change_watches", ct))!, DateTimeKind.Utc));
+
+            /* Change B at +65 is inside A's window and after that detect. The run at +71 is inside the hour, and A's watch is due: B is read before A is
+               evaluated, so it joins A's watch and moves the window's end to an hour after B. Nothing is evaluated yet. */
+            await ServerConfigAsync(h.Connection, t0.AddMinutes(65), Dop, 1, ct);
+            clock = t0.AddMinutes(71);
+            await pass.RunOnceAsync(ct);
+
+            Assert.Equal(1, await CountAsync(h.Connection, "SELECT count(*) FROM config.change_watches", ct));
+            Assert.Equal(1, await CountAsync(h.Connection, "SELECT count(*) FROM config.change_watches WHERE state = 'open'", ct));
+            Assert.Equal(2, await CountAsync(h.Connection, "SELECT count(*) FROM config.change_watch_changes", ct));
+            Assert.Equal(1, await CountAsync(h.Connection, "SELECT count(DISTINCT watch_id) FROM config.change_watch_changes", ct));
+            Assert.Equal(t0.AddMinutes(125), DateTime.SpecifyKind(
+                (DateTime)(await ScalarAsync(h.Connection, "SELECT window_ends_at FROM config.change_watches", ct))!, DateTimeKind.Utc));
+        });
+    }
+
+    [Fact]
+    public async Task ATargetWhoseDetectFailed_WaitsTheBackoff_ThenIsDetectedAgain()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            await AddServerAsync(h.Connection, ct);
+            var t0 = h.Now;
+            var clock = t0;
+            var pass = h.NewPassAt(() => clock);
+            await ServerConfigAsync(h.Connection, t0.AddMinutes(-30), Dop, 4, ct);
+            await ServerConfigAsync(h.Connection, t0.AddMinutes(-5), Dop, 4, ct);
+            await pass.DetectAsync(ct);
+
+            async Task Execute(string sql)
+            {
+                await using var command = new NpgsqlCommand(sql, h.Connection);
+                await command.ExecuteNonQueryAsync(ct);
+            }
+
+            /* The detect at +61 fails: the server-config read has no view to read. The marks stay where the detect at +0 left them. */
+            await ServerConfigAsync(h.Connection, t0.AddMinutes(30), Dop, 2, ct);
+            await Execute("ALTER VIEW v_server_config RENAME TO v_server_config_gone");
+            clock = t0.AddMinutes(61);
+            await pass.DetectAsync(ct);
+            Assert.All((await MarksAsync(h, ServerId, ct)).Values, m => Assert.Equal(t0, m));
+
+            /* The read works again. A run one minute later is inside the backoff: it reads nothing, so the change is not recorded and no mark moves. */
+            await Execute("ALTER VIEW v_server_config_gone RENAME TO v_server_config");
+            clock = t0.AddMinutes(62);
+            await pass.DetectAsync(ct);
+            Assert.Equal(0, await CountAsync(h.Connection, "SELECT count(*) FROM config.change_watch_changes", ct));
+            Assert.All((await MarksAsync(h, ServerId, ct)).Values, m => Assert.Equal(t0, m));
+
+            /* Once the backoff has passed the target is detected again, and the change is found. */
+            clock = t0.AddMinutes(61) + ChangeWatchPass.FailedDetectBackoff;
+            await pass.DetectAsync(ct);
+            Assert.Equal(1, await CountAsync(h.Connection, "SELECT count(*) FROM config.change_watch_changes", ct));
+        });
+    }
+
+    [Fact]
+    public async Task OneReadWithAnHourOfChanges_OpensTheWatchTheyWouldHaveOpenedOneAtATime()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            await AddServerAsync(h.Connection, ct);
+            var a = h.Now.AddMinutes(-170);
+            ChangeWatchChange Change(DateTime at, string what) => new($"server_config:{what}:{at:O}", "server_config", at, what);
+
+            /* No watch is open. A at -170 and C at -80 come in one read: C is 90 minutes after A, past the hour A's watch would hold. A opens the watch alone
+               and C is deferred, as it was when A was recorded within a tick and C a run later. */
+            var opened = await h.Store.RecordAsync(ServerId, ServerName, [Change(a, "a"), Change(a.AddMinutes(90), "c")], ct);
+            Assert.True(opened.Deferred);
+            Assert.Equal(1, await CountAsync(h.Connection, "SELECT count(*) FROM config.change_watch_changes", ct));
+            Assert.Equal(a.AddMinutes(60), DateTime.SpecifyKind(
+                (DateTime)(await ScalarAsync(h.Connection, "SELECT window_ends_at FROM config.change_watches", ct))!, DateTimeKind.Utc));
+
+            /* B at -120 is inside A's window, and C is inside the window B extends it to: one at a time both join, so in one read both join too. */
+            var joined = await h.Store.RecordAsync(ServerId, ServerName, [Change(a.AddMinutes(50), "b"), Change(a.AddMinutes(90), "c")], ct);
+            Assert.False(joined.Deferred);
+            Assert.Equal(3, await CountAsync(h.Connection, "SELECT count(*) FROM config.change_watch_changes", ct));
+            Assert.Equal(1, await CountAsync(h.Connection, "SELECT count(*) FROM config.change_watches", ct));
+            Assert.Equal(a.AddMinutes(150), DateTime.SpecifyKind(
+                (DateTime)(await ScalarAsync(h.Connection, "SELECT window_ends_at FROM config.change_watches", ct))!, DateTimeKind.Utc));
         });
     }
 
