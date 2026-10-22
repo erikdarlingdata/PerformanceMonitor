@@ -43,6 +43,16 @@ public partial class AddServerDialog : Window
     /// <see cref="ServerHostBindings"/>): the dialog says so, leaves the saved password or secret out of its box so neither
     /// a test nor a save sends it to the new host, and saving confirms the host.</summary>
     private readonly ServerHostChange? _hostChange;
+
+    /// <summary>The sentence saying what changed, shown when the dialog opens and again after each Test.</summary>
+    private readonly string _hostChangeLine = string.Empty;
+
+    /// <summary>The server being edited; null when adding one.</summary>
+    private readonly ServerConnection? _editing;
+
+    /// <summary>The saved password or client secret the dialog put in its box when it opened (null when it put none), so a
+    /// secret the user typed can be told apart from the saved one.</summary>
+    private string? _prefilledSecret;
     private string? _originalReplica;
 
     public AddServerDialog(ServerManager serverManager, ProfileManager profileManager)
@@ -79,10 +89,12 @@ public partial class AddServerDialog : Window
     {
         Title = "Edit SQL Server";
         _originalHost = existing.ServerName;
+        _editing = existing;
         _hostChange = serverManager.HostChange(existing);
         if (_hostChange != null)
         {
-            StatusText.Text = _hostChange.Describe(existing);
+            _hostChangeLine = _hostChange.Describe(existing);
+            StatusText.Text = _hostChangeLine;
         }
         _originalReplica = existing.QueryStoreReplica ?? "";
         ServerNameBox.Text = existing.ServerName;
@@ -151,7 +163,7 @@ public partial class AddServerDialog : Window
                 UsernameBox.Text = cred.Value.Username;
                 /* A password saved for another host stays out of the box: it is entered again for this one. */
                 if (_hostChange == null)
-                    PasswordBox.Password = cred.Value.Password;
+                    PasswordBox.Password = _prefilledSecret = cred.Value.Password;
             }
         }
         else if (existing.AuthenticationType == AuthenticationTypes.ServicePrincipal)
@@ -170,7 +182,7 @@ public partial class AddServerDialog : Window
                     AzureClientIdBox.Text = cred.Value.Username;
                 /* A secret saved for another host stays out of the box: it is entered again for this one. */
                 if (_hostChange == null)
-                    AzureClientSecretBox.Password = cred.Value.Password;
+                    AzureClientSecretBox.Password = _prefilledSecret = cred.Value.Password;
             }
         }
         else if (existing.AuthenticationType == AuthenticationTypes.ManagedIdentity)
@@ -542,7 +554,7 @@ public partial class AddServerDialog : Window
         {
             TestButton.IsEnabled = true;
             SaveButton.IsEnabled = true;
-            StatusText.Text = string.Empty;
+            StatusText.Text = _hostChangeLine;
         }
 
         return (connected, errorMessage, signInCancelled, serverVersion, brokerFailure, ambientFailure);
@@ -565,6 +577,65 @@ public partial class AddServerDialog : Window
         if (ServicePrincipalAuthRadio.IsChecked == true) return "Service principal";
         if (ManagedIdentityAuthRadio.IsChecked == true) return "Managed identity";
         return "unknown";
+    }
+
+    /// <summary>The authentication type the radios select (the profile's own when a profile is selected).</summary>
+    private string SelectedAuthenticationType()
+    {
+        if (UseProfileRadio.IsChecked == true && ProfileComboBox.SelectedItem is CredentialProfile profile) return profile.AuthType;
+        if (WindowsAuthRadio.IsChecked == true) return AuthenticationTypes.Windows;
+        if (EntraMfaAuthRadio.IsChecked == true) return AuthenticationTypes.EntraMFA;
+        if (EntraDefaultAuthRadio.IsChecked == true) return AuthenticationTypes.EntraDefaultCredential;
+        if (EntraDeviceCodeAuthRadio.IsChecked == true) return AuthenticationTypes.EntraDeviceCode;
+        if (ServicePrincipalAuthRadio.IsChecked == true) return AuthenticationTypes.ServicePrincipal;
+        if (ManagedIdentityAuthRadio.IsChecked == true) return AuthenticationTypes.ManagedIdentity;
+        return AuthenticationTypes.SqlServer;
+    }
+
+    /// <summary>
+    /// Asks before Test, the replica Test or Save connects to an edited server whose settings in the dialog are not the ones
+    /// this user confirmed, unless the user typed the password or secret in the dialog (see <see cref="HostConfirmationGate"/>).
+    /// The answer defaults to No. True when nothing needed asking or the user answered Yes.
+    /// </summary>
+    private bool ConfirmConnectWithUnconfirmedSettings(bool replica)
+    {
+        if (_editing == null)
+            return true;
+
+        var useProfile = UseProfileRadio.IsChecked == true && ProfileComboBox.SelectedItem is CredentialProfile;
+        var profile = useProfile ? (CredentialProfile)ProfileComboBox.SelectedItem : null;
+        var authType = SelectedAuthenticationType();
+        var candidate = new ServerConnection
+        {
+            Id = _editing.Id,
+            ServerName = ServerNameBox.Text,
+            QueryStoreReplica = string.IsNullOrWhiteSpace(QueryStoreReplicaBox.Text) ? null : QueryStoreReplicaBox.Text,
+            AuthenticationType = authType,
+            CredentialProfileId = profile?.Id,
+            DatabaseName = string.IsNullOrWhiteSpace(DatabaseNameBox.Text) ? null : DatabaseNameBox.Text,
+            UtilityDatabase = string.IsNullOrWhiteSpace(UtilityDatabaseBox.Text) ? null : UtilityDatabaseBox.Text,
+            EncryptMode = GetSelectedEncryptMode(),
+            TrustServerCertificate = TrustCertCheckBox.IsChecked == true
+        };
+
+        var typedSecret = !useProfile && authType switch
+        {
+            AuthenticationTypes.SqlServer => PasswordBox.Password,
+            AuthenticationTypes.ServicePrincipal => AzureClientSecretBox.Password,
+            _ => null
+        } is { Length: > 0 } secret && secret != _prefilledSecret;
+
+        var question = HostConfirmationGate.Question(
+            _serverManager.HostChangeIfSaved(candidate),
+            isEdit: true,
+            HostConfirmationGate.CredentialWords(authType, profile?.Name),
+            typedSecret,
+            replica);
+        if (question == null)
+            return true;
+
+        return MessageBox.Show(this, question, "Connect to this server?", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No)
+            == MessageBoxResult.Yes;
     }
 
     /// <summary>
@@ -603,7 +674,7 @@ public partial class AddServerDialog : Window
         {
             TestButton.IsEnabled = true;
             SaveButton.IsEnabled = true;
-            StatusText.Text = string.Empty;
+            StatusText.Text = _hostChangeLine;
         }
     }
 
@@ -639,6 +710,12 @@ public partial class AddServerDialog : Window
             return;
         }
 
+        /* A server whose settings this user has not confirmed: asked before a saved secret or the user's sign-in goes to it. */
+        if (!ConfirmConnectWithUnconfirmedSettings(replica: false))
+        {
+            return;
+        }
+
         var (connected, errorMessage, signInCancelled, serverVersion, brokerFailure, ambientFailure) = await RunConnectionTestAsync();
 
         if (connected)
@@ -649,7 +726,7 @@ public partial class AddServerDialog : Window
 
             /* #6254: a server that names a Query Store replica is tested on both connections, and the two results are shown apart. A
                replica that does not open is a warning and not a failed test: collection reads Query Store from the primary. */
-            var replicaTest = await RunReplicaConnectionTestAsync();
+            var replicaTest = ConfirmConnectWithUnconfirmedSettings(replica: true) ? await RunReplicaConnectionTestAsync() : null;
             if (replicaTest is { } replicaResult)
             {
                 MessageBox.Show(
@@ -834,6 +911,13 @@ public partial class AddServerDialog : Window
         if (idHolder != null)
         {
             StatusText.Text = ServerManager.DescribeIdHolder(candidate, idHolder, isEdit);
+            return;
+        }
+
+        /* Saving confirms the settings for this user, and with collection on it connects first: asked before either when the
+           settings are not the confirmed ones and the user did not type the password or secret here. */
+        if (!ConfirmConnectWithUnconfirmedSettings(replica: false))
+        {
             return;
         }
 

@@ -8,6 +8,7 @@
 
 using System;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
@@ -45,7 +46,247 @@ public sealed class ServerHostBindingTests : IDisposable
     private void WriteSharedServers(params ServerConnection[] servers) =>
         File.WriteAllText(Path.Combine(_sharedDir, "servers.json"), JsonSerializer.Serialize(new { Servers = servers }));
 
-    private ServerManager NewManager() => new(_sharedDir, hostBindingsPath: _bindingsPath);
+    /* A credential store under a fresh GUID prefix: the first-run step reads saved credentials, and never reads the user's. */
+    private readonly CredentialService _credentials =
+        new(new CredentialStore("PerformanceMonitorLiteHostTest" + Guid.NewGuid().ToString("N") + "_"));
+
+    private ServerManager NewManager() => new(_sharedDir, hostBindingsPath: _bindingsPath, credentialService: _credentials);
+
+    private static int StoredId(ServerConnection server) =>
+        RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
+
+    /// <summary>The first run for a user who had Lite data and collection rows for every server in the list.</summary>
+    private ServerManager FirstRunAsAUserWhoUsedEveryServer()
+    {
+        var manager = NewManager();
+        manager.BindHostsOnFirstRun(hadLiteData: true, manager.GetAllServers().Select(StoredId).ToArray());
+        return manager;
+    }
+
+    /// <summary>A record with the one server confirmed as it is now, and the resolver that enforces it.</summary>
+    private (ServerHostBindings Bindings, CredentialResolver Resolver) Confirmed(ServerConnection server)
+    {
+        var bindings = new ServerHostBindings(_bindingsPath);
+        bindings.Confirm(server);
+        return (bindings, new CredentialResolver(_credentials, null, bindings));
+    }
+
+    [Fact]
+    public void AuthenticationTypeOrCredentialProfileChange_IsRefused()
+    {
+        var server = Server("a", "sql01", AuthenticationTypes.Windows);
+        var (bindings, resolver) = Confirmed(server);
+        Assert.Null(bindings.Check(server));
+
+        server.AuthenticationType = AuthenticationTypes.EntraDefaultCredential;
+        var change = bindings.Check(server);
+        Assert.NotNull(change);
+        Assert.Equal("sign-in method", Assert.Single(change.Settings).Name);
+        Assert.Equal("The sign-in method for this server changed from Windows sign-in to Microsoft Entra default credential.", change.DescribeChange());
+        Assert.Throws<ServerHostNotConfirmedException>(() => resolver.GetConnectionString(server));
+
+        server.AuthenticationType = AuthenticationTypes.Windows;
+        Assert.Null(bindings.Check(server));
+
+        server.CredentialProfileId = "p2";
+        Assert.Equal("credential profile", Assert.Single(bindings.Check(server)!.Settings).Name);
+        Assert.Throws<ServerHostNotConfirmedException>(() => resolver.GetConnectionString(server));
+
+        /* The record on disk keeps both: a new instance (the next start) refuses the same change. */
+        Assert.NotNull(new ServerHostBindings(_bindingsPath).Check(server));
+    }
+
+    [Fact]
+    public void UtilityDatabaseOrDatabaseChange_IsRefused()
+    {
+        var server = Server("a", "sql01", AuthenticationTypes.Windows);
+        server.UtilityDatabase = "DBA";
+        var (bindings, resolver) = Confirmed(server);
+        Assert.Contains("Initial Catalog=DBA", resolver.GetUtilityConnectionString(server), StringComparison.Ordinal);
+
+        server.UtilityDatabase = "OtherDb";
+        Assert.Equal("utility database", Assert.Single(bindings.Check(server)!.Settings).Name);
+        Assert.Throws<ServerHostNotConfirmedException>(() => resolver.GetUtilityConnectionString(server));
+
+        server.UtilityDatabase = "DBA";
+        server.DatabaseName = "OtherDb";
+        Assert.Equal("database", Assert.Single(bindings.Check(server)!.Settings).Name);
+        Assert.Throws<ServerHostNotConfirmedException>(() => resolver.GetUtilityConnectionString(server));
+    }
+
+    [Fact]
+    public void WeakerEncryption_IsRefused_StrongerPasses_AndIsRecorded()
+    {
+        var server = Server("a", "sql01", AuthenticationTypes.Windows);
+        server.EncryptMode = "Mandatory";
+        server.TrustServerCertificate = false;
+        var (bindings, resolver) = Confirmed(server);
+
+        server.EncryptMode = "Optional";
+        Assert.Equal("encryption", Assert.Single(bindings.Check(server)!.Settings).Name);
+        Assert.Throws<ServerHostNotConfirmedException>(() => resolver.GetConnectionString(server));
+
+        server.EncryptMode = "Mandatory";
+        server.TrustServerCertificate = true;
+        Assert.Equal("certificate check", Assert.Single(bindings.Check(server)!.Settings).Name);
+
+        /* Stricter passes, and the record takes it: stepping back to the old setting is then a change. */
+        server.TrustServerCertificate = false;
+        server.EncryptMode = "Strict";
+        Assert.Null(bindings.Check(server));
+        Assert.Equal("tcp:sql01", new SqlConnectionStringBuilder(resolver.GetConnectionString(server)).DataSource);
+
+        server.EncryptMode = "Mandatory";
+        Assert.NotNull(bindings.Check(server));
+        Assert.NotNull(new ServerHostBindings(_bindingsPath).Check(server));
+
+        /* A dialog's unsaved stricter setting is not recorded. */
+        var other = Server("b", "sql02", AuthenticationTypes.Windows);
+        other.TrustServerCertificate = true;
+        bindings.Confirm(other);
+        other.TrustServerCertificate = false;
+        Assert.Null(bindings.Check(other, recordStricter: false));
+        other.TrustServerCertificate = true;
+        Assert.Null(bindings.Check(other));
+    }
+
+    [Fact]
+    public void NewUser_WithNoLiteData_BindsNothing_AndEveryServerSaysSo()
+    {
+        WriteSharedServers(
+            Server("a", "sql01", AuthenticationTypes.Windows),
+            Server("b", "sql02", AuthenticationTypes.Windows));
+        var manager = NewManager();
+
+        Assert.Equal(0, manager.BindHostsOnFirstRun(hadLiteData: false, manager.GetAllServers().Select(StoredId).ToArray()));
+
+        foreach (var id in new[] { "a", "b" })
+        {
+            var server = manager.GetServerById(id)!;
+            var change = manager.HostChange(server);
+            Assert.NotNull(change);
+            Assert.Null(change.ConfirmedHost);
+            Assert.StartsWith($"You have not connected to this server's host, {server.ServerName}, from this Windows account yet.", change.Describe(server), StringComparison.Ordinal);
+            Assert.Throws<ServerHostNotConfirmedException>(() => manager.CredentialResolver.GetConnectionString(server));
+        }
+
+        /* The record is written, so the next start (now with Lite data) does not bind the list either. */
+        Assert.True(File.Exists(_bindingsPath));
+        var next = NewManager();
+        Assert.Equal(0, next.BindHostsOnFirstRun(hadLiteData: true, next.GetAllServers().Select(StoredId).ToArray()));
+        Assert.NotNull(next.HostChange(next.GetServerById("a")!));
+    }
+
+    [Fact]
+    public void UpgradingUser_BindsOnlyTheServersTheyUsed()
+    {
+        var withRows = Server("rows", "sql01", AuthenticationTypes.Windows);
+        var withPassword = Server(Guid.NewGuid().ToString(), "sql02", AuthenticationTypes.SqlServer);
+        var profileId = Guid.NewGuid().ToString();
+        var withProfile = new ServerConnection { Id = "prof", ServerName = "sql03", AuthenticationType = AuthenticationTypes.SqlServer, CredentialProfileId = profileId };
+        var unused = Server("unused", "sql04", AuthenticationTypes.Windows);
+        var unusedLogin = Server("unused-login", "sql05", AuthenticationTypes.SqlServer);
+        WriteSharedServers(withRows, withPassword, withProfile, unused, unusedLogin);
+        try
+        {
+            Assert.SkipWhen(!_credentials.SaveCredential(withPassword.Id, "monitor", "secret"), "This session cannot write to Windows Credential Manager.");
+            Assert.True(_credentials.SaveCredential(ProfileManager.ProfileCredentialId(profileId), "monitor", "secret"));
+
+            var manager = NewManager();
+            manager.ProfileLookup = new OneProfile(new CredentialProfile { Id = profileId, Name = "Ops", AuthType = AuthenticationTypes.SqlServer });
+
+            Assert.Equal(3, manager.BindHostsOnFirstRun(hadLiteData: true, [StoredId(withRows)]));
+
+            Assert.Null(manager.HostChange(manager.GetServerById("rows")!));
+            Assert.Null(manager.HostChange(manager.GetServerById(withPassword.Id)!));
+            Assert.Null(manager.HostChange(manager.GetServerById("prof")!));
+            Assert.Null(manager.HostChange(manager.GetServerById("unused")!)!.ConfirmedHost);
+            Assert.Null(manager.HostChange(manager.GetServerById("unused-login")!)!.ConfirmedHost);
+        }
+        finally
+        {
+            _credentials.DeleteCredential(withPassword.Id);
+            _credentials.DeleteCredential(ProfileManager.ProfileCredentialId(profileId));
+        }
+    }
+
+    [Fact]
+    public void FailedSave_IsSurfaced_AndTheFirstRunBindsNothing()
+    {
+        WriteSharedServers(Server("a", "sql01", AuthenticationTypes.Windows));
+        /* A folder where the record file goes: the write fails the way a locked or read-only file does. */
+        Directory.CreateDirectory(_bindingsPath);
+        var manager = NewManager();
+        var shown = new System.Collections.Generic.List<string>();
+        manager.HostRecordSaveFailed += shown.Add;
+
+        Assert.Equal(0, manager.BindHostsOnFirstRun(hadLiteData: true, manager.GetAllServers().Select(StoredId).ToArray()));
+
+        var message = Assert.Single(shown);
+        Assert.StartsWith("Lite could not save the server settings you confirmed to ", message, StringComparison.Ordinal);
+        Assert.Equal(message, manager.HostRecordSaveProblem);
+        Assert.NotNull(manager.HostChange(manager.GetServerById("a")!));
+
+        /* A confirmation holds for this run and is reported again; nothing is written that a later start would bind from. */
+        manager.ConfirmHost(manager.GetServerById("a")!);
+        Assert.Equal(2, shown.Count);
+        Assert.Null(manager.HostChange(manager.GetServerById("a")!));
+        Assert.False(File.Exists(_bindingsPath));
+    }
+
+    [Fact]
+    public void ChangeText_SaysFromAndTo_WithHiddenAndLookAlikeCharactersEscaped()
+    {
+        var server = Server("a", "sql01", AuthenticationTypes.Windows);
+        var (bindings, _) = Confirmed(server);
+
+        server.ServerName = "sql" + (char)0x202E + "10lqs" + (char)0x0A + (char)0x0455 + "ql01";
+        var text = bindings.Check(server)!.Describe(server);
+
+        Assert.Equal("The host name for this server changed from sql01 to sql?10lqs?\\u0455ql01. Open Edit Server and save to confirm it before Lite connects.", text);
+    }
+
+    [Fact]
+    public void ConfirmationGate_AsksOnlyForAnEditedServerWithUnconfirmedSettings_AndACredentialNotTypedNow()
+    {
+        var server = Server("a", "old-host", AuthenticationTypes.Windows, replica: "old-r");
+        var (bindings, _) = Confirmed(server);
+        var windows = HostConfirmationGate.CredentialWords(AuthenticationTypes.Windows, null);
+
+        /* Unchanged settings, Add Server, or a password typed in the dialog: nothing to ask. */
+        Assert.Null(HostConfirmationGate.Question(bindings.Check(server), isEdit: true, windows, secretTypedNow: false));
+        server.ServerName = "new-host";
+        var change = bindings.Check(server);
+        Assert.Null(HostConfirmationGate.Question(change, isEdit: false, windows, secretTypedNow: false));
+        Assert.Null(HostConfirmationGate.Question(change, isEdit: true, "the saved SQL Server login", secretTypedNow: true));
+
+        Assert.Equal("Connect to new-host (was old-host) with your Windows sign-in?",
+            HostConfirmationGate.Question(change, isEdit: true, windows, secretTypedNow: false));
+        Assert.Equal("Connect to new-host (was old-host) with the credential profile 'Ops'?",
+            HostConfirmationGate.Question(change, isEdit: true, HostConfirmationGate.CredentialWords(AuthenticationTypes.SqlServer, "Ops"), secretTypedNow: false));
+
+        /* The replica Test asks only when the replica itself changed. */
+        Assert.Null(HostConfirmationGate.Question(change, isEdit: true, windows, secretTypedNow: false, replica: true));
+        server.ServerName = "old-host";
+        server.QueryStoreReplica = "new-r";
+        Assert.Equal("Connect to the Query Store replica new-r (was old-r) with your Windows sign-in?",
+            HostConfirmationGate.Question(bindings.Check(server), isEdit: true, windows, secretTypedNow: false, replica: true));
+
+        /* A settings change on the same host is asked about too, and says what changed. */
+        server.QueryStoreReplica = "old-r";
+        server.EncryptMode = "Optional";
+        Assert.Equal("Connect to old-host (was old-host) with your Windows sign-in?\n\nThe encryption for this server changed from Mandatory to Optional.",
+            HostConfirmationGate.Question(bindings.Check(server), isEdit: true, windows, secretTypedNow: false));
+
+        /* A server this user never confirmed. */
+        Assert.Equal("Connect to old-host (not confirmed from this Windows account) with your Windows sign-in?",
+            HostConfirmationGate.Question(new ServerHostBindings(null).Check(server), isEdit: true, windows, secretTypedNow: false));
+    }
+
+    private sealed class OneProfile(CredentialProfile profile) : IProfileLookup
+    {
+        public CredentialProfile? GetProfile(string id) => id == profile.Id ? profile : null;
+    }
 
     private static ServerConnection Server(string id, string host, string auth, string? replica = null) => new()
     {
@@ -57,14 +298,17 @@ public sealed class ServerHostBindingTests : IDisposable
     };
 
     [Fact]
-    public void Upgrade_WithNoRecord_BindsEveryServerToItsCurrentHostOnFirstRun_InTheUserFolderNotTheSharedOne()
+    public void Upgrade_WithNoRecord_BindsTheServersUsedToTheirCurrentSettingsOnFirstRun_InTheUserFolderNotTheSharedOne()
     {
         WriteSharedServers(
             Server("a", "sql01", AuthenticationTypes.SqlServer),
             Server("b", "sql02,1433", AuthenticationTypes.Windows));
         Assert.False(File.Exists(_bindingsPath));
 
-        var manager = NewManager();
+        /* Building the manager binds nothing; the first-run step does. */
+        Assert.NotNull(NewManager().HostChange(Server("a", "sql01", AuthenticationTypes.SqlServer)));
+        Assert.False(File.Exists(_bindingsPath));
+        var manager = FirstRunAsAUserWhoUsedEveryServer();
 
         Assert.True(File.Exists(_bindingsPath));
         Assert.False(File.Exists(Path.Combine(_sharedDir, ServerHostBindings.FileName)));
@@ -88,7 +332,7 @@ public sealed class ServerHostBindingTests : IDisposable
     public void SameHost_AsWritten_IsConfirmed_TrimmedAndCaseInsensitive()
     {
         WriteSharedServers(Server("a", "SQL01\\Prod,1433", AuthenticationTypes.Windows));
-        NewManager();
+        FirstRunAsAUserWhoUsedEveryServer();
 
         WriteSharedServers(Server("a", "  sql01\\PROD,1433 ", AuthenticationTypes.Windows));
         var manager = NewManager();
@@ -100,7 +344,7 @@ public sealed class ServerHostBindingTests : IDisposable
     public void ChangedPort_OrInstance_IsAChangedHost()
     {
         WriteSharedServers(Server("a", "sql01,1433", AuthenticationTypes.Windows), Server("b", "sql01\\one", AuthenticationTypes.Windows));
-        NewManager();
+        FirstRunAsAUserWhoUsedEveryServer();
 
         WriteSharedServers(Server("a", "sql01,1444", AuthenticationTypes.Windows), Server("b", "sql01\\two", AuthenticationTypes.Windows));
         var manager = NewManager();
@@ -113,7 +357,7 @@ public sealed class ServerHostBindingTests : IDisposable
     public async Task SqlLogin_ChangedHost_IsRefusedAndFlagged_AndAsksForThePasswordAgain()
     {
         WriteSharedServers(Server("a", "sql01", AuthenticationTypes.SqlServer));
-        NewManager();
+        FirstRunAsAUserWhoUsedEveryServer();
 
         WriteSharedServers(Server("a", "sql99.example", AuthenticationTypes.SqlServer));
         var manager = NewManager();
@@ -121,7 +365,7 @@ public sealed class ServerHostBindingTests : IDisposable
         var resolver = manager.CredentialResolver;
 
         var refused = Assert.Throws<ServerHostNotConfirmedException>(() => resolver.GetConnectionString(server));
-        Assert.Equal("The host name for this server changed to sql99.example. Enter the password again to connect to it.", refused.Message);
+        Assert.Equal("The host name for this server changed from sql01 to sql99.example. Enter the password again to connect to it.", refused.Message);
         Assert.Throws<ServerHostNotConfirmedException>(() => resolver.GetUtilityConnectionString(server));
         Assert.Throws<ServerHostNotConfirmedException>(() => resolver.GetConnectionStringForDatabase(server, "db"));
         Assert.Throws<ServerHostNotConfirmedException>(() => resolver.GetQueryStoreReplicaConnectionString(server));
@@ -138,27 +382,27 @@ public sealed class ServerHostBindingTests : IDisposable
     public void ServicePrincipal_ChangedHost_AsksForTheClientSecretAgain()
     {
         WriteSharedServers(Server("a", "one.database.windows.net", AuthenticationTypes.ServicePrincipal));
-        NewManager();
+        FirstRunAsAUserWhoUsedEveryServer();
         WriteSharedServers(Server("a", "two.database.windows.net", AuthenticationTypes.ServicePrincipal));
         var manager = NewManager();
         var server = manager.GetServerById("a")!;
 
         var refused = Assert.Throws<ServerHostNotConfirmedException>(() => manager.CredentialResolver.GetConnectionString(server));
-        Assert.Equal("The host name for this server changed to two.database.windows.net. Enter the client secret again to connect to it.", refused.Message);
+        Assert.Equal("The host name for this server changed from one.database.windows.net to two.database.windows.net. Enter the client secret again to connect to it.", refused.Message);
     }
 
     [Fact]
     public async Task IntegratedAuth_ChangedHost_IsRefusedUntilConfirmed_ThenConnectsToTheNewHost()
     {
         WriteSharedServers(Server("a", "sql01", AuthenticationTypes.Windows));
-        NewManager();
+        FirstRunAsAUserWhoUsedEveryServer();
 
         WriteSharedServers(Server("a", "sql77", AuthenticationTypes.Windows));
         var manager = NewManager();
         var server = manager.GetServerById("a")!;
 
         var refused = Assert.Throws<ServerHostNotConfirmedException>(() => manager.CredentialResolver.GetConnectionString(server));
-        Assert.Equal("The host name for this server changed to sql77. Open Edit Server and save to confirm it before Lite connects.", refused.Message);
+        Assert.Equal("The host name for this server changed from sql01 to sql77. Open Edit Server and save to confirm it before Lite connects.", refused.Message);
         Assert.False(ServerHostChange.AsksForSecret(server));
         Assert.Null((await manager.CheckConnectionAsync("a")).IsOnline);
 
@@ -182,7 +426,7 @@ public sealed class ServerHostBindingTests : IDisposable
             Server("def", "c.database.windows.net", AuthenticationTypes.EntraDefaultCredential),
             Server("dc", "d.database.windows.net", AuthenticationTypes.EntraDeviceCode),
             new ServerConnection { Id = "prof", ServerName = "e.database.windows.net", AuthenticationType = AuthenticationTypes.SqlServer, CredentialProfileId = "p1" });
-        NewManager();
+        FirstRunAsAUserWhoUsedEveryServer();
 
         WriteSharedServers(
             Server("mfa", "x.example", AuthenticationTypes.EntraMFA),
@@ -206,7 +450,7 @@ public sealed class ServerHostBindingTests : IDisposable
         WriteSharedServers(
             Server("a", "sql01", AuthenticationTypes.Windows, replica: "sql01-r"),
             Server("b", "sql02", AuthenticationTypes.Windows, replica: "sql02-r"));
-        NewManager();
+        FirstRunAsAUserWhoUsedEveryServer();
 
         WriteSharedServers(
             Server("a", "sql01", AuthenticationTypes.Windows, replica: "other-r"),
@@ -216,7 +460,7 @@ public sealed class ServerHostBindingTests : IDisposable
         var change = manager.HostChange(manager.GetServerById("a")!);
         Assert.NotNull(change);
         Assert.True(change.ReplicaChanged);
-        Assert.StartsWith("The Query Store replica for this server changed to other-r.", change.Describe(manager.GetServerById("a")!), StringComparison.Ordinal);
+        Assert.StartsWith("The Query Store replica for this server changed from sql01-r to other-r.", change.Describe(manager.GetServerById("a")!), StringComparison.Ordinal);
         Assert.Throws<ServerHostNotConfirmedException>(() => manager.CredentialResolver.GetQueryStoreReplicaConnectionString(manager.GetServerById("a")!));
         Assert.Null(manager.HostChange(manager.GetServerById("b")!));
     }
@@ -225,7 +469,7 @@ public sealed class ServerHostBindingTests : IDisposable
     public void ServerFirstSeenAfterTheRecordExists_IsNotConnectedUntilConfirmed()
     {
         WriteSharedServers(Server("a", "sql01", AuthenticationTypes.Windows));
-        NewManager();
+        FirstRunAsAUserWhoUsedEveryServer();
 
         WriteSharedServers(Server("a", "sql01", AuthenticationTypes.Windows), Server("new", "sql05", AuthenticationTypes.Windows));
         var manager = NewManager();
@@ -272,7 +516,7 @@ public sealed class ServerHostBindingTests : IDisposable
         try
         {
             Assert.SkipWhen(!credentials.SaveCredential(server.Id, "monitor", "first-secret"), "This session cannot write to Windows Credential Manager.");
-            bindings.BindAllOnFirstRun([server]);
+            bindings.BindOnFirstRun([server], hadLiteData: true, wasUsed: _ => true);
             var resolver = new CredentialResolver(credentials, null, bindings);
 
             var same = new SqlConnectionStringBuilder(resolver.GetConnectionString(server));

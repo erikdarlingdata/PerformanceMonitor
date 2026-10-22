@@ -253,6 +253,48 @@ public partial class MainWindow : Window
         Activate();
     }
 
+    /// <summary>
+    /// The server hash ids with collection rows in this user's store, hot or archived: which servers this user used. A read
+    /// that fails counts as none, so the server waits for its settings to be confirmed instead of being bound.
+    /// </summary>
+    private IReadOnlyCollection<int> ReadStoredServerIds()
+    {
+        var ids = new HashSet<int>();
+        foreach (var source in new[] { "collection_log", "v_collection_log" })
+        {
+            try
+            {
+                using var readLock = _databaseInitializer.AcquireReadLock();
+                using var connection = _databaseInitializer.CreateConnection();
+                connection.Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = $"SELECT DISTINCT server_id FROM {source} WHERE server_id IS NOT NULL";
+                using var reader = command.ExecuteReader();
+                while (reader.Read())
+                    ids.Add(reader.GetInt32(0));
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Debug("ServerHostBindings", $"Could not read the server ids in {source}: {ex.Message}");
+            }
+        }
+
+        return ids;
+    }
+
+    private bool _hostRecordProblemShown;
+
+    /// <summary>Shows, once per run, that the record of confirmed server settings could not be written; the status line
+    /// carries it every time.</summary>
+    private void ShowHostRecordSaveProblem(string message)
+    {
+        StatusText.Text = message;
+        if (_hostRecordProblemShown)
+            return;
+        _hostRecordProblemShown = true;
+        MessageBox.Show(this, message, "Server settings not saved", MessageBoxButton.OK, MessageBoxImage.Warning);
+    }
+
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
         try
@@ -261,6 +303,14 @@ public partial class MainWindow : Window
 
             // Initialize the DuckDB database
             await _databaseInitializer.InitializeAsync();
+
+            /* The first run of the per-user record of confirmed server settings, before anything below connects: a user who
+               used Lite before gets the servers they used bound (rows in this store, or a saved password); a new user
+               confirms each server. A record that cannot be written is shown, not passed over. */
+            _serverManager.HostRecordSaveFailed += message => Dispatcher.BeginInvoke(() => ShowHostRecordSaveProblem(message));
+            var storedServerIds = await Task.Run(ReadStoredServerIds);
+            _serverManager.BindHostsOnFirstRun(App.HadLiteDataAtStart, storedServerIds);
+            RefreshServerList();
 
             /* #5775: remove route credentials no route points at (a crash between writing a new generation and the row, or a
                delete that failed). Off the UI thread and not awaited: the sweep takes the write lock briefly, logs only a count

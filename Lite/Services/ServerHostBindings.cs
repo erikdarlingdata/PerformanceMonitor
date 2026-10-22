@@ -8,7 +8,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
+using System.Text;
 using System.Text.Json;
 using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Models;
@@ -16,11 +18,13 @@ using PerformanceMonitorLite.Models;
 namespace PerformanceMonitorLite.Services;
 
 /// <summary>
-/// The host (and Query Store replica) each server was last confirmed for by the Windows user running Lite, kept in that
-/// user's own config folder. servers.json is one list for every user of the computer, while a saved password and the user's
-/// own sign-in belong to the user, so Lite connects to a server only when the host servers.json names now is the one this
-/// user saved or confirmed for that server. Host names are compared as written (port and instance included), trimmed and
-/// case-insensitively.
+/// The connection settings each server was last confirmed with by the Windows user running Lite, kept in that user's own
+/// config folder. servers.json is one list for every user of the computer, while a saved password and the user's own sign-in
+/// belong to the user, so Lite connects to a server only when the settings servers.json names now are the ones this user saved
+/// or confirmed for that server. The settings kept are the ones that decide where the user's sign-in goes and where Lite runs
+/// code under it: the host, the Query Store replica, the authentication type, the credential profile, the database and the
+/// utility database (where Lite runs dbo.sp_IndexCleanup), and the encryption and certificate settings. Host names are compared
+/// as written (port and instance included), trimmed and case-insensitively.
 /// </summary>
 public sealed class ServerHostBindings
 {
@@ -33,9 +37,22 @@ public sealed class ServerHostBindings
     private readonly object _lock = new();
     private readonly Dictionary<string, Binding> _bindings = new(StringComparer.OrdinalIgnoreCase);
     private bool _hasRecord;
+    private bool _firstRunDone;
+    private string? _saveProblem;
 
-    /// <summary>One server's confirmed host and Query Store replica (empty when it has none).</summary>
-    public sealed record Binding(string Host, string Replica);
+    /// <summary>One server's confirmed settings. Replica, profile and database fields are empty when the server has none.</summary>
+    public sealed record Binding(
+        string Host,
+        string Replica,
+        string AuthenticationType,
+        string CredentialProfileId,
+        string DatabaseName,
+        string UtilityDatabase,
+        string EncryptMode,
+        bool TrustServerCertificate);
+
+    /// <summary>Raised (outside the lock) with the sentence to show when the record could not be written.</summary>
+    public event Action<string>? SaveFailed;
 
     /// <param name="filePath">The per-user file; null keeps the record in memory only (a <see cref="ServerManager"/> built
     /// without a per-user config folder, as tests do).</param>
@@ -53,10 +70,20 @@ public sealed class ServerHostBindings
             var saved = JsonSerializer.Deserialize<BindingsFile>(File.ReadAllText(filePath));
             if (saved?.Servers != null)
             {
-                foreach (var (id, binding) in saved.Servers)
+                foreach (var (id, entry) in saved.Servers)
                 {
-                    if (!string.IsNullOrEmpty(id) && binding != null)
-                        _bindings[id] = new Binding(binding.Host ?? "", binding.Replica ?? "");
+                    /* A field the entry lacks reads as a value no server carries (and, for encryption and the certificate
+                       check, as the strictest one), so the server is asked about again rather than passed. */
+                    if (!string.IsNullOrEmpty(id) && entry != null)
+                        _bindings[id] = new Binding(
+                            entry.Host ?? "",
+                            entry.Replica ?? "",
+                            entry.AuthenticationType ?? "",
+                            entry.CredentialProfileId ?? "",
+                            entry.DatabaseName ?? "",
+                            entry.UtilityDatabase ?? "",
+                            entry.EncryptMode ?? "Strict",
+                            entry.TrustServerCertificate ?? false);
                 }
             }
         }
@@ -66,70 +93,136 @@ public sealed class ServerHostBindings
         }
     }
 
-    /// <summary>Whether this user already had a record when Lite started (false on the first run after the upgrade).</summary>
+    /// <summary>Whether this user has a record (one existed when Lite started, or one was written since).</summary>
     public bool HasRecord
     {
         get { lock (_lock) return _hasRecord; }
     }
 
-    /// <summary>
-    /// The upgrade step. A user with no record yet (the first run of a version that keeps one) gets every server bound to
-    /// the host servers.json names at this moment; from then on a changed host has to be confirmed. Does nothing once a
-    /// record exists.
-    /// </summary>
-    public void BindAllOnFirstRun(IEnumerable<ServerConnection> servers)
+    /// <summary>The sentence for the last failed write of the record; null once a write succeeds.</summary>
+    public string? SaveProblem
     {
-        lock (_lock)
-        {
-            if (_hasRecord)
-                return;
-
-            foreach (var server in servers)
-                _bindings[server.Id] = BindingFor(server);
-
-            _hasRecord = true;
-            SaveLocked();
-        }
+        get { lock (_lock) return _saveProblem; }
     }
 
-    /// <summary>Null when the server's host and replica are the ones this user confirmed; otherwise what changed.</summary>
-    public ServerHostChange? Check(ServerConnection server)
+    /// <summary>
+    /// The first-run step, for a user with no record yet. A user who had no Lite data before this start gets nothing bound:
+    /// each server waits for its settings to be confirmed. A user who did (an upgrade) gets bound only the servers
+    /// <paramref name="wasUsed"/> says they used, to the settings servers.json names now; the rest wait too. The record is
+    /// written first, and when it cannot be written nothing is bound, so a failed write never leaves a binding behind that
+    /// the next start would make again unseen. Does nothing once a record exists, and runs once per instance. Returns how
+    /// many servers were bound.
+    /// </summary>
+    public int BindOnFirstRun(IEnumerable<ServerConnection> servers, bool hadLiteData, Func<ServerConnection, bool> wasUsed)
     {
+        string? problem;
+        int bound;
+        lock (_lock)
+        {
+            if (_hasRecord || _firstRunDone)
+                return 0;
+            _firstRunDone = true;
+
+            var chosen = new Dictionary<string, Binding>(StringComparer.OrdinalIgnoreCase);
+            if (hadLiteData)
+            {
+                foreach (var server in servers)
+                {
+                    if (wasUsed(server))
+                        chosen[server.Id] = BindingFor(server);
+                }
+            }
+
+            problem = TryWrite(chosen);
+            if (problem == null)
+            {
+                foreach (var (id, binding) in chosen)
+                    _bindings[id] = binding;
+                _hasRecord = true;
+            }
+
+            bound = problem == null ? chosen.Count : 0;
+        }
+
+        Report(problem);
+        return bound;
+    }
+
+    /// <summary>
+    /// Null when the server's settings are the ones this user confirmed; otherwise what changed. An encryption or certificate
+    /// setting stricter than the confirmed one is not a change: the record takes the stricter one, so a later step back to
+    /// the old setting is asked about.
+    /// </summary>
+    /// <param name="server">The server as servers.json names it, or as a dialog would save it.</param>
+    /// <param name="recordStricter">False for a dialog's unsaved settings: a stricter setting there is not recorded.</param>
+    public ServerHostChange? Check(ServerConnection server, bool recordStricter = true)
+    {
+        string? problem = null;
+        ServerHostChange? change;
         lock (_lock)
         {
             if (!_bindings.TryGetValue(server.Id, out var bound))
                 return new ServerHostChange(Normalize(server.ServerName), null, Normalize(server.QueryStoreReplica), ReplicaChanged: false);
 
-            if (!SameHost(bound.Host, server.ServerName))
-                return new ServerHostChange(Normalize(server.ServerName), bound.Host, Normalize(server.QueryStoreReplica), ReplicaChanged: false);
-
+            var hostChanged = !SameHost(bound.Host, server.ServerName);
             /* A removed replica sends nothing anywhere, so only a replica that is set and differs needs confirming. */
-            if (Normalize(server.QueryStoreReplica).Length > 0 && !SameHost(bound.Replica, server.QueryStoreReplica))
-                return new ServerHostChange(Normalize(server.ServerName), bound.Host, Normalize(server.QueryStoreReplica), ReplicaChanged: true);
+            var replicaChanged = Normalize(server.QueryStoreReplica).Length > 0 && !SameHost(bound.Replica, server.QueryStoreReplica);
+            var settings = SettingChanges(bound, server);
 
-            return null;
+            if (!hostChanged && !replicaChanged && settings.Count == 0)
+            {
+                if (recordStricter && IsStricter(bound, server))
+                {
+                    _bindings[server.Id] = bound with
+                    {
+                        EncryptMode = EncryptRank(server.EncryptMode) > EncryptRank(bound.EncryptMode) ? Normalize(server.EncryptMode) : bound.EncryptMode,
+                        TrustServerCertificate = bound.TrustServerCertificate && server.TrustServerCertificate
+                    };
+                    problem = SaveLocked();
+                }
+
+                change = null;
+            }
+            else
+            {
+                change = new ServerHostChange(Normalize(server.ServerName), bound.Host, Normalize(server.QueryStoreReplica), replicaChanged)
+                {
+                    ConfirmedReplica = bound.Replica,
+                    Settings = settings
+                };
+            }
         }
+
+        Report(problem);
+        return change;
     }
 
-    /// <summary>Binds the server to the host and replica it names now (the user saved it, added it, or confirmed it).</summary>
+    /// <summary>Binds the server to the settings it names now (the user saved it, added it, or confirmed it).</summary>
     public void Confirm(ServerConnection server)
     {
+        string? problem;
         lock (_lock)
         {
             _bindings[server.Id] = BindingFor(server);
-            _hasRecord = true;
-            SaveLocked();
+            problem = SaveLocked();
+            if (problem == null)
+                _hasRecord = true;
         }
+
+        Report(problem);
     }
 
     /// <summary>Drops the server's binding (the server was removed).</summary>
     public void Forget(string serverId)
     {
+        string? problem = null;
         lock (_lock)
         {
             if (_bindings.Remove(serverId))
-                SaveLocked();
+                problem = SaveLocked();
         }
+
+        Report(problem);
     }
 
     /// <summary>The host as written, trimmed. Comparison is case-insensitive (<see cref="SameHost"/>).</summary>
@@ -138,35 +231,116 @@ public sealed class ServerHostBindings
     internal static bool SameHost(string? a, string? b) =>
         string.Equals(Normalize(a), Normalize(b), StringComparison.OrdinalIgnoreCase);
 
-    private static Binding BindingFor(ServerConnection server) =>
-        new(Normalize(server.ServerName), Normalize(server.QueryStoreReplica));
+    /// <summary>Optional 0, Mandatory 1, Strict 2. A blank or unknown value is Mandatory, as the connection string builds it.</summary>
+    internal static int EncryptRank(string? mode) => Normalize(mode) switch
+    {
+        "Optional" => 0,
+        "Strict" => 2,
+        _ => 1
+    };
 
-    private void SaveLocked()
+    private static bool IsStricter(Binding bound, ServerConnection server) =>
+        EncryptRank(server.EncryptMode) > EncryptRank(bound.EncryptMode) ||
+        (bound.TrustServerCertificate && !server.TrustServerCertificate);
+
+    private static List<ServerSettingChange> SettingChanges(Binding bound, ServerConnection server)
+    {
+        var changes = new List<ServerSettingChange>();
+        if (!string.Equals(bound.AuthenticationType, Normalize(server.AuthenticationType), StringComparison.Ordinal))
+            changes.Add(new ServerSettingChange("sign-in method", AuthName(bound.AuthenticationType), AuthName(server.AuthenticationType)));
+        if (!SameHost(bound.CredentialProfileId, server.CredentialProfileId))
+            changes.Add(new ServerSettingChange("credential profile", OrNone(bound.CredentialProfileId), OrNone(server.CredentialProfileId)));
+        if (!SameHost(bound.DatabaseName, server.DatabaseName))
+            changes.Add(new ServerSettingChange("database", OrNone(bound.DatabaseName), OrNone(server.DatabaseName)));
+        if (!SameHost(bound.UtilityDatabase, server.UtilityDatabase))
+            changes.Add(new ServerSettingChange("utility database", OrNone(bound.UtilityDatabase), OrNone(server.UtilityDatabase)));
+        if (EncryptRank(server.EncryptMode) < EncryptRank(bound.EncryptMode))
+            changes.Add(new ServerSettingChange("encryption", OrNone(bound.EncryptMode), OrNone(server.EncryptMode)));
+        if (server.TrustServerCertificate && !bound.TrustServerCertificate)
+            changes.Add(new ServerSettingChange("certificate check", "checked", "trusted without a check"));
+        return changes;
+    }
+
+    private static string OrNone(string? value) => Normalize(value).Length == 0 ? "none" : Normalize(value);
+
+    private static string AuthName(string? type) => Normalize(type) switch
+    {
+        AuthenticationTypes.Windows => "Windows sign-in",
+        AuthenticationTypes.SqlServer => "SQL Server login",
+        AuthenticationTypes.EntraMFA => "Microsoft Entra MFA",
+        AuthenticationTypes.ServicePrincipal => "service principal",
+        AuthenticationTypes.ManagedIdentity => "managed identity",
+        AuthenticationTypes.EntraDefaultCredential => "Microsoft Entra default credential",
+        AuthenticationTypes.EntraDeviceCode => "Microsoft Entra device code",
+        "" => "none",
+        var other => other
+    };
+
+    private static Binding BindingFor(ServerConnection server) =>
+        new(
+            Normalize(server.ServerName),
+            Normalize(server.QueryStoreReplica),
+            Normalize(server.AuthenticationType),
+            Normalize(server.CredentialProfileId),
+            Normalize(server.DatabaseName),
+            Normalize(server.UtilityDatabase),
+            Normalize(server.EncryptMode),
+            server.TrustServerCertificate);
+
+    private void Report(string? problem)
+    {
+        if (problem != null)
+            SaveFailed?.Invoke(problem);
+    }
+
+    /// <summary>Writes the record; null on success, else the sentence to show (also kept in <see cref="SaveProblem"/>).</summary>
+    private string? SaveLocked() => TryWrite(_bindings);
+
+    private string? TryWrite(IReadOnlyDictionary<string, Binding> bindings)
     {
         if (_filePath == null)
-            return;
+            return null;
 
         try
         {
             var file = new BindingsFile();
-            foreach (var (id, binding) in _bindings)
-                file.Servers[id] = new BindingEntry { Host = binding.Host, Replica = binding.Replica };
+            foreach (var (id, binding) in bindings)
+            {
+                file.Servers[id] = new BindingEntry
+                {
+                    Host = binding.Host,
+                    Replica = binding.Replica,
+                    AuthenticationType = binding.AuthenticationType,
+                    CredentialProfileId = binding.CredentialProfileId,
+                    DatabaseName = binding.DatabaseName,
+                    UtilityDatabase = binding.UtilityDatabase,
+                    EncryptMode = binding.EncryptMode,
+                    TrustServerCertificate = binding.TrustServerCertificate
+                };
+            }
 
             Directory.CreateDirectory(Path.GetDirectoryName(_filePath)!);
             var temp = _filePath + ".tmp";
             File.WriteAllText(temp, JsonSerializer.Serialize(file, s_jsonOptions));
             File.Move(temp, _filePath, overwrite: true);
+            _saveProblem = null;
+            return null;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            /* The in-memory record still holds, so this run behaves; the next run asks again for what it could not keep. */
+            /* What is in memory still holds for this run. The user is told, and after a restart Lite asks again for what it
+               could not keep. */
             AppLogger.Warn("ServerHostBindings", $"Could not save {_filePath}: {ex.Message}");
+            _saveProblem =
+                $"Lite could not save the server settings you confirmed to {_filePath}: {ex.Message} " +
+                "What you confirm holds until Lite closes; after a restart Lite asks again before it connects.";
+            return _saveProblem;
         }
     }
 
     private sealed class BindingsFile
     {
-        public int Version { get; set; } = 1;
+        public int Version { get; set; } = 2;
         public Dictionary<string, BindingEntry?> Servers { get; set; } = new();
     }
 
@@ -174,36 +348,98 @@ public sealed class ServerHostBindings
     {
         public string? Host { get; set; }
         public string? Replica { get; set; }
+        public string? AuthenticationType { get; set; }
+        public string? CredentialProfileId { get; set; }
+        public string? DatabaseName { get; set; }
+        public string? UtilityDatabase { get; set; }
+        public string? EncryptMode { get; set; }
+        public bool? TrustServerCertificate { get; set; }
     }
 }
 
+/// <summary>One confirmed setting that differs now: its name, the confirmed value and the value servers.json names.</summary>
+public sealed record ServerSettingChange(string Name, string From, string To);
+
 /// <summary>
-/// A server whose host (or Query Store replica) is not the one this user confirmed for it.
+/// A server whose settings are not the ones this user confirmed for it.
 /// </summary>
 /// <param name="Host">The host servers.json names now.</param>
 /// <param name="ConfirmedHost">The host this user last confirmed; null when this user has never confirmed this server.</param>
 /// <param name="Replica">The Query Store replica servers.json names now (empty when none).</param>
-/// <param name="ReplicaChanged">True when the host matches and only the replica changed.</param>
+/// <param name="ReplicaChanged">True when the Query Store replica is set and is not the confirmed one.</param>
 public sealed record ServerHostChange(string Host, string? ConfirmedHost, string Replica, bool ReplicaChanged)
 {
+    private const int MaxShownLength = 80;
+
+    /// <summary>The Query Store replica this user last confirmed (empty when none).</summary>
+    public string ConfirmedReplica { get; init; } = "";
+
+    /// <summary>The other confirmed settings that differ now (sign-in method, profile, databases, encryption).</summary>
+    public IReadOnlyList<ServerSettingChange> Settings { get; init; } = [];
+
+    /// <summary>True when the host itself is not the confirmed one (or this user never confirmed one).</summary>
+    public bool HostChanged => ConfirmedHost == null || !ServerHostBindings.SameHost(ConfirmedHost, Host);
+
     /// <summary>
     /// True when the server signs in with a password or client secret saved for it alone: the change is then answered by
     /// entering that secret again. Every other mode (Windows, the Entra modes, managed identity, a credential profile) is
-    /// answered by confirming the new host.
+    /// answered by confirming the change.
     /// </summary>
     public static bool AsksForSecret(ServerConnection server) =>
         string.IsNullOrEmpty(server.CredentialProfileId) &&
         (server.AuthenticationType == AuthenticationTypes.SqlServer ||
          server.AuthenticationType == AuthenticationTypes.ServicePrincipal);
 
+    /// <summary>
+    /// A value from servers.json as it is shown: control characters, line and paragraph separators and bidi controls become
+    /// '?' as in <see cref="ServerHostSetting"/>'s refusal text, every other character outside printable ASCII is written as
+    /// \uXXXX (so a look-alike letter cannot pass for the one it imitates), and the text is cut at 80 characters.
+    /// </summary>
+    public static string Shown(string? value)
+    {
+        var text = value ?? "";
+        var builder = new StringBuilder(text.Length);
+        foreach (var c in text)
+        {
+            /* 0x2028 and 0x2029 are the line and paragraph separators; anything above 0x7E is outside printable ASCII. */
+            if (IsHidden(c))
+                builder.Append('?');
+            else if (c > (char)0x7E)
+                builder.Append("\\u").Append(((int)c).ToString("X4", CultureInfo.InvariantCulture));
+            else
+                builder.Append(c);
+        }
+
+        var cut = builder.ToString();
+        return cut.Length > MaxShownLength ? cut[..MaxShownLength] + "..." : cut;
+    }
+
+    private static bool IsHidden(char c) =>
+        (char.IsControl(c) && c != (char)0x09) || IsBidiControl(c) || c == (char)0x2028 || c == (char)0x2029;
+
+    private static bool IsBidiControl(char c) =>
+        c == (char)0x061C || c == (char)0x200E || c == (char)0x200F || (c >= (char)0x202A && c <= (char)0x202E) || (c >= (char)0x2066 && c <= (char)0x2069);
+
+    /// <summary>What changed, as plain sentences, without the closing instruction.</summary>
+    public string DescribeChange()
+    {
+        if (ConfirmedHost == null)
+            return $"You have not connected to this server's host, {Shown(Host)}, from this Windows account yet.";
+
+        var sentences = new List<string>();
+        if (HostChanged)
+            sentences.Add($"The host name for this server changed from {Shown(ConfirmedHost)} to {Shown(Host)}.");
+        if (ReplicaChanged)
+            sentences.Add($"The Query Store replica for this server changed from {(ConfirmedReplica.Length == 0 ? "none" : Shown(ConfirmedReplica))} to {Shown(Replica)}.");
+        foreach (var setting in Settings)
+            sentences.Add($"The {setting.Name} for this server changed from {Shown(setting.From)} to {Shown(setting.To)}.");
+        return string.Join(" ", sentences);
+    }
+
     /// <summary>The plain sentence the server's status, the connect prompt and the Edit dialog show.</summary>
     public string Describe(ServerConnection server)
     {
-        var what = ReplicaChanged
-            ? $"The Query Store replica for this server changed to {Replica}."
-            : ConfirmedHost == null
-                ? $"You have not connected to this server's host, {Host}, from this Windows account yet."
-                : $"The host name for this server changed to {Host}.";
+        var what = DescribeChange();
 
         if (!AsksForSecret(server))
             return what + " Open Edit Server and save to confirm it before Lite connects.";
@@ -215,7 +451,67 @@ public sealed record ServerHostChange(string Host, string? ConfirmedHost, string
 }
 
 /// <summary>
-/// Thrown in place of a connection string for a server whose host this user has not confirmed (see
+/// The Edit Server dialog's question before it connects (Test, the replica Test, or Save) to a server whose settings this
+/// user has not confirmed, with a credential the user did not type in the dialog: the server's saved password, a credential
+/// profile's secret, or the user's own Windows or Entra sign-in. Kept apart from the window so the decision can be tested.
+/// </summary>
+public static class HostConfirmationGate
+{
+    /// <summary>
+    /// The question to ask, or null when none is needed: the dialog adds a new server (the user typed every setting in it),
+    /// the settings in the dialog are the confirmed ones, or the credential is a password or secret the user typed in the
+    /// dialog just now (typing it is the confirmation, as on Save).
+    /// </summary>
+    /// <param name="change">The change between the dialog's settings and this user's record; null when they match.</param>
+    /// <param name="isEdit">True for Edit Server, false for Add Server.</param>
+    /// <param name="credential">What the connection signs in with, in words ("your Windows sign-in", "the credential profile
+    /// 'Ops'", "the saved password").</param>
+    /// <param name="secretTypedNow">True when the connection sends a password or client secret the user typed in the
+    /// dialog, not one read from the saved credentials.</param>
+    /// <param name="replica">True for the Query Store replica Test: the question names the replica.</param>
+    public static string? Question(ServerHostChange? change, bool isEdit, string credential, bool secretTypedNow, bool replica = false)
+        => QuestionCore(change, isEdit, credential, secretTypedNow, replica);
+
+    /// <summary>What a connection in the given mode signs in with, in words for <see cref="Question"/>.</summary>
+    public static string CredentialWords(string authenticationType, string? profileName)
+    {
+        if (profileName != null)
+            return $"the credential profile '{ServerHostChange.Shown(profileName)}'";
+
+        return authenticationType switch
+        {
+            AuthenticationTypes.Windows => "your Windows sign-in",
+            AuthenticationTypes.SqlServer => "the saved SQL Server login",
+            AuthenticationTypes.ServicePrincipal => "the saved client secret",
+            AuthenticationTypes.ManagedIdentity => "this computer's managed identity",
+            AuthenticationTypes.EntraDefaultCredential => "the Microsoft Entra sign-in on this computer",
+            _ => "your Microsoft Entra sign-in"
+        };
+    }
+
+    private static string? QuestionCore(ServerHostChange? change, bool isEdit, string credential, bool secretTypedNow, bool replica)
+    {
+        if (change == null || !isEdit || secretTypedNow)
+            return null;
+
+        if (replica)
+        {
+            if (!change.ReplicaChanged && change.ConfirmedHost != null)
+                return null;
+            var wasReplica = change.ConfirmedReplica.Length == 0 ? "none" : ServerHostChange.Shown(change.ConfirmedReplica);
+            return $"Connect to the Query Store replica {ServerHostChange.Shown(change.Replica)} (was {wasReplica}) with {credential}?";
+        }
+
+        var was = change.ConfirmedHost == null ? "not confirmed from this Windows account" : "was " + ServerHostChange.Shown(change.ConfirmedHost);
+        var question = $"Connect to {ServerHostChange.Shown(change.Host)} ({was}) with {credential}?";
+        return change.ConfirmedHost != null && (!change.HostChanged || change.ReplicaChanged || change.Settings.Count > 0)
+            ? question + "\n\n" + change.DescribeChange()
+            : question;
+    }
+}
+
+/// <summary>
+/// Thrown in place of a connection string for a server whose settings this user has not confirmed (see
 /// <see cref="ServerHostBindings"/>). An <see cref="InvalidOperationException"/>, so every caller that already reports a
 /// connection string it could not resolve reports this one the same way.
 /// </summary>

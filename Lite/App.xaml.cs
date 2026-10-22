@@ -62,6 +62,12 @@ public partial class App : Application
     public static string DataDirectory { get; private set; } = string.Empty;
 
     /// <summary>
+    /// Whether this Windows user's monitor.duckdb or settings.json existed when Lite started: they used Lite before. Decides
+    /// whether the first run of the per-user record of confirmed server settings binds anything (ServerHostBindings).
+    /// </summary>
+    public static bool HadLiteDataAtStart { get; private set; }
+
+    /// <summary>
     /// Gets the path to the DuckDB database file.
     /// </summary>
     public static string DatabasePath { get; private set; } = string.Empty;
@@ -640,6 +646,10 @@ public partial class App : Application
         ConfigDirectory = Path.Combine(appDataRoot, "config");
         DatabasePath = Path.Combine(appDataRoot, "monitor.duckdb");
         ArchiveDirectory = Path.Combine(appDataRoot, "archive");
+
+        /* Read before anything below creates either file: whether this Windows user ran Lite before this start. A user who
+           did is upgrading, and the servers they used are bound to their current settings; a new user confirms each one. */
+        HadLiteDataAtStart = File.Exists(DatabasePath) || File.Exists(Path.Combine(ConfigDirectory, "settings.json"));
 
         // Ensure directories exist
         Directory.CreateDirectory(ConfigDirectory);

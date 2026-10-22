@@ -425,7 +425,7 @@ public class ServerConnection : INotifyPropertyChanged
     /// This is the single resolution entry point; the removed instance overloads used to expose a
     /// <see cref="CredentialService"/>-only path that could silently bypass a profile.
     /// </summary>
-    public static string ResolveConnectionString(
+    internal static string ResolveConnectionString(
         ServerConnection server,
         CredentialService credentialService,
         IProfileLookup? profileLookup)
@@ -440,7 +440,7 @@ public class ServerConnection : INotifyPropertyChanged
     /// database and timeouts are the server's own, so a replica that takes the same login needs nothing more. Null when the
     /// setting is empty: the caller then reads from the primary and opens nothing. Builds a string only; it opens no connection.
     /// </summary>
-    public static string? ResolveQueryStoreReplicaConnectionString(
+    internal static string? ResolveQueryStoreReplicaConnectionString(
         ServerConnection server,
         CredentialService credentialService,
         IProfileLookup? profileLookup)
@@ -476,7 +476,7 @@ public class ServerConnection : INotifyPropertyChanged
     /// Like <see cref="ResolveConnectionString"/> but targets <see cref="UtilityDatabase"/> when set.
     /// Used for locating community stored procedures (sp_IndexCleanup) installed in a non-default database.
     /// </summary>
-    public static string ResolveUtilityConnectionString(
+    internal static string ResolveUtilityConnectionString(
         ServerConnection server,
         CredentialService credentialService,
         IProfileLookup? profileLookup)
@@ -502,7 +502,7 @@ public class ServerConnection : INotifyPropertyChanged
     /// Database is always the database being read — it has no cross-database execution, so a proc taking a
     /// @database_name parameter can only ever be handed its own.</para>
     /// </summary>
-    public static string ResolveConnectionStringForDatabase(
+    internal static string ResolveConnectionStringForDatabase(
         ServerConnection server,
         string databaseName,
         CredentialService credentialService,

@@ -80,32 +80,80 @@ public class ServerManager
     /// <param name="hostBindingsPath">This user's record of confirmed hosts (<see cref="ServerHostBindings"/>). Null takes
     /// <see cref="ServerHostBindings.FileName"/> in the app's per-user config folder; with no per-user folder (tests) the
     /// record is kept in memory only.</param>
-    public ServerManager(string configDirectory, ILogger<ServerManager>? logger = null, string? hostBindingsPath = null)
+    /// <param name="credentialService">The credential store; null takes Lite's own (tests pass one under a key prefix of
+    /// their own).</param>
+    public ServerManager(string configDirectory, ILogger<ServerManager>? logger = null, string? hostBindingsPath = null, CredentialService? credentialService = null)
     {
         _configFilePath = Path.Combine(configDirectory, "servers.json");
-        _credentialService = new CredentialService();
+        _credentialService = credentialService ?? new CredentialService();
         _logger = logger;
         _servers = new List<ServerConnection>();
         _connectionStatuses = new ConcurrentDictionary<string, ServerConnectionStatus>();
 
         LoadServers();
 
-        /* The per-user record of the host each server was confirmed for. Never beside servers.json: that folder is shared
-           by every user of the computer. The first run with no record binds every server to the host it names now (the
-           upgrade step); from then on a changed host is confirmed before Lite connects to it. */
+        /* The per-user record of the settings each server was confirmed with. Never beside servers.json: that folder is
+           shared by every user of the computer. Nothing is bound here: until BindHostsOnFirstRun runs (the main window, once
+           the local store is open) a user with no record has every server unconfirmed, and a changed setting is confirmed
+           before Lite connects to it. */
         _hostBindings = new ServerHostBindings(hostBindingsPath
             ?? (string.IsNullOrEmpty(App.ConfigDirectory) ? null : Path.Combine(App.ConfigDirectory, ServerHostBindings.FileName)));
+        _hostBindings.SaveFailed += message => HostRecordSaveFailed?.Invoke(message);
+    }
+
+    /// <summary>Raised with the sentence to show when this user's record of confirmed settings could not be written.</summary>
+    public event Action<string>? HostRecordSaveFailed;
+
+    /// <summary>The sentence for the last failed write of this user's record of confirmed settings; null once one succeeds.</summary>
+    public string? HostRecordSaveProblem => _hostBindings.SaveProblem;
+
+    /// <summary>
+    /// The first-run step for a user with no record of confirmed settings (see <see cref="ServerHostBindings.BindOnFirstRun"/>).
+    /// <paramref name="hadLiteData"/> is whether this user's monitor.duckdb or settings.json existed before this start; a user
+    /// without either is new and gets nothing bound. An upgrading user gets bound only the servers they used: one with a saved
+    /// password or secret (its own, or its credential profile's) in this user's credential store, or one with rows in this
+    /// user's local store (<paramref name="storedServerIds"/>, the hash ids collection writes under). Returns how many servers
+    /// were bound.
+    /// </summary>
+    public int BindHostsOnFirstRun(bool hadLiteData, IReadOnlyCollection<int> storedServerIds)
+    {
+        List<ServerConnection> servers;
         lock (_serversLock)
         {
-            _hostBindings.BindAllOnFirstRun(_servers);
+            servers = _servers.ToList();
         }
+
+        return _hostBindings.BindOnFirstRun(servers, hadLiteData, server =>
+            storedServerIds.Contains(RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server)))
+            || HasSavedSecret(server));
+    }
+
+    /// <summary>Whether this user's credential store holds a password or secret the server signs in with.</summary>
+    private bool HasSavedSecret(ServerConnection server)
+    {
+        if (!string.IsNullOrEmpty(server.CredentialProfileId))
+        {
+            var profile = ProfileLookup?.GetProfile(server.CredentialProfileId);
+            return profile != null
+                && profile.AuthType is AuthenticationTypes.SqlServer or AuthenticationTypes.ServicePrincipal
+                && _credentialService.GetCredential(ProfileManager.ProfileCredentialId(profile.Id)).HasValue;
+        }
+
+        return server.AuthenticationType is AuthenticationTypes.SqlServer or AuthenticationTypes.ServicePrincipal
+            && _credentialService.GetCredential(server.Id).HasValue;
     }
 
     /// <summary>
-    /// Null when this user confirmed the host (and Query Store replica) the server names now; otherwise what changed. Lite
-    /// does not connect to the server until <see cref="ConfirmHost"/> runs for it.
+    /// Null when this user confirmed the settings the server names now (host, Query Store replica, sign-in, databases,
+    /// encryption); otherwise what changed. Lite does not connect to the server until <see cref="ConfirmHost"/> runs for it.
     /// </summary>
     public ServerHostChange? HostChange(ServerConnection server) => _hostBindings.Check(server);
+
+    /// <summary>
+    /// <see cref="HostChange"/> for settings not saved yet (the Edit dialog's boxes): a stricter encryption setting there is
+    /// not recorded, since the user may still cancel.
+    /// </summary>
+    public ServerHostChange? HostChangeIfSaved(ServerConnection candidate) => _hostBindings.Check(candidate, recordStricter: false);
 
     /// <summary>
     /// Records that this user confirmed the host the server names now: the Edit dialog's save, after the password was
