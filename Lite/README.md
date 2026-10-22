@@ -95,4 +95,49 @@ Values are `#RRGGBB` (`#AARRGGBB` is accepted). A key that is not one of the twe
 
 The other six palette colors (`AccentHoverColor`, `AccentPressedColor`, `BackgroundLighterColor`, `ForegroundMutedColor`, `BorderColor`, `BorderLightColor`) are derived tones — a hover is the accent lightened a step, a border is the background lifted a step — and follow the theme author's values; they are not adjustable, and neither is any single control (the selected tab, one button): the knobs are the palette, and every surface built from it follows. A handful of component-specific brushes the themes paint with a fixed value (the plan viewer's panels, the time-range slicer, the deadlock graph) are likewise not derived from the palette and do not move.
 
+## Where Lite keeps its files
+
+| What | Where |
+|---|---|
+| Collected data (`monitor.duckdb`) | `%LOCALAPPDATA%\PerformanceMonitorLite-Data` |
+| Parquet archive | `%LOCALAPPDATA%\PerformanceMonitorLite-Data\archive` |
+| Logs (`lite_<date>.log`) | `%LOCALAPPDATA%\PerformanceMonitorLite-Data\logs` |
+| Settings (`settings.json`, `collection_schedule.json`, `ignored_wait_types.json`) | `%LOCALAPPDATA%\PerformanceMonitorLite-Data\config` |
+| Server list (`servers.json`) and credential profiles (`profiles.json`) | `%ProgramData%\PerformanceMonitorLite\config`, shared by every Windows user on the machine |
+| SQL and Entra passwords, the SMTP password, and webhook URLs | Windows Credential Manager, per Windows user |
+| The installed app (`Setup.exe` install) | `%LOCALAPPDATA%\PerformanceMonitorLite` |
+
+Lite keeps archived data for 3 months. This is a fixed value. `settings.json` has no retention key, and the Settings window has no retention control. Lite deletes an archive file when the date in its file name is more than 3 months back. A row can therefore stay a little longer than 3 months.
+
+Lite keeps each log file for 7 days. To open the logs, click **View Log** or **Open Log Folder** in the sidebar.
+
+## Remove a server, uninstall, and delete the data
+
+Do these steps in this order. Lite can only remove its Extended Events sessions from a server while Lite is still installed.
+
+1. Right-click each server in the sidebar and select **Remove**. Lite then drops this install's Extended Events sessions on that server and deletes the stored password for that server. The two shared sessions, `PerformanceMonitor_Deadlock` and `PerformanceMonitor_BlockedProcess`, stay on the server. See [Removing a server](../docs/lite-guide.md#removing-a-server). To change a server instead, select **Edit** in the same menu.
+2. Close Lite. If a minimized copy is in the system tray, open it and close it too.
+3. Uninstall Lite from Apps & Features. For the portable ZIP, delete the folder that you unzipped.
+4. To delete the history, delete `%LOCALAPPDATA%\PerformanceMonitorLite-Data`.
+5. To delete the server list, delete `%ProgramData%\PerformanceMonitorLite\config`.
+6. To delete the SMTP password and webhook URLs, open Windows Credential Manager. Delete the entries whose names start with `PerformanceMonitorLite_`.
+
+Uninstalling does not delete the data folder or the server list. If you uninstall before you remove the servers, the Extended Events sessions stay on those servers. Lite has no command that drops them later, so see [Cleaning up by hand](../docs/lite-guide.md#cleaning-up-by-hand).
+
+## Back up Lite and move it to another PC
+
+To back up Lite, close Lite and copy two folders:
+
+- `%LOCALAPPDATA%\PerformanceMonitorLite-Data`
+- `%ProgramData%\PerformanceMonitorLite\config`
+
+To move Lite to another PC:
+
+1. Install Lite on the new PC, start it once, and close it.
+2. Copy the two folders from the old PC over the same paths on the new PC.
+3. Start Lite. It gives the copied data folder a new install id, because the old id belongs to the old machine.
+4. Enter the SQL and Entra passwords again for each server. Windows Credential Manager passwords do not move with the folders. Servers that use Windows Authentication need nothing. If you use email alerts or webhooks, enter the SMTP password and webhook URLs again.
+
+Do not use **Import Settings** for this move. It reads `config\servers.json` under the folder that you select. The data folder has no current server list, because the list is in `%ProgramData%`.
+
 See the [root README](../README.md) for full documentation.
