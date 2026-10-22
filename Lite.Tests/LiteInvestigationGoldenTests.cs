@@ -57,6 +57,10 @@ public sealed class LiteInvestigationGoldenTests
 
     private static string Sha(string text) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
 
+    /// <summary>
+    /// #6462: the three hashes below moved with <c>report_contract.required</c> (it now lists summary and drops root_cause_found, and
+    /// <c>service_sets</c> names the one the service sets); the keyed pin further down moved with it. Re-pinned in the same PR.
+    /// </summary>
     [Theory]
     [InlineData(McpDataDetail.Full, "2A1A81C9E4BC0FC37E717758570F670539ADECA5D6BC2987A9B95689CAD9BBC2")]
     [InlineData(McpDataDetail.MaskLiterals, "D68F95DC98BA4706D8A4C630475B241904C9201B1F4B96BEBC93E16D2FC41F37")]
@@ -74,7 +78,7 @@ public sealed class LiteInvestigationGoldenTests
     /// <summary>
     /// #6066: the same brief at <c>metadataOnly</c> with the fixed test key (the 32 bytes 0x00 to 0x1f, the same key Darling's
     /// pseudonym tests use). Re-pinned in the same PR as the change, because every login in it is now <c>login#</c> plus 8 hex instead of
-    /// <c>login#1</c>.
+    /// <c>login#1</c>. #6462: moved again with <c>report_contract.required</c> (see the pin above).
     /// </summary>
     [Fact]
     public void TheLiteBrief_AtMetadataOnly_WithTheFixedKey_IsByteForByteUnchanged()
