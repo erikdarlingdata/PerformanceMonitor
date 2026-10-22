@@ -86,15 +86,13 @@ VALUES ($1, $2, $3, true, (now() AT TIME ZONE 'UTC'))
 ON CONFLICT (server_id, database_name)
 DO UPDATE SET expected_state = EXCLUDED.expected_state, is_user_override = true, updated_at = (now() AT TIME ZONE 'UTC')";
 
-    /* A write, so the newest snapshot is matched with IN (...) rather than the "= (SELECT MAX(collection_time))" shape
-       McpPayloadContractCensusTests reads as a latest-anchored READ that must project its anchor column. */
     public const string ResetToCurrentSql = @"
 INSERT INTO config.database_state_expected (server_id, database_name, expected_state, is_user_override, updated_at)
 SELECT $1, $2, CASE WHEN ds.is_in_standby THEN 'STANDBY' ELSE ds.state_desc END, false, (now() AT TIME ZONE 'UTC')
 FROM collect.database_states ds
 WHERE ds.server_id = $1
 AND   ds.database_name = $2
-AND   ds.collection_time IN (SELECT MAX(collection_time) FROM collect.database_states WHERE server_id = $1)
+AND   ds.collection_time = (SELECT MAX(collection_time) FROM collect.database_states WHERE server_id = $1)
 ON CONFLICT (server_id, database_name)
 DO UPDATE SET expected_state = EXCLUDED.expected_state, is_user_override = false, updated_at = (now() AT TIME ZONE 'UTC')";
 
