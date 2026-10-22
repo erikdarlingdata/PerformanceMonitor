@@ -153,6 +153,64 @@ VALUES (99, $1, $2, $3, 'Sales', 0.8, 0.6, 'queries', 'path-hashB0002', 'hashB00
         Assert.Contains("is marked same_root_cause", brief, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #6565, the twin of Darling's: PLAN_REGRESSION is a server-wide root fact (its key names no query), so key and database alone would
+    /// mark every plan regression report on the database. Two stories are the same root cause only when their findings share a force target
+    /// (database and query id). The request on queries 101 and 102 marks the report on query 101; a report on queries 201 and 202, one whose
+    /// finding has no targets and one with an empty target list are named but not marked. A request whose own finding has no targets marks nothing.
+    /// </summary>
+    [Fact]
+    public async Task PlanRegression_IsMarkedOnlyWhenTheFindingsShareAForceTarget()
+    {
+        static string Action(params long[] queryIds) => AlertContextSerializer.SerializeAction(new PerformanceMonitor.Analysis.RemediationAction(
+            "PLAN_REGRESSION", "force", queryIds.Select(q => new PerformanceMonitor.Analysis.ForcePlanTarget("Sales", q, q + 1000)).ToList()))!;
+
+        var findingId = 200L;
+        async Task FindingAsync(string hash, string? action, DateTime at) =>
+            await ExecAsync(@"
+INSERT INTO analysis_findings
+    (finding_id, analysis_time, server_id, server_name, database_name, severity, confidence, category, story_path, story_path_hash, story_text, root_fact_key, fact_count, remediation_action_json)
+VALUES ($1, $2, $3, $4, 'Sales', 0.8, 0.6, 'queries', $5, $6, 'story', 'PLAN_REGRESSION', 2, $7)",
+                findingId++, Micros(at), ServerId, ServerName, "path-" + hash, hash, action);
+
+        var reportId = 300L;
+        async Task<Guid> ReportedAsync(string hash, string? action, DateTime at)
+        {
+            var id = Guid.NewGuid();
+            await InsertRequestAsync(id, at, state: "reported", storyPathHash: hash);
+            await FindingAsync(hash, action, at);
+            await ExecAsync(@"
+INSERT INTO investigation_reports
+    (report_id, request_id, report_format, agent_id, claim_id, submitted_at, verdict, root_cause, root_cause_found, summary,
+     evidence, server_id, metric_name)
+VALUES ($1, $2, 1, 'agent-a', $3, $4, 'real', 'a regressed plan', true, NULL, '[{""tool"":""get_query_store_top""}]', $5, 'Blocking')",
+                reportId++, id, Guid.NewGuid(), Micros(at), ServerId);
+            return id;
+        }
+
+        var shared = await ReportedAsync("hashA0001", Action(101), Now.AddMinutes(-45));
+        var otherQueries = await ReportedAsync("hashC0003", Action(201, 202), Now.AddMinutes(-50));
+        var noTargets = await ReportedAsync("hashD0004", null, Now.AddMinutes(-40));
+        var emptyTargets = await ReportedAsync("hashE0005", Action(), Now.AddMinutes(-35));
+        var targetless = await ReportedAsync("hashG0007", null, Now.AddMinutes(-30));
+
+        var second = Guid.NewGuid();
+        await InsertRequestAsync(second, Now, storyPathHash: "hashB0002");
+        await FindingAsync("hashB0002", Action(101, 102), Now);
+
+        var reader = new DuckDbInvestigationBriefSourceReader(_initializer, () => Now);
+
+        var none = await reader.ReadAsync(targetless, TestContext.Current.CancellationToken);
+        Assert.DoesNotContain(none!.EarlierReports, r => r.SameRootCause);
+        Assert.Contains(none.EarlierReports, r => r.RequestId == shared);
+
+        var sources = await reader.ReadAsync(second, TestContext.Current.CancellationToken);
+        var marked = Assert.Single(sources!.EarlierReports, r => r.SameRootCause);
+        Assert.Equal(shared, marked.RequestId);
+        Assert.Equal(shared, sources.EarlierReports[0].RequestId);
+        Assert.Equal(new[] { otherQueries, noTargets, emptyTargets, targetless }.OrderBy(g => g), sources.EarlierReports.Where(r => !r.SameRootCause).Select(r => r.RequestId).OrderBy(g => g));
+    }
+
     [Fact]
     public async Task EverySource_ComesBackFromAPlantedStore_AndTheComposedBriefMasksItsLiterals()
     {

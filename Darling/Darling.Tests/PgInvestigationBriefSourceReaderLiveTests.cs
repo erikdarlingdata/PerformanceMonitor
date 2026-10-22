@@ -379,6 +379,71 @@ INSERT INTO config.agent_environment_profiles (scope_server_id, profile_text) VA
         });
     }
 
+    /// <summary>
+    /// #6565: PLAN_REGRESSION is a server-wide root fact (its key names no query), so key and database alone would mark every plan
+    /// regression report on the database. Two stories on one database are the same root cause only when their findings share a force
+    /// target (database and query id). The request's brief marks the report whose finding shares query 101; a report on queries 201 and 202,
+    /// one whose finding has no targets and one with an empty target list are named but not marked. A request whose own finding has no
+    /// targets marks nothing, the query-101 report included.
+    /// </summary>
+    [Fact]
+    public async Task PlanRegression_IsMarkedOnlyWhenTheFindingsShareAForceTarget()
+    {
+        await RunAsync(async (dataSource, connection, ct) =>
+        {
+            static string Action(params long[] queryIds) => AlertContextSerializer.SerializeAction(new PerformanceMonitor.Analysis.RemediationAction(
+                "PLAN_REGRESSION", "force", queryIds.Select(q => new PerformanceMonitor.Analysis.ForcePlanTarget("Sales", q, q + 1000)).ToList()))!;
+
+            async Task FindingAsync(string hash, string? action, DateTime at) =>
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    "INSERT INTO analysis_findings (finding_id, analysis_time, server_id, server_name, database_name, severity, confidence, category, story_path, story_path_hash, story_text, root_fact_key, fact_count, remediation_action_json) " +
+                    "VALUES ($1, $2, $3, $4, 'Sales', 0.8, 0.8, 'queries', $5, $6, 'story', 'PLAN_REGRESSION', 2, $7)",
+                    CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), ServerId, ServerName, "path-" + hash, hash, action);
+
+            InvestigationAlert StoryAlert(string hash, DateTime at) =>
+                new(1, ServerId, ServerName, "blocking", "Analysis: queries [" + hash + "]", at, new[] { ServerId + ":" + hash }, hash,
+                    20, 100, LeaseMinutes: 15, ExpiryMinutes: 240);
+
+            async Task<Guid> ReportedAsync(string hash, DateTime at)
+            {
+                var store = new InvestigationRequestStore(dataSource, 30, () => at);
+                var id = (await store.OpenOrJoinAsync(StoryAlert(hash, at), ct)).RequestId!.Value;
+                var claim = await store.ClaimAsync(id, "agent-a", ct);
+                Assert.Equal(InvestigationSubmitOutcome.Reported, await store.SubmitAsync(new InvestigationReportSubmission(
+                    id, claim.ClaimId!.Value, "agent-a", 1, "real", "a regressed plan", true, null, "[{\"tool\":\"get_query_store_top\"}]"), ct));
+                return id;
+            }
+
+            await FindingAsync("hashA0001", Action(101), Now.AddMinutes(-45));
+            await FindingAsync("hashC0003", Action(201, 202), Now.AddMinutes(-50));
+            await FindingAsync("hashD0004", null, Now.AddMinutes(-40));
+            await FindingAsync("hashE0005", Action(), Now.AddMinutes(-35));
+            await FindingAsync("hashG0007", null, Now.AddMinutes(-30));
+            await FindingAsync("hashB0002", Action(101, 102), Now);
+
+            var shared = await ReportedAsync("hashA0001", Now.AddMinutes(-45));
+            var otherQueries = await ReportedAsync("hashC0003", Now.AddMinutes(-50));
+            var noTargets = await ReportedAsync("hashD0004", Now.AddMinutes(-40));
+            var emptyTargets = await ReportedAsync("hashE0005", Now.AddMinutes(-35));
+            var targetless = await ReportedAsync("hashG0007", Now.AddMinutes(-30));
+
+            var reader = new PgInvestigationBriefSourceReader(dataSource, utcNow: () => Now);
+
+            /* A request whose own finding has no force targets marks nothing (it was reported, so it is read by id). */
+            var none = await reader.ReadAsync(targetless, ct);
+            Assert.DoesNotContain(none!.EarlierReports, r => r.SameRootCause);
+            Assert.Contains(none.EarlierReports, r => r.RequestId == shared);
+
+            var second = (await new InvestigationRequestStore(dataSource, 30, () => Now).OpenOrJoinAsync(StoryAlert("hashB0002", Now), ct)).RequestId!.Value;
+            var sources = await reader.ReadAsync(second, ct);
+
+            var marked = Assert.Single(sources!.EarlierReports, r => r.SameRootCause);
+            Assert.Equal(shared, marked.RequestId);
+            Assert.Equal(shared, sources.EarlierReports[0].RequestId);
+            Assert.Equal(new[] { otherQueries, noTargets, emptyTargets, targetless }.OrderBy(g => g), sources.EarlierReports.Where(r => !r.SameRootCause).Select(r => r.RequestId).OrderBy(g => g));
+        });
+    }
+
     private static async Task RunAsync(Func<NpgsqlDataSource, NpgsqlConnection, CancellationToken, Task> body)
     {
         var baseConnectionString = ConnectionString;
