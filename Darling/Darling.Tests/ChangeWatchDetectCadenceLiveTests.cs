@@ -174,26 +174,37 @@ public sealed class ChangeWatchDetectCadenceLiveTests
         {
             await AddServerAsync(h.Connection, ct);
 
-            /* The store's clock is h.Now, so the scenario runs in the past and its last run is at h.Now: t0 is 71 minutes before. */
-            var t0 = h.Now.AddMinutes(-71);
+            /* The store's clock follows the pass's, so a watch is due by the store's clock exactly when it is due by the pass's. */
+            var t0 = h.Now;
             var clock = t0;
             var pass = h.NewPassAt(() => clock);
+            void At(int minutes)
+            {
+                clock = t0.AddMinutes(minutes);
+                h.SetStoreNow(clock);
+            }
+
             await ServerConfigAsync(h.Connection, t0.AddMinutes(-30), Dop, 4, ct);
             await ServerConfigAsync(h.Connection, t0.AddMinutes(-5), Dop, 4, ct);
             await pass.RunOnceAsync(ct);
 
             /* Change A at +10 is recorded by the hourly detect at +61: its watch's window ends at +70. */
             await ServerConfigAsync(h.Connection, t0.AddMinutes(10), Dop, 2, ct);
-            clock = t0.AddMinutes(61);
+            At(61);
             await pass.RunOnceAsync(ct);
             Assert.Equal(1, await CountAsync(h.Connection, "SELECT count(*) FROM config.change_watch_changes", ct));
             Assert.Equal(t0.AddMinutes(70), DateTime.SpecifyKind(
                 (DateTime)(await ScalarAsync(h.Connection, "SELECT window_ends_at FROM config.change_watches", ct))!, DateTimeKind.Utc));
 
-            /* Change B at +65 is inside A's window and after that detect. The run at +71 is inside the hour, and A's watch is due: B is read before A is
-               evaluated, so it joins A's watch and moves the window's end to an hour after B. Nothing is evaluated yet. */
+            /* Change B at +65 is inside A's window and after that detect. A run at +66 is inside the hour and A's watch is not due: nothing is read. */
             await ServerConfigAsync(h.Connection, t0.AddMinutes(65), Dop, 1, ct);
-            clock = t0.AddMinutes(71);
+            At(66);
+            await pass.RunOnceAsync(ct);
+            Assert.Equal(1, await CountAsync(h.Connection, "SELECT count(*) FROM config.change_watch_changes", ct));
+
+            /* The run at +71 is inside the hour, and A's watch is due: B is read before A is evaluated, so it joins A's watch and moves the window's end
+               to an hour after B. Nothing is evaluated yet. */
+            At(71);
             await pass.RunOnceAsync(ct);
 
             Assert.Equal(1, await CountAsync(h.Connection, "SELECT count(*) FROM config.change_watches", ct));
@@ -202,6 +213,47 @@ public sealed class ChangeWatchDetectCadenceLiveTests
             Assert.Equal(1, await CountAsync(h.Connection, "SELECT count(DISTINCT watch_id) FROM config.change_watch_changes", ct));
             Assert.Equal(t0.AddMinutes(125), DateTime.SpecifyKind(
                 (DateTime)(await ScalarAsync(h.Connection, "SELECT window_ends_at FROM config.change_watches", ct))!, DateTimeKind.Utc));
+        });
+    }
+
+    [Fact]
+    public async Task ADeferredChangeAfterTheWindow_OpensItsOwnWatchInTheRunThatEvaluatesTheFirst_AndDoesNotWaitAnHour()
+    {
+        await RunAsync(false, async (h, ct) =>
+        {
+            await AddServerAsync(h.Connection, ct);
+            var t0 = h.Now;
+            var clock = t0;
+            var pass = h.NewPassAt(() => clock);
+            void At(int minutes)
+            {
+                clock = t0.AddMinutes(minutes);
+                h.SetStoreNow(clock);
+            }
+
+            await ServerConfigAsync(h.Connection, t0.AddMinutes(-30), Dop, 4, ct);
+            await ServerConfigAsync(h.Connection, t0.AddMinutes(-5), Dop, 4, ct);
+            await pass.RunOnceAsync(ct);
+
+            /* Change A at +10 is recorded by the hourly detect at +61: its window ends at +70, and the target's last detect is +61. */
+            await ServerConfigAsync(h.Connection, t0.AddMinutes(10), Dop, 2, ct);
+            At(61);
+            await pass.RunOnceAsync(ct);
+            Assert.Equal(1, await CountAsync(h.Connection, "SELECT count(*) FROM config.change_watches WHERE state = 'open'", ct));
+
+            /* Change C at +72 is after A's window. The run at +73 is twelve minutes after the last detect, so only the read of a due watch finds C. It is
+               deferred behind A's watch, A is evaluated, and the detect of the same run reads C again and opens its own watch. That detect is gated by the
+               last-detected time, and only the removal of that time on deferral lets it through: without it C would wait until +121. */
+            await ServerConfigAsync(h.Connection, t0.AddMinutes(72), Dop, 1, ct);
+            At(73);
+            await pass.RunOnceAsync(ct);
+
+            Assert.Equal(1, await CountAsync(h.Connection, "SELECT count(*) FROM config.change_watches WHERE state = 'closed'", ct));
+            Assert.Equal(1, await CountAsync(h.Connection, "SELECT count(*) FROM config.change_watches WHERE state = 'open'", ct));
+            Assert.Equal(2, await CountAsync(h.Connection, "SELECT count(*) FROM config.change_watch_changes", ct));
+            Assert.Equal(2, await CountAsync(h.Connection, "SELECT count(DISTINCT watch_id) FROM config.change_watch_changes", ct));
+            Assert.Equal(t0.AddMinutes(132), DateTime.SpecifyKind(
+                (DateTime)(await ScalarAsync(h.Connection, "SELECT window_ends_at FROM config.change_watches WHERE state = 'open'", ct))!, DateTimeKind.Utc));
         });
     }
 
