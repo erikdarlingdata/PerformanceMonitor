@@ -358,7 +358,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         return map;
     }
 
-    private static HashSet<ClockFrame> FramesInText(string text, ISet<string>? markersUsed = null)
+    private static HashSet<ClockFrame> FramesInText(string text)
     {
         var found = new HashSet<ClockFrame>();
 
@@ -367,7 +367,6 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             if (text.Contains(marker, StringComparison.OrdinalIgnoreCase))
             {
                 found.Add(frame);
-                markersUsed?.Add(marker);
             }
         }
 
@@ -384,7 +383,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     /// synthetic longer name, because a matcher contract that only holds for the names currently present is
     /// one collector away from not holding.
     /// </summary>
-    private static HashSet<ClockFrame> FramesInRelation(string relation, string column, ISet<string>? markersUsed = null)
+    private static HashSet<ClockFrame> FramesInRelation(string relation, string column)
     {
         var found = new HashSet<ClockFrame>();
 
@@ -394,7 +393,6 @@ public sealed class ConsumedTimestampFrameDisciplineTests
                 && Regex.IsMatch(relation, Regex.Escape(name) + @"(?![\w])", RegexOptions.IgnoreCase))
             {
                 found.Add(frame);
-                markersUsed?.Add(name);
             }
         }
 
@@ -412,10 +410,9 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         string rhs,
         Dictionary<string, HashSet<string>> aliases,
         string sql,
-        ISet<string>? markersUsed = null,
         int depth = 0)
     {
-        var found = FramesInText(rhs, markersUsed);
+        var found = FramesInText(rhs);
 
         foreach (var reference in Regex.Matches(rhs, @"(?<![\w.@])(\w+)\.(\w+)").Cast<Match>())
         {
@@ -432,7 +429,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             {
                 foreach (var relation in relations)
                 {
-                    found.UnionWith(FramesInRelation(relation, reference.Groups[2].Value, markersUsed));
+                    found.UnionWith(FramesInRelation(relation, reference.Groups[2].Value));
                 }
             }
         }
@@ -453,7 +450,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
                         continue;
                     }
 
-                    found.UnionWith(FramesOfAssignment(assignment, aliases, sql, markersUsed, depth + 1));
+                    found.UnionWith(FramesOfAssignment(assignment, aliases, sql, depth: depth + 1));
                 }
             }
         }
@@ -463,7 +460,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
 
     /// <summary>The classifier's verdict for one (table, column): a single frame, or null when the T-SQL
     /// yields no marker at all or yields two that disagree. Null is an UNKNOWN and never a UTC.</summary>
-    private static ClockFrame? ClassifyFromTsql(string collector, string column, ISet<string>? markersUsed = null)
+    private static ClockFrame? ClassifyFromTsql(string collector, string column)
     {
         var sql = WithoutComments(File.ReadAllText(CollectorSourcePath(collector)));
         var aliases = AliasMap(sql);
@@ -471,7 +468,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
 
         foreach (var assignment in AssignmentsOf(sql, column, variable: false))
         {
-            frames.UnionWith(FramesOfAssignment(assignment, aliases, sql, markersUsed));
+            frames.UnionWith(FramesOfAssignment(assignment, aliases, sql));
         }
 
         return frames.Count == 1 ? frames.Single() : null;
