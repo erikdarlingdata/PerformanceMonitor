@@ -19,6 +19,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Npgsql;
@@ -1194,6 +1195,11 @@ public sealed class DarlingMcpHostService : BackgroundService
            tools are registered: without it the SDK would serve the parameter as a client argument. Every setting
            off unless the host passes the one built from darling.json. */
         services.AddSingleton<DarlingMcpAddServersPolicy>(addServers ?? DarlingMcpAddServersPolicy.Default);
+
+        /* #6334: get_known_patterns and get_alert_history mask the operator's note at the served mcp.dataDetail level, so the level
+           is a service parameter of those tools. The real host registers its setting before this runs (Start), and TryAdd leaves it
+           be; anywhere else the level is full, as the host filter passes through. */
+        services.TryAddSingleton(new McpDataDetailSetting(McpDataDetail.Full));
 
         /* #5915: the Level 2 mute and custom-rule tools read the served policy through this seat, so under the investigations
            arm they go through the agent_action gate and under the writes arm they write as before. A service parameter, so a

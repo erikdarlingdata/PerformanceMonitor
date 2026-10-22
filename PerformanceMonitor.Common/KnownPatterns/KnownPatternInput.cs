@@ -43,9 +43,23 @@ public sealed record KnownPatternInput(
             return $"window_minutes must be between 0 and {KnownPatternMatcher.MaxWindowMinutes}.";
         }
 
+        var metric = MetricName?.Trim();
+        if (metric is { Length: > KnownPatternMatcher.MaxMetricNameLength })
+        {
+            return $"The metric name is {metric.Length} characters; the most a known pattern holds is {KnownPatternMatcher.MaxMetricNameLength}. Use the alert metric name, or leave it empty for every metric.";
+        }
+
+        // Shape and length first, before any lookup: only an IANA-shaped id of at most 64 characters ever reaches the zone database
+        // (security review of #6334). The store's CHECK uses the same limits.
+        var zone = TimeZone?.Trim();
+        if (!string.IsNullOrEmpty(zone) && !KnownPatternMatcher.IsZoneIdShape(zone))
+        {
+            return $"The time zone must be an IANA id of at most {KnownPatternMatcher.MaxTimeZoneLength} characters, such as America/New_York, or empty for UTC.";
+        }
+
         if (!KnownPatternMatcher.IsKnownTimeZone(TimeZone))
         {
-            return $"The time zone '{TimeZone?.Trim()}' is not known on this machine. Use an IANA id such as America/New_York, or leave it empty for UTC.";
+            return $"The time zone '{zone}' is not known on this machine. Use an IANA id such as America/New_York, or leave it empty for UTC.";
         }
 
         if (ServerId is < 1)

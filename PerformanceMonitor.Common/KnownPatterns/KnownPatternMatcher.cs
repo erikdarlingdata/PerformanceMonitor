@@ -116,7 +116,7 @@ public static class KnownPatternMatcher
         var zone = FindZone(id);
         if (zone is null)
         {
-            if (Warned.TryAdd(id, true))
+            if (Warned.Count < MaxCachedZones && Warned.TryAdd(id, true))
             {
                 log?.Invoke(string.Create(CultureInfo.InvariantCulture,
                     $"Known pattern: time zone '{id}' is not known on this machine; its entries are matched in UTC."));
@@ -128,19 +128,62 @@ public static class KnownPatternMatcher
         return TimeZoneInfo.ConvertTimeFromUtc(utc, zone);
     }
 
-    private static TimeZoneInfo? FindZone(string id) => ZoneCache.GetOrAdd(id, static key =>
+    /// <summary>
+    /// Resolves an IANA zone id, caching only the zones that were found: a miss is never stored, so ids a caller invents cannot grow the
+    /// cache (security review of #6334). Every non-fatal failure counts as "not found": on Unix a folder-named id such as <c>America</c>
+    /// throws a <see cref="System.Security.SecurityException"/> or an <see cref="System.IO.IOException"/> instead of
+    /// <see cref="TimeZoneNotFoundException"/>, and a lookup must never throw out of a match or a write check.
+    /// </summary>
+    private static TimeZoneInfo? FindZone(string id)
     {
+        if (ZoneCache.TryGetValue(id, out var cached))
+        {
+            return cached;
+        }
+
+        if (!IsZoneIdShape(id))
+        {
+            return null;
+        }
+
+        TimeZoneInfo? found;
         try
         {
-            return TimeZoneInfo.FindSystemTimeZoneById(key);
+            found = ZoneLookup(id);
         }
-        catch (TimeZoneNotFoundException)
+        catch (Exception ex) when (ex is not OutOfMemoryException)
         {
             return null;
         }
-        catch (InvalidTimeZoneException)
+
+        if (found is not null && ZoneCache.Count < MaxCachedZones)
         {
-            return null;
+            ZoneCache[id] = found;
         }
-    });
+
+        return found;
+    }
+
+    /// <summary>The lookup behind <see cref="FindZone"/>; a test replaces it to fake a host whose lookup throws.</summary>
+    internal static Func<string, TimeZoneInfo?> ZoneLookup { get; set; } = static id => TimeZoneInfo.FindSystemTimeZoneById(id);
+
+    /// <summary>How many resolved zones the cache keeps. The machine has a few hundred zones; this is a backstop, not a working limit.</summary>
+    private const int MaxCachedZones = 1024;
+
+    /// <summary>The number of zones the cache holds (for tests).</summary>
+    internal static int CachedZoneCount => ZoneCache.Count;
+
+    /// <summary>True when <paramref name="id"/> is shaped like an IANA id: at most <see cref="MaxTimeZoneLength"/> characters of
+    /// letters, digits, <c>_ + -</c>, with <c>/</c> between parts. Anything else is refused before any lookup.</summary>
+    internal static bool IsZoneIdShape(string id) => id.Length <= MaxTimeZoneLength && ZoneIdShape.IsMatch(id);
+
+    /// <summary>The longest time zone id a write accepts. The store's CHECK uses the same limit.</summary>
+    public const int MaxTimeZoneLength = 64;
+
+    /// <summary>The longest metric name a write accepts.</summary>
+    public const int MaxMetricNameLength = 128;
+
+    private static readonly System.Text.RegularExpressions.Regex ZoneIdShape = new(
+        @"\A[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*\z",
+        System.Text.RegularExpressions.RegexOptions.CultureInvariant | System.Text.RegularExpressions.RegexOptions.NonBacktracking);
 }
