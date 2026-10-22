@@ -678,8 +678,37 @@ public sealed class DarlingWebHostGateLiveTests
         Assert.Equal(StatusCodes.Status404NotFound, withCookie.Response.StatusCode);
     }
 
-    /// <summary>No token configured, loopback-only: with <c>web.allowTokenlessLoopback</c> on the dashboard is open to
-    /// local browsers as earlier builds served it; with it off the start is refused, blank token or no block alike.</summary>
+    /// <summary>A pipeline configured with a token under the length floor and no explicit reads-only reason works the reason out
+    /// itself: the sign-in works and reads pass, and a write is refused 403 with <see cref="DarlingWebHostService.ShortTokenWriteRefusedMessage"/>.
+    /// Before, a caller that left the argument out got writes with a short token.</summary>
+    [Fact]
+    public async Task LoopbackOnly_ShortToken_WithNoExplicitReason_ServesReadsAndRefusesWrites()
+    {
+        const string shortToken = "tiny";
+        using var server = await BuildServer(networkMode: false, requireTokenWhenLoopbackOnly: true, accessToken: shortToken);
+        var exchange = await PostSignIn(server, "localhost", IPAddress.Loopback, shortToken);
+        Assert.Equal(StatusCodes.Status302Found, exchange.Response.StatusCode);
+        var setCookie = Assert.Single(exchange.Response.Headers.SetCookie) ?? string.Empty;
+        var cookie = setCookie[..setCookie.IndexOf(';')];
+
+        var read = await Send(server, "/some/unmapped/path", "localhost", IPAddress.Loopback, cookie: cookie);
+        Assert.Equal(StatusCodes.Status404NotFound, read.Response.StatusCode);
+
+        var write = await server.SendAsync(ctx =>
+        {
+            ctx.Request.Method = "POST";
+            ctx.Request.Path = "/api/some-write";
+            ctx.Request.Headers.Host = "localhost";
+            ctx.Request.Headers["Cookie"] = cookie;
+            ctx.Connection.RemoteIpAddress = IPAddress.Loopback;
+        });
+        Assert.Equal(StatusCodes.Status403Forbidden, write.Response.StatusCode);
+        var body = await new StreamReader(write.Response.Body).ReadToEndAsync();
+        Assert.Contains("reads only", body, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>No token configured, loopback-only: with <c>web.allowTokenlessLoopback</c> on the dashboard serves
+    /// local browsers with no token, for reads only; with it off the start is refused, blank token or no block alike.</summary>
     [Fact]
     public async Task LoopbackOnly_NoTokenConfigured_StaysOpenOnlyWithTheOptOut()
     {

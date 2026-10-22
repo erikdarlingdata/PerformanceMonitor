@@ -41,12 +41,12 @@ using PerformanceMonitor.Notifications;
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
 /// <summary>
-/// Optional hosted service serving Darling's read-only WEB DASHBOARD over HTTP (#1562) — a SECOND, independent
+/// Optional hosted service serving Darling's WEB DASHBOARD over HTTP (#1562) — a SECOND, independent
 /// Kestrel host beside the MCP host (<see cref="DarlingMcpHostService"/>), with its own port (default 5153),
 /// its own kill switch (<c>web.enabled</c> / config_service.web_enabled), its own LAN-exposure block, and its
 /// own firewall rule. Not co-hosted with MCP because MCP owns the root path on its port, the two need
 /// independent enable switches (web must not require mcp_enabled), and they gate different blast radii (the MCP
-/// token guards analyze_server's live outbound SQL connections; the web surface is read-only over the store).
+/// token guards analyze_server's live outbound SQL connections; the web surface reads the store, and its edit seat writes only through the host's gates).
 ///
 /// <para><b>Shape mirrors the MCP host</b> (5s supervisor poll, a pure <see cref="DecideWebAction"/> decision
 /// table, 30s failed-start backoff, <c>StartAsync</c> not <c>RunAsync</c> so the supervisor owns the wait) and
@@ -59,7 +59,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// included — the MCP host's exposed-mode loopback-token SSRF guard, now mirrored here (#1649). Loopback is
 /// exempt from the CIDR test only (127.0.0.1 is not in a LAN CIDR), never from the credential. A
 /// loopback-only dashboard with no token configured does not start unless <c>web.allowTokenlessLoopback</c> is on, which
-/// registers no auth middleware at all and serves local browsers tokenless as earlier builds did; one
+/// serves local browsers with no token, for reads only, and refuses every change; one
 /// with a configured <c>web.network.encryptedToken</c> / <c>token</c> (or that network mode fell back to after its token
 /// resolved, a refused TLS certificate) has this same token-to-cookie gate, because the operator's config says every
 /// client presents the token (<see cref="ResolveLoopbackOnlyToken"/>). A request needs either a valid session
@@ -632,8 +632,8 @@ public sealed class DarlingWebHostService : BackgroundService
                 /* A loopback-only start (no web.network.listen, or one the ladder refused) resolves a token the
                    operator configured too, and the pipeline then gates the loopback dashboard on it through the
                    token-to-cookie gate, as it gates one that network mode fell back to. No token configured stops this
-                   start unless web.allowTokenlessLoopback is on, which leaves accessToken empty and the dashboard open
-                   to local browsers as earlier builds served it. The no-token line is logged once per process: the
+                   start unless web.allowTokenlessLoopback is on, which leaves accessToken empty and the dashboard serving
+                   local browsers with no token, for reads only. The no-token line is logged once per process: the
                    config is held for the process lifetime, so the 30s retries would only repeat it. A configured token
                    that cannot be used stops this start, because serving the dashboard open would drop the credential
                    the operator asked every client to present. */
@@ -959,8 +959,8 @@ public sealed class DarlingWebHostService : BackgroundService
                config said every client presents the token. accessToken holds the resolved token in both branches above
                (the network branch, and the loopback-only branch via ResolveLoopbackOnlyToken), so "not network mode,
                token set" covers that state and a loopback-only start whose configured token resolved. A start
-               with no token configured gets here only with web.allowTokenlessLoopback on, leaves it empty and stays
-               tokenless; a configured token that cannot be used never gets here, the start stops in every mode. */
+               with no token configured gets here only with web.allowTokenlessLoopback on, leaves it empty and serves
+               reads only with no token; a configured token that cannot be used never gets here, the start stops in every mode. */
             var requireTokenWhenLoopbackOnly = !networkMode && accessToken.Length > 0;
 
             /* #6265: a web token with the MCP token's value is refused for web sign-in (the pipeline checks each posted token). The
@@ -1056,8 +1056,8 @@ public sealed class DarlingWebHostService : BackgroundService
     /// address this host actually binds: a loopback name/IP (<c>localhost</c>, <c>127.0.0.1</c>, <c>::1</c>) or,
     /// when LAN-exposed, the configured listen IP (<paramref name="networkListenIp"/>). Any port suffix is
     /// ignored (already split into <see cref="HostString.Host"/>), and an empty Host is allowed (HTTP/1.0 / some
-    /// health probes). This rejects a rebound foreign hostname pointed at 127.0.0.1:5153 before the tokenless
-    /// loopback allow, while a direct IP request from the real operator passes.
+    /// health probes). This rejects a rebound foreign hostname pointed at 127.0.0.1:5153 before any auth
+    /// decision, while a direct IP request from the real operator passes.
     ///
     /// <para>#1648 lifted the decision itself into the shared
     /// <see cref="PerformanceMonitor.Common.HostHeaderGuard"/> (via <see cref="DarlingHostBinding"/>) so the two
@@ -1079,12 +1079,11 @@ public sealed class DarlingWebHostService : BackgroundService
     ///
     /// <para>Loopback skips the CIDR check (127.0.0.1 is not in a LAN CIDR, so testing it there would 403 the
     /// operator's own browser) but still needs a session cookie or a signed-in token, exactly like any
-    /// other remote. It previously passed tokenless on the grounds that the web surface was read-only; that
+    /// other remote. It previously passed with no credential on the grounds that the web surface was read-only; that
     /// stopped being true when Custom Views v2 added view create/update/delete and <c>/api/compose/run</c>, so
-    /// any local process — a scheduled task, SSRF'd code, another user's session — could read the whole store
-    /// and mutate views with no credential while the host was LAN-exposed (#1649). This now mirrors the MCP
-    /// host's rule verbatim: in exposed mode even a local client presents the token, which IS the loopback
-    /// guard against SSRF and sandboxed sockets.</para>
+    /// any local process could read the whole store and change views with no credential while the host was
+    /// LAN-exposed (#1649). This now mirrors the MCP host's rule verbatim: in exposed mode even a local client
+    /// presents the token.</para>
     ///
     /// <para>A non-loopback remote must additionally be inside <paramref name="allowedCidr"/> (a
     /// null/unverifiable remote fails closed to <see cref="WebAuthAction.Forbid"/>). Then a valid session
@@ -1226,6 +1225,10 @@ public sealed class DarlingWebHostService : BackgroundService
         string? mcpToken = null,
         string? sharedTokenReadsOnlyProblem = null)
     {
+        /* A caller that does not say whether the token is under the length floor gets the same answer the start path
+           computes: a short shared token serves reads only. Without this a forgotten argument meant writes. */
+        sharedTokenReadsOnlyProblem ??= accessToken.Length > 0 ? DarlingHostBinding.DescribeTokenProblem(accessToken) : null;
+
         Func<DateTime> clock = utcNow ?? (() => DateTime.UtcNow);
 
         /* #2479 item 5: the gates below used to refuse silently. Rate-limited per (gate, source),
@@ -1271,8 +1274,8 @@ public sealed class DarlingWebHostService : BackgroundService
 
            The observer is outermost so a throw from compression, the Host guard or the auth gate is logged too. It decides
            nothing about a request before next() runs (no refusal, no write, no read of the body), so it adds no unauthenticated
-           surface ahead of the Host guard, which stays the first app.Use (HostHeaderGuardTests, #1648: that guard is the fix for a
-           previously-exploited hole, and a handler that DECIDED anything ahead of it would be new surface on the tokenless loopback
+           surface ahead of the Host guard, which stays the first app.Use (HostHeaderGuardTests, #1648: that guard is the fix for
+           the #1576 rebinding gap, and a handler that DECIDED anything ahead of it would sit ahead of that guard on the loopback
            bind). Compression only transforms an OUTGOING body (Content-Encoding), never a routing or auth decision, so it costs
            nothing to wrap the gates' own refusal bodies and the login page in it. A throw before the marker below comes from a
            request nobody has authenticated, so the observer's line for it goes through the refusals throttle (round 2, L1). */
@@ -1316,7 +1319,7 @@ public sealed class DarlingWebHostService : BackgroundService
            the configured listen IP. networkListenIp is null in loopback mode, so ONLY loopback Hosts pass
            there; a rebound foreign hostname pointed at 127.0.0.1:5153 is rejected 400 before any auth
            decision, route handler, or static file. publicBaseUrlHost (#4220) is also admitted, in BOTH
-           modes, because it is operator config on this box, not attacker-reachable — see
+           modes, because it is operator config on this box, not something a request chooses — see
            DarlingHostBinding.IsAllowedHost. */
         app.Use(async (context, next) =>
         {
@@ -1693,13 +1696,6 @@ public sealed class DarlingWebHostService : BackgroundService
         => path.Equals("/api", StringComparison.OrdinalIgnoreCase)
             || path.StartsWith("/api/", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>
-    /// PURE per-request decision, composing the sign-in flow around <see cref="DecideWebAuth"/>: the CIDR
-    /// stays OUTERMOST (an out-of-CIDR caller is 403 even on the OIDC endpoints — sign-in is not a way past
-    /// the network boundary), then a flow path is handled regardless of credential state (a signed-in user
-    /// re-visiting /auth/oidc/login is starting a new sign-in, not asking for the dashboard), then the
-    /// original matrix decides exactly as before.
-    /// </summary>
     /// <summary>Writes the body of a write a reads-only dashboard refuses (the caller sets the 403): <paramref name="message"/> as the JSON error.</summary>
     private static async Task WriteReadsOnlyRefusalAsync(HttpContext context, string message)
     {
@@ -1707,6 +1703,13 @@ public sealed class DarlingWebHostService : BackgroundService
         await context.Response.WriteAsync("{\"error\": " + System.Text.Json.JsonSerializer.Serialize(message) + "}");
     }
 
+    /// <summary>
+    /// PURE per-request decision, composing the sign-in flow around <see cref="DecideWebAuth"/>: the CIDR
+    /// stays OUTERMOST (an out-of-CIDR caller is 403 even on the OIDC endpoints — sign-in is not a way past
+    /// the network boundary), then a flow path is handled regardless of credential state (a signed-in user
+    /// re-visiting /auth/oidc/login is starting a new sign-in, not asking for the dashboard), then the
+    /// original matrix decides exactly as before.
+    /// </summary>
     internal static WebRequestAction DecideWebRequest(
         IPAddress? remoteIp, CidrAllowList allowedCidr, bool isAuthFlowRoute, bool hasValidCookie,
         IPAddress? connectionIp = null)

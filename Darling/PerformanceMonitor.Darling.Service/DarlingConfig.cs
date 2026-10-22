@@ -346,7 +346,7 @@ public sealed class DarlingConfig
     public McpConfig Mcp { get; set; } = new();
 
     /// <summary>
-    /// The embedded web dashboard (#1562): a second, independent Kestrel host serving a read-only,
+    /// The embedded web dashboard (#1562): a second, independent Kestrel host serving a
     /// browser-based view of the monitoring store over HTTP — a SEPARATE port + kill switch + exposure block
     /// from the MCP server (they gate different blast radii). Default OFF: a headless service should not open a
     /// port unless the operator asks. Loopback-only by default; an opt-in <see cref="WebConfig.Network"/> block
@@ -1609,7 +1609,7 @@ public sealed class McpNetworkConfig
     /// In NETWORK mode the Host-header guard admits that one exact name, compared ignoring case, beside the
     /// names it always admits; it never admits a name the operator did not write here. In loopback-only mode,
     /// and in every mode that degrades to it (an unreadable token, a refused certificate), the guard does NOT
-    /// admit it: that surface is tokenless, and the name exists for the network listener's clients. With
+    /// admit it: the name exists for the network listener's clients, and a loopback-only listener has no use for it. With
     /// <see cref="Tls"/> set it is also the name the certificate should carry as a dNSName SAN, and the host
     /// warns (never refuses) when it does not. A value that is set but is not a bare DNS name is ignored with one
     /// Warning at start. A name written in Unicode is admitted as the ASCII (punycode) name a client sends in

@@ -1893,7 +1893,7 @@ WHERE r.rolname IN ('admin', 'viewer', 'mcp')";
         return (T)(await command.ExecuteScalarAsync(ct))!;
     }
 
-    /// <summary>The hosts take a typed logger; this one forwards to a capture so a failed start says why.</summary>
+    /// <summary>The hosts take a typed logger; this one records its lines so a failed start says why.</summary>
     private sealed class TypedLogger<T> : ILogger<T>
     {
         private readonly CapturingTestLogger _inner;

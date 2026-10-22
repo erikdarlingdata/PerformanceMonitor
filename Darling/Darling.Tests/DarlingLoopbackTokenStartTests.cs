@@ -36,7 +36,7 @@ public sealed class DarlingLoopbackTokenStartTests
 {
     private const string Token = "loopback-start-test-token-0123456789abcdef";
 
-    /// <summary>The hosts take a typed logger; this one forwards to a capture so each test can read the start's lines.</summary>
+    /// <summary>The hosts take a typed logger; this one records its lines so each test can read what the start said.</summary>
     private sealed class TypedLogger<T>(CapturingTestLogger inner) : ILogger<T>
     {
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => inner.BeginScope(state);

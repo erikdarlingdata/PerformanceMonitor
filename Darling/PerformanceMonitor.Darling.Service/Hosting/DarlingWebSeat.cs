@@ -84,16 +84,16 @@ internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? Own
 
     /// <summary>The request's resolved seat. Every pipeline the host builds stores one before routing (the auth gate,
     /// or the reads-only gate of a tokenless dashboard); an absent item (routes mapped without the
-    /// host's pipeline, as some tests map them) reads as <see cref="SharedToken"/>.</summary>
+    /// host's pipeline, as some tests map them) reads as <see cref="ReadsOnly"/>, so a request nobody sat a seat for cannot write.</summary>
     internal static DarlingWebSeat FromContext(HttpContext context)
         => context.Items.TryGetValue(HttpContextItemKey, out var value) && value is DarlingWebSeat seat
             ? seat
-            : SharedToken;
+            : ReadsOnly;
 
     /// <summary>Whether this request is a signed-in session whose seat may edit (#6236): the auth middleware stored a seat (it does so
     /// only for a request that holds a valid session) and that seat is the shared token's or an OIDC admin's. A dashboard with no
     /// sign-in configured registers no middleware, so nothing is stored and this is false, unlike <see cref="FromContext"/>, whose
-    /// default is the shared-token seat.</summary>
+    /// default is the reads-only seat.</summary>
     internal static bool IsSignedInAdmin(HttpContext context)
         => context.Items.TryGetValue(HttpContextItemKey, out var value) && value is DarlingWebSeat { CanEdit: true };
 
