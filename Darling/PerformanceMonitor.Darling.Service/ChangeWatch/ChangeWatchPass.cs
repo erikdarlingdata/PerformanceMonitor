@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -25,18 +26,40 @@ namespace PerformanceMonitor.Darling.Service.ChangeWatch;
 
 /// <summary>
 /// #6234: the change watch's worker pass, run on the investigation sweep's tick. It does two things for SQL Server targets.
-/// <para><b>Detect.</b> It reads the recorded changes of the last hour (the same snapshot readers and diff the
+/// <para><b>Detect, at most once an hour per target.</b> It reads the recorded changes since the target's last detect (the same snapshot readers and diff the
 /// <c>get_server_config_changes</c>, <c>get_database_config_changes</c> and <c>get_trace_flag_changes</c> tools use; the
 /// database-scoped configuration snapshots; plan forcing by an agent, from the plan-force ledger, and by a person, from the forced-plan
-/// snapshots) and records them: each change opens a watch for its server or extends the open one.</para>
-/// <para><b>Evaluate.</b> Every open watch whose window has ended (including one that ended while the service was down: the pass
+/// snapshots) and records them: each change opens a watch for its server or extends the open one. A configuration change is rare and the
+/// read is the costliest statement the service sends to the store (the database-scoped configuration diff), so a target is read once per
+/// <see cref="DetectInterval"/> (#6234), not on every sweep tick. The time of a target's last detect is kept in memory only: a new
+/// instance (a restart) detects every target on its first run, and the marks and the change keys in the store, not that time, are what
+/// keep a change from being missed or recorded twice (see <see cref="DetectLookback"/>).</para>
+/// <para><b>Evaluate, on every run.</b> Every open watch whose window has ended (including one that ended while the service was down: the pass
 /// runs at start) is compared with the hour before and the same hour a week earlier. When a measure moved, ONE request opens through
-/// the dispatcher's own gate and route (<c>change_watch</c> trigger kind); otherwise the watch closes quietly.</para>
+/// the dispatcher's own gate and route (<c>change_watch</c> trigger kind); otherwise the watch closes quietly. Finding the due watches is one
+/// indexed read of the small watch table, and the measure reads happen only for a watch that is due, so this part stays on the sweep's tick and a
+/// watch is still evaluated within a tick of its window's end.</para>
 /// </summary>
 public sealed partial class ChangeWatchPass
 {
-    /// <summary>How far back a pass looks for a change. A change is recorded once under its key, so a longer look only costs reads.</summary>
-    public static readonly TimeSpan DetectLookback = TimeSpan.FromMinutes(70);
+    /// <summary>
+    /// #6234: the least time between two detects of one target. The database-scoped configuration diff was the store's costliest statement at a
+    /// tick of 60 seconds, and a setting changes far less often than that. A target detects at once on a new <see cref="ChangeWatchPass"/> (the
+    /// first run after a start) and then once this long after its last detect finished reading. A watch is evaluated at the end of its window, which
+    /// is <see cref="ChangeWatchStore.Window"/> after the latest change, so a change is recorded up to this long (and one sweep tick) after it
+    /// happened. The watch's window is still measured from the change's own time, so the measures are the same, and the watch is evaluated at the end of that window,
+    /// or on the run after the one that records it when that end is already past.
+    /// </summary>
+    public static readonly TimeSpan DetectInterval = TimeSpan.FromMinutes(60);
+
+    /// <summary>
+    /// How far back a detect looks for a change: twice <see cref="DetectInterval"/>. The marks, not this, decide what is read: a detect reads from each
+    /// source's mark, which sits <see cref="MarkSlack"/> before the end of the target's last detect, so an hourly cadence reads about an hour and five
+    /// minutes. This is only the cap on a stretch with no detect at all (the service paused or down). It is twice the interval, and not the 70 minutes it
+    /// was at a tick of 60 seconds, so that a detect that comes late by a long sweep, a pause or a slow store (more than five minutes at 70, now up to
+    /// about an hour) still reads from its mark and loses nothing. A change is recorded once under its key, so a longer look only costs reads.
+    /// </summary>
+    public static readonly TimeSpan DetectLookback = DetectInterval + DetectInterval;
 
     /* #6234 PostgreSQL pass: every enabled target, with its engine kind: a PostgreSQL target reads its own change sources
        (ChangeWatchPass.Postgres.cs) and is evaluated by its own readers. */
@@ -127,6 +150,9 @@ WHERE after.hit IS NULL
     private readonly Func<DateTime> _utcNow;
     private readonly int _commandTimeoutSeconds;
 
+    /* #6234: when each target's last detect was read (the pass clock at its start), by server id. In memory on purpose: a restart detects every target at once, which costs one read per target and cannot miss a change. */
+    private readonly ConcurrentDictionary<int, DateTime> _lastDetected = new();
+
     /// <param name="readSource">The store's read connection (the collected tables and the registry).</param>
     /// <param name="store">The watch tables.</param>
     /// <param name="dispatch">The shared dispatch core the alert path uses: its route, agent gate and store call open the request.</param>
@@ -182,7 +208,11 @@ WHERE after.hit IS NULL
         await DetectAsync(cancellationToken);
     }
 
-    /// <summary>Records the last hour's changes of every target (SQL Server and PostgreSQL), opening or extending its watch.</summary>
+    /// <summary>
+    /// Records the changes of every target (SQL Server and PostgreSQL) that has not been detected for <see cref="DetectInterval"/>, opening or extending its
+    /// watch. A target detected less than that long ago is skipped without a read of its marks or its sources. A target whose detect failed, or whose changes
+    /// were deferred behind an open watch that is due, is not counted as detected and is tried again on the next call, as it was before the interval.
+    /// </summary>
     public async Task DetectAsync(CancellationToken cancellationToken = default)
     {
         var servers = new List<(int Id, string Name, bool Postgres)>();
@@ -198,8 +228,19 @@ WHERE after.hit IS NULL
 
         var end = DateTime.SpecifyKind(_utcNow(), DateTimeKind.Utc);
         var floor = end - DetectLookback;
+        var enabled = servers.Select(s => s.Id).ToHashSet();
+        foreach (var known in _lastDetected.Keys.Where(k => !enabled.Contains(k)).ToList())
+        {
+            _lastDetected.TryRemove(known, out _);
+        }
+
         foreach (var (id, name, postgres) in servers)
         {
+            if (_lastDetected.TryGetValue(id, out var last) && end - last < DetectInterval)
+            {
+                continue;
+            }
+
             try
             {
                 var marks = await _store.GetMarksAsync(id, cancellationToken);
@@ -242,13 +283,14 @@ WHERE after.hit IS NULL
 
                 if (deferred)
                 {
-                    /* A change after the open watch's window waits for that watch to be evaluated: the marks stay, and the next pass reads it again. */
+                    /* A change after the open watch's window waits for that watch to be evaluated: the marks stay, the target is not counted as detected, and the next pass (a tick, as the watch is evaluated first) reads it again. */
                     _logger.LogDebug("A change on {Server} is after its open watch's window; it is recorded once that watch has been evaluated", name);
                     continue;
                 }
 
                 /* Only after the changes are recorded: a failed read or record leaves the marks, and the next pass reads the same rows again. */
                 await _store.SetMarksAsync(id, sources.ToDictionary(s => s, _ => end - MarkSlack, StringComparer.Ordinal), cancellationToken);
+                _lastDetected[id] = end;
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
