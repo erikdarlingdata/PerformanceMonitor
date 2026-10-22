@@ -4,7 +4,8 @@ Uninstalls the PerformanceMonitor Darling service and removes the viewer shortcu
 
 .DESCRIPTION
 Run from an ELEVATED PowerShell. Stops and deletes the Windows service, removes the scoped Windows
-Firewall rules it installed, and removes the Desktop / Start Menu 'Darling Viewer' shortcuts.
+Firewall rules it installed, removes the Desktop / Start Menu 'Darling Viewer' shortcuts, and removes any account's direct
+grant that install-darling.ps1 gave when it was asked to add someone to the operator group (#6478; see below).
 DELIBERATELY LEFT IN PLACE: the extracted program folder,
 darling.json, and everything under %ProgramData%\PerformanceMonitorDarling (the PostgreSQL store
 with all collected history, the DPAPI credential files, and the service logs) - so an uninstall
@@ -81,6 +82,62 @@ foreach ($lnkPath in @(
 }
 
 $dataRoot = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'PerformanceMonitorDarling'
+
+# Direct operator grants (#6478). When install-darling.ps1 is asked to add a person to the operator group it also gives that
+# person a direct entry of the group's access, so the Viewer works in the session that is already open: read on darling.json
+# and on the store's admin and viewer credential files, traverse on the store folder. The service drops such an entry when it
+# next rewrites those permissions at a start, but these files are left in place by this uninstall and no service is left to
+# rewrite them, so the entry would stay. Each of those four paths is protected and holds only SYSTEM, Administrators, the
+# service account and the operator group, so any other entry written directly on it (not inherited) is removed, and nothing else
+# is changed. The group itself and its members are left alone: the group is the administrator's, as the installer says.
+function Remove-DarlingDirectOperatorGrants([string]$configPath, [string]$storeFolder, [string]$groupName) {
+    $ErrorActionPreference = 'Continue'
+    $keep = @('S-1-5-18', 'S-1-5-32-544')
+    try { $keep += (New-Object System.Security.Principal.NTAccount($env:COMPUTERNAME, $groupName)).Translate([System.Security.Principal.SecurityIdentifier]).Value }
+    catch { }
+    $paths = @($configPath)
+    if ($storeFolder) {
+        $paths += $storeFolder
+        $paths += (Join-Path $storeFolder 'pg-admin-credential.dpapi')
+        $paths += (Join-Path $storeFolder 'pg-viewer-credential.dpapi')
+    }
+    foreach ($path in $paths) {
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        # A link is never followed: icacls would change what it points at.
+        if ($null -eq $item -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) { continue }
+        try { $rules = @((Get-Acl -LiteralPath $path).Access) }
+        catch { Write-Host "Could not read the permissions of $path ($($_.Exception.Message))." -ForegroundColor Yellow; continue }
+        foreach ($rule in $rules) {
+            if ($rule.IsInherited -or $rule.AccessControlType -ne 'Allow') { continue }
+            try { $sid = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { continue }
+            if ($keep -contains $sid -or $sid -like 'S-1-5-80-*') { continue }
+            $null = & icacls.exe $path /remove:g "*$sid" 2>&1
+            if ($LASTEXITCODE -eq 0) { Write-Host "Removed the direct grant for $($rule.IdentityReference) on $path." }
+            else { Write-Host "Could not remove the direct grant for $($rule.IdentityReference) on $path (icacls exit $LASTEXITCODE). Run: icacls `"$path`" /remove:g *$sid" -ForegroundColor Yellow }
+        }
+    }
+}
+
+# The store folder: the parent of postgres.dataDirectory in darling.json (the default is under %ProgramData%), or none when the
+# store is not managed. Read with a regex, not ConvertFrom-Json, which Windows PowerShell 5.1 fails on darling.json's comments.
+$operatorConfigPath = Join-Path $PSScriptRoot 'darling.json'
+$operatorStoreFolder = $dataRoot
+if (Test-Path -LiteralPath $operatorConfigPath -PathType Leaf) {
+    try {
+        $configText = (Get-Content -LiteralPath $operatorConfigPath -Raw -ErrorAction Stop) -split "`r?`n" | ForEach-Object { $_ -replace '(?<!:)//.*$', '' }
+        $configText = $configText -join "`n"
+        $managed = [regex]::Matches($configText, '"managed"\s*:\s*(true|false)')
+        $dataDirectory = [regex]::Matches($configText, '"dataDirectory"\s*:\s*"((?:[^"\\]|\\.)*)"')
+        if ($managed.Count -gt 0 -and $managed[$managed.Count - 1].Groups[1].Value -eq 'false') { $operatorStoreFolder = $null }
+        elseif ($dataDirectory.Count -gt 0 -and $dataDirectory[$dataDirectory.Count - 1].Groups[1].Value.Trim()) {
+            $operatorStoreFolder = [System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath([regex]::Unescape($dataDirectory[$dataDirectory.Count - 1].Groups[1].Value)).TrimEnd('\'))
+        }
+    }
+    catch { }
+}
+try { Remove-DarlingDirectOperatorGrants $operatorConfigPath $operatorStoreFolder 'PerformanceMonitor Darling Operators' }
+catch { Write-Host "Could not check for direct operator grants ($($_.Exception.Message))." -ForegroundColor Yellow }
+
 if ($PurgeData) {
     if (Test-Path $dataRoot) {
         Write-Host ''
