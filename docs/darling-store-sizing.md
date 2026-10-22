@@ -2,6 +2,8 @@
 
 This guide gives the disk, RAM and vCPU counts for a Darling store host, by the number of monitored servers. The numbers come from three production stores that we measured on 2026-10-14. A load test on a restored copy of a store will update them ([#5794](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5794)). The harness and its runbook are in [`Darling/loadtest/`](../Darling/loadtest/README.md).
 
+To back up, restore or move a store, and to see how much disk it uses, see [Back up, restore and move the store](darling-store-backup.md).
+
 Each row says if its number is measured or estimated. An estimate is a straight-line extension of a measured store. It is not a measurement.
 
 ## What one monitored server costs
