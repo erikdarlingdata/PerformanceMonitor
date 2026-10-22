@@ -259,7 +259,8 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         /* #6374: the seed's writer stamps the coverage row's applied_through with the REAL clock (the product's own
            DateTime.UtcNow), not LiveClock, so a DARLING_TEST_CLOCK_UTC behind the real clock put the window's end before
            applied_through, clause 4 sent the read to raw, and the interval path did not serve. The end is therefore never
-           before the real clock; the hour the window sits at still comes from LiveClock. */
+           before the real clock; with an override at or after the real clock, the hour the window sits at comes from
+           LiveClock. */
         var realNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
         end = end > realNow ? end : realNow;
         end = end.AddTicks(-(end.Ticks % TimeSpan.TicksPerSecond)).AddSeconds(1);
