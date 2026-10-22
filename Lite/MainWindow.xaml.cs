@@ -310,7 +310,6 @@ public partial class MainWindow : Window
             _serverManager.HostRecordSaveFailed += message => Dispatcher.BeginInvoke(() => ShowHostRecordSaveProblem(message));
             var storedServerIds = await Task.Run(ReadStoredServerIds);
             _serverManager.BindHostsOnFirstRun(App.HadLiteDataAtStart, storedServerIds);
-            RefreshServerList();
 
             /* #5775: remove route credentials no route points at (a crash between writing a new generation and the row, or a
                delete that failed). Off the UI thread and not awaited: the sweep takes the write lock briefly, logs only a count
