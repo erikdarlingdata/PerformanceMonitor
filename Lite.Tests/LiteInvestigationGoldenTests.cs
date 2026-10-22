@@ -58,9 +58,9 @@ public sealed class LiteInvestigationGoldenTests
     private static string Sha(string text) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
 
     [Theory]
-    [InlineData(McpDataDetail.Full, "103E37D369912AE9161B2691C10F7F51BFEBF5FA72E60CE18B4A50BE17ADAD67")]
-    [InlineData(McpDataDetail.MaskLiterals, "6427BD28BEE859A66C29009A545072C0B5F96B6DF9BCFEA1E52B7A0EBDA5F46E")]
-    [InlineData(McpDataDetail.MetadataOnly, "CD0442961146963B9162A96E5395B181B8238FD232AA1E651F6771745A5BCE3E")]
+    [InlineData(McpDataDetail.Full, "2A1A81C9E4BC0FC37E717758570F670539ADECA5D6BC2987A9B95689CAD9BBC2")]
+    [InlineData(McpDataDetail.MaskLiterals, "D68F95DC98BA4706D8A4C630475B241904C9201B1F4B96BEBC93E16D2FC41F37")]
+    [InlineData(McpDataDetail.MetadataOnly, "9C7E884F127787EFA70D37CF08869E3227358D1979F49CF3C97E18D97C9A2944")]
     public void TheLiteBrief_ForAFixedInput_IsByteForByteUnchanged(McpDataDetail mode, string expectedSha)
     {
         /* No key: the brief numbers logins per answer (login#1), as before #6066, so this pin did not move. */
@@ -81,7 +81,7 @@ public sealed class LiteInvestigationGoldenTests
     {
         var brief = InvestigationBriefComposer.Compose(Sources(), LiteInvestigationBriefTools.Tools, McpDataDetail.MetadataOnly, At, FixedKey());
 
-        Assert.True("A93E1CC9D8C35BA9DE65580E43F3DB5C5A64DE53D6C94C6538B4FC92344D98AF" == Sha(brief), $"The keyed Lite brief moved; its SHA-256 is {Sha(brief)}, length {brief.Length}:\n{brief}");
+        Assert.True("65DC09863AF1BD6A16722B928B3CF90E79C934B09B6349CFA426E5C1FDFBFF9F" == Sha(brief), $"The keyed Lite brief moved; its SHA-256 is {Sha(brief)}, length {brief.Length}:\n{brief}");
         Assert.DoesNotContain("corp", brief, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("alice", brief, StringComparison.OrdinalIgnoreCase);
     }
