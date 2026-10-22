@@ -29,7 +29,7 @@ These are the defaults for a SQL Server target. Each collector run sends at leas
 
 That is about 1,360 queries an hour per server, or roughly 114 in every 5 minutes. `long_query_completions` is off by default. Turning it on adds one more query a minute.
 
-- One at a time per server. Collectors for one server run one after another, so a server sees one collector query at a time.
+- One at a time per server in Lite. Collectors for one server run one after another, so a server sees one collector query at a time. In Darling, `query_store`, `plan_correction`, `pg_wait_sampling` and the daily collectors run detached from the server's pass. They can overlap the collectors in the pass.
 - Darling. It sweeps up to 4 servers at once (`maxConcurrentSweeps`, default 4, range 1 to 16).
 - Lite. The limit of 7 caps how many connection attempts are in flight at once. This smooths the log-in burst when many servers are polled together. It does not cap how many connections are open.
 - `READ UNCOMMITTED`. Every query that reads a SQL Server target starts with `SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED`. The collectors take no shared locks, so they do not wait behind writers. The cost is that they can read uncommitted data.
@@ -74,7 +74,7 @@ Darling records how long each collector run took (`get_collector_cost`). The fig
 
 What the table shows:
 
-- Summed over every collector run on the SQL Server targets, the query time was about 2,000 seconds (33 minutes) per server per day. Collectors for a server run one after another, so that is about 2% of a day, spread over roughly 1,360 short queries an hour.
+- Summed over every collector run on the SQL Server targets, the query time was about 2,000 seconds (33 minutes) per server per day. That is about 2% of a day, spread over roughly 1,360 short queries an hour. Detached collectors can overlap the pass, so this is the sum of the query times, not time with one query at a time.
 - Most of the frequent collectors average under 50 ms.
 - By total time, the largest are the collectors that read Extended Events sessions or the default trace (`long_query_completions`, `blocked_process_report`, `attention`, `system_health_events`, `deadlocks`, `default_trace_events`) and `procedure_stats`. Together they are about 70% of the time. The data does not say why `procedure_stats` is slower than the other DMV collectors.
 - Daily `index_object_stats` is the longest single collector. It averaged 8 seconds and took up to 221 seconds, under its 300-second limit.
