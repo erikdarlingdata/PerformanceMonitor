@@ -956,6 +956,7 @@ DECLARE
    v_old_multi_subnet_failover boolean;
    v_old_query_store_replica text;
    v_query_store_replica text;
+   v_has_replica boolean;
    v_host text;
    v_port integer;
    v_auth text;
@@ -981,7 +982,7 @@ BEGIN
    SELECT s.modified_at, s.host, s.port, s.auth, s.database, s.read_only_intent, s.username, s.encrypt_mode,
           s.trust_server_certificate, s.multi_subnet_failover,
           (COALESCE(s.remediation_encrypted_password, '') <> '' OR COALESCE((to_jsonb(s) ->> 'hypothetical_index_encrypted_password'), '') <> ''),
-          s.aws_role_arn, s.aws_external_id, NULLIF(btrim(s.query_store_replica), '')
+          s.aws_role_arn, s.aws_external_id, NULLIF(btrim(to_jsonb(s) ->> 'query_store_replica'), '')
    INTO v_old_modified_at, v_old_host, v_old_port, v_old_auth, v_old_database, v_old_read_only_intent,
         v_old_username, v_old_encrypt_mode, v_old_trust_server_certificate, v_old_multi_subnet_failover,
         v_remediation_held, v_old_role, v_old_ext, v_old_query_store_replica
@@ -1091,28 +1092,53 @@ BEGIN
       v_secret := NULL;
    END IF;
 
+   v_has_replica := EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'config.config_monitored_servers'::regclass
+                           AND attname = 'query_store_replica' AND NOT attisdropped);
+
    -- A value the table's own checks refuse (a required column, a format, a duplicate) answers invalid_value too:
    -- the table's error text is not passed on.
    BEGIN
-      UPDATE config.config_monitored_servers AS s
-      SET name = CASE WHEN 'name' = ANY (p_columns) THEN p_name ELSE s.name END,
-          host = v_host,
-          port = v_port,
-          database = v_database,
-          read_only_intent = v_read_only_intent,
-          auth = v_auth,
-          username = v_username,
-          encrypted_password = CASE WHEN v_secret_set THEN v_secret ELSE s.encrypted_password END,
-          encrypt_mode = v_encrypt_mode,
-          trust_server_certificate = v_trust_server_certificate,
-          multi_subnet_failover = v_multi_subnet_failover,
-          query_store_replica = v_query_store_replica,
-          monthly_cost_usd = CASE WHEN 'monthly_cost_usd' = ANY (p_columns) THEN p_monthly_cost_usd ELSE s.monthly_cost_usd END,
-          aws_role_arn = v_role,
-          aws_external_id = v_ext,
-          modified_at = (now() AT TIME ZONE 'UTC')
-      WHERE s.server_id = p_server_id
-      RETURNING s.modified_at INTO new_modified_at;
+      -- A store below V213 has no query_store_replica column (a script run before the service migrated it): the write leaves it out there.
+      IF v_has_replica THEN
+         UPDATE config.config_monitored_servers AS s
+         SET name = CASE WHEN 'name' = ANY (p_columns) THEN p_name ELSE s.name END,
+             host = v_host,
+             port = v_port,
+             database = v_database,
+             read_only_intent = v_read_only_intent,
+             auth = v_auth,
+             username = v_username,
+             encrypted_password = CASE WHEN v_secret_set THEN v_secret ELSE s.encrypted_password END,
+             encrypt_mode = v_encrypt_mode,
+             trust_server_certificate = v_trust_server_certificate,
+             multi_subnet_failover = v_multi_subnet_failover,
+             query_store_replica = v_query_store_replica,
+             monthly_cost_usd = CASE WHEN 'monthly_cost_usd' = ANY (p_columns) THEN p_monthly_cost_usd ELSE s.monthly_cost_usd END,
+             aws_role_arn = v_role,
+             aws_external_id = v_ext,
+             modified_at = (now() AT TIME ZONE 'UTC')
+         WHERE s.server_id = p_server_id
+         RETURNING s.modified_at INTO new_modified_at;
+      ELSE
+         UPDATE config.config_monitored_servers AS s
+         SET name = CASE WHEN 'name' = ANY (p_columns) THEN p_name ELSE s.name END,
+             host = v_host,
+             port = v_port,
+             database = v_database,
+             read_only_intent = v_read_only_intent,
+             auth = v_auth,
+             username = v_username,
+             encrypted_password = CASE WHEN v_secret_set THEN v_secret ELSE s.encrypted_password END,
+             encrypt_mode = v_encrypt_mode,
+             trust_server_certificate = v_trust_server_certificate,
+             multi_subnet_failover = v_multi_subnet_failover,
+             monthly_cost_usd = CASE WHEN 'monthly_cost_usd' = ANY (p_columns) THEN p_monthly_cost_usd ELSE s.monthly_cost_usd END,
+             aws_role_arn = v_role,
+             aws_external_id = v_ext,
+             modified_at = (now() AT TIME ZONE 'UTC')
+         WHERE s.server_id = p_server_id
+         RETURNING s.modified_at INTO new_modified_at;
+      END IF;
    EXCEPTION WHEN integrity_constraint_violation THEN
       RETURN QUERY SELECT 'invalid_value'::text, NULL::timestamp;
       RETURN;
@@ -1568,7 +1594,8 @@ BEGIN
                 'name', s.name, 'engine', s.engine, 'host', s.host, 'port', s.port, 'database', s.database,
                 'auth', s.auth, 'username', s.username, 'encryptedPassword', s.encrypted_password,
                 'readOnlyIntent', s.read_only_intent, 'trustServerCertificate', s.trust_server_certificate,
-                'encryptMode', s.encrypt_mode, 'multiSubnetFailover', s.multi_subnet_failover))
+                'encryptMode', s.encrypt_mode, 'multiSubnetFailover', s.multi_subnet_failover,
+                'queryStoreReplica', NULLIF(btrim(to_jsonb(s) ->> 'query_store_replica'), '')))
         INTO v_args
       FROM config.config_monitored_servers AS s
       WHERE s.server_id = p_server_id;

@@ -191,10 +191,24 @@ public class DeadlocksTelemetryCursorLiteTests
             var readItem = source.IndexOf("readItem: async (item, ct) =>", StringComparison.Ordinal);
             var complete = source.IndexOf("onItemComplete: (item, batchCount", readItem, StringComparison.Ordinal);
             Assert.True(readItem > 0 && complete > readItem, $"{host}: enumerated hooks not found");
-            var itemDrop = source.IndexOf("context.DropStagedItemState();", readItem, StringComparison.Ordinal);
-            var itemQuery = source.IndexOf("BuildPerItemQuery(item, context)", readItem, StringComparison.Ordinal);
+            /* #6254: Darling's readItem hands each read to ReadQueryStoreItemAsync (the replica attempt, and the primary read a failed
+               replica read falls back to), which holds the drop and the query. The rule is unchanged: the drop comes first in the
+               body that runs the per-item query, and readItem reaches that body before onItemComplete. */
+            var itemBody = source.IndexOf("Task<List<TRow>> ReadQueryStoreItemAsync(", StringComparison.Ordinal);
+            if (itemBody < 0)
+            {
+                itemBody = readItem;
+            }
+            else
+            {
+                var viaHelper = source.IndexOf("ReadQueryStoreItemAsync(item, ", readItem, StringComparison.Ordinal);
+                Assert.True(viaHelper > readItem && viaHelper < complete, $"{host}: readItem must run its reads through the helper that drops first");
+            }
+
+            var itemDrop = source.IndexOf("context.DropStagedItemState();", itemBody, StringComparison.Ordinal);
+            var itemQuery = source.IndexOf("BuildPerItemQuery(item, context)", itemBody, StringComparison.Ordinal);
             var itemLand = source.IndexOf("context.LandStagedItemState();", readItem, StringComparison.Ordinal);
-            Assert.True(itemDrop > readItem && itemDrop < itemQuery && itemQuery < complete, $"{host} must drop first in readItem, before the per-item query");
+            Assert.True(itemDrop > itemBody && itemDrop < itemQuery && itemQuery < complete, $"{host} must drop first in readItem, before the per-item query");
             Assert.True(itemLand > complete, $"{host} must land inside onItemComplete, not readItem");
         }
     }
