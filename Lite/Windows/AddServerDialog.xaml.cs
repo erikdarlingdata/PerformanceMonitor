@@ -416,6 +416,9 @@ public partial class AddServerDialog : Window
         return builder;
     }
 
+    /// <summary>#6459: SERVERPROPERTY('EngineEdition') the last connection test read, or 0 before one succeeded.</summary>
+    private int _testedEngineEdition;
+
     private async System.Threading.Tasks.Task<(bool Connected, string? ErrorMessage, bool SignInCancelled, string? ServerVersion, EntraBrokerFailureKind BrokerFailure, EntraAmbientCredentialFailureKind AmbientFailure)> RunConnectionTestAsync()
     {
         TestButton.IsEnabled = false;
@@ -469,8 +472,19 @@ public partial class AddServerDialog : Window
                 }
             }
 
-            using var cmd = new SqlCommand("SELECT @@VERSION", connection);
-            var version = await cmd.ExecuteScalarAsync() as string;
+            /* #6459: the engine edition rides on the same round trip, so the replica test can say an Azure SQL Database never reads one. */
+            using var cmd = new SqlCommand("SELECT @@VERSION, CONVERT(int, SERVERPROPERTY('EngineEdition'));", connection);
+            string? version = null;
+            _testedEngineEdition = 0;
+            using (var reader = await cmd.ExecuteReaderAsync())
+            {
+                if (await reader.ReadAsync())
+                {
+                    version = reader.IsDBNull(0) ? null : reader.GetString(0);
+                    _testedEngineEdition = reader.IsDBNull(1) ? 0 : reader.GetInt32(1);
+                }
+            }
+
             serverVersion = version?.Split('\n')[0]?.Trim();
             connected = true;
         }
@@ -578,6 +592,12 @@ public partial class AddServerDialog : Window
             return null;
         }
 
+        /* #6459: an Azure SQL Database never reads a replica, so there is nothing to open: the caller shows the note instead. */
+        if (QueryStoreReplicaConnectionTest.IgnoredOnAzureSqlDatabaseNote(_testedEngineEdition, QueryStoreReplicaBox.Text) is not null)
+        {
+            return null;
+        }
+
         TestButton.IsEnabled = false;
         SaveButton.IsEnabled = false;
         StatusText.Text = "Testing the Query Store replica...";
@@ -643,6 +663,11 @@ public partial class AddServerDialog : Window
                     replicaResult.Error is null ? "Connection Successful" : "Connection Successful, replica not reached",
                     MessageBoxButton.OK,
                     replicaResult.Error is null ? MessageBoxImage.Information : MessageBoxImage.Warning);
+            }
+            else if (QueryStoreReplicaConnectionTest.IgnoredOnAzureSqlDatabaseNote(_testedEngineEdition, QueryStoreReplicaBox.Text) is { } azureReplicaNote)
+            {
+                /* #6459: the setting is accepted and has no effect on an Azure SQL Database; say so now, not never. */
+                MessageBox.Show(message + "\n\n" + azureReplicaNote, "Connection Successful, replica setting not used", MessageBoxButton.OK, MessageBoxImage.Warning);
             }
             else
             {

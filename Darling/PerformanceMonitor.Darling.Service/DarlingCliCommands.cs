@@ -1218,7 +1218,7 @@ public static partial class DarlingCliCommands
             return passLine;
         }
 
-        var replicaPrefix = string.IsNullOrEmpty(probe.QueryStoreReplicaError) ? "         " : "  [WARN] ";
+        var replicaPrefix = string.IsNullOrEmpty(probe.QueryStoreReplicaError) && !probe.QueryStoreReplicaIgnoredOnAzureSqlDb ? "         " : "  [WARN] ";
         return passLine + Environment.NewLine + $"{replicaPrefix}{serverName}: Primary: connected. {replicaLine}";
     }
 
