@@ -3991,7 +3991,7 @@
                             </Grid.RowDefinitions>
                             <TextBlock Grid.Row="0" Text="Sweep Pressure (trailing 7 days)" FontWeight="SemiBold" Margin="0,4,0,4"
                                        Foreground="{DynamicResource ForegroundBrush}"/>
-                            <DataGrid Grid.Row="1" x:Name="SweepPressureStatsGrid" Style="{StaticResource DarkGrid}" MaxHeight="190" Margin="0,0,0,12">
+                            <DataGrid Grid.Row="1" x:Name="SweepPressureStatsGrid" Style="{StaticResource DarkGrid}" Margin="0,0,0,12">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Header="Measure" Binding="{Binding Label}" Width="180"/>
                                     <DataGridTextColumn Header="Value" Binding="{Binding Value}" Width="*"/>
