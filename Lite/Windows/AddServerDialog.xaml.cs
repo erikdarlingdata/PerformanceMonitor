@@ -35,6 +35,11 @@ public partial class AddServerDialog : Window
     /// </summary>
     public ServerConnection? AddedServer { get; private set; }
 
+    /// <summary>#6352: the host the edited server had when the dialog opened. Save changes the live list object before it
+    /// calls the manager, so the manager's own stored copy cannot tell a changed host from an unchanged one.</summary>
+    private string? _originalHost;
+    private string? _originalReplica;
+
     public AddServerDialog(ServerManager serverManager, ProfileManager profileManager)
     {
         InitializeComponent();
@@ -68,6 +73,8 @@ public partial class AddServerDialog : Window
         : this(serverManager, profileManager)
     {
         Title = "Edit SQL Server";
+        _originalHost = existing.ServerName;
+        _originalReplica = existing.QueryStoreReplica ?? "";
         ServerNameBox.Text = existing.ServerName;
         DisplayNameBox.Text = existing.DisplayName;
         EnabledCheckBox.IsChecked = existing.IsEnabled;
@@ -84,6 +91,7 @@ public partial class AddServerDialog : Window
         DescriptionTextBox.Text = existing.Description ?? "";
         DatabaseNameBox.Text = existing.DatabaseName ?? "";
         UtilityDatabaseBox.Text = existing.UtilityDatabase ?? "";
+        QueryStoreReplicaBox.Text = existing.QueryStoreReplica ?? "";
         ReadOnlyIntentCheckBox.IsChecked = existing.ReadOnlyIntent;
         MultiSubnetFailoverCheckBox.IsChecked = existing.MultiSubnetFailover;
         MonthlyCostBox.Text = existing.MonthlyCostUsd.ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -290,22 +298,42 @@ public partial class AddServerDialog : Window
         };
     }
 
-    private SqlConnectionStringBuilder BuildConnectionBuilder()
+    /// <summary>
+    /// The Test Connection builder before authentication is applied. The Data Source goes through
+    /// <see cref="ServerHostSetting.TcpDataSource"/>, as the collectors' own builder does, so the test does not fall back
+    /// to a named pipe over SMB with this process's Windows credentials (#6352).
+    /// </summary>
+    internal static SqlConnectionStringBuilder BuildBaseConnectionBuilder(
+        string serverName,
+        string databaseName,
+        bool trustServerCertificate,
+        SqlConnectionEncryptOption encrypt,
+        bool readOnlyIntent,
+        bool multiSubnetFailover)
     {
-        var dbName = DatabaseNameBox.Text.Trim();
-        var builder = new SqlConnectionStringBuilder
+        var dbName = databaseName.Trim();
+        return new SqlConnectionStringBuilder
         {
-            DataSource = ServerNameBox.Text.Trim(),
+            DataSource = ServerHostSetting.TcpDataSource(serverName.Trim()),
             InitialCatalog = string.IsNullOrEmpty(dbName) ? "master" : dbName,
             ApplicationName = "PerformanceMonitorLite",
             ConnectTimeout = 10,
-            TrustServerCertificate = TrustCertCheckBox.IsChecked == true,
-            Encrypt = ParseEncryptOption(GetSelectedEncryptMode()),
-            ApplicationIntent = ReadOnlyIntentCheckBox.IsChecked == true
-                ? ApplicationIntent.ReadOnly
-                : ApplicationIntent.ReadWrite,
-            MultiSubnetFailover = MultiSubnetFailoverCheckBox.IsChecked == true
+            TrustServerCertificate = trustServerCertificate,
+            Encrypt = encrypt,
+            ApplicationIntent = readOnlyIntent ? ApplicationIntent.ReadOnly : ApplicationIntent.ReadWrite,
+            MultiSubnetFailover = multiSubnetFailover
         };
+    }
+
+    private SqlConnectionStringBuilder BuildConnectionBuilder()
+    {
+        var builder = BuildBaseConnectionBuilder(
+            ServerNameBox.Text,
+            DatabaseNameBox.Text,
+            TrustCertCheckBox.IsChecked == true,
+            ParseEncryptOption(GetSelectedEncryptMode()),
+            ReadOnlyIntentCheckBox.IsChecked == true,
+            MultiSubnetFailoverCheckBox.IsChecked == true);
 
         // Credential-profile mode: apply the profile's auth via the SAME shared helper, sourcing every
         // field from the profile (its auth type + non-secret fields + secret from Credential Manager).
@@ -539,11 +567,61 @@ public partial class AddServerDialog : Window
             ambientFailure,
             string.IsNullOrEmpty(App.DataDirectory) ? null : System.IO.Path.Combine(App.DataDirectory, "logs"));
 
+    /// <summary>
+    /// #6254: opens the Query Store replica named in the dialog, on the dialog's own connection string with the replica host and
+    /// read-only intent (<see cref="QueryStoreReplicaConnectionTest"/>). Null when the box is empty.
+    /// </summary>
+    private async System.Threading.Tasks.Task<(string Host, string? Error)?> RunReplicaConnectionTestAsync()
+    {
+        if (string.IsNullOrWhiteSpace(QueryStoreReplicaBox.Text))
+        {
+            return null;
+        }
+
+        TestButton.IsEnabled = false;
+        SaveButton.IsEnabled = false;
+        StatusText.Text = "Testing the Query Store replica...";
+        try
+        {
+            return await QueryStoreReplicaConnectionTest.RunAsync(BuildConnectionBuilder().ConnectionString, QueryStoreReplicaBox.Text);
+        }
+        finally
+        {
+            TestButton.IsEnabled = true;
+            SaveButton.IsEnabled = true;
+            StatusText.Text = string.Empty;
+        }
+    }
+
+    /// <summary>#6352: the refusal for the host in the box, or null. A server being edited keeps the host it was saved
+    /// with, so only a NEW or CHANGED host is held to the rule (see <see cref="ServerManager.HostRefusal"/>).</summary>
+    private string? HostBoxRefusal() =>
+        ServerManager.HostRefusal(ServerNameBox.Text, Title == "Edit SQL Server" ? _originalHost : null);
+
+    /// <summary>#6254: the refusal for the Query Store replica in the box, or null. A server being edited keeps the replica it was
+    /// saved with, so only a NEW or CHANGED replica is held to the host rule (see <see cref="ServerManager.ReplicaRefusal"/>).</summary>
+    private string? ReplicaBoxRefusal() =>
+        ServerManager.ReplicaRefusal(QueryStoreReplicaBox.Text, Title == "Edit SQL Server" ? _originalReplica : null);
+
     private async void TestButton_Click(object sender, RoutedEventArgs e)
     {
         if (string.IsNullOrEmpty(ServerNameBox.Text.Trim()))
         {
             StatusText.Text = "Enter a server name first.";
+            return;
+        }
+
+        /* #6352: Test connects with the typed host, so a named-pipe or admin host is refused here too. */
+        if (HostBoxRefusal() is { } testHostRefusal)
+        {
+            StatusText.Text = testHostRefusal;
+            return;
+        }
+
+        /* #6254: the replica is a second host Lite connects to with this server's credentials, held to the same rule. */
+        if (ReplicaBoxRefusal() is { } testReplicaRefusal)
+        {
+            StatusText.Text = testReplicaRefusal;
             return;
         }
 
@@ -554,7 +632,22 @@ public partial class AddServerDialog : Window
             var message = serverVersion != null
                 ? $"Successfully connected to {ServerNameBox.Text.Trim()}!\n\n{serverVersion}"
                 : $"Successfully connected to {ServerNameBox.Text.Trim()}!";
-            MessageBox.Show(message, "Connection Successful", MessageBoxButton.OK, MessageBoxImage.Information);
+
+            /* #6254: a server that names a Query Store replica is tested on both connections, and the two results are shown apart. A
+               replica that does not open is a warning and not a failed test: collection reads Query Store from the primary. */
+            var replicaTest = await RunReplicaConnectionTestAsync();
+            if (replicaTest is { } replicaResult)
+            {
+                MessageBox.Show(
+                    message + "\n\n" + QueryStoreReplicaConnectionTest.Compose(replicaResult),
+                    replicaResult.Error is null ? "Connection Successful" : "Connection Successful, replica not reached",
+                    MessageBoxButton.OK,
+                    replicaResult.Error is null ? MessageBoxImage.Information : MessageBoxImage.Warning);
+            }
+            else
+            {
+                MessageBox.Show(message, "Connection Successful", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
 
             if (AddedServer != null && InteractiveModeSelected)
             {
@@ -594,6 +687,20 @@ public partial class AddServerDialog : Window
         if (string.IsNullOrEmpty(serverName))
         {
             StatusText.Text = "Server name is required.";
+            return;
+        }
+
+        /* #6352: refused before any connect or save: a host that SqlClient would read as a named pipe or an admin
+           connection (np:, lpc:, admin:, \host\pipe, //host). An edit that leaves the host as it was is not held to it. */
+        if (HostBoxRefusal() is { } hostRefusal)
+        {
+            StatusText.Text = hostRefusal;
+            return;
+        }
+
+        if (ReplicaBoxRefusal() is { } replicaRefusal)
+        {
+            StatusText.Text = replicaRefusal;
             return;
         }
 
@@ -768,6 +875,7 @@ public partial class AddServerDialog : Window
                 AddedServer.Description = DescriptionTextBox.Text.Trim();
                 AddedServer.DatabaseName = string.IsNullOrWhiteSpace(DatabaseNameBox.Text) ? null : DatabaseNameBox.Text.Trim();
                 AddedServer.UtilityDatabase = string.IsNullOrWhiteSpace(UtilityDatabaseBox.Text) ? null : UtilityDatabaseBox.Text.Trim();
+                AddedServer.QueryStoreReplica = string.IsNullOrWhiteSpace(QueryStoreReplicaBox.Text) ? null : QueryStoreReplicaBox.Text.Trim();
                 AddedServer.ReadOnlyIntent = ReadOnlyIntentCheckBox.IsChecked == true;
                 AddedServer.MultiSubnetFailover = MultiSubnetFailoverCheckBox.IsChecked == true;
                 if (decimal.TryParse(MonthlyCostBox.Text, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var editCost) && editCost >= 0)
@@ -820,6 +928,7 @@ public partial class AddServerDialog : Window
                     Description = DescriptionTextBox.Text.Trim(),
                     DatabaseName = string.IsNullOrWhiteSpace(DatabaseNameBox.Text) ? null : DatabaseNameBox.Text.Trim(),
                     UtilityDatabase = string.IsNullOrWhiteSpace(UtilityDatabaseBox.Text) ? null : UtilityDatabaseBox.Text.Trim(),
+                    QueryStoreReplica = string.IsNullOrWhiteSpace(QueryStoreReplicaBox.Text) ? null : QueryStoreReplicaBox.Text.Trim(),
                     ReadOnlyIntent = ReadOnlyIntentCheckBox.IsChecked == true,
                     MultiSubnetFailover = MultiSubnetFailoverCheckBox.IsChecked == true,
                     MonthlyCostUsd = monthlyCost,

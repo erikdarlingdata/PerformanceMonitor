@@ -1210,7 +1210,16 @@ public static partial class DarlingCliCommands
             return $"  [FAIL] {serverName}: {probe.Error}";
         }
 
-        return $"  [PASS] {serverName}: {DarlingServerConnector.DescribeProbeFacts(probe)}";
+        var passLine = $"  [PASS] {serverName}: {DarlingServerConnector.DescribeProbeFacts(probe)}";
+        /* #6254: a server with a Query Store replica is tested on both connections, and each is named. A replica that could not be
+           opened is a [WARN], not a [FAIL]: the primary answered, and collection reads Query Store from it. */
+        if (DarlingServerConnector.DescribeQueryStoreReplica(probe) is not { } replicaLine)
+        {
+            return passLine;
+        }
+
+        var replicaPrefix = string.IsNullOrEmpty(probe.QueryStoreReplicaError) ? "         " : "  [WARN] ";
+        return passLine + Environment.NewLine + $"{replicaPrefix}{serverName}: Primary: connected. {replicaLine}";
     }
 
     /// <summary>

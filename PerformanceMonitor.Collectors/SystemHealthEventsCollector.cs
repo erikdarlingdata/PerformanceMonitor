@@ -101,6 +101,8 @@ OPTION(RECOMPILE);
 
 {RingBufferXml.ParseSql}
 
+{RingBufferXml.TruncationSql}
+
 INSERT
     @system_health
 (
@@ -131,7 +133,10 @@ AND   evt.value('(@name)[1]', 'sysname') IN
           N'scheduler_monitor_system_health_ring_buffer_recorded',
           N'wait_info'
       )
-OPTION(RECOMPILE);";
+OPTION(RECOMPILE);
+
+/* #6441: whether SQL Server truncated the buffer's XML, read by ReadAsync after the event rows. */
+{RingBufferXml.TruncationSelectSql}";
 
     public override string Name => "system_health_events";
 
@@ -197,6 +202,10 @@ OPTION(RECOMPILE);";
                 EventXml = reader.IsDBNull(2) ? null : scrub.Xml(reader.GetString(2)),
             });
         }
+
+        /* #6441: SQL Server cuts the ring buffer's XML at about 4 MB and keeps the OLDEST events, so on a busy server
+           this read can store 0 rows while new events exist. The counts are what bands the collector WARNING. */
+        await RingBufferXml.MeasureTrailingTruncationAsync(reader, context, cancellationToken);
 
         return rows;
     }

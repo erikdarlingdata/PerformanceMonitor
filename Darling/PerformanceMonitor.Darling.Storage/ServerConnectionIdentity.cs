@@ -18,11 +18,11 @@ namespace PerformanceMonitor.Darling.Storage;
 /// </summary>
 public readonly record struct ServerConnectionIdentity(
     string Host, int Port, string Engine, string? Database, bool ReadOnlyIntent, string Auth, string? Username,
-    string EncryptMode, bool TrustServerCertificate, bool MultiSubnetFailover)
+    string EncryptMode, bool TrustServerCertificate, bool MultiSubnetFailover, string? QueryStoreReplica)
 {
     /// <summary>The columns every reader selects, in this order, to build an identity from a stored row.</summary>
     public const string StoredColumns = "host, port, engine, database, read_only_intent, auth, username, " +
-        "encrypt_mode, trust_server_certificate, multi_subnet_failover";
+        "encrypt_mode, trust_server_certificate, multi_subnet_failover, query_store_replica";
 
     /// <summary>
     /// The one mapping from a raw stored row: null text becomes the empty string and a null port becomes 0. The text is
@@ -30,14 +30,14 @@ public readonly record struct ServerConnectionIdentity(
     /// </summary>
     public static ServerConnectionIdentity FromStoredColumns(
         string? host, int? port, string? engine, string? database, bool readOnlyIntent, string? auth,
-        string? username, string? encryptMode, bool trust, bool multiSubnet) =>
+        string? username, string? encryptMode, bool trust, bool multiSubnet, string? queryStoreReplica) =>
         new(host ?? "", port ?? 0, engine ?? "", database ?? "", readOnlyIntent, auth ?? "", username ?? "",
-            encryptMode ?? "", trust, multiSubnet);
+            encryptMode ?? "", trust, multiSubnet, QueryStoreReplicaSetting.Normalize(queryStoreReplica) ?? "");
 
     /// <summary>
     /// True when <paramref name="b"/> connects differently from <paramref name="a"/>. Host, database and username
-    /// compare ordinally, the port compares as a number, authentication, encrypt mode and engine ignore case, and the
-    /// flags compare as stored.
+    /// compare ordinally, the port compares as a number, authentication, encrypt mode and engine ignore case, the
+    /// flags compare as stored, and the Query Store replica (#6254) compares ordinally after trimming, empty and null alike.
     /// </summary>
     public static bool Differ(ServerConnectionIdentity a, ServerConnectionIdentity b) =>
         !string.Equals(a.Host, b.Host, StringComparison.Ordinal)
@@ -49,5 +49,6 @@ public readonly record struct ServerConnectionIdentity(
         || !string.Equals(a.Username, b.Username, StringComparison.Ordinal)
         || !string.Equals(a.EncryptMode, b.EncryptMode, StringComparison.OrdinalIgnoreCase)
         || a.TrustServerCertificate != b.TrustServerCertificate
-        || a.MultiSubnetFailover != b.MultiSubnetFailover;
+        || a.MultiSubnetFailover != b.MultiSubnetFailover
+        || QueryStoreReplicaSetting.Differ(a.QueryStoreReplica, b.QueryStoreReplica);
 }

@@ -111,6 +111,44 @@ SELECT CONVERT(nvarchar(max), @ring_xml);";
         Assert.Equal(expectedAttribute, (string?)XElement.Parse(xml!).Element("e")!.Attribute("a"));
     }
 
+    /// <summary>#6441: the truncation fragment, run by SQL Server over a buffer shaped like a cut one (the attributes SQL
+    /// Server writes, fewer events in the XML than <c>eventCount</c>) and over a whole one.</summary>
+    [Theory]
+    [InlineData("<RingBufferTarget truncated=\"1\" eventCount=\"5\"><event name=\"a\" timestamp=\"2026-01-01T00:00:00.000Z\"/><event name=\"b\" timestamp=\"2026-01-02T00:00:00.000Z\"/></RingBufferTarget>", true, 3L)]
+    [InlineData("<RingBufferTarget truncated=\"0\" eventCount=\"2\"><event name=\"a\" timestamp=\"2026-01-01T00:00:00.000Z\"/><event name=\"b\" timestamp=\"2026-01-02T00:00:00.000Z\"/></RingBufferTarget>", false, 0L)]
+    public async Task TruncationSql_ReadsTheCut_TheHiddenCount_AndTheNewestVisibleEvent(string buffer, bool truncated, long hidden)
+    {
+        var connectionString = ConnectionString("pm-6441-truncation-live-test");
+        Assert.SkipWhen(connectionString is null, SkipMessage);
+        var ct = TestContext.Current.CancellationToken;
+
+        var sql = RingBufferXml.DeclareSql + @"
+SET @ring_text = @text;
+SET @ring_session = N'system_health';
+" + RingBufferXml.ParseSql + @"
+" + RingBufferXml.TruncationSql + @"
+" + RingBufferXml.TruncationSelectSql;
+
+        await using var connection = new SqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await using var command = new SqlCommand(sql, connection) { CommandTimeout = 60 };
+        command.Parameters.Add("@text", System.Data.SqlDbType.NVarChar, -1).Value = buffer;
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        Assert.True(await reader.ReadAsync(ct));
+
+        Assert.Equal(truncated, reader.GetBoolean(0));
+        Assert.Equal(hidden, reader.GetInt64(1));
+        if (truncated)
+        {
+            /* The newest visible event is 2026-01-02, so its age is at least the time since then. */
+            Assert.True(reader.GetInt64(2) > (long)(DateTime.UtcNow - new DateTime(2026, 1, 2, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds - 60);
+        }
+        else
+        {
+            Assert.True(reader.IsDBNull(2));
+        }
+    }
+
     [Fact]
     public async Task ParseSql_NullText_ReadsAsNoBufferAndDoesNotThrow()
     {

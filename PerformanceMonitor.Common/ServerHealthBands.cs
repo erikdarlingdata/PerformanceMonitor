@@ -2388,6 +2388,15 @@ namespace PerformanceMonitor.Common
                 return Warning;
             }
 
+            /* #6441. A ring-buffer read whose XML SQL Server truncated still records SUCCESS (often with 0 rows,
+               because the cut drops the NEWEST events and the watermark filters the rest), so the run's counts are
+               the only record that the read is blind. Same rule as the partial-database note: the NEWEST run's
+               note, read only where the ladder would otherwise say HEALTHY. */
+            if (RingBufferTruncationNote.TryParse(latestRunNote, out _, out _))
+            {
+                return Warning;
+            }
+
             return Healthy;
         }
 
@@ -2538,22 +2547,46 @@ namespace PerformanceMonitor.Common
         /// whether the emptiness is surprising, and a false alarm on a legitimately empty install is
         /// worse than a missing hint. The fleet rollup passes nothing at all, by design.
         /// </param>
+        /// <param name="readSource">
+        /// #6254: where the collector's newest run read its rows from, for a Query Store run that read a replica
+        /// (<c>replica 12, primary 2</c>). Null or blank, the default and every server with the setting off, adds
+        /// nothing, so the note is the one it was before.
+        /// </param>
         public static string FormatCollectionNote(
             string? lastNote,
             long noteCount,
             long totalRuns,
             string? collectorName = null,
             bool targetHasUserDatabases = false,
-            string? recoveredNote = null)
+            string? recoveredNote = null,
+            string? readSource = null)
         {
             /* #5646: the recovery sentence rides beside the run note, in the same column on every surface. */
             var runNote = FormatRunNote(lastNote, noteCount, totalRuns, collectorName, targetHasUserDatabases);
-            if (string.IsNullOrEmpty(recoveredNote))
+            var note = string.IsNullOrEmpty(recoveredNote)
+                ? runNote
+                : runNote.Length == 0 ? recoveredNote : recoveredNote + "; " + runNote;
+            return AppendReadSource(note, readSource);
+        }
+
+        /// <summary>
+        /// #6254: the per-run Collection Log grids' message cell. A run's own message (its error, or the note it left) with the run's
+        /// <c>read_source</c> after it, worded as the health views word it (<c>read source: replica 12, primary 2</c>). A run with no
+        /// read source (every run of a server with the replica setting off, every collector but Query Store, every run stored before the
+        /// column existed) returns the message exactly as it was, blank for none.
+        /// </summary>
+        public static string FormatRunMessage(string? message, string? readSource) =>
+            AppendReadSource(message ?? string.Empty, readSource);
+
+        private static string AppendReadSource(string note, string? readSource)
+        {
+            if (string.IsNullOrWhiteSpace(readSource))
             {
-                return runNote;
+                return note;
             }
 
-            return runNote.Length == 0 ? recoveredNote : recoveredNote + "; " + runNote;
+            var source = "read source: " + readSource.Trim();
+            return note.Length == 0 ? source : note + "; " + source;
         }
 
         private static string FormatRunNote(
@@ -2573,6 +2606,14 @@ namespace PerformanceMonitor.Common
                labelled as the latest run's and carry no run-count qualifier at all. */
             if (HasMeasurements(lastNote))
             {
+                /* #6441: a truncated ring buffer bands WARNING, and the counts alone do not say why. */
+                if (RingBufferTruncationNote.Describe(lastNote) is { } truncation)
+                {
+                    return noteCount >= totalRuns && totalRuns > 0
+                        ? "latest run: " + truncation + " (" + lastNote + ")"
+                        : string.Format(CultureInfo.InvariantCulture, "latest noted run: {0} ({1}; {2} of {3} runs)", truncation, lastNote, noteCount, totalRuns);
+                }
+
                 /* The note is the newest run that CARRIED one, and some measurers write counts only when
                    something happened. Only when every run carried it is it the newest run's. */
                 return noteCount >= totalRuns && totalRuns > 0

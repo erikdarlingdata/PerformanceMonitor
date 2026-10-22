@@ -554,6 +554,34 @@ AND   event_xml IS NOT NULL";
     }
 
     /// <summary>
+    /// #6441: the note the collector's NEWEST run left, when that run succeeded (null otherwise). A truncated ring buffer
+    /// is recorded only there (<see cref="PerformanceMonitor.Common.RingBufferTruncationNote"/>): the run is SUCCESS,
+    /// usually with 0 rows. Darling twin: <c>DarlingSystemHealthReader.GetLatestRunNoteAsync</c>.
+    /// </summary>
+    public async Task<string?> GetLatestCollectorRunNoteAsync(int serverId, string collectorName)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        command.CommandText = @"
+SELECT CASE WHEN cl.status = 'SUCCESS' THEN cl.error_message END
+FROM v_collection_log AS cl
+WHERE cl.server_id = $1
+AND   cl.collector_name = $2
+AND   cl.collection_time =
+      (
+          SELECT MAX(n.collection_time)
+          FROM v_collection_log AS n
+          WHERE n.server_id = $1
+          AND   n.collector_name = $2
+      )";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = collectorName });
+        return await command.ExecuteScalarAsync() as string;
+    }
+
+    /// <summary>
     /// How many raw events of one type the window held BEFORE any shred or significance gate - the count that
     /// lets a zero-row answer say "captured and gated out" (healthy) rather than "nothing here" (#3541 A12).
     /// <para>Run only on the empty path, and over the SAME window arithmetic the typed readers use

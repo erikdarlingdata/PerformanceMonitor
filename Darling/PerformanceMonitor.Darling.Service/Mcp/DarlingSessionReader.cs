@@ -143,51 +143,11 @@ internal static class DarlingSessionReader
     /* ─────────────────────────── active queries (query snapshots over the window) ─────────────────────────── */
 
     /// <summary>
-    /// The captured query snapshots over the window — the viewer's <c>LatestQuerySnapshotsSql</c> projected
-    /// to the columns Lite's get_active_queries surfaces, from the base <c>query_snapshots</c> table (the
-    /// viewer reads base here too). granted_query_memory_gb is <c>numeric(18,2)</c> → double precision.
-    /// $1 server_id, $2/$3 window (naive UTC), $4 row cap, $5 database filter (<c>text[]</c>, NULL = all; #5245), $6 blocking_only,
-    /// $7 wait_type filter (NULL = all; #5235).
-    ///
-    /// <para><b>The database predicate is the list form (#5245).</b> <see cref="DatabaseFilter.Clause"/> on <c>w.database_name</c>
-    /// at $5, so one name and several names are the same statement text; <see cref="DatabaseFilter.Parameter"/> binds the set.
-    /// This read has ONE tier (the base <c>query_snapshots</c> table), so the clause is in the one place the filter belongs: the
-    /// population, which also feeds <c>blocker_in_population</c>, so a head blocker outside the set stays off the page.</para>
-    ///
-    /// <para><b>Every filter is part of the query (#3541 A13).</b> This read used to return the whole window
-    /// unfiltered and unbounded; the tool then applied <c>database_name</c> and <c>blocking_only</c> in C#,
-    /// took <c>limit</c>, and published the pre-filter row count as <c>total_snapshots</c> beside the page —
-    /// so the "total" was of a different population from the rows, and a page could be empty while the
-    /// window held matches. Now the filters are predicates on the same statement, the population count is
-    /// <c>COUNT(*) OVER ()</c> on the FILTERED rows above the parameterised <c>LIMIT</c> (the #3613 idiom), and
-    /// the cap is the caller's, fetched at <c>limit + 1</c> so truncation is observed rather than inferred.</para>
-    ///
-    /// <para><b>Head blockers are never stripped (#3541 A13).</b> The WAITFOR trim exists to drop the idle
-    /// shells a monitoring session leaves in dm_exec_requests, but the classic head blocker IS a session
-    /// sitting in <c>WAITFOR</c> with an open transaction — and this read dropped it while its victims'
-    /// <c>blocking_session_id</c> pointed at the session that was no longer on the page. A row is kept
-    /// whatever its text when some row in the SAME capture names it as its blocker. Same capture, not same
-    /// window: session ids are reused, so "any row in the window points at this session id" would resurrect
-    /// unrelated sessions from other snapshots, which is what the old C# arm did.</para>
-    ///
-    /// <para><b>The two blocker-presence flags.</b> <c>blocker_in_capture</c>: the victim's blocker had a row
-    /// in the same capture at all — FALSE is the other classic head blocker, a session idle in an open
-    /// transaction, which sys.dm_exec_requests never lists and so was never captured; the tool says so on the
-    /// row rather than leaving a dangling id. <c>blocker_in_population</c>: the blocker also passes the
-    /// caller's own filters (a head blocker in another database under a <c>database_name</c> filter does
-    /// not) — the caller asked for that database, so the row is honoured and the victim says its blocker was
-    /// filtered. A blocker that passes both but falls past the page is detected by the tool, which has the
-    /// page.</para>
-    ///
-    /// <para><b>The wait_type filter (#5235)</b> is a population predicate beside <c>database_name</c>, so
-    /// <c>population_count</c> and <c>LIMIT</c> see it and it ANDs with the other filters. It matches the request's
-    /// OWN wait at the capture (<c>query_snapshots.wait_type</c>; a NULL wait never matches), by exact name with
-    /// the case ignored: one equality, so a <c>%</c> or <c>_</c> in the input is literal. Case is ignored because a
-    /// case miss would read as a true <c>empty</c>. The stored value may carry the trailing space an older
-    /// collector wrote, so the match takes the name with and without one. A head blocker on another
-    /// wait leaves the page, and its victims say <c>blocker_not_shown = filtered</c> (the database filter's rule).</para>
+    /// The window's population: <c>window_rows</c> (the server's snapshots in $2..$3), the head blockers, and <c>population</c> (the
+    /// WAITFOR trim and the database, blocking_only and wait_type filters at $5, $6 and $7). Shared by the row read below and the
+    /// snapshot list below (#6302), so a snapshot the picker lists holds exactly the rows the table then shows.
     /// </summary>
-    public static readonly string ActiveQueriesSql = $$"""
+    private static readonly string ActiveQueriesPopulationCtes = $$"""
         WITH window_rows AS (
             SELECT
                 collection_time,
@@ -249,6 +209,55 @@ internal static class DarlingSessionReader
             AND   (NOT $6::boolean OR w.blocking_session_id > 0 OR h.session_id IS NOT NULL)
             AND   ($7::text IS NULL OR upper(w.wait_type) IN (upper($7), upper($7) || ' '))
         )
+        """;
+
+    /// <summary>
+    /// The captured query snapshots over the window — the viewer's <c>LatestQuerySnapshotsSql</c> projected
+    /// to the columns Lite's get_active_queries surfaces, from the base <c>query_snapshots</c> table (the
+    /// viewer reads base here too). granted_query_memory_gb is <c>numeric(18,2)</c> → double precision.
+    /// $1 server_id, $2/$3 window (naive UTC), $4 row cap, $5 database filter (<c>text[]</c>, NULL = all; #5245), $6 blocking_only,
+    /// $7 wait_type filter (NULL = all; #5235).
+    ///
+    /// <para><b>The database predicate is the list form (#5245).</b> <see cref="DatabaseFilter.Clause"/> on <c>w.database_name</c>
+    /// at $5, so one name and several names are the same statement text; <see cref="DatabaseFilter.Parameter"/> binds the set.
+    /// This read has ONE tier (the base <c>query_snapshots</c> table), so the clause is in the one place the filter belongs: the
+    /// population, which also feeds <c>blocker_in_population</c>, so a head blocker outside the set stays off the page.</para>
+    ///
+    /// <para><b>Every filter is part of the query (#3541 A13).</b> This read used to return the whole window
+    /// unfiltered and unbounded; the tool then applied <c>database_name</c> and <c>blocking_only</c> in C#,
+    /// took <c>limit</c>, and published the pre-filter row count as <c>total_snapshots</c> beside the page —
+    /// so the "total" was of a different population from the rows, and a page could be empty while the
+    /// window held matches. Now the filters are predicates on the same statement, the population count is
+    /// <c>COUNT(*) OVER ()</c> on the FILTERED rows above the parameterised <c>LIMIT</c> (the #3613 idiom), and
+    /// the cap is the caller's, fetched at <c>limit + 1</c> so truncation is observed rather than inferred.</para>
+    ///
+    /// <para><b>Head blockers are never stripped (#3541 A13).</b> The WAITFOR trim exists to drop the idle
+    /// shells a monitoring session leaves in dm_exec_requests, but the classic head blocker IS a session
+    /// sitting in <c>WAITFOR</c> with an open transaction — and this read dropped it while its victims'
+    /// <c>blocking_session_id</c> pointed at the session that was no longer on the page. A row is kept
+    /// whatever its text when some row in the SAME capture names it as its blocker. Same capture, not same
+    /// window: session ids are reused, so "any row in the window points at this session id" would resurrect
+    /// unrelated sessions from other snapshots, which is what the old C# arm did.</para>
+    ///
+    /// <para><b>The two blocker-presence flags.</b> <c>blocker_in_capture</c>: the victim's blocker had a row
+    /// in the same capture at all — FALSE is the other classic head blocker, a session idle in an open
+    /// transaction, which sys.dm_exec_requests never lists and so was never captured; the tool says so on the
+    /// row rather than leaving a dangling id. <c>blocker_in_population</c>: the blocker also passes the
+    /// caller's own filters (a head blocker in another database under a <c>database_name</c> filter does
+    /// not) — the caller asked for that database, so the row is honoured and the victim says its blocker was
+    /// filtered. A blocker that passes both but falls past the page is detected by the tool, which has the
+    /// page.</para>
+    ///
+    /// <para><b>The wait_type filter (#5235)</b> is a population predicate beside <c>database_name</c>, so
+    /// <c>population_count</c> and <c>LIMIT</c> see it and it ANDs with the other filters. It matches the request's
+    /// OWN wait at the capture (<c>query_snapshots.wait_type</c>; a NULL wait never matches), by exact name with
+    /// the case ignored: one equality, so a <c>%</c> or <c>_</c> in the input is literal. Case is ignored because a
+    /// case miss would read as a true <c>empty</c>. The stored value may carry the trailing space an older
+    /// collector wrote, so the match takes the name with and without one. A head blocker on another
+    /// wait leaves the page, and its victims say <c>blocker_not_shown = filtered</c> (the database filter's rule).</para>
+    /// </summary>
+    public static readonly string ActiveQueriesSql = $$"""
+        {{ActiveQueriesPopulationCtes}}
         SELECT
             p.collection_time,
             p.session_id,
@@ -374,6 +383,67 @@ internal static class DarlingSessionReader
         }
 
         return new ActiveQueriesPage(rows, populationCount);
+    }
+
+    /// <summary>
+    /// The snapshot list (#6302): one row per distinct <c>collection_time</c> in the population (the same one the row read above sees,
+    /// so the WAITFOR trim and the database, blocking_only and wait_type filters apply), newest first, with the rows each holds.
+    /// A snapshot is a capture instant, and the row read's cap is on ROWS, not captures: a busy hour's 50-row page can hold two
+    /// snapshots and hide the rest, so the web's picker cannot be built from that page. $4 caps the snapshots; <c>snapshot_count</c>
+    /// is the population's whole count above the cap (the #3613 idiom).
+    /// </summary>
+    public static readonly string ActiveQuerySnapshotsSql = $$"""
+        {{ActiveQueriesPopulationCtes}}
+        , snapshots AS (
+            SELECT
+                collection_time,
+                COUNT(*) AS row_count
+            FROM population
+            GROUP BY collection_time
+        )
+        SELECT
+            s.collection_time,
+            s.row_count,
+            COUNT(*) OVER () AS snapshot_count
+        FROM snapshots AS s
+        ORDER BY s.collection_time DESC
+        LIMIT $4
+        """;
+
+    /// <summary>One stored snapshot: its capture instant (naive UTC) and the rows it holds under the filters.</summary>
+    public sealed record ActiveQuerySnapshot(DateTime CollectionTime, long RowCount);
+
+    /// <summary>The newest <paramref name="cap"/> snapshots and the filtered population's whole snapshot count.</summary>
+    public sealed record ActiveQuerySnapshotsPage(List<ActiveQuerySnapshot> Snapshots, long SnapshotCount);
+
+    /// <summary>The snapshot list over the window (#6302); callers detecting truncation pass <c>cap + 1</c>.</summary>
+    internal static Task<ActiveQuerySnapshotsPage> GetActiveQuerySnapshotsAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap,
+        DatabaseFilter databases, bool blockingOnly = false, string? waitType = null, CancellationToken cancellationToken = default) =>
+        GetActiveQuerySnapshotsAsync(postgres, serverId, startUtc, endUtc, cap, databases, blockingOnly, waitType, tags: null, cancellationToken);
+
+    /// <summary>The same list narrowed to a query tag (#5984), as the row read is: the tag sits in the population.</summary>
+    internal static async Task<ActiveQuerySnapshotsPage> GetActiveQuerySnapshotsAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap,
+        DatabaseFilter databases, bool blockingOnly, string? waitType, QueryTagFilter? tags, CancellationToken cancellationToken)
+    {
+        var snapshots = new List<ActiveQuerySnapshot>();
+        long count = 0;
+        await using var command = postgres.CreateCommand(QueryTagReadJoin.Apply(ActiveQuerySnapshotsSql, serverId, tags));
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
+        DarlingMcpReadParameters.AddInt(command, cap);
+        command.Parameters.Add(databases.Parameter());
+        DarlingMcpReadParameters.AddBoolean(command, blockingOnly);
+        DarlingMcpReadParameters.AddNullableText(command, waitType);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            snapshots.Add(new ActiveQuerySnapshot(reader.GetDateTime(0), reader.GetInt64(1)));
+            count = reader.GetInt64(2);
+        }
+
+        return new ActiveQuerySnapshotsPage(snapshots, count);
     }
 
     /* ─────────────────────────── waiting tasks (base table over the window) ─────────────────────────── */

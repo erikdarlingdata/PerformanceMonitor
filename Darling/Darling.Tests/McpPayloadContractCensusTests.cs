@@ -1547,6 +1547,8 @@ public sealed class McpPayloadContractCensusTests
             "#5234: get_query_store_query_history's per-interval points[] is capped at MaxPoints (150) and a byte budget, keeping the NEWEST points, observed off the fetched row count; plans[] is capped separately (plans_truncated) — two bounds in one payload, the second spelled <bound>_truncated"),
         ("plans_truncated", ["DarlingMcpQueryStoreHistoryTools.cs"],
             "#5234: get_query_store_query_history's per-plan plans[] roll-up is capped at MaxPlans (20), the longest by total duration, beside the per-interval points[] bound (points_truncated) — two bounds in one payload, the second spelled <bound>_truncated"),
+        ("known_patterns_truncated", ["DarlingMcpAlertTools.cs"],
+            "#6334: get_alert_history's per-row known_patterns[] (the operator's known-pattern entries matching that alert) is capped at MaxPerAlertRow (5), the rest left off; observed off the matched count, per row, beside the page's own truncated — two bounds in one payload, the second spelled <bound>_truncated"),
         ("scan_truncated", ["DarlingMcpBlockingTools.cs", "DarlingMcpQueryTagRollupTools.cs"],
             "the dedup_key fingerprint scan's ceiling (FingerprintScanCeiling) and #5983's get_resource_use_by_tag deadlock-graph scan ceiling (DeadlockScanCeiling), observed off a ceiling + 1 fetch, beside the page's own truncated — two bounds in one payload, the second spelled <bound>_truncated"),
         ("processes_truncated", ["DarlingMcpBlockingTools.cs"],

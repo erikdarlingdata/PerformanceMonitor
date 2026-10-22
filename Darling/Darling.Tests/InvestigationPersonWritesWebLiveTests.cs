@@ -344,8 +344,7 @@ FROM config.investigation_journal WHERE event = 'note_written'", ct));
             {
                 var answer = await Send("PUT", path, Json, text);
                 Assert.Equal(403, answer.Status);
-                Assert.Equal(DarlingWebEndpoints.InvestigationWriteRefusedMessage, (string)answer.Body!["error"]!);
-                Assert.Contains("admin role", (string)answer.Body["error"]!, StringComparison.Ordinal);
+                Assert.Equal(DarlingWebEndpoints.InvestigationWriteRefusedMessage(false), (string)answer.Body!["error"]!);
             }
 
             Assert.Equal("open", await ScalarAsync(owner, $"SELECT state FROM config.investigation_requests WHERE request_id = '{open}'", ct));

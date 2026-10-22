@@ -158,6 +158,8 @@ public sealed class DarlingMcpHealthParserTools
 
             var notice = await NoticeAsync(postgres, c, hours_back, EarliestOf(c.Rows.Select(r => r.EventTime)), emptyAnswer: false, logger, cancellationToken);
             var buckets = BucketCpu(c.Rows, bucketMinutes);
+            /* The corruption and contention charts (#6295): the Viewer's first five sick spinlock types, oldest snapshot first. */
+            var spinlockTypes = SickSpinlockTypes(c.Rows);
 
             return Finish(notice, JsonSerializer.Serialize(new
             {
@@ -170,6 +172,7 @@ public sealed class DarlingMcpHealthParserTools
                 last_captured_at = Stamp(c.LastCapturedAt),
                 bucket_minutes = bucketMinutes,
                 snapshots = c.Rows.Count,
+                sick_spinlock_types = spinlockTypes,
                 /* Every bucket is shown, so the page's row-limit notice (total_entries above shown) never fires on this answer. */
                 total_entries = buckets.Count,
                 shown = buckets.Count,
@@ -178,15 +181,49 @@ public sealed class DarlingMcpHealthParserTools
                     event_time = b.Start.ToString("o"),
                     system_cpu_utilization = b.SystemCpu,
                     sql_cpu_utilization = b.SqlCpu,
-                    snapshots = b.Snapshots
+                    snapshots = b.Snapshots,
+                    /* Counters (#6295): the largest value any snapshot in the bucket carried, so one bad page is never averaged
+                       away. null when no snapshot in the bucket carried the attribute (a gap, never a made-up 0); 0 is a real 0. */
+                    bad_pages_detected = b.BadPagesDetected,
+                    interval_dump_requests = b.IntervalDumpRequests,
+                    is_access_violation_occurred = b.IsAccessViolationOccurred,
+                    write_access_violation_count = b.WriteAccessViolationCount,
+                    non_yielding_tasks_reported = b.NonYieldingTasksReported,
+                    latch_warnings = b.LatchWarnings,
+                    sick_spinlocks = b.SickSpinlocks.Where(x => spinlockTypes.Contains(x.Key))
+                        .Select(x => new { type = x.Key, backoffs = x.Value })
                 })
             }, McpHelpers.JsonOptions));
         }
         catch (Exception ex) when (ex is not OperationCanceledException) { return McpHelpers.FormatError("get_health_parser_system_health", ex); }
     }
 
-    /// <summary>One bucket of the CPU chart: where it starts and the mean of each reading in it.</summary>
-    internal readonly record struct CpuBucket(DateTime Start, double? SystemCpu, double? SqlCpu, int Snapshots);
+    /// <summary>One bucket of the chart read: where it starts, the mean of each CPU reading in it, and (#6295) the largest value of
+    /// each Corruption / Contention counter and of each sick spinlock type's backoffs. A counter no snapshot in the bucket
+    /// carried is null.</summary>
+    internal readonly record struct CpuBucket(
+        DateTime Start, double? SystemCpu, double? SqlCpu, int Snapshots,
+        long? BadPagesDetected = null, long? IntervalDumpRequests = null, long? IsAccessViolationOccurred = null,
+        long? WriteAccessViolationCount = null, long? NonYieldingTasksReported = null, long? LatchWarnings = null,
+        IReadOnlyDictionary<string, long>? SickSpinlocksOrNull = null)
+    {
+        public IReadOnlyDictionary<string, long> SickSpinlocks => SickSpinlocksOrNull ?? new Dictionary<string, long>();
+    }
+
+    /// <summary>SQL Server writes "none" into sickSpinlockType when no spinlock is sick. That is the healthy answer, not a spinlock
+    /// type: the web chart leaves it out (the Viewer would draw a flat line named "none").</summary>
+    private static bool IsSickSpinlock(string? type) =>
+        !string.IsNullOrEmpty(type) && !string.Equals(type, "none", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The sick spinlock types the Viewer's Sick Spinlocks chart draws: the first five distinct names, taking the snapshots
+    /// oldest first. The chart read names them once so the page draws the same series in the same order.</summary>
+    internal static List<string> SickSpinlockTypes(IEnumerable<SystemHealthRecord> rows) =>
+        rows.Where(r => r.EventTime.HasValue && IsSickSpinlock(r.SickSpinlockType))
+            .OrderBy(r => r.EventTime)
+            .Select(r => r.SickSpinlockType!)
+            .Distinct()
+            .Take(5)
+            .ToList();
 
     /// <summary>Groups the snapshots into <paramref name="bucketMinutes"/>-wide buckets aligned to the UTC epoch (every ladder
     /// width divides a day, so none straddles midnight) and averages each CPU reading over the snapshots that carry it.
@@ -199,6 +236,11 @@ public sealed class DarlingMcpHealthParserTools
             var present = values.Where(v => v.HasValue).Select(v => (double)v!.Value).ToList();
             return present.Count == 0 ? null : Math.Round(present.Average(), 1);
         }
+        static long? Peak(IEnumerable<long?> values)
+        {
+            var present = values.Where(v => v.HasValue).Select(v => v!.Value).ToList();
+            return present.Count == 0 ? null : present.Max();
+        }
 
         return rows
             .Where(r => r.EventTime.HasValue)
@@ -208,7 +250,17 @@ public sealed class DarlingMcpHealthParserTools
                 new DateTime(g.Key * width, DateTimeKind.Utc),
                 Mean(g.Select(r => r.SystemCpuUtilization)),
                 Mean(g.Select(r => r.SqlCpuUtilization)),
-                g.Count()))
+                g.Count(),
+                Peak(g.Select(r => r.BadPagesDetected)),
+                Peak(g.Select(r => r.IntervalDumpRequests)),
+                Peak(g.Select(r => r.IsAccessViolationOccurred)),
+                Peak(g.Select(r => r.WriteAccessViolationCount)),
+                Peak(g.Select(r => r.NonYieldingTasksReported)),
+                Peak(g.Select(r => r.LatchWarnings)),
+                /* The Viewer plots a sick spinlock's backoffs, or 1 when the snapshot names the type without a count. */
+                g.Where(r => IsSickSpinlock(r.SickSpinlockType))
+                    .GroupBy(r => r.SickSpinlockType!)
+                    .ToDictionary(t => t.Key, t => t.Max(r => r.SpinlockBackoffs ?? 1))))
             .ToList();
     }
 
@@ -834,6 +886,18 @@ public sealed class DarlingMcpHealthParserTools
            index walk stops at its first row, and the stamp it returns is THIS type's newest capture rather
            than the server-level witness standing in for it. */
         var lastOfType = await DarlingSystemHealthReader.GetLastCaptureOfTypeAsync(postgres, c.ServerId, eventType, cancellationToken);
+
+        /* #6441, ahead of every rung: when the newest collection run found the ring buffer truncated, the read is blind
+           to the newest events, so none of "healthy", "quiet" or "never fired" is true. */
+        if (RingBufferTruncationNote.Describe(
+                await DarlingSystemHealthReader.GetLatestRunNoteAsync(postgres, c.ServerId, SystemHealthCollectorName, cancellationToken)) is { } truncation)
+        {
+            return WitnessStatus(
+                "unavailable",
+                RingBufferTruncationNote.HealthParserMessage(eventType, c.DisplayName, hoursBack, truncation),
+                sourceObserved: true, c.LastCapturedAt, lastCapturedOfTypeAt: lastOfType, eventsInWindow: c.RawEventCount);
+        }
+
         if (c.RawEventCount > 0)
         {
             var notice = await NoticeAsync(postgres, c, hoursBack, null, emptyAnswer: true, logger, cancellationToken);

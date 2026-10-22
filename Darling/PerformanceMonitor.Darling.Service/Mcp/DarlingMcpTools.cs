@@ -1463,6 +1463,100 @@ public sealed class DarlingMcpTools
         }
     }
 
+    [McpServerTool(Name = "unmute_analysis_finding"), Description("Write: removes the mute that mute_analysis_finding registered for story_path_hash, in the scope of server_name (all servers when omitted), so the pattern appears in later analysis runs again. status: unmuted (removed is at least 1), not_muted (that scope held no mute; nothing changed), error (the delete failed; the mute may still be in force). <<GUIDE>> Undoes a mute. Served only when the operator sets mcp.allowWrites, with mute_analysis_finding. A mute registered for all servers is not removed by naming one server, and a per-server mute is not removed by omitting server_name: pass the same server_name (or none) the mute used. removed is the number of registry rows deleted; previous lists them (mute_id, story_path, reason, muted_utc), and undo is the mute_analysis_finding call that puts the mute back (the new row gets a new mute_id and date). Findings the pattern would have produced while it was muted were never stored, so nothing comes back until the next analysis pass finds the pattern again. server_name resolves the way mute_analysis_finding resolves it: exact, else partial, a name matching several servers answers \"ambiguous\" with the candidates and one matching none answers \"not_found\"; either way nothing changes. An error status can be partial: removed counts the rows that were deleted before the failure, and the rest of the mute is still in force.")]
+    public static async Task<string> UnmuteAnalysisFinding(
+        DarlingAnalysisService analysisService,
+        NpgsqlDataSource postgres,
+        [Description("The story_path_hash of the muted pattern.")] string story_path_hash,
+        [Description("Server name. If omitted, removes the all-servers mute.")] string? server_name = null)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(story_path_hash))
+            {
+                return McpHelpers.Refusal("story_path_hash", "story_path_hash is required.");
+            }
+
+            /* #6383: the scope resolves with the rule mute_analysis_finding uses (#4734), so the name a mute was
+               registered under unmutes under the same spelling. A tie or a miss answers before anything is deleted. */
+            var scope = MuteScope.All;
+            string? kind = null;
+            if (server_name != null)
+            {
+                var (registry, fault) = await DarlingServerResolver.LoadEnabledOrFaultAsync(postgres);
+                if (fault != null) return fault;
+
+                scope = ResolveMuteScope(registry, server_name, story_path_hash, forUnmute: true);
+                if (scope.Answer != null) return scope.Answer;
+
+                kind = await ReadRegistrationKindAsync(postgres, scope.ServerId!.Value);
+            }
+
+            /* The delete is the viewer's own (PgFindingStore.UnmuteStoryAsync, by mute_id): one statement, no second
+               copy. It logs and swallows a store failure, so a refused delete is counted and reported as `error`,
+               never as `not_muted`. */
+            var write = await analysisService.UnmuteFindingAsync(scope.ServerId, story_path_hash);
+            var removed = write.Removed.Count;
+            var previous = write.Removed.Select(r => new
+            {
+                mute_id = r.MuteId,
+                story_path = r.StoryPath,
+                reason = r.Reason,
+                muted_utc = r.MutedDate,
+            }).ToList();
+
+            /* The mute call that puts it back: the same scope and, when a removed row carried one, its reason. */
+            var undoArguments = new Dictionary<string, object?> { ["story_path_hash"] = story_path_hash };
+            if (server_name != null)
+            {
+                undoArguments["server_name"] = scope.Label;
+            }
+
+            var earlierReason = write.Removed.Select(r => r.Reason).FirstOrDefault(r => !string.IsNullOrEmpty(r));
+            if (earlierReason != null)
+            {
+                undoArguments["reason"] = earlierReason;
+            }
+
+            var undo = removed > 0 ? (object)new { tool = "mute_analysis_finding", arguments = undoArguments } : "None needed: nothing was removed.";
+
+            if (write.Failed > 0)
+            {
+                return JsonSerializer.Serialize(new
+                {
+                    status = "error",
+                    message = removed == 0
+                        ? "The unmute could not be written to the monitoring store (see the service log); the mute is still in force. If the log says permission denied, the mcp role lacks DELETE on config.analysis_muted: re-run provision-roles.sql, or restart a managed store so its roles are re-provisioned."
+                        : $"The unmute removed {removed} mute row(s) and then failed on {write.Failed} more (see the service log); the rest of the mute is still in force. Call again to retry.",
+                    story_path_hash,
+                    server = scope.Label,
+                    kind,
+                    removed,
+                    previous,
+                    undo,
+                }, McpHelpers.JsonOptions);
+            }
+
+            return JsonSerializer.Serialize(new
+            {
+                status = removed > 0 ? "unmuted" : "not_muted",
+                story_path_hash,
+                server = scope.Label,
+                kind,
+                removed,
+                previous,
+                undo,
+                note = removed > 0
+                    ? $"Removed {removed} mute row(s) for this scope. The pattern is no longer skipped and is reported again when a later analysis pass finds it."
+                    : "This scope holds no mute for this story_path_hash, so nothing changed. A mute registered for all servers is removed by omitting server_name; a per-server mute by naming that server.",
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex)
+        {
+            return McpHelpers.FormatError("unmute_analysis_finding", ex);
+        }
+    }
+
     /// <summary>
     /// The definition row's database name and read-only intent for one server (#4734): the two facts
     /// <see cref="PerformanceMonitor.Common.ServerIdHelper.BuildStorageName"/> suffixes the storage name for, read from
@@ -1527,7 +1621,8 @@ WHERE d.server_id = $1";
     internal static MuteScope ResolveMuteScope(
         IReadOnlyList<DarlingServerResolver.RegisteredServer> registry,
         string serverName,
-        string storyPathHash)
+        string storyPathHash,
+        bool forUnmute = false)
     {
         var target = DarlingMcpServerAdminTools.ResolveForRemoval(registry, serverName, nameClash: NameClash.Refuse);
 
@@ -1535,6 +1630,34 @@ WHERE d.server_id = $1";
         {
             var resolved = target.Candidates[0];
             return new MuteScope(resolved.ServerId, resolved.ServerName, null);
+        }
+
+        /* #6383: unmute_analysis_finding resolves with the same rule, and refuses with its own wording and the
+           fields an unmute answers with (removed), not the mute's registered/already_muted. */
+        if (forUnmute)
+        {
+            if (target.Candidates.Count == 0)
+            {
+                return new MuteScope(null, string.Empty, JsonSerializer.Serialize(new
+                {
+                    status = "not_found",
+                    message = DarlingServerResolver.MissSentence(registry, serverName, DarlingPeerDirectory.Current),
+                    story_path_hash = storyPathHash,
+                    removed = 0,
+                }, McpHelpers.JsonOptions));
+            }
+
+            return new MuteScope(null, string.Empty, JsonSerializer.Serialize(new
+            {
+                status = "ambiguous",
+                message = $"'{serverName}' matches {target.Candidates.Count} registered servers " +
+                          $"({(target.MatchedBy == "exact" ? "the same name on more than one registration" : "as a partial name")}); " +
+                          "nothing was unmuted. Re-issue unmute_analysis_finding with ONE candidate's full server name.",
+                matched_by = target.MatchedBy,
+                story_path_hash = storyPathHash,
+                removed = 0,
+                candidates = target.Candidates.Select(c => new { server = c.ServerName, display_name = c.DisplayName }),
+            }, McpHelpers.JsonOptions));
         }
 
         if (target.Candidates.Count == 0)

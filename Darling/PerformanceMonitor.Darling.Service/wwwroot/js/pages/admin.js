@@ -7,7 +7,7 @@
  */
 
 /* Admin: a window onto what the desktop's Manage Servers, Notification Routes and Settings windows show.
-   Seven tabs (the first three each one existing read):
+   Ten tabs (the first three each one existing read):
      Servers             GET /api/admin/servers (every configured server, enabled or not)
      Notification Routes get_notification_routes
      Alert Settings      get_alert_settings
@@ -16,7 +16,10 @@
      Practice Scores     GET /api/investigation-practice-scores (#5918: how each agent did on practice requests), and Start (#6265)
      Pending Notes       GET /api/investigation-notes/pending, with Approve and Reject (#5903), and Write a note (#6265)
      Threshold Overrides GET /api/threshold-overrides, with Save, Edit and Remove under an admin store login (#5916)
-   Routes and Settings change nothing. The Servers tab also lets a sign-in that can make changes edit one server in place
+     Agent changes       what agents changed and were refused, with Undo and the switch that turns agent changes off (#5917)
+     Server actions      GET /api/server-actions, with the per-server action switches an admin store login can change (#6269)
+     Environment Profiles GET /api/environment-profiles, edited as in the Viewer (#6264)
+   Alert Settings changes nothing; Notification Routes edits the agent channel for a sign-in that can make changes (#6264). The Servers tab also lets a sign-in that can make changes edit one server in place
    (#5240): an Edit button on each row opens a form above the grid, filled from GET /api/admin/servers/{id}.
    The active tab rides in the hash (#/admin/<tab>) and in module scope, so the 60 s repaint keeps it.
    Every cell is an allow-listed column or a key the settings read emits; a route row's destinations are never
@@ -24,7 +27,7 @@
    it reaches a row. */
 
 import { VIZ } from "../panels.js";
-import { el, mount, loadingStrip, errorStrip, emptyStrip, noticeStrip, readTool, apiGet, apiGetFleet, apiWrite, onSessionExpired, localizeIsoText } from "../util.js";
+import { el, mount, loadingStrip, errorStrip, emptyStrip, noticeStrip, listOnlyNote, readTool, apiGet, apiGetFleet, apiWrite, onSessionExpired, localizeIsoText } from "../util.js";
 import { getSession } from "../views-api.js";
 import { writeNote, startPractice, writeAccess, SIGN_IN_SENTENCE, NOTE_MAX_LENGTH, NOTE_MAX_DAYS, NOTE_DEFAULT_DAYS } from "../investigation-writes.js";
 import { buildAgentChanges, resetAgentChangesStatus } from "./admin-agent-changes.js";
@@ -43,6 +46,10 @@ export const SERVER_COLUMNS = [
   { key: "read_only", label: "Read only", format: "bool" },
   { key: "added", label: "Added", format: "time" },
   { key: "last_collected", label: "Last Collected", format: "time" },
+  /* #6351: the other enabled registrations that last reported this machine's identity, worked out when the list is read (an address
+     can start reaching another machine, e.g. after an availability group listener fails over). An agent-scoped notification route
+     on one of them does not cover the other. The service sends the names already joined; blank when there is no overlap. */
+  { key: "same_machine_as", label: "Same machine as", wrap: true },
 ];
 
 /* A disabled server's row is drawn with the grey row class the grid already uses for a canceled job run. */
@@ -187,7 +194,7 @@ export const GROUP_FIELDS = {
   health_bands: ["deadlock_warn_per_hour", "deadlock_critical_per_hour"],
   poison_wait: ["enabled", "threshold_ms"],
   runnable_queue: ["enabled", "warning_per_scheduler", "critical_per_scheduler"],
-  client_timeouts: ["enabled", "warning_per_minute", "critical_per_minute"],
+  client_timeouts: ["enabled", "warning_per_minute", "critical_per_minute", "warning_multiple", "critical_multiple"],
   long_running_query: ["enabled", "threshold_minutes", "max_results", "exclude_sp_server_diagnostics", "exclude_wait_for",
     "exclude_backups", "exclude_misc_waits", "exclude_cdc", "excluded_program_name_prefixes", "excluded_logins"],
   tempdb_space: ["enabled", "threshold_percent"],
@@ -346,6 +353,9 @@ export const EDIT_FIELDS = [
   { key: "database", label: "Database" },
   { key: "read_only_intent", label: "Read-only intent" },
   { key: "multi_subnet_failover", label: "Multi-subnet failover" },
+  /* #6254: SQL Server only. The host (or listener) a Query Store read may use instead of the primary; blank = off. It is part
+     of how the server is reached: the saved password is bound to it, so changing it needs the password again. */
+  { key: "query_store_replica", label: "QS replica" },
   { key: "monthly_cost_usd", label: "Monthly Cost ($)" },
   /* #5452: PostgreSQL only, like port. A blank box keeps the stored role; "Remove AWS role" sends null. The external ID is
      not here: it is write-only, read from its own box at Save, never held in the form's values. */
@@ -412,6 +422,7 @@ export function editFormValues(row) {
     database: asText(r.database),
     read_only_intent: r.read_only_intent === true,
     multi_subnet_failover: r.multi_subnet_failover === true,
+    query_store_replica: asText(r.query_store_replica),
     monthly_cost_usd: Number.isFinite(cost) ? String(cost) : "0",
     aws_role_arn: asText(r.aws_role_arn),
     aws_external_id_set: r.aws_external_id_set === true,
@@ -444,6 +455,8 @@ export function normalizeEdit(values, engine) {
     database: trim(v.database) || null,
     read_only_intent: v.read_only_intent === true,
     multi_subnet_failover: v.multi_subnet_failover === true,
+    /* Trimmed; blank is "no replica", which the service reads as a removal. A PostgreSQL target has none. */
+    query_store_replica: postgres ? "" : trim(v.query_store_replica),
     monthly_cost_usd: cost === "" ? 0 : /^(\d+\.?\d*|\.\d+)$/.test(cost) ? Number(cost) : NaN,
     /* A blank box is "no role typed" (null): it keeps the stored role, it never removes it. */
     aws_role_arn: postgres ? trim(v.aws_role_arn) || null : null,
@@ -461,7 +474,8 @@ function connectionDiffers(o, v) {
     || o.username !== v.username
     || o.encrypt_mode.toLowerCase() !== v.encrypt_mode.toLowerCase()
     || o.trust_server_certificate !== v.trust_server_certificate
-    || o.multi_subnet_failover !== v.multi_subnet_failover;
+    || o.multi_subnet_failover !== v.multi_subnet_failover
+    || o.query_store_replica !== v.query_store_replica;
 }
 
 /** True when the service will ask for the password again: the effective auth (PostgreSQL is always "SQL") stores a
@@ -557,6 +571,8 @@ export function buildEditBody(original, values, token, password, externalId) {
   return body;
 }
 
+const QS_REPLICA_NOTE = "Optional. A readable secondary (host or host,port) or an availability group listener to read Query Store from instead of this server. Same login and password; blank = off. Not used on Azure SQL Database. Changing it needs the password again.";
+
 const UNEXPECTED_ANSWER = "The service gave an answer this page does not understand, so it is not known whether anything was saved. Your entries are kept; check the server list before saving again.";
 
 /** What one answer to the edit means, from the HTTP status, the parsed body and (for status 0) the transport's own
@@ -583,7 +599,10 @@ export function interpretEdit(status, body, message, expired) {
     const name = asText(b.display_name) || asText(b.server);
     const note = typeof b.note === "string" && b.note ? " " + b.note : "";
     const tested = b.tested === true ? " The connection was tested before saving." : "";
-    return { kind: "updated", close: true, reread: true, notice: (name ? 'Saved "' + name + '".' : "Saved.") + note + tested };
+    /* #6254: the Query Store replica's own connection result, said beside the primary's. A replica that would not open is a
+       warning in the same notice, not a failed save: the service reads Query Store from the primary until it can. */
+    const replica = typeof b.query_store_replica_test === "string" && b.query_store_replica_test ? " " + b.query_store_replica_test : "";
+    return { kind: "updated", close: true, reread: true, notice: (name ? 'Saved "' + name + '".' : "Saved.") + note + tested + replica };
   }
   if (status === 200 && word === "unchanged") return { kind: "unchanged", close: true, reread: false, notice: "No change was needed; nothing was written." };
   return { kind: "failed", close: false, reread: false, banner: sentence };
@@ -972,6 +991,8 @@ function formNode(f) {
     rows.push(
       checkRow(f, "read_only_intent", "Read-only intent (for AG listeners and readable replicas)"),
       checkRow(f, "multi_subnet_failover", "Multi-subnet failover (for AG listeners and FCIs)"),
+      textRow(f, "query_store_replica", "QS replica:", { autocomplete: "off", ...KEEP_FROM_PASSWORD_MANAGERS }).row,
+      el("div", { class: "muted", text: QS_REPLICA_NOTE }),
     );
   }
   rows.push(
@@ -1235,7 +1256,7 @@ async function buildRoutes(body, generation) {
   /* A failed signing read leaves the strip out; the routes below are the page. */
   const signingNodes = signing && signing.kind === "data" ? signingStatusLines(signing.data).map((t) => noticeStrip(t)) : [];
   mount(body, [
-    ...(access.routes ? routeEditorNodes(options) : routeListOnlyNodes(access.message)),
+    ...(access.routes ? routeEditorNodes(options) : routeListOnlyNodes(access.message, access.managed)),
     noticeStrip(ROUTES_NOTE),
     ...signingNodes,
     VIZ.table({ routes: rows }, {
@@ -1310,9 +1331,7 @@ export const FEEDBACK_NOTE =
   "one that did. A second feedback from the same person replaces their first. Reports are listed newest first.";
 
 /* Shown instead of the form when the store says this dashboard's login may not record (can_record false). */
-export const FEEDBACK_LIST_ONLY =
-  "Recording needs a store login with the admin role. On managed and compose stores the web dashboard connects as the viewer role, " +
-  "so this page is list-only there and feedback is given in the desktop Viewer.";
+export const feedbackListOnly = (managed) => listOnlyNote(managed, "this page is list-only", "To record feedback");
 
 /* What the counts and the list are taken over, in words: the answer's own window (hours_back). */
 export function feedbackWindowLabel(hours) {
@@ -1434,7 +1453,7 @@ async function buildFeedback(body, generation) {
   const rerender = () => buildFeedback(body, generation);
   const canRecord = session.can_edit === true && data.can_record === true;
   const nodes = [noticeStrip(FEEDBACK_NOTE)];
-  if (data.can_record !== true) nodes.push(noticeStrip(FEEDBACK_LIST_ONLY));
+  if (data.can_record !== true) nodes.push(noticeStrip(feedbackListOnly(session.managed_store === true)));
   nodes.push(el("h3", { class: "section-title", text: "False positives by alert family" }));
   nodes.push(el("p", { class: "mute-label", "data-fb-window": "1", text: feedbackWindowLabel(data.hours_back) }));
   nodes.push(VIZ.table({ families }, {
@@ -1796,10 +1815,9 @@ export const OVERRIDE_COLUMNS = [
 const OVERRIDES_NOTE_EDITING =
   "A threshold held for one server, or for one database on it, that differs from the global value. The alert engine uses it for that server only " +
   "and applies a change within its reload interval. To silence an alert, mute it.";
-const OVERRIDES_NOTE_READ_ONLY =
-  "A threshold held for one server, or for one database on it, that differs from the global value. This sign-in lists them but cannot change them: " +
-  "a managed or compose store connects this page as the viewer role. Change an override in the desktop Viewer, or (bring-your-own store) set " +
-  "postgres.webConnectionString to an admin login.";
+const overridesNoteReadOnly = (managed) =>
+  "A threshold held for one server, or for one database on it, that differs from the global value. " +
+  listOnlyNote(managed, "this page lists them only", "To change an override");
 const OVERRIDE_DENIED = "Changing a threshold override needs";
 
 /** The rows of the overrides grid from the list read's body. `database` and `server_id` stay on the row for Edit and Remove. */
@@ -1951,7 +1969,7 @@ async function buildOverrides(body, generation) {
      the store login holds the write grant on this table. */
   const canEdit = session.can_edit === true && !!res.data && res.data.can_edit === true;
   const keys = Array.isArray(res.data && res.data.keys) ? res.data.keys : [];
-  nodes.push(noticeStrip(canEdit ? OVERRIDES_NOTE_EDITING : OVERRIDES_NOTE_READ_ONLY));
+  nodes.push(noticeStrip(canEdit ? OVERRIDES_NOTE_EDITING : overridesNoteReadOnly(session.managed_store === true)));
   if (res.data && typeof res.data.note === "string" && res.data.note) nodes.push(noticeStrip(res.data.note));
   if (canEdit) nodes.push(overrideFormNode(Array.isArray(res.data.servers) ? res.data.servers : [], keys));
   nodes.push(VIZ.table({ overrides: overrideRows(res.data) }, {
@@ -1974,16 +1992,16 @@ const agentChangesContext = {
 };
 const buildAgentChangesTab = (body, generation) => buildAgentChanges(body, generation, agentChangesContext);
 
-/* Server actions (#6269) lives in its own file too, with the same helpers. */
-const serverActionsContext = {
-  ...agentChangesContext,
-  repaint: () => {
-    if (shownTab === "server-actions" && shownBody) return startBuilder("server-actions", shownBody, ++renderGeneration);
-    return null;
-  },
-};
-const buildServerActionsTab = (body, generation) => buildServerActions(body, generation, serverActionsContext);
-
+/* Server actions (#6269) lives in its own file too, with the same helpers. */
+const serverActionsContext = {
+  ...agentChangesContext,
+  repaint: () => {
+    if (shownTab === "server-actions" && shownBody) return startBuilder("server-actions", shownBody, ++renderGeneration);
+    return null;
+  },
+};
+const buildServerActionsTab = (body, generation) => buildServerActions(body, generation, serverActionsContext);
+
 const BUILDERS = { servers: buildServers, routes: buildRoutes, settings: buildSettings, feedback: buildFeedback, practice: buildPractice, pending: buildPending, overrides: buildOverrides, "agent-changes": buildAgentChangesTab, profiles: buildProfilesTab, "server-actions": buildServerActionsTab };
 
 /* Run a tab's builder. A builder that throws leaves an error strip: in the Servers tab's table area when its boxes are on the

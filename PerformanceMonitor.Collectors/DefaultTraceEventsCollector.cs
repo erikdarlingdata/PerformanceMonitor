@@ -301,6 +301,50 @@ SET @trace_continues =
         ELSE 0
     END;
 
+/*#6381: SQL Server on Linux answers a read of the ACTIVE trace file with Msg 568 ('Encountered an error or an
+  unexpected end of trace file') while the server is growing that file: it extends it in 1 MB steps, and for 5-7 seconds
+  at each step the read cannot reach a clean end of file (measured on two SQL Server 2022 Linux containers: 4 windows in
+  15 minutes, none longer than 7.2 s, each clearing by itself; a collector polling every few minutes lands in one about
+  1 run in 80, which is what the lab logged). The read goes into a table variable (a temp table writes Object:Created/Deleted rows into the very trace file being read, which makes the file grow, and so the window, more often) inside TRY...CATCH and ONLY Msg 568 is
+  retried, up to 5 more times 2 s apart (10 s, past the longest window), on the server, where nothing has reached the
+  client yet: a retry in the host would double the rows already streamed, and an error that lands before the first row
+  never reaches ReadAsync at all. A 568 that outlasts the retries, and every other error, is re-thrown unchanged: a trace
+  file that is missing (Msg 19049), not a trace file (19050) or really corrupt still fails the cycle.*/
+DECLARE
+    @read_attempt tinyint = 1;
+
+DECLARE
+    @default_trace_events table
+    (
+        event_time datetime NULL,
+        event_name nvarchar(128) NULL,
+        event_class int NULL,
+        spid int NULL,
+        database_name nvarchar(256) NULL,
+        database_id int NULL,
+        login_name nvarchar(256) NULL,
+        host_name nvarchar(256) NULL,
+        application_name nvarchar(256) NULL,
+        object_name nvarchar(256) NULL,
+        filename nvarchar(256) NULL,
+        integer_data int NULL,
+        integer_data_2 int NULL,
+        text_data nvarchar(max) NULL,
+        session_login_name nvarchar(256) NULL,
+        error_number int NULL,
+        severity int NULL,
+        state int NULL,
+        event_sequence bigint NULL,
+        duration_us bigint NULL,
+        end_time datetime NULL
+    );
+
+WHILE @read_attempt <= 6
+BEGIN
+    BEGIN TRY
+        DELETE @default_trace_events;
+
+INSERT @default_trace_events
 SELECT /* PerformanceMonitorLite */
     event_time = ft.StartTime,
     event_name = te.name,
@@ -315,7 +359,7 @@ SELECT /* PerformanceMonitorLite */
     filename = ft.FileName,
     integer_data = ft.IntegerData,
     integer_data_2 = ft.IntegerData2,
-    text_data = ft.TextData,
+    text_data = CONVERT(nvarchar(max), ft.TextData),
     session_login_name = ft.SessionLoginName,
     error_number = ft.Error,
     severity = ft.Severity,
@@ -416,6 +460,24 @@ AND
     )
 )
 OPTION(RECOMPILE, MAXDOP 1);
+
+        SET @read_attempt = 7; /*read through: leave the loop*/
+    END TRY
+    BEGIN CATCH
+        IF ERROR_NUMBER() <> 568
+        OR @read_attempt >= 6
+        BEGIN
+            THROW;
+        END;
+
+        SET @read_attempt = @read_attempt + 1;
+        WAITFOR DELAY '00:00:02';
+    END CATCH;
+END;
+
+SELECT /* PerformanceMonitorLite */
+    *
+FROM @default_trace_events;
 
 SELECT /* PerformanceMonitorLite */
     current_trace_path = @current_trace_path,

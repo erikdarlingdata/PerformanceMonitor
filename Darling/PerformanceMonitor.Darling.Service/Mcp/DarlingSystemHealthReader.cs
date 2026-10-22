@@ -132,6 +132,32 @@ internal static class DarlingSystemHealthReader
         AND   event_xml IS NOT NULL
         """;
 
+    /// <summary>
+    /// #6441: the note the collector's NEWEST run left, when that run succeeded (NULL otherwise). A truncated ring
+    /// buffer is recorded only there (<see cref="RingBufferTruncationNote"/>). One backward step down
+    /// <c>idx_collection_log_watermark (server_id, collector_name, collection_time DESC)</c>.
+    /// <para>$1 server_id, $2 collector_name.</para>
+    /// </summary>
+    public const string LatestRunNoteSql = """
+        SELECT CASE WHEN status = 'SUCCESS' THEN error_message END
+        FROM v_collection_log
+        WHERE server_id = $1
+        AND   collector_name = $2
+        ORDER BY collection_time DESC
+        LIMIT 1
+        """;
+
+    /// <summary>Runs <see cref="LatestRunNoteSql"/>: null when the collector never ran or its newest run left no note.</summary>
+    public static async Task<string?> GetLatestRunNoteAsync(
+        NpgsqlDataSource postgres, int serverId, string collectorName, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(LatestRunNoteSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddInt(command, serverId);
+        DarlingMcpReadParameters.AddText(command, collectorName);
+        return await command.ExecuteScalarAsync(cancellationToken) as string;
+    }
+
     /// <summary>Runs <see cref="LastCaptureSql"/>: null when no system_health event of any type has ever
     /// been stored for the server.</summary>
     public static Task<DateTime?> GetLastCaptureAsync(

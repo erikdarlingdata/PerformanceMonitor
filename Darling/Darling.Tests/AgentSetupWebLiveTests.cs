@@ -84,7 +84,7 @@ public sealed class AgentSetupWebLiveTests
 
     private static async Task WithWebRoutesAsync(
         string managedRole, Func<NpgsqlDataSource, NpgsqlDataSource, Sender, CancellationToken, Task> body, IPasswordKeyRing? ring = null,
-        DarlingWebSeat? seat = null, bool signedIn = true)
+        DarlingWebSeat? seat = null, bool signedIn = true, bool managedStore = false)
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the agent setup web live tests.");
@@ -143,7 +143,8 @@ public sealed class AgentSetupWebLiveTests
 
                 await next(context);
             });
-            DarlingWebEndpoints.MapAll(app, webLogin, new CollectorRuntimeState(), new CapturingTestLogger(), passwordKeys: ring);
+            DarlingWebEndpoints.MapAll(app, webLogin, new CollectorRuntimeState(), new CapturingTestLogger(), passwordKeys: ring,
+                postgresConfig: managedStore ? new PostgresConfig { Managed = true } : null);
             await app.StartAsync(ct);
             using var server = app.GetTestServer();
 
@@ -435,7 +436,7 @@ public sealed class AgentSetupWebLiveTests
             {
                 var answer = await Send(method, path, method == "DELETE" ? null : Json, json);
                 Assert.Equal(403, answer.Status);
-                Assert.Equal(DarlingWebAgentSetup.RefusedMessage, (string)answer.Body!["error"]!);
+                Assert.Equal(DarlingWebAgentSetup.RefusedMessage(false), (string)answer.Body!["error"]!);
             }
 
             Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config_notification_routes", ct));
@@ -443,6 +444,38 @@ public sealed class AgentSetupWebLiveTests
             Assert.Equal("fleet: OLTP", await ScalarAsync(owner, "SELECT profile_text FROM config.agent_environment_profiles", ct));
             Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event LIKE 'profile_%'", ct));
         }, DarlingPasswordKey.FromPrivateKey(PasswordPrivateKey.Generate()));
+    }
+
+    /// <summary>#6445: the same viewer-role 403, but the web host runs on the managed store. That store refuses <c>postgres.webConnectionString</c>,
+    /// so the sentence must not send the user to it or to "the admin login"; a store you bring yourself keeps that advice. Both are real
+    /// refusals from the store's own grants, and nothing is written.</summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task TheViewerRoles403_NamesTheAdminLoginOption_OnlyOnAStoreYouBringYourself(bool managedStore)
+    {
+        await WithWebRoutesAsync("viewer", async (owner, viewer, Send, ct) =>
+        {
+            var seeded = await SeedRouteAsync(owner, "performance", ct);
+            foreach (var (method, path, json) in new[]
+            {
+                ("POST", "/api/notification-routes", "{\"metric_match\":\"blocking\",\"agent_level\":1}"),
+                ("DELETE", $"/api/notification-routes/{seeded}", null),
+                ("PUT", "/api/environment-profiles", "{\"profile_text\":\"changed\"}"),
+            })
+            {
+                var answer = await Send(method, path, method == "DELETE" ? null : Json, json);
+                Assert.Equal(403, answer.Status);
+                var said = (string)answer.Body!["error"]!;
+                Assert.Equal(DarlingWebAgentSetup.RefusedMessage(managedStore), said);
+                Assert.Contains("Viewer app", said, StringComparison.Ordinal);
+                Assert.Equal(!managedStore, said.Contains("webConnectionString", StringComparison.Ordinal));
+                Assert.Equal(!managedStore, said.Contains("admin", StringComparison.OrdinalIgnoreCase));
+            }
+
+            Assert.Equal(managedStore, (bool)(await Send("GET", "/api/session", null)).Body!["managed_store"]!);
+            Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config_notification_routes", ct));
+        }, DarlingPasswordKey.FromPrivateKey(PasswordPrivateKey.Generate()), managedStore: managedStore);
     }
 
     [Fact]

@@ -186,6 +186,17 @@ export function errorStrip(message) {
 export function emptyStrip(message) {
   return el("div", { class: "strip empty" }, [localizeIsoText(plainText(message))]);
 }
+/** #6445: the note a page that lists only shows. The advice depends on the store: a managed store refuses postgres.webConnectionString,
+    so it says only that this dashboard lists and the Viewer app makes the change; a store you brought yourself may give the web an
+    admin store login. `lists` finishes "so ..." and `toChange` starts the sentence that names the Viewer. The service's own 403
+    sentences come from DarlingWebStoreWrites and say the same. */
+export function listOnlyNote(managedStore, lists, toChange) {
+  return managedStore === true
+    ? "This dashboard lists only on this store, so " + lists + ". " + toChange + ", use the Viewer app."
+    : "This dashboard's store login cannot make changes, so " + lists + ". " + toChange +
+      ", use the Viewer app, or give the web an admin store login (set postgres.webConnectionString to an admin login).";
+}
+
 /** A non-fatal caveat about otherwise-good data (e.g. the #1665 partial-window notice). The sentence may be one the service
     wrote for an MCP caller (a width note, a truncation note), so it passes through plainText like every message (#5644 W8). */
 export function noticeStrip(message) {
@@ -194,6 +205,50 @@ export function noticeStrip(message) {
 /** A note line under a chart, from a payload's own `aggregate_note`: written for an MCP caller, said in the page's words (#5644 W8). */
 export function metricNote(text) {
   return el("div", { class: "mp-metric-note", text: plainText(text) });
+}
+
+/**
+ * What one point of a bucketed trend covers, from the read's own `bucket_minutes` / `bucket` fields: "covers 1 hour",
+ * "is one collection", or null when the read states neither (#6359).
+ */
+export function bucketWidthText(d) {
+  const minutes = d && typeof d.bucket_minutes === "number" && d.bucket_minutes > 0 ? d.bucket_minutes : null;
+  if (minutes !== null) {
+    if (minutes % 1440 === 0) return "covers " + (minutes === 1440 ? "1 day" : minutes / 1440 + " days");
+    if (minutes % 60 === 0) return "covers " + (minutes === 60 ? "1 hour" : minutes / 60 + " hours");
+    return "covers " + (minutes === 1 ? "1 minute" : minutes + " minutes");
+  }
+  return d && d.bucket === "per-collection" ? "is one collection" : null;
+}
+
+/**
+ * The sentence a chart owes its reader about what a point is (#6359), said from the read's own width fields in the page's
+ * words. The payload's `aggregate_note` is written for an MCP caller (it names `peak_*` fields and says to pass a
+ * `bucket_minutes`), so no panel prints it. `kind` is what the PANEL's read returns, never read from the note's text:
+ * "summed" for counts, waits and I/O (a bucket the window cuts short holds smaller counts; rates are true rates over the
+ * time it covers), "level" for CPU, memory, tempdb and other gauges (each point averages the samples in its bucket), or
+ * omitted when only the width is worth saying. One collection per point needs neither fact. Null when the read states no width.
+ */
+export function chartNoteText(data, kind) {
+  const width = bucketWidthText(data);
+  if (!width) return null;
+  if (width === "is one collection") return "Each point is one collection.";
+  const sentence = (kind === "level" ? "Each point " + width + " and is the average of the samples in it." : "Each point " + width + ".") +
+    (kind === "summed" ? " A bucket the window cuts short holds smaller counts; rates are true rates over the time the bucket covers." : "");
+  return data.source === "hourly" ? sentence + " " + HOURLY_TRAIL_TEXT : sentence;
+}
+
+/**
+ * What a read served from the hourly rollup owes its reader: the series trails the clock by up to two hours, because the
+ * current hour is never materialized and the one before it lands on the next refresh (DurationTrendRouting, #6359). Said when
+ * the read's own `source` field is "hourly", never from the note's text; without it the empty right edge reads as missing data.
+ */
+const HOURLY_TRAIL_TEXT = "The newest hour or two is not in this chart yet: hourly totals are added after each hour ends.";
+
+/** The note line under a chart for a trend read (see chartNoteText), or null when the read states no width. */
+export function chartNote(data, kind) {
+  const text = chartNoteText(data, kind);
+  return text ? el("div", { class: "mp-metric-note", text }) : null;
 }
 
 /**
@@ -580,6 +635,39 @@ export function windowFromHours(hours) {
   }
   const windowEnd = Date.now();
   return { windowStart: windowEnd - h * 3600000, windowEnd };
+}
+
+/**
+ * #6359: the window a panel draws when it reads the WHOLE hours the grid ranked over (a row's History; see readTool's
+ * `wholeWindow`): [end - hours, end], where end is the custom range's end (or now), not the exact pair the reader picked.
+ * Without a custom range it is windowFromHours's window.
+ */
+export function wholeWindowFromHours(hours) {
+  const h = Number(hours);
+  if (!isFinite(h) || h < 1) return null;
+  if (liveRange() && h === activeRange.hours) {
+    const windowEnd = activeRange.asOf ? activeRange.endMs : Date.now();
+    return { windowStart: windowEnd - h * 3600000, windowEnd };
+  }
+  return windowFromHours(hours);
+}
+
+/**
+ * #6359: the sentence a History panel owes when the window it reads is wider than the range the reader picked, or null when
+ * they are the same (a preset, or a range of whole hours). The grids rank over whole hours back from the end of the range, so
+ * "Past 5 minutes" ranks over an hour; History reads that same window (readTool's `wholeWindow`), and says so here.
+ */
+export function widenedWindowNote(hours) {
+  const range = liveRange();
+  const h = Number(hours);
+  if (!range || !isFinite(h) || h < 1 || h !== range.hours) return null;
+  if (h * 3600000 - (range.endMs - range.startMs) < 60000) return null;
+  const end = range.asOf ? range.endMs : Date.now();
+  const at = (ms) => localTime(new Date(ms).toISOString());
+  return (
+    "This history covers the window the grid ranked over, " + at(end - h * 3600000) + " to " + (range.asOf ? at(end) : "now") +
+    ", which is wider than the range you picked (" + at(range.startMs) + " to " + (range.asOf ? at(range.endMs) : "now") + ")."
+  );
 }
 
 /* ─────────────────────────── value formatters ─────────────────────────── */
@@ -1139,13 +1227,22 @@ export function alertDeliveryState(a) {
   return ALERT_STATE_LABELS[a.notification_type] || null;
 }
 
-/** GET a read-only tool by its MCP name with query-string params. `signal` — see apiGet (#4191). */
-export function readTool(tool, params, signal) {
-  const plan = planCustomRange(tool, params);
+/** GET a read-only tool by its MCP name with query-string params. `signal` — see apiGet (#4191). `options.wholeWindow` (#6359): under
+ *  a custom range the read is still anchored at the range's end, but its rows are NOT cut to the exact picked pair, so a read
+ *  that answers over the whole hours the grid ranked over (a row's History) shows all of that window. */
+export function readTool(tool, params, signal, options) {
+  const plan = planCustomRange(tool, params, !!(options && options.wholeWindow));
+  const selection = params ? params[TRIM_TO] : undefined;
   return apiGetJoined("/api/read/" + tool + buildQuery(withDatabaseFilter(tool, plan.params)), signal)
     .then(localizeWindowNote)
-    .then((res) => finishCustomRange(res, plan));
+    .then((res) => finishCustomRange(res, plan))
+    .then((res) => (selection && res && res.kind === "data" ? { ...res, data: trimToRange(res.data, selection.startMs, selection.endMs, 0) } : res));
 }
+
+/** #6301: a read of an event list (blocking, deadlocks, active snapshots) that carries this key, as `{ startMs, endMs }`, has its rows cut to
+ *  that exact pair afterwards. A narrowed read is whole hours back from the selection's end, so without the cut the grid would list events from
+ *  before the selection. A symbol, so it never reaches the query string. Totals and rankings do not carry it: they aggregate. */
+export const TRIM_TO = Symbol("trimTo");
 
 /* ─────────────────────────── custom range (server page) ─────────────────────────── */
 
@@ -1222,7 +1319,7 @@ export function activeRangeStamp() {
 /* Marks the retry readWithinKeptHistory sends for fewer hours, with the hours the read first asked for. */
 const NARROWED_FROM = Symbol("narrowedFrom");
 
-function planCustomRange(tool, params) {
+function planCustomRange(tool, params, wholeWindow) {
   const range = liveRange();
   const narrowedFrom = params ? params[NARROWED_FROM] : undefined;
   const asked = narrowedFrom != null ? Number(narrowedFrom) : Number(params && params.hours);
@@ -1231,6 +1328,7 @@ function planCustomRange(tool, params) {
   }
   if (READS_WITHOUT_AS_OF.has(tool)) return { params, range: null, ignored: true };
   const withEnd = range.asOf ? { ...params, as_of: range.asOf } : params;
+  if (wholeWindow) return { params: withEnd, range: null, ignored: false };
   if (narrowedFrom == null) return { params: withEnd, range, ignored: false };
   /* The kept-history retry: the same end, the hours the store keeps, and only the part of the range those hours reach. */
   const kept = Number(params.hours);

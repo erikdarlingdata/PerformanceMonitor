@@ -2092,6 +2092,22 @@ ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS starts_at_utc time
 ALTER TABLE config.config_service ADD COLUMN IF NOT EXISTS query_store_fetch_top_n integer NOT NULL DEFAULT 100;";
 
     /// <summary>
+    /// V213 (#6254): two nullable text columns. <c>config.config_monitored_servers.query_store_replica</c> is the host (or listener
+    /// name) Query Store is read from instead of the server itself; NULL, the default for every existing row, keeps today's behaviour.
+    /// <c>collect.collection_log.read_source</c> says which host a collection read came from; NULL on every existing row. Neither has a
+    /// default and neither needs a backfill, so each <c>ADD COLUMN</c> is catalog-only. An older build ignores both columns and reads
+    /// every row as it did before, so there is no rollback line. Idempotent.
+    /// </summary>
+    private const string V213Sql = @"
+ALTER TABLE config.config_monitored_servers ADD COLUMN IF NOT EXISTS query_store_replica text;
+ALTER TABLE collect.collection_log ADD COLUMN IF NOT EXISTS read_source text;
+
+/* The log lives in the collect schema, and its passthrough view freezes its column list at CREATE (the V80 lesson), so every read
+   of the log (the MCP tools, the web page, the Viewer) would never see read_source without this. Appending is the one alteration
+   CREATE OR REPLACE VIEW permits, which is exactly what an ADD COLUMN produces. */
+CREATE OR REPLACE VIEW collect.v_collection_log AS SELECT * FROM collect.collection_log;";
+
+    /// <summary>
     /// V210 (#6281, part of #5632): the MCP tag writes may not change which servers an agent route covers. A tag-scoped route covers
     /// every registered server mapped to its tag or to any descendant of it (<c>NotificationRouteScopeExpander</c>), and
     /// <c>update_notification_route</c> refuses over MCP to change an agent route's scope, so the tag tools, which write
@@ -2190,6 +2206,84 @@ CREATE TRIGGER trg_agent_route_tag_guard
     BEFORE UPDATE OR DELETE ON config.server_tags
     FOR EACH ROW EXECUTE FUNCTION config.agent_route_tag_guard();
 ALTER TABLE config.server_tags ENABLE ALWAYS TRIGGER trg_agent_route_tag_guard;";
+
+    /// <summary>
+    /// V211 (#5736): the two multiples of the relative Client Timeouts bars, on the singleton <c>config_alert_settings</c> row beside the two
+    /// bars they scale. Warning is max(<c>client_timeouts_warning_per_minute</c>, <c>client_timeouts_warning_multiple</c> x the server's baseline) and
+    /// Critical is the same with the Critical pair, the baseline being the server's own p99.9 of its 3-minute average attention rate over the last 7 days.
+    /// The two existing columns keep their names and become the FLOORS (their defaults, 10 and 60, are unchanged). Two <c>integer NOT NULL</c> columns with
+    /// constant defaults (3 and 10), catalog-only, no backfill, no GRANT (the roles hold table-level privileges on the config schema) and no trigger (the
+    /// statement-level <c>trg_bump_alert_settings</c> already bumps <c>config_version</c> on any write here). The baseline itself needs no storage: the
+    /// service computes it from <c>collection_log</c> and <c>attention_events</c> and keeps it in memory for a day.
+    /// </summary>
+    private const string V211Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS client_timeouts_warning_multiple integer NOT NULL DEFAULT 3,
+    ADD COLUMN IF NOT EXISTS client_timeouts_critical_multiple integer NOT NULL DEFAULT 10;";
+    /// V212 (#6285, #6339): <c>collect.servers.machine_identity</c>, the name the monitored machine gives itself, written on every
+    /// connect. For a SQL Server it is <c>SERVERPROPERTY('ServerName')</c> folded to lower case (NULL on an Azure SQL Database, which
+    /// names no machine of its own); for PostgreSQL it is the cluster's <c>system_identifier</c>, a colon and the server port (NULL
+    /// when the monitoring role may not call <c>pg_control_system()</c>). <c>add_servers</c> and <c>edit_server</c> over MCP compare
+    /// what a new connection reports with this column, so a machine reached under a second name is recognised. It lives on the
+    /// registry, which no retention purge touches and which keeps a removed registration's row, so the identity of a removed
+    /// registration stays. No backfill: a registration fills its own on its next connect, and until then it is matched by its
+    /// text alone. No view refresh: <c>collect.servers</c> is a registry, not a hypertable.
+    /// </summary>
+    private const string V212Sql = @"
+ALTER TABLE collect.servers
+    ADD COLUMN IF NOT EXISTS machine_identity text;";
+    /// <summary>
+    /// V214 (#6334): <c>config.config_known_patterns</c>, the operator's known-pattern entries ("the backup job pushes High CPU every night
+    /// at 02:00"), shown beside the alerts they match. Context only: an entry never mutes, never pages and never changes an alert.
+    ///
+    /// <para>Every scope column is nullable and NULL means any: <c>server_id</c> (every server), <c>metric_name</c> (every metric, the name
+    /// alert history holds), <c>time_of_day</c> (any time). <c>time_of_day</c> is a wall-clock time in <c>time_zone</c> (an IANA id; NULL is
+    /// UTC) and matches within <c>window_minutes</c> either side, wrapping past midnight; the shared
+    /// <c>KnownPatternMatcher</c> in PerformanceMonitor.Common is the one place that rule lives. <c>expires_at_utc</c> is a naive UTC
+    /// <c>timestamp</c> like the mute rules' (NULL never expires). <c>note</c> is operator-written text, held to 1-500 characters by a
+    /// CHECK so a write that skips the store's function still cannot store more. Further CHECKs hold every column to what a reader can
+    /// load, so a direct call to a write function (or the owner's own SQL) cannot store a row that breaks the read of every entry: a
+    /// time of day below 24:00, a finite expiry before year 10000, a time zone that is a bounded IANA-shaped id (the shape only: the
+    /// zone's existence is the matcher's call, because PostgreSQL's names and .NET's differ at the edges), a metric name of at most 128
+    /// characters, an author of at most 256 and a note with some non-blank text. <c>updated_by</c> and <c>updated_at_utc</c> are NULL
+    /// until an edit; only <c>config.update_known_pattern</c> sets them.</para>
+    ///
+    /// <para><b>The table joins the <c>config_version</c> reload beacon</b> with V117's statement-level trigger on V17's shared
+    /// <c>config.config_bump_version()</c> function, so a write from any path (the web editor, the Viewer, hand-written SQL) moves the
+    /// beacon and a service that caches the entries re-reads them. No GRANT here: the readers' schema-wide SELECT covers a new
+    /// <c>config</c> table, and the writes go through owner-rights functions that provisioning grants to the operator roles. Additive;
+    /// an older build never reads the table.</para>
+    /// </summary>
+    private const string V214Sql = @"
+CREATE TABLE IF NOT EXISTS config.config_known_patterns
+(
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    server_id integer,
+    metric_name text,
+    time_of_day time,
+    time_zone text,
+    window_minutes integer NOT NULL DEFAULT 30,
+    note text NOT NULL,
+    created_by text,
+    created_at_utc timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC'),
+    expires_at_utc timestamp,
+    updated_by text,
+    updated_at_utc timestamp,
+    CONSTRAINT ck_known_patterns_note CHECK (char_length(note) BETWEEN 1 AND 500 AND btrim(note, E' 	
+') <> ''),
+    CONSTRAINT ck_known_patterns_window CHECK (window_minutes BETWEEN 0 AND 720),
+    CONSTRAINT ck_known_patterns_time_of_day CHECK (time_of_day < '24:00'),
+    CONSTRAINT ck_known_patterns_expires CHECK (expires_at_utc IS NULL OR (isfinite(expires_at_utc) AND expires_at_utc < '10000-01-01')),
+    CONSTRAINT ck_known_patterns_time_zone CHECK (time_zone IS NULL OR (char_length(time_zone) <= 64 AND time_zone ~ '^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$')),
+    CONSTRAINT ck_known_patterns_metric CHECK (char_length(metric_name) <= 128),
+    CONSTRAINT ck_known_patterns_created_by CHECK (char_length(created_by) <= 256),
+    CONSTRAINT ck_known_patterns_updated_by CHECK (char_length(updated_by) <= 256)
+);
+
+DROP TRIGGER IF EXISTS trg_bump_known_patterns ON config.config_known_patterns;
+CREATE TRIGGER trg_bump_known_patterns
+    AFTER INSERT OR UPDATE OR DELETE ON config.config_known_patterns
+    FOR EACH STATEMENT EXECUTE FUNCTION config.config_bump_version();";
 
     /// <summary>
     /// V196 (#5632, step 5): Level 3 and the per-server action switches. <b>Nothing here turns an action on.</b>
@@ -2576,6 +2670,10 @@ $rung$;";
         new Migration(208, "mute-rule-starts-at", V208Sql),
         new Migration(209, "query-store-fetch-top-n", V209Sql),
         new Migration(210, "mcp-agent-route-tag-guard", V210Sql),
+        new Migration(211, "client-timeouts-relative-bars", V211Sql),
+        new Migration(212, "server-machine-identity", V212Sql),
+        new Migration(213, "query-store-replica", V213Sql),
+        new Migration(214, "known-patterns", V214Sql),
     };
 
     /// <summary>

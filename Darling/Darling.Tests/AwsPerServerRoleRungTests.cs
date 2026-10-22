@@ -163,13 +163,15 @@ public sealed class AwsPerServerRoleRungTests
     [Fact]
     public void TheEditFunctionTakesSeventeenArguments_AndTheWrapperKeepsTheOldFifteen()
     {
-        Assert.Equal(17, DarlingManagedRoles.EditMonitoredServerSignature.Split(',').Length);
+        Assert.Equal(18, DarlingManagedRoles.EditMonitoredServerSignature.Split(',').Length);
+        Assert.Equal(17, DarlingManagedRoles.EditMonitoredServerSeventeenSignature.Split(',').Length);
         Assert.Equal(15, DarlingManagedRoles.EditMonitoredServerLegacySignature.Split(',').Length);
-        Assert.Equal(DarlingManagedRoles.EditMonitoredServerLegacySignature + ", text, text", DarlingManagedRoles.EditMonitoredServerSignature);
+        Assert.Equal(DarlingManagedRoles.EditMonitoredServerLegacySignature + ", text, text", DarlingManagedRoles.EditMonitoredServerSeventeenSignature);
+        Assert.Equal(DarlingManagedRoles.EditMonitoredServerSeventeenSignature + ", text", DarlingManagedRoles.EditMonitoredServerSignature);
 
         var function = DarlingManagedRoles.BuildEditMonitoredServerFunctionSql("config");
         Assert.Contains("p_aws_role_arn text,", function, StringComparison.Ordinal);
-        Assert.Contains("p_aws_external_id text)", function, StringComparison.Ordinal);
+        Assert.Contains("p_aws_external_id text,", function, StringComparison.Ordinal);
         Assert.Contains("'external_id_needed'", function, StringComparison.Ordinal);
         Assert.Contains("'external_id_needs_role'", function, StringComparison.Ordinal);
         Assert.Contains(

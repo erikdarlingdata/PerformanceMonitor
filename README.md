@@ -22,13 +22,17 @@ It supports SQL Server 2016 SP2 to 2025. SQL Server 2017 needs CU3 or later. It 
 - **Lite** is a single desktop app that monitors your servers remotely, on demand. Nothing is installed on your server. It stores data in local DuckDB and Parquet files.
 - **Darling** is a service on Windows or Linux that collects 24/7 into a central PostgreSQL store. The Windows viewer and the web dashboard read that store from any seat.
 
+Both editions can hand an alert to an AI agent that you run, and Lite lets the agent read and report. Darling can also let it change alert settings (mutes, custom alert rules and thresholds). On a server, it can force or unforce a Query Store plan, evict a cached plan or kill a session. Each of these has its own switch per server, and all are off until you turn them on. Darling records every change, and a person can undo alert-setting changes and plan forces but not a plan eviction or a session kill. [Agent dispatch](docs/darling-agent-dispatch.md) explains the levels.
+
 The Dashboard edition is deprecated. Existing installs keep working, but we recommend Lite or Darling for new deployments. [Choosing an edition](docs/editions.md) compares all three.
+
+Each release ships these downloads. For Lite, a `Setup.exe` and a portable ZIP. For Darling, the service ZIP (with the viewer inside), a Viewer `Setup.exe` for a remote seat, and the Linux and Compose tarballs. The Full Dashboard and its CLI installer ship nothing. Their last builds are in the [v3.2.0 release](https://github.com/erikdarlingdata/PerformanceMonitor/releases/tag/v3.2.0).
 
 Not sure which one? Start with Lite. It is one download, nothing is installed on your server, and data starts to flow in under 5 minutes.
 
 ## Quick start: Lite
 
-1. Download [`PerformanceMonitorLite-win-Setup.exe`](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest). It is a self-contained build, so you do not install a .NET runtime first.
+1. Download [`PerformanceMonitorLite-lite-Setup.exe`](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest). It is a self-contained build, so you do not install a .NET runtime first.
 2. Run the installer. It adds Start Menu and Desktop shortcuts.
 3. Start Lite from the Start Menu or the Desktop shortcut.
 4. Click **+ Add Server**, enter the connection details, test, and save.
@@ -56,12 +60,15 @@ These steps are for Windows. For Linux, the full steps, and the web dashboard, r
 | [Lite guide](docs/lite-guide.md) | Install, upgrade, collectors, Extended Events sessions, storage, configuration |
 | [Darling quick start](docs/darling-quick-start.md) | Install on Windows, Linux notes, web dashboard |
 | [Darling operator guide](Darling/README.md) | Darling configuration, permissions, operations |
+| [Darling store sizing](docs/darling-store-sizing.md) | Disk, RAM and vCPU for a store host, by number of servers |
 | [Tabs](docs/tabs.md) | What each tab shows |
 | [Alerts and notifications](docs/alerts.md) | Alert types, channels, routes, email |
+| [Agent dispatch](docs/darling-agent-dispatch.md) | Hand an alert to your own AI agent: levels, the brief and report, undo, the remediation login |
+| [Signed webhooks](docs/signed-webhooks.md) | Verify that a generic webhook post came from Darling |
 | [Agent job monitoring](docs/agent-job-monitoring.md) | Running SQL Agent jobs and jobs that run longer than expected |
 | [MCP server](docs/mcp-server.md) | Setup, the tool list and the Lite investigation tools for AI analysis |
 | [Authentication](docs/authentication.md) | Authentication types and credential profiles |
-| [Permissions](docs/permissions.md) | Grants for on-premises, Azure, and AWS RDS |
+| [Permissions](docs/permissions.md) | Grants for on-premises, Azure, and AWS RDS. The optional agent remediation login is in [Agent dispatch](docs/darling-agent-dispatch.md#the-remediation-login) |
 | [Platform notes](docs/platform-notes.md) | AWS RDS and Aurora configuration |
 | [Performance impact](docs/performance-impact.md) | Load on monitored servers, and local resources for Lite |
 | [Troubleshooting](docs/troubleshooting.md) | Common problems for Lite and Darling |

@@ -72,6 +72,83 @@ internal static class StaTestThread
     /// </summary>
     internal static void Step(string what) => s_host.Step(what);
 
+    /// <summary>How long <see cref="Settle"/> waits for application idle. Half the hang guard, so a settle that never ends fails its own test before the guard strands the shared thread.</summary>
+    internal static readonly TimeSpan IdleLimit = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// #6333: shows the window and lets the dispatcher reach application idle, with the wait bounded. Replaces the unbounded
+    /// <c>PushFrame</c> each WPF test class copied: a frame that is never woken left the body, and with it the shared thread, waiting
+    /// until the 60 s hang guard stranded every later WPF test in the process (a Lite shard lost a whole class that way).
+    /// </summary>
+    internal static void Settle(Window window)
+    {
+        Step("Settle: Show() on the window");
+        window.Show();
+        WaitForIdle(window.Dispatcher, IdleLimit);
+    }
+
+    /// <summary>
+    /// Runs a dispatcher frame until an application-idle operation runs, for at most <paramref name="limit"/>. When the limit passes
+    /// the test fails alone, saying what it waited for and how many dispatcher operations ran meanwhile, and the shared thread stays usable.
+    /// </summary>
+    internal static void WaitForIdle(Dispatcher dispatcher, TimeSpan limit) => WaitForIdle(dispatcher, limit, DispatcherPriority.ApplicationIdle);
+
+    /// <summary>
+    /// <see cref="WaitForIdle(Dispatcher, TimeSpan)"/> at a chosen <paramref name="idlePriority"/>. An overload, not an optional
+    /// parameter: an optional <see cref="DispatcherPriority"/> stores a constant of a WindowsBase type in this method's metadata, and
+    /// the nightly test map's AltCover (Mono.Cecil) cannot resolve WindowsBase when it rewrites the assembly. It failed every test-map
+    /// shard from nightly 569 on with "Failed to resolve System.Windows.Threading.DispatcherPriority".
+    /// </summary>
+    internal static void WaitForIdle(Dispatcher dispatcher, TimeSpan limit, DispatcherPriority idlePriority)
+    {
+        var frame = new DispatcherFrame();
+        var idle = false;
+        var operations = 0;
+        var lastPriority = DispatcherPriority.Invalid;
+        var priorToLast = DispatcherPriority.Invalid;
+        DispatcherHookEventHandler counter = (_, e) =>
+        {
+            operations++;
+            priorToLast = lastPriority;
+            lastPriority = e.Operation.Priority;
+        };
+        dispatcher.Hooks.OperationStarted += counter;
+
+        /* Send priority and promoted by the dispatcher on every pass, so it fires even when the queue is never empty. */
+        var expiry = new DispatcherTimer(DispatcherPriority.Send, dispatcher) { Interval = limit };
+        expiry.Tick += (_, _) =>
+        {
+            /* The tick is itself an operation the counter saw; the message counts the dispatcher's work, not the guard's. */
+            operations--;
+            lastPriority = priorToLast;
+            frame.Continue = false;
+        };
+        try
+        {
+            dispatcher.BeginInvoke(idlePriority, new Action(() =>
+            {
+                idle = true;
+                frame.Continue = false;
+            }));
+            expiry.Start();
+            Step("Settle: waiting in a dispatcher frame for application idle");
+            Dispatcher.PushFrame(frame);
+        }
+        finally
+        {
+            expiry.Stop();
+            dispatcher.Hooks.OperationStarted -= counter;
+        }
+
+        if (!idle)
+        {
+            throw new TimeoutException(
+                $"The dispatcher did not reach {(idlePriority == DispatcherPriority.ApplicationIdle ? "application idle" : idlePriority.ToString())} within {limit.TotalMilliseconds:0} ms: it ran {operations} operations meanwhile"
+                + (operations == 0 ? " (none: the frame was not woken to run what the window queued)" : $", the last at priority {lastPriority}")
+                + ". Work queued ahead of idle without end looks like the second; a pump that never wakes looks like the first (#6216, #6333).");
+        }
+    }
+
     /// <summary>
     /// For a test that must own its thread: waits for the gate and returns the token that releases it. Not re-entrant, and not to
     /// be called from a body already running in <see cref="Run(Action)"/>.

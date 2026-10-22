@@ -160,13 +160,15 @@ public sealed class QueryStoreDurationTrendTableLiveTests
     }
 
     /// <summary>
-    /// #4310 site 3 clause 6's own pin for the duration trend: (c) on the LEGACY seed
-    /// (<see cref="QueryStoreIntervalWideGridLiveTests.SeedGridLegacyAsync"/>, forced long-covered so clauses
-    /// 1-5 alone would otherwise route the table), the gate refuses — <see cref="QueryStoreIntervalWide.ReadsTableAsync"/>
-    /// returns <c>UseTable == false</c> — and <see cref="ViewerDataService.GetQueryStoreDurationTrendAsync"/>
-    /// therefore returns exactly raw's own per-snapshot points (arm 2's un-deduped, collection_time-placed
-    /// treatment), not the table's collapsed one. This is the originally red CI case (a legacy-only store's
-    /// duration trend losing points to the table's per-identity collapse), now green via raw.
+    /// #4310 site 3 clause 6's own pin for the duration trend, and the only end-to-end guard on the Viewer's
+    /// <c>LegacyRows.Refuse</c>. The LEGACY seed (<see cref="QueryStoreIntervalWideGridLiveTests.SeedGridLegacyAsync"/>)
+    /// fetches one interval (id 400) in three cycles at three different <c>collection_time</c>s, forced long-covered
+    /// so clauses 1-5 alone would route the table, over a window at or above
+    /// <see cref="ViewerDataService.QueryStoreDurationTrendMinWindow"/> so the Viewer really reaches the gate.
+    /// Raw places one point per cycle. The table keeps only the interval's latest snapshot, so its points differ
+    /// (asserted below, so the comparison cannot go vacuous). With the Viewer asking for clause 6 the gate refuses,
+    /// and <see cref="ViewerDataService.GetQueryStoreDurationTrendAsync"/> returns exactly raw's own per-snapshot points.
+    /// If the Viewer's call is changed to <c>LegacyRows.Allow</c>, it returns the table's collapsed points and this test fails.
     /// </summary>
     [Fact]
     public async Task LegacySeed_RefusesTheTable_AndTheDurationTrendMatchesRawsPerSnapshotPoints()
@@ -185,12 +187,21 @@ public sealed class QueryStoreDurationTrendTableLiveTests
         await QueryStoreIntervalWideGridLiveTests.SeedGridLegacyAsync(runner, ServerId, WindowStart, ct);
         await ForceFilledSinceAsync(connection, WindowStart.AddDays(-1), ct);
 
+        /* The window must reach the Viewer's own gate, or the Viewer reads raw whatever flag it passes. */
+        Assert.True(WindowEnd - WindowStart >= ViewerDataService.QueryStoreDurationTrendMinWindow, "the window is below the trend's table threshold, so the Viewer never reaches the gate");
+
+        /* The gate decision itself, asked the way the trend asks (the Viewer's own call is checked by the series below). */
         var (useTable, _) = await QueryStoreIntervalWide.ReadsTableAsync(
-            connection, ServerId, WindowStart, WindowEnd, null, QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct);
+            connection, ServerId, WindowStart, WindowEnd, null, ViewerDataService.QueryStoreDurationTrendMinWindow, 30, null, legacyRows: QueryStoreIntervalWide.LegacyRows.Refuse, ct);
         Assert.False(useTable, "every row in this seed is legacy (interval_start_time_utc IS NULL); clause 6 must refuse the table");
 
         var rawPoints = await ReadPointsAsync(postgres, ViewerDataService.QueryStoreDurationTrendSql, WindowStart, WindowEnd, ct);
         Assert.True(rawPoints.Count > 0, "the seed produced no raw points; the comparison would be vacuous");
+
+        /* The seed must be one the table gets wrong: interval 400 is fetched in three cycles, raw has a point per cycle, the table
+           has one snapshot of it. If these were equal, the series assertion below could not tell the two paths apart. */
+        var tablePoints = await ReadPointsAsync(postgres, ViewerDataService.QueryStoreDurationTrendTableSql, WindowStart, WindowEnd, ct, isTableSql: true);
+        Assert.NotEqual(rawPoints, tablePoints);
 
         await using var viewer = new ViewerDataService(scratch.ConnectionString);
         var series = await viewer.GetQueryStoreDurationTrendAsync(ServerId, WindowStart, WindowEnd);

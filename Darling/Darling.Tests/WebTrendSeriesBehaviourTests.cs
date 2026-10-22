@@ -80,7 +80,9 @@ public sealed class WebTrendSeriesBehaviourTests
         Assert.Equal(["SalesDb.sales_data", "SalesDb.sales_log"], Labels(charts[1]));
         Assert.Equal("15 MB/s", Top(charts[0]));
         Assert.Equal("10 MB/s", Top(charts[1]));
-        Assert.Contains("THROUGHPUT NOTE", card.GetProperty("notes").EnumerateArray().Select(e => e.GetString()));
+        // #6359: the width and the summed-read fact, never the read's MCP-facing aggregate_note.
+        Assert.Contains("Each point covers 15 minutes. A bucket the window cuts short holds smaller counts; rates are true rates over the time the bucket covers.", card.GetProperty("notes").EnumerateArray().Select(e => e.GetString()));
+        Assert.DoesNotContain(card.GetProperty("notes").EnumerateArray().Select(e => e.GetString()), n => n!.Contains("bucket_minutes", System.StringComparison.Ordinal));
     }
 
     /// <summary>The tempdb file chart plots each file's read latency plus its write latency, as the desktop does, and a file with no figure at all has no line.</summary>

@@ -340,6 +340,8 @@ OPTION(RECOMPILE);
 
 {RingBufferXml.ParseSql}
 
+{RingBufferXml.TruncationSql}
+
 INSERT
     @PerformanceMonitor_LongQueryCompletions
 (
@@ -348,7 +350,10 @@ INSERT
 SELECT
     ring_xml = @ring_xml
 WHERE @ring_xml IS NOT NULL;
-{ShredSelect}";
+{ShredSelect}
+
+/* #6441: whether SQL Server truncated the ring buffer's XML, read by ReadAsync after the event rows. */
+{RingBufferXml.TruncationSelectSql}";
 
         /* Use the most recent event_time from the host store as the cutoff, or fall back to
            CollectorContext.EventFallbackWindow on first run (mirrors the blocked-process / deadlock collectors). */
@@ -428,6 +433,10 @@ WHERE @ring_xml IS NOT NULL;
                 SessionId = reader.IsDBNull(19) ? null : reader.GetInt32(19),
             });
         }
+
+        /* #6441: the session's ring buffer is 4096 KB, whose XML can pass SQL Server's 4 MB cut; the cut keeps the
+           OLDEST events, so the counts are what bands the collector WARNING when new completions are out of sight. */
+        await RingBufferXml.MeasureTrailingTruncationAsync(reader, context, cancellationToken);
 
         return rows;
     }

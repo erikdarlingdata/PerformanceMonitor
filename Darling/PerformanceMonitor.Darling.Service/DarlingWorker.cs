@@ -991,6 +991,9 @@ public sealed class DarlingWorker : BackgroundService
     /* MinValue = the first sweep after startup runs the retention purge, then daily. */
     private DateTime _nextPurgeUtc = DateTime.MinValue;
 
+    /// <summary>The once-per-24-hours rule for the <c>collect.query_store_text</c> prune, shared by the scheduled passes (a pass the wall budget stopped brings the next one forward to within the hour).</summary>
+    private readonly QueryTextPruneGate _queryTextPruneGate = new();
+
     /* MinValue = the first sweep after startup evaluates the store disk-pressure self-alert, then every
        s_diskCheckInterval. Fleet-level (one shared store), so it is a single field, not per-server. */
     private DateTime _nextDiskCheckUtc = DateTime.MinValue;
@@ -7401,6 +7404,7 @@ LIMIT 1";
         && a.TrustServerCertificate == b.TrustServerCertificate
         && a.ReadOnlyIntent == b.ReadOnlyIntent
         && a.MultiSubnetFailover == b.MultiSubnetFailover
+        && !QueryStoreReplicaSetting.Differ(a.QueryStoreReplica, b.QueryStoreReplica)
         && a.Port == b.Port
         && a.TargetEngine == b.TargetEngine
         && a.AwsRoleKey == b.AwsRoleKey
@@ -13302,7 +13306,8 @@ AND   j.hypertable_name = '{relation}'", connection))
             name => StoreConfigProvider.ResolveFleetRetentionDays(name, overrides),
             config.PlanContentRetentionDays,
             paceWal: true,
-            collectionPressure: _collectionPressure);
+            collectionPressure: _collectionPressure,
+            queryTextPruneGate: _queryTextPruneGate);
 
         /* #5592: a pass the wall budget stopped brings the next scheduled pass forward to within the hour. */
         NotePurgePassEnded(purgeSummary, DateTime.UtcNow);
@@ -16291,11 +16296,12 @@ LIMIT 1";
     private async Task LogRunAsync(
         ServerLoopState server, ServerRuntime runtime, string collectorName, string status, int rowsCollected,
         long sqlMs, long storageMs, string? errorMessage, FanoutCost? fanout, ServerPhaseCost? phases,
-        DrainForensics? drain, FetchPhaseCost? fetchPhases, int? sweepPeerMaxMs, ILogger? logger, CancellationToken cancellationToken)
+        DrainForensics? drain, FetchPhaseCost? fetchPhases, int? sweepPeerMaxMs, ILogger? logger, CancellationToken cancellationToken,
+        string? readSource = null)
     {
         await DarlingObservability.LogCollectionAsync(
             _postgres!, runtime, collectorName, status, rowsCollected, sqlMs, storageMs, errorMessage, fanout, phases, drain,
-            fetchPhases, sweepPeerMaxMs, logger, cancellationToken);
+            fetchPhases, sweepPeerMaxMs, logger, cancellationToken, readSource);
         RecordRunForBackoff(server, runtime, collectorName, status, errorMessage);
     }
 
@@ -16674,7 +16680,8 @@ LIMIT 1";
 
             await LogRunAsync(
                 server, runtime, collectorName, status, result.Rows, result.SqlMs, result.StorageMs, result.Note,
-                result.Fanout, result.ServerPhases, result.Drain, result.FetchPhases, peerMaxAtDispatchMs, _logger, cancellationToken);
+                result.Fanout, result.ServerPhases, result.Drain, result.FetchPhases, peerMaxAtDispatchMs, _logger, cancellationToken,
+                readSource: result.ReadSource);
 
             /* #2864 item 3: fold THIS run into the body's peer high-water mark, AFTER its own row is
                written so a collector is never its own peer. The mark answers the question that took

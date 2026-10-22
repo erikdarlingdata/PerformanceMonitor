@@ -609,10 +609,18 @@ public static class QueryStoreRegressionBaseline
                 ELSE 'LOW'
             END AS severity,
             /* #2150: text comes from collect.query_store_text now, and this projection's grain is exactly
-               that table's key, so it resolves here with a keyed join rather than inside the aggregate.
+               that table's key, so it resolves here as a keyed lookup per output row, not inside the aggregate.
+               #5506: it is a scalar subquery, not a join. The planner expected about 3M rows in ranked where
+               the real count is 3 to 4 thousand, so a join hashed the server's whole text table to label 30
+               rows. The primary key is (server_id, database_name, query_id), so the subquery returns one row
+               or NULL, as the join did.
                The MAX(query_text) sample stays as the fallback: it is where text lived before the
                cutover, and it is what keeps the regression rows readable for existing history. */
-            COALESCE(x.query_sql_text, r.query_text_sample) AS query_text_sample,
+            COALESCE((SELECT x.query_sql_text
+                      FROM query_store_text AS x
+                      WHERE x.server_id = $1
+                      AND   x.database_name = r.database_name
+                      AND   x.query_id = r.query_id), r.query_text_sample) AS query_text_sample,
             r.last_execution_time,
             /* #5506: why the row is here: cost, timeouts, errors, or a combination in that order, comma separated. */
             array_to_string(ARRAY_REMOVE(ARRAY[
@@ -642,10 +650,6 @@ public static class QueryStoreRegressionBaseline
             r.total_count
         FROM ranked AS r
         CROSS JOIN slots AS s
-        LEFT JOIN query_store_text AS x
-          ON  x.server_id = $1
-          AND x.database_name = r.database_name
-          AND x.query_id = r.query_id
         WHERE (r.is_cost AND r.class_rn <= CAST(@@LIMIT AS integer) - s.failure_slots)
         OR    (NOT r.is_cost AND r.class_rn <= s.failure_slots)
         ORDER BY r.is_cost DESC,

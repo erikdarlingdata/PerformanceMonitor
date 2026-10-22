@@ -97,11 +97,12 @@ public static class DarlingWebEndpoints
     internal static readonly IReadOnlySet<string> WebOnlyReadNames = new HashSet<string>(StringComparer.Ordinal)
     {
         "get_alert_details",
+        "get_overview_baselines",
         "get_block_chain",
     };
 
     /// <summary>The tool names deliberately absent from the <c>/api/read/*</c> 1:1 read surface. <c>analyze_server</c>
-    /// makes a live monitored-server connection; <c>mute_analysis_finding</c> writes; the <c>analyze_*_plan</c> family
+    /// makes a live monitored-server connection; <c>mute_analysis_finding</c> and <c>unmute_analysis_finding</c> (#6383) write; the <c>analyze_*_plan</c> family
     /// is the compute-heavy plan-analysis phase-2 work; the Custom Views tools (#1599) are served by their OWN
     /// richer web endpoints (<c>/api/views</c> CRUD + <c>/api/compose/run</c> + the <c>/api/catalog</c> compose
     /// vocabulary that <c>describe_custom_view_catalog</c> mirrors), not a <c>/api/read/{tool}</c> query-string mirror;
@@ -126,6 +127,7 @@ public static class DarlingWebEndpoints
     {
         "analyze_server",
         "mute_analysis_finding",
+        "unmute_analysis_finding",
         "analyze_query_plan",
         "analyze_procedure_plan",
         "analyze_query_store_plan",
@@ -394,6 +396,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            of a server built before it. Production calls MapAll once, so nothing changes there. A caller with
            no accumulator (a test that maps the routes directly) records nothing. */
         var readLatencyRecorder = new ReadLatencyRecorder(readLatency, logger, slowReads, readAdmission);
+
+        /* #6445: the Admin writes the web's store login cannot make answer a 403 whose advice depends on the store. A managed store refuses
+           postgres.webConnectionString, so its sentences say the dashboard lists only and the Viewer app makes the change. */
+        var managedStore = DarlingWebStoreWrites.IsManaged(postgresConfig);
 
         /* Liveness AND collection state (#2953). The one health surface that does not read the store, which
            makes it the only one that can answer when the store IS the problem — so it reports the collector's
@@ -688,27 +694,29 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             });
         }
 
-        MapCustomViews(app, postgres, logger, readLatencyRecorder, readAdmission);
+        MapCustomViews(app, postgres, logger, readLatencyRecorder, readAdmission, managedStore);
         MapCustomAlerts(app, postgres, logger, readAdmission, readLatencyRecorder);
         MapMuteRules(app, postgres, logger);
-        MapInvestigationNotes(app, new InvestigationRequestStore(postgres, McpCommandDeadlines.ReadSeconds), logger);
-        MapThresholdOverrides(app, postgres, logger);
-        MapAgentSetup(app, postgres, logger, passwordKeys);
-        MapAgentChanges(app, new AgentChangeUndo(postgres, McpCommandDeadlines.ReadSeconds), logger, ownerSource);
+        DarlingKnownPatternRoutes.Map(app, postgres, logger);
+        MapInvestigationNotes(app, new InvestigationRequestStore(postgres, McpCommandDeadlines.ReadSeconds), logger, managedStore);
+        MapThresholdOverrides(app, postgres, logger, managedStore);
+        MapAgentSetup(app, postgres, logger, passwordKeys, managedStore);
+        MapAgentChanges(app, new AgentChangeUndo(postgres, McpCommandDeadlines.ReadSeconds), logger, ownerSource, managedStore);
         MapServerTags(app, postgres, logger);
-        MapServerActions(app, postgres, new AgentChangeUndo(postgres, McpCommandDeadlines.ReadSeconds), logger, ownerSource);
+        MapServerActions(app, postgres, new AgentChangeUndo(postgres, McpCommandDeadlines.ReadSeconds), logger, ownerSource, managedStore);
         MapAdminServers(app, postgres);
         MapQueryTags(app, postgres, logger, readAdmission, readLatencyRecorder);
         MapCollectorRuns(app, new PostgresSnapshotNowStore(postgres), logger, async (name, ct) => { var (r, err) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, name, ct, NameClash.Refuse); return (r.ServerId, err); });
         MapServers(app, postgres, logger);
         MapAlertHistoryDismiss(app, postgres, logger);
-        MapInvestigationFeedback(app, postgres, logger);
+        MapInvestigationFeedback(app, postgres, logger, managedStore);
         MapInvestigationExport(
             app, postgres, logger, dataDetail, pseudonymKeys, readAdmission, readLatencyRecorder,
             investigationExportGate ?? new InvestigationExportGate(InvestigationExportGate.FolderFor(
-                DarlingManagedPostgres.ResolveDataDirectory(postgresConfig ?? new PostgresConfig()))));
+                DarlingManagedPostgres.ResolveDataDirectory(postgresConfig ?? new PostgresConfig()))),
+            managedStore: managedStore);
         MapInvestigationPractice(app, postgres, logger);
-        MapInvestigationPersonWrites(app, postgres, logger);
+        MapInvestigationPersonWrites(app, postgres, logger, managedStore);
         MapWebhookSigningStatus(app, collector);
 
         /* The fleet sweep feed (#3466 lane 3): dedicated read routes like /api/fleet, over the same
@@ -742,7 +750,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// duplicate-name conflict detection. Error bodies are always <c>{"error": "..."}</c>, matching the read surface.
     /// </summary>
     internal static void MapCustomViews(WebApplication app, NpgsqlDataSource postgres, ILogger logger, ReadLatencyRecorder readLatencyRecorder,
-        ReadAdmission? readAdmission)
+        ReadAdmission? readAdmission, bool managedStore = false)
     {
         var store = new CustomViewStore(postgres);
 
@@ -759,7 +767,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                existed). The page decides the Personal checkbox from it, and "My views" and read-only from each view's own `mine`. Neither the
                subject nor the key is returned: a name decides nothing, and a key is never shown. */
             var seat = DarlingWebSeat.FromContext(context);
-            return JsonNodeResult(new JsonObject { ["can_edit"] = seat.CanEdit, ["can_own"] = seat.OwnerKey is not null, ["signed_in_admin"] = DarlingWebSeat.IsSignedInAdmin(context) });
+            return JsonNodeResult(new JsonObject { ["can_edit"] = seat.CanEdit, ["can_own"] = seat.OwnerKey is not null, ["signed_in_admin"] = DarlingWebSeat.IsSignedInAdmin(context), ["managed_store"] = managedStore });
         });
 
         /* The read catalog: input truth (read names + their WIRE query keys) the composer binds params from. */
@@ -1258,7 +1266,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// for any other store failure. The decision is stamped as every web write is: the seat's <see cref="DarlingWebSeat.EditorPrincipal"/>
     /// (the signed-in subject, else <c>web</c>) shaped as <c>person:&lt;name&gt;</c>, as the Viewer stamps a decision. The list body goes through the statement sweep (#4348) like every other body that carries text an agent wrote.
     /// </summary>
-    private static void MapInvestigationNotes(WebApplication app, InvestigationRequestStore notes, ILogger logger)
+    private static void MapInvestigationNotes(WebApplication app, InvestigationRequestStore notes, ILogger logger, bool managedStore = false)
     {
         app.MapGet("/api/investigation-notes/pending", async (HttpContext context) =>
         {
@@ -1308,7 +1316,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
             catch (Exception ex) when (IsInsufficientPrivilege(ex))
             {
-                return NoteDecisionRefusedResult();
+                return NoteDecisionRefusedResult(managedStore);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -1348,7 +1356,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
             catch (Exception ex) when (IsInsufficientPrivilege(ex))
             {
-                return NoteDecisionRefusedResult();
+                return NoteDecisionRefusedResult(managedStore);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -1366,7 +1374,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// (the <c>viewer</c> role of a managed or compose store), 400 for a refused key, value or server. Every body goes through the
     /// statement sweep (#4348): <c>set_by</c> on an agent's override is text an agent named.
     /// </summary>
-    private static void MapThresholdOverrides(WebApplication app, NpgsqlDataSource postgres, ILogger logger)
+    private static void MapThresholdOverrides(WebApplication app, NpgsqlDataSource postgres, ILogger logger, bool managedStore = false)
     {
         app.MapGet("/api/threshold-overrides", async (HttpContext context) =>
         {
@@ -1410,7 +1418,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             try
             {
                 var (status, answer) = await DarlingWebThresholdOverrides.ChangeAsync(
-                    postgres, logger, body, DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
+                    postgres, logger, body, DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted, managedStore);
                 return DarlingWebStatementSweep.JsonText(
                     answer, "/api/threshold-overrides", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, status);
             }
@@ -1431,7 +1439,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// 403 when the store refuses for privilege (SQLSTATE 42501: the <c>viewer</c> role of a managed or compose store), 404 for a route that is
     /// gone and 400 with the shared rule's sentence for a refused value. The work is <see cref="DarlingWebAgentSetup"/>'s.
     /// </summary>
-    private static void MapAgentSetup(WebApplication app, NpgsqlDataSource postgres, ILogger logger, IPasswordKeyRing? passwordKeys)
+    private static void MapAgentSetup(WebApplication app, NpgsqlDataSource postgres, ILogger logger, IPasswordKeyRing? passwordKeys, bool managedStore = false)
     {
         app.MapGet("/api/agent-setup/access", async (HttpContext context) =>
         {
@@ -1469,7 +1477,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         {
             var stopwatch = Stopwatch.StartNew();
             var run = await AgentSetupRunAsync(context, logger, "/api/environment-profiles",
-                (body, editor, ct) => DarlingWebAgentSetup.SaveProfileAsync(postgres, body, editor, ct));
+                (body, editor, ct) => DarlingWebAgentSetup.SaveProfileAsync(postgres, body, editor, ct, managedStore));
             return DarlingWebStatementSweep.JsonText(
                 run.Body, "/api/environment-profiles", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, run.Status);
         });
@@ -1478,7 +1486,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         {
             var stopwatch = Stopwatch.StartNew();
             var run = await AgentSetupRunAsync(context, logger, "/api/notification-routes",
-                (body, editor, ct) => DarlingWebAgentSetup.SaveRouteAsync(postgres, logger, null, body, editor, passwordKeys ?? DarlingPasswordKey.Current, ct));
+                (body, editor, ct) => DarlingWebAgentSetup.SaveRouteAsync(postgres, logger, null, body, editor, passwordKeys ?? DarlingPasswordKey.Current, ct, managedStore));
             return DarlingWebStatementSweep.JsonText(
                 run.Body, "/api/notification-routes", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, run.Status);
         });
@@ -1487,7 +1495,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         {
             var stopwatch = Stopwatch.StartNew();
             var run = await AgentSetupRunAsync(context, logger, "/api/notification-routes/{id}",
-                (body, editor, ct) => DarlingWebAgentSetup.SaveRouteAsync(postgres, logger, id, body, editor, passwordKeys ?? DarlingPasswordKey.Current, ct));
+                (body, editor, ct) => DarlingWebAgentSetup.SaveRouteAsync(postgres, logger, id, body, editor, passwordKeys ?? DarlingPasswordKey.Current, ct, managedStore));
             return DarlingWebStatementSweep.JsonText(
                 run.Body, "/api/notification-routes/{id}", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, run.Status);
         });
@@ -1513,7 +1521,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             try
             {
                 var (status, answer) = await DarlingWebAgentSetup.DeleteRouteAsync(
-                    postgres, logger, id, DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
+                    postgres, logger, id, DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted, managedStore);
                 return DarlingWebStatementSweep.JsonText(
                     answer, "/api/notification-routes/{id}", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, status);
             }
@@ -1580,9 +1588,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
     /// <summary>The 403 sentence a note decision answers when the store refuses the write (SQLSTATE 42501): the web host runs on
     /// whatever login <c>postgres.webConnectionString</c> names, and deciding a note is an <c>admin</c> role write (#5903).</summary>
-    internal const string NoteDecisionRefusedMessage =
-        "Deciding a note needs a store login with the admin role. Managed and compose stores connect the web dashboard as the viewer role, "
-        + "which lists pending notes but cannot decide them: decide in the desktop Viewer, or (bring-your-own store) set postgres.webConnectionString to an admin login.";
+    internal static string NoteDecisionRefusedMessage(bool managedStore) =>
+        DarlingWebStoreWrites.Refused("decide notes", managedStore, "Decide them in the Viewer app");
 
     /// <summary>The sentence a person-made investigation change answers with 403 when the request holds no signed-in admin seat (#6265):
     /// a dashboard with no sign-in configured has no caller to name, so the change is made in the Viewer or after signing in.</summary>
@@ -1592,8 +1599,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     private static IResult SignInRequiredResult() => ErrorResult(InvestigationWriteSignInMessage, StatusCodes.Status403Forbidden);
 
     /// <summary>The 403 a refused note decision answers: the fixed <see cref="NoteDecisionRefusedMessage"/> sentence in the mute-rule error envelope.</summary>
-    private static IResult NoteDecisionRefusedResult() =>
-        ErrorResult(NoteDecisionRefusedMessage, StatusCodes.Status403Forbidden);
+    private static IResult NoteDecisionRefusedResult(bool managedStore) =>
+        ErrorResult(NoteDecisionRefusedMessage(managedStore), StatusCodes.Status403Forbidden);
 
     /// <summary>True when the store refused the statement for privilege (SQLSTATE 42501).</summary>
     internal static bool IsInsufficientPrivilege(Exception ex) => ex is PostgresException { SqlState: "42501" };
@@ -1642,13 +1649,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
     /// <summary>The 403 sentence an undo or a switch answers when the store refuses the write for privilege (SQLSTATE 42501): the web host
     /// runs on whatever login <c>postgres.webConnectionString</c> names, the <c>viewer</c> role on a managed or compose store (#5917).</summary>
-    internal const string AgentChangeRefusedMessage =
-        "This dashboard signs in to the store as the viewer role, so it cannot undo or switch off agent changes. "
-        + "Use the Viewer app, or run the web under the admin login.";
+    internal static string AgentChangeRefusedMessage(bool managedStore) =>
+        DarlingWebStoreWrites.Refused("undo or switch off agent changes", managedStore);
 
     /// <summary>The 403 a refused undo or switch answers: the fixed <see cref="AgentChangeRefusedMessage"/> sentence in the error envelope.</summary>
-    private static IResult AgentChangeRefusedResult() =>
-        ErrorResult(AgentChangeRefusedMessage, StatusCodes.Status403Forbidden);
+    private static IResult AgentChangeRefusedResult(bool managedStore) =>
+        ErrorResult(AgentChangeRefusedMessage(managedStore), StatusCodes.Status403Forbidden);
 
     /// <summary>
     /// The Agent changes routes (#5917): <c>GET /api/agent-changes</c> lists the calls (with their result, or "unknown"), the refusals,
@@ -1659,7 +1665,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// refusal ("changed since", name taken, already undone, no undo) and 400 for a bad body or login. Journal text goes through
     /// <c>InvestigationFieldMasking.JournalDetail</c> at the web's level (full, as the other web reads of the journal).
     /// </summary>
-    private static void MapAgentChanges(WebApplication app, AgentChangeUndo changes, ILogger logger, StoreOwnerSource? ownerSource = null)
+    private static void MapAgentChanges(WebApplication app, AgentChangeUndo changes, ILogger logger, StoreOwnerSource? ownerSource = null, bool managedStore = false)
     {
         app.MapGet("/api/agent-changes", async (HttpContext context) =>
         {
@@ -1733,7 +1739,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
                     if (!await changes.CanDecideAsync(context.RequestAborted))
                     {
-                        return AgentChangeRefusedResult();
+                        return AgentChangeRefusedResult(managedStore);
                     }
 
                     var (planBody, planStatus) = await UndoPlanChangeAsync(context, changes, ownerSource, logger, id, login);
@@ -1757,7 +1763,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
             catch (Exception ex) when (IsInsufficientPrivilege(ex))
             {
-                return AgentChangeRefusedResult();
+                return AgentChangeRefusedResult(managedStore);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -1798,7 +1804,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
             catch (Exception ex) when (IsInsufficientPrivilege(ex))
             {
-                return AgentChangeRefusedResult();
+                return AgentChangeRefusedResult(managedStore);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -2552,18 +2558,38 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     internal sealed class SingleReleaseSlot
     {
         private readonly SemaphoreSlim gate;
-        private int held = 1;
+        private readonly object sync = new();
+        private readonly Action? beforeFree;
+        private bool released;
 
-        internal SingleReleaseSlot(SemaphoreSlim gate)
+        /// <param name="gate">The one-slot gate to free.</param>
+        /// <param name="beforeFree">A test seam only: runs inside the first release, after it claimed the slot and before
+        /// it frees the gate, so a test can stand a second caller in that window. Production passes nothing.</param>
+        internal SingleReleaseSlot(SemaphoreSlim gate, Action? beforeFree = null)
         {
             this.gate = gate;
+            this.beforeFree = beforeFree;
         }
 
-        /// <summary>Frees the slot on the first call; every later call does nothing.</summary>
+        /// <summary>
+        /// Frees the slot on the first call; every later call does nothing, but it does not RETURN until the first
+        /// call has really freed the gate (#6440). A flag flipped with Interlocked.Exchange before gate.Release() let a
+        /// second caller see "already released" and return while the first caller, preempted between the flag and
+        /// the Release, had not freed the gate yet: the handler then sent its answer, the client sent its next
+        /// edit, and that edit was refused with 429. The lock makes the second caller wait that moment out. Nothing
+        /// inside it blocks or awaits.
+        /// </summary>
         internal void Release()
         {
-            if (Interlocked.Exchange(ref held, 0) == 1)
+            lock (sync)
             {
+                if (released)
+                {
+                    return;
+                }
+
+                released = true;
+                beforeFree?.Invoke();
                 gate.Release();
             }
         }
@@ -2888,9 +2914,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
     /// <summary>The 403 sentence a feedback record answers when the store refuses the write (SQLSTATE 42501): the web host runs on
     /// whatever login <c>postgres.webConnectionString</c> names, and recording feedback is an <c>admin</c> role write (#5913).</summary>
-    internal const string FeedbackRefusedMessage =
-        "Recording feedback needs a store login with the admin role. Managed and compose stores connect the web dashboard as the viewer role, "
-        + "which lists feedback but cannot record it: give feedback in the desktop Viewer, or (bring-your-own store) set postgres.webConnectionString to an admin login.";
+    internal static string FeedbackRefusedMessage(bool managedStore) =>
+        DarlingWebStoreWrites.Refused("record feedback", managedStore, "Give feedback in the Viewer app");
 
     /* ─────────────────────── #5918 practice scores ─────────────────────── */
 
@@ -2933,10 +2958,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
     /// <summary>The 403 sentence these three writes answer when the store refuses them for privilege (SQLSTATE 42501): the web host runs on
     /// whatever login <c>postgres.webConnectionString</c> names, the <c>viewer</c> role on a managed or compose store (#6265).</summary>
-    internal const string InvestigationWriteRefusedMessage =
-        "Closing a request, writing a note and starting a practice request need a store login with the admin role. Managed and compose stores "
-        + "connect the web dashboard as the viewer role, which lists them but cannot: do it in the desktop Viewer, or (bring-your-own store) set "
-        + "postgres.webConnectionString to an admin login.";
+    internal static string InvestigationWriteRefusedMessage(bool managedStore) =>
+        DarlingWebStoreWrites.Refused("close a request, write a note or start a practice request", managedStore, "Do it in the Viewer app");
 
     /// <summary>The most bytes one of these write bodies may carry (a note is at most 2,000 characters).</summary>
     internal const int MaxInvestigationWriteBodyBytes = 64 * 1024;
@@ -2956,7 +2979,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// 400 for a value the rules refuse (in plain words), 404 for an unknown request or case, 409 for a request that cannot be closed or a case that
     /// cannot be replayed, a fixed-sentence 500 or 503 for any other store failure.
     /// </summary>
-    internal static void MapInvestigationPersonWrites(WebApplication app, NpgsqlDataSource postgres, ILogger logger)
+    internal static void MapInvestigationPersonWrites(WebApplication app, NpgsqlDataSource postgres, ILogger logger, bool managedStore = false)
     {
         var requests = new InvestigationRequestStore(postgres, McpCommandDeadlines.ReadSeconds, () => DateTime.UtcNow);
         var practice = new InvestigationPracticeStore(postgres, McpCommandDeadlines.ReadSeconds);
@@ -3010,7 +3033,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
             catch (Exception ex) when (IsInsufficientPrivilege(ex))
             {
-                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = InvestigationWriteRefusedMessage }, route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = InvestigationWriteRefusedMessage(managedStore) }, route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -3082,7 +3105,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
             catch (Exception ex) when (IsInsufficientPrivilege(ex))
             {
-                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = InvestigationWriteRefusedMessage }, route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = InvestigationWriteRefusedMessage(managedStore) }, route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -3133,7 +3156,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
             catch (Exception ex) when (IsInsufficientPrivilege(ex))
             {
-                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = InvestigationWriteRefusedMessage }, route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = InvestigationWriteRefusedMessage(managedStore) }, route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -3234,7 +3257,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// A second record by the same author replaces the first. Bodies go through the statement sweep (#4348): they carry text an agent
     /// and a person wrote.
     /// </summary>
-    internal static void MapInvestigationFeedback(WebApplication app, NpgsqlDataSource postgres, ILogger logger)
+    internal static void MapInvestigationFeedback(WebApplication app, NpgsqlDataSource postgres, ILogger logger, bool managedStore = false)
     {
         var store = new InvestigationFeedbackStore(postgres, McpCommandDeadlines.ReadSeconds);
 
@@ -3312,7 +3335,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
             catch (Exception ex) when (IsFeedbackPrivilegeRefusal(ex))
             {
-                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = FeedbackRefusedMessage }, "/api/investigation-feedback/{requestId}",
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = FeedbackRefusedMessage(managedStore) }, "/api/investigation-feedback/{requestId}",
                     logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -3324,9 +3347,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     }
 
     /// <summary>The 403 sentence the export answers a login that may not record feedback (#6236).</summary>
-    internal const string InvestigationExportRefusedMessage =
-        "Exporting investigation cases needs the same store login as recording feedback: the admin role. Managed and compose stores connect the web "
-        + "dashboard as the viewer role, which cannot: run --export-investigations on the host, or (bring-your-own store) set postgres.webConnectionString to an admin login.";
+    internal static string InvestigationExportRefusedMessage(bool managedStore) =>
+        DarlingWebStoreWrites.Refused("export investigation cases", managedStore, "Run --export-investigations on the host");
 
     /// <summary>The 403 sentence the export answers a request that is not a signed-in admin session (#6236).</summary>
     internal const string InvestigationExportSeatMessage =
@@ -3352,7 +3374,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// </summary>
     internal static void MapInvestigationExport(
         WebApplication app, NpgsqlDataSource postgres, ILogger logger, McpDataDetail dataDetail, IPseudonymKeySource? pseudonymKeys,
-        ReadAdmission? readAdmission = null, ReadLatencyRecorder? readLatencyRecorder = null, InvestigationExportGate? exportGate = null)
+        ReadAdmission? readAdmission = null, ReadLatencyRecorder? readLatencyRecorder = null, InvestigationExportGate? exportGate = null,
+        bool managedStore = false)
     {
         exportGate ??= new InvestigationExportGate(InvestigationExportGate.FolderFor(DarlingManagedPostgres.ResolveDataDirectory(new PostgresConfig())));
         var feedbackStore = new InvestigationFeedbackStore(postgres, McpCommandDeadlines.ReadSeconds);
@@ -3405,7 +3428,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     if (!await feedbackStore.CanRecordAsync(connection, context.RequestAborted))
                     {
                         run.Complete(ReadOutcome.GateFailed);
-                        return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = InvestigationExportRefusedMessage }, "/api/investigation-export", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
+                        return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = InvestigationExportRefusedMessage(managedStore) }, "/api/investigation-export", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
                     }
                 }
 
@@ -3463,7 +3486,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             catch (Exception ex) when (IsFeedbackPrivilegeRefusal(ex))
             {
                 run.Complete(ReadOutcome.GateFailed);
-                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = InvestigationExportRefusedMessage }, "/api/investigation-export", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = InvestigationExportRefusedMessage(managedStore) }, "/api/investigation-export", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -3925,9 +3948,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     }
 
     /// <summary>The 403 a refused switch change answers when the web signs in to the store as the viewer role (#6269).</summary>
-    internal const string ServerActionRefusedMessage =
-        "This dashboard signs in to the store as the viewer role, so it cannot change server action switches. "
-        + "Use the Viewer app, or run the web under the admin login.";
+    internal static string ServerActionRefusedMessage(bool managedStore) =>
+        DarlingWebStoreWrites.Refused("change server action switches", managedStore);
 
     /// <summary>
     /// The server action switch routes (#6269). <c>GET /api/server-actions</c> lists every server with a state for each action
@@ -3940,7 +3962,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// admin check is the web login's own privileges (<see cref="AgentChangeUndo.CanDecideAsync"/>) and the seat's method gate. The change is
     /// journaled by <c>person:&lt;login&gt;</c>, surface <c>web</c>.
     /// </summary>
-    internal static void MapServerActions(WebApplication app, NpgsqlDataSource postgres, AgentChangeUndo changes, ILogger logger, StoreOwnerSource? ownerSource)
+    internal static void MapServerActions(WebApplication app, NpgsqlDataSource postgres, AgentChangeUndo changes, ILogger logger, StoreOwnerSource? ownerSource, bool managedStore = false)
     {
         app.MapGet("/api/server-actions", async (HttpContext context) =>
         {
@@ -3991,7 +4013,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 /* The admin check comes before anything is read or written. */
                 if (!await changes.CanDecideAsync(context.RequestAborted))
                 {
-                    return ErrorResult(ServerActionRefusedMessage, StatusCodes.Status403Forbidden);
+                    return ErrorResult(ServerActionRefusedMessage(managedStore), StatusCodes.Status403Forbidden);
                 }
 
                 var owner = ownerSource?.Read();
@@ -5897,8 +5919,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// may read <c>collect.query_store_interval_wide</c> (V145) instead of deduping raw — decided here, in the
     /// runner, BEFORE <see cref="ComposeCompiler.Compile"/> runs, because the compiler stays pure and never
     /// opens a connection. Reuses the pure <see cref="QueryStoreIntervalWide.UseTable"/> decision (through
-    /// <see cref="QueryStoreIntervalWide.ReadsTableAsync"/>, which also runs clause 6 — no legacy row in the
-    /// window — and the literal-end-before-applied_through refusal) for EVERY server in scope: a fleet panel
+    /// <see cref="QueryStoreIntervalWide.ReadsTableAsync"/>, which also applies the literal-end-before-applied_through
+    /// refusal; clause 6, the legacy-row probe, is not asked for here, because the composed panels read the newest snapshot per interval) for EVERY server in scope: a fleet panel
     /// (null/empty <paramref name="serverScope"/>) must pass for every server the store has rows for, or the
     /// hybrid would silently under-read a server whose table coverage lags. Any fault, a schema below V145, or
     /// a refused clause on any server in scope makes the whole panel raw — every input here leans toward raw,
@@ -5986,7 +6008,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
                 var plan = await QueryStoreIntervalWide.ResolveReadAsync(
                     connection, serverId, start, end, literalWindowEnd, ComposeQueryStoreWideMinWindow,
-                    McpCommandDeadlines.ReadSeconds, ReadScope.Current?.Logger, cancellationToken, storeWide);
+                    McpCommandDeadlines.ReadSeconds, ReadScope.Current?.Logger, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow, cancellationToken, storeWide: storeWide);
                 if (!plan.UseTable)
                 {
                     if (plan.DecisionFailed)
@@ -7492,12 +7514,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_analysis_findings"] = R(CatAnalysis, "Persisted analysis findings for a server.", PServer(), PHours(24), PAsOf(), PLimit(MaxRowLimit), PBool("include_drilldown", false), PBool("full_text", true)),
 
             /* ── sessions (DarlingMcpSessionTools) ── */
-            ["get_active_queries"] = R(CatSessions, "Currently-active queries, optionally blocking-only.", PServer(), PHours(1), PDatabases(), PBool("blocking_only", false), PText("wait_type"), PLimit(50), PAsOf(), PText("tag")),
+            ["get_active_queries"] = R(CatSessions, "Currently-active queries, optionally blocking-only.", PServer(), PHours(1), PDatabases(), PBool("blocking_only", false), PText("wait_type"), PLimit(50), PAsOf(), PText("tag"), PText("collection_time"), PBool("snapshots_only", false)),
             ["get_session_stats"] = R(CatSessions, "Session-level summary counters for a server.", PServer()),
             ["get_waiting_tasks"] = R(CatSessions, "Tasks currently waiting, with wait type and duration.", PServer(), PHours(1), PLimit(30), PDatabases(), PAsOf()),
 
             /* ── alerts / mute rules (DarlingMcpAlertTools) ── */
-            ["get_alert_history"] = R(CatAlerts, "Recent fired-alert history for a server, newest first and bounded by limit. Excludes operator-dismissed alerts unless include_dismissed is true (dismissed_excluded_count says how many the default hid).", PServer(), PHours(24), PLimit(50), PAsOf(), PBool("include_dismissed", false), PText("metric_name"), PText("family")),
+            ["get_alert_history"] = R(CatAlerts, "Recent fired-alert history for a server, newest first and bounded by limit. Excludes operator-dismissed alerts unless include_dismissed is true (dismissed_excluded_count says how many the default hid). include_streak adds streak_days to each row: days in a row this metric fired at this time of day before the alert, muted fires counting.", PServer(), PHours(24), PLimit(50), PAsOf(), PBool("include_dismissed", false), PText("metric_name"), PText("family"), PBool("include_streak", false)),
             ["get_alert_settings"] = R(CatAlerts, "The current alert-settings configuration."),
             /* #5241: a web-only read (no MCP tool behind it, see WebOnlyReadNames): one alert's advice and fix script,
                fetched when its Analysis row is first expanded. The key is the page's own row identity. */
@@ -7536,6 +7558,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_query_store_health"] = R(CatConfig, "Per-database Query Store health: actual vs desired state, readonly_reason, storage vs cap, and the two capture modes (query_capture_mode ALL / AUTO / CUSTOM / NONE, wait_stats_capture_mode ON / OFF; null on a pre-rung row or a pre-2017 engine).", PServer(), PDatabases()),
             ["get_server_config_changes"] = R(CatConfig, "Server-configuration changes over time.", PServer(), PHours(168), PAsOf()),
             ["get_trace_flag_changes"] = R(CatConfig, "Trace-flag changes over time.", PServer(), PHours(168), PAsOf()),
+            ["get_known_patterns"] = R(CatConfig, "The operator-written known-pattern entries (a note on a recurring alert pattern); get_alert_history rows carry the matches.", PServer(), PText("metric_name")),
             ["get_change_watches"] = R(CatConfig, "A server's change watches, open and closed: each recorded change opens a 60 minute watch, with its changes, measures and result.", PServer(), PText("state"), PLimit(20)),
 
             /* ── core data reads (DarlingMcpDataTools + long-query / fleet tools) ── */
@@ -7615,13 +7638,16 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_perfmon_trend"] = R(CatTrends, "One perfmon counter over time (requires counter_name).", PReqText("counter_name"), PServer(), PHours(24), PAsOf(), PInt("bucket_minutes")),
             /* #3653 item 17: the four reads below disclose the WINDOW floor as window_truncated (beside
                effective_start / effective_hours_back) — not the page dialect's truncated, which they never had. */
-            ["get_procedure_duration_trend"] = R(CatTrends, "Stored-procedure elapsed ms/sec + executions/sec over time; window_truncated says the tier did not hold the whole window.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes"), PDatabases()),
+            ["get_procedure_duration_trend"] = R(CatTrends, "Stored-procedure elapsed ms/sec + executions/sec over time, or one procedure's with procedure_name (its full_name from the Top Procedures grid, plus one database_name); window_truncated says the tier did not hold the whole window.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes"), PDatabases(), PText("procedure_name")),
             ["get_query_duration_trend"] = R(CatTrends, "Query elapsed ms/sec + executions/sec over time (per-interval rates, not percentiles); window_truncated says the tier did not hold the whole window.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes"), PDatabases()),
             ["get_query_store_duration_trend"] = R(CatTrends, "Query Store duration ms/sec + executions/sec over time; window_truncated says the tier did not hold the whole window.", PServer(), PHours(24), PAsOf(), PDatabases()),
             ["get_query_trend"] = R(CatTrends, "One query's metrics over time (requires query_hash + database_name); window_truncated says the tier did not hold the whole window.", PReqText("query_hash"), PReqText("database_name"), PServer(), PHours(24), PAsOf()),
 
             /* ── health / overview (DarlingMcpHealthTools / DarlingMcpFleetTools) ── */
             ["get_server_summary"] = R(CatOverview, "A one-shot health summary for a server.", PServer()),
+            /* #6291: a web-only read (no MCP tool behind it, see WebOnlyReadNames): the four baselines (CPU, waits per second, I/O latency, blocking)
+               at the window start that the Overview strips draw their bands and anomaly markers from. Keyed by the window start the page draws. */
+            ["get_overview_baselines"] = R(CatOverview, "The four baselines the Overview strips draw their band and anomaly markers from (CPU, waits per second, I/O latency, blocking): each bucket's mean and effective standard deviation at the window start, null where there is not enough history.", PServer(), PReqText("window_start")),
             ["get_daily_summary"] = R(CatOverview, "The daily health summary (optionally for a specific date).", PServer(), PText("summary_date")),
             ["get_daily_summary_range"] = R(CatOverview, "One daily health summary per collected day over a span of days - the Performance Calendar's month grid.", PServer(), PInt("days_back", 30), PAsOf()),
             ["get_fleet_overview"] = R(CatOverview, "The banded cross-server fleet roll-up.", PHours(DefaultFleetHours), PTextDefault("detail", "summary"), PBool("worst_only", false), PText("band")),
@@ -7643,7 +7669,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_spinlock_stats"] = R(CatLatch, "Top spinlock activity in the window.", PServer(), PHours(24), PTop(10), PAsOf()),
 
             /* ── memory grants (DarlingMcpMemoryGrantTools) ── */
-            ["get_memory_grants"] = R(CatMemoryGrants, "Active/recent memory grants.", PServer(), PHours(1), PAsOf()),
+            ["get_memory_grants"] = R(CatMemoryGrants, "Active/recent memory grants. chart=true answers the whole window as one point per bucket per resource pool instead of grants[] and window[]; bucket_minutes picks the width.", PServer(), PHours(1), PAsOf(), PBool("chart", false), PInt("bucket_minutes")),
             ["get_memory_pressure_events"] = R(CatMemoryGrants, "Memory-pressure events in the window.", PServer(), PHours(24), PAsOf()),
             ["get_resource_semaphore"] = R(CatMemoryGrants, "Resource-semaphore state over time.", PServer(), PHours(24), PAsOf()),
 
@@ -8477,7 +8503,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             /* ── sessions ── */
             ["get_active_queries"] = (c, pg, an) => DatabaseNames(c) is { } databases
-                ? DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), databases, QueryBool(c, "blocking_only", false), Str(c, "wait_type"), Rows(c, "limit", 50), 2000, AsOf(c), logger, c.RequestAborted, tag: Str(c, "tag"))
+                ? DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), databases, QueryBool(c, "blocking_only", false), Str(c, "wait_type"), Rows(c, "limit", 50), 2000, AsOf(c), logger, c.RequestAborted, tag: Str(c, "tag"), collectionTime: Str(c, "collection_time"), snapshotsOnly: QueryBool(c, "snapshots_only", false))
                 : DatabaseNamesRefusal(c),
             ["get_session_stats"] = (c, pg, an) => DarlingMcpSessionTools.GetSessionStats(pg, Server(c), c.RequestAborted),
             ["get_waiting_tasks"] = (c, pg, an) => DatabaseNames(c) is { } databases
@@ -8485,7 +8511,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 : DatabaseNamesRefusal(c),
 
             /* ── alerts / mute rules ── */
-            ["get_alert_history"] = (c, pg, an) => DarlingMcpAlertTools.GetAlertHistory(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), include_dismissed: QueryBool(c, "include_dismissed", false), metric_name: Str(c, "metric_name"), family: Str(c, "family"), cancellationToken: c.RequestAborted),
+            ["get_alert_history"] = (c, pg, an) => DarlingMcpAlertTools.GetAlertHistory(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), include_dismissed: QueryBool(c, "include_dismissed", false), metric_name: Str(c, "metric_name"), family: Str(c, "family"), include_streak: QueryBool(c, "include_streak", false), cancellationToken: c.RequestAborted),
             ["get_alert_details"] = (c, pg, an) => First(c, "server_id") is null ? MissingParam("server_id")
                 : !RequireText(c, "metric_name", out var detailsMetric) ? MissingParam("metric_name")
                 : !RequireText(c, "alert_time", out var detailsTime) ? MissingParam("alert_time")
@@ -8571,6 +8597,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 ? DarlingMcpConfigHistoryTools.GetQueryStoreHealth(pg, Server(c), databases, c.RequestAborted)
                 : DatabaseNamesRefusal(c),
             ["get_server_config_changes"] = (c, pg, an) => DarlingMcpConfigHistoryTools.GetServerConfigChanges(pg, Server(c), Hours(c, 168), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_known_patterns"] = (c, pg, an) => DarlingMcpKnownPatternTools.GetKnownPatterns(pg, Server(c), Str(c, "metric_name"), cancellationToken: c.RequestAborted),
             ["get_change_watches"] = (c, pg, an) => DarlingMcpChangeWatchTools.GetChangeWatches(pg, Server(c), Str(c, "state"), Rows(c, "limit", 20), c.RequestAborted),
             ["get_trace_flag_changes"] = (c, pg, an) => DarlingMcpConfigHistoryTools.GetTraceFlagChanges(pg, Server(c), Hours(c, 168), as_of: AsOf(c), cancellationToken: c.RequestAborted),
 
@@ -8745,7 +8772,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 : MissingParam("counter_name"),
             ["get_procedure_duration_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
                 ? (DatabaseNames(c) is { } databases
-                    ? DarlingMcpTrendTools.GetProcedureDurationTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, databases, TrendBudget.Chart, cancellationToken: c.RequestAborted)
+                    ? DarlingMcpTrendTools.GetProcedureDurationTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, databases, TrendBudget.Chart, Str(c, "procedure_name"), c.RequestAborted)
                     : DatabaseNamesRefusal(c))
                 : UnparseableParam("bucket_minutes"),
             ["get_query_duration_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
@@ -8764,6 +8791,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             /* ── health / overview ── */
             ["get_server_summary"] = (c, pg, an) => DarlingMcpHealthTools.GetServerSummary(pg, Server(c), registryState, logger, c.RequestAborted),
+            /* #6291: the web-only Overview baselines read. A key that is present but unreadable is refused, never defaulted. */
+            ["get_overview_baselines"] = (c, pg, an) => !RequireText(c, "window_start", out var baselineWindowStart)
+                ? MissingParam("window_start")
+                : DarlingWebOverviewBaselines.GetOverviewBaselines(pg, an, Server(c), baselineWindowStart, c.RequestAborted),
             ["get_daily_summary"] = (c, pg, an) => DarlingMcpHealthTools.GetDailySummary(pg, Server(c), Str(c, "summary_date"), registryState, logger, c.RequestAborted),
             ["get_daily_summary_range"] = (c, pg, an) => DarlingMcpHealthTools.GetDailySummaryRange(pg, Server(c), QueryInt(c, "days_back", null, 30), AsOf(c), registryState, logger, c.RequestAborted),
             ["get_fleet_overview"] = (c, pg, an) => DarlingMcpFleetTools.GetFleetOverview(pg, Hours(c, DefaultFleetHours), Str(c, "detail") ?? "summary", QueryBool(c, "worst_only", false), Str(c, "band"), registryState: registryState, logger: logger, cancellationToken: c.RequestAborted),
@@ -8789,7 +8820,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_spinlock_stats"] = (c, pg, an) => DarlingMcpLatchSpinlockTools.GetSpinlockStats(pg, Server(c), Hours(c, 24), Rows(c, "top", 10), as_of: AsOf(c), cancellationToken: c.RequestAborted),
 
             /* ── memory grants ── */
-            ["get_memory_grants"] = (c, pg, an) => DarlingMcpMemoryGrantTools.GetMemoryGrants(pg, Server(c), Hours(c, 1), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_memory_grants"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
+                ? DarlingMcpMemoryGrantTools.GetMemoryGrants(pg, Server(c), Hours(c, 1), AsOf(c), QueryBool(c, "chart", false), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
+                : UnparseableParam("bucket_minutes"),
             ["get_memory_pressure_events"] = (c, pg, an) => DarlingMcpMemoryGrantTools.GetMemoryPressureEvents(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_resource_semaphore"] = (c, pg, an) => DarlingMcpMemoryGrantTools.GetResourceSemaphore(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
 

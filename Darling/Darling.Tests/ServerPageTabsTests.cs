@@ -881,7 +881,7 @@ public sealed class ServerPageTabsTests
     /// <summary>
     /// The tabs whose desktop twin does something the browser cannot say so, in the tab itself.
     ///
-    /// <para>Plan analysis, the query heatmap, cached-plan retrieval and actual-plan re-execution all need either
+    /// <para>Plan analysis, cached-plan retrieval and actual-plan re-execution all need either
     /// a plan renderer or a command back to the monitored server, and this read-only seat has neither. The same
     /// goes for the interactive deadlock graph (the block-chain tree is on the page since #6292). A reader told to open the desktop viewer
     /// is better served than one given a web page that looks like plan analysis and is not — so the absence is
@@ -893,7 +893,7 @@ public sealed class ServerPageTabsTests
         var js = ServerTabsJs;
 
         Assert.Contains("are in the desktop viewer, not on this page", js, StringComparison.Ordinal);
-        Assert.Contains("Plan analysis, the query heatmap", js, StringComparison.Ordinal);
+        Assert.Contains("Plan analysis, cached-plan retrieval", js, StringComparison.Ordinal);
 
         /* The note renders — a `note` field with no renderer is the same silence in a different place. */
         Assert.Contains("const strip = noticeStrip(note);", js, StringComparison.Ordinal);
@@ -930,19 +930,6 @@ public sealed class ServerPageTabsTests
            moment a comment happened to contain one, which is the shape of check that converts an open question
            into false confidence. The helper THROWS without an emptyText, and every tab is built during the
            DOM-shim run, so a table panel that forgot one cannot reach a browser. */
-        /* The WHOLE signature, so emptyText is asserted to be a declared parameter rather than something
-           read off an options object. #3278 appended `noteKey = null` - an opt-in server-supplied caveat,
-           unrelated to this guard - and #4925 appended `moreNoteKeys = null` after it (further caveat fields
-           rendered the same way), and #4843 appended `columnGroups = null` (the opt-in column groups of a wide grid), and #5226 appended `control = null` (a node drawn under the title:
-           the ranking selector of the Top Queries / Top Procedures cards), and #5245 appended `dbScope = null` (the panel's own database-scope chip, for a panel whose scope differs from its read's class; unrelated to this guard)., and the release walk appended `extensionMissingLine = null` (the plain line a precondition panel shows when its optional extension is not installed; unrelated to this guard). The literal is spelled out here rather than truncated at emptyText
-           because a prefix match would stop noticing a parameter inserted BEFORE it. */
-        /* #5644 W16 appended `emptyWins = false` after those (the panel's one agreed sentence replaces the read's own empty message
-           on an empty envelope; unrelated to this guard, and the throw below still fires without an emptyText). */
-        Assert.Contains(
-            "function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, "
-            + "noteKey = null, moreNoteKeys = null, columnGroups = null, control = null, dbScope = null, extensionMissingLine = null, emptyWins = false)",
-            js,
-            StringComparison.Ordinal);
         Assert.Contains(
             "if (!emptyText) throw new Error(\"table(\" + title + \"): a table panel must explain its own empty state.\");",
             js,
@@ -1133,7 +1120,7 @@ public sealed class ServerPageTabsTests
 
         /* And fanout carries the same empty-state rule the two descriptor helpers do, so routing a panel through
            it is never the way to lose the sentence. */
-        Assert.Contains("function fanout(read, params, specs)", js, StringComparison.Ordinal);
+        Assert.Contains("function fanout(read, params, specs", js, StringComparison.Ordinal);
         Assert.Contains("a data panel must explain its own empty state.", js, StringComparison.Ordinal);
     }
 

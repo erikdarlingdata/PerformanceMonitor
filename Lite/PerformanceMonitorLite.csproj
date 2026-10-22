@@ -41,6 +41,13 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- #6365: SqlClient follows a mirroring partner the SERVER names, and that name gets no tcp: prefix (named pipe over SMB
+         with the process's Windows credentials). This writes the switch into runtimeconfig.json so it is set before any code
+         runs; ServerHostSetting also sets it in a static constructor as a backup. -->
+    <RuntimeHostConfigurationOption Include="Switch.Microsoft.Data.SqlClient.IgnoreServerProvidedFailoverPartner" Value="true" />
+  </ItemGroup>
+
+  <ItemGroup>
     <InternalsVisibleTo Include="Lite.Tests" />
   </ItemGroup>
 

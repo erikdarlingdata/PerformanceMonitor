@@ -145,6 +145,15 @@ function New-Base([string]$version, [string]$root, [bool]$acceptWritable, [bool]
         $owner = (Get-Acl -LiteralPath $backup).GetOwner([System.Security.Principal.SecurityIdentifier])
         $ownerName = try { $owner.Translate([System.Security.Principal.NTAccount]).Value } catch { '(untranslatable)' }
         Write-Host "owner of ${backup}: $ownerName"
+        # A 3.10.0 base hardens only the darling.json.bak-yyyyMMdd-HHmmss names (the gap #5649 closes), so it leaves a
+        # hand-named backup as it found it. In the field that file is already the service's from an earlier 3.9.0 or
+        # older start, so the leg gives it to the service the same way and checks again.
+        if ($ownerName -notlike "NT SERVICE\$svc") {
+            icacls $backup /setowner "NT SERVICE\$svc" | Out-Host
+            $owner = (Get-Acl -LiteralPath $backup).GetOwner([System.Security.Principal.SecurityIdentifier])
+            $ownerName = try { $owner.Translate([System.Security.Principal.NTAccount]).Value } catch { '(untranslatable)' }
+            Write-Host "owner of ${backup} after setowner: $ownerName"
+        }
         if ($ownerName -notlike "NT SERVICE\$svc") { Fail-Leg "the hand-named backup is owned by $ownerName after the base install, not by the service, so the leg would not exercise the check" }
     }
     Write-Host "BASE: $version installed in $root, pg-runtime extracted by its service, service stopped"

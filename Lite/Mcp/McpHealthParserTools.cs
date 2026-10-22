@@ -676,6 +676,18 @@ public sealed class McpHealthParserTools
         /* The type-scoped probe runs on every rung: on rung 1 the type exists in the window, and the stamp it
            returns is THIS type's newest capture rather than the server-level witness standing in for it. */
         var lastOfType = await dataService.GetLastSystemHealthCaptureOfTypeAsync(serverId, eventType);
+
+        /* #6441, ahead of every rung: when the newest collection run found the ring buffer truncated, the read is blind
+           to the newest events, so none of "healthy", "quiet" or "never fired" is true. */
+        if (RingBufferTruncationNote.Describe(
+                await dataService.GetLatestCollectorRunNoteAsync(serverId, SystemHealthCollectorName)) is { } truncation)
+        {
+            return WitnessStatus(
+                "unavailable",
+                RingBufferTruncationNote.HealthParserMessage(eventType, serverName, hoursBack, truncation),
+                sourceObserved: true, lastCapturedAt, lastCapturedOfTypeAt: lastOfType, eventsInWindow: captured);
+        }
+
         if (captured > 0)
         {
             var notice = await WindowNoticeAsync(dataService, serverId, hoursBack, windowEnd, emptyAnswer: true);

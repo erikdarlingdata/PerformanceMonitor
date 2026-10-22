@@ -2,7 +2,7 @@
 
 Part of the [Performance Monitor documentation](../README.md#documentation).
 
-1. Download **[`PerformanceMonitorLite-win-Setup.exe`](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest)** — a self-contained build, so there is **no .NET runtime to install first**.
+1. Download **[`PerformanceMonitorLite-lite-Setup.exe`](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest)** — a self-contained build, so there is **no .NET runtime to install first**.
 2. Run the installer — it installs to `%LocalAppData%\PerformanceMonitorLite`, adds **Start Menu** and **Desktop** shortcuts, and registers the app under **Apps & Features** so it shows up in Windows search and can be uninstalled normally. Auto-update is wired in. Your data goes in `%LocalAppData%\PerformanceMonitorLite-Data`, a separate folder the installer never touches.
 3. Launch from the Start Menu or Desktop shortcut.
 4. Click **+ Add Server**, enter connection details, test, save.
@@ -19,6 +19,8 @@ That was not always true: through 3.5.0 the ZIP was a portable build with no run
 > **Warning — upgrading an install older than the data-relocation fix:** on those versions Lite kept its data *inside* the install directory, and re-running `Setup.exe` over an existing install deletes that directory before the new build ever runs. It takes the DuckDB store, the Parquet archive, the logs, and `settings.json` with it. Upgrade **in place** instead: the **About** button in the left sidebar downloads and applies the update without touching your data, or extract the portable ZIP over your existing copy. From this release on, data lives outside the install directory and is moved there automatically on first start, so `Setup.exe` is safe again. (Your monitored-server list is unaffected either way — it lives in `%ProgramData%\PerformanceMonitorLite\config` — and so are the passwords in Windows Credential Manager.)
 
 **Always On AG?** Enable **ReadOnlyIntent** in the connection settings to route Lite's monitoring queries to a readable secondary, keeping the primary clear. Enable **MultiSubnetFailover** for multi-subnet failover scenarios.
+
+**Query Store from a replica.** Set **QS replica** (a host, `host,port` or listener name) on a SQL Server registration to read Query Store from a readable secondary instead of the primary. Empty, the default, reads the primary and changes nothing. Azure SQL Database never reads a replica. The replica host gets the same login and password as the server, so it must accept them. Collection health shows the newest Query Store run's `read_source` (for example `replica 12, primary 2`) in the Note column and the MCP `get_collection_health` row, only when a run has one.
 
 ### Lite Collectors
 
@@ -70,7 +72,7 @@ That was not always true: through 3.5.0 the ZIP was a portable build with no run
 | database_scoped_config | On connect | Database-scoped configurations |
 | trace_flags | On connect | `DBCC TRACESTATUS` |
 
-Darling runs this same shared collector set across a fleet of servers (latch stats, spinlock stats, CPU scheduler, plan cache, and system_health parsing are now part of the shared catalog above, collected by Lite too) — see the [Darling collector reference](../Darling/README.md).
+Darling runs these same 43 collectors across a fleet of servers, plus a 44th, `query_store_forced_plans`, which reads each database's forced plans. Lite does not have it. Darling also runs 29 PostgreSQL collectors. See the [Darling collector reference](../Darling/README.md).
 
 ### The Extended Events Sessions Lite Creates
 
@@ -166,7 +168,7 @@ The shared `PerformanceMonitor_Deadlock` and `PerformanceMonitor_BlockedProcess`
 
 All data is stored in `%LOCALAPPDATA%\PerformanceMonitorLite-Data\` — a different folder from the install directory (`%LOCALAPPDATA%\PerformanceMonitorLite\`), so neither an in-app update nor re-running `Setup.exe` can disturb it. Data from an older install is moved into the new folder automatically the first time this version starts.
 
-- **Hot data** in DuckDB 1.5.2 — non-blocking checkpoints, free block reuse, stable file size without periodic resets
+- **Hot data** in DuckDB 1.5.5 — non-blocking checkpoints, free block reuse, stable file size without periodic resets
 - **Archive** to Parquet with ZSTD compression (~10x reduction) — automatic monthly compaction keeps file count low (~75 files vs thousands)
 - **Retention**: 3-month calendar-month rolling window
 - **Memory limit**: DuckDB's memory limit is a setting (Settings, Dashboard Defaults, "DuckDB memory limit"). The default is 2 GB, and it can go from 1 GB up to 80% of memory. A change applies after a restart.

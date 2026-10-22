@@ -309,8 +309,7 @@ WHERE event = 'note_rejected' AND actor = 'person:tester' AND request_id = '{rej
             {
                 var answer = await Send("PUT", route, "application/json");
                 Assert.Equal(403, answer.Status);
-                Assert.Equal(DarlingWebEndpoints.NoteDecisionRefusedMessage, (string)answer.Body!["error"]!);
-                Assert.Contains("admin role", (string)answer.Body["error"]!, StringComparison.Ordinal);
+                Assert.Equal(DarlingWebEndpoints.NoteDecisionRefusedMessage(false), (string)answer.Body!["error"]!);
             }
 
             Assert.Equal("pending|pending", await ScalarAsync(owner,

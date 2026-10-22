@@ -85,9 +85,15 @@ public sealed class PgSecondaryReplicaScopeTests
     [Theory]
     [InlineData("raw")]
     [InlineData("table")]
+    [InlineData("daily")]
     public void EachRegressedQueriesVariant_CarriesTheMarkerExactlyOnce_BeforeItsLimit(string variant)
     {
-        var sql = variant == "raw" ? PgDrillDownCollector.RegressedQueriesSql : PgDrillDownCollector.RegressedQueriesTableSql;
+        var sql = variant switch
+        {
+            "raw" => PgDrillDownCollector.RegressedQueriesSql,
+            "table" => PgDrillDownCollector.RegressedQueriesTableSql,
+            _ => PgDrillDownCollector.RegressedQueriesDailySql,
+        };
 
         var first = sql.IndexOf(PgSecondaryReplicaScope.Marker, StringComparison.Ordinal);
         Assert.True(first >= 0, variant + " variant lost the secondary-replica marker");

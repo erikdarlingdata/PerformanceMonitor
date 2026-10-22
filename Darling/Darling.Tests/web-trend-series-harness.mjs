@@ -62,7 +62,7 @@ const ENVELOPE = (message) => ({ status: "unavailable", message });
 const QUIET = (metric) => ({ status: "empty", message: "No " + metric + " rows recorded for sql2019 in the last 48 hours. This server HAS collected them before." });
 const DATA = {
   file_io_throughput: {
-    aggregate_note: "THROUGHPUT NOTE",
+    bucket: "15 minutes", bucket_minutes: 15, aggregate_note: "Each point summarizes one 15-minute bucket; peak_* is the most extreme collection; pass bucket_minutes (1-1440) for another width, or narrow hours_back.",
     series: [
       { file_label: "SalesDb.sales_data", trend: [{ time: T(0), read_mb_per_sec: 12.5, write_mb_per_sec: 3 }, { time: T(15), read_mb_per_sec: 14, write_mb_per_sec: null }] },
       { file_label: "SalesDb.sales_log", trend: [{ time: T(0), read_mb_per_sec: 0, write_mb_per_sec: 8 }, { time: T(15), read_mb_per_sec: 0, write_mb_per_sec: 9 }] },

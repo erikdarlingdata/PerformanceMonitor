@@ -209,6 +209,37 @@ public static class DarlingSecrets
     }
 
     /// <summary>
+    /// #6254: the secret for a connection to the server's Query Store replica, or null when its authentication needs none. The same
+    /// resolution as <see cref="ResolvePassword(MonitoredServer, out bool, IPasswordKeyRing?)"/> (a sealed value opens only for the
+    /// connection identity it was sealed for, replica included), plus one rule a seal cannot give: a stored <c>env:</c>/<c>file:</c>
+    /// reference carries no binding, so it is used for the replica only when darling.json declares it
+    /// (<see cref="MonitoredServer.EncryptedPasswordDeclaredByFile"/>). A store-only reference on a store whose password trigger
+    /// predates the replica could otherwise follow a replica change made by a writer who cannot change the host. Refused with a
+    /// sentence that names neither the variable nor the path.
+    /// </summary>
+    internal static string? ResolveReplicaPassword(MonitoredServer server, IPasswordKeyRing? ring = null)
+    {
+        if (server is null)
+        {
+            throw new ArgumentNullException(nameof(server));
+        }
+
+        if (!server.RequiresResolvedSecret)
+        {
+            return null;
+        }
+
+        if (!server.EncryptedPasswordDeclaredByFile && DarlingSecretSource.IsReference(server.EncryptedPassword))
+        {
+            throw new InvalidOperationException(
+                $"servers['{server.DisplayName}'].encryptedPassword: a stored env: or file: reference is not used for a Query Store replica unless darling.json declares it. " +
+                "Enter the password again.");
+        }
+
+        return ResolvePassword(server, out _, ring);
+    }
+
+    /// <summary>
     /// Resolves a server's REMEDIATION credential password (#2138 phase 1) — the second, opt-in identity a
     /// write to a monitored server travels on. Same shapes <see cref="ResolvePassword(MonitoredServer, out bool, IPasswordKeyRing?)"/>
     /// accepts for its stored slot, minus the plaintext one.

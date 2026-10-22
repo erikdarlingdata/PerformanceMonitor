@@ -511,7 +511,7 @@ scripted check — catch it and read `$_.ErrorDetails.Message` for the body.
 
 Be clear about this before you file it as a bug. The web dashboard reads the store as the least-privilege
 `viewer` role. Its `/api/read/*` surface is machine-derived from the MCP tool catalog minus an explicit
-exclusion list — 93 read endpoints out of 112 tools — and these are the exclusions that matter to you:
+exclusion list, and these are the exclusions that matter to you:
 
 - **No plan analysis.** The whole `analyze_query_plan` / `analyze_procedure_plan` / `analyze_query_store_plan` /
   `analyze_plan_xml` family is excluded. **Use the WPF viewer for plans** — it has the graphical plan viewer,
@@ -788,7 +788,7 @@ claude mcp add --transport http --scope user sql-monitor-darling http://localhos
 port you configured.)
 
 **Proof:** `claude mcp list` shows `sql-monitor-darling` as connected, and `/mcp` in a new Claude Code session
-lists **101 tools** — `list_servers`, `get_fleet_overview`, `get_wait_stats`, `analyze_server` and the rest.
+lists the Darling tools — `list_servers`, `get_fleet_overview`, `get_wait_stats`, `analyze_server` and the rest.
 Ask it *"what servers are being monitored?"* and it should answer from your store.
 
 Two details that save a round of guessing: the endpoint is the **root path** (`http://localhost:5152/`, not

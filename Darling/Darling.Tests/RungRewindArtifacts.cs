@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -475,6 +475,34 @@ ALTER TABLE IF EXISTS config.config_service DROP COLUMN IF EXISTS query_store_fe
 DROP TRIGGER IF EXISTS trg_agent_route_tag_guard ON config.server_tag_map;
 DROP TRIGGER IF EXISTS trg_agent_route_tag_guard ON config.server_tags;
 DROP FUNCTION IF EXISTS config.agent_route_tag_guard();"),
+
+        // V211 (#5736): the relative Client Timeouts bars' two multiples. The warning multiple column is the probe's newest sentinel. The rewind drops both,
+        // so a re-run of V211 adds them again at their defaults. Safe on a store that never had them.
+        new(211, "hasClientTimeoutsMultiples",
+            @"
+ALTER TABLE IF EXISTS config.config_alert_settings DROP COLUMN IF EXISTS client_timeouts_warning_multiple, DROP COLUMN IF EXISTS client_timeouts_critical_multiple;"),
+
+        // V212 (#6285): the machine identity on the server registry. The column is the probe's newest sentinel. Safe on a store that never had it.
+        new(212, "hasServerMachineIdentity",
+            @"
+ALTER TABLE IF EXISTS collect.servers DROP COLUMN IF EXISTS machine_identity;"),
+
+        // V213 (#6254): the Query Store replica setting. The config column is the probe's newest sentinel. The rewind drops both new columns;
+        // collect.v_collection_log freezes its column list at CREATE, so it is dropped first and made again over the table without read_source
+        // (the shape V210 left), and a re-run of V213 appends the column to it again. Safe on a store that never had them.
+        new(213, "hasQueryStoreReplica",
+            @"
+ALTER TABLE IF EXISTS config.config_monitored_servers DROP COLUMN IF EXISTS query_store_replica;
+DROP VIEW IF EXISTS collect.v_collection_log;
+ALTER TABLE IF EXISTS collect.collection_log DROP COLUMN IF EXISTS read_source;
+DO $$ BEGIN IF to_regclass('collect.collection_log') IS NOT NULL THEN
+  EXECUTE 'CREATE VIEW collect.v_collection_log AS SELECT * FROM collect.collection_log';
+END IF; END $$;"),
+        // V214 (#6334): the known-pattern entries. The table is the probe's newest sentinel. The rewind drops it (and its trigger with it), so a re-run
+        // of V214 builds both again. Safe on a store that never had it.
+        new(214, "hasKnownPatterns",
+            @"
+DROP TABLE IF EXISTS config.config_known_patterns;"),
     ];
 
     /// <summary>

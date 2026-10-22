@@ -191,6 +191,9 @@ public sealed class ReadAdmissionCoverageCensusTests
         [SweepsFile + "GET \"/api/sweeps/{id:long}\""] = null,
         [SweepsFile + "GET \"/api/sweeps/watch-items\""] = null,
         ["DarlingServerDatabasesEndpoint.cs: GET Route"] = null, // the database picker, /api/server-databases
+        ["DarlingKnownPatternRoutes.cs: POST \"/api/known-patterns\""] = "write (#6334)",
+        ["DarlingKnownPatternRoutes.cs: PUT \"/api/known-patterns/{id:long}\""] = "write (#6334)",
+        ["DarlingKnownPatternRoutes.cs: DELETE \"/api/known-patterns/{id:long}\""] = "write (#6334)",
         [WebFile + "POST \"/api/compose/run\""] = null,
         [WebFile + "POST \"/api/alerts/test\""] = null,
         [WebFile + "GET \"/api/investigation-export\""] = null, // #6236: admitted like the other heavy reads; up to 2000 cases, read a page at a time

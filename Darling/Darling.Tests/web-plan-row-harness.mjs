@@ -8,6 +8,15 @@ import { pathToFileURL } from "node:url";
 class FakeNode {
   constructor(tag) { this.tag = tag; this.children = []; this.attrs = {}; this.listeners = {}; this.parent = null; this._text = ""; this.className = ""; this.style = {}; this.rect = { left: 0, width: 0 }; this.clientWidth = 0; this.clientLeft = 0; }
   get isConnected() { let n = this; while (n.parent) n = n.parent; return n === body; }
+  /* A tiny layout: a node with `h` set is that tall; a spacer is its style height; a panel is out of flow but has its own height;
+     a row is its tallest cell; anything else stacks its in-flow children. */
+  get offsetHeight() {
+    if (this.className === "plan-panel") return this.h || 0;
+    if (this.h !== undefined) return this.h;
+    if (this.className === "plan-spacer") return parseFloat(this.style.height) || 0;
+    const flow = this.children.filter((c) => c.className !== "plan-panel").map((c) => c.offsetHeight);
+    return this.tag === "tr" ? Math.max(0, ...flow) : flow.reduce((a, b) => a + b, 0);
+  }
   get firstChild() { return this.children[0] || null; }
   get textContent() { return this._text + this.children.map((c) => c.textContent).join(""); }
   set textContent(v) { this._text = String(v); this.children = []; }
@@ -24,9 +33,16 @@ class FakeNode {
 class FakeObserver {
   static all = [];
   constructor(cb) { this.cb = cb; this.targets = []; this.live = true; FakeObserver.all.push(this); }
-  observe(t) { this.targets.push(t); }
+  observe(t) { this.targets.push(t); this.seen = null; }
   disconnect() { this.live = false; this.targets = []; }
   fire() { this.cb([]); }
+  /* Like the real thing: calls back only when something it watches changed size since its last call. */
+  poll() {
+    if (!this.live) return false;
+    const sig = this.targets.map((t) => t.offsetHeight).join(",");
+    if (sig === this.seen) return false;
+    this.seen = sig; this.cb([]); return true;
+  }
 }
 const body = new FakeNode("body");
 globalThis.Node = FakeNode;
@@ -50,7 +66,31 @@ function grid(rows = 2) {
   }
   return { wrap, tbody, hosts };
 }
-const panelNode = () => { const p = new FakeNode("div"); p.className = "plan-panel"; return p; };
+const panelNode = (h) => { const p = new FakeNode("div"); p.className = "plan-panel"; if (h !== undefined) p.h = h; return p; };
+
+/* A row as the Queries grid draws it: a tall cell of its own text, a History cell and a Plan cell (each a button), on the page. */
+function historyAndPlanRow(ownHeight = 60) {
+  const wrap = new FakeNode("div"); wrap.className = "table-wrap"; wrap.clientWidth = 600;
+  const table = new FakeNode("table"); const tbody = new FakeNode("tbody"); const tr = new FakeNode("tr");
+  wrap.appendChild(table); table.appendChild(tbody); tbody.appendChild(tr); body.appendChild(wrap);
+  const text = new FakeNode("td"); text.h = ownHeight; tr.appendChild(text);
+  const hosts = ["history", "plan"].map(() => {
+    const td = new FakeNode("td"); const host = new FakeNode("div"); host.className = planRow.CLOSED_CLASS;
+    const button = new FakeNode("button"); button.h = 20; host.appendChild(button); td.appendChild(host); tr.appendChild(td); return host;
+  });
+  return { tr, hosts };
+}
+/* Lets every observer react to size changes until none has anything left to say, or `cap` rounds pass (a row that never settles). */
+function settle(cap = 12) {
+  let rounds = 0;
+  while (rounds < cap) {
+    let any = false;
+    for (const o of FakeObserver.all) any = o.poll() || any;
+    if (!any) break;
+    rounds++;
+  }
+  return rounds;
+}
 
 const scenarios = {
   /* The pure rule: where the panel sits so it covers the wrap's visible area. */
@@ -76,6 +116,33 @@ const scenarios = {
     wrap.clientWidth = 450; FakeObserver.all[0].fire();
     out.afterResize = { left: panel.style.left, width: panel.style.width };
     out.watching = FakeObserver.all[0].targets.map((t) => t.tag + ":" + t.className);
+  },
+  /* History and Plan open on one row (#6359): the row settles at its own height plus both panels, the panels stacked. */
+  async twoPanelsOneRow() {
+    const { tr, hosts } = historyAndPlanRow(60);
+    const [history, plan] = hosts; const hp = panelNode(100); const pp = panelNode(150);
+    out.closedRow = tr.offsetHeight;
+    planRow.dockPanelUnderRow(history, hp); out.historyAlone = (settle(), tr.offsetHeight);
+    out.historyAloneBottom = hp.style.bottom;
+    planRow.dockPanelUnderRow(plan, pp);
+    out.rounds = settle();
+    out.both = tr.offsetHeight;
+    out.historyBottom = hp.style.bottom; out.planBottom = pp.style.bottom;
+    /* A later pass (a resize, a reload) leaves it where it is. */
+    for (let i = 0; i < 3; i++) for (const o of FakeObserver.all) o.fire();
+    out.afterMore = tr.offsetHeight;
+    /* The Plan panel loads taller. */
+    pp.h = 220; settle(); out.planGrew = tr.offsetHeight; out.historyBottomAfterGrow = hp.style.bottom;
+    /* Closing Plan puts the row back to History alone. */
+    plan.children = plan.children.filter((c) => c.tag === "button"); planRow.undockPanel(plan); settle();
+    out.afterPlanClosed = tr.offsetHeight; out.historyBottomAfterClose = hp.style.bottom;
+  },
+  /* One panel alone sizes as it always has: the row's own height plus the panel. */
+  async onePanelAlone() {
+    const { tr, hosts } = historyAndPlanRow(60);
+    const p = panelNode(100);
+    planRow.dockPanelUnderRow(hosts[1], p);
+    out.rounds = settle(); out.height = tr.offsetHeight; out.bottom = p.style.bottom;
   },
   /* One observer per open panel; closing, redrawing and discarding the grid all let go of it. */
   async observerLifecycle() {

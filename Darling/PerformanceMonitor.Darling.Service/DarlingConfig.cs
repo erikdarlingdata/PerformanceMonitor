@@ -846,15 +846,27 @@ public sealed class AlertsConfig
     [JsonPropertyName("clientTimeoutsEnabled")]
     public bool ClientTimeoutsEnabled { get; set; }
 
-    /// <summary>Client Timeouts Warning bar (#5640), attentions per minute over the covered span. Shipped 10. Read through
+    /// <summary>Client Timeouts Warning FLOOR (#5640, #5736), attentions per minute over the covered span. Shipped 10. The bar is the higher of this and
+    /// the Warning multiple times the server's own baseline. Read through
     /// <see cref="AttentionEvaluator.ClampBars"/>. Store column <c>client_timeouts_warning_per_minute</c> (V179).</summary>
     [JsonPropertyName("clientTimeoutsWarningPerMinute")]
     public int ClientTimeoutsWarningPerMinute { get; set; } = AttentionEvaluator.DefaultWarningPerMinute;
 
-    /// <summary>Client Timeouts Critical bar (#5640). Shipped 60. Never read below the Warning bar. Store column
+    /// <summary>Client Timeouts Critical FLOOR (#5640, #5736). Shipped 60. Never read below the Warning floor. Store column
     /// <c>client_timeouts_critical_per_minute</c> (V179).</summary>
     [JsonPropertyName("clientTimeoutsCriticalPerMinute")]
     public int ClientTimeoutsCriticalPerMinute { get; set; } = AttentionEvaluator.DefaultCriticalPerMinute;
+
+    /// <summary>Client Timeouts Warning multiple (#5736). The Warning bar is the higher of <see cref="ClientTimeoutsWarningPerMinute"/> (the floor) and
+    /// this many times the server's own baseline, the p99.9 of its 3-minute average attention rate over the last 7 days. Shipped 3. Store column
+    /// <c>client_timeouts_warning_multiple</c> (V211).</summary>
+    [JsonPropertyName("clientTimeoutsWarningMultiple")]
+    public int ClientTimeoutsWarningMultiple { get; set; } = AttentionBaselineMath.DefaultWarningMultiple;
+
+    /// <summary>Client Timeouts Critical multiple (#5736). Shipped 10. Never read below the Warning multiple. Store column
+    /// <c>client_timeouts_critical_multiple</c> (V211).</summary>
+    [JsonPropertyName("clientTimeoutsCriticalMultiple")]
+    public int ClientTimeoutsCriticalMultiple { get; set; } = AttentionBaselineMath.DefaultCriticalMultiple;
 
     [JsonPropertyName("longRunningQueryEnabled")]
     public bool LongRunningQueryEnabled { get; set; } = true;
@@ -2470,6 +2482,17 @@ public sealed class MonitoredServer
     [JsonPropertyName("multiSubnetFailover")]
     public bool MultiSubnetFailover { get; set; }
 
+    /// <summary>
+    /// #6254: where Query Store is read from instead of this server, a host (<c>host,port</c> allowed) or an availability group
+    /// listener name. Empty, the default, reads it from the server itself. SQL Server only; the replica connection is
+    /// <see cref="MonitoredServerConnection.BuildQueryStoreReplicaConnectionString"/>. It is
+    /// the last field of <see cref="ConnectionIdentity"/>: a change of it is a change of how the server is reached, and it is bound
+    /// into a sealed password (<see cref="SecretBinding"/>) only when it is set, so a change of it needs the password again and no
+    /// stored password is sent to a replica host nobody entered it for.
+    /// </summary>
+    [JsonPropertyName("queryStoreReplica")]
+    public string? QueryStoreReplica { get; set; }
+
     [JsonPropertyName("excludedDatabases")]
     public List<string> ExcludedDatabases { get; set; } = new();
 
@@ -2745,7 +2768,8 @@ public sealed class MonitoredServer
     /// </summary>
     [JsonIgnore]
     internal ServerConnectionIdentity ConnectionIdentity => StoredIdentity ?? ServerConnectionIdentity.FromStoredColumns(
-        Host, Port, Engine, Database, ReadOnlyIntent, Auth, Username, EncryptMode, TrustServerCertificate, MultiSubnetFailover);
+        Host, Port, Engine, Database, ReadOnlyIntent, Auth, Username, EncryptMode, TrustServerCertificate, MultiSubnetFailover,
+        QueryStoreReplica);
 
     /// <summary>The binding a sealed <c>encryptedPassword</c> must have been sealed for.</summary>
     [JsonIgnore]

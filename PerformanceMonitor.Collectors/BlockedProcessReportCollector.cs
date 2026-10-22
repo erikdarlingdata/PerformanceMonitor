@@ -295,6 +295,8 @@ BEGIN
 
     {RingBufferXml.ParseSql}
 
+    {RingBufferXml.TruncationSql}
+
     INSERT
         @PerformanceMonitor_BlockedProcess
     (
@@ -756,7 +758,9 @@ OPTION(RECOMPILE);
    reader is correctly positioned on the probe-failure set below by the time the host reads it. */
 SELECT
     execution_count = @execution_count,
-    gated = CASE WHEN @shred_needed = 1 THEN CONVERT(bit, 0) ELSE CONVERT(bit, 1) END;
+    gated = CASE WHEN @shred_needed = 1 THEN CONVERT(bit, 0) ELSE CONVERT(bit, 1) END,
+    /* #6441: whether SQL Server truncated the ring buffer's XML (all NULL when the gate skipped the read). */
+    {RingBufferXml.TruncationColumnsSql};
 
 /* Trailing result set = the payload path's probe-failure contract (#1851/#1865,
    EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync). Always returned, and empty on both of
@@ -989,6 +993,9 @@ OUTER APPLY
             }
 
             context.Measure(ShredGatedMeasurement, !reader.IsDBNull(1) && reader.GetBoolean(1) ? 1 : 0);
+
+            /* #6441: SQL Server cuts a ring buffer's XML at about 4 MB and keeps the OLDEST events. */
+            RingBufferXml.MeasureTruncation(reader, 2, context);
         }
 
         /* Measure() ACCUMULATES a repeated label, which is what makes this correct on the per-database

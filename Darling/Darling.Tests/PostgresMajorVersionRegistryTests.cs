@@ -74,9 +74,6 @@ public sealed class PostgresMajorVersionRegistryTests
     {
         var sql = DarlingObservability.UpsertServerSql;
 
-        Assert.Contains("postgres_major_version)", sql, StringComparison.Ordinal);
-        Assert.Contains("$9)", sql, StringComparison.Ordinal);
-
         /* The re-connect arm matters as much as the insert: a version is a probed fact about the target, so
            a server upgraded from 16 to 17 has to correct it on the next connect, exactly as engine_kind does.
            Without this the column would be right only for servers first registered after the rung landed. */

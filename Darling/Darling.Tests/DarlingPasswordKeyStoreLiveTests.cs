@@ -331,7 +331,7 @@ public sealed class DarlingPasswordKeyStoreLiveTests
             Assert.Equal(SHA256.HashData(Encoding.UTF8.GetBytes("legacy-remediation-blob")), pins["1/remediation"].Value);
             Assert.Equal(SHA256.HashData(Encoding.UTF8.GetBytes("legacy-smtp-blob")), pins["0/smtp"].Value);
 
-            var server = ServerConnectionIdentity.FromStoredColumns("alpha-example", 1433, "sqlserver", "", false, "sql", "monitor_login", "Mandatory", false, false);
+            var server = ServerConnectionIdentity.FromStoredColumns("alpha-example", 1433, "sqlserver", "", false, "sql", "monitor_login", "Mandatory", false, false, null);
             Assert.Equal(PasswordBinding.ForServer(server).LegacyPinHash(), pins["1/server"].Binding);
             Assert.Equal(PasswordBinding.ForRemediation(server, "fix_login").LegacyPinHash(), pins["1/remediation"].Binding);
             Assert.Equal(PasswordBinding.ForSmtp("smtp.example.com", 587, true, "mail_login").LegacyPinHash(), pins["0/smtp"].Binding);
