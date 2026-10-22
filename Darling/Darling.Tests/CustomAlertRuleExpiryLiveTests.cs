@@ -253,7 +253,7 @@ VALUES ($1, (now() AT TIME ZONE 'UTC'), $2, $3, (now() AT TIME ZONE 'UTC'), $4, 
             Assert.False((bool)revived["expired"]!);
             Assert.Null((string?)revived["expires_at_utc"]);
             Assert.NotNull((string?)revived["previous_expires_at_utc"]);
-            Assert.Contains("update_custom_alert_rule", (string?)revived["undo"]);
+            Assert.Equal("update_custom_alert_rule", (string?)revived["undo"]!["tool"]);
 
             bodySucceeded = true;
         }

@@ -700,9 +700,10 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         /* #5825: the delivery read also carries the per-channel resolution flags, so it returns a DeliveryRead. */
         Assert.Contains("private static async Task<DeliveryRead?> ReadDeliveryAsync", reader, StringComparison.Ordinal);
 
-        /* And both tool paths go through the combined entry point -- get_alert_settings and the post-write
-           re-read, which is the one described to the caller as the authoritative merged state. */
-        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(
+        /* And every tool path goes through the combined entry point -- get_alert_settings, the pre-write read that names the
+           previous values for the undo (#6403), and the post-write re-read, which is the one described to the caller as the
+           authoritative merged state. */
+        Assert.Equal(3, System.Text.RegularExpressions.Regex.Matches(
             tools, @"GetAlertConfigurationAsync\(postgres(, cancellationToken)?\)").Count);
     }
 
@@ -1635,6 +1636,24 @@ public sealed class SetMuteRuleEnabledTests
             (string)Payload(json)["created_at_utc"]!,
             System.Globalization.CultureInfo.InvariantCulture,
             System.Globalization.DateTimeStyles.RoundtripKind);
+
+    /// <summary>#6403: updated and unchanged both carry the previous value and the call that puts it back; running that call restores the rule.</summary>
+    [Theory]
+    [InlineData(true, false, "updated")]
+    [InlineData(false, false, "unchanged")]
+    public async Task TheAnswer_CarriesThePreviousValue_AndAnUndoThatRestoresIt(bool before, bool sent, string status)
+    {
+        var store = StoreWith(enabled: before);
+
+        var answer = JsonNode.Parse(await DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, RuleId, sent))!;
+        Assert.Equal(status, (string)answer["status"]!);
+        Assert.Equal(before, (bool)answer["previous"]!["enabled"]!);
+        Assert.Equal("set_mute_rule_enabled", (string)answer["undo"]!["tool"]!);
+
+        var arguments = answer["undo"]!["arguments"]!;
+        await DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, (string)arguments["rule_id"]!, (bool)arguments["enabled"]!);
+        Assert.Equal(before, store.Row(RuleId)!.Enabled);
+    }
 
     /* ---------------- the instrument ---------------- */
 

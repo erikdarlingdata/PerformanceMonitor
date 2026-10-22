@@ -178,6 +178,24 @@ public sealed class AgentChangeToolUndoLiveTests
         });
     }
 
+    /// <summary>#6403: the Level 2 answer of set_mute_rule_enabled carries previous and an undo that, run through the writes surface, turns the rule back on.</summary>
+    [Fact]
+    public async Task TheLevel2SetMuteRuleEnabledAnswer_CarriesThePreviousValue_AndAnUndoThatRestoresIt()
+    {
+        await RunAsync(async c =>
+        {
+            var id = (string)Parse(await CreateMute(c))["mute_rule"]!["id"]!;
+            var answer = Parse(await DarlingMcpAlertTools.SetMuteRuleEnabled(c.Source, id, false, c.Arg, AgentSeat));
+            Assert.Equal("updated", (string?)answer["status"]);
+            Assert.True((bool)answer["previous"]!["enabled"]!);
+            Assert.Equal("set_mute_rule_enabled", (string?)answer["undo"]!["tool"]);
+
+            var arguments = answer["undo"]!["arguments"]!;
+            await DarlingMcpAlertTools.SetMuteRuleEnabled(c.Source, (string)arguments["rule_id"]!, (bool)arguments["enabled"]!);
+            Assert.Equal("True", await ScalarAsync(c, $"SELECT enabled FROM config.config_mute_rules WHERE id = '{id}'"));
+        });
+    }
+
     [Fact]
     public async Task AMuteTheAgentDeleted_ComesBackWithItsIdAndItsCreatedTime()
     {
