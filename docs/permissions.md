@@ -9,6 +9,11 @@ Nothing is installed on the target server. Below is the full least-privilege gra
 ```sql
 USE [master];
 
+/* Create the login first. Skip this statement if the login already exists. For Windows
+   authentication use CREATE LOGIN [DOMAINccount] FROM WINDOWS; instead. In Darling with integrated
+   authentication, the account is the one the service runs as (see the Darling operator guide). */
+CREATE LOGIN [YourLogin] WITH PASSWORD = N'<strong password>';
+
 /* Server-scoped DMVs - the required core. Also implies VIEW DATABASE STATE in every database. */
 GRANT VIEW SERVER STATE TO [YourLogin];
 
@@ -22,7 +27,7 @@ GRANT CONNECT ANY DATABASE TO [YourLogin];
    catalog views return zero rows that look exactly like "no data" (see the AG note below). */
 GRANT VIEW ANY DEFINITION TO [YourLogin];
 
-/* The deadlock / blocked-process Extended Events sessions, and the opt-in long-query trace session.
+/* The deadlock, blocked-process and attention Extended Events sessions, and the opt-in long-query trace session.
    A login without this shows PERMISSIONS for the collector instead of an error. */
 GRANT ALTER ANY EVENT SESSION TO [YourLogin];
 
@@ -45,6 +50,7 @@ GRANT ALTER SETTINGS TO [YourLogin];
 USE [msdb];
 CREATE USER [YourLogin] FOR LOGIN [YourLogin];
 GRANT SELECT ON dbo.sysjobs         TO [YourLogin];
+GRANT SELECT ON dbo.sysjobsteps     TO [YourLogin];  -- names the Agent job and step on a Long-Running Query alert
 GRANT SELECT ON dbo.sysjobactivity  TO [YourLogin];
 GRANT SELECT ON dbo.sysjobhistory   TO [YourLogin];
 GRANT SELECT ON dbo.sysjobschedules TO [YourLogin];
@@ -57,7 +63,7 @@ Two operational notes. The msdb grants live inside a system database that SQL Se
 
 **Availability Groups need a second grant.** The `ag_replica_states` / `ag_database_replica_states` collectors read the AG *catalog views* (`sys.availability_groups`, `sys.availability_replicas`) alongside the `sys.dm_hadr_*` DMVs. The DMVs are covered by `VIEW SERVER STATE`, but [the catalog views require `VIEW ANY DEFINITION`](https://learn.microsoft.com/en-us/sql/database-engine/availability-groups/windows/monitor-availability-groups-transact-sql) — and catalog views enforce that by *hiding rows*, not by raising an error. So on a real AG cluster a login with only `VIEW SERVER STATE` gets zero rows, which looks exactly like a server with no availability groups. If your AG dashboards are empty, this grant is why.
 
-Darling uses the same target-server grants; its bundled PostgreSQL store and service account are covered in the [Darling operator guide](../Darling/README.md). The deprecated Full edition's install/least-privilege grants are in [deprecated/Dashboard/README.md](../deprecated/Dashboard/README.md).
+Darling uses the same target-server grants. Its bundled PostgreSQL store and service account are covered in the [Darling operator guide](../Darling/README.md). Darling can also monitor PostgreSQL servers, which need different grants (see [PostgreSQL targets](#postgresql-targets-darling)), and it has two optional extra logins (see [Optional Darling logins](#optional-darling-logins)). The deprecated Full edition's install/least-privilege grants are in [deprecated/Dashboard/README.md](../deprecated/Dashboard/README.md).
 
 ### FinOps Index Analysis (per-database grants)
 
@@ -69,10 +75,10 @@ For each target user database:
 
 ```sql
 USE [YourTargetDatabase];
-CREATE USER [SQLServerPerfMon] FOR LOGIN [SQLServerPerfMon];
-GRANT VIEW DATABASE STATE                       TO [SQLServerPerfMon];
-GRANT VIEW DEFINITION                           TO [SQLServerPerfMon];
-GRANT SELECT ON sys.sql_expression_dependencies TO [SQLServerPerfMon];
+CREATE USER [YourLogin] FOR LOGIN [YourLogin];
+GRANT VIEW DATABASE STATE                       TO [YourLogin];
+GRANT VIEW DEFINITION                           TO [YourLogin];
+GRANT SELECT ON sys.sql_expression_dependencies TO [YourLogin];
 ```
 
 Or apply broadly with `sp_MSforeachdb`:
@@ -82,11 +88,11 @@ EXEC sp_MSforeachdb N'
 USE [?];
 IF DB_ID() > 4 AND DATABASEPROPERTYEX(DB_NAME(), ''Updateability'') = ''READ_WRITE''
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = ''SQLServerPerfMon'')
-        CREATE USER [SQLServerPerfMon] FOR LOGIN [SQLServerPerfMon];
-    GRANT VIEW DATABASE STATE                       TO [SQLServerPerfMon];
-    GRANT VIEW DEFINITION                           TO [SQLServerPerfMon];
-    GRANT SELECT ON sys.sql_expression_dependencies TO [SQLServerPerfMon];
+    IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = ''YourLogin'')
+        CREATE USER [YourLogin] FOR LOGIN [YourLogin];
+    GRANT VIEW DATABASE STATE                       TO [YourLogin];
+    GRANT VIEW DEFINITION                           TO [YourLogin];
+    GRANT SELECT ON sys.sql_expression_dependencies TO [YourLogin];
 END';
 ```
 
@@ -103,10 +109,10 @@ Azure SQL Database doesn't support server-level logins. Create a **contained dat
 
 ```sql
 -- Connect to your target database (not master)
-CREATE USER [SQLServerPerfMon] WITH PASSWORD = 'YourStrongPassword';
-GRANT VIEW DATABASE STATE TO [SQLServerPerfMon];
-GRANT VIEW DEFINITION     TO [SQLServerPerfMon];
-GRANT ALTER ANY DATABASE EVENT SESSION TO [SQLServerPerfMon];
+CREATE USER [YourLogin] WITH PASSWORD = 'YourStrongPassword';
+GRANT VIEW DATABASE STATE TO [YourLogin];
+GRANT VIEW DEFINITION     TO [YourLogin];
+GRANT ALTER ANY DATABASE EVENT SESSION TO [YourLogin];
 ```
 
 The third grant, `ALTER ANY DATABASE EVENT SESSION`, lets the monitor create its Extended Events sessions in the database. Without it, the Extended Events collectors have no session to read.
@@ -134,3 +140,21 @@ Works like on-premises. Use server-level logins with `VIEW SERVER STATE`. SQL Ag
 ### AWS RDS for SQL Server
 
 For ongoing collection, `VIEW SERVER STATE` and msdb access work the same as on-premises, but `sp_configure` is not available (use RDS Parameter Groups instead — see [Platform Notes](platform-notes.md#platform-notes)).
+
+### PostgreSQL targets (Darling)
+
+Only Darling monitors PostgreSQL servers. Lite does not. The SQL Server grants above do not apply to a PostgreSQL target. A PostgreSQL target needs these:
+
+- `pg_monitor` on the monitoring role.
+- `pg_read_all_data` on PostgreSQL 14 and later.
+- `pg_read_server_files` and `EXECUTE` on `pg_read_file`, on self-hosted targets only. Three collectors read the server log with them.
+- The `pg_stat_statements` extension, for the `pg_statement_stats` collector.
+
+The exact statements are in the Darling operator guide, in [Permissions on a PostgreSQL target](../Darling/README.md#permissions-on-a-postgresql-target).
+
+### Optional Darling logins
+
+Darling can use two more logins, each with its own grants. Neither is part of the grant block above. The monitoring login stays read-only.
+
+- The remediation login runs the changes that an operator or an agent starts. These are: force or unforce a Query Store plan, evict a cached plan, and kill a session. Its grants are in the Darling operator guide, in [Configuration Reference](../Darling/README.md#servers-array-at-least-one-entry), under "Least privilege for the remediation credential".
+- The "Test an index" login is for PostgreSQL targets only. The check never runs under the monitoring login. The setup is in [Testing an index on PostgreSQL](../Darling/README.md#testing-an-index-on-postgresql).
