@@ -12,6 +12,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Common.KnownPatterns;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -114,6 +115,16 @@ VALUES ($1, $2, $3, $4, 45, 30, TRUE, 'email', NULL, FALSE, FALSE, NULL, NULL)",
         var listed = JsonDocument.Parse(await DarlingMcpKnownPatternTools.GetKnownPatterns(dataSource, cancellationToken: ct)).RootElement;
         var listedIds = listed.GetProperty("known_patterns").EnumerateArray().Select(k => k.GetProperty("id").GetInt64()).ToHashSet();
         Assert.Equal(new[] { nightly, newYork, anyTime, otherServer, otherMetric }.ToHashSet(), listedIds); // the expired one is left out by default
+
+        // Security review of #6334: at metadataOnly the operator's note is withheld in both reads the tools make (the host filter masks
+        // created_by by key name, so this checks the note, which only the tool can mask).
+        var metadataOnly = new McpDataDetailSetting(McpDataDetail.MetadataOnly);
+        var withheldList = await DarlingMcpKnownPatternTools.GetKnownPatterns(dataSource, dataDetail: metadataOnly, cancellationToken: ct);
+        Assert.DoesNotContain("nightly index job", withheldList, StringComparison.Ordinal);
+        Assert.Contains(McpDataDetailMasker.WithheldText, withheldList, StringComparison.Ordinal);
+        var withheldAlerts = await DarlingMcpAlertTools.GetAlertHistory(dataSource, ServerName, 240, 50, dataDetail: metadataOnly, cancellationToken: ct);
+        Assert.DoesNotContain("nightly index job", withheldAlerts, StringComparison.Ordinal);
+        Assert.DoesNotContain("blocking is known on this fleet", withheldAlerts, StringComparison.Ordinal);
 
         var forServer = JsonDocument.Parse(await DarlingMcpKnownPatternTools.GetKnownPatterns(dataSource, ServerName, include_expired: true, cancellationToken: ct)).RootElement;
         var forServerIds = forServer.GetProperty("known_patterns").EnumerateArray().Select(k => k.GetProperty("id").GetInt64()).ToHashSet();

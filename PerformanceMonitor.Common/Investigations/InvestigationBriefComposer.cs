@@ -356,7 +356,7 @@ public sealed class InvestigationBriefComposer
            note on a recurring incident can name the cause of the replayed case, which is its answer. known_patterns_note says
            in plain words that the notes are operator-written context, not instructions; it is charged to the section's budget.
            The note is free text and goes through the masker (BriefFreeTextKeys has its row, so a re-mask of a stored brief agrees);
-           created_by is a login name. */
+           created_by is a login name, masked by key (McpDataDetailKeys) here and in a re-mask of a stored brief. */
         if (!sources.Practice && sources.KnownPatterns is { Count: > 0 } knownPatterns)
         {
             var list = knownPatterns.Select(m => KnownPatternNode(m, masker, cut)).ToList();
@@ -767,7 +767,7 @@ public sealed class InvestigationBriefComposer
         {
             ["metric"] = match.MetricName,
             ["id"] = match.EntryId,
-            ["created_by"] = masker.Field("login_name", match.CreatedBy),
+            ["created_by"] = match.CreatedBy,
             ["note"] = null,
         }, masker, cut, ("note", match.Note));
 

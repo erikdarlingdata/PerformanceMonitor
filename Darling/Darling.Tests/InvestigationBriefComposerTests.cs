@@ -584,6 +584,24 @@ public sealed class InvestigationBriefComposerTests
         Assert.NotEqual(LoginCanary, (string?)metadataOnly["created_by"]);
     }
 
+    /* #6334 security review: a brief stored at full and served at metadataOnly re-masks the entry's author and note. */
+    [Fact]
+    public void KnownPatterns_AStoredFullBrief_ServedAtMetadataOnly_ReMasksTheAuthorAndTheNote()
+    {
+        var match = new InvestigationKnownPatternMatch("Blocking", 7, "The job runs WHERE id = 55443322 every night", LoginCanary);
+        var stored = InvestigationBriefComposer.Compose(Sources(knownPatterns: new[] { match }), DarlingInvestigationBriefTools.Tools, McpDataDetail.Full, Now);
+        Assert.Contains(LoginCanary, stored, StringComparison.Ordinal);
+
+        var served = InvestigationFieldMasking.StoredBrief(stored, McpDataDetail.MetadataOnly, McpDataDetailMasker.ForAnswer(McpDataDetail.MetadataOnly))!.AsObject();
+        var entry = served["known_patterns"]![0]!;
+        Assert.NotEqual(LoginCanary, (string?)entry["created_by"]);
+        Assert.DoesNotContain(LoginCanary, entry.ToJsonString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("55443322", entry.ToJsonString(), StringComparison.Ordinal);
+
+        var composed = Brief(Sources(knownPatterns: new[] { match }), McpDataDetail.MetadataOnly)["known_patterns"]![0]!;
+        Assert.Equal((string?)composed["created_by"], (string?)entry["created_by"]);
+    }
+
     /* ---- masking under all three levels ---- */
 
     [Fact]
