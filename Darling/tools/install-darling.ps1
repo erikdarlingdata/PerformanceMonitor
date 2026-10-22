@@ -1900,10 +1900,18 @@ function Test-DarlingDomainController {
 # to No, -NoOperatorPrompt never asks, and -AddOperator names the account for a scripted install. Each function below is small
 # so a test can stand in for the machine.
 
-# True only when a person can answer a prompt: an interactive window station, input that is not redirected, and a host not
-# started with -NonInteractive. Anything else is treated as No by the caller, never waited on.
+# True for a PowerShell remoting session (WinRM, Enter-PSSession, Invoke-Command). Such a session can report
+# [Environment]::UserInteractive as true yet has no console to answer on, so a Read-Host there would hang. Its host is
+# named ServerRemoteHost and $PSSenderInfo is set. Takes both as arguments so a test can stand in for the session.
+function Test-DarlingRemoteSession([string]$HostName, $SenderInfo) {
+    return ($HostName -eq 'ServerRemoteHost' -or $null -ne $SenderInfo)
+}
+
+# True only when a person can answer a prompt: an interactive window station, input that is not redirected, a host not
+# started with -NonInteractive, and not a remoting session. Anything else is treated as No by the caller, never waited on.
 function Test-DarlingInteractiveHost {
     if (-not [Environment]::UserInteractive) { return $false }
+    if (Test-DarlingRemoteSession $Host.Name $PSSenderInfo) { return $false }
     try { if ([Console]::IsInputRedirected) { return $false } }
     catch { return $false }
     foreach ($argument in [Environment]::GetCommandLineArgs()) {

@@ -93,8 +93,13 @@ $dataRoot = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'P
 function Remove-DarlingDirectOperatorGrants([string]$configPath, [string]$storeFolder, [string]$groupName) {
     $ErrorActionPreference = 'Continue'
     $keep = @('S-1-5-18', 'S-1-5-32-544')
+    # The group's own SID is what keeps its entries. If it cannot be resolved, the loop below could not tell the group's
+    # entries from a direct grant and would remove them, so nothing is removed at all.
     try { $keep += (New-Object System.Security.Principal.NTAccount($env:COMPUTERNAME, $groupName)).Translate([System.Security.Principal.SecurityIdentifier]).Value }
-    catch { }
+    catch {
+        Write-Host "Could not resolve the operator group '$groupName' ($($_.Exception.Message)), so the direct grants were left in place on darling.json and the store folder." -ForegroundColor Yellow
+        return
+    }
     $paths = @($configPath)
     if ($storeFolder) {
         $paths += $storeFolder

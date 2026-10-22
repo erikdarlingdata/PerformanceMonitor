@@ -389,9 +389,32 @@ public sealed class DarlingOperatorGroupScriptTests
     public void TheHostCheckSaysNoUnderNonInteractive()
     {
         const string scriptName = "install-darling.ps1";
-        var lines = RunWindowsPowerShell(ExtractFunction(Script(scriptName), "Test-DarlingInteractiveHost", scriptName) + "\nTest-DarlingInteractiveHost", nonInteractive: true);
+        var lines = RunWindowsPowerShell(ExtractFunction(Script(scriptName), "Test-DarlingRemoteSession", scriptName) + "\n" + ExtractFunction(Script(scriptName), "Test-DarlingInteractiveHost", scriptName) + "\nTest-DarlingInteractiveHost", nonInteractive: true);
 
         Assert.Equal(new[] { "False" }, lines);
+    }
+
+    /// <summary>A PowerShell remoting session can report UserInteractive as true with no console behind it, so the prompt
+    /// would hang. The remoting check says yes for the remote host name and for a set $PSSenderInfo (either alone is enough),
+    /// and no for an ordinary console. The real host check is then run with the sender info set, so it answers No whatever
+    /// the console around it looks like.</summary>
+    [Fact]
+    public void ARemotingSessionIsTreatedAsAHostThatCannotAnswer()
+    {
+        const string scriptName = "install-darling.ps1";
+        var probe = string.Join(
+            "\n",
+            ExtractFunction(Script(scriptName), "Test-DarlingRemoteSession", scriptName),
+            "'host=' + (Test-DarlingRemoteSession 'ServerRemoteHost' $null)",
+            "'sender=' + (Test-DarlingRemoteSession 'ConsoleHost' ([pscustomobject]@{ ConnectedUser = 'CONTOSO\\alice' }))",
+            "'console=' + (Test-DarlingRemoteSession 'ConsoleHost' $null)",
+            "$PSSenderInfo = [pscustomobject]@{ ConnectedUser = 'CONTOSO\\alice' }",
+            ExtractFunction(Script(scriptName), "Test-DarlingInteractiveHost", scriptName),
+            "'interactive=' + (Test-DarlingInteractiveHost)");
+
+        var lines = RunWindowsPowerShell(probe);
+
+        Assert.Equal(new[] { "host=True", "sender=True", "console=False", "interactive=False" }, lines);
     }
 
     /// <summary>The real account check: a person's own account resolves to its SID, and the names that would put every user
@@ -489,6 +512,46 @@ public sealed class DarlingOperatorGroupScriptTests
             Assert.Equal(
                 new[] { config, store, admin, viewer }.Select(path => $"ICACLS {path} /remove:g *S-1-5-32-546").ToArray(),
                 lines.Where(line => line.StartsWith("ICACLS ", StringComparison.Ordinal)).ToArray());
+        }
+        finally
+        {
+            Directory.Delete(folder, recursive: true);
+        }
+    }
+
+    /// <summary>When the operator group's own SID cannot be resolved, the function cannot tell the group's entries from a
+    /// direct grant, so it removes nothing from any of the four paths and says so by naming the group. The group lookup is made
+    /// to throw by naming a group that does not exist; the stand-in ACL still carries entries (one of them the group's own).</summary>
+    [Fact]
+    public void UninstallRemovesNothingWhenTheOperatorGroupCannotBeResolved()
+    {
+        const string scriptName = "uninstall-darling.ps1";
+        var folder = Directory.CreateTempSubdirectory("darling-uninstall-6478-").FullName;
+        try
+        {
+            var store = Path.Combine(folder, "store");
+            Directory.CreateDirectory(store);
+            var config = Path.Combine(folder, "darling.json");
+            File.WriteAllText(config, "{}");
+            File.WriteAllText(Path.Combine(store, "pg-admin-credential.dpapi"), "x");
+            File.WriteAllText(Path.Combine(store, "pg-viewer-credential.dpapi"), "x");
+
+            var probe = string.Join(
+                "\n",
+                "$env:COMPUTERNAME = 'BUILTIN'",
+                "$script:log = New-Object System.Collections.ArrayList",
+                "function Write-Host { param($Object, $ForegroundColor) [void]$script:log.Add([string]$Object) }",
+                "function New-Rule($sidText, [bool]$inherited, $type = 'Allow') { [pscustomobject]@{ IdentityReference = (New-Object System.Security.Principal.SecurityIdentifier $sidText); IsInherited = $inherited; AccessControlType = $type } }",
+                "function Get-Acl { param($LiteralPath) [pscustomobject]@{ Access = @((New-Rule 'S-1-5-18' $false), (New-Rule 'S-1-5-32-544' $false), (New-Rule 'S-1-5-32-559' $false), (New-Rule 'S-1-5-32-546' $false)) } }",
+                "function icacls.exe { [void]$script:log.Add('ICACLS ' + ($args -join ' ')); $global:LASTEXITCODE = 0 }",
+                ExtractFunction(Script(scriptName), "Remove-DarlingDirectOperatorGrants", scriptName),
+                $"Remove-DarlingDirectOperatorGrants '{config}' '{store}' 'No Such Operator Group 6478'",
+                "$script:log");
+
+            var lines = RunWindowsPowerShell(probe);
+
+            Assert.DoesNotContain(lines, line => line.StartsWith("ICACLS ", StringComparison.Ordinal));
+            Assert.Contains(lines, line => line.Contains("No Such Operator Group 6478", StringComparison.Ordinal) && line.Contains("left in place", StringComparison.Ordinal));
         }
         finally
         {
