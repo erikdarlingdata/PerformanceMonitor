@@ -284,6 +284,33 @@ VALUES ($1,$2,$3,$4,$5,$6,$7)",
             Assert.EndsWith(". " + McpHelpers.CutWindowNothingReadMessage, cut.GetProperty("message").GetString()!, StringComparison.Ordinal);
         });
 
+    /* #6441, the Lite twin is McpWindowNoticeSystemHealthToolTests.ATruncatedRingBuffer_OnTheNewestRun_IsNotCalledQuiet: the same
+       covered window as the test below, but the newest system_health run recorded a truncated ring buffer. Before the fix the
+       answer was "genuinely quiet rather than blind" while the newest events sat on the server unread. */
+    [Theory]
+    [InlineData(HealthTool.SystemHealth)]
+    [InlineData(HealthTool.SignificantWaits)]
+    public async Task AnEmptyAnswer_AfterATruncatedRingBufferRun_IsNotCalledQuiet_AgainstDevPostgres(HealthTool tool) =>
+        await RunHealthAsync("rbtrunc-" + tool, async (c, ds, end) =>
+        {
+            await SeedHealthServerAsync(c, "rbtrunc-" + tool, end.AddDays(-30), end.AddDays(-8), end.AddMinutes(-30));
+            await SeedHealthEventAsync(c, "rbtrunc-" + tool, tool, end.AddDays(-20));
+            var name = HealthName("rbtrunc-" + tool);
+            await DarlingMcpTestData.ExecAsync(c, TestContext.Current.CancellationToken,
+                @"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected, error_message)
+VALUES ($1, $2, $3, $4, $5, 12, 'SUCCESS', 0, 'ring_buffer_truncated=1 ring_buffer_events_hidden=773 newest_visible_event_age_s=19380')",
+                CollectionIdGenerator.Next(), ServerIdHelper.GetDeterministicHashCode(name), name, Collector, DarlingMcpTestData.Naive(end));
+
+            var root = WindowFloorLiveHarness.Parse(await CallHealthAsync(tool, ds, "rbtrunc-" + tool, 168, end));
+
+            Assert.Equal("unavailable", root.GetProperty("status").GetString());
+            var message = root.GetProperty("message").GetString()!;
+            Assert.Contains("NOT an all-clear", message, StringComparison.Ordinal);
+            Assert.Contains("773 event(s) are hidden", message, StringComparison.Ordinal);
+            Assert.Contains("5 h 23 min old", message, StringComparison.Ordinal);
+            Assert.DoesNotContain("quiet", message, StringComparison.Ordinal);
+        });
+
     [Theory]
     [InlineData(HealthTool.SystemHealth)]
     [InlineData(HealthTool.SignificantWaits)]

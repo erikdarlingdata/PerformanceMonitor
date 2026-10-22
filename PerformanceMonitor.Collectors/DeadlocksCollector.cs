@@ -125,6 +125,8 @@ BEGIN
 
     {RingBufferXml.ParseSql}
 
+    {RingBufferXml.TruncationSql}
+
     INSERT
         @PerformanceMonitor_Deadlock
     (
@@ -186,7 +188,9 @@ OPTION(RECOMPILE);
    above -- always one row, whichever branch the IF took. */
 SELECT
     execution_count = @execution_count,
-    gated = CASE WHEN @shred_needed = 1 THEN CONVERT(bit, 0) ELSE CONVERT(bit, 1) END;";
+    gated = CASE WHEN @shred_needed = 1 THEN CONVERT(bit, 0) ELSE CONVERT(bit, 1) END,
+    /* #6441: whether SQL Server truncated the ring buffer's XML (all NULL when the gate skipped the read). */
+    {RingBufferXml.TruncationColumnsSql};";
 
     /* On-prem / Azure MI / AWS RDS: read from ring_buffer (server-scoped session)
        Use .query() to get XML with structure intact, then CONVERT to nvarchar(max) */
@@ -237,6 +241,8 @@ BEGIN
 
     {RingBufferXml.ParseSql}
 
+    {RingBufferXml.TruncationSql}
+
     INSERT
         @PerformanceMonitor_Deadlock
     (
@@ -269,7 +275,9 @@ OPTION(RECOMPILE);
    above -- always one row, whichever branch the IF took. */
 SELECT
     execution_count = @execution_count,
-    gated = CASE WHEN @shred_needed = 1 THEN CONVERT(bit, 0) ELSE CONVERT(bit, 1) END;";
+    gated = CASE WHEN @shred_needed = 1 THEN CONVERT(bit, 0) ELSE CONVERT(bit, 1) END,
+    /* #6441: whether SQL Server truncated the ring buffer's XML (all NULL when the gate skipped the read). */
+    {RingBufferXml.TruncationColumnsSql};";
 
     /* Best-effort victim plan capture (CapturePlanXml only — Darling). Resolve the victim's deadlocked
        statement plan from the live plan cache by its executionStack frame's sql_handle + statement
@@ -711,6 +719,9 @@ OUTER APPLY
             }
 
             context.Measure(ShredGatedMeasurement, !reader.IsDBNull(1) && reader.GetBoolean(1) ? 1 : 0);
+
+            /* #6441: SQL Server cuts a ring buffer's XML at about 4 MB and keeps the OLDEST events. */
+            RingBufferXml.MeasureTruncation(reader, 2, context);
         }
 
         return rows;

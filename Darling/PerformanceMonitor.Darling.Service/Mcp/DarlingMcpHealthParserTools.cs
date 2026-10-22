@@ -886,6 +886,18 @@ public sealed class DarlingMcpHealthParserTools
            index walk stops at its first row, and the stamp it returns is THIS type's newest capture rather
            than the server-level witness standing in for it. */
         var lastOfType = await DarlingSystemHealthReader.GetLastCaptureOfTypeAsync(postgres, c.ServerId, eventType, cancellationToken);
+
+        /* #6441, ahead of every rung: when the newest collection run found the ring buffer truncated, the read is blind
+           to the newest events, so none of "healthy", "quiet" or "never fired" is true. */
+        if (RingBufferTruncationNote.Describe(
+                await DarlingSystemHealthReader.GetLatestRunNoteAsync(postgres, c.ServerId, SystemHealthCollectorName, cancellationToken)) is { } truncation)
+        {
+            return WitnessStatus(
+                "unavailable",
+                RingBufferTruncationNote.HealthParserMessage(eventType, c.DisplayName, hoursBack, truncation),
+                sourceObserved: true, c.LastCapturedAt, lastCapturedOfTypeAt: lastOfType, eventsInWindow: c.RawEventCount);
+        }
+
         if (c.RawEventCount > 0)
         {
             var notice = await NoticeAsync(postgres, c, hoursBack, null, emptyAnswer: true, logger, cancellationToken);

@@ -107,8 +107,9 @@ export const MEASUREMENT_LABELS = [
   "csv_records_discarded", "events_read", "events_stored", "foreign_zone_lines_skipped", "forged_captures_skipped",
   "identity_epoch_changes", "job_history_identity_regressions", "job_history_identity_store_watermark",
   "job_history_identity_target_row", "json_records_discarded", "log_bytes_skipped", "log_files_skipped_by_rotation",
-  "log_matches_limited", "log_resume_file_missing", "log_resume_file_recycled", "postmaster_epoch_changes",
-  "raise_shaped_deadlocks_skipped", "report_xml_empty", "report_xml_unparsed", "shred_gated", "statement_scrub_ms",
+  "log_matches_limited", "log_resume_file_missing", "log_resume_file_recycled", "newest_visible_event_age_s",
+  "postmaster_epoch_changes", "raise_shaped_deadlocks_skipped", "report_xml_empty", "report_xml_unparsed",
+  "ring_buffer_events_hidden", "ring_buffer_truncated", "shred_gated", "statement_scrub_ms",
   "statement_scrub_named", "statement_scrub_timeouts", "statement_scrub_unjudged", "statements_dealloc",
   "statements_epoch_changes",
 ];

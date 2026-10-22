@@ -2388,6 +2388,15 @@ namespace PerformanceMonitor.Common
                 return Warning;
             }
 
+            /* #6441. A ring-buffer read whose XML SQL Server truncated still records SUCCESS (often with 0 rows,
+               because the cut drops the NEWEST events and the watermark filters the rest), so the run's counts are
+               the only record that the read is blind. Same rule as the partial-database note: the NEWEST run's
+               note, read only where the ladder would otherwise say HEALTHY. */
+            if (RingBufferTruncationNote.TryParse(latestRunNote, out _, out _))
+            {
+                return Warning;
+            }
+
             return Healthy;
         }
 
@@ -2597,6 +2606,14 @@ namespace PerformanceMonitor.Common
                labelled as the latest run's and carry no run-count qualifier at all. */
             if (HasMeasurements(lastNote))
             {
+                /* #6441: a truncated ring buffer bands WARNING, and the counts alone do not say why. */
+                if (RingBufferTruncationNote.Describe(lastNote) is { } truncation)
+                {
+                    return noteCount >= totalRuns && totalRuns > 0
+                        ? "latest run: " + truncation + " (" + lastNote + ")"
+                        : string.Format(CultureInfo.InvariantCulture, "latest noted run: {0} ({1}; {2} of {3} runs)", truncation, lastNote, noteCount, totalRuns);
+                }
+
                 /* The note is the newest run that CARRIED one, and some measurers write counts only when
                    something happened. Only when every run carried it is it the newest run's. */
                 return noteCount >= totalRuns && totalRuns > 0

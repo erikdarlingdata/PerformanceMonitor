@@ -104,15 +104,18 @@ public sealed class McpZeroIsAMeasurementTests
     }
 
     /// <summary>
-    /// The ladder itself: four rungs, three of them <c>empty</c> and exactly one <c>unavailable</c> — the
+    /// The ladder itself: five rungs, three of them <c>empty</c> and two <c>unavailable</c> (#6441). One is the
     /// nothing-of-any-type-ever rung, with <c>source_observed: false</c> and the sentence the
-    /// EngineCapabilityMissTests pin (<c>system_health session is started</c>). Rung 3 — this type never, the
+    /// EngineCapabilityMissTests pin (<c>system_health session is started</c>). The other is the truncated-capture
+    /// rung, which comes first: when the newest collection run found the ring buffer truncated, an empty window is
+    /// not a true negative, so it is <c>unavailable</c>, not <c>empty</c>. It reads the collection log's note,
+    /// which is why it is a probe of its own and the witness stays the events view. Rung 3 — this type never, the
     /// session alive — must be <c>empty</c>: a memory-node OOM that never happened is the healthy measurement.
     /// </summary>
     [Theory]
     [InlineData(DarlingMcp + "/DarlingMcpHealthParserTools.cs")]
     [InlineData(LiteMcp + "/McpHealthParserTools.cs")]
-    public void TheEmptyLadder_HasFourRungs_AndOnlyTheDeadSessionIsUnavailable(string file)
+    public void TheEmptyLadder_HasFiveRungs_AndOnlyTheDeadSessionAndTheTruncatedCaptureAreUnavailable(string file)
     {
         var source = ReadRepoFile(file.Split('/'));
         var start = source.IndexOf("private static async Task<string> EmptyAsync", StringComparison.Ordinal);
@@ -121,13 +124,14 @@ public sealed class McpZeroIsAMeasurementTests
         var ladder = Strip(source[start..end]);
 
         Assert.Equal(3, Regex.Matches(ladder, "WitnessStatus\\(\\s*\"empty\"").Count);
-        Assert.Single(Regex.Matches(ladder, "WitnessStatus\\(\\s*\"unavailable\""));
+        Assert.Equal(2, Regex.Matches(ladder, "WitnessStatus\\(\\s*\"unavailable\"").Count);
+        Assert.Contains("RingBufferTruncationNote.Describe", ladder, StringComparison.Ordinal);
         Assert.Single(Regex.Matches(ladder, "sourceObserved: false"));
         Assert.Contains("NOT an all-clear", ladder, StringComparison.Ordinal);
         Assert.Contains("system_health session is started", ladder, StringComparison.Ordinal);
         /* The engine-capability probe goes FIRST on the dead rung — the stronger claim. */
         Assert.True(
-            ladder.IndexOf("NotCollectedStatusAsync", StringComparison.Ordinal) < ladder.IndexOf("\"unavailable\"", StringComparison.Ordinal));
+            ladder.IndexOf("NotCollectedStatusAsync", StringComparison.Ordinal) < ladder.LastIndexOf("\"unavailable\"", StringComparison.Ordinal));
         /* The healthy rungs never reach for the dead rung's word, so a caller keying on it cannot be misled. */
         var rung3 = ladder[..ladder.IndexOf("NotCollectedStatusAsync", StringComparison.Ordinal)];
         Assert.DoesNotContain("EVER", rung3, StringComparison.Ordinal);
