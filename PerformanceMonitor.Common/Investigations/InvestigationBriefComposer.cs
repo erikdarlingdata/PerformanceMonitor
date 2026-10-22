@@ -242,6 +242,10 @@ public sealed class InvestigationBriefComposer
            for byte as before (Lite's golden pin). */
         if (mode != McpDataDetail.Full)
             ((JsonArray)root["read_rules"]!).Add(ParameterValuesHiddenRule);
+        /* #6554: a Change Watch request on a server whose Query Store is not collected (a readable secondary, query_store_replica off)
+           says so, so an empty Query Store read is not taken for "nothing changed". Absent otherwise, so no other brief moves a byte. */
+        if (!string.IsNullOrWhiteSpace(sources.QueryStoreNotCollected))
+            ((JsonArray)root["read_rules"]!).Add("Query Store reads for this server will be empty. " + sources.QueryStoreNotCollected);
         /* #5999: the registry's names for the server, read when the brief is composed. display_name is always present on Darling;
            instance_name is absent once the server has left the registry. Lite names both from its server list (#6011). Not host_name: that key is a masked client host (see InvestigationToolCore.RequestPayload). */
         if (request.DisplayName is { } displayName)

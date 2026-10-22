@@ -282,6 +282,18 @@ SELECT
     public static async Task<string?> QueryStoreReadableSecondaryStatusAsync(
         NpgsqlDataSource postgres, int serverId, string serverName, CancellationToken cancellationToken = default)
     {
+        var message = await QueryStoreReadableSecondaryMessageAsync(postgres, serverId, serverName, cancellationToken);
+        return message is null ? null : McpHelpers.Status(CollectorRuntimePrecondition.NotCollectedStatusWord, message);
+    }
+
+    /// <summary>
+    /// #6554: the one-line reason a Query Store read on this server is empty because it is a readable secondary with
+    /// <c>query_store_replica</c> off, or <c>null</c> when it is not or the read fails. The one source of the wording: the
+    /// Query Store reads' <c>not_collected</c> answer and a Change Watch request's brief both use it.
+    /// </summary>
+    public static async Task<string?> QueryStoreReadableSecondaryMessageAsync(
+        NpgsqlDataSource postgres, int serverId, string serverName, CancellationToken cancellationToken = default)
+    {
         try
         {
             await using var command = postgres.CreateCommand(ReadableSecondaryFactsSql);
@@ -293,7 +305,7 @@ SELECT
                 return null;
             }
 
-            var message = CollectorRuntimePrecondition.QueryStoreReadableSecondaryMessage(
+            return CollectorRuntimePrecondition.QueryStoreReadableSecondaryMessage(
                 serverName,
                 reader.IsDBNull(0) ? null : reader.GetString(0),
                 (int)reader.GetInt64(2),
@@ -301,7 +313,6 @@ SELECT
                 replicaConfigured: !reader.IsDBNull(1),
                 "Darling collects Query Store from a registered server only when that server is not a readable secondary, and query_store_replica is off for it. " +
                 "Register the primary, or set query_store_replica on the primary to read Query Store from a readable secondary (edit_server).");
-            return message is null ? null : McpHelpers.Status(CollectorRuntimePrecondition.NotCollectedStatusWord, message);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

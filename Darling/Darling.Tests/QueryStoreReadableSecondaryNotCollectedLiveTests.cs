@@ -146,4 +146,51 @@ public sealed class QueryStoreReadableSecondaryNotCollectedLiveTests
             return 0;
         });
     }
+
+    private static async Task<string> BriefRulesAsync(NpgsqlConnection c, NpgsqlDataSource postgres, CancellationToken ct, string metric, string trigger)
+    {
+        var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+        var store = new InvestigationRequestStore(postgres, 30, () => now.AddMinutes(-5));
+        var opened = await store.OpenOrJoinAsync(
+            new InvestigationAlert(1, ServerId, ServerName, "blocking", metric, now.AddMinutes(-5), new[] { ServerId + ":" + metric }, null,
+                20, 100, LeaseMinutes: 15, ExpiryMinutes: 240) { TriggerKind = trigger }, ct);
+        var sources = await new PerformanceMonitor.Darling.Service.Investigations.PgInvestigationBriefSourceReader(postgres, utcNow: () => now)
+            .ReadAsync(opened.RequestId!.Value, ct);
+        var brief = InvestigationBriefComposer.Compose(sources!, PerformanceMonitor.Darling.Service.Investigations.DarlingInvestigationBriefTools.Tools, McpDataDetail.Full, now);
+        return JsonDocument.Parse(brief).RootElement.GetProperty("read_rules").ToString();
+    }
+
+    /// <summary>#6554: a Change Watch request on a readable secondary (query_store_replica off) says in its brief that the Query Store reads
+    /// will be empty and why, in the wording the reads use; an alert request on it, and a Change Watch request on a primary, say nothing.</summary>
+    [Fact]
+    public async Task ChangeWatchBrief_OnASecondary_SaysTheQueryStoreReadsWillBeEmpty_AndWhy()
+    {
+        await WithStoreAsync(async (c, postgres, ct) =>
+        {
+            await SeedRoleAsync(c, ct, "Secondary");
+            var rules = await BriefRulesAsync(c, postgres, ct, InvestigationTriggerKinds.ChangeWatchMetric, InvestigationTriggerKinds.ChangeWatch);
+            Assert.Contains("Query Store reads for this server will be empty", rules);
+            Assert.Contains("readable secondary", rules);
+            Assert.Contains("query_store_replica", rules);
+            return 0;
+        });
+    }
+
+    [Fact]
+    public async Task ChangeWatchBrief_OnAPrimary_AndAlertBriefOnASecondary_SayNothingAboutQueryStore()
+    {
+        await WithStoreAsync(async (c, postgres, ct) =>
+        {
+            await SeedRoleAsync(c, ct, "Primary");
+            Assert.DoesNotContain("Query Store", await BriefRulesAsync(c, postgres, ct, InvestigationTriggerKinds.ChangeWatchMetric, InvestigationTriggerKinds.ChangeWatch));
+            return 0;
+        });
+
+        await WithStoreAsync(async (c, postgres, ct) =>
+        {
+            await SeedRoleAsync(c, ct, "Secondary");
+            Assert.DoesNotContain("Query Store", await BriefRulesAsync(c, postgres, ct, "CPU", InvestigationTriggerKinds.Alert));
+            return 0;
+        });
+    }
 }
