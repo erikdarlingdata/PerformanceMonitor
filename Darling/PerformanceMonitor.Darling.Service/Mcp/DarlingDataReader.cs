@@ -124,7 +124,10 @@ internal static class DarlingDataReader
         double? TextFetchTargetMs = null,
         double? TextFetchWriteMs = null,
         long? TextFetchIdsAttempted = null,
-        long? TextFetchProbeIds = null)
+        long? TextFetchProbeIds = null,
+        /* V213 (#6254): which host a Query Store run read from, e.g. "replica 12, primary 2 (redo_behind: Sales)". NULL on every run
+           written before the setting existed and on every run of a server with the setting off: the tools then show nothing. */
+        string? ReadSource = null)
     {
         /* The residual, derived rather than read (V108 stores no other_ms column on purpose): open + drain
            + this SUM to SqlDurationMs by construction, so a large value here is a real finding - cost in
@@ -4099,6 +4102,55 @@ internal static class DarlingDataReader
                 GetCollectionHealthAsync(postgres, scanServerId, scanWindowStart, scanToken),
             cancellationToken);
 
+    /// <summary>
+    /// #6254: the newest Query Store run's <c>read_source</c> on this server in the window, which collection health shows beside that
+    /// collector. The newest run, not the newest run that had one: a server whose setting was turned off must stop showing a source
+    /// the moment its runs stop writing one. One keyed index walk that stops at the first row.
+    /// </summary>
+    internal const string CollectionHealthReadSourceSql = @"
+SELECT read_source
+FROM v_collection_log
+WHERE server_id = $1
+AND   collector_name = $3
+AND   collection_time >= $2
+ORDER BY collection_time DESC, log_id DESC
+LIMIT 1";
+
+    /// <summary>
+    /// #6254: collector name to <c>read_source</c> for the collectors whose newest run has one. Empty when none does (every server with the
+    /// Query Store replica setting off), and then collection health is exactly what it was. A failed read is empty too, with a warning: the
+    /// health read answers without the extra field. A cancellation is not swallowed.
+    /// </summary>
+    internal static async Task<Dictionary<string, string>> ReadCollectionHealthReadSourcesAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime windowStartUtc, CancellationToken cancellationToken)
+    {
+        var sources = new Dictionary<string, string>(StringComparer.Ordinal);
+        try
+        {
+            await using var command = postgres.CreateCommand(CollectionHealthReadSourceSql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            AddInt(command, serverId);
+            AddTimestamp(command, windowStartUtc);
+            command.Parameters.Add(new NpgsqlParameter { Value = QueryStoreWideReadGuard.QueryStoreRawCollector });
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0))
+            {
+                var source = reader.GetString(0);
+                if (source.Length > 0)
+                {
+                    sources[QueryStoreWideReadGuard.QueryStoreRawCollector] = source;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            ReadScope.Warn($"#6254 collection health could not read the Query Store read source for server {serverId}; it is shown without one", ex);
+            return new Dictionary<string, string>(StringComparer.Ordinal);
+        }
+
+        return sources;
+    }
+
     public static async Task<List<CollectorHealth>> GetCollectionHealthAsync(
         NpgsqlDataSource postgres, int serverId, DateTime windowStartUtc, CancellationToken cancellationToken = default)
     {
@@ -4687,7 +4739,8 @@ FROM config.config_collector_schedules";
             text_fetch_target_ms,
             text_fetch_write_ms,
             text_fetch_ids_attempted,
-            text_fetch_probe_ids
+            text_fetch_probe_ids,
+            read_source
         FROM v_collection_log
         WHERE server_id = $1
         AND   collection_time >= $2
@@ -4862,7 +4915,8 @@ FROM config.config_collector_schedules";
             reader.IsDBNull(i + 22) ? null : Convert.ToDouble(reader.GetValue(i + 22)),
             reader.IsDBNull(i + 23) ? null : Convert.ToDouble(reader.GetValue(i + 23)),
             reader.IsDBNull(i + 24) ? null : Convert.ToInt64(reader.GetValue(i + 24)),
-            reader.IsDBNull(i + 25) ? null : Convert.ToInt64(reader.GetValue(i + 25)));
+            reader.IsDBNull(i + 25) ? null : Convert.ToInt64(reader.GetValue(i + 25)),
+            reader.IsDBNull(i + 26) ? null : reader.GetString(i + 26));
 
     /// <summary>One <see cref="CollectionLogEntry"/> plus which server it came from — the fleet-wide row shape
     /// (#4199), needed only because <see cref="GetCollectionLogFleetAsync"/> merges runs across every enabled
@@ -4913,7 +4967,8 @@ FROM config.config_collector_schedules";
             cl.text_fetch_target_ms,
             cl.text_fetch_write_ms,
             cl.text_fetch_ids_attempted,
-            cl.text_fetch_probe_ids
+            cl.text_fetch_probe_ids,
+            cl.read_source
         FROM v_collection_log cl
         JOIN servers s ON s.server_id = cl.server_id AND s.is_enabled
         WHERE cl.collection_time >= $1

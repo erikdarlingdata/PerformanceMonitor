@@ -62,7 +62,7 @@ public sealed class ViewerAwsRoleFieldsTests
             Assert.Contains("$20", sql, StringComparison.Ordinal);
         }
 
-        Assert.DoesNotContain("$21", ViewerDataService.MonitoredServerInsertIfAbsentSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("$22", ViewerDataService.MonitoredServerInsertIfAbsentSql, StringComparison.Ordinal);
         Assert.Contains("aws_role_arn = EXCLUDED.aws_role_arn", ViewerDataService.MonitoredServerUpsertSql, StringComparison.Ordinal);
     }
 
@@ -71,13 +71,13 @@ public sealed class ViewerAwsRoleFieldsTests
     {
         var sql = ViewerDataService.MonitoredServerUpsertSql;
         Assert.DoesNotContain("aws_external_id = EXCLUDED.aws_external_id,", sql, StringComparison.Ordinal);
-        Assert.Contains("WHEN $21 THEN EXCLUDED.aws_external_id", sql, StringComparison.Ordinal);
+        Assert.Contains("WHEN $22 THEN EXCLUDED.aws_external_id", sql, StringComparison.Ordinal);
         Assert.Contains("ELSE config_monitored_servers.aws_external_id END", sql, StringComparison.Ordinal);
         Assert.Contains("WHEN EXCLUDED.aws_role_arn IS NULL THEN NULL", sql, StringComparison.Ordinal);
 
         /* A role that changes with nothing typed clears the stored ID; the arm sits after the typed one and before the keep. */
         const string changed = "WHEN EXCLUDED.aws_role_arn IS DISTINCT FROM config_monitored_servers.aws_role_arn THEN NULL";
-        var typed = sql.IndexOf("WHEN $21 THEN EXCLUDED.aws_external_id", StringComparison.Ordinal);
+        var typed = sql.IndexOf("WHEN $22 THEN EXCLUDED.aws_external_id", StringComparison.Ordinal);
         var kept = sql.IndexOf("ELSE config_monitored_servers.aws_external_id END", StringComparison.Ordinal);
         var arm = sql.IndexOf(changed, StringComparison.Ordinal);
         Assert.True(arm > typed && arm < kept, "the role-changed arm follows the typed arm and precedes the keep");

@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Collectors;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
@@ -130,7 +131,19 @@ public sealed partial class DarlingMcpServerAdminTools
     internal static bool SameTarget(RegisteredTarget held, ParsedServerEntry entry)
     {
         var config = entry.ProbeConfig;
-        var wanted = MachineKeyOf(config.Host, config.Engine, config.Port);
+        return SameMachine(held, config.Host, config.Engine, config.Port);
+    }
+
+    /// <summary>The Query Store replica of an entry is a SQL Server endpoint the service connects to, so it is a machine the
+    /// entry points at exactly as its host is (#6254). The value is a host[,port] or a listener name; the port and instance are
+    /// folded from it by <see cref="MachineKeyOf"/>.</summary>
+    internal static bool SameReplicaTarget(RegisteredTarget held, ParsedServerEntry entry)
+        => QueryStoreReplicaSetting.Normalize(entry.ProbeConfig.QueryStoreReplica) is { } replica
+            && SameMachine(held, replica, null, 0);
+
+    private static bool SameMachine(RegisteredTarget held, string host, string? engine, int hostPort)
+    {
+        var wanted = MachineKeyOf(host, engine, hostPort);
         if (!held.Removed)
         {
             return held.Host is not null && string.Equals(MachineKeyOf(held.Host, held.Engine, held.Port), wanted, StringComparison.Ordinal);
@@ -181,7 +194,7 @@ public sealed partial class DarlingMcpServerAdminTools
     internal static async Task<string?> TargetHeldRefusalAsync(
         IReadOnlyList<RegisteredTarget> held, ParsedServerEntry entry,
         Func<int, CancellationToken, Task<int?>> scopedRoute, CancellationToken cancellationToken, int? exceptServerId = null, bool forEdit = false,
-        string? probedIdentity = null, bool textMatch = true, bool postgresIdentityUnread = false)
+        string? probedIdentity = null, bool textMatch = true, bool postgresIdentityUnread = false, bool checkReplica = true)
     {
         if (exceptServerId is { } editedId && probedIdentity is not null
             && held.FirstOrDefault(t => t.ServerId == editedId)?.Identity == probedIdentity)
@@ -203,12 +216,15 @@ public sealed partial class DarlingMcpServerAdminTools
             }
 
             var sameText = textMatch && SameTarget(other, entry);
+            /* #6254: the Query Store replica is a machine the service connects to for this registration, so it is held to the same rule
+               as the host. An edit passes checkReplica only when it changes the replica (a host-only edit leaves it alone). */
+            var replicaHeld = !sameText && checkReplica && SameReplicaTarget(other, entry);
             var sameIdentity = SameIdentity(other, probedIdentity);
             /* #6340 round 2 (N1): a PostgreSQL probe that read no identity (the login may not call pg_control_system()) cannot say
                whether it reached the cluster a covered PostgreSQL registration holds under another name, so it is refused rather than
                matched by host text alone. Only for an entry that moves an address (an add, or an edit of the address). */
             var identityUnread = postgresIdentityUnread && textMatch && IsPostgresIdentity(other.Identity);
-            if (!sameText && !sameIdentity && !identityUnread)
+            if (!sameText && !replicaHeld && !sameIdentity && !identityUnread)
             {
                 continue;
             }
@@ -218,7 +234,7 @@ public sealed partial class DarlingMcpServerAdminTools
                 continue;
             }
 
-            if (!sameText && !sameIdentity)
+            if (!sameText && !replicaHeld && !sameIdentity)
             {
                 return (forEdit ? "Not saved: " : "Not added: ") + $"{entry.ProbeConfig.Host} cannot be checked against '{other.Label}'"
                     + (other.Removed ? " (a removed registration)" : "")
@@ -229,9 +245,10 @@ public sealed partial class DarlingMcpServerAdminTools
                     + "GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO the login), or change this in the Viewer or on the web dashboard.";
             }
 
-            return (forEdit ? "Not saved: " : "Not added: ") + $"{entry.ProbeConfig.Host} is already registered as '{other.Label}'"
+            var named = replicaHeld ? QueryStoreReplicaSetting.Normalize(entry.ProbeConfig.QueryStoreReplica)! : entry.ProbeConfig.Host;
+            return (forEdit ? "Not saved: " : "Not added: ") + $"{named} is already registered as '{other.Label}'"
                 + (other.Removed ? " (a removed registration)" : "")
-                + (sameText ? "" : " (the server reports the same name for itself)")
+                + (sameText || replicaHeld ? "" : " (the server reports the same name for itself)")
                 + $", and route {routeId} (an agent setting) is scoped to it, so "
                 + (forEdit ? "this registration, moved there, would sit outside that route. " : "a second registration of the machine would sit outside that route. ")
                 + (forEdit ? "Where a registration connects is changed in the Viewer or on the web dashboard." : "Register another database or intent in the Viewer or on the web dashboard.");
@@ -320,10 +337,10 @@ public sealed partial class DarlingMcpServerAdminTools
     /// holds the machine. <paramref name="exceptServerId"/> is the registration an edit changes.</summary>
     internal static async Task<string?> TargetHeldRefusalInTransactionAsync(
         NpgsqlConnection connection, NpgsqlTransaction transaction, ParsedServerEntry entry, int? exceptServerId, CancellationToken cancellationToken, bool forEdit = false, string? probedIdentity = null,
-        bool textMatch = true, bool postgresIdentityUnread = false)
+        bool textMatch = true, bool postgresIdentityUnread = false, bool checkReplica = true)
     {
         var held = await LoadRegisteredTargetsAsync(connection, transaction, cancellationToken);
         return await TargetHeldRefusalAsync(held, entry,
-            (serverId, token) => ScopedAgentRouteAsync(connection, transaction, serverId, token), cancellationToken, exceptServerId, forEdit, probedIdentity, textMatch, postgresIdentityUnread);
+            (serverId, token) => ScopedAgentRouteAsync(connection, transaction, serverId, token), cancellationToken, exceptServerId, forEdit, probedIdentity, textMatch, postgresIdentityUnread, checkReplica);
     }
 }

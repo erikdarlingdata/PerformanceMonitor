@@ -50,8 +50,8 @@ public sealed class ServerEditPasswordRuleViewerTests
     /// form's host trimmed of spaces as the dialog trims it) to a form that changes only the host and port.</summary>
     private static bool ViewerMoves(string storedHost, int storedPort, string newHost, int newPort) =>
         ServerConnectionIdentity.Differ(
-            ServerConnectionIdentity.FromStoredColumns(newHost.Trim(' '), newPort, null, null, false, null, null, null, false, false),
-            ServerConnectionIdentity.FromStoredColumns(storedHost, storedPort, null, null, false, null, null, null, false, false));
+            ServerConnectionIdentity.FromStoredColumns(newHost.Trim(' '), newPort, null, null, false, null, null, null, false, false, null),
+            ServerConnectionIdentity.FromStoredColumns(storedHost, storedPort, null, null, false, null, null, null, false, false, null));
 
     [Theory]
     [InlineData("edit-rule.example.test", 0, "edit-rule.example.test", 0, false)]

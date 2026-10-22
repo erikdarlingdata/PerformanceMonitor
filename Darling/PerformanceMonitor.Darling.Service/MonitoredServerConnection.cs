@@ -9,6 +9,7 @@
 using System;
 using Microsoft.Data.SqlClient;
 using Npgsql;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -84,6 +85,53 @@ public static class MonitoredServerConnection
         {
             builder.IntegratedSecurity = true;
         }
+
+        return builder.ConnectionString;
+    }
+
+    /// <summary>
+    /// #6254: the connection string for reading Query Store from the server's readable replica, or null when the server has none,
+    /// is a PostgreSQL target (never has one) or is an Azure SQL Database (<paramref name="isAzureSqlDatabase"/>: it reads Query
+    /// Store from itself in this version, the same gate Lite's runner applies). It is the server's own connection string
+    /// (<see cref="BuildConnectionString"/>) with the host replaced by the replica (a host, <c>host,port</c> or listener name, taken
+    /// as typed) and <c>ApplicationIntent=ReadOnly</c>: the same login, authentication, encryption, certificate trust,
+    /// MultiSubnetFailover, database and timeouts. The ONE place the replica connection is built, so no caller assembles its own.
+    ///
+    /// <para><b>The replica and the password come from one place.</b> The replica is read from
+    /// <see cref="MonitoredServer.ConnectionIdentity"/>, the identity the stored password's seal is opened with
+    /// (<see cref="PasswordBinding.ForServer"/>), not from the free <see cref="MonitoredServer.QueryStoreReplica"/> property, and the
+    /// password is resolved here from the same server object (<see cref="DarlingSecrets.ResolvePassword(MonitoredServer, out bool, IPasswordKeyRing?)"/>),
+    /// never passed in: so a password opened for one replica host cannot be sent to another. A stored <c>env:</c>/<c>file:</c>
+    /// reference is not covered by a seal, so one is used for the replica only when darling.json declares it
+    /// (<see cref="MonitoredServer.EncryptedPasswordDeclaredByFile"/>); a store that holds one without the file's word refuses.
+    /// A refused or unresolvable password throws <see cref="InvalidOperationException"/>, as the primary connection's does.</para>
+    /// This builds a string and opens nothing.
+    /// </summary>
+    public static string? BuildQueryStoreReplicaConnectionString(MonitoredServer server, bool isAzureSqlDatabase, IPasswordKeyRing? ring = null)
+    {
+        if (server is null)
+        {
+            throw new ArgumentNullException(nameof(server));
+        }
+
+        if (server.IsPostgres || isAzureSqlDatabase
+            || QueryStoreReplicaSetting.Normalize(server.ConnectionIdentity.QueryStoreReplica) is not { } replica)
+        {
+            return null;
+        }
+
+        /* The last gate, for a value that reached the store without the surfaces' check (a direct write to the table). */
+        if (QueryStoreReplicaSetting.Refusal(replica) is { } replicaRefusal)
+        {
+            throw new InvalidOperationException($"servers['{server.DisplayName}'].queryStoreReplica: {replicaRefusal}");
+        }
+
+        var password = DarlingSecrets.ResolveReplicaPassword(server, ring);
+        var builder = new SqlConnectionStringBuilder(BuildConnectionString(server, password))
+        {
+            DataSource = PerformanceMonitor.Common.ServerHostSetting.TcpDataSource(replica),
+            ApplicationIntent = ApplicationIntent.ReadOnly,
+        };
 
         return builder.ConnectionString;
     }

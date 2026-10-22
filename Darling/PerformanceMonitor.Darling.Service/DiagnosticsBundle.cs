@@ -121,6 +121,8 @@ internal static class DiagnosticsBundle
         "MonitoredServer.TrustServerCertificate",
         "MonitoredServer.EncryptMode",
         "MonitoredServer.MultiSubnetFailover",
+        /* #6254: the Query Store replica is a host (or listener name); the bundle seeds it into the host names. */
+        "MonitoredServer.QueryStoreReplica",
         "MonitoredServer.ExcludedDatabases",
         "MonitoredServer.MonthlyCostUsd",
         "MonitoredServer.StoredServerId",
@@ -429,6 +431,7 @@ internal static class DiagnosticsBundle
         {
             aliaser.AddName(AliasKind.Server, server.Name);
             aliaser.AddName(AliasKind.Host, server.Host);
+            aliaser.AddName(AliasKind.Host, server.QueryStoreReplica);
             aliaser.AddName(AliasKind.Database, server.Database);
             aliaser.AddName(AliasKind.Login, server.Username);
             aliaser.AddName(AliasKind.Login, server.RemediationUsername);

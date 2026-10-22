@@ -44,7 +44,7 @@ public sealed partial class ViewerPasswordSealer(PasswordPublicKey key)
     public static ServerConnectionIdentity IdentityOf(MonitoredServerRow row) =>
         ServerConnectionIdentity.FromStoredColumns(
             row.Host, row.Port, row.Engine, row.Database, row.ReadOnlyIntent, row.Auth, row.Username, row.EncryptMode,
-            row.TrustServerCertificate, row.MultiSubnetFailover);
+            row.TrustServerCertificate, row.MultiSubnetFailover, row.QueryStoreReplica);
 
     /// <summary>The binding a row's password is sealed for.</summary>
     public static PasswordBinding BindingOf(MonitoredServerRow row)

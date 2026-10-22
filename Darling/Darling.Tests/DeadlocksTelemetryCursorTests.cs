@@ -11,7 +11,6 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Data.Common;
 using System.Globalization;
-using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -126,7 +125,7 @@ public class DeadlocksTelemetryCursorTests
     public async Task TheSeam_DropDiscardsTheStagedCursor_SoNothingIsSavedAndTheNextRunReReadsTheBatch()
     {
         /* The seam's semantics only: after a drop, a sibling's save carries no cursor. That each host drops
-           when an item's write throws is pinned by the source-order test below, not by this one. */
+           when an item's write throws is pinned by DeadlocksAzureLoopStateLiveTests, which runs the host loop, not by this one. */
         var ctx = await ReadAsync(Ctx(), Row(At(0, 10), "HS"), Row(At(0, 20), "HS"));
         Assert.True(ctx.StagedItemState.ContainsKey(Key));
 
@@ -151,68 +150,6 @@ public class DeadlocksTelemetryCursorTests
         Assert.Equal(At(0, 20).ToString("o", CultureInfo.InvariantCulture), ctx.PendingState[Key]);
         Assert.Equal("100", ctx.PendingState[XeShredGate.KeyFor("master")]);
         Assert.Empty(ctx.StagedItemState);
-    }
-
-    [Fact]
-    public void BothHosts_LandStagedItemState_OnlyAfterTheItemsWrite_AndDropItBeforeTheRead()
-    {
-        /* The per-database loops swallow one item's failure and save PendingState if a sibling succeeded, so
-           the order in the host IS the guarantee: the landing call must come after the flush, never before. */
-        var root = FindRepoRoot();
-        Assert.True(root is not null, "repo root not found -- the source pin cannot run");
-
-        /* #5813: Lite's Azure loop reads from the reader its read budget opened (openedRead.Reader), so each host
-           names its own per-database read. */
-        foreach (var (host, readText, write, serverWriteText) in new[]
-        {
-            ("Darling/PerformanceMonitor.Darling.Service/DarlingCollectorRunner.cs", "batch = await definition.ReadAsync(dbReader", "WriteBatchAsync(pgConnection, definition, batch", "WriteBatchAsync(pgConnection, definition, rows"),
-            ("Lite/Services/RemoteCollectorService.DefinitionRunner.cs", "batch = await definition.ReadAsync(openedRead.Reader", "WriteBatch(duckConnection, definition, batch", "WriteBatch(duckConnection, definition, rows"),
-        })
-        {
-            var source = File.ReadAllText(Path.Combine(root!, host.Replace('/', Path.DirectorySeparatorChar)));
-            var read = source.IndexOf(readText, StringComparison.Ordinal);
-            Assert.True(read > 0, $"{host}: per-database read not found");
-            var drop = source.LastIndexOf("context.DropStagedItemState();", read, StringComparison.Ordinal);
-            var flush = source.IndexOf(write, read, StringComparison.Ordinal);
-            var land = source.IndexOf("context.LandStagedItemState();", read, StringComparison.Ordinal);
-            var perDatabaseCatch = source.IndexOf("catch (OutOfMemoryException)", read, StringComparison.Ordinal);
-
-            Assert.True(drop > 0, $"{host} must drop staged item state before each database's read");
-            Assert.True(flush > read && land > flush, $"{host} must land staged item state after the item's write");
-            Assert.True(land < perDatabaseCatch, $"{host} must land inside the try, so a throw skips it");
-
-            /* Server-scoped path: the landing follows its own whole-run write. */
-            var serverWrite = source.IndexOf(serverWriteText, StringComparison.Ordinal);
-            Assert.True(serverWrite > 0, $"{host}: server-scoped write not found");
-            var serverLand = source.IndexOf("context.LandStagedItemState();", serverWrite, StringComparison.Ordinal);
-            Assert.True(serverLand > serverWrite, $"{host} must land staged item state after the server-scoped write");
-
-            /* Enumerated path: the drop is in readItem, the landing is in onItemComplete, never in readItem. */
-            var readItem = source.IndexOf("readItem: async (item, ct) =>", StringComparison.Ordinal);
-            var complete = source.IndexOf("onItemComplete: (item, batchCount", readItem, StringComparison.Ordinal);
-            Assert.True(readItem > 0 && complete > readItem, $"{host}: enumerated hooks not found");
-            var itemDrop = source.IndexOf("context.DropStagedItemState();", readItem, StringComparison.Ordinal);
-            var itemQuery = source.IndexOf("BuildPerItemQuery(item, context)", readItem, StringComparison.Ordinal);
-            var itemLand = source.IndexOf("context.LandStagedItemState();", readItem, StringComparison.Ordinal);
-            Assert.True(itemDrop > readItem && itemDrop < itemQuery && itemQuery < complete, $"{host} must drop first in readItem, before the per-item query");
-            Assert.True(itemLand > complete, $"{host} must land inside onItemComplete, not readItem");
-        }
-    }
-
-    private static string? FindRepoRoot()
-    {
-        var directory = new DirectoryInfo(AppContext.BaseDirectory);
-        for (var i = 0; i < 12 && directory is not null; i++)
-        {
-            if (File.Exists(Path.Combine(directory.FullName, "PerformanceMonitor.sln")))
-            {
-                return directory.FullName;
-            }
-
-            directory = directory.Parent;
-        }
-
-        return null;
     }
 
     [Theory]

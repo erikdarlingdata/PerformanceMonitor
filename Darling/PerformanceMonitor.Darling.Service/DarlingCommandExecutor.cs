@@ -831,6 +831,11 @@ WHERE status = 'in_progress'
                 isAurora = probe.IsAurora,
                 isInRecovery = probe.IsInRecovery,
                 facts = DarlingServerConnector.DescribeProbeFacts(probe),
+                /* #6254: the Query Store replica's own result, beside the primary's (null on a server with none). A replica that
+                   would not open leaves this a "connected" result: collection reads the primary. The dialogs show the note. */
+                queryStoreReplica = probe.QueryStoreReplica,
+                queryStoreReplicaError = probe.QueryStoreReplicaError,
+                queryStoreReplicaNote = DarlingServerConnector.DescribeQueryStoreReplica(probe),
             });
             return ("connected", json);
         }
@@ -929,7 +934,7 @@ WHERE status = 'in_progress'
         var tested = ServerConnectionIdentity.FromStoredColumns(
             server.Host, server.Port, server.Engine ?? "sqlserver", server.Database, server.ReadOnlyIntent,
             server.Auth ?? "integrated", server.Username, server.EncryptMode ?? "Mandatory", server.TrustServerCertificate,
-            server.MultiSubnetFailover);
+            server.MultiSubnetFailover, server.QueryStoreReplica);
         foreach (var stored in await storedSettingsOfReference(reference!, cancellationToken))
         {
             if (!ServerConnectionIdentity.Differ(tested, stored))
@@ -959,7 +964,8 @@ WHERE status = 'in_progress'
                 reader.IsDBNull(2) ? "sqlserver" : reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetString(3),
                 !reader.IsDBNull(4) && reader.GetBoolean(4), reader.IsDBNull(5) ? "integrated" : reader.GetString(5),
                 reader.IsDBNull(6) ? null : reader.GetString(6), reader.IsDBNull(7) ? "Mandatory" : reader.GetString(7),
-                !reader.IsDBNull(8) && reader.GetBoolean(8), !reader.IsDBNull(9) && reader.GetBoolean(9)));
+                !reader.IsDBNull(8) && reader.GetBoolean(8), !reader.IsDBNull(9) && reader.GetBoolean(9),
+                reader.IsDBNull(10) ? null : reader.GetString(10)));
         }
 
         return found;
