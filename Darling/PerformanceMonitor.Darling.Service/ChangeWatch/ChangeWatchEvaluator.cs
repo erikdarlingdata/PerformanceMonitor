@@ -378,7 +378,7 @@ WHERE rn = 1";
                     if (DurationMoved(queryBeforeAvg, queryAfterAvg) && (queryWeekAvg is null || DurationMoved(queryWeekAvg.Value, queryAfterAvg)))
                     {
                         measures.Add(new ChangeWatchMeasure(measureName, "ms", queryBeforeAvg / 1000, queryAfterAvg / 1000,
-                            queryWeekAvg / 1000, true, $"Query Store query {queryId} in {database}; {queryBefore.Executions} -> {queryAfter.Executions} executions"));
+                            queryWeekAvg / 1000, true, $"read from Query Store: query_id {queryId} in database {database}; {queryBefore.Executions} -> {queryAfter.Executions} executions"));
                     }
                 }
             }
@@ -419,7 +419,7 @@ WHERE rn = 1";
                 if (DurationMoved(beforeAvg, afterAvg) && (weekAvg is null || DurationMoved(weekAvg.Value, afterAvg)))
                 {
                     measures.Add(new ChangeWatchMeasure("query_avg_duration_ms:" + hash, "ms", beforeAvg / 1000, afterAvg / 1000,
-                        weekAvg / 1000, true, $"database {after.Database}; {before.Executions} -> {after.Executions} executions"));
+                        weekAvg / 1000, true, $"read from the plan cache (query_stats), query_hash {hash} in database {after.Database ?? "(unknown)"}; {before.Executions} -> {after.Executions} executions"));
                 }
             }
 
@@ -487,7 +487,15 @@ WHERE rn = 1";
         foreach (var m in measures.Where(m => m.Moved).Take(5))
         {
             text.Append(m.Name).Append(" before ").Append(Num(m.Before)).Append(" after ").Append(Num(m.After))
-                .Append(" week earlier ").Append(Num(m.WeekEarlier)).Append(' ').Append(m.Unit).Append("; ");
+                .Append(" week earlier ").Append(Num(m.WeekEarlier)).Append(' ').Append(m.Unit);
+            /* #6551: the note names the database and the read (plan cache or Query Store) a query measure came from, so an agent can call the
+               matching trend read for the right database without guessing it from another change line. */
+            if (!string.IsNullOrEmpty(m.Note))
+            {
+                text.Append(" (").Append(m.Note).Append(')');
+            }
+
+            text.Append("; ");
         }
 
         var result = text.ToString().TrimEnd(' ', ';');

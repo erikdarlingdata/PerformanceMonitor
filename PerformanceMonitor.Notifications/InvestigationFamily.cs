@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Notifications;
 
@@ -148,6 +149,16 @@ public static class InvestigationFamily
         if (string.Equals(metricName, AlertFamily.InvestigationUnansweredMetric, StringComparison.Ordinal))
         {
             return null;
+        }
+
+        /* #6551: a change watch's request (metric "Change Watch", opened by the change-watch pass and not by an alert) is a question about
+           what a recorded change did to plans and query measures, so it is query performance. A forced-plan change is the common case; a
+           configuration change is read through the same query measures. Without this it fell to `other`, next to custom and external
+           alerts, and an operator that routes families to agents sent it to the agent that works those. The name is not in the notification
+           census (it is not an alert), so it is mapped here and not in PerformanceMetricFamilies. */
+        if (string.Equals(metricName, InvestigationTriggerKinds.ChangeWatchMetric, StringComparison.Ordinal))
+        {
+            return QueryPerformance;
         }
 
         if (PerformanceMetricFamilies.TryGetValue(metricName, out var named))

@@ -237,6 +237,50 @@ public sealed class ChangeWatchDetectionLiveTests
         });
     }
 
+    /* #6551: a readable secondary's Query Store holds the primary's forced plans, so its plan-snapshot changes are the primary's and open no watch here. */
+    [Fact]
+    public async Task APlanChange_InADatabaseThisServerHoldsAsASecondary_IsNotRecorded_ButTheLedgerAndOtherDatabasesAre()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            var first = h.Now.AddMinutes(-50);
+            var second = h.Now.AddMinutes(-40);
+            await ForcedPlanCaptureAsync(h.Connection, first, "Replicated", ct);
+            await ForcedPlanCaptureAsync(h.Connection, first, "Local", ct);
+            await ForcedPlanCaptureAsync(h.Connection, second, "Replicated", ct, (1, 10));
+            await ForcedPlanCaptureAsync(h.Connection, second, "Local", ct, (2, 20));
+            await LedgerAsync(h.Connection, h.Now.AddMinutes(-20), "Replicated", 3, 30, "force", ct);
+
+            static bool Snapshot(ChangeWatchChange c) => c.Key.StartsWith("plan_force:snapshot:", StringComparison.Ordinal);
+
+            /* Before any availability-group snapshot the server is not known to be a secondary: both databases' changes are read. */
+            Assert.Equal(2, (await h.NewPass().ReadChangesAsync(ServerId, first.AddMinutes(-1), h.Now, ct)).Count(Snapshot));
+
+            await SeedAsync(h.Connection, "ag_replica_states", new Dictionary<string, object>
+            {
+                ["server_id"] = ServerId, ["server_name"] = ServerName, ["collection_time"] = Naive(h.Now.AddMinutes(-5)), ["ag_name"] = "AG1",
+                ["replica_server_name"] = ServerName, ["role_desc"] = "SECONDARY", ["is_local"] = true,
+            }, ct);
+            await SeedAsync(h.Connection, "ag_database_replica_states", new Dictionary<string, object>
+            {
+                ["server_id"] = ServerId, ["server_name"] = ServerName, ["collection_time"] = Naive(h.Now.AddMinutes(-5)), ["ag_name"] = "AG1",
+                ["database_name"] = "Replicated", ["replica_server_name"] = ServerName, ["is_local"] = true,
+            }, ct);
+
+            var found = await h.NewPass().ReadChangesAsync(ServerId, first.AddMinutes(-1), h.Now, ct);
+            Assert.Equal(new[] { "plan_force:snapshot:Local:2:20:" + Stamp(second) }, Keys(found.Where(Snapshot)));
+            Assert.Contains(found, c => c.Key.StartsWith("plan_force:action:", StringComparison.Ordinal));
+
+            /* After a failover the newest snapshot says PRIMARY: nothing is left out. */
+            await SeedAsync(h.Connection, "ag_replica_states", new Dictionary<string, object>
+            {
+                ["server_id"] = ServerId, ["server_name"] = ServerName, ["collection_time"] = Naive(h.Now.AddMinutes(-1)), ["ag_name"] = "AG1",
+                ["replica_server_name"] = ServerName, ["role_desc"] = "PRIMARY", ["is_local"] = true,
+            }, ct);
+            Assert.Equal(2, (await h.NewPass().ReadChangesAsync(ServerId, first.AddMinutes(-1), h.Now, ct)).Count(Snapshot));
+        });
+    }
+
     [Fact]
     public async Task MarkerRows_DoNotFailDetection_AndALaterCapturedDatabaseIsABaseline_NotAForce()
     {
