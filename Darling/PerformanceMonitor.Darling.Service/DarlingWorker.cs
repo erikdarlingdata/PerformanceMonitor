@@ -5965,7 +5965,7 @@ LIMIT 1";
     /// five on-load collectors' once-a-day recapture, the catalog's 1440-minute collectors, and any collector an
     /// operator slows to a day or more.
     /// </summary>
-    internal const int DailyCollectorIntervalMinutes = 1440;
+    internal const int DailyCollectorIntervalMinutes = SweepPressureReport.DailyCollectorIntervalMinutes;
 
     /// <summary>
     /// #4938: the most detached daily runs that may be going at once across the whole fleet. Each holds a connection
@@ -6228,7 +6228,7 @@ LIMIT 1";
     /// interval, where an on-load collector's 0 has already become its daily recapture.
     /// </summary>
     internal static bool IsDailyInterval(int effectiveIntervalMinutes) =>
-        effectiveIntervalMinutes >= DailyCollectorIntervalMinutes;
+        SweepPressureReport.IsDailyInterval(effectiveIntervalMinutes);
 
     /// <summary>
     /// #4938, #4999: whether a finished run's cost goes into the sweep body's peer high-water mark (#2864). Not
@@ -6456,7 +6456,7 @@ LIMIT 1";
     /// the gate acquisition tests it once, and this is not that call.
     /// </summary>
     internal static bool IsDetachedByName(string name) =>
-        IsQueryStoreCollector(name) || IsPlanCorrectionCollector(name) || IsPgWaitSamplingCollector(name);
+        SweepPressureReport.IsDetachedByName(name);
 
     /// <summary>
     /// #4999: THE test for whether a collector's scheduled run leaves its server's sequential pass: the three
@@ -6467,7 +6467,7 @@ LIMIT 1";
     /// run is not part of the body, and a long run of it is not an overrun of the body.
     /// </summary>
     internal static bool RunsDetached(string name, int effectiveIntervalMinutes) =>
-        IsDetachedByName(name) || IsDailyInterval(effectiveIntervalMinutes);
+        SweepPressureReport.RunsDetached(name, effectiveIntervalMinutes);
 
     /// <summary>
     /// #4999: the (server, collector) slot an INLINE run of a daily collector takes: the at-connect run of an on-load
