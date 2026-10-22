@@ -574,7 +574,14 @@ public sealed class DarlingMcpHostService : BackgroundService
                shorter than it gates the write tools no better than none, so they stay off.
                No usable token, no writes: the tools stay absent and the log names the setting. */
             var writes = DarlingMcpWritePolicy.ResolveForStart(config.Mcp, bearerToken, out var writeTokenProblem);
-            if (config.Mcp.AllowWrites)
+            /* #6542: with named tokens and no legacy token, mcp.allowWrites and mcp.allowInvestigations govern nothing: each named token's
+               role decides its tools. The lines below describe the legacy token, so they are skipped rather than logged as a failure. */
+            var namedTokensOnly = bearerToken.Length == 0 && config.Mcp.HasNamedTokens;
+            if (namedTokensOnly)
+            {
+                /* The named-token lines further down say what is served. */
+            }
+            else if (config.Mcp.AllowWrites)
             {
                 if (!writes.Writes && writeTokenProblem is not null)
                 {
@@ -625,7 +632,10 @@ public sealed class DarlingMcpHostService : BackgroundService
                token cannot tell an agent from a person. Both settings on: they stay off and this one Critical line says
                why. The token gate (requireTokenWhenLoopbackOnly) and the wrong-token throttle (DarlingSignInThrottle) in
                front of every request cover them as they cover the writes, since they are only served with a token. */
-            LogInvestigationsGate(_logger, config.Mcp, writes, writeTokenProblem);
+            if (!namedTokensOnly)
+            {
+                LogInvestigationsGate(_logger, config.Mcp, writes, writeTokenProblem);
+            }
 
             /* #6542: the named tokens (mcp.tokens), each with its own role. With none configured the set holds only the legacy token
                and its policy, and the start serves exactly what it served before. A named token that cannot be served (a bad name or
@@ -882,7 +892,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                covers that state and a loopback-only start whose configured token resolved. A start with no token
                configured leaves it empty and stays tokenless; a configured token that cannot be used never gets here,
                the start stops in every mode. */
-            var requireTokenWhenLoopbackOnly = RequireTokenWhenLoopbackOnly(networkMode, bearerToken) || (!networkMode && tokenSet.HasNamed);
+            var requireTokenWhenLoopbackOnly = RequireTokenWhenLoopbackOnly(networkMode, bearerToken, tokenSet);
 
             /* #5288: the Host guard admits the listen address only while the server is exposed on it. networkListenIp
                was parsed before any degrade and still holds it afterwards, so it goes through
@@ -1007,8 +1017,8 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// Whether the loopback listener requires the bearer token (#5288): in loopback-only mode with a resolved
     /// token. One decision for the start path and the tests, so what gates the write tools is one computation.
     /// </summary>
-    internal static bool RequireTokenWhenLoopbackOnly(bool networkMode, string bearerToken)
-        => !networkMode && bearerToken.Length > 0;
+    internal static bool RequireTokenWhenLoopbackOnly(bool networkMode, string bearerToken, DarlingMcpTokenSet? tokens = null)
+        => !networkMode && (bearerToken.Length > 0 || tokens is { HasNamed: true });
 
     /// <summary>
     /// Pins forwarded-header handling OFF on a host's builder (#5288), so the peer address the gates judge is always the
@@ -2067,7 +2077,9 @@ public sealed class DarlingMcpHostService : BackgroundService
             });
         }
 
-        if (networkMode || requireTokenWhenLoopbackOnly)
+        /* #6542: named tokens always gate the listener, whatever flags the caller passed. A request that skipped the gate would carry
+           no caller and be served the legacy token's tool set. */
+        if (networkMode || requireTokenWhenLoopbackOnly || tokens is { HasNamed: true })
         {
             var token = bearerToken;
 

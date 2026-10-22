@@ -375,7 +375,7 @@ public sealed partial class DarlingMcpInvestigationTools
         [Description("Omit, or 1.")] int? brief_format = null,
         DarlingMcpServedPolicy? served = null,
         CancellationToken cancellationToken = default) =>
-        ClaimAsync(Store(postgres), composer, request_id, agent_id, claim_id, brief_format, cancellationToken, served?.Policy.TokenName);
+        ClaimAsync(Store(postgres), composer, request_id, agent_id, claim_id, brief_format, cancellationToken, served?.Policy.AgentTokenName);
 
     /// <summary>The claim over a given store and composer, so a test can drive a composer that fails. <paramref name="tokenName"/> is
     /// the name of the named agent token the call came with (#6542), or null for the legacy token: with a name, the agent is that

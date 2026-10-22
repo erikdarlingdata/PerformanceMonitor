@@ -70,8 +70,9 @@ public sealed class DarlingMcpPlanForceTools
         [Description("Default true: return the exact statement and the before state, write nothing. Pass false to write.")] bool dry_run = true,
         StoreOwnerSource? ownerSource = null,
         ILogger? logger = null,
+        DarlingMcpServedPolicy? served = null,
         CancellationToken cancellationToken = default) =>
-        RunAsync(postgres, ownerSource?.Read(), logger, force: true, server_name, database_name, query_id, plan_id, agent_action, dry_run, cancellationToken);
+        RunAsync(postgres, ownerSource?.Read(), logger, force: true, server_name, database_name, query_id, plan_id, agent_action, dry_run, cancellationToken, served?.Policy.AgentTokenName);
 
     [McpServerTool(Name = "unforce_query_store_plan"), Description(
         "Agent arm, SQL Server only: removes the forced plan of one Query Store plan on the monitored server. Dry run by default: returns the exact statement and the before state, writes nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's force_plan switch and remediation login; ships off. " +
@@ -88,8 +89,9 @@ public sealed class DarlingMcpPlanForceTools
         [Description("Default true: return the exact statement and the before state, write nothing. Pass false to write.")] bool dry_run = true,
         StoreOwnerSource? ownerSource = null,
         ILogger? logger = null,
+        DarlingMcpServedPolicy? served = null,
         CancellationToken cancellationToken = default) =>
-        RunAsync(postgres, ownerSource?.Read(), logger, force: false, server_name, database_name, query_id, plan_id, agent_action, dry_run, cancellationToken);
+        RunAsync(postgres, ownerSource?.Read(), logger, force: false, server_name, database_name, query_id, plan_id, agent_action, dry_run, cancellationToken, served?.Policy.AgentTokenName);
 
     [McpServerTool(Name = "evict_cached_plan"), Description(
         "Agent arm, SQL Server only: evicts ONE plan handle from the monitored server's plan cache, so the next run compiles a new plan. Dry run by default: returns the exact statement, what Darling collected for that handle and any warnings, and writes nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's evict_plan switch and remediation login (with ALTER SERVER STATE); ships off. " +
@@ -106,8 +108,9 @@ public sealed class DarlingMcpPlanForceTools
         [Description("Default true: return the exact statement and what Darling collected, write nothing. Pass false to write.")] bool dry_run = true,
         StoreOwnerSource? ownerSource = null,
         ILogger? logger = null,
+        DarlingMcpServedPolicy? served = null,
         CancellationToken cancellationToken = default) =>
-        RunEvictAsync(postgres, ownerSource?.Read(), logger, server_name, plan_handle, agent_action, dry_run, cancellationToken);
+        RunEvictAsync(postgres, ownerSource?.Read(), logger, server_name, plan_handle, agent_action, dry_run, cancellationToken, served?.Policy.AgentTokenName);
 
     [McpServerTool(Name = "kill_session"), Description(
         "Agent arm: kills ONE session on the monitored SQL Server or PostgreSQL server, after checking in the same batch or statement that it is still the session you named. Dry run by default: returns what the server says about the session and kills nothing; a write needs dry_run=false. Needs agent_action at Level 3, that server's kill_session switch (ships off) and a remediation login with kill rights (grants in the guide). Refuses Darling's own sessions, session_gone and session_reused. " +
@@ -131,8 +134,9 @@ public sealed class DarlingMcpPlanForceTools
         [Description("Default true: run the check and kill nothing. Pass false to kill.")] bool dry_run = true,
         StoreOwnerSource? ownerSource = null,
         ILogger? logger = null,
+        DarlingMcpServedPolicy? served = null,
         CancellationToken cancellationToken = default) =>
-        RunKillAsync(postgres, ownerSource?.Read(), logger, server_name, session_id, login_time, backend_id, agent_action, dry_run, cancellationToken, database_name);
+        RunKillAsync(postgres, ownerSource?.Read(), logger, server_name, session_id, login_time, backend_id, agent_action, dry_run, cancellationToken, database_name, served?.Policy.AgentTokenName);
 
     private static string Answer(string status, string? reason, string message, object? extra = null)
     {
@@ -169,7 +173,7 @@ public sealed class DarlingMcpPlanForceTools
 
     /// <summary>The tool body, so a test drives it with its own data sources. <paramref name="owner"/> is the store owner's data source.</summary>
     internal static async Task<string> RunAsync(NpgsqlDataSource postgres, NpgsqlDataSource? owner, ILogger? logger, bool force, string? server_name,
-        string database_name, long query_id, long plan_id, string? agent_action, bool dry_run, CancellationToken ct)
+        string database_name, long query_id, long plan_id, string? agent_action, bool dry_run, CancellationToken ct, string? agentTokenName = null)
     {
         var tool = force ? ForceToolName : UnforceToolName;
         var kind = force ? AgentChangeKinds.PlanForce : AgentChangeKinds.PlanUnforce;
@@ -211,7 +215,7 @@ public sealed class DarlingMcpPlanForceTools
             }
 
             /* 2: the gate, for a dry run too. */
-            var decision = await ServerActionGate.AuthorizeAsync(store, owner, logger, tool, ServerActionNames.ForcePlan, agent_action, target, ct);
+            var decision = await ServerActionGate.AuthorizeAsync(store, owner, logger, tool, ServerActionNames.ForcePlan, agent_action, target, ct, agentTokenName);
             if (decision.Refusal is { } gateRefusal)
                 return DarlingAgentActionGate.RefusalAnswer(gateRefusal);
             var permit = decision.Permit!;
@@ -351,7 +355,7 @@ public sealed class DarlingMcpPlanForceTools
 
     /// <summary>The evict tool body (#5632, step 10), so a test drives it with its own data sources. <paramref name="owner"/> is the store owner's data source.</summary>
     internal static async Task<string> RunEvictAsync(NpgsqlDataSource postgres, NpgsqlDataSource? owner, ILogger? logger, string? server_name,
-        string? plan_handle, string? agent_action, bool dry_run, CancellationToken ct)
+        string? plan_handle, string? agent_action, bool dry_run, CancellationToken ct, string? agentTokenName = null)
     {
         const string tool = EvictToolName;
         logger ??= NullLogger.Instance;
@@ -386,7 +390,7 @@ public sealed class DarlingMcpPlanForceTools
 
             /* 3: the gate, for a dry run too. The permit's Id and the journal's target.id are the handle in its one normal form. */
             var target = new AgentActionTarget(resolved.ServerId, resolved.ServerName, handle, null);
-            var decision = await ServerActionGate.AuthorizeAsync(store, owner, logger, tool, ServerActionNames.EvictPlan, agent_action, target, ct);
+            var decision = await ServerActionGate.AuthorizeAsync(store, owner, logger, tool, ServerActionNames.EvictPlan, agent_action, target, ct, agentTokenName);
             if (decision.Refusal is { } gateRefusal)
                 return DarlingAgentActionGate.RefusalAnswer(gateRefusal);
             var permit = decision.Permit!;
@@ -456,7 +460,7 @@ public sealed class DarlingMcpPlanForceTools
 
     /// <summary>The kill tool body (#5632, step 12), so a test drives it with its own data sources. <paramref name="owner"/> is the store owner's data source.</summary>
     internal static async Task<string> RunKillAsync(NpgsqlDataSource postgres, NpgsqlDataSource? owner, ILogger? logger, string? server_name,
-        int? session_id, string? login_time, string? backend_id, string? agent_action, bool dry_run, CancellationToken ct, string? database_name = null)
+        int? session_id, string? login_time, string? backend_id, string? agent_action, bool dry_run, CancellationToken ct, string? database_name = null, string? agentTokenName = null)
     {
         const string tool = KillToolName;
         logger ??= NullLogger.Instance;
@@ -471,7 +475,7 @@ public sealed class DarlingMcpPlanForceTools
             /* 1: the engine decides how the session is named. A PostgreSQL target has its own arm (pid plus start second from backend_id). */
             var (engineEdition, engineKind) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, ct);
             if (engineKind is not null && engineKind.Contains("postgres", StringComparison.OrdinalIgnoreCase))
-                return await RunKillPostgresAsync(owner, logger, store, resolved, session_id, backend_id, agent_action, dry_run, ct);
+                return await RunKillPostgresAsync(owner, logger, store, resolved, session_id, backend_id, agent_action, dry_run, ct, agentTokenName);
 
             /* An Azure SQL Database scopes KILL and the session views to the connected database (#5632): the kill connects to the session's
                own database, which the agent names. The batch checks the engine again, so a registry that has not recorded it yet is refused there. */
@@ -510,7 +514,7 @@ public sealed class DarlingMcpPlanForceTools
             }
 
             var target = new AgentActionTarget(resolved.ServerId, resolved.ServerName, idText, targetDatabase);
-            var decision = await ServerActionGate.AuthorizeAsync(store, owner, logger, tool, ServerActionNames.KillSession, agent_action, target, ct);
+            var decision = await ServerActionGate.AuthorizeAsync(store, owner, logger, tool, ServerActionNames.KillSession, agent_action, target, ct, agentTokenName);
             if (decision.Refusal is { } gateRefusal)
                 return DarlingAgentActionGate.RefusalAnswer(gateRefusal);
             var permit = decision.Permit!;
@@ -640,7 +644,7 @@ public sealed class DarlingMcpPlanForceTools
     /// <c>not_permitted</c> before any kill is tried.
     /// </summary>
     private static async Task<string> RunKillPostgresAsync(NpgsqlDataSource? owner, ILogger logger, InvestigationRequestStore store,
-        (int ServerId, string ServerName, string DisplayName) resolved, int? session_id, string? backend_id, string? agent_action, bool dry_run, CancellationToken ct)
+        (int ServerId, string ServerName, string DisplayName) resolved, int? session_id, string? backend_id, string? agent_action, bool dry_run, CancellationToken ct, string? agentTokenName = null)
     {
         const string tool = KillToolName;
 
@@ -666,7 +670,7 @@ public sealed class DarlingMcpPlanForceTools
         /* 2: the gate, for a dry run too. The permit's Id and the journal's target.id are the pid in decimal. */
         var idText = pid.ToString(CultureInfo.InvariantCulture);
         var target = new AgentActionTarget(resolved.ServerId, resolved.ServerName, idText, null);
-        var decision = await ServerActionGate.AuthorizeAsync(store, owner, logger, tool, ServerActionNames.KillSession, agent_action, target, ct);
+        var decision = await ServerActionGate.AuthorizeAsync(store, owner, logger, tool, ServerActionNames.KillSession, agent_action, target, ct, agentTokenName);
         if (decision.Refusal is { } gateRefusal)
             return DarlingAgentActionGate.RefusalAnswer(gateRefusal);
         var permit = decision.Permit!;

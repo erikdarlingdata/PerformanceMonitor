@@ -46,6 +46,9 @@ internal sealed class DarlingMcpTokenSet
 
     private readonly bool _serverAdmin;
 
+    /// <summary>The compare <see cref="Match"/> makes, the constant-time one. A test replaces it to count the compares.</summary>
+    internal Func<string?, string?, bool> Compare { get; init; } = DarlingHostBinding.FixedTimeTokenEquals;
+
     internal string LegacyToken { get; }
 
     internal DarlingMcpWritePolicy.Effective LegacyPolicy { get; }
@@ -100,14 +103,16 @@ internal sealed class DarlingMcpTokenSet
         }
 
         McpCaller? found = null;
-        if (LegacyToken.Length > 0 && DarlingHostBinding.FixedTimeTokenEquals(presented, LegacyToken))
+        if (LegacyToken.Length > 0 && Compare(presented, LegacyToken))
         {
             found = new McpCaller(null, LegacyPolicy);
         }
 
         foreach (var entry in Named)
         {
-            if (DarlingHostBinding.FixedTimeTokenEquals(presented, entry.Token) && found is null)
+            /* The compare runs first and always: a match must not skip the compares after it. */
+            var same = Compare(presented, entry.Token);
+            if (same && found is null)
             {
                 found = new McpCaller(entry.Name, PolicyFor(entry));
             }

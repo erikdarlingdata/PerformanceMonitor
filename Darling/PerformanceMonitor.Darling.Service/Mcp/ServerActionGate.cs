@@ -55,7 +55,8 @@ internal static class ServerActionGate
         string serverAction,
         string? agentAction,
         AgentActionTarget target,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? agentTokenName = null)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(ownerSource);
@@ -67,6 +68,15 @@ internal static class ServerActionGate
         {
             await store.RecordAgentActionRefusalAsync(null, null, tool, problem.Reason, cancellationToken);
             return new ServerActionDecision(null, problem);
+        }
+
+        /* #6542: a named agent token is the agent's identity, so a server action acts only as that name. */
+        if (agentTokenName is not null && !string.Equals(action!.AgentId, agentTokenName, StringComparison.Ordinal))
+        {
+            await store.RecordAgentActionRefusalAsync(action.RequestId, agentTokenName, tool, DarlingMcpInvestigationTools.AgentIdNotToken,
+                cancellationToken);
+            return new ServerActionDecision(null, new AgentActionRefusal(DarlingMcpInvestigationTools.AgentIdNotToken,
+                DarlingMcpInvestigationTools.AgentIdNotTokenMessage(agentTokenName)));
         }
 
         var hooks = new ServerActionHooks

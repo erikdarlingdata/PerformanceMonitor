@@ -231,6 +231,10 @@ internal static class DarlingMcpWritePolicy
     {
         internal static readonly Effective Off = new(false, false);
 
+        /// <summary>The name an agent call must act as (#6542): the token's name when the token is a named agent token, else null. An
+        /// operator token has a name too, but it is not an agent, so no agent_id is held to it.</summary>
+        internal string? AgentTokenName => Investigations ? TokenName : null;
+
         /// <summary>True when a tool named <paramref name="toolName"/> is offered under this policy.</summary>
         internal bool Offers(string toolName) => Offers(toolName, AgentActionTools);
 

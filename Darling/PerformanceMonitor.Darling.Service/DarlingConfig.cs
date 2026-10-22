@@ -1478,10 +1478,10 @@ public sealed class McpConfig
     [JsonPropertyName("tokens")]
     public List<McpTokenEntry>? Tokens { get; set; }
 
-    /// <summary>True when <see cref="Tokens"/> has an entry that sets a token value.</summary>
+    /// <summary>True when <see cref="Tokens"/> has an entry. An entry that cannot be served (no value, a bad name or role) still counts:
+    /// named tokens were asked for, so a start must not fall back to serving without credentials.</summary>
     [JsonIgnore]
-    public bool HasNamedTokens =>
-        Tokens is { Count: > 0 } && Tokens.Any(t => t is not null && (!string.IsNullOrWhiteSpace(t.EncryptedToken) || !string.IsNullOrWhiteSpace(t.Token)));
+    public bool HasNamedTokens => Tokens is { Count: > 0 } && Tokens.Any(t => t is not null);
 }
 
 /// <summary>

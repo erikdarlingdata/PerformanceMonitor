@@ -72,7 +72,7 @@ internal static class DarlingAgentActionGate
         }
 
         /* #6542: a named agent token is the agent's identity, so its agent_action acts only as that name. */
-        if (policy.TokenName is { } tokenName && !string.Equals(action!.AgentId, tokenName, StringComparison.Ordinal))
+        if (policy.AgentTokenName is { } tokenName && !string.Equals(action!.AgentId, tokenName, StringComparison.Ordinal))
         {
             await store.RecordAgentActionRefusalAsync(action.RequestId, tokenName, tool, DarlingMcpInvestigationTools.AgentIdNotToken,
                 cancellationToken);
