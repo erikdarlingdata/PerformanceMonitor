@@ -203,6 +203,50 @@ public sealed class ChangeWatchDetectionLiveTests
         });
     }
 
+    /// <summary>
+    /// #6550: a forced or unforced plan carries how it was forced, from the forced-plan capture it was seen in (the previous one for an unforce):
+    /// AUTO for automatic plan correction, MANUAL for a person, unknown where the capture holds no value.
+    /// </summary>
+    [Fact]
+    public async Task PlanForceChanges_SayHowThePlanWasForced()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            var t1 = h.Now.AddMinutes(-40);
+            var t2 = t1.AddMinutes(10);
+            var t3 = t1.AddMinutes(20);
+
+            await ForcedPlanCaptureAsync(h.Connection, t1, "Sales", ct);
+            await ForcedPlanMarkerAsync(h.Connection, t2, "Sales", ct);
+            foreach (var (query, plan, type) in new (long, long, string?)[] { (1, 10, "AUTO"), (2, 20, "MANUAL"), (3, 30, null) })
+            {
+                var values = new Dictionary<string, object>
+                {
+                    ["server_id"] = ServerId, ["server_name"] = ServerName, ["collection_time"] = Naive(t2), ["database_name"] = "Sales",
+                    ["query_id"] = query, ["plan_id"] = plan,
+                };
+                if (type is not null)
+                {
+                    values["plan_forcing_type"] = type;
+                }
+
+                await SeedAsync(h.Connection, "query_store_forced_plans", values, ct);
+            }
+
+            await ForcedPlanCaptureAsync(h.Connection, t3, "Sales", ct);
+
+            var found = (await h.NewPass().ReadChangesAsync(ServerId, t1, h.Now, ct)).ToDictionary(c => c.Key);
+
+            Assert.Equal("AUTO", found["plan_force:snapshot:Sales:1:10:" + Stamp(t2)].PlanForcingType);
+            Assert.Equal("MANUAL", found["plan_force:snapshot:Sales:2:20:" + Stamp(t2)].PlanForcingType);
+            Assert.Equal("unknown", found["plan_force:snapshot:Sales:3:30:" + Stamp(t2)].PlanForcingType);
+            Assert.Equal("AUTO", found["plan_force:unforced:Sales:1:10:" + Stamp(t3)].PlanForcingType);
+            Assert.Equal("MANUAL", found["plan_force:unforced:Sales:2:20:" + Stamp(t3)].PlanForcingType);
+            Assert.Contains("[forcing type AUTO: automatic plan correction]", found["plan_force:snapshot:Sales:1:10:" + Stamp(t2)].Description, StringComparison.Ordinal);
+            Assert.Contains("[forcing type MANUAL]", found["plan_force:snapshot:Sales:2:20:" + Stamp(t2)].Description, StringComparison.Ordinal);
+        });
+    }
+
     internal static string Stamp(DateTime time) => time.ToString("yyyyMMddTHHmmssfff", System.Globalization.CultureInfo.InvariantCulture);
 
     [Fact]
