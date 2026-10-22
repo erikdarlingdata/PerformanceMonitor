@@ -353,13 +353,16 @@ jobs:
           # is running (not waiting) is polled as before, within the same 35-minute budget.
           QUEUED_POLLS_MAX=6
           RERUN_WF=.github/workflows/claude-review-guard-rerun.yml
-          queued_polls=0; waiting_on=''; started_run=''
+          queued_polls=0; waiting_on=''; started_run=''; counted_run=''
           not_started() { case "$1" in queued|waiting|pending|requested) return 0 ;; esac; return 1; }
           # $1 is the run's status. Counts this poll when the run, or its review job once the decide
           # job is done, has not started. The job read is skipped once the review job of this run
           # has been seen started, and a job read that fails counts nothing (#2309: one poll lost).
           count_queued() {
             local review_status others queued_jq
+            # The count belongs to the run being watched: a replacement run (the cancelled arm below)
+            # has a queue of its own, so it gets its own QUEUED_POLLS_MAX polls from zero.
+            if [ "$counted_run" != "$run_id" ]; then counted_run=$run_id; queued_polls=0; fi
             if not_started "$1"; then
               queued_polls=$((queued_polls + 1)); waiting_on="the run itself (its decide job)"
               return 0
