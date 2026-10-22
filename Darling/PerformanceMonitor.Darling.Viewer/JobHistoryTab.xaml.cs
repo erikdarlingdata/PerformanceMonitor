@@ -617,6 +617,11 @@ public partial class JobHistoryTab : UserControl
 
     private async void Filter_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        if (CategoryFilterComboBox is null || NoJobsMessage is null)
+        {
+            return;
+        }
+
         /* #6391: a category belongs to the server it was picked for. A different server starts the Category pick over, before the read,
            so the read does not carry the earlier server's category into a server that has no such category. */
         if (ReferenceEquals(sender, ServerFilterComboBox) && CategoryFilterComboBox.SelectedIndex > 0)
