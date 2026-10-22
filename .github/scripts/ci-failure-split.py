@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Split recent failed Build runs into the deliberate "CI not run" marker and real failures (#5943).
 
-A pull request whose CI is declined (a draft, or the merge-train label) still runs one job that fails on purpose
-with the annotation title "CI not run" (build.yml, "Fail when CI did not run"), so the pull request cannot merge
+A pull request whose CI is declined by the merge-train label still runs one job that fails on purpose
+with the annotation title "CI not run" (build.yml, "Report when CI did not run"), so the pull request cannot merge
 without an admin override. Counted as an ordinary failure it made up 147 of 200 recent failed runs, and the real
 failure rate looked far worse than it was. This script counts that marker apart:
 
