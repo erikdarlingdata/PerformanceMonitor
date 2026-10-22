@@ -56,7 +56,16 @@ internal static class SettingsImport
             {
                 if (fileName == SettingsFileName)
                 {
-                    File.WriteAllBytes(target, WithoutMcpGateKeys(File.ReadAllBytes(source)));
+                    // Read it the way the MCP settings reader does (File.ReadAllText takes a byte-order mark or UTF-16), so a
+                    // file the reader accepts is one the strip can read. A file that is not a JSON object is not copied.
+                    var cleaned = WithoutMcpGateKeys(File.ReadAllText(source));
+                    if (cleaned is null)
+                    {
+                        AppLogger.Warn("Import", "Import Settings skipped settings.json: it is not a readable JSON object.");
+                        continue;
+                    }
+
+                    File.WriteAllText(target, cleaned);
                 }
                 else
                 {
@@ -71,16 +80,21 @@ internal static class SettingsImport
     }
 
     /// <summary>
-    /// The settings file's bytes without the keys in <see cref="McpGateKeys"/>. A file that is not a JSON object is returned as it
-    /// is: the MCP settings reader refuses it the same way, so it turns nothing on.
+    /// The settings file's text without the keys in <see cref="McpGateKeys"/>, or null when the text is not a JSON object. A file
+    /// the MCP settings reader refuses is not worth copying, so the caller skips it.
     /// </summary>
-    internal static byte[] WithoutMcpGateKeys(byte[] settingsJson)
+    internal static string? WithoutMcpGateKeys(string settingsJson)
     {
         try
         {
             using var document = JsonDocument.Parse(settingsJson);
             var root = document.RootElement;
-            if (root.ValueKind != JsonValueKind.Object || !root.EnumerateObject().Any(p => McpGateKeys.Contains(p.Name)))
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            if (!root.EnumerateObject().Any(p => McpGateKeys.Contains(p.Name)))
             {
                 return settingsJson;
             }
@@ -99,11 +113,11 @@ internal static class SettingsImport
 
             AppLogger.Info("Import", "Import Settings left out the MCP settings that loosen who can use the MCP server ("
                 + string.Join(", ", McpGateKeys) + "); they keep this user's values.");
-            return stream.ToArray();
+            return System.Text.Encoding.UTF8.GetString(stream.ToArray());
         }
         catch (JsonException)
         {
-            return settingsJson;
+            return null;
         }
     }
 }

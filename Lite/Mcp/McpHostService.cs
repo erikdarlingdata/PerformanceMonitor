@@ -122,7 +122,19 @@ public sealed class McpHostService : BackgroundService
     /// <param name="Investigations">The investigation tools are served.</param>
     /// <param name="AskedWrites">The settings asked for the write tools.</param>
     /// <param name="AskedInvestigations">The settings asked for the investigation tools.</param>
-    internal readonly record struct McpServing(string? Token, bool Writes, bool Investigations, bool AskedWrites, bool AskedInvestigations);
+    internal readonly record struct McpServing(string? Token, bool Writes, bool Investigations, bool AskedWrites, bool AskedInvestigations)
+    {
+        /// <summary>The compiler-made <c>ToString</c> would print the token, so it shows only whether there is one.</summary>
+        private bool PrintMembers(System.Text.StringBuilder builder)
+        {
+            builder.Append("Token = ").Append(Token is null ? "<none>" : "<set>")
+                .Append(", Writes = ").Append(Writes)
+                .Append(", Investigations = ").Append(Investigations)
+                .Append(", AskedWrites = ").Append(AskedWrites)
+                .Append(", AskedInvestigations = ").Append(AskedInvestigations);
+            return true;
+        }
+    }
 
     /// <summary>
     /// The one decision of what a start serves, the same rule as Darling's (<c>DarlingMcpWritePolicy.ResolveForStart</c>). With
@@ -363,7 +375,7 @@ public sealed class McpHostService : BackgroundService
     internal static List<(LogLevel Level, string Message)> StartupLines(McpServing serving)
     {
         var lines = new List<(LogLevel, string)>();
-        const string writeTools = "mute_analysis_finding, unmute_analysis_finding, set_notification_route_enabled, delete_notification_route";
+        var writeTools = $"{McpWritePolicy.WriteTools.Count} write tools";
         if (serving.Token is null)
         {
             lines.Add((LogLevel.Warning,
@@ -374,18 +386,18 @@ public sealed class McpHostService : BackgroundService
         if (serving.Writes)
         {
             lines.Add((LogLevel.Warning,
-                $"MCP write tools are ON ({McpWritePolicy.WritesSetting}): the write tools ({writeTools}) are served to any client that has the MCP token."));
+                $"MCP write tools are ON ({McpWritePolicy.WritesSetting}): the {writeTools} are served to any client that has the MCP token."));
         }
         else if (serving.AskedWrites)
         {
             lines.Add((LogLevel.Critical,
                 $"{McpWritePolicy.WritesSetting} is on but the MCP write tools stay OFF: they need a token of at least {McpTokenStore.MinimumTokenLength} characters, "
-                + $"and {McpSettings.AllowTokenlessLoopbackSetting} must be off. Not served: {writeTools}."));
+                + $"and {McpSettings.AllowTokenlessLoopbackSetting} must be off. The {writeTools} are not served."));
         }
         else
         {
             lines.Add((LogLevel.Information,
-                $"MCP write tools are off (the default): the write tools ({writeTools}) are not served. To serve them set {McpWritePolicy.WritesSetting} to true in settings.json (a token is needed too)."));
+                $"MCP write tools are off (the default): the {writeTools} are not served. To serve them set {McpWritePolicy.WritesSetting} to true in settings.json (a token is needed too)."));
         }
 
         if (McpInvestigationPolicy.StartupLine(serving.AskedInvestigations, serving.AskedWrites, usable) is { } line)

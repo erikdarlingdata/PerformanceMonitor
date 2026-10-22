@@ -207,7 +207,7 @@ public sealed class McpHostGateLiveTests : IDisposable
     }
 
     [Fact]
-    public async Task WithATokenAndWritesOff_TheInvestigationToolsAreListed_AndWithBothAsked_NeitherGroupIs()
+    public async Task WithATokenAndWritesOff_TheInvestigationToolsAreListed_AndWithBothAsked_OnlyTheWritesAre()
     {
         var investigations = await StartAsync(Token, allowTokenless: false, allowInvestigations: true);
         var both = await StartAsync(Token, allowTokenless: false, allowWrites: true, allowInvestigations: true);

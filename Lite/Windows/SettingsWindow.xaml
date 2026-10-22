@@ -870,7 +870,11 @@
                                     <TextBlock Text="Token:" VerticalAlignment="Center" Margin="0,0,6,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                     <TextBox AutomationProperties.Name="MCP token" x:Name="McpTokenTextBox" Width="320" IsReadOnly="True"
-                                             VerticalAlignment="Center"/>
+                                             VerticalAlignment="Center">
+                                        <TextBox.CommandBindings>
+                                            <CommandBinding Command="ApplicationCommands.Copy" Executed="McpTokenTextBox_Copy"/>
+                                        </TextBox.CommandBindings>
+                                    </TextBox>
                                     <Button x:Name="CopyMcpTokenButton" Content="Copy _Token" Margin="6,0,0,0" Padding="8,2"
                                             VerticalAlignment="Center" Click="CopyMcpTokenButton_Click"/>
                                     <Button x:Name="NewMcpTokenButton" Content="New token" Margin="6,0,0,0" Padding="8,2"

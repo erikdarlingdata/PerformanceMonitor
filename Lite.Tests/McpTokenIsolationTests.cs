@@ -28,7 +28,11 @@ public sealed class McpTokenIsolationTests : IDisposable
 {
     private const string Marker = "saved-password-marker-7f3a";
 
-    private readonly string _prefix = "PerformanceMonitorLite.Test_" + Guid.NewGuid().ToString("N") + "_";
+    /* The two production prefixes, each followed by a tag of this test's own: the server-password prefix and the token's differ at
+       the same character as in production, and neither extends the other. */
+    private static readonly string Tag = "Test_" + Guid.NewGuid().ToString("N") + "_";
+    private readonly string _prefix = CredentialService.CredentialPrefix + Tag;
+    private readonly string _tokenPrefix = CredentialManagerMcpTokenVault.CredentialPrefix + Tag;
     private readonly string _folder = Path.Combine(Path.GetTempPath(), "lite-mcp-isolation-" + Guid.NewGuid().ToString("N"));
 
     public McpTokenIsolationTests() => Directory.CreateDirectory(_folder);
@@ -37,6 +41,7 @@ public sealed class McpTokenIsolationTests : IDisposable
     {
         var credentials = new CredentialService(new CredentialStore(_prefix, "Performance Monitor Lite test"));
         credentials.DeleteCredential("McpToken");
+        credentials.DeleteCredential("Mcp_McpToken");
 
         try { Directory.Delete(_folder, recursive: true); } catch { /* best effort */ }
     }
@@ -56,7 +61,7 @@ public sealed class McpTokenIsolationTests : IDisposable
     [Fact]
     public void TheToken_LivesApartFromTheServerPasswordEntries_AndNewTokenReplacesIt()
     {
-        var tokens = McpTokenStore.ForPrefix(_prefix + "Mcp_");
+        var tokens = McpTokenStore.ForPrefix(_tokenPrefix);
         var credentials = TestCredentials();
 
         var first = tokens.GetOrCreate(out var failure, out var created);
@@ -64,7 +69,10 @@ public sealed class McpTokenIsolationTests : IDisposable
         Assert.True(created);
 
         /* A server entry named McpToken, in the server-password prefix, is another entry: it neither reads nor replaces the token. */
+        Assert.False(_tokenPrefix.StartsWith(_prefix, StringComparison.OrdinalIgnoreCase));
+        Assert.False(_prefix.StartsWith(_tokenPrefix, StringComparison.OrdinalIgnoreCase));
         Assert.True(credentials.SaveCredential("McpToken", "McpToken", Marker));
+        Assert.True(credentials.SaveCredential("Mcp_McpToken", "McpToken", Marker));
         Assert.Equal(first, tokens.Read(out _));
 
         var replacement = tokens.Replace(out failure);
@@ -74,7 +82,7 @@ public sealed class McpTokenIsolationTests : IDisposable
         Assert.Equal(replacement, tokens.Read(out _));
         Assert.Equal(Marker, credentials.GetCredential("McpToken")!.Value.Password);
 
-        TestCredentialsOf(_prefix + "Mcp_").DeleteCredential("McpToken");
+        TestCredentialsOf(_tokenPrefix).DeleteCredential("McpToken");
     }
 
     private static CredentialService TestCredentialsOf(string prefix) => new(new CredentialStore(prefix, "Performance Monitor Lite test"));
@@ -186,5 +194,57 @@ public sealed class McpTokenIsolationTests : IDisposable
 
         Assert.False(McpSettings.Load(newConfig).AllowTokenlessLoopback);
         Assert.Equal(7000, McpSettings.Load(newConfig).Port);
+    }
+
+    [Theory]
+    [InlineData("utf8bom")]
+    [InlineData("utf16")]
+    public void ImportSettings_DropsTheOptOut_FromAFileWithAByteOrderMarkOrUtf16(string encoding)
+    {
+        var oldConfig = Path.Combine(_folder, "old3" + encoding, "config");
+        var newConfig = Path.Combine(_folder, "new3" + encoding, "config");
+        Directory.CreateDirectory(oldConfig);
+        Directory.CreateDirectory(newConfig);
+        System.Text.Encoding fileEncoding = encoding == "utf16" ? System.Text.Encoding.Unicode : new System.Text.UTF8Encoding(true);
+        File.WriteAllText(Path.Combine(oldConfig, "settings.json"),
+            """{ "mcp_enabled": true, "mcp_port": 6124, "mcp_allow_tokenless_loopback": true }""", fileEncoding);
+
+        SettingsImport.CopyMissing(oldConfig, Path.Combine(_folder, "old3" + encoding), newConfig, Path.Combine(_folder, "new3" + encoding));
+
+        var copied = JsonNode.Parse(File.ReadAllText(Path.Combine(newConfig, "settings.json")))!.AsObject();
+        Assert.False(copied.ContainsKey("mcp_allow_tokenless_loopback"));
+        Assert.Equal(6124, (int)copied["mcp_port"]!);
+        Assert.False(McpSettings.Load(newConfig).AllowTokenlessLoopback);
+    }
+
+    [Fact]
+    public void ImportSettings_SkipsASettingsFileThatIsNotAJsonObject()
+    {
+        var oldConfig = Path.Combine(_folder, "old4", "config");
+        var newConfig = Path.Combine(_folder, "new4", "config");
+        Directory.CreateDirectory(oldConfig);
+        Directory.CreateDirectory(newConfig);
+        File.WriteAllText(Path.Combine(oldConfig, "settings.json"), "{ \"mcp_allow_tokenless_loopback\": true,, }");
+        File.WriteAllText(Path.Combine(oldConfig, "collection_schedule.json"), "[]");
+
+        var copied = SettingsImport.CopyMissing(oldConfig, Path.Combine(_folder, "old4"), newConfig, Path.Combine(_folder, "new4"));
+
+        Assert.False(File.Exists(Path.Combine(newConfig, "settings.json")));
+        Assert.True(File.Exists(Path.Combine(newConfig, "collection_schedule.json")));
+        Assert.Equal(1, copied);
+    }
+
+    // ---- the serving record never prints the token ----
+
+    [Fact]
+    public void McpServing_ToString_DoesNotPrintTheToken()
+    {
+        var serving = McpHostService.DecideServing("a-token-value-that-must-stay-out-of-logs", false, true, false);
+
+        var text = serving.ToString();
+
+        Assert.DoesNotContain("a-token-value-that-must-stay-out-of-logs", text);
+        Assert.Contains("<set>", text);
+        Assert.Contains("<none>", McpHostService.DecideServing(null, true, false, false).ToString());
     }
 }

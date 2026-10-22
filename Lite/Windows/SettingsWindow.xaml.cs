@@ -709,6 +709,20 @@ public partial class SettingsWindow : Window
             : "Couldn't copy: the clipboard is in use.";
     }
 
+    /// <summary>Ctrl+C and the context-menu Copy in the token box: the same clipboard path as Copy Token (kept out of history and cloud sync).</summary>
+    private void McpTokenTextBox_Copy(object sender, ExecutedRoutedEventArgs e)
+    {
+        var text = McpTokenTextBox.SelectedText.Length > 0 ? McpTokenTextBox.SelectedText : McpTokenTextBox.Text;
+        if (!_mcpTokenless && text.Length > 0)
+        {
+            McpStatusText.Text = ClipboardText.TrySetDataObject(SecretClipboard.Build(text))
+                ? "Copied to clipboard!"
+                : "Couldn't copy: the clipboard is in use.";
+        }
+
+        e.Handled = true;
+    }
+
     private void CopyMcpTokenButton_Click(object sender, RoutedEventArgs e)
     {
         var token = TokenForCopy();
@@ -730,8 +744,14 @@ public partial class SettingsWindow : Window
         }
 
         McpTokenTextBox.Text = token;
-        _mcpService?.ReplaceToken(token);
-        McpStatusText.Text = "New token made. The old one no longer works: your MCP client needs the new config (use Copy MCP config).";
+
+        /* The window may hold no host reference (it was opened while the server was still starting) or the swap may be refused;
+           closing Settings then restarts the host from the stored token, so the old token never outlives this click. */
+        var swapped = _mcpService?.ReplaceToken(token) ?? false;
+        McpSettingsChanged = true;
+        McpStatusText.Text = swapped
+            ? "New token made. The old one no longer works: your MCP client needs the new config (use Copy MCP config)."
+            : "New token made. The old one stops working when you close Settings: your MCP client needs the new config (use Copy MCP config).";
     }
 
     private async void AutoPortButton_Click(object sender, RoutedEventArgs e)
