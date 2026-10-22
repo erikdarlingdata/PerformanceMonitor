@@ -1459,13 +1459,18 @@ jobs:
         if: github.event_name == 'release'
         run: dotnet publish Lite/PerformanceMonitorLite.csproj -c Release -r win-x64 --self-contained -o publish/Lite-velopack
 
+      # #6471: the Windows service and the viewer\ folder inside the Darling zip are self-contained, as Lite and
+      # the viewer Setup.exe already are, so a stock Windows Server needs no .NET Runtime, ASP.NET Core Runtime or
+      # Desktop Runtime before install-darling.ps1 runs. Runtime patches now arrive with Darling releases. The Linux
+      # tarball and the Docker image keep their own framework-dependent publishes (the linux job below, and
+      # Darling/Dockerfile); neither uses these two steps.
       - name: Publish Darling Service
         if: steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
-        run: dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release -o publish/DarlingService
+        run: dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release -r win-x64 --self-contained -o publish/DarlingService
 
       - name: Publish Darling Viewer
         if: steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
-        run: dotnet publish Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj -c Release -o publish/DarlingViewer
+        run: dotnet publish Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj -c Release -r win-x64 --self-contained -o publish/DarlingViewer
 
       - name: Publish Darling Viewer (self-contained for Velopack)
         if: github.event_name == 'release'
