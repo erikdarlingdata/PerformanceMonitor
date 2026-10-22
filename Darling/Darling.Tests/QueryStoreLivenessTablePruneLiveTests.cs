@@ -116,6 +116,92 @@ public sealed class QueryStoreLivenessTablePruneLiveTests
         Assert.Equal(3, textBatches);
     }
 
+    /// <summary>The rule on its own: never run, a day or more ago, or a clock that stepped back, is due. Anything younger is not.</summary>
+    [Theory]
+    [InlineData(null, 0, true)]
+    [InlineData(0, 23, false)]
+    [InlineData(0, 24, true)]
+    [InlineData(0, 30, true)]
+    [InlineData(10, 0, true)]
+    public void TheQueryTextPruneGate_IsDueOncePerTwentyFourHours(int? lastRanHour, int nowHour, bool expectedDue)
+    {
+        var origin = new DateTime(2026, 10, 20, 0, 0, 0, DateTimeKind.Unspecified);
+        DateTime? last = lastRanHour is int h ? origin.AddHours(h) : null;
+
+        Assert.Equal(expectedDue, QueryTextPruneGate.IsDue(last, origin.AddHours(nowHour)));
+    }
+
+    /// <summary>
+    /// One prune clears a two-day backlog (rows older than the cutoff by one and two days, well under the 300,000-row cap), and
+    /// a second pass inside 24 hours leaves rows that expired in between, because the prune does not run. A pass 24 hours
+    /// after the first prunes again. The gate is the one the worker hands every scheduled pass. The rows kept are inside the
+    /// cutoff, so the cutoff itself (and its margin) is unchanged.
+    /// </summary>
+    [Fact]
+    public async Task TheQueryTextPrune_ClearsATwoDayBacklogInOneRun_AndSkipsAPassInsideTwentyFourHours()
+    {
+        var baseConnectionString = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the query_store_text once-a-day prune test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var utcNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var clock = utcNow;
+        var gate = new QueryTextPruneGate(() => clock);
+        var log = new CapturingTestLogger();
+
+        /* Server 1: a two-day backlog, 400 and 401 days old (past every horizon a shared collector can set). Server 2: kept. */
+        await SeedTextAsync(connection, 1, 0, 500, utcNow.AddDays(-400), ct);
+        await SeedTextAsync(connection, 1, 500, 500, utcNow.AddDays(-401), ct);
+        await SeedTextAsync(connection, 2, 0, 5, utcNow.AddHours(-1), ct);
+
+        await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: false, log, ct, queryTextPruneGate: gate);
+
+        Assert.Equal(0L, await TextCountAsync(connection, 1, ct));
+        Assert.Equal(5L, await TextCountAsync(connection, 2, ct));
+
+        /* Inside 24 hours: rows that are expired now are left, and nothing else is touched. */
+        await SeedTextAsync(connection, 3, 0, 200, utcNow.AddDays(-400), ct);
+        clock = utcNow.AddHours(23);
+        await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: false, log, ct, queryTextPruneGate: gate);
+
+        Assert.Equal(200L, await TextCountAsync(connection, 3, ct));
+        Assert.Equal(5L, await TextCountAsync(connection, 2, ct));
+
+        /* Twenty-four hours after the first prune: it runs and clears them. */
+        clock = utcNow.AddHours(24);
+        await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: false, log, ct, queryTextPruneGate: gate);
+
+        Assert.Equal(0L, await TextCountAsync(connection, 3, ct));
+        Assert.Equal(5L, await TextCountAsync(connection, 2, ct));
+    }
+
+    private static async Task SeedTextAsync(
+        NpgsqlConnection connection, int serverId, int firstQueryId, int count, DateTime lastSeen, System.Threading.CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(
+            "INSERT INTO collect.query_store_text (server_id, database_name, query_id, query_sql_text, last_seen) " +
+            "SELECT $1, 'db', gs, 'SELECT ' || gs, $4 FROM generate_series($2, $3) gs", connection);
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(firstQueryId + 1);
+        command.Parameters.AddWithValue(firstQueryId + count);
+        command.Parameters.AddWithValue(lastSeen);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task<long> TextCountAsync(NpgsqlConnection connection, int serverId, System.Threading.CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand("SELECT COUNT(*) FROM collect.query_store_text WHERE server_id = $1", connection);
+        command.Parameters.AddWithValue(serverId);
+        return (long)(await command.ExecuteScalarAsync(ct))!;
+    }
+
     private static async Task SeedMapRowsAsync(
         NpgsqlConnection connection, int expiredCount, int keptCount, DateTime expiredStamp, DateTime keptStamp, System.Threading.CancellationToken ct)
     {

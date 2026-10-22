@@ -22,8 +22,8 @@ namespace Darling.Tests;
 /// <summary>
 /// The 24 h retention of the day-partitioned Query Store interval tables (#5571), through
 /// <see cref="DarlingRetention.PurgeIntervalTableAsync"/> on a real store that has been through the migration rungs and
-/// the promotion: whole expired days are dropped and a partial day is kept, the legacy table is row-purged by name and
-/// dropped only after promotion once its bound has expired, a drop that hits a lock timeout gives up and succeeds on the
+/// the promotion: whole expired days are dropped and a partial day is kept, the legacy table is row-purged by name only while the store
+/// is not promoted, and is left for a whole-table drop once it is (and dropped once its bound has expired), a drop that hits a lock timeout gives up and succeeds on the
 /// next pass, the DEFAULT partition loses only rows before the cutoff, and a daily partition's row survives a purge of
 /// a legacy row that has the same <c>ctid</c>. The step-level drops are in <see cref="QueryStoreIntervalPartitionsLiveTests"/>;
 /// these go through the retention entry point the sweep calls.
@@ -80,7 +80,7 @@ public sealed class QueryStoreIntervalRetentionLiveTests
     public Task RetentionDropsAWholeExpiredDay_AndKeepsAPartialOne_Latest() => AssertWholeDayDroppedAndPartialDayKeptAsync(Latest);
 
     [Fact]
-    public async Task TheLegacyTable_IsRowPurgedByName_ThenDroppedAfterPromotionOnceItsBoundHasExpired()
+    public async Task ThePromotedLegacyTable_IsKeptWithItsExpiredRows_ThenDroppedWholeOnceItsBoundHasExpired()
     {
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
@@ -99,12 +99,13 @@ public sealed class QueryStoreIntervalRetentionLiveTests
             Assert.Equal(table.Legacy, await PartitionOfAsync(connection, table, 1, ct));
             Assert.Equal(table.Legacy, await PartitionOfAsync(connection, table, 2, ct));
 
-            /* S (10-05) is after the cutoff (wide 9-29, latest 9-23): the legacy table is not droppable yet, but its expired row is row-purged. */
+            /* S (10-05) is after the cutoff (wide 9-29, latest 9-23): the legacy table is not droppable yet. The store is promoted, so
+               the whole table is dropped later and its expired row is NOT row-deleted now. */
             var first = await PurgeAsync(postgres, table, Now, logger, ct);
             Assert.Equal(0, first.Failed);
-            Assert.Equal(1, first.RowsDeleted);
+            Assert.Equal(0, first.RowsDeleted);
             Assert.True(await ExistsAsync(connection, table.Legacy, ct), "the legacy table still holds a live row");
-            Assert.Equal(0L, await CountAsync(connection, $"SELECT count(*) FROM {table.Parent} WHERE query_id = 1", ct));
+            Assert.Equal(1L, await CountAsync(connection, $"SELECT count(*) FROM {table.Parent} WHERE query_id = 1", ct));
             Assert.Equal(1L, await CountAsync(connection, $"SELECT count(*) FROM {table.Parent} WHERE query_id = 2", ct));
 
             /* Once S is at or below the cutoff the whole legacy table goes in one DROP. */
@@ -112,11 +113,84 @@ public sealed class QueryStoreIntervalRetentionLiveTests
             var drop = await PurgeAsync(postgres, table, later, logger, ct);
             Assert.Equal(0, drop.Failed);
             Assert.False(await ExistsAsync(connection, table.Legacy, ct), "the legacy table is dropped after promotion once S has expired");
-            Assert.Equal(0L, await CountAsync(connection, $"SELECT count(*) FROM {table.Parent} WHERE query_id = 2", ct));
+            Assert.Equal(0, drop.RowsDeleted);
+            Assert.Equal(0L, await CountAsync(connection, $"SELECT count(*) FROM {table.Parent} WHERE query_id IN (1, 2)", ct));
 
             /* And a purge with no legacy table left skips it without an error or a warning. */
             var again = await PurgeAsync(postgres, table, later, logger, ct);
             Assert.Equal(0, again.Failed);
+        }
+
+        Assert.False(logger.HasAtLeast(LogLevel.Warning), logger.Dump());
+    }
+
+    /// <summary>
+    /// A promoted store leaves the legacy table's expired rows for the whole-table drop. The row delete would pay WAL, index work
+    /// and vacuum on a table that is about to be dropped. Here S is after the cutoff, so nothing is droppable yet, and many expired
+    /// rows (more than one drain batch is not needed: any row is enough to show the DELETE ran) stay.
+    /// </summary>
+    [Fact]
+    public async Task APromotedStore_WithExpiredLegacyRows_DeletesNoLegacyRows()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenStoreAsync(scratch, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var logger = new ListLogger();
+
+        foreach (var table in QueryStoreIntervalPartitions.All)
+        {
+            for (var i = 1; i <= 5; i++)
+            {
+                await InsertAsync(connection, table, Now.AddDays(-20).AddMinutes(i), i, ct);   /* expired */
+            }
+
+            await PromoteAsync(connection, table, Now.AddDays(-5), logger, ct);               /* S = Now - 5 d + 2 d, after the cutoff */
+            var state = await QueryStoreIntervalPartitions.ReadStateAsync(connection, table, ct);
+            Assert.True(state.Promoted);
+            Assert.True(state.LegacyUpper > Now.AddDays(-table.HorizonDays), "S is after the cutoff, so the drop does not take it yet");
+
+            var result = await PurgeAsync(postgres, table, Now, logger, ct);
+
+            Assert.Equal(0, result.Failed);
+            Assert.Equal(0, result.RowsDeleted);
+            Assert.True(await ExistsAsync(connection, table.Legacy, ct));
+            Assert.Equal(5L, await CountAsync(connection, $"SELECT count(*) FROM {table.Legacy}", ct));
+        }
+
+        Assert.False(logger.HasAtLeast(LogLevel.Warning), logger.Dump());
+    }
+
+    /// <summary>The other side of the gate: a store that is not promoted holds live data in the legacy table and keeps row-deleting its expired rows.</summary>
+    [Fact]
+    public async Task AnUnpromotedStore_StillRowDeletesExpiredLegacyRows()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenStoreAsync(scratch, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var logger = new ListLogger();
+
+        foreach (var table in QueryStoreIntervalPartitions.All)
+        {
+            for (var i = 1; i <= 5; i++)
+            {
+                await InsertAsync(connection, table, Now.AddDays(-20).AddMinutes(i), i, ct);   /* expired */
+            }
+
+            await InsertAsync(connection, table, Now.AddDays(-1), 6, ct);                      /* live */
+            Assert.False((await QueryStoreIntervalPartitions.ReadStateAsync(connection, table, ct)).Promoted);
+
+            var result = await PurgeAsync(postgres, table, Now, logger, ct);
+
+            Assert.Equal(0, result.Failed);
+            Assert.Equal(5, result.RowsDeleted);
+            Assert.Equal(1L, await CountAsync(connection, $"SELECT count(*) FROM {table.Parent}", ct));
+            Assert.Equal(1L, await CountAsync(connection, $"SELECT count(*) FROM {table.Parent} WHERE query_id = 6", ct));
         }
 
         Assert.False(logger.HasAtLeast(LogLevel.Warning), logger.Dump());
@@ -238,7 +312,7 @@ public sealed class QueryStoreIntervalRetentionLiveTests
     }
 
     [Fact]
-    public async Task ALegacyRowAndADailyPartitionRowThatShareACtid_AreNotConfused_ByThePurge()
+    public async Task ALegacyRowAndADailyPartitionRowThatShareACtid_AreBothLeftAlone_ByThePromotedPurge()
     {
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
@@ -270,11 +344,13 @@ public sealed class QueryStoreIntervalRetentionLiveTests
                 $"SELECT count(*) FROM {table.Legacy} AS l WHERE EXISTS (SELECT 1 FROM {table.DayPartition(s)} AS d WHERE d.ctid = l.ctid)", ct);
             Assert.Equal(3L, shared);   /* the precondition that makes this test able to fail */
 
+            /* The promoted purge leaves the legacy rows for the whole-table drop, so it deletes nothing, and a ctid delete that
+               reached across partitions would show as a missing daily row. */
             var result = await PurgeAsync(postgres, table, Now, logger, ct);
 
             Assert.Equal(0, result.Failed);
-            Assert.Equal(3, result.RowsDeleted);
-            Assert.Equal(0L, await CountAsync(connection, $"SELECT count(*) FROM {table.Parent} WHERE query_id <= 3", ct));
+            Assert.Equal(0, result.RowsDeleted);
+            Assert.Equal(3L, await CountAsync(connection, $"SELECT count(*) FROM {table.Parent} WHERE query_id <= 3", ct));
             Assert.Equal(3L, await CountAsync(connection, $"SELECT count(*) FROM {table.DayPartition(s)}", ct));
         }
 
@@ -308,11 +384,11 @@ public sealed class QueryStoreIntervalRetentionLiveTests
         var failed = await PurgeAsync(postgres, wide, Now, logger, ct);
         var healthy = await PurgeAsync(postgres, latest, Now, logger, ct);
 
-        /* The failed drop is counted and logged, and the same call still row-purged the legacy table. */
+        /* The failed drop is counted and logged, and the same call still finished (the promoted legacy table's rows are left for the drop, so no row is deleted). */
         Assert.Equal(1, failed.Failed);
         Assert.True(logger.Lines.Any(l => l.Level == LogLevel.Warning && l.Message.Contains("could not drop expired partitions", StringComparison.Ordinal)), logger.Dump());
-        Assert.Equal(1, failed.RowsDeleted);
-        Assert.Equal(0L, await CountAsync(connection, $"SELECT count(*) FROM {wide.Parent} WHERE query_id = 1", ct));
+        Assert.Equal(0, failed.RowsDeleted);
+        Assert.Equal(1L, await CountAsync(connection, $"SELECT count(*) FROM {wide.Parent} WHERE query_id = 1", ct));
         Assert.True(await ExistsAsync(connection, wide.Legacy, ct), "the blocked legacy table is still there");
 
         /* The other table purged normally. */
