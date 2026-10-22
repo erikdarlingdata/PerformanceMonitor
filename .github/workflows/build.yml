@@ -345,6 +345,12 @@ jobs:
       darling_build_artifact: ${{ steps.upload-darling-build.outcome == 'success' && 'guard-test-build-darling' || '' }}
 
     steps:
+      # #6497: the runner's first step. A Windows runner whose processes cannot start (every step failed with
+      # 0xC0000142 STATUS_DLL_INIT_FAILED) fails HERE in seconds instead of one step at a time. It runs before
+      # checkout, so no global.json is in play: this only proves `dotnet` starts.
+      - name: Check the runner can start a process
+        timeout-minutes: 2
+        run: dotnet --version
       - uses: actions/checkout@v7
 
       - name: Detect changed paths
@@ -472,6 +478,12 @@ jobs:
       lite_build_artifact: ${{ steps.upload-lite-build.outcome == 'success' && 'guard-test-build-lite' || '' }}
 
     steps:
+      # #6497: the runner's first step. A Windows runner whose processes cannot start (every step failed with
+      # 0xC0000142 STATUS_DLL_INIT_FAILED) fails HERE in seconds instead of one step at a time. It runs before
+      # checkout, so no global.json is in play: this only proves `dotnet` starts.
+      - name: Check the runner can start a process
+        timeout-minutes: 2
+        run: dotnet --version
       - uses: actions/checkout@v7
 
       - name: Detect changed paths
@@ -591,6 +603,12 @@ jobs:
       actions: read
 
     steps:
+      # #6497: the runner's first step. A Windows runner whose processes cannot start (every step failed with
+      # 0xC0000142 STATUS_DLL_INIT_FAILED) fails HERE in seconds instead of one step at a time. It runs before
+      # checkout, so no global.json is in play: this only proves `dotnet` starts.
+      - name: Check the runner can start a process
+        timeout-minutes: 2
+        run: dotnet --version
       - uses: actions/checkout@v7
 
       # #5947: actionlint reads the workflow files for what the text tests do not look for: YAML and expression
@@ -875,6 +893,13 @@ jobs:
       docs-fastpath: ${{ steps.fastpath.outputs.engaged }}
 
     steps:
+      # #6497: the runner's first step. A Windows runner whose processes cannot start (every step failed with
+      # 0xC0000142 STATUS_DLL_INIT_FAILED) fails HERE in seconds instead of one step at a time. It runs before
+      # checkout, so no global.json is in play: this only proves `dotnet` starts.
+      - name: Check the runner can start a process
+        timeout-minutes: 2
+        if: ${{ needs.gate.outputs.run == 'true' }}
+        run: dotnet --version
       - name: Report when CI did not run
         if: ${{ needs.gate.outputs.run != 'true' }}
         shell: bash
@@ -1939,6 +1964,12 @@ jobs:
       contents: read
 
     steps:
+      # #6497: the runner's first step. A Windows runner whose processes cannot start (every step failed with
+      # 0xC0000142 STATUS_DLL_INIT_FAILED) fails HERE in seconds instead of one step at a time. It runs before
+      # checkout, so no global.json is in play: this only proves `dotnet` starts.
+      - name: Check the runner can start a process
+        timeout-minutes: 2
+        run: dotnet --version
       - uses: actions/checkout@v7
 
       # Only do the expensive TimescaleDB work when code Darling compiles changed — or when the gate
@@ -2906,6 +2937,12 @@ jobs:
       contents: read
 
     steps:
+      # #6497: the runner's first step. A Windows runner whose processes cannot start (every step failed with
+      # 0xC0000142 STATUS_DLL_INIT_FAILED) fails HERE in seconds instead of one step at a time. It runs before
+      # checkout, so no global.json is in play: this only proves `dotnet` starts.
+      - name: Check the runner can start a process
+        timeout-minutes: 2
+        run: dotnet --version
       - uses: actions/checkout@v7
 
       # Feeds the self-validation arm below only. Skipped on release for the same reason the other
@@ -3267,6 +3304,12 @@ jobs:
       # Reads the pinned run's lite-tests-timing artifacts (gh run download in the shard step), nothing else.
       actions: read
     steps:
+      # #6497: the runner's first step. A Windows runner whose processes cannot start (every step failed with
+      # 0xC0000142 STATUS_DLL_INIT_FAILED) fails HERE in seconds instead of one step at a time. It runs before
+      # checkout, so no global.json is in play: this only proves `dotnet` starts.
+      - name: Check the runner can start a process
+        timeout-minutes: 2
+        run: dotnet --version
       - uses: actions/checkout@v7
 
       - name: Detect changed paths

@@ -252,7 +252,7 @@ public sealed class GuardStageWorkflowTests
         var runner = JobBlock(Yaml(), "guard-tests");
         var runnerSteps = runner[runner.IndexOf("    steps:\n", StringComparison.Ordinal)..]
             .Split("\n      - ", StringSplitOptions.None)
-            .Skip(2)
+            .Skip(3) /* the runner check (#6497), then the checkout, are not the producer's decision's to gate */
             .ToList();
         Assert.NotEmpty(runnerSteps);
         foreach (var step in runnerSteps.Where(st => !st.StartsWith("name: Upload the Guard ", StringComparison.Ordinal)))
@@ -478,11 +478,13 @@ public sealed class GuardStageWorkflowTests
         var steps = build[build.IndexOf("    steps:\n", StringComparison.Ordinal)..]
             .Split("\n      - ", StringSplitOptions.None)
             .Skip(1)
-            .Take(2)
+            .Take(3)
             .ToList();
 
-        Assert.StartsWith("name: Report when CI did not run", steps[0], StringComparison.Ordinal);
-        Assert.StartsWith("uses: actions/checkout@v7", steps[1], StringComparison.Ordinal);
+        /* #6497: the runner check is first, so a runner that cannot start a process fails there in seconds. */
+        Assert.StartsWith("name: Check the runner can start a process", steps[0], StringComparison.Ordinal);
+        Assert.StartsWith("name: Report when CI did not run", steps[1], StringComparison.Ordinal);
+        Assert.StartsWith("uses: actions/checkout@v7", steps[2], StringComparison.Ordinal);
     }
 
     /// <summary>
