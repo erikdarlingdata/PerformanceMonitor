@@ -36,7 +36,7 @@ public sealed class QueryStoreReplicaConnectionTestTests
 
         Assert.Equal(("replica-01,14331", (string?)null), result);
         var builder = new SqlConnectionStringBuilder(Assert.Single(opened));
-        Assert.Equal("replica-01,14331", builder.DataSource);
+        Assert.EndsWith("replica-01,14331", builder.DataSource, StringComparison.Ordinal); /* the swap pins TCP with a tcp: prefix (#6254) */
         Assert.Equal(ApplicationIntent.ReadOnly, builder.ApplicationIntent);
         var primary = new SqlConnectionStringBuilder(Primary);
         Assert.Equal(primary.InitialCatalog, builder.InitialCatalog);

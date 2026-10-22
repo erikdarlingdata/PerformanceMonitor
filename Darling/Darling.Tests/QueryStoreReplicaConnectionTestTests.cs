@@ -72,7 +72,7 @@ public sealed class QueryStoreReplicaConnectionTestTests : IDisposable
         var text = Assert.Single(opened);
         Assert.Equal(MonitoredServerConnection.BuildQueryStoreReplicaConnectionString(server, false), text);
         var builder = new SqlConnectionStringBuilder(text);
-        Assert.Equal(Replica, builder.DataSource);
+        Assert.EndsWith(Replica, builder.DataSource, StringComparison.Ordinal); /* the builder pins TCP with a tcp: prefix (#6254) */
         Assert.Equal(ApplicationIntent.ReadOnly, builder.ApplicationIntent);
     }
 
