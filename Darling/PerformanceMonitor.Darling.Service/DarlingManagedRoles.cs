@@ -56,7 +56,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// <c>collect</c> + <c>config</c>-minus-the-secret-columns) PLUS a NARROW, enumerated set of writes —
 /// INSERT on <c>collect.analysis_findings</c> and INSERT/DELETE on <c>config.analysis_muted</c> (what <c>analyze_server</c>
 /// persists + the mute and unmute tools need, #6383), INSERT/UPDATE/DELETE on <c>config.custom_views</c> (the
-/// custom-view tools, #1599), the alert-tuning writes (INSERT/UPDATE/DELETE on
+/// custom-view tools, #1599), INSERT/UPDATE/DELETE on <c>config.database_state_expected</c> (the database-state expectation tool, #6397), the alert-tuning writes (INSERT/UPDATE/DELETE on
 /// <c>config.config_mute_rules</c> + UPDATE on the singleton <c>config.config_alert_settings</c> + UPDATE on
 /// the single non-secret <c>email_cooldown_minutes</c> column of <c>config.config_notification</c>, plus the
 /// two beacon columns of <c>config.config_service</c> so the settings write's self-bump trigger can fire),
@@ -1500,7 +1500,10 @@ GRANT INSERT, UPDATE, DELETE ON {config}.custom_alert_rules TO {viewer};
 GRANT INSERT, UPDATE, DELETE ON {config}.custom_alert_rules TO {mcp};
 -- The Viewer's per-database database-state override editor (#1986) writes config.database_state_expected:
 -- the same narrow single-table floor as custom_views. Created by V49, so provisioning runs after migration.
+-- The mcp role gets the same three (#6397): set_database_state_expected upserts (INSERT, UPDATE) and clears (DELETE) one row, and its
+-- read, get_database_state_expectations, already runs on mcp's SELECT on all of config. Nothing wider, and no sibling table.
 GRANT INSERT, UPDATE, DELETE ON {config}.database_state_expected TO {viewer};
+GRANT INSERT, UPDATE, DELETE ON {config}.database_state_expected TO {mcp};
 
 -- 8. Alert tuning (the MCP alert-tuning write tools): the mcp role's alert-config writes, mirroring section 7's
 --    custom_views grant model (EXPLICIT single-table statements, NO ALTER DEFAULT PRIVILEGES). update_alert_settings

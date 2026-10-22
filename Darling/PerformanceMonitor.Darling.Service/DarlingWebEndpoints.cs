@@ -170,6 +170,9 @@ public static class DarlingWebEndpoints
         "restore_alert_history",
         "set_quiet_window",
         "clear_quiet_window",
+        /* #6397: the Database State expectations are edited in the Viewer's override editor; the web has no route for them. */
+        "get_database_state_expectations",
+        "set_database_state_expected",
         /* #5632 Phase A: claim and submit write investigation state for an agent over MCP; the web serves the two
            investigation reads only (/api/read). */
         "claim_investigation_request",
