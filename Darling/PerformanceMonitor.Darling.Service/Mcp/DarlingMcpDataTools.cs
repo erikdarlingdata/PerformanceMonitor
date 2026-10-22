@@ -289,16 +289,9 @@ public sealed class DarlingMcpDataTools
                 /* Distinguish "unknown wait type here" from "nothing collected at all", handing back the
                    ones that do have data — Lite's get_wait_trend miss vocabulary. */
                 var collected = await DarlingDataReader.GetDistinctWaitTypesAsync(postgres, resolved.ServerId, start, now, cancellationToken);
-                if (collected.Count == 0)
-                    return McpHelpers.Status(
-                        "unavailable",
-                        $"No trend data for wait type '{wait_type}'. No wait stats have been collected for this server in the last {hours_back}h yet " +
-                        "(the collector may not have run, or delta wait stats need a second collection cycle).");
-
-                return McpHelpers.Status(
-                    "not_collected",
-                    $"No trend data for wait type '{wait_type}'. It may not be a wait type observed on this server in this window — see hints.collected_wait_types for the {collected.Count} that have data.",
-                    new { collected_wait_types = collected });
+                /* #6446: the collector skips the ignored (benign) waits, so only those are never collected; a wait type it would
+                   store that had no waiting in the window is empty, not not_collected. The hint stays for a typo. */
+                return TrendPayloads.WaitTrendMiss(wait_type, hours_back, IgnoredWaitDefaults.All, collected);
             }
 
             /* #3653 A5: wait_stats is the FIRST identity-epoch carrier (#3705), so this is the trend whose

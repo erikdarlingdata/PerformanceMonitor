@@ -2,7 +2,7 @@
 
 Part of the [Performance Monitor documentation](../README.md#documentation).
 
-1. Download **[`PerformanceMonitorLite-win-Setup.exe`](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest)** — a self-contained build, so there is **no .NET runtime to install first**.
+1. Download **[`PerformanceMonitorLite-lite-Setup.exe`](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest)** — a self-contained build, so there is **no .NET runtime to install first**.
 2. Run the installer — it installs to `%LocalAppData%\PerformanceMonitorLite`, adds **Start Menu** and **Desktop** shortcuts, and registers the app under **Apps & Features** so it shows up in Windows search and can be uninstalled normally. Auto-update is wired in. Your data goes in `%LocalAppData%\PerformanceMonitorLite-Data`, a separate folder the installer never touches.
 3. Launch from the Start Menu or Desktop shortcut.
 4. Click **+ Add Server**, enter connection details, test, save.

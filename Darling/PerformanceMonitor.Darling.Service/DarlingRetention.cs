@@ -402,11 +402,17 @@ public static class DarlingRetention
     /// The wall time a pass with a <paramref name="collectionPressure"/> may run before it stops at a batch boundary;
     /// null takes <see cref="RetentionCollectionYield.DefaultWallBudget"/>.
     /// </param>
+    /// <param name="queryTextPruneGate">
+    /// The once-per-24-hours rule for the <c>collect.query_store_text</c> prune. The scheduled pass hands in the worker's
+    /// gate, so the prune runs at most once in 24 hours even when budget-stopped passes follow each other within the hour.
+    /// Null (the on-demand <c>purge_now</c> command, and every test that predates the rule) prunes on every pass.
+    /// </param>
     public static async Task<PurgeSummary> PurgeAsync(
         NpgsqlDataSource postgres, bool timescaleAvailable, ILogger? logger, CancellationToken cancellationToken,
         Func<string, int>? retentionDaysFor = null, int planContentRetentionDays = 0,
         int livenessTouchedTablePruneRowCap = LivenessTouchedTablePruneRowCap, bool paceWal = false,
-        string? runLabel = null, ICollectionPressure? collectionPressure = null, TimeSpan? wallBudget = null)
+        string? runLabel = null, ICollectionPressure? collectionPressure = null, TimeSpan? wallBudget = null,
+        QueryTextPruneGate? queryTextPruneGate = null)
     {
         /* One pacer per run, its rate read once from the store's own checkpoint settings before the first
            table is touched. */
@@ -421,7 +427,7 @@ public static class DarlingRetention
 
         return await PurgeWithPacerAsync(
             postgres, timescaleAvailable, logger, cancellationToken, retentionDaysFor, planContentRetentionDays,
-            livenessTouchedTablePruneRowCap, walPacer, runLabel);
+            livenessTouchedTablePruneRowCap, walPacer, runLabel, queryTextPruneGate);
     }
 
     /// <summary>
@@ -433,7 +439,7 @@ public static class DarlingRetention
         NpgsqlDataSource postgres, bool timescaleAvailable, ILogger? logger, CancellationToken cancellationToken,
         Func<string, int>? retentionDaysFor = null, int planContentRetentionDays = 0,
         int livenessTouchedTablePruneRowCap = LivenessTouchedTablePruneRowCap, RetentionWalPacer? walPacer = null,
-        string? runLabel = null)
+        string? runLabel = null, QueryTextPruneGate? queryTextPruneGate = null)
     {
         /* Clamp at the destructive sink, like retentionDaysFor's clamp below (review catch): the value
            arrives pre-clamped only when a store read succeeded and ApplyToConfig ran. On a
@@ -775,22 +781,34 @@ public static class DarlingRetention
                 /* #2150: query_store statement text, same shape and same direction of margin as the two
                    above — it must outlive the facts that reference it, because text retired early reads as a
                    statement that never had text rather than as one whose text expired. */
-                var queryTextCutoff = utcNow.AddDays(-(widestFactRetentionDays + QueryStoreTextStore.PruneMarginDays));
-                var queryTextDeleted = await PurgeOneAsync(
-                    postgres, QueryStoreTextStore.TableName,
-                    UnorderedRowCappedDeleteSql(
-                        QueryStoreTextStore.TableName, QueryStoreTextStore.LastSeenColumn, livenessTouchedTablePruneRowCap),
-                    queryTextCutoff, logger, cancellationToken,
-                    batchSize: livenessTouchedTablePruneRowCap,
-                    pacer: walPacer);
-                if (queryTextDeleted is not null)
+                var tablesLeftBefore = walPacer?.Yield?.TablesLeft ?? 0;
+                if (queryTextPruneGate is null || queryTextPruneGate.IsDue())
                 {
-                    tablesPurged++;
-                    totalRowsDeleted += queryTextDeleted.Value;
-                }
-                else
-                {
-                    tablesFailed++;
+                    var queryTextCutoff = utcNow.AddDays(-(widestFactRetentionDays + QueryStoreTextStore.PruneMarginDays));
+                    var queryTextDeleted = await PurgeOneAsync(
+                        postgres, QueryStoreTextStore.TableName,
+                        UnorderedRowCappedDeleteSql(
+                            QueryStoreTextStore.TableName, QueryStoreTextStore.LastSeenColumn, livenessTouchedTablePruneRowCap),
+                        queryTextCutoff, logger, cancellationToken,
+                        batchSize: livenessTouchedTablePruneRowCap,
+                        pacer: walPacer);
+                    if (queryTextDeleted is not null)
+                    {
+                        tablesPurged++;
+                        totalRowsDeleted += queryTextDeleted.Value;
+
+                        /* Counts as a run only when the pass's wall budget did not cut THIS table short (a spent budget skips
+                           the table with a clean 0, and a stop part-way leaves rows behind): the next pass tries again. A stop
+                           on a later table does not matter, this one had finished. */
+                        if ((walPacer?.Yield?.TablesLeft ?? 0) == tablesLeftBefore)
+                        {
+                            queryTextPruneGate?.MarkRan();
+                        }
+                    }
+                    else
+                    {
+                        tablesFailed++;
+                    }
                 }
 
                 foreach (var dimTable in PayloadDimensions.DimTables)
@@ -1586,7 +1604,9 @@ public static class DarlingRetention
     /// is retried by the next hourly pass, not an error.</description></item>
     /// <item><description><b>The legacy table's row-capped purge (#5569).</b> It names <c>X_legacy</c>, never the
     /// parent: a <c>ctid</c> repeats across partitions, so <c>ctid IN (SELECT ctid ...)</c> against the parent could
-    /// delete live rows of another day. Skipped, with no warning, when the legacy table no longer exists.</description></item>
+    /// delete live rows of another day. Skipped, with no warning, when the legacy table no longer exists. Also skipped once
+    /// the parent is promoted and the legacy table has a bound S: the drops above take the whole table when S reaches the
+    /// cutoff, so deleting its expired rows until then is wasted work.</description></item>
     /// <item><description><b>The DEFAULT partition</b>, a plain DELETE of rows older than the cutoff, skipped when
     /// DEFAULT does not exist.</description></item>
     /// </list>
@@ -1624,8 +1644,13 @@ public static class DarlingRetention
         {
             failed++;
         }
-        else if (legacyExists.Value)
+        else if (legacyExists.Value && !await LegacyDropsWholeAsync(postgres, table, logger, cancellationToken))
         {
+            /* Not promoted (or no readable bound S): the legacy table holds live data and is never dropped, so its expired rows
+               are row-purged by name. Once promoted with a bound S, DropExpiredAsync drops the whole table when S is at or
+               before the cutoff, and row-deleting its expired rows until then is wasted WAL, index work and vacuum (the
+               production store spent about 4 minutes a day on it). Every reader of these tables filters at its own analysis
+               window, so an expired legacy row left until the drop is never read as a wrong answer. */
             var legacyDeleted = await PurgeOneAsync(
                 postgres, table.Legacy,
                 RowCappedDeleteSql(table.Legacy, "first_execution_time", IntervalDeleteRowCap),
@@ -1669,6 +1694,28 @@ public static class DarlingRetention
         }
 
         return new IntervalPartitionPurge(purged, rows, failed);
+    }
+
+    /// <summary>
+    /// True when the legacy table's rows are left for <see cref="QueryStoreIntervalPartitions.DropExpiredAsync"/> to drop whole:
+    /// the parent is promoted and the legacy table carries a bound S the drop can read. An unpromoted store, a bound that does
+    /// not parse (the drop never takes such a table) and a state read that fails all return false, so the row purge runs as
+    /// it did before.
+    /// </summary>
+    private static async Task<bool> LegacyDropsWholeAsync(
+        NpgsqlDataSource postgres, QueryStoreIntervalPartitions.IntervalTable table, ILogger? logger, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            var state = await QueryStoreIntervalPartitions.ReadStateAsync(connection, table, cancellationToken);
+            return state.Promoted && state.LegacyExists && state.LegacyUpper.HasValue;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning("Retention could not read the partition state of {Table}: {Failure}", table.Parent, DescribePurgeFailure(ex));
+            return false;
+        }
     }
 
     /// <summary>Whether a schema-qualified relation exists: true or false, or null (warned) when the probe itself failed.</summary>
@@ -2533,4 +2580,35 @@ public readonly record struct PurgeSummary(int TablesPurged, int RowsDeleted, in
 
     /// <summary>Rows deleted plus whole chunks dropped — the coarse "how much did this purge remove" count.</summary>
     public int TotalPurged => RowsDeleted + ChunksDropped;
+}
+
+/// <summary>
+/// The once-per-24-hours rule for the <c>collect.query_store_text</c> prune. Each prune statement is a full serial scan of the
+/// table's heap (about 33 seconds on the production store with 42 SQL Server servers), because the table has no
+/// <c>last_seen</c> index on purpose (it would stop the liveness touch from updating in place). A retention pass is due daily,
+/// but a pass the wall budget stops brings the next one forward to within the hour, and each service start runs one at once, so
+/// the passes themselves are not a daily cadence. The gate holds the time of the last prune that finished, in memory, so the
+/// worker's passes share it. A restart forgets it, which costs one extra prune. A day's backlog is far under the prune's
+/// 300,000-row cap, so one run a day clears it. The prune's cutoff, including <see cref="QueryStoreTextStore.PruneMarginDays"/>,
+/// is unchanged.
+/// </summary>
+public sealed class QueryTextPruneGate
+{
+    /// <summary>The least time between two prunes.</summary>
+    public static readonly TimeSpan Interval = TimeSpan.FromHours(24);
+
+    private readonly Func<DateTime> _utcNow;
+    private DateTime? _lastRanUtc;
+
+    public QueryTextPruneGate(Func<DateTime>? utcNow = null) => _utcNow = utcNow ?? (() => DateTime.UtcNow);
+
+    /// <summary>True when no prune has finished yet, the last one was <see cref="Interval"/> or more ago, or the clock stepped back past it.</summary>
+    public bool IsDue() => IsDue(_lastRanUtc, _utcNow());
+
+    /// <summary>The rule on its own, so a test can pin the table.</summary>
+    public static bool IsDue(DateTime? lastRanUtc, DateTime nowUtc) =>
+        lastRanUtc is not { } last || nowUtc < last || nowUtc - last >= Interval;
+
+    /// <summary>Records that a prune finished now.</summary>
+    public void MarkRan() => _lastRanUtc = _utcNow();
 }

@@ -228,25 +228,52 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>
-    /// The Job History tab's Server choices that do not depend on the runs it read (#5703): every managed server the job history
-    /// collector runs on (the sidebar's set, <see cref="GetManagedServersAsync"/>, narrowed by <see cref="JobHistoryCollector.CollectsOn"/>:
-    /// not a disabled server, a PostgreSQL target or an Azure SQL Database, none of which can have job history; Amazon RDS and Azure SQL
-    /// Managed Instance run SQL Agent and stay), by the name the grid's Server column speaks. A server with runs in the window is still
-    /// offered, from the rows. The runs alone would leave a quiet server out of the drop-down whenever a busier server's newest runs fill
-    /// the row cap.
+    /// The Job History tab's Server choices that do not depend on the runs it read (#5703): every managed server a job history can be asked
+    /// of (the sidebar's set, <see cref="GetManagedServersAsync"/>, narrowed by <see cref="OffersJobHistory"/>), by the name the grid's Server
+    /// column speaks. A server with runs in the window is still offered, from the rows. The runs alone would leave a quiet server out of the
+    /// drop-down whenever a busier server's newest runs fill the row cap, and a server with no SQL Agent (an Azure SQL Database) out for good.
     /// </summary>
-    public async Task<List<JobHistoryFilterChoices.ServerChoice>> GetJobHistoryServerChoicesAsync(CancellationToken cancellationToken = default)
+    public async Task<List<JobHistoryFilterChoices.ServerChoice>> GetJobHistoryServerChoicesAsync(CancellationToken cancellationToken = default) =>
+        (await GetJobHistoryServersAsync(cancellationToken)).Choices;
+
+    /// <summary>The Job History tab's registered servers: the Server drop-down's choices, and which of them are Azure SQL Databases (no SQL Agent).</summary>
+    public sealed record JobHistoryServers(List<JobHistoryFilterChoices.ServerChoice> Choices, IReadOnlySet<int> AzureSqlDatabaseIds);
+
+    /// <summary>Reads the registered servers the Job History tab offers (<see cref="OffersJobHistory"/>), with the Azure SQL Databases among them marked.</summary>
+    public async Task<JobHistoryServers> GetJobHistoryServersAsync(CancellationToken cancellationToken = default)
     {
         var servers = await GetManagedServersAsync(cancellationToken);
-        return ServerChoicesOf(servers);
+        return ServersOf(servers);
     }
 
-    /// <summary>Maps the managed servers to Server choices: those the job history collector runs on, by display name.</summary>
+    /// <summary>
+    /// Whether the Job History Server drop-down offers this registered server (#6391): a server the job history collector runs on
+    /// (<see cref="JobHistoryCollector.CollectsOn"/>: not a disabled server or a PostgreSQL target; Amazon RDS and Azure SQL Managed Instance
+    /// run SQL Agent and stay), and also an enabled Azure SQL Database. It has no SQL Agent and never any rows, but it is a registered server,
+    /// so it must be pickable for the tab to say so in plain words; filtering it out left it unpickable with the sentence never shown.
+    /// </summary>
+    internal static bool OffersJobHistory(DarlingServer server) =>
+        JobHistoryCollector.CollectsOn(server.IsEnabled, server.EngineKind, server.EngineEdition)
+        || IsEnabledAzureSqlDatabase(server);
+
+    private static bool IsEnabledAzureSqlDatabase(DarlingServer server) =>
+        server.EngineEdition == CollectorEngineCapability.AzureSqlDatabaseEngineEdition
+        && JobHistoryCollector.CollectsOn(server.IsEnabled, server.EngineKind, CollectorEngineCapability.UnknownEngineEdition);
+
+    /// <summary>Maps the managed servers to the Job History servers: those <see cref="OffersJobHistory"/>, by display name.</summary>
+    internal static JobHistoryServers ServersOf(IEnumerable<DarlingServer> servers)
+    {
+        var offered = servers.Where(OffersJobHistory).ToList();
+        return new JobHistoryServers(
+            offered
+                .Select(s => new JobHistoryFilterChoices.ServerChoice(s.ServerId, string.IsNullOrEmpty(s.DisplayName) ? s.ServerName : s.DisplayName))
+                .ToList(),
+            offered.Where(IsEnabledAzureSqlDatabase).Select(s => s.ServerId).ToHashSet());
+    }
+
+    /// <summary>Maps the managed servers to Server choices (see <see cref="ServersOf"/>).</summary>
     internal static List<JobHistoryFilterChoices.ServerChoice> ServerChoicesOf(IEnumerable<DarlingServer> servers) =>
-        servers
-            .Where(s => JobHistoryCollector.CollectsOn(s.IsEnabled, s.EngineKind, s.EngineEdition))
-            .Select(s => new JobHistoryFilterChoices.ServerChoice(s.ServerId, string.IsNullOrEmpty(s.DisplayName) ? s.ServerName : s.DisplayName))
-            .ToList();
+        ServersOf(servers).Choices;
 
     /// <summary>
     /// The Job History tab's Category choices (#5703): every category with a run in the window, from a read of its own that the row cap

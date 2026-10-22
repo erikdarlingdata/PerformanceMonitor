@@ -186,7 +186,7 @@ public class McpStatusEnvelopeTests : IClassFixture<SharedDuckDbFixture>, IDispo
     {
         await SeedWaitStatsAsync("CXPACKET", "PAGEIOLATCH_SH");
 
-        var json = await McpWaitTools.GetWaitTrend(_dataService, _serverManager, "SOS_SCHEDULER_YIELD");
+        var json = await McpWaitTools.GetWaitTrend(_dataService, _serverManager, "SLEEP_TASK");
         var root = Parse(json);
 
         Assert.Equal("not_collected", root.GetProperty("status").GetString());

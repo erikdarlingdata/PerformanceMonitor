@@ -171,7 +171,7 @@ public partial class JobHistoryTab : UserControl
                beside the grid's read; a failure costs the extra choices and never the grid. */
             var service = _dataService;
             /* The two reads start side by side, here, where the width is declared; JoinChoicesAsync only waits for both. */
-            var serversTask = refreshChoices ? ReadHalfAsync("servers", "server", () => service.GetJobHistoryServerChoicesAsync(), choicesKey) : null;
+            var serversTask = refreshChoices ? ReadHalfAsync("servers", "server", () => service.GetJobHistoryServersAsync(), choicesKey) : null;
             var categoriesTask = refreshChoices
                 ? ReadHalfAsync("categories", "category", () => service.GetJobHistoryCategoriesAsync(windowStartUtc, windowIsLive ? null : windowEndUtc, serverId: serverId), choicesKey)
                 : null;
@@ -192,6 +192,7 @@ public partial class JobHistoryTab : UserControl
             var choicesApplied = ApplyKnownChoicesAsync(choicesTask, choicesKey, gen, all);
 
             var displayCount = JobHistoryDataGrid.Items.Count;
+            NoJobsMessage.Text = EmptyNote(IsAzureSqlDatabaseSelected());
             NoJobsMessage.Visibility = displayCount == 0 ? Visibility.Visible : Visibility.Collapsed;
             RunTimeHeaderText.Text = TimeColumnTitle.For("Run Time", ViewerTimeHelper.CurrentDisplayMode, all.Any(r => r.MixedServers)); // D5: the column names its clock
             DataGridHeaderFit.Apply(JobHistoryDataGrid); // #6136: the longer title ("Run Time (server)") widens its column
@@ -293,8 +294,8 @@ public partial class JobHistoryTab : UserControl
 
     /// <summary>Waits for the two choices reads the load started (null when this load did not start them). Neither throws: a failed
     /// read is null for its half (see <see cref="ReadHalfAsync{T}"/>).</summary>
-    private static async Task<(List<JobHistoryFilterChoices.ServerChoice>? Servers, List<string>? Categories)> JoinChoicesAsync(
-        Task<List<JobHistoryFilterChoices.ServerChoice>?> serversTask, Task<List<string>?> categoriesTask)
+    private static async Task<(ViewerDataService.JobHistoryServers? Servers, List<string>? Categories)> JoinChoicesAsync(
+        Task<ViewerDataService.JobHistoryServers?> serversTask, Task<List<string>?> categoriesTask)
     {
         var servers = await serversTask;
         var categories = await categoriesTask;
@@ -327,28 +328,56 @@ public partial class JobHistoryTab : UserControl
     /// load did not read them). A half that failed keeps the last one, and the choices are read again on the next load until both halves
     /// have succeeded for this window. The grid is already bound: it never waits on this read.</summary>
     private Task<bool> ApplyKnownChoicesAsync(
-        Task<(List<JobHistoryFilterChoices.ServerChoice>? Servers, List<string>? Categories)>? choicesTask,
+        Task<(ViewerDataService.JobHistoryServers? Servers, List<string>? Categories)>? choicesTask,
         JobHistoryChoicesKey key, int gen, List<ViewerJobHistoryRow> rows) =>
         JobHistoryLoadSteps.ApplyWhenCurrentAsync(choicesTask, () => _loads.Superseded(nameof(LoadJobsAsync), gen), choices =>
         {
-            if (choices.Servers is not null)
-            {
-                _knownServers = choices.Servers;
-            }
-
-            if (choices.Categories is not null)
-            {
-                _knownCategories = choices.Categories;
-            }
-
+            ApplyChoices(choices.Servers, choices.Categories, rows);
             if (choices.Servers is not null && choices.Categories is not null)
             {
                 _choicesFreshness.Record(key, DateTime.UtcNow);
             }
-
-            PopulateServerFilter(rows);
-            PopulateCategoryFilter(rows);
         });
+
+    /// <summary>
+    /// Takes the choices read beside the grid and redraws the Server and Category drop-downs from them and from <paramref name="rows"/>.
+    /// A half that is null (its read failed) keeps the last one. Internal so the tests drive the tab's own redraw.
+    /// </summary>
+    internal void ApplyChoices(ViewerDataService.JobHistoryServers? servers, List<string>? categories, List<ViewerJobHistoryRow> rows)
+    {
+        if (servers is not null)
+        {
+            _knownServers = servers.Choices;
+            _azureServerIds = servers.AzureSqlDatabaseIds;
+        }
+
+        StartCategoriesOverWhenServerChanged();
+        if (categories is not null)
+        {
+            _knownCategories = categories;
+        }
+
+        PopulateServerFilter(rows);
+        PopulateCategoryFilter(rows);
+
+        /* #6391: the empty-grid sentence follows the picked server, and the engine list may have arrived after the grid bound. */
+        NoJobsMessage.Text = EmptyNote(IsAzureSqlDatabaseSelected());
+    }
+
+    /// <summary>The Azure SQL Database servers among the Server choices, as the last read found them (they have no SQL Agent, so they never have rows).</summary>
+    private IReadOnlySet<int> _azureServerIds = new HashSet<int>();
+
+    /// <summary>The server the Category drop-down was last built for (null is All Servers), so a different pick starts the list over.</summary>
+    private int? _categoryListServerId;
+
+    /// <summary>What the empty grid says (#6391): the plain no-SQL-Agent sentence the web's Job History uses for an Azure SQL Database, else the usual note.</summary>
+    internal static string EmptyNote(bool azureSqlDatabase) =>
+        azureSqlDatabase ? AzureNoAgentLine : "No job runs recorded in the selected time range";
+
+    /// <summary>The web Job History's sentence for an Azure SQL Database (job-history.js AZURE_NO_AGENT_LINE).</summary>
+    internal const string AzureNoAgentLine = "Azure SQL Database has no SQL Agent, so it has no job history.";
+
+    private bool IsAzureSqlDatabaseSelected() => GetSelectedServerId() is int id && _azureServerIds.Contains(id);
 
     private void PopulateServerFilter(List<ViewerJobHistoryRow> rows)
     {
@@ -407,10 +436,37 @@ public partial class JobHistoryTab : UserControl
         ServerFilterComboBox.SelectionChanged += Filter_SelectionChanged;
     }
 
+    /// <summary>
+    /// #6391: the Category list is the picked server's categories (or the fleet's at All Servers). A different pick starts it over: what was
+    /// on offer, and the categories read for the earlier pick, belong to the earlier server. Run before a choices read is taken in, so the
+    /// new server's categories are not thrown away with the old ones.
+    /// </summary>
+    private void StartCategoriesOverWhenServerChanged()
+    {
+        var pickedServer = GetSelectedServerId();
+        if (pickedServer == _categoryListServerId)
+        {
+            return;
+        }
+
+        _categoryListServerId = pickedServer;
+        _knownCategories = [];
+        CategoryFilterComboBox.SelectionChanged -= Filter_SelectionChanged;
+        while (CategoryFilterComboBox.Items.Count > 1)
+        {
+            CategoryFilterComboBox.Items.RemoveAt(1);
+        }
+
+        CategoryFilterComboBox.SelectedIndex = 0;
+        CategoryFilterComboBox.SelectionChanged += Filter_SelectionChanged;
+    }
+
     private void PopulateCategoryFilter(List<ViewerJobHistoryRow> rows)
     {
         /* #5703: the choices only grow (JobHistoryFilterChoices.MergeCategories): those already on offer, every category with a run in the
            window (a read the row cap does not touch), and the rows just read. */
+        StartCategoriesOverWhenServerChanged();
+
         var offered = CategoryFilterComboBox.Items
             .OfType<ComboBoxItem>()
             .Skip(1)
@@ -561,6 +617,22 @@ public partial class JobHistoryTab : UserControl
 
     private async void Filter_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        if (CategoryFilterComboBox is null || NoJobsMessage is null)
+        {
+            return;
+        }
+
+        /* #6391: a category belongs to the server it was picked for. A different server starts the Category pick over, before the read,
+           so the read does not carry the earlier server's category into a server that has no such category. */
+        if (ReferenceEquals(sender, ServerFilterComboBox) && CategoryFilterComboBox.SelectedIndex > 0)
+        {
+            CategoryFilterComboBox.SelectionChanged -= Filter_SelectionChanged;
+            CategoryFilterComboBox.SelectedIndex = 0;
+            CategoryFilterComboBox.SelectionChanged += Filter_SelectionChanged;
+        }
+
+        NoJobsMessage.Text = EmptyNote(IsAzureSqlDatabaseSelected());
+
         if (IsLoaded)
         {
             await LoadJobsAsync();

@@ -991,6 +991,9 @@ public sealed class DarlingWorker : BackgroundService
     /* MinValue = the first sweep after startup runs the retention purge, then daily. */
     private DateTime _nextPurgeUtc = DateTime.MinValue;
 
+    /// <summary>The once-per-24-hours rule for the <c>collect.query_store_text</c> prune, shared by the scheduled passes (a pass the wall budget stopped brings the next one forward to within the hour).</summary>
+    private readonly QueryTextPruneGate _queryTextPruneGate = new();
+
     /* MinValue = the first sweep after startup evaluates the store disk-pressure self-alert, then every
        s_diskCheckInterval. Fleet-level (one shared store), so it is a single field, not per-server. */
     private DateTime _nextDiskCheckUtc = DateTime.MinValue;
@@ -13303,7 +13306,8 @@ AND   j.hypertable_name = '{relation}'", connection))
             name => StoreConfigProvider.ResolveFleetRetentionDays(name, overrides),
             config.PlanContentRetentionDays,
             paceWal: true,
-            collectionPressure: _collectionPressure);
+            collectionPressure: _collectionPressure,
+            queryTextPruneGate: _queryTextPruneGate);
 
         /* #5592: a pass the wall budget stopped brings the next scheduled pass forward to within the hour. */
         NotePurgePassEnded(purgeSummary, DateTime.UtcNow);

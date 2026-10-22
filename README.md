@@ -32,7 +32,7 @@ Not sure which one? Start with Lite. It is one download, nothing is installed on
 
 ## Quick start: Lite
 
-1. Download [`PerformanceMonitorLite-win-Setup.exe`](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest). It is a self-contained build, so you do not install a .NET runtime first.
+1. Download [`PerformanceMonitorLite-lite-Setup.exe`](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest). It is a self-contained build, so you do not install a .NET runtime first.
 2. Run the installer. It adds Start Menu and Desktop shortcuts.
 3. Start Lite from the Start Menu or the Desktop shortcut.
 4. Click **+ Add Server**, enter the connection details, test, and save.

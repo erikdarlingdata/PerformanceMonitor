@@ -62,19 +62,19 @@ public sealed class AgentChangesWebLiveTests
             Assert.True((bool)planRow["can_undo"]!);
             var planUndo = await Send("PUT", "/api/agent-changes/" + planCall + "/undo", "application/json", "{\"confirm\":true}");
             Assert.Equal(403, planUndo.Status);
-            Assert.Equal(DarlingWebEndpoints.AgentChangeRefusedMessage, (string)planUndo.Body!["error"]!);
+            Assert.Equal(DarlingWebEndpoints.AgentChangeRefusedMessage(false), (string)planUndo.Body!["error"]!);
             Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE actor LIKE 'person:%'", ct));
 
             var undone = await Send("PUT", "/api/agent-changes/" + await CalledIdAsync(owner, "m-web", ct) + "/undo", "application/json");
             Assert.Equal(403, undone.Status);
-            Assert.Equal(DarlingWebEndpoints.AgentChangeRefusedMessage, (string)undone.Body!["error"]!);
+            Assert.Equal(DarlingWebEndpoints.AgentChangeRefusedMessage(false), (string)undone.Body!["error"]!);
             Assert.Equal(
-                "This dashboard signs in to the store as the viewer role, so it cannot undo or switch off agent changes. Use the Viewer app, or run the web under the admin login.",
+                "This dashboard's store login cannot undo or switch off agent changes. Use the Viewer app to make the change, or give the web an admin store login (set postgres.webConnectionString to an admin login).",
                 (string)undone.Body["error"]!);
 
             var off = await Send("PUT", "/api/agent-changes/switch", "application/json", "{\"enabled\":false}");
             Assert.Equal(403, off.Status);
-            Assert.Equal(DarlingWebEndpoints.AgentChangeRefusedMessage, (string)off.Body!["error"]!);
+            Assert.Equal(DarlingWebEndpoints.AgentChangeRefusedMessage(false), (string)off.Body!["error"]!);
 
             Assert.Equal("agent says", await ScalarAsync(owner, "SELECT reason FROM config.config_mute_rules WHERE id = 'm-web'", ct));
             Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.config_service WHERE NOT agent_actions_enabled", ct));

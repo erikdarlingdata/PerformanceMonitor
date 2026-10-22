@@ -21,7 +21,7 @@
    Self-contained: admin.js hands this file its helpers. */
 
 import { VIZ } from "../panels.js";
-import { el, mount, errorStrip, emptyStrip, noticeStrip, apiGet, apiWrite } from "../util.js";
+import { el, mount, errorStrip, emptyStrip, noticeStrip, listOnlyNote, apiGet, apiWrite } from "../util.js";
 
 export const AGENT_LEVEL_CHOICES = [
   { value: "", label: "Inherit" },
@@ -33,9 +33,7 @@ export const AGENT_LEVEL_CHOICES = [
 
 export const AGENT_LIMIT_DEFAULTS = { perHour: "20", perDay: "100", lease: "15", expiry: "240" };
 
-export const ROUTES_LIST_ONLY =
-  "This dashboard signs in to the store as the viewer role (managed and compose stores), so routes are listed only. " +
-  "To add, edit or delete a route, use the Viewer app, or run the web under the admin login.";
+export const routesListOnly = (managed) => listOnlyNote(managed, "routes are listed only", "To add, edit or delete a route");
 export const ROUTES_EDITING_NOTE =
   "Add, edit and delete a route's agent channel, match, scope and destinations here. A webhook URL or key is sealed when saved and never " +
   "shown again: a box left blank keeps the saved one, and Remove deletes it. Email recipients are shown and edited as plain text.";
@@ -283,9 +281,9 @@ export function routeEditorNodes(options) {
 
 /** The nodes for a seat that lists only. */
 /* #6274: a seat that is not a signed-in admin lists only, and the service says why in its own sentence (sign in as an admin, or use the Viewer). */
-export function routeListOnlyNodes(message) {
+export function routeListOnlyNodes(message, managed) {
   const status = statusNode(routeStatus);
-  return (status ? [status] : []).concat([noticeStrip(message || ROUTES_LIST_ONLY)]);
+  return (status ? [status] : []).concat([noticeStrip(message || routesListOnly(managed))]);
 }
 
 /** The Routes grid's extra columns: Agent use for everyone, Change (Edit and Delete) for an editing seat. */
@@ -312,17 +310,16 @@ export function routeColumns(base, options) {
 
 /** Whether the seat may edit: the session says it can make changes AND the store login holds the grants. */
 export async function readAgentSetupAccess(session) {
-  if (!session || session.can_edit !== true) return { routes: false, profiles: false };
+  const managed = !!session && session.managed_store === true;
+  if (!session || session.can_edit !== true) return { routes: false, profiles: false, managed };
   const res = await apiGet("/api/agent-setup/access");
   const d = res && res.kind === "data" ? res.data : null;
-  return { routes: !!d && d.can_edit_routes === true, profiles: !!d && d.can_edit_profiles === true, message: d && typeof d.sign_in_message === "string" ? d.sign_in_message : null };
+  return { routes: !!d && d.can_edit_routes === true, profiles: !!d && d.can_edit_profiles === true, managed, message: d && typeof d.sign_in_message === "string" ? d.sign_in_message : null };
 }
 
 /* ───────────────────────────── Environment Profiles ───────────────────────────── */
 
-export const PROFILES_LIST_ONLY =
-  "This dashboard signs in to the store as the viewer role (managed and compose stores), so profiles are listed only. " +
-  "To change one, use the Viewer app, or run the web under the admin login.";
+export const profilesListOnly = (managed) => listOnlyNote(managed, "profiles are listed only", "To change one");
 export const PROFILES_NOTE =
   "An environment profile is free text every agent brief carries for its scope: the fleet, one server or one tag. Write the server's role, " +
   "business hours, owners, read limits and patterns known to be noisy. Saving blank text removes the scope's profile. Every change is journaled.";
@@ -380,7 +377,7 @@ export async function buildProfiles(body, generation, ctx) {
   const nodes = [];
   const status = statusNode(profileStatus);
   if (status) nodes.push(status);
-  nodes.push(noticeStrip(canEdit ? PROFILES_NOTE : (typeof d.sign_in_message === "string" && d.sign_in_message) || PROFILES_LIST_ONLY));
+  nodes.push(noticeStrip(canEdit ? PROFILES_NOTE : (typeof d.sign_in_message === "string" && d.sign_in_message) || profilesListOnly(session.managed_store === true)));
   if (canEdit) nodes.push(profileForm(profiles, fleet, d.max_length || 4000, ctx));
   const rows = profiles.map((p) => ({ ...p, scope: profileScopeText(p, fleet.servers, fleet.tags) }));
   nodes.push(rows.length

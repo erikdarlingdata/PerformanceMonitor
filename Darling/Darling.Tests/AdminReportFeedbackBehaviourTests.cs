@@ -73,7 +73,7 @@ public sealed class AdminReportFeedbackBehaviourTests
 
         Assert.Equal(0, page.GetProperty("formsBefore").GetInt32());
         Assert.Contains(Strings(page.GetProperty("strips")),
-            t => t.Contains("list-only there", System.StringComparison.Ordinal) && t.Contains("desktop Viewer", System.StringComparison.Ordinal));
+            t => t.Contains("this page is list-only", System.StringComparison.Ordinal) && t.Contains("To record feedback, use the Viewer app", System.StringComparison.Ordinal));
     }
 
     [Fact]
