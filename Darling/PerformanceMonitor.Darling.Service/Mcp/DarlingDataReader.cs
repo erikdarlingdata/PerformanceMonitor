@@ -298,7 +298,8 @@ internal static class DarlingDataReader
         int? PostgresMajorVersion = null,
         DateTime? RegisteredAt = null,
         int? SqlEngineEdition = null,
-        IReadOnlyList<string>? SameMachineAs = null);
+        IReadOnlyList<string>? SameMachineAs = null,
+        decimal MonthlyCostUsd = 0m);
 
     /// <summary>The latest server_properties snapshot (Lite's <c>ServerPropertiesRow</c>).
     /// <paramref name="UtcOffsetMinutes"/> is the offset IN FORCE at that collection (V16; null on a pre-V16 row)
@@ -3329,7 +3330,8 @@ internal static class DarlingDataReader
             s.postgres_major_version,
             s.created_date,
             s.sql_engine_edition,
-            {SameMachineAsColumnSql}
+            {SameMachineAsColumnSql},
+            COALESCE(c.monthly_cost_usd, 0) AS monthly_cost_usd
         FROM servers s
         JOIN config.config_monitored_servers c ON c.server_id = s.server_id
         LEFT JOIN LATERAL
@@ -3364,7 +3366,8 @@ internal static class DarlingDataReader
                 reader.IsDBNull(6) ? null : reader.GetInt32(6),
                 reader.IsDBNull(7) ? null : reader.GetDateTime(7),
                 reader.IsDBNull(8) ? null : reader.GetInt32(8),
-                reader.IsDBNull(9) ? null : reader.GetFieldValue<string[]>(9)));
+                reader.IsDBNull(9) ? null : reader.GetFieldValue<string[]>(9),
+                reader.GetDecimal(10)));
         }
 
         return rows;
