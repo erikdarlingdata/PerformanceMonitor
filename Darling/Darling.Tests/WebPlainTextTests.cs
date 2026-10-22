@@ -376,6 +376,25 @@ public sealed class WebPlainTextTests
         Assert.Equal("Azure SQL Database does not have this data.", o[0]);
         Assert.NotEqual(generic, o[0]);
     }
+
+    /// <summary>#6439: the tempdb File I/O Latency panel on an Azure SQL Database says the same short line as the other Azure panels, not "check
+    /// that collection is running"; any other engine gets no such answer and keeps its own miss.</summary>
+    [Fact]
+    public void TheTempDbFileIoAzureAnswer_IsNotCollected_AndBecomesTheAzureLine()
+    {
+        var json = PerformanceMonitor.Darling.Service.Mcp.DarlingEngineCapability.TempDbFileIoNotCollectedStatus("example-azure-db", 5)!;
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        Assert.Equal("not_collected", doc.RootElement.GetProperty("status").GetString());
+        var message = doc.RootElement.GetProperty("message").GetString()!;
+        Assert.DoesNotContain("Check that collection is running", message);
+
+        var o = Run([message], out _);
+        Assert.Equal("Azure SQL Database does not have this data.", o[0]);
+
+        Assert.Null(PerformanceMonitor.Darling.Service.Mcp.DarlingEngineCapability.TempDbFileIoNotCollectedStatus("example-sql", 3));
+        Assert.Null(PerformanceMonitor.Darling.Service.Mcp.DarlingEngineCapability.TempDbFileIoNotCollectedStatus("example-mi", 8));
+        Assert.Null(PerformanceMonitor.Darling.Service.Mcp.DarlingEngineCapability.TempDbFileIoNotCollectedStatus("unknown", 0));
+    }
 }
 
 /// <summary>Collection Health on a server without Always On lists the two AG collectors as not applicable.</summary>

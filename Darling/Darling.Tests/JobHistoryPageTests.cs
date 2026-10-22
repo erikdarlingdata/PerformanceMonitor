@@ -218,6 +218,21 @@ public sealed class JobHistoryPageTests
         Assert.Equal("Failed", rebuilt.GetProperty("selects").GetProperty("Status").GetString());
     }
 
+    /// <summary>#6439: the Category choices are the selected server's own. A server that has shown no run (an Azure SQL Database) lists none, a
+    /// server lists the categories its own answers carried, and a pick made on one server is not sent for the next.</summary>
+    [Fact]
+    public void TheCategoryChoices_AreTheSelectedServersOwn()
+    {
+        var c = Run().GetProperty("categoryChoices");
+
+        Assert.Equal(",Backup,Maintenance", string.Join(",", Strings(c.GetProperty("fleet"))));
+        Assert.Equal("", string.Join(",", Strings(c.GetProperty("noRuns"))));
+        Assert.Equal(",Backup", string.Join(",", Strings(c.GetProperty("oneServer"))));
+        Assert.Equal("Backup", c.GetProperty("pickedSent").GetString());
+        Assert.Equal(",Backup,Maintenance", string.Join(",", Strings(c.GetProperty("backToFleet"))));
+        Assert.Equal(JsonValueKind.Null, c.GetProperty("fleetCategorySent").ValueKind);
+    }
+
     [Fact]
     public void AFleetCallNamesNoServerAndAOneServerCallNamesIt()
     {
