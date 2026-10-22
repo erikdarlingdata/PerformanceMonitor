@@ -90,6 +90,37 @@ public sealed class LiteInvestigationGoldenTests
         Assert.DoesNotContain("alice", brief, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// The brief's <c>report_contract.required</c> is exactly the required parameters of Lite's submit tool (found by reflection, not
+    /// by reading source text). It once listed root_cause_found, which the tool does not take, and left out summary. The brief's
+    /// golden bytes above moved for that, and the pins were updated in the same PR.
+    /// </summary>
+    [Fact]
+    public void ReportContractRequired_IsExactlyTheSubmitToolsRequiredParameters()
+    {
+        var brief = System.Text.Json.Nodes.JsonNode.Parse(InvestigationBriefComposer.Compose(Sources(), LiteInvestigationBriefTools.Tools, McpDataDetail.Full, At))!;
+        var required = brief["report_contract"]!["required"]!.AsArray().Select(n => (string)n!).OrderBy(n => n, StringComparer.Ordinal).ToList();
+        var method = typeof(McpInvestigationTools).GetMethod(nameof(McpInvestigationTools.SubmitInvestigationReport))!;
+        var fromTool = method.GetParameters()
+            .Where(p => !p.IsOptional && p.GetCustomAttribute<DescriptionAttribute>() is not null)
+            .Select(p => p.Name!).OrderBy(n => n, StringComparer.Ordinal).ToList();
+        Assert.Equal(fromTool, required);
+    }
+
+    /// <summary>An ANOMALY_WRITE_LATENCY story names get_file_io_trend, then get_file_io_stats, ahead of the family calls.</summary>
+    [Fact]
+    public void AnAnomalyWriteLatencyStory_NamesTheFileIoReadsFirst()
+    {
+        var s = Sources();
+        var finding = s.Findings[0] with { RootFactKey = "ANOMALY_WRITE_LATENCY", NextTools = Array.Empty<InvestigationNextCall>() };
+        var withFinding = new InvestigationBriefSources(s.Request, s.Alerts, new[] { finding }, s.EarlierReports, s.RecentChanges, s.Notes, s.Profiles);
+        var brief = System.Text.Json.Nodes.JsonNode.Parse(InvestigationBriefComposer.Compose(withFinding, LiteInvestigationBriefTools.Tools, McpDataDetail.Full, At))!;
+        var calls = brief["next_calls"]!.AsArray().Select(c => (string)c!["tool"]!).ToList();
+        Assert.Equal("get_file_io_trend", calls[0]);
+        Assert.Equal("get_file_io_stats", calls[1]);
+        Assert.Contains("get_blocked_process_reports", calls);
+    }
+
     private static PseudonymKey FixedKey()
     {
         var bytes = new byte[32];
