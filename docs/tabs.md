@@ -27,6 +27,8 @@ Both feature auto-refresh, chart drill-down to Active Queries, right-click CSV e
 
 Both also share one time range picker with the web pages. It has presets, calendar periods, and typed ranges such as `last 3 days` or `since 9am`. A text column's filter lists its values to tick, like Excel, and stays set across refreshes and restarts.
 
+Lite has Investigations and Manage Query Tags buttons in its sidebar. The Darling viewer opens Investigations from Settings.
+
 The Darling viewer adds a fleet sidebar and per-server tabs, and it shows a PostgreSQL target on its own set of tabs. See [Darling/README.md](../Darling/README.md). The deprecated Dashboard's six-tab-group layout is documented in [deprecated/Dashboard/README.md](../deprecated/Dashboard/README.md).
 
 The Darling web dashboard has these pages in its sidebar:
@@ -36,14 +38,15 @@ The Darling web dashboard has these pages in its sidebar:
 - FinOps, with the same twelve sub-tabs as the table above
 - Fleet Sweeps
 - Alert History and Alert Rules
-- Admin, with the tabs Servers, Notification Routes, Alert Settings, and Report Feedback
-- Custom Views, Mute Rules, and Manage Tags (create, rename, recolour, move under another tag, put sibling tags in order with Move up and Move down, delete, and assign servers)
+- Investigations (requests, briefs, reports and feedback for your own AI agent)
+- Admin, with the tabs Servers, Notification Routes, Alert Settings, Report Feedback, Practice Scores, Pending Notes, Threshold Overrides, Agent changes, Server actions, and Environment Profiles
+- Custom Views, Mute Rules, Known Patterns, and Manage Tags (create, rename, recolour, move under another tag, put sibling tags in order with Move up and Move down, delete, and assign servers), Query Tags (the tag tree, hand assignments and rules), and Query Tag Usage (resource use by tag)
 - Job History
 
 The page for one SQL Server has these tabs:
 
 - Overview, Wait Stats, CPU, Memory, and Blocking
-- File I/O, Queries, and Configuration
+- File I/O, I/O Trends, Queries, and Configuration
 - Config Changes, Activity, and System Events
 - Collection Health and Recommendations
 

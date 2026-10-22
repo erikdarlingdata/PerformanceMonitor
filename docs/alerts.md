@@ -37,6 +37,8 @@ All thresholds are configurable in Settings.
 
 All cooldown periods are independently configurable in Settings under the Performance Alerts section.
 
+In Darling, an alert that clears can also be sent to Slack, Teams, the generic webhook and email. Each channel has a Send resolutions setting. It is off by default. A route can override it for its own destinations.
+
 #### PagerDuty Setup
 
 To receive alerts in PagerDuty:
