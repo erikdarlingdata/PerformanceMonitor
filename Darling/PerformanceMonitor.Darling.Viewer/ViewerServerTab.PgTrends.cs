@@ -73,17 +73,16 @@ public partial class ViewerServerTab
             hover.Clear();
             ApplyTheme(chart);
 
-            chart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-
             if (panel.Lines.Count == 0)
             {
-                chart.Plot.Axes.SetLimitsX(startUtc.ToOADate(), endUtc.ToOADate());
-                ReapplyAxisColors(chart);
-                chart.Plot.YLabel(panel.YLabel);
+                /* The shared empty chart installs its own empty tick generators on a plain numeric axis. A date axis
+                   refuses that ("Date axis must have a ITickGenerator generator"), which aborted the whole load and left
+                   one oversized blank chart, so the date axis is set only for a chart that has lines (#6385). */
                 RefreshEmptyChart(chart, panel.YLabel, panel.YLabel);
-                chart.Refresh();
                 continue;
             }
+
+            chart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
 
             double max = 0;
             var color = 0;
