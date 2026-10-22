@@ -3285,7 +3285,8 @@ internal static class DarlingDataReader
     internal const string SameMachineAsColumnSql = """
         COALESCE((SELECT array_agg(COALESCE(NULLIF(m.display_name, ''), m.server_name) ORDER BY m.server_name)
                   FROM servers m
-                  WHERE m.machine_identity = s.machine_identity AND m.server_id <> s.server_id AND m.is_enabled), ARRAY[]::text[]) AS same_machine_as
+                  WHERE m.machine_identity = s.machine_identity AND m.server_id <> s.server_id
+                    AND EXISTS (SELECT 1 FROM config.config_monitored_servers mc WHERE mc.server_id = m.server_id AND mc.is_enabled)), ARRAY[]::text[]) AS same_machine_as
         """;
 
     /// <summary>
@@ -3294,6 +3295,14 @@ internal static class DarlingDataReader
     /// <c>ServerSummaryItem.ClassifyFreshness</c>). <c>created_date</c> rides on the same registry row for the
     /// retention rule <see cref="ServerListRow"/> describes (#3967). $-free (no parameters, no bare now()) so a
     /// test can pin the dialect ungated.
+    ///
+    /// <para><b>#6454: the definition is the truth for name and enabled.</b> The registry row (<c>servers</c>) is mirrored
+    /// from <c>config.config_monitored_servers</c> only on the service's next reload, and its display name only on the next
+    /// connect, so an <c>edit_server</c> or <c>remove_server</c> read stale here for 40 to 60 seconds while
+    /// <c>get_collection_state</c> (which reads the definition) was current. The read now takes the display name and the
+    /// enabled flag from the definition and lists only a registry row that still has one: the reload's own
+    /// <c>DisableOrphanedServersSql</c> rule, applied at once. A server that never connected has no registry row and is
+    /// still not listed.</para>
     ///
     /// <para><b>#3976: a per-server LATERAL probe, not a correlated <c>MAX(collection_time)</c>.</b> The two
     /// read the SAME value — the newest collection per server — but a bound cannot make the old shape cheap:
@@ -3313,7 +3322,7 @@ internal static class DarlingDataReader
         SELECT
             s.server_id,
             s.server_name,
-            s.display_name,
+            COALESCE(NULLIF(c.name, ''), s.display_name) AS display_name,
             s.sql_major_version,
             latest.collection_time AS last_collection,
             s.engine_kind,
@@ -3322,6 +3331,7 @@ internal static class DarlingDataReader
             s.sql_engine_edition,
             {SameMachineAsColumnSql}
         FROM servers s
+        JOIN config.config_monitored_servers c ON c.server_id = s.server_id
         LEFT JOIN LATERAL
         (
             SELECT cl.collection_time
@@ -3331,7 +3341,7 @@ internal static class DarlingDataReader
             ORDER BY cl.collection_time DESC
             LIMIT 1
         ) AS latest ON TRUE
-        WHERE s.is_enabled
+        WHERE c.is_enabled
         ORDER BY s.server_name
         """;
 
