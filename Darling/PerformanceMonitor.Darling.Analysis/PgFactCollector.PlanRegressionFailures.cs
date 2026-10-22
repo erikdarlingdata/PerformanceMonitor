@@ -117,7 +117,10 @@ public sealed partial class PgFactCollector
         var recentStart = AsNaive(context.TimeRangeEnd).AddHours(-PlanRegressionFailureRule.RecentHours);
         var baselineHours = Math.Max(1.0, (recentStart - windowStart).TotalHours);
 
-        /* The gate absorbs its own faults (a failed decision answers raw), so nothing is swallowed here. */
+        /* The gate absorbs its own faults (a failed decision answers raw), so nothing is swallowed here. This read keeps the newest
+           snapshot per interval, which the table holds for a legacy row too, so it does NOT ask for clause 6's legacy-row probe
+           (requireNoLegacyRows stays false). The probe decompresses every batch of the server on compressed chunks, and this
+           read runs it on every analysis pass. Only the duration trend, which places every snapshot, needs it. */
         var (useWide, _) = await QueryStoreIntervalWide.ReadsTableAsync(
             connection, context.ServerId, windowStart, AsNaive(context.TimeRangeEnd), null,
             QueryStoreIntervalWide.TopMinWindow, FactCommandTimeoutSeconds, _logger, context.CancellationToken);

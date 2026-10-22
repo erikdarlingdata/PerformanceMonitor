@@ -231,7 +231,7 @@ public sealed class QueryStoreIntervalWideGridLiveTests
         await SeedGridAsync(runnerTier2, ServerId, WindowStart, ct);
         await ForceFilledSinceAsync(connectionTier2, WindowStart.AddDays(-1), ct);
         var (useTableTier2, clampTier2) = await QueryStoreIntervalWide.ReadsTableAsync(
-            connectionTier2, ServerId, WindowStart, WindowEnd, null, QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct);
+            connectionTier2, ServerId, WindowStart, WindowEnd, null, QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct, requireNoLegacyRows: true);
         Assert.True(useTableTier2, "the tier-2 seed carries no legacy row; clause 6 must not refuse it");
         await AssertRawEqualsTableAsync(connectionTier2, WindowStart, WindowEnd, clampTier2, null, TestTop, ct);
 
@@ -245,8 +245,12 @@ public sealed class QueryStoreIntervalWideGridLiveTests
         await SeedGridLegacyAsync(runnerLegacy, ServerId, WindowStart, ct);
         await ForceFilledSinceAsync(connectionLegacy, WindowStart.AddDays(-1), ct);
         var (useTableLegacy, _) = await QueryStoreIntervalWide.ReadsTableAsync(
-            connectionLegacy, ServerId, WindowStart, WindowEnd, null, QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct);
+            connectionLegacy, ServerId, WindowStart, WindowEnd, null, QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct, requireNoLegacyRows: true);
         Assert.False(useTableLegacy, "every row in this seed is legacy (interval_start_time_utc IS NULL); clause 6 must refuse the table");
+        /* Clause 6 is opt-in: a reader that keeps the newest snapshot per interval does not ask, and gets the table over the same window. */
+        var (useTableNotAsked, _) = await QueryStoreIntervalWide.ReadsTableAsync(
+            connectionLegacy, ServerId, WindowStart, WindowEnd, null, QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct);
+        Assert.True(useTableNotAsked, "without requireNoLegacyRows the legacy rows must not refuse the table");
     }
 
     /// <summary>

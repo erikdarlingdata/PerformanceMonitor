@@ -185,8 +185,10 @@ public sealed class QueryStoreDurationTrendTableLiveTests
         await QueryStoreIntervalWideGridLiveTests.SeedGridLegacyAsync(runner, ServerId, WindowStart, ct);
         await ForceFilledSinceAsync(connection, WindowStart.AddDays(-1), ct);
 
+        /* The trend asks for clause 6 (requireNoLegacyRows); the gate is opt-in since #6267's follow-up. The viewer read below goes through the
+           trend's own call, which passes it. */
         var (useTable, _) = await QueryStoreIntervalWide.ReadsTableAsync(
-            connection, ServerId, WindowStart, WindowEnd, null, QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct);
+            connection, ServerId, WindowStart, WindowEnd, null, QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct, requireNoLegacyRows: true);
         Assert.False(useTable, "every row in this seed is legacy (interval_start_time_utc IS NULL); clause 6 must refuse the table");
 
         var rawPoints = await ReadPointsAsync(postgres, ViewerDataService.QueryStoreDurationTrendSql, WindowStart, WindowEnd, ct);
