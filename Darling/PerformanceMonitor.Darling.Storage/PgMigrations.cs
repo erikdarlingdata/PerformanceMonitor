@@ -2232,6 +2232,58 @@ ALTER TABLE config.config_alert_settings
     private const string V212Sql = @"
 ALTER TABLE collect.servers
     ADD COLUMN IF NOT EXISTS machine_identity text;";
+    /// <summary>
+    /// V214 (#6334): <c>config.config_known_patterns</c>, the operator's known-pattern entries ("the backup job pushes High CPU every night
+    /// at 02:00"), shown beside the alerts they match. Context only: an entry never mutes, never pages and never changes an alert.
+    ///
+    /// <para>Every scope column is nullable and NULL means any: <c>server_id</c> (every server), <c>metric_name</c> (every metric, the name
+    /// alert history holds), <c>time_of_day</c> (any time). <c>time_of_day</c> is a wall-clock time in <c>time_zone</c> (an IANA id; NULL is
+    /// UTC) and matches within <c>window_minutes</c> either side, wrapping past midnight; the shared
+    /// <c>KnownPatternMatcher</c> in PerformanceMonitor.Common is the one place that rule lives. <c>expires_at_utc</c> is a naive UTC
+    /// <c>timestamp</c> like the mute rules' (NULL never expires). <c>note</c> is operator-written text, held to 1-500 characters by a
+    /// CHECK so a write that skips the store's function still cannot store more. Further CHECKs hold every column to what a reader can
+    /// load, so a direct call to a write function (or the owner's own SQL) cannot store a row that breaks the read of every entry: a
+    /// time of day below 24:00, a finite expiry before year 10000, a time zone that is a bounded IANA-shaped id (the shape only: the
+    /// zone's existence is the matcher's call, because PostgreSQL's names and .NET's differ at the edges), a metric name of at most 128
+    /// characters, an author of at most 256 and a note with some non-blank text. <c>updated_by</c> and <c>updated_at_utc</c> are NULL
+    /// until an edit; only <c>config.update_known_pattern</c> sets them.</para>
+    ///
+    /// <para><b>The table joins the <c>config_version</c> reload beacon</b> with V117's statement-level trigger on V17's shared
+    /// <c>config.config_bump_version()</c> function, so a write from any path (the web editor, the Viewer, hand-written SQL) moves the
+    /// beacon and a service that caches the entries re-reads them. No GRANT here: the readers' schema-wide SELECT covers a new
+    /// <c>config</c> table, and the writes go through owner-rights functions that provisioning grants to the operator roles. Additive;
+    /// an older build never reads the table.</para>
+    /// </summary>
+    private const string V214Sql = @"
+CREATE TABLE IF NOT EXISTS config.config_known_patterns
+(
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    server_id integer,
+    metric_name text,
+    time_of_day time,
+    time_zone text,
+    window_minutes integer NOT NULL DEFAULT 30,
+    note text NOT NULL,
+    created_by text,
+    created_at_utc timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC'),
+    expires_at_utc timestamp,
+    updated_by text,
+    updated_at_utc timestamp,
+    CONSTRAINT ck_known_patterns_note CHECK (char_length(note) BETWEEN 1 AND 500 AND btrim(note, E' 	
+') <> ''),
+    CONSTRAINT ck_known_patterns_window CHECK (window_minutes BETWEEN 0 AND 720),
+    CONSTRAINT ck_known_patterns_time_of_day CHECK (time_of_day < '24:00'),
+    CONSTRAINT ck_known_patterns_expires CHECK (expires_at_utc IS NULL OR (isfinite(expires_at_utc) AND expires_at_utc < '10000-01-01')),
+    CONSTRAINT ck_known_patterns_time_zone CHECK (time_zone IS NULL OR (char_length(time_zone) <= 64 AND time_zone ~ '^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$')),
+    CONSTRAINT ck_known_patterns_metric CHECK (char_length(metric_name) <= 128),
+    CONSTRAINT ck_known_patterns_created_by CHECK (char_length(created_by) <= 256),
+    CONSTRAINT ck_known_patterns_updated_by CHECK (char_length(updated_by) <= 256)
+);
+
+DROP TRIGGER IF EXISTS trg_bump_known_patterns ON config.config_known_patterns;
+CREATE TRIGGER trg_bump_known_patterns
+    AFTER INSERT OR UPDATE OR DELETE ON config.config_known_patterns
+    FOR EACH STATEMENT EXECUTE FUNCTION config.config_bump_version();";
 
     /// <summary>
     /// V196 (#5632, step 5): Level 3 and the per-server action switches. <b>Nothing here turns an action on.</b>
@@ -2621,6 +2673,7 @@ $rung$;";
         new Migration(211, "client-timeouts-relative-bars", V211Sql),
         new Migration(212, "server-machine-identity", V212Sql),
         new Migration(213, "query-store-replica", V213Sql),
+        new Migration(214, "known-patterns", V214Sql),
     };
 
     /// <summary>

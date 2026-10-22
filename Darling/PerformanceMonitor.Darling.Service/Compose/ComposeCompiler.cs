@@ -305,7 +305,7 @@ public static class ComposeCompiler
         /* #4605: query_store_interval_wide (V145) already holds the latest snapshot per
            interval, every outcome — exactly what the raw ROW_NUMBER dedupe below computes — so an eligible
            run reads it directly instead of re-sorting every raw snapshot in the window. Eligibility
-           (QueryStoreIntervalWide.UseTable plus clause 6, per server in scope) is decided by the runner
+           (QueryStoreIntervalWide.UseTable, per server in scope; clause 6's legacy-row probe is not asked for, the table holds the same newest-snapshot-per-interval rows) is decided by the runner
            BEFORE compiling (ComposeRunContext.QueryStoreWideEligible), never here: the compiler stays pure
            and never opens a connection. The table has no server_name column, so the relation joins the
            registry (collect.servers, server_id PRIMARY KEY / server_name NOT NULL — 1:1) to restore it,

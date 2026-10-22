@@ -9,6 +9,7 @@ using Npgsql;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Common.KnownPatterns;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -482,9 +483,33 @@ ORDER BY m.metric_name, f.day DESC";
             }
         }
 
+        /* #6334: the operator's known-pattern entries, loaded once for the brief and matched in memory for each linked metric at the
+           first alert's time. `recurrence` has one row per linked metric (a metric with no history still comes back) and every row
+           carries the shared first-alert time, so it is the metric list and the anchor, with no query of its own. The load is the
+           alert history's (LoadForAlertsAsync): a store older than V214 has no table and gives no entries and no error. Entries
+           expired at the alert's time are judged by the matcher, not here. A practice request reads none (the composer drops the
+           section for it too): a note can name the cause of the replayed case. */
+        var knownPatterns = new List<InvestigationKnownPatternMatch>();
+        if (practiceOf is null && recurrence.Count > 0)
+        {
+            var entries = await DarlingMcpKnownPatternTools.LoadForAlertsAsync(_postgres, cancellationToken).ConfigureAwait(false);
+            if (entries.Count > 0)
+            {
+                foreach (var item in recurrence)
+                {
+                    foreach (var entry in KnownPatternMatcher.Match(entries, request.ServerId, item.MetricName, item.AroundUtc,
+                        message => _logger?.LogWarning("{Message}", message)))
+                    {
+                        knownPatterns.Add(new InvestigationKnownPatternMatch(item.MetricName, entry.Id, entry.Note, entry.CreatedBy, entry.UpdatedBy));
+                    }
+                }
+            }
+        }
+
         return new InvestigationBriefSources(request, alerts, findings, earlier, changes, notes, profiles,
             priorLinks.Count > 0 ? priorLinks : null, requestUrl, practiceOf is not null,
-            recurrence.Count > 0 ? recurrence : null, evidence.Count > 0 ? evidence : null);
+            recurrence.Count > 0 ? recurrence : null, evidence.Count > 0 ? evidence : null,
+            knownPatterns.Count > 0 ? knownPatterns : null);
     }
 
     /// <summary>The latest findings for the server over 24 hours, collapsed per chain, the request's own story first, each
