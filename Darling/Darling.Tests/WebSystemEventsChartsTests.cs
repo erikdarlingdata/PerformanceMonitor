@@ -119,6 +119,20 @@ public sealed class WebSystemEventsChartsBehaviourTests
         Assert.Equal("No sick spinlock was reported in this window.", r.GetProperty("spinNone").GetProperty("text").GetString());
     }
 
+    /// <summary>#6439: the System Events intro that says the counters are "charted below" is shown only when a chart is drawn.</summary>
+    [Fact]
+    public void TheChartedBelowSentence_IsShownOnlyWhenAChartIsDrawn()
+    {
+        var intro = Run().GetProperty("intro");
+
+        Assert.Contains("charted below", intro.GetProperty("text").GetString(), StringComparison.Ordinal);
+        Assert.True(intro.GetProperty("zero").GetBoolean());
+        Assert.True(intro.GetProperty("spin").GetBoolean());
+        Assert.False(intro.GetProperty("noRows").GetBoolean());
+        Assert.False(intro.GetProperty("noData").GetBoolean());
+        Assert.False(intro.GetProperty("nothing").GetBoolean());
+    }
+
     /// <summary>A bucket carries the LARGEST value of each counter (one bad page is never averaged away), 0 stays 0, and a counter no
     /// snapshot in the bucket carried is null, not 0.</summary>
     [Fact]

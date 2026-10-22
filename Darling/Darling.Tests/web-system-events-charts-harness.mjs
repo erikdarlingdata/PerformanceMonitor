@@ -127,4 +127,15 @@ out.spinPoints = sec.spinlockPoints(spin);
 out.spinDrawn = drew(byTitle["Contention Events: Sick Spinlocks"], spin);
 out.spinNone = drew(byTitle["Contention Events: Sick Spinlocks"], { sick_spinlock_types: [], entries: [entry(0, { sick_spinlocks: [] })] });
 
+/* #6439: the "charted below" sentence is shown only when a chart is drawn: a collected 0 or a named sick spinlock draws; a window
+   with no row, or rows that carry no counter and no spinlock (an Azure SQL Database), draws nothing. */
+out.intro = {
+  text: sec.COUNTERS_INTRO,
+  zero: sec.counterChartsDrawn(zeros),
+  spin: sec.counterChartsDrawn(spin),
+  noRows: sec.counterChartsDrawn({ entries: [], sick_spinlock_types: [] }),
+  noData: sec.counterChartsDrawn({ entries: [entry(0, { bad_pages_detected: null, latch_warnings: null })], sick_spinlock_types: [] }),
+  nothing: sec.counterChartsDrawn(null),
+};
+
 console.log(JSON.stringify(out));

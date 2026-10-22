@@ -3,7 +3,7 @@ Performance Monitor Lite - .NET runtime prerequisites
 
 There are none. Both builds carry their own .NET runtime.
 
-  * PerformanceMonitorLite-win-Setup.exe
+  * PerformanceMonitorLite-lite-Setup.exe
 
     Self-contained. Nothing to install first, and it auto-updates.
 

@@ -144,13 +144,35 @@
                                 </ControlTemplate>
                             </ToggleButton.Template>
                         </ToggleButton>
+                        <!-- #6452: the selection box needs the item-template SELECTOR as well as the template. DisplayMemberPath reaches the
+                             closed box through ItemTemplateSelector, so without it a record item (a ServerChoice) showed its type name. -->
                         <ContentPresenter x:Name="ContentSite"
                                           IsHitTestVisible="False"
                                           Content="{TemplateBinding SelectionBoxItem}"
                                           ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                                          ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}"
                                           Margin="{TemplateBinding Padding}"
                                           VerticalAlignment="Center"
                                           HorizontalAlignment="Left"/>
+                        <!-- #6452: an IsEditable combo shows its Text through this box (the ComboBox finds it by name); the template had none,
+                             so the Metric box in Add Known Pattern was blank. Shown only when IsEditable, clear of the drop arrow. -->
+                        <TextBox x:Name="PART_EditableTextBox"
+                                 Visibility="Collapsed"
+                                 Focusable="True"
+                                 IsReadOnly="{TemplateBinding IsReadOnly}"
+                                 Margin="0,0,20,0"
+                                 Padding="{TemplateBinding Padding}"
+                                 VerticalContentAlignment="Center"
+                                 Background="Transparent"
+                                 BorderThickness="0"
+                                 Foreground="{TemplateBinding Foreground}"
+                                 CaretBrush="{TemplateBinding Foreground}">
+                            <TextBox.Template>
+                                <ControlTemplate TargetType="TextBox">
+                                    <ScrollViewer x:Name="PART_ContentHost" Focusable="False" HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Hidden"/>
+                                </ControlTemplate>
+                            </TextBox.Template>
+                        </TextBox>
                         <Popup x:Name="PART_Popup" Placement="Bottom"
                                IsOpen="{TemplateBinding IsDropDownOpen}"
                                AllowsTransparency="True" Focusable="False" PopupAnimation="Slide">
@@ -165,6 +187,10 @@
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsEnabled" Value="False">
                             <Setter Property="Foreground" Value="{DynamicResource ViewerDisabledTextBrush}"/>
+                        </Trigger>
+                        <Trigger Property="IsEditable" Value="True">
+                            <Setter TargetName="PART_EditableTextBox" Property="Visibility" Value="Visible"/>
+                            <Setter TargetName="ContentSite" Property="Visibility" Value="Collapsed"/>
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
