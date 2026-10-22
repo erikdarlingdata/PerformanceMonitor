@@ -58,9 +58,9 @@ public sealed class LiteInvestigationGoldenTests
     private static string Sha(string text) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
 
     [Theory]
-    [InlineData(McpDataDetail.Full, "103E37D369912AE9161B2691C10F7F51BFEBF5FA72E60CE18B4A50BE17ADAD67")]
-    [InlineData(McpDataDetail.MaskLiterals, "6427BD28BEE859A66C29009A545072C0B5F96B6DF9BCFEA1E52B7A0EBDA5F46E")]
-    [InlineData(McpDataDetail.MetadataOnly, "CD0442961146963B9162A96E5395B181B8238FD232AA1E651F6771745A5BCE3E")]
+    [InlineData(McpDataDetail.Full, "3A16CBDB09F87010BDD08947368E86CA6D9413BF3B42B089E7EFC52AAB5719D0")]
+    [InlineData(McpDataDetail.MaskLiterals, "2C147B3983FE99993A2D63E54CA6342A4C743C8E3D01FCE65E27F210BA707633")]
+    [InlineData(McpDataDetail.MetadataOnly, "8CD402B156AF237F81355CD2D2D866B91573458772C8752184A7A1183FF8B57C")]
     public void TheLiteBrief_ForAFixedInput_IsByteForByteUnchanged(McpDataDetail mode, string expectedSha)
     {
         /* No key: the brief numbers logins per answer (login#1), as before #6066, so this pin did not move. */
@@ -81,9 +81,40 @@ public sealed class LiteInvestigationGoldenTests
     {
         var brief = InvestigationBriefComposer.Compose(Sources(), LiteInvestigationBriefTools.Tools, McpDataDetail.MetadataOnly, At, FixedKey());
 
-        Assert.True("A93E1CC9D8C35BA9DE65580E43F3DB5C5A64DE53D6C94C6538B4FC92344D98AF" == Sha(brief), $"The keyed Lite brief moved; its SHA-256 is {Sha(brief)}, length {brief.Length}:\n{brief}");
+        Assert.True("FF1D2CDE30BB0A40A613101446B469EE8D53D67019C8DCF38CB3AB036B0AD657" == Sha(brief), $"The keyed Lite brief moved; its SHA-256 is {Sha(brief)}, length {brief.Length}:\n{brief}");
         Assert.DoesNotContain("corp", brief, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("alice", brief, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// The brief's <c>report_contract.required</c> is exactly the required parameters of Lite's submit tool (found by reflection, not
+    /// by reading source text). It once listed root_cause_found, which the tool does not take, and left out summary. The brief's
+    /// golden bytes above moved for that, and the pins were updated in the same PR.
+    /// </summary>
+    [Fact]
+    public void ReportContractRequired_IsExactlyTheSubmitToolsRequiredParameters()
+    {
+        var brief = System.Text.Json.Nodes.JsonNode.Parse(InvestigationBriefComposer.Compose(Sources(), LiteInvestigationBriefTools.Tools, McpDataDetail.Full, At))!;
+        var required = brief["report_contract"]!["required"]!.AsArray().Select(n => (string)n!).OrderBy(n => n, StringComparer.Ordinal).ToList();
+        var method = typeof(McpInvestigationTools).GetMethod(nameof(McpInvestigationTools.SubmitInvestigationReport))!;
+        var fromTool = method.GetParameters()
+            .Where(p => !p.IsOptional && p.GetCustomAttribute<DescriptionAttribute>() is not null)
+            .Select(p => p.Name!).OrderBy(n => n, StringComparer.Ordinal).ToList();
+        Assert.Equal(fromTool, required);
+    }
+
+    /// <summary>An ANOMALY_WRITE_LATENCY story names get_file_io_trend, then get_file_io_stats, ahead of the family calls.</summary>
+    [Fact]
+    public void AnAnomalyWriteLatencyStory_NamesTheFileIoReadsFirst()
+    {
+        var s = Sources();
+        var finding = s.Findings[0] with { RootFactKey = "ANOMALY_WRITE_LATENCY", NextTools = Array.Empty<InvestigationNextCall>() };
+        var withFinding = new InvestigationBriefSources(s.Request, s.Alerts, new[] { finding }, s.EarlierReports, s.RecentChanges, s.Notes, s.Profiles);
+        var brief = System.Text.Json.Nodes.JsonNode.Parse(InvestigationBriefComposer.Compose(withFinding, LiteInvestigationBriefTools.Tools, McpDataDetail.Full, At))!;
+        var calls = brief["next_calls"]!.AsArray().Select(c => (string)c!["tool"]!).ToList();
+        Assert.Equal("get_file_io_trend", calls[0]);
+        Assert.Equal("get_file_io_stats", calls[1]);
+        Assert.Contains("get_blocked_process_reports", calls);
     }
 
     private static PseudonymKey FixedKey()

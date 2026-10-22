@@ -61,19 +61,7 @@ Nothing is installed on the monitored SQL Servers by either edition beyond two l
   ```
 
   On Windows Server 2022 build 20348.5622, `Set-ProcessMitigation -Remove -Disable UserShadowStack` did not remove the setting (it returned `C000000D`). `Set-ProcessMitigation -Reset` failed too ("Invalid input parameters"). The registry way above worked. The `Set-ProcessMitigation -Disable` command writes three values (`MitigationOptions`, `MitigationAuditOptions`, `EAFModules`) under the exe's key in `Image File Execution Options`. The undo removes only those values and leaves any other value on that key alone. Restart the program afterwards. The first command is described in Microsoft's [Set-ProcessMitigation](https://learn.microsoft.com/en-us/powershell/module/processmitigations/set-processmitigation) reference.
-- **.NET 10 runtimes on the host**, from <https://dotnet.microsoft.com/download/dotnet/10.0>. Both
-  shipped binaries are framework-dependent, and a stock Windows Server image has none of them:
-  - **.NET Runtime 10 and ASP.NET Core Runtime 10** for the service. The simplest way to get both is the
-    **ASP.NET Core Hosting Bundle 10**, which installs the two together. The standalone ASP.NET Core
-    Runtime installer does **not** include the base .NET Runtime, so with that installer alone you also
-    need the .NET Runtime 10. ASP.NET Core is required unconditionally — the MCP package brings the
-    ASP.NET Core framework reference in transitively, so it is needed whether or not you ever enable MCP
-    or the web dashboard.
-  - **.NET Desktop Runtime 10** for the viewer (WPF). Not needed on a headless collector host, and not
-    needed for a remote seat installed from the viewer's own `Setup.exe`, which is self-contained.
-
-  `install-darling.ps1` checks these before it installs anything: it refuses when the .NET Runtime or
-  ASP.NET Core is missing and warns when the Desktop runtime is. The .NET 10 SDK covers both if you are building from source.
+- **No .NET runtime to install on Windows.** The service and the bundled `viewer\` folder in the zip carry their own .NET runtime. They are self-contained. A stock Windows Server needs nothing installed first. Runtime updates arrive with each Darling release. The Linux tarball is different: see [Run on Linux](#run-on-linux-docker-compose-or-systemd-1804). You need the .NET 10 SDK only to build from source.
 
 Build from the repository root:
 
@@ -1462,6 +1450,8 @@ The notable rungs are below. For the **complete** current schema, read `Darling/
 | **V77** — Activity-driven plan fetch | Three strokes behind #2312's reshape of the Query Store plan/text fetch: `query_store_plan_map.digest` goes **nullable** (a plan whose XML the engine cannot persist gets a NULL-digest map row — the content-less marker that stops the probe re-selecting it forever), `query_store_text` gains `query_hash` (the Query Store reset detector: an id whose stored hash differs from the live one names a DIFFERENT statement now and its text refetches within one cycle), and the retired `planwm:`/`textwm:` watermark state rows are deleted wholesale. The fetch itself no longer walks the plan catalog by watermark — the cycle's collected rows name their plans, the store answers which are missing, and only those are fetched |
 
 All timestamps in the store are **naive-UTC** `timestamp` columns — the product-wide cross-store contract (Lite's DuckDB does the same).
+
+To back up, restore or move the store, see [Back up, restore and move the store](../docs/darling-store-backup.md).
 
 ### Reading the store directly (plan XML is compressed)
 
