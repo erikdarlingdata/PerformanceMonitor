@@ -38,6 +38,11 @@ public partial class AddServerDialog : Window
     /// <summary>#6352: the host the edited server had when the dialog opened. Save changes the live list object before it
     /// calls the manager, so the manager's own stored copy cannot tell a changed host from an unchanged one.</summary>
     private string? _originalHost;
+
+    /// <summary>Set when this user has not confirmed the host the edited server names now (see
+    /// <see cref="ServerHostBindings"/>): the dialog says so, leaves the saved password or secret out of its box so neither
+    /// a test nor a save sends it to the new host, and saving confirms the host.</summary>
+    private readonly ServerHostChange? _hostChange;
     private string? _originalReplica;
 
     public AddServerDialog(ServerManager serverManager, ProfileManager profileManager)
@@ -74,6 +79,11 @@ public partial class AddServerDialog : Window
     {
         Title = "Edit SQL Server";
         _originalHost = existing.ServerName;
+        _hostChange = serverManager.HostChange(existing);
+        if (_hostChange != null)
+        {
+            StatusText.Text = _hostChange.Describe(existing);
+        }
         _originalReplica = existing.QueryStoreReplica ?? "";
         ServerNameBox.Text = existing.ServerName;
         DisplayNameBox.Text = existing.DisplayName;
@@ -139,7 +149,9 @@ public partial class AddServerDialog : Window
             if (cred.HasValue)
             {
                 UsernameBox.Text = cred.Value.Username;
-                PasswordBox.Password = cred.Value.Password;
+                /* A password saved for another host stays out of the box: it is entered again for this one. */
+                if (_hostChange == null)
+                    PasswordBox.Password = cred.Value.Password;
             }
         }
         else if (existing.AuthenticationType == AuthenticationTypes.ServicePrincipal)
@@ -156,7 +168,9 @@ public partial class AddServerDialog : Window
                 // The stored credential's username is the client id; prefer the model value when present.
                 if (string.IsNullOrEmpty(AzureClientIdBox.Text))
                     AzureClientIdBox.Text = cred.Value.Username;
-                AzureClientSecretBox.Password = cred.Value.Password;
+                /* A secret saved for another host stays out of the box: it is entered again for this one. */
+                if (_hostChange == null)
+                    AzureClientSecretBox.Password = cred.Value.Password;
             }
         }
         else if (existing.AuthenticationType == AuthenticationTypes.ManagedIdentity)
@@ -787,6 +801,13 @@ public partial class AddServerDialog : Window
                 StatusText.Text = "Username is required for SQL Server authentication.";
                 return;
             }
+
+            /* The host changed since this user saved the password: it is entered again before anything connects. */
+            if (_hostChange != null && !useProfile && string.IsNullOrEmpty(password))
+            {
+                StatusText.Text = _hostChange.Describe(AddedServer!);
+                return;
+            }
         }
 
         /* #4789: the id everything is collected under is a 32-bit hash of the name, database and read-only intent,
@@ -899,6 +920,10 @@ public partial class AddServerDialog : Window
                 {
                     _serverManager.UpdateServer(AddedServer, username, password);
                 }
+
+                /* Saving the dialog (with the password entered again where the server has one) confirms the host it
+                   names now, for this user. */
+                _serverManager.ConfirmHost(AddedServer);
             }
             else
             {

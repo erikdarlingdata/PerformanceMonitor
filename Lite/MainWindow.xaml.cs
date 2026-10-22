@@ -770,6 +770,7 @@ public partial class MainWindow : Window
         foreach (var server in servers)
         {
             server.IsOnline = _serverManager.GetConnectionStatus(server.Id).IsOnline;
+            server.HostChangeNotice = _serverManager.HostChange(server)?.Describe(server);
             server.HasCollectorErrors = _collectorService != null
                 && server.IsOnline == true
                 && _collectorService.GetHealthSummary(server).ErroringCollectors > 0;
@@ -1288,6 +1289,23 @@ public partial class MainWindow : Window
                 await openTab.ShowIncidentAsync(shown.View, shown.FromUtc, shown.ToUtc, reload: true);
             }
             return;
+        }
+
+        /* A server whose host this user has not confirmed opens Edit Server instead, once, with the sentence saying what
+           changed: saving it (with the password entered again where the server has one) confirms the host, and only then
+           does this connect. Closing it connects to nothing. */
+        if (_serverManager.HostChange(server) is { } hostChange)
+        {
+            StatusText.Text = hostChange.Describe(server);
+            var confirmDialog = new AddServerDialog(_serverManager, _profileManager, server) { Owner = this };
+            var saved = confirmDialog.ShowDialog() == true;
+            RefreshServerList();
+            if (!saved || _serverManager.HostChange(server) != null)
+            {
+                return;
+            }
+
+            StatusText.Text = string.Empty;
         }
 
         /* Clear a previously declined interactive sign-in when the user explicitly connects: opening
@@ -2389,6 +2407,7 @@ public partial class MainWindow : Window
             {
                 var status = _serverManager.GetConnectionStatus(server.Id);
                 server.IsOnline = status?.IsOnline;
+                server.HostChangeNotice = _serverManager.HostChange(server)?.Describe(server);
                 if (status?.IsOnline == null) continue;
 
                 bool isOnline = status.IsOnline == true;

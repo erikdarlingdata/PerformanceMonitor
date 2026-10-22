@@ -236,6 +236,14 @@ public class ServerConnection : INotifyPropertyChanged
     public bool? HasCollectorErrors { get; set; }
 
     /// <summary>
+    /// The sentence saying this server's host is not the one the current Windows user confirmed for it (see
+    /// <c>ServerHostBindings</c>), shown first in the sidebar tooltip; null when the host is confirmed. Never saved:
+    /// servers.json is shared, and the answer differs per user.
+    /// </summary>
+    [JsonIgnore]
+    public string? HostChangeNotice { get; set; }
+
+    /// <summary>
     /// The sidebar row's status, as a VALUE — the same <see cref="ServerCardStatus"/> the Overview card
     /// renders (#2458). This row used to derive its own copy of the four-word ladder from this same flag
     /// pair, on a different type, on a different surface: the sidebar and the card could therefore say
@@ -274,7 +282,7 @@ public class ServerConnection : INotifyPropertyChanged
     /// </summary>
     [JsonIgnore]
     public string DotTooltip => string.Join("\n",
-        CardStatus.Headline(),
+        HostChangeNotice is { Length: > 0 } notice ? notice + "\n" + CardStatus.Headline() : CardStatus.Headline(),
         "It reports the connection check only, not collection freshness — the Overview card's Last Collect row bands that.",
         DotTooltipAction);
 
