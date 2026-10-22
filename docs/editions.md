@@ -31,7 +31,7 @@ All editions include real-time alerts (email + webhooks), charts and graphs, dar
 | Azure SQL Database | Supported | Supported | Not supported |
 | Azure SQL MI / AWS RDS | Supported | Supported | Supported |
 | PostgreSQL (self-hosted, AWS RDS, Aurora) | Not supported | Supported | Not supported |
-| Graphical plan viewer | Built-in, 30-rule PlanAnalyzer | Built-in, 30-rule PlanAnalyzer | Built-in, 30-rule PlanAnalyzer |
+| Graphical plan viewer | Built-in, 37-rule PlanAnalyzer | Built-in, 37-rule PlanAnalyzer | Built-in, 37-rule PlanAnalyzer |
 | Standalone plan viewer | Open/paste/drag `.sqlplan` | Open/paste/drag `.sqlplan` | Open/paste/drag `.sqlplan` |
 | Alerts (tray + email + webhooks) | Yes | Email + webhooks (headless) | Yes |
 | Themes | Dark and light | Dark and light | Dark and light |
