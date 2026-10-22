@@ -993,7 +993,6 @@
     "Darling.Tests.LiteJobHistoryLoadingCapTests": 0,
     "Darling.Tests.LiteJobHistorySourceTests": 0,
     "Darling.Tests.LitePerfmonWaitStatisticsArtifactSourceTests": 0,
-    "Darling.Tests.LiteReadsTraitGuardTests": 21.36,
     "Darling.Tests.LiveCleanupBatchTests": 0.93,
     "Darling.Tests.LiveClockCensusTests": 1.12,
     "Darling.Tests.LivePostgresCollectionHygieneTests": 0.1,

@@ -556,9 +556,8 @@ It finds a read spelled three ways, and **only** these three:
 - a bare root name as an element of a collection projected one element to one whole path —
   `new[] { "Lite", "Lite.Tests" }.Select(d => Path.Combine(root, d))`.
 
-Anything else is invisible to it, and that is a decision rather than a gap — the census of shapes it
-cannot see, and the measurement behind refusing to widen it again, are in
-`TheCSharpMatchers_StillCannotSeeTheseSpellings`. The practical consequence is short: **spell the path
+Anything else is invisible to it, and that is a decision rather than a gap: widening the matcher again
+costs more than it finds. The practical consequence is short: **spell the path
 one of those three ways, at the site that reads it.** A root literal buried mid-`Path.Combine`, segments
 handed to a helper, or a segment array declared in another member all read fine and leave the guard
 unable to tell whether CI can run you. Nothing warns you — it is the silent direction by construction.
