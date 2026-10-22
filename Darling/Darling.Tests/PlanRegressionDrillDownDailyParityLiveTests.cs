@@ -13,6 +13,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using NpgsqlTypes;
@@ -46,6 +47,7 @@ public sealed class PlanRegressionDrillDownDailyParityLiveTests
 {
     private const int ServerId = -5794001;
     private const string Db = "db";
+    private const string OtherDb = "db_two";
 
     /* The analysis window is the hour before the kit's fixed Now, so M (the comparison window's day-aligned start) is 14 days
        before that, and the open day is Now's. */
@@ -57,9 +59,18 @@ public sealed class PlanRegressionDrillDownDailyParityLiveTests
     /* The open day's watermark: its rows that start before 11:00 are in its totals, the rest are live. */
     private static readonly DateTime Watermark = OpenDay.AddHours(11);
 
-    /* Four offenders, and one query that regressed the same way but is not on the fact's list. */
+    /* Four offenders in the first database and one steady one in the second, which never regresses (#6376 review). The
+       second database also has a regressed query 1, so (OtherDb, 1) is a CROSS pair: its database and its query id are both
+       on the list, but not as a pair. The table route matches the two arrays independently and returns it; the daily route
+       matches pairs and must not. And one query that regressed the same way but is not on the fact's list. */
     private static readonly long[] Offenders = { 1, 2, 3, 4 };
+    private static readonly PlanRegressionOffender[] Pairs =
+        [.. Offenders.Select(q => new PlanRegressionOffender(Db, q)), new PlanRegressionOffender(OtherDb, SteadyOtherQuery)];
+    private const long SteadyOtherQuery = 20;
     private const long NotAnOffender = 9;
+
+    /* The offender that carries a non-NULL replica_role (PRIMARY) and has a SECONDARY copy of its latest plan. */
+    private const long PrimaryRoleQuery = 4;
 
     [Fact]
     public async Task TheDailyRoute_ReturnsTheTableRoutesRows_WithWholeAndPartialDays_AndWithoutOffendersFallsBack()
@@ -78,12 +89,25 @@ public sealed class PlanRegressionDrillDownDailyParityLiveTests
         Assert.True(homes.Count >= 10, $"the seed landed in {homes.Count} partition(s): {string.Join(", ", homes)}");
 
         /* ---- the table route: no day is built, so the product reads the interval table ---- */
-        var table = await DrillDownAsync(postgres, Offenders);
+        var tableAll = await DrillDownAsync(postgres, Pairs);
+        var table = OnPairs(tableAll);
         Assert.Equal(Offenders, table.Select(r => r.GetProperty("query_id").GetInt64()).OrderBy(q => q).ToArray());
         var two = table.Single(r => r.GetProperty("query_id").GetInt64() == 2);
         Assert.True(two.GetProperty("parameter_sensitivity_cofired").GetBoolean(), "query 2's plan-cache signature must be flagged");
         Assert.Equal("offender 2", two.GetProperty("query_text").GetString());
         Assert.Equal("text one", table.Single(r => r.GetProperty("query_id").GetInt64() == 1).GetProperty("query_text").GetString());
+
+        /* A non-NULL replica_role: query 4's regressed rows are the primary's, and its secondary rows carry a newer hash on
+           another plan. The hash lookup has to stay on the latest plan's replica, or it picks up the secondary's hash and
+           loses the plan-cache flag. */
+        var four = table.Single(r => r.GetProperty("query_id").GetInt64() == 4);
+        Assert.Equal("PRIMARY", four.GetProperty("replica_role").GetString());
+        Assert.True(four.GetProperty("parameter_sensitivity_cofired").GetBoolean(), "query 4's plan-cache signature must be flagged");
+
+        /* The one real difference between the routes (#6376 review): the table route matches database and query id as two
+           independent lists, so the cross pair is in its rows. */
+        Assert.Contains(tableAll, r => r.GetProperty("database").GetString() == OtherDb && r.GetProperty("query_id").GetInt64() == 1);
+        Assert.DoesNotContain(table, r => r.GetProperty("database").GetString() == OtherDb);
 
         /* ---- every closed day built whole by the builder, the open day and tomorrow partially ---- */
         for (var day = WindowStart; day < OpenDay; day = day.AddDays(1))
@@ -97,11 +121,13 @@ public sealed class PlanRegressionDrillDownDailyParityLiveTests
         Assert.Equal(16, built.Count);
         Assert.Equal(Watermark, built.Single(b => b.Day == DateOnly.FromDateTime(OpenDay)).Through);
         Assert.Equal(Watermark, PgFactCollector.PlanRegressionLiveFloorWithWatermarks(WindowStart, built));
-        Assert.Equal(table.Select(r => r.GetRawText()), (await DrillDownAsync(postgres, Offenders)).Select(r => r.GetRawText()));
+        var daily = await DrillDownAsync(postgres, Pairs);
+        Assert.Equal(table.Select(r => r.GetRawText()), daily.Select(r => r.GetRawText()));
+        Assert.DoesNotContain(daily, r => r.GetProperty("database").GetString() == OtherDb);
 
         /* The daily route really ran: doubling one built total moves the product's answer. */
         await ExecAsync(connection, $"UPDATE collect.plan_regression_daily SET cpu_us_sum = cpu_us_sum * 2 WHERE server_id = {ServerId} AND query_id = 3 AND day = DATE '{OpenDay.AddDays(-3):yyyy-MM-dd}'", ct);
-        Assert.NotEqual(table.Select(r => r.GetRawText()), (await DrillDownAsync(postgres, Offenders)).Select(r => r.GetRawText()));
+        Assert.NotEqual(table.Select(r => r.GetRawText()), (await DrillDownAsync(postgres, Pairs)).Select(r => r.GetRawText()));
         await ExecAsync(connection, $"UPDATE collect.plan_regression_daily SET cpu_us_sum = cpu_us_sum / 2 WHERE server_id = {ServerId} AND query_id = 3 AND day = DATE '{OpenDay.AddDays(-3):yyyy-MM-dd}'", ct);
 
         /* ---- a closed day not built: the live floor drops to the day before it, and the rows are the same ---- */
@@ -110,7 +136,7 @@ public sealed class PlanRegressionDrillDownDailyParityLiveTests
         var gapped = await BuiltDaysAsync(connection, ct);
         Assert.Equal(15, gapped.Count);
         Assert.Equal(gap.AddDays(-1).ToDateTime(TimeOnly.MinValue), PgFactCollector.PlanRegressionLiveFloorWithWatermarks(WindowStart, gapped));
-        Assert.Equal(table.Select(r => r.GetRawText()), (await DrillDownAsync(postgres, Offenders)).Select(r => r.GetRawText()));
+        Assert.Equal(table.Select(r => r.GetRawText()), (await DrillDownAsync(postgres, Pairs)).Select(r => r.GetRawText()));
         Assert.NotNull(await PlanRegressionDaily.BuildDayAsync(connection, ServerId, gap, TimeRangeEnd, ct));
 
         /* ---- not vacuous: the open-day half and the watermarks carry rows ---- */
@@ -123,8 +149,50 @@ public sealed class PlanRegressionDrillDownDailyParityLiveTests
         /* ---- no offenders: the table read, unrestricted, so the query that is not an offender is in it ---- */
         var unrestricted = await DrillDownAsync(postgres, null);
         Assert.Contains(unrestricted, r => r.GetProperty("query_id").GetInt64() == NotAnOffender);
-        Assert.Equal(unrestricted.Select(r => r.GetRawText()), (await DrillDownAsync(postgres, Array.Empty<long>())).Select(r => r.GetRawText()));
+        Assert.Equal(unrestricted.Select(r => r.GetRawText()), (await DrillDownAsync(postgres, Array.Empty<PlanRegressionOffender>())).Select(r => r.GetRawText()));
         Assert.Equal(await TableRowsAsync(connection, ct), await RowsOfAsync(unrestricted));
+    }
+
+    /// <summary>
+    /// When the built-days read fails, the drill-down's transaction is aborted. It is disposed, and the table read runs
+    /// outside it on the same connection, and returns the table route's rows (#6376 review). The built days are readable and
+    /// the daily route is the answer first (a doubled total moves it); then the built-days table is renamed away, so the
+    /// built-days read fails with 42P01. The rows must come back as the table route's, not as an error or an empty answer,
+    /// and the failure is warned about once.
+    /// </summary>
+    [Fact]
+    public async Task WhenTheBuiltDaysReadFails_TheDrillDownStillReturnsTheTableRoutesRows()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenStoreAsync(scratch, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        await SeedAsync(connection, ct);
+
+        var table = OnPairs(await DrillDownAsync(postgres, Pairs));
+        Assert.Equal(Offenders, table.Select(r => r.GetProperty("query_id").GetInt64()).OrderBy(q => q).ToArray());
+
+        for (var day = WindowStart; day < OpenDay; day = day.AddDays(1))
+        {
+            Assert.NotNull(await PlanRegressionDaily.BuildDayAsync(connection, ServerId, DateOnly.FromDateTime(day), TimeRangeEnd, ct));
+        }
+
+        /* The daily route answers, and a changed total shows it: the table route's rows are no longer what comes back. */
+        var quiet = new ListLogger();
+        Assert.Equal(table.Select(r => r.GetRawText()), (await DrillDownAsync(postgres, Pairs, quiet)).Select(r => r.GetRawText()));
+        Assert.False(quiet.HasAtLeast(LogLevel.Warning), quiet.Dump());
+        await ExecAsync(connection, $"UPDATE collect.plan_regression_daily SET cpu_us_sum = cpu_us_sum * 2 WHERE server_id = {ServerId} AND query_id = 3 AND day = DATE '{OpenDay.AddDays(-3):yyyy-MM-dd}'", ct);
+        Assert.NotEqual(table.Select(r => r.GetRawText()), (await DrillDownAsync(postgres, Pairs)).Select(r => r.GetRawText()));
+
+        /* The built-days read now fails. The totals are still doubled, so only the table read can give the table route's rows. */
+        await ExecAsync(connection, "ALTER TABLE collect.plan_regression_daily_built RENAME TO plan_regression_daily_built_gone", ct);
+        var logger = new ListLogger();
+        var fallback = await DrillDownAsync(postgres, Pairs, logger);
+
+        Assert.Contains(logger.Lines, l => l.Level == LogLevel.Warning && l.Message.Contains("built-days read failed", StringComparison.Ordinal));
+        Assert.Equal(table.Select(r => r.GetRawText()), OnPairs(fallback).Select(r => r.GetRawText()));
     }
 
     /* ---------------------------------------------------------------------------------------------------------- */
@@ -149,19 +217,34 @@ INSERT INTO collect.query_store_interval_latest
     (server_id, database_name, query_id, plan_id, replica_role, runtime_stats_interval_id, first_execution_time,
      collection_time, query_plan_hash, query_hash, execution_count, avg_cpu_time_us, avg_duration_us,
      last_execution_time, is_forced_plan, force_failure_count, query_text, avg_rowcount)
-SELECT {ServerId}, '{Db}', q, q * 10 + CASE WHEN h < timestamp '{switchAt}' THEN 1 ELSE 2 END, NULL,
+SELECT {ServerId}, o.dbn, q, q * 10 + CASE WHEN h < timestamp '{switchAt}' THEN 1 ELSE 2 END,
+       CASE WHEN q = {PrimaryRoleQuery} THEN 'PRIMARY' END,
        extract(epoch FROM h)::bigint / 3600, h, h + interval '65 minutes',
        'p' || q || CASE WHEN h < timestamp '{switchAt}' THEN 'a' ELSE 'b' END,
        CASE WHEN q = 2 AND h >= timestamp '{Stamp(OpenDay)}' THEN NULL ELSE 'qh' || q END,
        100,
-       CASE WHEN h < timestamp '{switchAt}' THEN 5000 + extract(hour FROM h)::bigint * 5
+       CASE WHEN q = {SteadyOtherQuery} THEN 5000 + extract(hour FROM h)::bigint * 5
+            WHEN h < timestamp '{switchAt}' THEN 5000 + extract(hour FROM h)::bigint * 5
             ELSE 50000 + q * 1000 + extract(hour FROM h)::bigint * 10 + extract(day FROM h)::bigint END,
-       CASE WHEN h < timestamp '{switchAt}' THEN 8000 ELSE 90000 + extract(hour FROM h)::bigint END,
+       CASE WHEN q = {SteadyOtherQuery} OR h < timestamp '{switchAt}' THEN 8000 ELSE 90000 + extract(hour FROM h)::bigint END,
        h + interval '59 minutes', false, 0,
        CASE WHEN q = 2 AND extract(hour FROM h)::int % 4 = 0 THEN NULL ELSE 'offender ' || q END, 10
 FROM generate_series(timestamp '{first}', timestamp '{last}', interval '2 hours') AS h
-CROSS JOIN (SELECT unnest(ARRAY[{string.Join(", ", Offenders)}, {NotAnOffender}]::bigint[]) AS q) AS o
-ORDER BY q, h;", ct);
+CROSS JOIN (VALUES {string.Join(", ", Offenders.Append(NotAnOffender).Select(x => $"('{Db}', {x})"))}, ('{OtherDb}', 1), ('{OtherDb}', {SteadyOtherQuery})) AS o (dbn, q)
+ORDER BY o.dbn, q, h;", ct);
+
+        /* Query 4 has a second replica: SECONDARY rows of its latest plan only (so no regression of its own), newer than the
+           primary's, with a different hash. The primary's row must flag the plan-cache signature of ITS hash, so the hash
+           lookup has to stay on the primary's rows. */
+        await ExecAsync(connection, $@"
+INSERT INTO collect.query_store_interval_latest
+    (server_id, database_name, query_id, plan_id, replica_role, runtime_stats_interval_id, first_execution_time,
+     collection_time, query_plan_hash, query_hash, execution_count, avg_cpu_time_us, avg_duration_us,
+     last_execution_time, is_forced_plan, force_failure_count, query_text, avg_rowcount)
+SELECT {ServerId}, '{Db}', {PrimaryRoleQuery}, {PrimaryRoleQuery * 10 + 2}, 'SECONDARY', 800000 + n, timestamp '{Stamp(OpenDay.AddHours(13))}' + n * interval '10 minutes',
+       timestamp '{Stamp(OpenDay.AddHours(14))}', 'p{PrimaryRoleQuery}b', 'qh{PrimaryRoleQuery}s', 100, 55000, 90000,
+       timestamp '{Stamp(OpenDay.AddHours(13))}' + n * interval '10 minutes' + interval '9 minutes', false, 0, 'offender {PrimaryRoleQuery}', 10
+FROM generate_series(0, 2) AS n;", ct);
 
         /* Query 1's straddles: into the window's first day (the first execution in the legacy partition, on M - 1), into a
            closed day, and into the open day below its watermark. */
@@ -182,7 +265,7 @@ VALUES ({ServerId}, '{Db}', 1, {plan}, NULL, 900000 + {plan}, timestamp '{Stamp(
             $"INSERT INTO collect.query_store_interval_latest_coverage (server_id, filled_since, applied_through) VALUES ({ServerId}, timestamp '{Stamp(WindowStart.AddDays(-5))}', timestamp '{Stamp(TimeRangeEnd)}') "
             + "ON CONFLICT (server_id) DO UPDATE SET filled_since = EXCLUDED.filled_since", ct);
 
-        foreach (var q in new[] { 2L, 3L })
+        foreach (var q in new[] { 2L, 3L, PrimaryRoleQuery })
         {
             await using var cache = new NpgsqlCommand(@"
 INSERT INTO collect.query_stats
@@ -202,6 +285,9 @@ VALUES ($1, $2, $3, 'regr-5794', $4, $5, $6, $7, 100, 20000, 20000000, 1024, 102
 
         await ExecAsync(connection, $"ANALYZE {Latest.Parent}", ct);
     }
+
+    /// <summary>The rows of the first database only: the rows both routes owe for the fact's pairs.</summary>
+    private static List<JsonElement> OnPairs(List<JsonElement> rows) => rows.Where(r => r.GetProperty("database").GetString() == Db).ToList();
 
     private static string Stamp(DateTime value) => value.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
 
@@ -261,7 +347,7 @@ VALUES ($1, $2, $3, 'regr-5794', $4, $5, $6, $7, 100, 20000, 20000000, 1024, 102
     private static async Task<List<PlanRegressionDaily.BuiltDay>> BuiltDaysAsync(NpgsqlConnection connection, CancellationToken ct) =>
         await QueryStoreIntervalLatest.ReadBuiltDaysAsync(connection, null, ServerId, WindowStart, 60, null, _ => false, ct);
 
-    private static AnalysisContext NewContext(IEnumerable<long>? offenders) => new()
+    private static AnalysisContext NewContext(IEnumerable<PlanRegressionOffender>? offenders) => new()
     {
         ServerId = ServerId,
         ServerName = "regr-5794",
@@ -270,11 +356,11 @@ VALUES ($1, $2, $3, 'regr-5794', $4, $5, $6, $7, 100, 20000, 20000000, 1024, 102
         ServerUtcOffset = TimeSpan.Zero,
         PlanRegressionReadsIntervalTable = true,
         PlanRegressionWindowStart = WindowStart,
-        PlanRegressionOffenders = offenders?.Select(q => new PlanRegressionOffender(Db, q)).ToList(),
+        PlanRegressionOffenders = offenders?.ToList(),
     };
 
     /// <summary>The drill-down's rows as the product builds them, through the pass's own entry point.</summary>
-    private static async Task<List<JsonElement>> DrillDownAsync(NpgsqlDataSource postgres, IEnumerable<long>? offenders)
+    private static async Task<List<JsonElement>> DrillDownAsync(NpgsqlDataSource postgres, IEnumerable<PlanRegressionOffender>? offenders, ILogger? logger = null)
     {
         var finding = new AnalysisFinding
         {
@@ -285,7 +371,7 @@ VALUES ($1, $2, $3, 'regr-5794', $4, $5, $6, $7, 100, 20000, 20000000, 1024, 102
             Severity = 1.0,
         };
 
-        await new PgDrillDownCollector(postgres).EnrichFindingsAsync([finding], NewContext(offenders));
+        await new PgDrillDownCollector(postgres, logger: logger).EnrichFindingsAsync([finding], NewContext(offenders));
         if (finding.DrillDown is null || !finding.DrillDown.TryGetValue("regressed_queries", out var raw))
             return [];
 

@@ -252,7 +252,7 @@ public sealed class DarlingAnalysisPipelineTests
            against a table that no longer exists. query_text_dim is the second (#3902): the
            parameter-sensitivity drill-down resolves text for its five output rows by digest rather than
            reading v_query_stats, whose join resolves it for every row in the window. */
-        var sideTables = new[] { QueryStoreTextStore.TableName, PayloadDimensions.QueryTextDimTable, QueryStoreIntervalLatest.TableName, "collect.plan_regression_daily" }
+        var sideTables = new[] { QueryStoreTextStore.TableName, PayloadDimensions.QueryTextDimTable, QueryStoreIntervalLatest.TableName, PlanRegressionDaily.TableName }
             .Select(t => t.Contains('.', StringComparison.Ordinal) ? t.Split('.')[^1] : t)
             .ToHashSet(StringComparer.Ordinal);
 

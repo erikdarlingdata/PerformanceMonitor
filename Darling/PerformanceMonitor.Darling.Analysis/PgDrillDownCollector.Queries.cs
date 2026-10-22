@@ -1016,6 +1016,15 @@ LIMIT 5";
     /// group's rows carry two hashes or two texts, and a Query Store query_id has one statement and one hash, so within
     /// one (query_id, plan hash) group they agree; a NULL on some rows is skipped by both.</para>
     ///
+    /// <para><b>One real difference: pairs, not two lists.</b> The table twin matches an offender as
+    /// <c>database_name = ANY($5) AND query_id = ANY($6)</c>, two lists tested separately, so with (dbA, 7) and (dbB, 9) on the
+    /// list it also admits the cross pairs (dbA, 9) and (dbB, 7). Query ids are numbered per database, so on a server with
+    /// many similar databases those collisions are real. This read matches exact (database, query_id) pairs, so it returns
+    /// the offenders and never a cross pair, and it can return fewer rows than the table twin for the same list. The pairs
+    /// are the right set: an offender the fact excluded must not reach a force (#5630), and a cross pair would bypass that
+    /// rule. The table twin keeps its old match (it is the fallback, and its plan depends on it, #5957), so a pass that falls
+    /// back can still show a cross pair. <c>PlanRegressionDrillDownDailyParityLiveTests</c> seeds one and pins both.</para>
+    ///
     /// <para><b>The offender pairs.</b> The live half drives the interval table per (database, query_id) pair through an
     /// explicit LATERAL, so each pair is one seek of <see cref="QueryStoreBackgroundIndexes.LatestDatabaseQueryFirstExec"/>.
     /// Do not write it as <c>(database_name, query_id) IN (SELECT ... FROM unnest(...))</c>: over the partitioned table
@@ -1176,6 +1185,9 @@ SELECT
             AND   q.query_plan_hash = t.latest_plan_hash
             AND   q.replica_role IS NOT DISTINCT FROM t.replica_role
             AND   q.query_text IS NOT NULL
+            -- Newest first, so the row is the same on every run (and the hash lookup below picks the same way). The group
+            -- is one plan's rows for one query, a few dozen at most, and only the output rows without a text row get here.
+            ORDER BY q.first_execution_time DESC
             LIMIT 1
         )
     ) AS query_text,
@@ -1274,7 +1286,13 @@ ORDER BY t.regression_factor DESC";
             /* A failed built-days read leaves the snapshot aborted, so the table read runs without it. */
             readsDays ? snapshot : null) { CommandTimeout = DrillDownCommandTimeoutSeconds };
         if (!readsDays && snapshot is not null)
-            await snapshot.RollbackAsync(context.CancellationToken);
+        {
+            /* Disposed, as the fact does at the same point, rather than rolled back: disposing rolls back an active
+               transaction and swallows the error when the connection is already broken, so a dead connection cannot lose the
+               drill-down here (the table read below would then fail on its own, and be reported as its own failure). The
+               `await using` above disposes it again, which is a no-op. */
+            await snapshot.DisposeAsync();
+        }
         cmd.Parameters.AddWithValue(context.ServerId);
         cmd.Parameters.AddWithValue(windowStart);
         /* $3/$4: the STANDARD analysis window for the psp_signature CTE — deliberately not the 14-day
