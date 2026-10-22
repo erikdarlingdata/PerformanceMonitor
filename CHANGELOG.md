@@ -88,7 +88,7 @@ Full entries: [docs/changelog/3.11.md](docs/changelog/3.11.md)
 - **Lite can manage query tags and see resource use by tag** ([#5993])
 - **Investigation request events reach the agent and its people** ([#6032])
 - **Agents can read an investigation's frozen evidence** ([#6033])
-- **Notification routes can now set a fallback route** ([#6036])
+- **Notification routes can now set a fallback route** ([#6036], [#6447])
 - **The Darling viewer shows query tags: a Tag column and filter on the Queries grids, and a by-tag resource view** ([#5988])
 - **Web dashboard: a Query Tag Usage page, and a tag column and filter on the query grids** ([#5987])
 - **The web dashboard can manage query tags, their hand assignments and their rules** ([#5986], [#5971])
@@ -5832,3 +5832,4 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#6382]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6382
 [#6383]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6383
 [#6438]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6438
+[#6447]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/6447
