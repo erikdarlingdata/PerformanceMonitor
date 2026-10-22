@@ -296,9 +296,9 @@ public partial class SettingsWindow : Window
         LoadMcpToken();
     }
 
-    /* The MCP token lives in Windows Credential Manager for this Windows user (McpTokenStore). This window only reads it:
-       the token is made when the server first starts with none, or when Copy is used before then. */
-    private readonly McpTokenStore _mcpTokens = McpTokenStore.ForApp(new CredentialService());
+    /* The MCP token lives in Windows Credential Manager for this Windows user (McpTokenStore). This window reads it:
+       the token is made when the server first starts with none, or when Copy is used before then. New token replaces it. */
+    private readonly McpTokenStore _mcpTokens = McpTokenStore.ForApp();
     private bool _mcpTokenless;
 
     private void LoadMcpToken()
@@ -307,6 +307,7 @@ public partial class SettingsWindow : Window
         {
             McpTokenTextBox.Text = "No token is required (mcp_allow_tokenless_loopback is on in settings.json)";
             CopyMcpTokenButton.IsEnabled = false;
+            NewMcpTokenButton.IsEnabled = false;
             return;
         }
 
@@ -701,8 +702,9 @@ public partial class SettingsWindow : Window
             command = McpTokenStore.ClientCommand(int.TryParse(port, out var p) ? p : McpSettings.DefaultPort, token);
         }
 
-        /* Use SetDataObject with copy=false to avoid WPF's problematic Clipboard.Flush() */
-        McpStatusText.Text = ClipboardText.TrySetDataObject(command)
+        /* Use SetDataObject with copy=false to avoid WPF's problematic Clipboard.Flush(). The command carries the token, so it is
+           kept out of Clipboard History and the cloud clipboard (SecretClipboard); without a token it is plain text. */
+        McpStatusText.Text = ClipboardText.TrySetDataObject(_mcpTokenless ? command : SecretClipboard.Build(command))
             ? "Copied to clipboard!"
             : "Couldn't copy: the clipboard is in use.";
     }
@@ -711,9 +713,25 @@ public partial class SettingsWindow : Window
     {
         var token = TokenForCopy();
         if (token is null) return;
-        McpStatusText.Text = ClipboardText.TrySetDataObject(token)
+        McpStatusText.Text = ClipboardText.TrySetDataObject(SecretClipboard.Build(token))
             ? "Token copied to clipboard! Send it as the header \"Authorization: Bearer <token>\"."
             : "Couldn't copy: the clipboard is in use.";
+    }
+
+    /// <summary>Makes a new token and stores it over the old one. The running server uses it at once (the old token stops
+    /// working), so the MCP client needs the new config.</summary>
+    private void NewMcpTokenButton_Click(object sender, RoutedEventArgs e)
+    {
+        var token = _mcpTokens.Replace(out var failure);
+        if (token is null)
+        {
+            McpStatusText.Text = "Couldn't make a new token: " + failure;
+            return;
+        }
+
+        McpTokenTextBox.Text = token;
+        _mcpService?.ReplaceToken(token);
+        McpStatusText.Text = "New token made. The old one no longer works: your MCP client needs the new config (use Copy MCP config).";
     }
 
     private async void AutoPortButton_Click(object sender, RoutedEventArgs e)

@@ -368,7 +368,11 @@ public class ServerManager
         }
 
         // Save credentials based on authentication type
-        if (server.AuthenticationType == AuthenticationTypes.SqlServer && !string.IsNullOrEmpty(username) && password != null)
+        if (!ServerCredentialIds.Allows(server.Id, server.DisplayName))
+        {
+            // A saved password is written only for a server whose Id is a GUID (ServerCredentialIds).
+        }
+        else if (server.AuthenticationType == AuthenticationTypes.SqlServer && !string.IsNullOrEmpty(username) && password != null)
         {
             // For SQL Server auth, save both username and password
             if (!_credentialService.SaveCredential(server.Id, username, password))
@@ -446,7 +450,11 @@ public class ServerManager
         }
 
         // Update credentials based on authentication type
-        if (server.AuthenticationType == AuthenticationTypes.SqlServer && !string.IsNullOrEmpty(username) && password != null)
+        if (!ServerCredentialIds.Allows(server.Id, server.DisplayName))
+        {
+            // A saved password is written or deleted only for a server whose Id is a GUID (ServerCredentialIds).
+        }
+        else if (server.AuthenticationType == AuthenticationTypes.SqlServer && !string.IsNullOrEmpty(username) && password != null)
         {
             // For SQL Server auth, update both username and password
             if (!_credentialService.UpdateCredential(server.Id, username, password))
@@ -537,7 +545,11 @@ public class ServerManager
 
         if (server != null)
         {
-            _credentialService.DeleteCredential(id);
+            if (ServerCredentialIds.Allows(id, server.DisplayName))
+            {
+                _credentialService.DeleteCredential(id);
+            }
+
             _connectionStatuses.TryRemove(id, out _);
             _logger?.LogInformation("Deleted server '{DisplayName}' ({ServerName})", server.DisplayName, server.ServerName);
         }

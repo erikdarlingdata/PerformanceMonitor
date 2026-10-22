@@ -15,12 +15,20 @@ internal interface IMcpTokenVault
     string? Write(string token);
 }
 
-/// <summary>The real vault: the <c>PerformanceMonitorLite_McpToken</c> entry of Windows Credential Manager, through <see cref="CredentialService"/>.
-/// Credential Manager entries belong to the signed-in Windows user, the same place Lite keeps saved server passwords.</summary>
+/// <summary>The real vault: the <c>PerformanceMonitorLite.Mcp_McpToken</c> entry of Windows Credential Manager, through <see cref="CredentialService"/>.
+/// Credential Manager entries belong to the signed-in Windows user. The entry has a prefix of its own, never the
+/// <c>PerformanceMonitorLite_</c> one that a server's saved password uses, so no server Id can name it.</summary>
 internal sealed class CredentialManagerMcpTokenVault : IMcpTokenVault
 {
-    /// <summary>The key part of the target name; the service adds the <c>PerformanceMonitorLite_</c> prefix.</summary>
+    /// <summary>The key part of the target name; the store adds <see cref="CredentialPrefix"/>.</summary>
     internal const string EntryName = "McpToken";
+
+    /// <summary>The prefix of the token's own Credential Manager entries. A server's saved password is <c>PerformanceMonitorLite_</c>
+    /// plus its Id; the 23rd character here is a dot, never an underscore, so no Id can produce this target.</summary>
+    internal const string CredentialPrefix = "PerformanceMonitorLite.Mcp_";
+
+    /// <summary>The whole target name in Credential Manager (for messages and cleanup).</summary>
+    internal const string TargetName = CredentialPrefix + EntryName;
 
     private const string UserName = "McpToken";
 
@@ -42,7 +50,8 @@ internal sealed class CredentialManagerMcpTokenVault : IMcpTokenVault
 /// <summary>
 /// Lite's MCP token. Once the MCP server is on, every request carries <c>Authorization: Bearer &lt;token&gt;</c>, like Darling's.
 /// The token is made the first time the server starts with none (this includes the first start after an upgrade with MCP already
-/// on) and is kept in Windows Credential Manager for the signed-in user, never in a file. An entry that cannot be read is never
+/// on) and is kept in Windows Credential Manager for the signed-in user, never in a Lite file (the MCP client keeps its own
+/// copy in its config). An entry that cannot be read is never
 /// replaced: the start is refused with the reason, because a new token would silently break every client that holds the old one.
 /// </summary>
 internal sealed class McpTokenStore
@@ -50,12 +59,39 @@ internal sealed class McpTokenStore
     /// <summary>Random bytes in a token. The token is their lowercase hex text, 64 characters (Darling's minimum is 16).</summary>
     internal const int TokenBytes = 32;
 
+    /// <summary>A token counts only at this length or longer (Darling's floor). A shorter one still gates every request, but
+    /// the write and investigation tools stay off (<see cref="McpHostService.DecideServing"/>).</summary>
+    internal const int MinimumTokenLength = 16;
+
     private readonly IMcpTokenVault _vault;
 
     internal McpTokenStore(IMcpTokenVault vault) => _vault = vault ?? throw new ArgumentNullException(nameof(vault));
 
-    /// <summary>The app's store: Credential Manager, under the same prefix as Lite's saved server passwords.</summary>
-    internal static McpTokenStore ForApp(CredentialService credentials) => new(new CredentialManagerMcpTokenVault(credentials));
+    /// <summary>The app's store: Credential Manager, under <see cref="CredentialManagerMcpTokenVault.CredentialPrefix"/>, apart from
+    /// the entries of Lite's saved server passwords.</summary>
+    internal static McpTokenStore ForApp(Microsoft.Extensions.Logging.ILogger? logger = null) =>
+        new(new CredentialManagerMcpTokenVault(new CredentialService(
+            new CredentialStore(CredentialManagerMcpTokenVault.CredentialPrefix, "Performance Monitor Lite MCP token", logger))));
+
+    /// <summary>The store over a Credential Manager prefix of a test's own.</summary>
+    internal static McpTokenStore ForPrefix(string credentialPrefix) =>
+        new(new CredentialManagerMcpTokenVault(new CredentialService(new CredentialStore(credentialPrefix, "Performance Monitor Lite MCP token test"))));
+
+    /// <summary>Makes a new token and stores it over the old one, which stops working once the host is started again or reloads its
+    /// token. Null with <paramref name="failure"/> set when it cannot be saved (the old entry is then unchanged).</summary>
+    internal string? Replace(out string? failure)
+    {
+        var token = Generate();
+        var writeFailure = _vault.Write(token);
+        if (writeFailure is not null)
+        {
+            failure = "the new token could not be saved: " + writeFailure;
+            return null;
+        }
+
+        failure = null;
+        return token;
+    }
 
     /// <summary>A new token: 32 random bytes as 64 lowercase hex characters.</summary>
     internal static string Generate() => Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(TokenBytes));

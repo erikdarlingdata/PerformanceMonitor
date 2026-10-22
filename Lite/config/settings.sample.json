@@ -280,22 +280,23 @@
   "mcp_enabled": false,
   "mcp_port": 5151,
   // NO UI. Off by default. Once the MCP endpoint is on, every request needs the token, like Darling's: Lite makes a token the
-  // first time the endpoint starts with none and keeps it in Windows Credential Manager (PerformanceMonitorLite_McpToken) for
-  // the signed-in Windows user, never in a file. Settings -> Access shows it, with Copy Token and Copy MCP config buttons;
-  // a client sends the header "Authorization: Bearer <token>". Set this to true to serve local clients with no token, as
-  // earlier builds did. Change it, then restart Lite.
+  // first time the endpoint starts with none and keeps it in Windows Credential Manager (PerformanceMonitorLite.Mcp_McpToken)
+  // for the signed-in Windows user, never in a Lite file (the MCP client keeps its own copy in its config). Settings -> Access
+  // shows it, with Copy Token, Copy MCP config and New token buttons; a client sends the header "Authorization: Bearer <token>".
+  // Set this to true to serve local clients with no token, as earlier builds did: only the read tools are served then, and the
+  // write and investigation tools stay off. Import Settings never brings this value in. Change it, then restart Lite.
   "mcp_allow_tokenless_loopback": false,
   // NO UI. Off by default. The MCP write tools (mute_analysis_finding and unmute_analysis_finding) are served only
   // when this is true; with it off a call to one fails as an unknown tool. Change it, then restart Lite. Mutes that
   // already exist stay in force while it is off; turn it on to remove one with unmute_analysis_finding.
-  // With mcp_allow_tokenless_loopback on, the endpoint has no token or caller check: with this on too, ANY program on this
-  // computer that can reach the port can mute or unmute analysis findings. Leave it off unless you trust every program that runs here.
+  // The write tools also need the MCP token: with mcp_allow_tokenless_loopback on they stay off whatever this says, and Lite
+  // logs one Critical line. Import Settings never brings this value in.
   "mcp_allow_writes": false,
   // NO UI. Off by default. Serves the four investigation tools (list_investigation_requests, claim_investigation_request,
   // submit_investigation_report, get_investigation_reports) only when this is true AND mcp_allow_writes is false: with
   // both on, the investigation tools stay off and Lite logs one Critical line. With it off a call to one fails as an
-  // unknown tool. Change it, then restart Lite. With mcp_allow_tokenless_loopback on there is no token: with this on too, ANY
-  // program on this computer that can reach the port can list, claim and report on investigation requests.
+  // unknown tool. Change it, then restart Lite. They also need the MCP token: with mcp_allow_tokenless_loopback on they stay off
+  // and Lite logs one Critical line. Import Settings never brings this value in.
   "mcp_allow_investigations": false,
   // NO UI. How much collected data the MCP answers hand out: "full" (the default), "maskLiterals" (statement text keeps
   // its shape with every literal replaced) or "metadataOnly" (statement text, plans and input buffers are withheld, logins

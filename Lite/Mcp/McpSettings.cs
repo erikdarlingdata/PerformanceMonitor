@@ -60,14 +60,15 @@ internal sealed class McpSettings
     /// Whether the four investigation tools (<see cref="McpInvestigationPolicy.InvestigationTools"/>, #5820) are
     /// offered. Default OFF. Read from <c>mcp_allow_investigations</c> (<see cref="McpInvestigationPolicy.InvestigationsSetting"/>)
     /// at start, like <c>mcp_allow_writes</c>. They are served only when this is on AND <see cref="AllowWrites"/> is
-    /// off (<see cref="McpInvestigationPolicy.Served"/>): with the token off (mcp_allow_tokenless_loopback), the agent tools reach local processes only
-    /// when the mute and route-disable tools are not also reachable. A file setting only, no Settings window control.
+    /// off (<see cref="McpInvestigationPolicy.Served"/>): they also need a token, so with mcp_allow_tokenless_loopback on they are not served, and the mute
+    /// and route-disable tools are never served alongside them. A file setting only, no Settings window control.
     /// </summary>
     public bool AllowInvestigations { get; set; } = false;
 
     /// <summary>
     /// Default OFF: once the MCP server is on, every request needs the token (<see cref="McpTokenStore"/>), like Darling's.
-    /// On, the server answers local clients without one, as earlier builds did. Read from <c>mcp_allow_tokenless_loopback</c>
+    /// On, the server answers local clients without one, as earlier builds did, but serves the read tools only: the write and
+    /// investigation tools need a token. Import Settings never brings this value in from another folder. Read from <c>mcp_allow_tokenless_loopback</c>
     /// (<see cref="AllowTokenlessLoopbackSetting"/>) at start, so a change needs a restart. File setting only, no Settings window control.
     /// </summary>
     public bool AllowTokenlessLoopback { get; set; } = false;

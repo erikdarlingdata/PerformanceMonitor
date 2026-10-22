@@ -6,8 +6,7 @@ namespace PerformanceMonitorLite.Mcp;
 
 /// <summary>
 /// The switch in front of every MCP tool that CHANGES what Lite stores. MCP is off by default, but once it is on,
-/// every tool the server registers is callable by any client that reaches the port, and the loopback endpoint
-/// needs no token. A client that approves tool calls automatically could then mute analysis findings without the
+/// every tool the server registers is callable by any client that is let in. A client that approves tool calls automatically could then mute analysis findings without the
 /// operator ever being asked. So the write tools are behind one setting in settings.json,
 /// <see cref="WritesSetting"/> (<see cref="McpSettings.AllowWrites"/>), default OFF. It is the twin of Darling's
 /// <c>mcp.allowWrites</c> (<c>DarlingMcpWritePolicy</c>).
@@ -23,10 +22,11 @@ namespace PerformanceMonitorLite.Mcp;
 /// by themselves, which is why they come with the setting and not instead of it.</para>
 ///
 /// <para>Lite's endpoint is loopback-only behind the shared Host-header guard and, like Darling's, needs the MCP token
-/// unless mcp_allow_tokenless_loopback is on. The setting is the whole switch for the write tools, so with the token off
-/// and this on ANY program on this computer that can reach the port can mute and unmute analysis findings; the sample settings
-/// (<c>settings.sample.json</c>) and the README's MCP section say so. The setting has no UI control, so it has no
-/// tooltip.</para>
+/// unless mcp_allow_tokenless_loopback is on. The write tools need <see cref="WritesSetting"/> AND a token of at least
+/// <see cref="McpTokenStore.MinimumTokenLength"/> characters: with mcp_allow_tokenless_loopback on, only the read tools are served
+/// and the writes stay off (<see cref="McpHostService.DecideServing"/>, which Darling's <c>DarlingMcpWritePolicy.ResolveForStart</c>
+/// mirrors). The sample settings (<c>settings.sample.json</c>) and the README's MCP section say so. The setting has no UI
+/// control, so it has no tooltip.</para>
 /// </summary>
 internal static class McpWritePolicy
 {

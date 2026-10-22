@@ -740,11 +740,11 @@ public partial class MainWindow : Window
                none, which includes the first start after an upgrade with MCP already on. With mcp_allow_tokenless_loopback
                on there is none and nothing is made. A token that cannot be read or saved stops the start: serving without it
                would drop the check, and a new one would break every client that holds the old one. */
-            var mcpToken = McpTokenStore.ForApp(new Services.CredentialService(new AppLoggerAdapter<Services.CredentialService>()))
+            var mcpToken = McpTokenStore.ForApp(new AppLoggerAdapter<McpTokenStore>())
                 .Resolve(mcpSettings, out var tokenFailure, out var tokenCreated);
             if (tokenFailure is not null)
             {
-                AppLogger.Error("MCP", $"The MCP server is not started: {tokenFailure}. Its token lives in Windows Credential Manager as PerformanceMonitorLite_McpToken. " +
+                AppLogger.Error("MCP", $"The MCP server is not started: {tokenFailure}. Its token lives in Windows Credential Manager as PerformanceMonitorLite.Mcp_McpToken. " +
                     $"Fix that entry and restart Lite, or set {McpSettings.AllowTokenlessLoopbackSetting} to true in settings.json to serve without a token.");
                 return;
             }
@@ -756,7 +756,7 @@ public partial class MainWindow : Window
                     $"To serve without a token as before, set {McpSettings.AllowTokenlessLoopbackSetting} to true in settings.json.");
             }
 
-            _mcpService = new McpHostService(_dataService!, _serverManager, _muteRuleService, _databaseInitializer, mcpSettings.Port, InvestigationStore, _scheduleManager, mcpSettings.AllowWrites, mcpSettings.AllowInvestigations, mcpSettings.DataDetail, _pseudonymKeys, mcpToken);
+            _mcpService = new McpHostService(_dataService!, _serverManager, _muteRuleService, _databaseInitializer, mcpSettings.Port, InvestigationStore, mcpToken, mcpSettings.AllowTokenlessLoopback, _scheduleManager, mcpSettings.AllowWrites, mcpSettings.AllowInvestigations, mcpSettings.DataDetail, _pseudonymKeys);
             _mcpDataDetail = mcpSettings.DataDetail;
             _ = _mcpService.StartAsync(_backgroundCts!.Token);
         }

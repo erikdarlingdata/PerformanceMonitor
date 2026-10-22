@@ -873,6 +873,9 @@
                                              VerticalAlignment="Center"/>
                                     <Button x:Name="CopyMcpTokenButton" Content="Copy _Token" Margin="6,0,0,0" Padding="8,2"
                                             VerticalAlignment="Center" Click="CopyMcpTokenButton_Click"/>
+                                    <Button x:Name="NewMcpTokenButton" Content="New token" Margin="6,0,0,0" Padding="8,2"
+                                            VerticalAlignment="Center" Click="NewMcpTokenButton_Click"
+                                            ToolTip="Make a new token. The old one stops working at once, and your MCP client needs the new config."/>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="0,6,0,0">
                                     <Button x:Name="CopyMcpCommandButton" Content="Cop_y MCP config" Click="CopyMcpCommandButton_Click"/>
