@@ -19,10 +19,13 @@ You should receive a response within 72 hours. We will work with you to understa
 
 This policy applies to:
 
-- SQL collection and reporting stored procedures
-- Dashboard and Lite WPF applications
-- Installer utilities
-- SQL installation scripts
+- Lite, the desktop app, and its embedded MCP server
+- Darling: the service, the viewer, the MCP server, and the web dashboard
+- The shared libraries that Lite and Darling use
+- The deprecated Full Edition, which is still supported for existing users
+  - The SQL collection and reporting stored procedures
+  - The SQL installation scripts in `install/`
+  - The Full Dashboard and the CLI installer in `deprecated/`
 
 ## Security Best Practices
 
@@ -32,4 +35,4 @@ When using Performance Monitor:
 - Use dedicated service accounts with minimal required permissions
 - Enable encryption for SQL Server connections
 - Keep your SQL Server instances patched and up to date
-- Review the [installation documentation](README.md) for recommended security configurations
+- Review the [permissions](docs/permissions.md) and [authentication](docs/authentication.md) documentation for recommended security configurations
