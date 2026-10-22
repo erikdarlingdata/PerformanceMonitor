@@ -1649,20 +1649,49 @@ jobs:
           VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
           # Pin vpk to the Velopack library version (keep in sync with the Velopack
-          # PackageReference in PerformanceMonitorLite.csproj).
-          dotnet tool install -g vpk --version 1.2.158
+          # PackageVersion in Directory.Packages.props; a vpk older than the library logs
+          # "Velopack library version is greater than vpk version").
+          dotnet tool install -g vpk --version 1.2.161
           New-Item -ItemType Directory -Force -Path releases/velopack-lite
           New-Item -ItemType Directory -Force -Path releases/velopack-darlingviewer
 
+          # #6506: `vpk download github` logs "No releases found" and EXITS 0 when the GitHub
+          # releases API answers with an empty list. v3.11.0 hit that for the lite channel (the
+          # darlingviewer call 18 seconds later got 19 releases), so `vpk pack` found no previous
+          # package, built only a full package, and the release shipped with no Lite delta. A first
+          # release for a channel legitimately downloads nothing, so tell the two apart: retry an
+          # empty download, then fail the step if an earlier release already carries the channel's
+          # releases.<channel>.json. vpk reads only the 10 newest releases, so the check looks at
+          # the same window.
+          function Invoke-VpkChannelDownload([string]$Channel, [string]$Dir) {
+            $repo = '${{ github.repository }}'
+            $feed = "releases.$Channel.json"
+            $attempts = 4
+            for ($i = 1; $i -le $attempts; $i++) {
+              vpk download github --repoUrl "https://github.com/$repo" --channel $Channel -o $Dir --token $env:GH_TOKEN
+              $vpkExit = $LASTEXITCODE
+              if (@(Get-ChildItem -LiteralPath $Dir -File -Filter '*.nupkg').Count -gt 0) { return }
+              Write-Host "vpk download for channel '$Channel' fetched no package (attempt $i of $attempts, exit $vpkExit)."
+              if ($i -lt $attempts) { Start-Sleep -Seconds (15 * $i) }
+            }
+            $json = gh api "repos/$repo/releases?per_page=10"
+            if ($LASTEXITCODE -ne 0) { throw "Cannot tell whether channel '$Channel' has an earlier release: listing releases failed (gh exit $LASTEXITCODE). Failing rather than publishing without a delta." }
+            $withFeed = (@($json | ConvertFrom-Json | Where-Object { -not $_.prerelease -and -not $_.draft -and ($_.assets.name -contains $feed) } | ForEach-Object { $_.tag_name }) -join ', ')
+            if ($withFeed) { throw "vpk download found no previous package for channel '$Channel' after $attempts attempts, but earlier release(s) carry $feed ($withFeed). Failing so the release does not ship without a delta (#6506)." }
+            Write-Host "No earlier release carries $feed, so '$Channel' is a first release: continuing with a full package only."
+          }
+
           # Lite: download previous + pack (from the SIGNED velopack output, not the raw publish dir)
-          vpk download github --repoUrl https://github.com/${{ github.repository }} --channel lite -o releases/velopack-lite --token $env:GH_TOKEN
+          Invoke-VpkChannelDownload 'lite' 'releases/velopack-lite'
           vpk pack -u PerformanceMonitorLite -v $env:VERSION -p signed/Lite-Velopack -e PerformanceMonitorLite.exe -o releases/velopack-lite --channel lite
+          if ($LASTEXITCODE -ne 0) { throw "vpk pack for channel 'lite' failed (exit $LASTEXITCODE)." }
 
           # Darling Viewer remote-seat installer (#1555): download previous + pack (from the SIGNED
           # velopack output). Its own 'darlingviewer' channel/delta feed, separate from the co-located
           # viewer inside PerformanceMonitorDarling-*.zip (which stays plain-zip only).
-          vpk download github --repoUrl https://github.com/${{ github.repository }} --channel darlingviewer -o releases/velopack-darlingviewer --token $env:GH_TOKEN
+          Invoke-VpkChannelDownload 'darlingviewer' 'releases/velopack-darlingviewer'
           vpk pack -u PerformanceMonitorDarlingViewer -v $env:VERSION -p signed/DarlingViewer-Velopack -e PerformanceMonitor.Darling.Viewer.exe -o releases/velopack-darlingviewer --channel darlingviewer
+          if ($LASTEXITCODE -ne 0) { throw "vpk pack for channel 'darlingviewer' failed (exit $LASTEXITCODE)." }
 
       # #3288: Velopack GENERATES three executables during `vpk pack` — the portable launcher
       # stub, Update.exe (Squirrel.exe under its internal name) and Setup.exe — so no pre-pack
