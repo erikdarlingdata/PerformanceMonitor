@@ -1400,10 +1400,16 @@ public sealed partial class DarlingMcpAlertTools
         Func<int, Task<string?>>? serverNameLookup = null,
         string? client_app_pattern = null,
         string? external_source = null,
-        string? starts_at = null)
+        string? starts_at = null,
+        DateTime? nowUtc = null)
     {
         try
         {
+            /* #6465: the one clock this create reads, taken once. A caller that tests against a fixed instant (the quiet-window
+               tool's core) passes it, so CreatedAtUtc and the duplicate check agree with its own scope check; the service passes
+               none and gets the real clock. */
+            var now = nowUtc ?? DateTime.UtcNow;
+
             /* #5654: a source name the registry could never hold would key a rule that mutes nothing. A value that is blank
                or holds a control character is refused, never read as "any source" (that would widen the rule to every
                source's alerts); only an omitted field means any source, as on the web create and PATCH. */
@@ -1469,7 +1475,7 @@ public sealed partial class DarlingMcpAlertTools
             var rule = new MuteRule
             {
                 Enabled = true,
-                CreatedAtUtc = DateTime.UtcNow,
+                CreatedAtUtc = now,
                 ExpiresAtUtc = expiresAtUtc,
                 StartsAtUtc = startsAtUtc,
                 Reason = Trimmed(reason),
@@ -1484,7 +1490,7 @@ public sealed partial class DarlingMcpAlertTools
                 ClientAppPattern = Trimmed(client_app_pattern)
             };
 
-            var existing = await InsertUnlessDuplicateAsync(store, rule);
+            var existing = await InsertUnlessDuplicateAsync(store, rule, now);
             if (existing != null)
             {
                 return AlreadyExists(existing);
@@ -2174,12 +2180,12 @@ public sealed partial class DarlingMcpAlertTools
     /// fields and the same expiry (see <see cref="FindDuplicate"/>). Returns that existing rule and inserts nothing
     /// when it does, or null once it has inserted.
     /// </summary>
-    internal static async Task<MuteRule?> InsertUnlessDuplicateAsync(IMuteRuleStore store, MuteRule rule)
+    internal static async Task<MuteRule?> InsertUnlessDuplicateAsync(IMuteRuleStore store, MuteRule rule, DateTime? nowUtc = null)
     {
         await s_createGate.WaitAsync();
         try
         {
-            var existing = FindDuplicate(await store.LoadAllAsync(), rule, DateTime.UtcNow);
+            var existing = FindDuplicate(await store.LoadAllAsync(), rule, nowUtc ?? DateTime.UtcNow);
             if (existing != null)
             {
                 return existing;

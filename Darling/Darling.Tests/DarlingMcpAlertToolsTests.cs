@@ -2671,7 +2671,7 @@ public sealed class RepeatedCreateMuteRuleTests
         Assert.Contains("CreateMuteRuleOver(new PgMuteRuleStore(postgres)", source, StringComparison.Ordinal);
         /* Exactly two callers of the checked insert (the tool's body and the web core), and no unchecked
            InsertAsync left on a create path. */
-        Assert.Equal(2, source.Split("await InsertUnlessDuplicateAsync(store, rule)").Length - 1);
+        Assert.Equal(2, source.Split("await InsertUnlessDuplicateAsync(store, rule").Length - 1);
         Assert.DoesNotContain("new PgMuteRuleStore(postgres).InsertAsync(rule)", source, StringComparison.Ordinal);
     }
 }

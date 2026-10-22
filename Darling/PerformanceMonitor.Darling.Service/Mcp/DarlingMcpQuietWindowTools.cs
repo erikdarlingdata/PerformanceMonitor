@@ -184,7 +184,9 @@ public sealed class DarlingMcpQuietWindowTools
         var text = string.IsNullOrWhiteSpace(reason) ? ReasonPrefix : $"{ReasonPrefix}: {reason.Trim()}";
         var answer = await DarlingMcpAlertTools.CreateMuteRuleOver(
             store, target?.DisplayName, null, null, null, null, null, text, Iso(end), target?.ServerId,
-            target is { } t ? _ => Task.FromResult<string?>(t.DisplayName) : null, null, null, start.HasValue ? Iso(start.Value) : null);
+            target is { } t ? _ => Task.FromResult<string?>(t.DisplayName) : null, null, null, start.HasValue ? Iso(start.Value) : null,
+            /* #6465: the same instant the scope check above used, so the duplicate check and CreatedAtUtc don't read the real clock. */
+            nowUtc: nowUtc);
 
         var node = JsonNode.Parse(answer) as JsonObject;
         var status = node?["status"]?.GetValue<string>();
