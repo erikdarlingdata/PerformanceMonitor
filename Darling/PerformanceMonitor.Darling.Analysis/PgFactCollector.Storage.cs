@@ -47,7 +47,17 @@ WHERE rn = 1";
        the answer is the old one whenever a file has dropped out. The one case the probe cannot see is a file
        that appears and vanishes strictly between those two snapshots and in neither of them; DatabaseSizeSql
        would carry it for up to 24 hours as a ghost, and #3896 exists to age ghosts out. Columns: total_size_mb
-       (NULL with no qualifying row), dropped_out (true when DatabaseSizeSql must decide). */
+       (NULL with no qualifying row), dropped_out (true when DatabaseSizeSql must decide).
+
+       #5794: the two edge timestamps are each a MATERIALIZED one-row CTE (prev_t, old_t), and the probe compares
+       collection_time to them with `= (SELECT ...) OR = (SELECT ...)`. The earlier shape put both in an `edge` CTE
+       and probed with `collection_time IN (SELECT collection_time FROM edge)`. A set-valued IN subquery is not a
+       runtime-exclusion key for the hypertable, so the planner appended 52 of 55 chunks (compressed ones too) and
+       scanned about 1.19M rows to find two timestamps (546 to 582 ms on the busiest store). A scalar init-plan
+       value IS a runtime key, so ChunkAppend now opens only the chunks that hold the two edge times (7.6 ms
+       execution). The answer is the same: a timestamp that finds no row yields NULL, `= NULL` matches nothing, and
+       that is what the empty IN set did. Keep the probe a scalar comparison against a materialized single-row CTE.
+       Do not fold the two timestamps back into one set. */
     public const string DatabaseSizeNewestSql = @"
 WITH newest AS (
     SELECT collection_time
@@ -67,28 +77,25 @@ cur AS (
     AND   size_mb > 0
     ORDER BY database_name, file_name
 ),
-edge AS (
-    (
-        SELECT collection_time
-        FROM file_io_stats
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time < (SELECT collection_time FROM newest)
-        AND   size_mb > 0
-        ORDER BY collection_time DESC
-        LIMIT 1
-    )
-    UNION
-    (
-        SELECT collection_time
-        FROM file_io_stats
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time < (SELECT collection_time FROM newest)
-        AND   size_mb > 0
-        ORDER BY collection_time ASC
-        LIMIT 1
-    )
+prev_t AS MATERIALIZED (
+    SELECT collection_time
+    FROM file_io_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time < (SELECT collection_time FROM newest)
+    AND   size_mb > 0
+    ORDER BY collection_time DESC
+    LIMIT 1
+),
+old_t AS MATERIALIZED (
+    SELECT collection_time
+    FROM file_io_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time < (SELECT collection_time FROM newest)
+    AND   size_mb > 0
+    ORDER BY collection_time ASC
+    LIMIT 1
 )
 SELECT
     (SELECT SUM(size_mb) FROM cur) AS total_size_mb,
@@ -96,7 +103,8 @@ SELECT
         SELECT 1
         FROM file_io_stats AS f
         WHERE f.server_id = $1
-        AND   f.collection_time IN (SELECT collection_time FROM edge)
+        AND   (f.collection_time = (SELECT collection_time FROM prev_t)
+               OR f.collection_time = (SELECT collection_time FROM old_t))
         AND   f.size_mb > 0
         AND   NOT EXISTS (
             SELECT 1

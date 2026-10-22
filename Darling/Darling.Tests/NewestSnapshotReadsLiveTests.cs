@@ -108,6 +108,68 @@ WITH latest AS (
 SELECT counter_name, cntr_value, delta_cntr_value, sample_interval_seconds
 FROM latest WHERE rn = 1";
 
+    /// <summary>
+    /// DatabaseSizeNewestSql as shipped before #5794: the two edge timestamps in one `edge` CTE, probed with
+    /// `IN (SELECT ...)`. An oracle, never run by the product. The new statement must return exactly these rows.
+    /// </summary>
+    private const string EdgeInOracleSql = @"
+WITH newest AS (
+    SELECT collection_time
+    FROM file_io_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   size_mb > 0
+    ORDER BY collection_time DESC
+    LIMIT 1
+),
+cur AS (
+    SELECT DISTINCT ON (database_name, file_name) database_name, file_name, size_mb
+    FROM file_io_stats
+    WHERE server_id = $1
+    AND   collection_time = (SELECT collection_time FROM newest)
+    AND   size_mb > 0
+    ORDER BY database_name, file_name
+),
+edge AS (
+    (
+        SELECT collection_time
+        FROM file_io_stats
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time < (SELECT collection_time FROM newest)
+        AND   size_mb > 0
+        ORDER BY collection_time DESC
+        LIMIT 1
+    )
+    UNION
+    (
+        SELECT collection_time
+        FROM file_io_stats
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time < (SELECT collection_time FROM newest)
+        AND   size_mb > 0
+        ORDER BY collection_time ASC
+        LIMIT 1
+    )
+)
+SELECT
+    (SELECT SUM(size_mb) FROM cur) AS total_size_mb,
+    EXISTS (
+        SELECT 1
+        FROM file_io_stats AS f
+        WHERE f.server_id = $1
+        AND   f.collection_time IN (SELECT collection_time FROM edge)
+        AND   f.size_mb > 0
+        AND   NOT EXISTS (
+            SELECT 1
+            FROM cur AS c
+            WHERE c.database_name = f.database_name
+            AND   c.file_name = f.file_name
+        )
+    ) AS dropped_out";
+
     private static readonly string[] s_counters = ["Batch Requests/sec", "SQL Compilations/sec", "SQL Re-Compilations/sec"];
 
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
@@ -534,6 +596,281 @@ FROM generate_series($2::timestamp, $3::timestamp, interval '1 minute') AS t CRO
         var report = $"{plans}{Environment.NewLine}file_io old={oldSize} new={newSize}; perfmon old={oldPerfmon} new={newPerfmon}";
         Assert.True(newSize * 3 <= oldSize, "the database-size read should touch a third of the blocks or less: " + report);
         Assert.True(newPerfmon * 3 <= oldPerfmon, "the perfmon read should touch a third of the blocks or less: " + report);
+    }
+
+    private static async Task FileIoRowAsync(NpgsqlConnection c, int serverId, DateTime at, string db, string file, decimal? size, CancellationToken ct)
+    {
+        using var cmd = new NpgsqlCommand(@"
+INSERT INTO file_io_stats (collection_id, collection_time, server_id, server_name, database_name, file_name, file_type, size_mb)
+VALUES ($1, $2, $3, 'newest-snapshot-e2e', $4, $5, 'ROWS', $6)", c);
+        cmd.Parameters.AddWithValue(CollectionIdGenerator.Next());
+        cmd.Parameters.AddWithValue(at);
+        cmd.Parameters.AddWithValue(serverId);
+        cmd.Parameters.AddWithValue(db);
+        cmd.Parameters.AddWithValue(file);
+        cmd.Parameters.Add(new NpgsqlParameter { Value = size.HasValue ? size.Value : DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Numeric });
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>Compresses every raw chunk that ends on or before the start of <paramref name="end"/>'s day; the end's own day stays raw.</summary>
+    private static async Task<(long Compressed, long Raw)> CompressOlderChunksAsync(NpgsqlConnection c, DateTime end, CancellationToken ct)
+    {
+        using (var enable = new NpgsqlCommand(TimescaleSupport.EnableCompressionSql("file_io_stats"), c))
+        {
+            await enable.ExecuteNonQueryAsync(ct);
+        }
+
+        using (var compress = new NpgsqlCommand(
+            "SELECT compress_chunk(ch, if_not_compressed => true) FROM show_chunks('file_io_stats', older_than => $1::timestamp) AS ch", c))
+        {
+            compress.Parameters.AddWithValue(Naive(end.Date));
+            await compress.ExecuteNonQueryAsync(ct);
+        }
+
+        using var count = new NpgsqlCommand(@"
+SELECT COUNT(*) FILTER (WHERE is_compressed), COUNT(*) FILTER (WHERE NOT is_compressed)
+FROM timescaledb_information.chunks WHERE hypertable_name = 'file_io_stats'", c);
+        using var reader = await count.ExecuteReaderAsync(ct);
+        Assert.True(await reader.ReadAsync(ct));
+        return (reader.GetInt64(0), reader.GetInt64(1));
+    }
+
+    /* Edge times used by the #5794 scenarios, minutes before the window's end. The anchored end is 22:00 UTC, so Old
+       (23.5 h back) and PrevCompressed (23 h back) land in the previous UTC day's chunk, which the helper compresses, and Mid,
+       Prev and New land in the end's own day, which stays raw. */
+    private const int Old = 1410, PrevCompressed = 1380, Mid = 720, Prev = 30, New = 0;
+
+    /// <summary>
+    /// Seeds every case the edge probe can meet, one server each: (server, name, expected dropped_out).
+    /// </summary>
+    private static async Task<List<(int ServerId, string Name, bool DroppedOut)>> SeedEdgeScenariosAsync(NpgsqlConnection c, DateTime end, CancellationToken ct)
+    {
+        DateTime At(int minutesAgo) => end.AddMinutes(-minutesAgo);
+        var scenarios = new List<(int, string, bool)>();
+        var next = -579_400;
+
+        async Task<int> Server(string name, bool dropped, params (int Minutes, string File, decimal? Size)[] rows)
+        {
+            var id = next--;
+            foreach (var (minutes, file, size) in rows)
+            {
+                await FileIoRowAsync(c, id, At(minutes), "Db", file, size, ct);
+            }
+
+            scenarios.Add((id, name, dropped));
+            return id;
+        }
+
+        (int, string, decimal?)[] Steady(params int[] minutes) =>
+            minutes.SelectMany(m => new[] { (m, "A", (decimal?)100m), (m, "B", (decimal?)200m), (m, "C", (decimal?)300m) }).ToArray();
+
+        await Server("steady", false, Steady(Old, Mid, Prev, New));
+
+        /* A file that disappears between the two edges: present in the oldest edge only, in the previous-snapshot edge
+           only, and in both (newest lacks it in each). The oldest-edge case is the one a dropped second probe loses. */
+        await Server("vanished-after-oldest-edge", true,
+            Steady(Old, Mid, Prev, New).Where(r => !(r.Item2 == "C" && (r.Item1 == Prev || r.Item1 == New))).ToArray());
+        await Server("vanished-at-previous-edge-only", true,
+            [(Old, "A", 100m), (Prev, "A", 100m), (Prev, "D", 40m), (New, "A", 100m)]);
+        await Server("vanished-before-newest-in-both-edges", true,
+            [(Old, "A", 100m), (Old, "C", 300m), (Prev, "A", 100m), (Prev, "C", 300m), (New, "A", 100m)]);
+
+        /* A new file: only in the newest snapshot, then in the last two. Nothing dropped out. */
+        await Server("new-file-in-newest", false, [(Old, "A", 100m), (Prev, "A", 100m), (New, "A", 100m), (New, "N", 70m)]);
+        await Server("new-file-in-previous-and-newest", false,
+            [(Old, "A", 100m), (Prev, "A", 100m), (Prev, "N", 70m), (New, "A", 100m), (New, "N", 70m)]);
+
+        /* A file seen only strictly between the edges is the documented unseen case: neither read sees it. */
+        await Server("only-between-edges", false, [(Old, "A", 100m), (Mid, "A", 100m), (Mid, "C", 300m), (Prev, "A", 100m), (New, "A", 100m)]);
+
+        /* NULL and zero sizes: a newest row that stopped qualifying drops out; an older row that never qualified does not. */
+        await Server("zero-in-newest", true, [(Old, "A", 100m), (Old, "B", 400m), (Prev, "A", 100m), (Prev, "B", 400m), (New, "A", 150m), (New, "B", 0m)]);
+        await Server("null-in-newest", true, [(Old, "A", 100m), (Old, "B", 400m), (Prev, "A", 100m), (New, "A", 150m), (New, "B", null)]);
+        await Server("zero-only-in-edges", false, [(Old, "A", 100m), (Old, "B", 0m), (Prev, "A", 100m), (Prev, "B", 0m), (New, "A", 100m)]);
+        await Server("null-only-in-edges", false, [(Old, "A", 100m), (Old, "B", null), (Prev, "A", 100m), (Prev, "B", null), (New, "A", 100m)]);
+        await Server("negative-in-edge", false, [(Old, "A", 100m), (Old, "B", -5m), (New, "A", 100m)]);
+
+        /* Captures: one only, two only (both edges are the same snapshot), nothing, only after the end, only before the lookback. */
+        await Server("single-capture", false, [(New, "A", 10m), (New, "B", 20m)]);
+        await Server("two-captures-same-edge-dropped", true, [(Prev, "A", 100m), (Prev, "C", 300m), (New, "A", 100m)]);
+        await Server("two-captures-same-edge-steady", false, [(Prev, "A", 100m), (New, "A", 100m)]);
+        scenarios.Add((next--, "no-rows", false));
+        await Server("after-end-only", false, [(-30, "A", 7777m)]);
+        await Server("before-lookback-only", false, [(1800, "A", 900m)]);
+        await Server("after-end-newer-than-window", false, [(Prev, "A", 100m), (-30, "A", 7777m), (-30, "C", 5m)]);
+
+        /* A file seen only before the lookback starts is not an edge. */
+        await Server("edge-before-lookback-ignored", false, [(1800, "X", 55m), (Prev, "A", 100m), (New, "A", 100m)]);
+
+        /* Ties on collection_time: duplicate rows at the same timestamp, equal and unequal sizes, in the newest and an edge. */
+        await Server("duplicate-rows-at-newest-and-edge", true,
+            [(Old, "A", 100m), (Old, "A", 100m), (Old, "C", 300m), (Old, "C", 300m), (New, "A", 100m), (New, "A", 100m), (New, "B", 200m), (New, "B", 200m)]);
+        await Server("duplicate-rows-nothing-dropped", false,
+            [(Old, "A", 100m), (Old, "A", 100m), (Prev, "A", 100m), (New, "A", 100m), (New, "A", 100m)]);
+
+        /* Both edges inside the compressed chunk (the previous raw day), and the previous-snapshot edge compressed while the newest is raw. */
+        await Server("compressed-edges-vanished", true,
+            [(Old, "A", 100m), (Old, "C", 300m), (PrevCompressed, "A", 100m), (PrevCompressed, "C", 300m), (New, "A", 100m)]);
+        await Server("compressed-previous-edge-steady", false,
+            [(Old, "A", 100m), (PrevCompressed, "A", 100m), (New, "A", 100m)]);
+
+        return scenarios;
+    }
+
+    private static async Task<(double? Total, bool DroppedOut)> RunEdgeStatementAsync(NpgsqlConnection c, string sql, AnalysisContext context, CancellationToken ct)
+    {
+        using var cmd = new NpgsqlCommand(sql, c);
+        cmd.Parameters.AddWithValue(context.ServerId);
+        cmd.Parameters.AddWithValue(Naive(context.LatestValueStartFor("file_io_stats")));
+        cmd.Parameters.AddWithValue(Naive(context.TimeRangeEnd));
+        using var reader = await cmd.ExecuteReaderAsync(ct);
+        Assert.True(await reader.ReadAsync(ct));
+        return (reader.IsDBNull(0) ? null : Convert.ToDouble(reader.GetValue(0)), reader.GetBoolean(1));
+    }
+
+    private static async Task<List<string>> EdgeMismatchesAsync(
+        NpgsqlConnection c, string sql, DateTime end, IEnumerable<(int ServerId, string Name, bool DroppedOut)> scenarios, CancellationToken ct)
+    {
+        var mismatches = new List<string>();
+        foreach (var (serverId, name, _) in scenarios)
+        {
+            var context = Context(serverId, end);
+            var oracle = await RunEdgeStatementAsync(c, EdgeInOracleSql, context, ct);
+            var candidate = await RunEdgeStatementAsync(c, sql, context, ct);
+            if (oracle != candidate)
+            {
+                mismatches.Add($"{name}: oracle={oracle} candidate={candidate}");
+            }
+        }
+
+        return mismatches;
+    }
+
+    /// <summary>
+    /// #5794: the probe now compares to two scalar timestamps instead of an IN set. Its rows must be the old
+    /// statement's rows in every case the probe can meet, across compressed and raw chunks.
+    /// </summary>
+    [Fact]
+    public async Task TheDatabaseSizeNewestRead_ReturnsTheInSetShapesRows_InEveryEdgeCase_AgainstDevPostgres()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live newest-snapshot edge parity test.");
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, c) = await OpenAsync(ct);
+        await using var scratchLease = scratch;
+        await using var connectionLease = c;
+
+        var end = Now();
+        var scenarios = await SeedEdgeScenariosAsync(c, end, ct);
+        if (scratch.TimescaleEnabled)
+        {
+            var (compressed, raw) = await CompressOlderChunksAsync(c, end, ct);
+            Assert.True(compressed >= 1 && raw >= 1, $"the fixture must hold both compressed and raw chunks (compressed={compressed}, raw={raw})");
+        }
+
+        Assert.Empty(await EdgeMismatchesAsync(c, PgFactCollector.DatabaseSizeNewestSql, end, scenarios, ct));
+
+        /* By value, so identical-but-vacuous answers cannot pass: every scenario's dropped_out is what the case says. */
+        foreach (var (serverId, name, dropped) in scenarios)
+        {
+            var (total, droppedOut) = await RunEdgeStatementAsync(c, PgFactCollector.DatabaseSizeNewestSql, Context(serverId, end), ct);
+            Assert.True(dropped == droppedOut, $"{name}: expected dropped_out={dropped}, got {droppedOut} (total {total})");
+        }
+
+        var steadyTotal = (await RunEdgeStatementAsync(c, PgFactCollector.DatabaseSizeNewestSql, Context(scenarios.Single(s => s.Name == "steady").ServerId, end), ct)).Total;
+        Assert.Equal(600d, steadyTotal);
+        var dupTotal = (await RunEdgeStatementAsync(c, PgFactCollector.DatabaseSizeNewestSql, Context(scenarios.Single(s => s.Name == "duplicate-rows-at-newest-and-edge").ServerId, end), ct)).Total;
+        Assert.Equal(300d, dupTotal);
+        var empty = await RunEdgeStatementAsync(c, PgFactCollector.DatabaseSizeNewestSql, Context(scenarios.Single(s => s.Name == "no-rows").ServerId, end), ct);
+        Assert.Equal((null, false), empty);
+    }
+
+    /// <summary>
+    /// The parity check above must be able to fail: a statement that probes only one edge, or that matches no edge
+    /// at all, returns different rows in the scenarios, so a regression of either kind is caught.
+    /// </summary>
+    [Fact]
+    public async Task TheEdgeParityCheck_CatchesAProbeThatDropsAnEdge_AgainstDevPostgres()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live newest-snapshot edge parity test.");
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, c) = await OpenAsync(ct);
+        await using var scratchLease = scratch;
+        await using var connectionLease = c;
+
+        var end = Now();
+        var scenarios = await SeedEdgeScenariosAsync(c, end, ct);
+        if (scratch.TimescaleEnabled)
+        {
+            await CompressOlderChunksAsync(c, end, ct);
+        }
+
+        var shipped = PgFactCollector.DatabaseSizeNewestSql;
+        var dropsOldest = System.Text.RegularExpressions.Regex.Replace(
+            shipped, @"\s+OR\s+f\.collection_time = \(SELECT collection_time FROM old_t\)", string.Empty);
+        var dropsPrevious = System.Text.RegularExpressions.Regex.Replace(
+            shipped, @"f\.collection_time = \(SELECT collection_time FROM prev_t\)\s+OR\s+", string.Empty);
+        Assert.NotEqual(shipped, dropsOldest);
+        Assert.NotEqual(shipped, dropsPrevious);
+
+        var oldestMisses = await EdgeMismatchesAsync(c, dropsOldest, end, scenarios, ct);
+        var previousMisses = await EdgeMismatchesAsync(c, dropsPrevious, end, scenarios, ct);
+        Assert.Contains(oldestMisses, m => m.StartsWith("vanished-after-oldest-edge:", StringComparison.Ordinal));
+        Assert.Contains(previousMisses, m => m.StartsWith("vanished-at-previous-edge-only:", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The point of #5794: against raw and compressed chunks over several days, the probe opens only the chunks that
+    /// hold the two edge snapshots. The IN-set shape appended every chunk of the table (including the compressed
+    /// ones) to find two timestamps. Block counts, not timings, so the assertion is stable.
+    /// </summary>
+    [Fact]
+    public async Task TheDatabaseSizeNewestRead_ProbesOnlyTheEdgeChunks_NotEveryChunk_AgainstDevPostgres()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live newest-snapshot chunk-exclusion test.");
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, c) = await OpenAsync(ct);
+        await using var scratchLease = scratch;
+        await using var connectionLease = c;
+        Assert.SkipUnless(scratch.TimescaleEnabled, "chunk exclusion needs TimescaleDB");
+
+        const int serverId = -579_390;
+        var end = Now();
+
+        /* Six days of five-minute snapshots, 20 files each, ending at the window's end: the lookback holds the last
+           day (two raw days' chunks) and the older four days sit in chunks the lookback never reaches. */
+        using (var seed = new NpgsqlCommand(@"
+INSERT INTO file_io_stats (collection_id, collection_time, server_id, server_name, database_name, file_name, file_type, size_mb)
+SELECT 579_000_000_000 + (EXTRACT(EPOCH FROM t)::bigint / 300) * 100 + f, t, $1, 'newest-snapshot-e2e',
+       'Db' || f, 'Db' || f || '_data', 'ROWS', 100 * f
+FROM generate_series($2::timestamp, $3::timestamp, interval '5 minutes') AS t CROSS JOIN generate_series(1, 20) AS f", c))
+        {
+            seed.Parameters.AddWithValue(serverId);
+            seed.Parameters.AddWithValue(Naive(end.AddDays(-6)));
+            seed.Parameters.AddWithValue(Naive(end));
+            await seed.ExecuteNonQueryAsync(ct);
+        }
+
+        var (compressed, raw) = await CompressOlderChunksAsync(c, end, ct);
+        Assert.True(compressed >= 3 && raw >= 1, $"the fixture must hold several compressed chunks and a raw one (compressed={compressed}, raw={raw})");
+        using (var analyze = new NpgsqlCommand("ANALYZE file_io_stats", c))
+        {
+            await analyze.ExecuteNonQueryAsync(ct);
+        }
+
+        var context = Context(serverId, end);
+        var lookback = context.LatestValueStartFor("file_io_stats");
+        var oracle = await RunEdgeStatementAsync(c, EdgeInOracleSql, context, ct);
+        var shipped = await RunEdgeStatementAsync(c, PgFactCollector.DatabaseSizeNewestSql, context, ct);
+        Assert.Equal(oracle, shipped);
+        Assert.Equal((21000d, false), shipped);
+
+        var oldBlocks = await BlocksAsync(c, EdgeInOracleSql, [serverId, lookback, end], ct);
+        var newBlocks = await BlocksAsync(c, PgFactCollector.DatabaseSizeNewestSql, [serverId, lookback, end], ct);
+        Assert.True(newBlocks * 2 <= oldBlocks,
+            $"the edge probe should touch half the blocks of the IN-set shape or fewer: old={oldBlocks} new={newBlocks}");
     }
 
     private static async Task<long> BlocksAsync(NpgsqlConnection c, string sql, object[] parameters, CancellationToken ct)
