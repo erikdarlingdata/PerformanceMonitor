@@ -1211,12 +1211,12 @@ FROM (
         TimeSpan minWindow,
         int commandTimeoutSeconds,
         ILogger? logger,
-        CancellationToken cancellationToken,
-        LegacyRows legacyRows)
+        LegacyRows legacyRows,
+        CancellationToken cancellationToken)
     {
         var p = await ResolveReadAsync(
             connection, serverId, windowStart, windowEnd, literalWindowEnd, minWindow,
-            commandTimeoutSeconds, logger, cancellationToken, legacyRows);
+            commandTimeoutSeconds, logger, legacyRows, cancellationToken);
         return (p.UseTable, p.ClampedStart);
     }
 
@@ -1260,8 +1260,8 @@ FROM (
         TimeSpan minWindow,
         int commandTimeoutSeconds,
         ILogger? logger,
-        CancellationToken cancellationToken,
         LegacyRows legacyRows,
+        CancellationToken cancellationToken,
         StoreWideInputsCache? storeWide = null)
     {
         /* The probes bind these as timestamp-without-time-zone, which Npgsql refuses for Kind=Utc; a caller that

@@ -96,7 +96,7 @@ public static class DarlingQueryTagRollupReader
         {
             var plan = await QueryStoreIntervalWide.ResolveReadAsync(
                 connection, serverId, windowStart, windowEnd, windowEnd, QueryStoreMinWindow,
-                readSeconds, logger, cancellationToken, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow);
+                readSeconds, logger, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow, cancellationToken);
             if (!plan.UseTable)
             {
                 refused[serverId] = plan.DecisionFailed

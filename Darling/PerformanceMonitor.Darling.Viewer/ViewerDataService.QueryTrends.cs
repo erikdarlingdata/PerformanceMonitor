@@ -648,8 +648,8 @@ public sealed partial class ViewerDataService
                a legacy row at every collection_time it was stored at, and the table keeps one snapshot of it. */
             var (useTable, clampedStart) = await QueryStoreIntervalWide.ReadsTableAsync(
                 connection, serverId, startUtc, endUtc, literalEndUtc, QueryStoreDurationTrendMinWindow,
-                ViewerCommandDeadlines.CurrentInteractiveReadSeconds, logger: null, cancellationToken,
-                legacyRows: QueryStoreIntervalWide.LegacyRows.Refuse);
+                ViewerCommandDeadlines.CurrentInteractiveReadSeconds, logger: null, legacyRows: QueryStoreIntervalWide.LegacyRows.Refuse,
+                cancellationToken);
             if (!useTable)
             {
                 return null;

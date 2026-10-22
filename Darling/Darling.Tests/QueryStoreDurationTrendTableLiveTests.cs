@@ -192,7 +192,7 @@ public sealed class QueryStoreDurationTrendTableLiveTests
 
         /* The gate decision itself, asked the way the trend asks (the Viewer's own call is checked by the series below). */
         var (useTable, _) = await QueryStoreIntervalWide.ReadsTableAsync(
-            connection, ServerId, WindowStart, WindowEnd, null, ViewerDataService.QueryStoreDurationTrendMinWindow, 30, null, ct, legacyRows: QueryStoreIntervalWide.LegacyRows.Refuse);
+            connection, ServerId, WindowStart, WindowEnd, null, ViewerDataService.QueryStoreDurationTrendMinWindow, 30, null, legacyRows: QueryStoreIntervalWide.LegacyRows.Refuse, ct);
         Assert.False(useTable, "every row in this seed is legacy (interval_start_time_utc IS NULL); clause 6 must refuse the table");
 
         var rawPoints = await ReadPointsAsync(postgres, ViewerDataService.QueryStoreDurationTrendSql, WindowStart, WindowEnd, ct);

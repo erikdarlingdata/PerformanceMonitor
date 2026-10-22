@@ -168,7 +168,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
 
     internal static Task<QueryStoreIntervalWide.WideReadPlan> ResolveAsync(Rig rig, CancellationToken ct) =>
         QueryStoreIntervalWide.ResolveReadAsync(
-            rig.Connection, ServerId, S, rig.End, rig.End, DarlingDataReader.QueryStoreTopMinWindow, 60, null, ct, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow);
+            rig.Connection, ServerId, S, rig.End, rig.End, DarlingDataReader.QueryStoreTopMinWindow, 60, null, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow, ct);
 
     internal static Task DropRawChunksOlderThanAsync(Rig rig, DateTime cutoff, CancellationToken ct) =>
         ExecAsync(rig.Connection, "SELECT drop_chunks('collect.query_store_stats', older_than => @cutoff)", cutoff, ct);

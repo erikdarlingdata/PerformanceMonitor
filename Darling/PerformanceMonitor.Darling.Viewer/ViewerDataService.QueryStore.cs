@@ -536,7 +536,7 @@ public sealed partial class ViewerDataService
                instant the table provably equals what raw held; the banner names it. */
             var plan = await QueryStoreIntervalWide.ResolveReadAsync(
                 connection, serverId, startUtc, endUtc, literalEndUtc, QueryStoreIntervalWide.GridWideMinWindow,
-                ViewerCommandDeadlines.CurrentInteractiveReadSeconds, logger: null, cancellationToken, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow);
+                ViewerCommandDeadlines.CurrentInteractiveReadSeconds, logger: null, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow, cancellationToken);
             if (!plan.UseTable)
             {
                 return null;

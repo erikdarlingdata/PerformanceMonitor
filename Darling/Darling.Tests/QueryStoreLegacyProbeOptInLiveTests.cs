@@ -202,10 +202,10 @@ FROM generate_series(@from, @to, INTERVAL '5 minutes') AS t",
         /* The gate, as the failure read calls it (no opt-in): the table. And with the probe asked for, the same window is refused. */
         var windowStart = end.AddDays(-14).AddHours(-1);
         var (useTable, _) = await QueryStoreIntervalWide.ReadsTableAsync(
-            rig.Connection, ServerId, windowStart, end, null, QueryStoreIntervalWide.TopMinWindow, 30, null, ct, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow);
+            rig.Connection, ServerId, windowStart, end, null, QueryStoreIntervalWide.TopMinWindow, 30, null, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow, ct);
         Assert.True(useTable, "a window holding legacy rows must still route the failure read to the table");
         var (forcedProbe, _) = await QueryStoreIntervalWide.ReadsTableAsync(
-            rig.Connection, ServerId, windowStart, end, null, QueryStoreIntervalWide.TopMinWindow, 30, null, ct, legacyRows: QueryStoreIntervalWide.LegacyRows.Refuse);
+            rig.Connection, ServerId, windowStart, end, null, QueryStoreIntervalWide.TopMinWindow, 30, null, legacyRows: QueryStoreIntervalWide.LegacyRows.Refuse, ct);
         Assert.False(forcedProbe, "with the probe on, the legacy rows must refuse the table (the control for the assertion above)");
 
         /* The two forms of the failure read, same bounds, compared on every column. */
@@ -291,11 +291,11 @@ FROM generate_series(@from, @to, INTERVAL '5 minutes') AS t",
         var start = rig.End.AddDays(-6);
 
         var (asked, _) = await QueryStoreIntervalWide.ReadsTableAsync(
-            rig.Connection, ServerId, start, rig.End, null, TimeSpan.FromHours(48), 30, null, ct, legacyRows: QueryStoreIntervalWide.LegacyRows.Refuse);
+            rig.Connection, ServerId, start, rig.End, null, TimeSpan.FromHours(48), 30, null, legacyRows: QueryStoreIntervalWide.LegacyRows.Refuse, ct);
         Assert.False(asked, "a legacy row in the window must refuse the table for a reader that places every snapshot");
 
         var (notAsked, _) = await QueryStoreIntervalWide.ReadsTableAsync(
-            rig.Connection, ServerId, start, rig.End, null, TimeSpan.FromHours(48), 30, null, ct, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow);
+            rig.Connection, ServerId, start, rig.End, null, TimeSpan.FromHours(48), 30, null, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow, ct);
         Assert.True(notAsked, "the same window must route a reader that keeps the newest snapshot per interval to the table");
     }
 
