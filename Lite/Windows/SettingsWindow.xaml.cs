@@ -292,6 +292,42 @@ public partial class SettingsWindow : Window
         _mcpSettingsProblem = settings.Problem;
         McpEnabledCheckBox.IsChecked = settings.Enabled;
         McpPortTextBox.Text = settings.Port.ToString();
+        _mcpTokenless = settings.AllowTokenlessLoopback;
+        LoadMcpToken();
+    }
+
+    /* The MCP token lives in Windows Credential Manager for this Windows user (McpTokenStore). This window only reads it:
+       the token is made when the server first starts with none, or when Copy is used before then. */
+    private readonly McpTokenStore _mcpTokens = McpTokenStore.ForApp(new CredentialService());
+    private bool _mcpTokenless;
+
+    private void LoadMcpToken()
+    {
+        if (_mcpTokenless)
+        {
+            McpTokenTextBox.Text = "No token is required (mcp_allow_tokenless_loopback is on in settings.json)";
+            CopyMcpTokenButton.IsEnabled = false;
+            return;
+        }
+
+        var token = _mcpTokens.Read(out var failure);
+        McpTokenTextBox.Text = token ?? (failure is null
+            ? "Made the first time the MCP server starts, or when you copy it"
+            : "Could not be read: " + failure);
+    }
+
+    /// <summary>The token to copy: the stored one, made first when there is none. Null with the status line set when it cannot be had.</summary>
+    private string? TokenForCopy()
+    {
+        var token = _mcpTokens.GetOrCreate(out var failure, out _);
+        if (token is null)
+        {
+            McpStatusText.Text = "Couldn't get the MCP token: " + failure;
+            return null;
+        }
+
+        McpTokenTextBox.Text = token;
+        return token;
     }
 
     private void UpdateMcpStatus()
@@ -653,10 +689,30 @@ public partial class SettingsWindow : Window
     private void CopyMcpCommandButton_Click(object sender, RoutedEventArgs e)
     {
         var port = McpPortTextBox.Text;
-        var command = $"claude mcp add --transport http --scope user sql-monitor http://localhost:{port}/";
+        string command;
+        if (_mcpTokenless)
+        {
+            command = $"claude mcp add --transport http --scope user sql-monitor http://localhost:{port}/";
+        }
+        else
+        {
+            var token = TokenForCopy();
+            if (token is null) return;
+            command = McpTokenStore.ClientCommand(int.TryParse(port, out var p) ? p : McpSettings.DefaultPort, token);
+        }
+
         /* Use SetDataObject with copy=false to avoid WPF's problematic Clipboard.Flush() */
         McpStatusText.Text = ClipboardText.TrySetDataObject(command)
             ? "Copied to clipboard!"
+            : "Couldn't copy: the clipboard is in use.";
+    }
+
+    private void CopyMcpTokenButton_Click(object sender, RoutedEventArgs e)
+    {
+        var token = TokenForCopy();
+        if (token is null) return;
+        McpStatusText.Text = ClipboardText.TrySetDataObject(token)
+            ? "Token copied to clipboard! Send it as the header \"Authorization: Bearer <token>\"."
             : "Couldn't copy: the clipboard is in use.";
     }
 

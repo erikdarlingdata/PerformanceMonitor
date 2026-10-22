@@ -68,7 +68,7 @@ internal static class McpInvestigationPolicy
 
         return (Microsoft.Extensions.Logging.LogLevel.Information,
             $"MCP investigation tools are ON ({InvestigationsSetting}): {string.Join(", ", InvestigationTools)} are served. "
-            + "Lite has no token, so any local process that reaches the MCP port can list, claim and report on investigation requests.");
+            + "Every client needs the MCP token; with mcp_allow_tokenless_loopback on there is none, and any local process that reaches the MCP port can list, claim and report on investigation requests.");
     }
 
     /// <summary>Removes the four tools from <paramref name="tools"/> IN PLACE unless <paramref name="served"/>.</summary>

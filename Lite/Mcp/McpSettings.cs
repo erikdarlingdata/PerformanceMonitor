@@ -60,10 +60,20 @@ internal sealed class McpSettings
     /// Whether the four investigation tools (<see cref="McpInvestigationPolicy.InvestigationTools"/>, #5820) are
     /// offered. Default OFF. Read from <c>mcp_allow_investigations</c> (<see cref="McpInvestigationPolicy.InvestigationsSetting"/>)
     /// at start, like <c>mcp_allow_writes</c>. They are served only when this is on AND <see cref="AllowWrites"/> is
-    /// off (<see cref="McpInvestigationPolicy.Served"/>): Lite has no token, so the agent tools reach local processes only
+    /// off (<see cref="McpInvestigationPolicy.Served"/>): with the token off (mcp_allow_tokenless_loopback), the agent tools reach local processes only
     /// when the mute and route-disable tools are not also reachable. A file setting only, no Settings window control.
     /// </summary>
     public bool AllowInvestigations { get; set; } = false;
+
+    /// <summary>
+    /// Default OFF: once the MCP server is on, every request needs the token (<see cref="McpTokenStore"/>), like Darling's.
+    /// On, the server answers local clients without one, as earlier builds did. Read from <c>mcp_allow_tokenless_loopback</c>
+    /// (<see cref="AllowTokenlessLoopbackSetting"/>) at start, so a change needs a restart. File setting only, no Settings window control.
+    /// </summary>
+    public bool AllowTokenlessLoopback { get; set; } = false;
+
+    /// <summary>The settings.json key for <see cref="AllowTokenlessLoopback"/>.</summary>
+    public const string AllowTokenlessLoopbackSetting = "mcp_allow_tokenless_loopback";
 
     /// <summary>
     /// How much collected data the MCP answers hand out (#5632 on Darling, #5820 here): full (the default),
@@ -178,6 +188,16 @@ internal sealed class McpSettings
                 }
 
                 settings.AllowInvestigations = allowInvestigations.GetBoolean();
+            }
+
+            if (root.TryGetProperty("mcp_allow_tokenless_loopback", out var allowTokenless))
+            {
+                if (allowTokenless.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                {
+                    return Lost(WrongKind(AllowTokenlessLoopbackSetting, allowTokenless, "true or false"));
+                }
+
+                settings.AllowTokenlessLoopback = allowTokenless.GetBoolean();
             }
 
             if (root.TryGetProperty("mcp_data_detail", out var dataDetail))

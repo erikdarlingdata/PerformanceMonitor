@@ -22,9 +22,9 @@ namespace PerformanceMonitorLite.Mcp;
 /// destructive, so the hints only tell a client which tools are safe to call without asking; they protect nothing
 /// by themselves, which is why they come with the setting and not instead of it.</para>
 ///
-/// <para>Unlike Darling, Lite adds no bearer token: its endpoint is loopback-only behind the shared Host-header
-/// guard, and it has no token or caller check to gate on. The setting is the whole switch, so with it on ANY program
-/// on this computer that can reach the port can mute and unmute analysis findings; the sample settings
+/// <para>Lite's endpoint is loopback-only behind the shared Host-header guard and, like Darling's, needs the MCP token
+/// unless mcp_allow_tokenless_loopback is on. The setting is the whole switch for the write tools, so with the token off
+/// and this on ANY program on this computer that can reach the port can mute and unmute analysis findings; the sample settings
 /// (<c>settings.sample.json</c>) and the README's MCP section say so. The setting has no UI control, so it has no
 /// tooltip.</para>
 /// </summary>

@@ -31,6 +31,7 @@ public sealed class McpHostService : BackgroundService
     private readonly McpDataDetail _dataDetail;
     private readonly IPseudonymKeySource? _pseudonymKeys;
     private readonly IInvestigationRequestStore _investigationStore;
+    private readonly string? _bearerToken;
     private WebApplication? _app;
 
     /// <summary>
@@ -49,8 +50,9 @@ public sealed class McpHostService : BackgroundService
     /// to it fails as an unknown tool. See <see cref="McpWritePolicy"/>.</param>
     public McpHostService(LocalDataService dataService, ServerManager serverManager, MuteRuleService muteRuleService, DuckDbInitializer duckDb, int port, IInvestigationRequestStore investigationStore, ScheduleManager? scheduleManager = null, bool allowWrites = false,
         bool allowInvestigations = false, McpDataDetail dataDetail = McpDataDetail.Full,
-        IPseudonymKeySource? pseudonymKeys = null)
+        IPseudonymKeySource? pseudonymKeys = null, string? bearerToken = null)
     {
+        _bearerToken = string.IsNullOrEmpty(bearerToken) ? null : bearerToken;
         _pseudonymKeys = pseudonymKeys;
         _dataService = dataService;
         _serverManager = serverManager;
@@ -108,6 +110,32 @@ public sealed class McpHostService : BackgroundService
     internal static void RegisterCollectorRunTimes(IServiceCollection services, ScheduleManager? schedules, ServerManager serverManager)
     {
         services.AddSingleton(new McpCollectorRunTimes(schedules, serverManager));
+    }
+
+    /// <summary>
+    /// The token gate: every request must carry <c>Authorization: Bearer &lt;token&gt;</c> with the right token, or it is
+    /// answered 401 with <c>WWW-Authenticate: Bearer</c> before <c>MapMcp</c>. The compare is constant-time
+    /// (<see cref="McpTokenStore.IsAuthorized"/>). This is Darling's gate for its loopback listener. A null or empty
+    /// <paramref name="token"/> installs nothing (<c>mcp_allow_tokenless_loopback</c> is on).
+    /// </summary>
+    internal static void UseBearerTokenGate(IApplicationBuilder app, string? token)
+    {
+        if (string.IsNullOrEmpty(token))
+        {
+            return;
+        }
+
+        app.Use(async (context, next) =>
+        {
+            if (!McpTokenStore.IsAuthorized(context.Request.Headers.Authorization.ToString(), token))
+            {
+                context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                context.Response.Headers.WWWAuthenticate = "Bearer";
+                return;
+            }
+
+            await next(context);
+        });
     }
 
     /// <summary>
@@ -295,11 +323,20 @@ public sealed class McpHostService : BackgroundService
                 await next(context);
             });
 
+            /* After the Host guard, before the JSON guard and MapMcp: a request with no token or a wrong one is refused 401
+               before anything else looks at it. */
+            UseBearerTokenGate(_app, _bearerToken);
+
             UseJsonPostGuard(_app);
 
             _app.MapMcp();
 
             AppLogger.Info("MCP", $"Starting MCP server on http://localhost:{_port}");
+            if (_bearerToken is null)
+            {
+                AppLogger.Warn("MCP",
+                    $"{McpSettings.AllowTokenlessLoopbackSetting} is on: the MCP server serves http://localhost with no token. Turn it off to require one.");
+            }
 
             /* One line at every start, because an install that used the mute tool before the switch existed loses
                it on upgrade until the operator turns the setting on. */
