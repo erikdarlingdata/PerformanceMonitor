@@ -537,7 +537,7 @@ public sealed class McpQueryTools
 
             if (rows.Count == 0)
                 return await McpRuntimePrecondition.WithQueryStoreNotWritingHintAsync(
-                    await EmptyAnswerAsync(), dataService, resolved.ServerId, database_name);
+                    await EmptyAnswerAsync(), dataService, resolved.ServerId, resolved.DisplayName, database_name);
 
             var result = rows.Select(r => new
             {

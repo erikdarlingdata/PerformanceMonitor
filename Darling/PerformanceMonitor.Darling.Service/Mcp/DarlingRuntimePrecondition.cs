@@ -260,6 +260,56 @@ ORDER BY database_name";
     }
 
     /// <summary>
+    /// #6554: the three facts <see cref="CollectorRuntimePrecondition.QueryStoreReadableSecondaryMessage"/> judges, in one round trip:
+    /// the newest collected <c>ag_replica_role</c>, whether the server names a <c>query_store_replica</c>, and how many databases
+    /// in the newest <c>query_store_health</c> capture carry the readable-secondary bit (of how many). $1 server_id.
+    /// </summary>
+    public const string ReadableSecondaryFactsSql = @"
+SELECT
+    (SELECT sp.ag_replica_role FROM server_properties AS sp WHERE sp.server_id = $1 ORDER BY sp.collection_time DESC LIMIT 1),
+    (SELECT COALESCE(NULLIF(btrim(c.query_store_replica), ''), NULL) FROM config.config_monitored_servers AS c WHERE c.server_id = $1),
+    (SELECT COUNT(*) FROM v_query_store_health AS h
+      WHERE h.server_id = $1 AND h.capture_time = (SELECT MAX(h2.capture_time) FROM v_query_store_health AS h2 WHERE h2.server_id = $1)),
+    (SELECT COUNT(*) FROM v_query_store_health AS h
+      WHERE h.server_id = $1 AND (h.readonly_reason & 8) <> 0
+        AND h.capture_time = (SELECT MAX(h2.capture_time) FROM v_query_store_health AS h2 WHERE h2.server_id = $1))";
+
+    /// <summary>
+    /// #6554: the <c>not_collected</c> envelope for a Query Store read on a server that is a readable secondary with
+    /// <c>query_store_replica</c> off, or <c>null</c> (the caller keeps its own answer) when the evidence does not say so or the
+    /// read fails: this runs on a path that already found nothing.
+    /// </summary>
+    public static async Task<string?> QueryStoreReadableSecondaryStatusAsync(
+        NpgsqlDataSource postgres, int serverId, string serverName, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await using var command = postgres.CreateCommand(ReadableSecondaryFactsSql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            DarlingMcpReadParameters.AddInt(command, serverId);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                return null;
+            }
+
+            var message = CollectorRuntimePrecondition.QueryStoreReadableSecondaryMessage(
+                serverName,
+                reader.IsDBNull(0) ? null : reader.GetString(0),
+                (int)reader.GetInt64(2),
+                (int)reader.GetInt64(3),
+                replicaConfigured: !reader.IsDBNull(1),
+                "Darling collects Query Store from a registered server only when that server is not a readable secondary, and query_store_replica is off for it. " +
+                "Register the primary, or set query_store_replica on the primary to read Query Store from a readable secondary (edit_server).");
+            return message is null ? null : McpHelpers.Status(CollectorRuntimePrecondition.NotCollectedStatusWord, message);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
     /// #6181: the message for a Query Store read that found no sample EVER stored, when the latest health snapshot says Query
     /// Store is on and the query_store collector's latest run succeeded (see
     /// <see cref="CollectorRuntimePrecondition.QueryStoreFirstIntervalMessage"/>), or null when it does not (state unknown,
@@ -307,11 +357,17 @@ ORDER BY database_name";
     /// answer is an empty or unavailable status (#6074). Other statuses (a precondition, a not-collected answer, an error) already say their own cause.
     /// </summary>
     public static async Task<string> WithQueryStoreNotWritingHintAsync(
-        string answer, NpgsqlDataSource postgres, int serverId, DatabaseFilter databases, CancellationToken cancellationToken = default)
+        string answer, NpgsqlDataSource postgres, int serverId, string serverName, DatabaseFilter databases, CancellationToken cancellationToken = default)
     {
         if (!McpHelpers.IsEmptyOrUnavailableStatus(answer))
         {
             return answer;
+        }
+
+        /* #6554: on a readable secondary READ_ONLY is the normal state, so say it is not collected instead of hinting at a fault. */
+        if (await QueryStoreReadableSecondaryStatusAsync(postgres, serverId, serverName, cancellationToken) is { } notCollected)
+        {
+            return notCollected;
         }
 
         return McpHelpers.AppendToMessage(answer, await QueryStoreNotWritingHintAsync(postgres, serverId, databases, cancellationToken));

@@ -699,6 +699,50 @@ public static class CollectorRuntimePrecondition
                PreconditionEpilogue;
     }
 
+    /// <summary>The engine's readable-secondary bit in <c>readonly_reason</c> (the same bit the collectors gate on, #1558).</summary>
+    public const int ReadableSecondaryReadonlyBit = 8;
+
+    /// <summary>The <c>status</c> word of <see cref="QueryStoreReadableSecondaryMessage"/>: the data is not collected here, and the reason is not a fault to repair.</summary>
+    public const string NotCollectedStatusWord = "not_collected";
+
+    /// <summary>
+    /// #6554: the one-line reason a Query Store read on a readable secondary is empty, or <c>null</c> when the evidence does not
+    /// say the server is one. The collectors skip every database whose <c>readonly_reason</c> has bit 8 (Query Store, its
+    /// forced-plan and plan-correction fan-outs, and since #6252 its health row), so a registered secondary has no Query Store
+    /// rows to read, and the older answers ("empty", "Query Store is READ_ONLY") sent the reader to look for a fault in what is a
+    /// secondary's normal state. The server is a secondary when its collected <c>ag_replica_role</c> says <c>Secondary</c>, or when
+    /// every database in its newest health capture carries the bit (an RDS read replica reads <c>Standalone</c> in the role, and
+    /// captures from before #6252 still carry the bit). Null when <paramref name="replicaConfigured"/> is true: then the Query Store
+    /// is read from a replica and an empty read has some other cause.
+    /// </summary>
+    /// <param name="healthDatabases">Databases in the newest <c>query_store_health</c> capture.</param>
+    /// <param name="healthSecondaryDatabases">Of those, how many carry <see cref="ReadableSecondaryReadonlyBit"/>.</param>
+    /// <param name="settingClause">Why the product does not read it, and the setting that changes that (product specific).</param>
+    public static string? QueryStoreReadableSecondaryMessage(
+        string serverName,
+        string? agReplicaRole,
+        int healthDatabases,
+        int healthSecondaryDatabases,
+        bool replicaConfigured,
+        string settingClause)
+    {
+        if (replicaConfigured)
+        {
+            return null;
+        }
+
+        var roleSaysSecondary = string.Equals(agReplicaRole?.Trim(), "Secondary", StringComparison.OrdinalIgnoreCase);
+        var healthSaysSecondary = healthDatabases > 0 && healthSecondaryDatabases == healthDatabases;
+        if (!roleSaysSecondary && !healthSaysSecondary)
+        {
+            return null;
+        }
+
+        return $"Query Store is not collected for {serverName}: it is a readable secondary, and {settingClause} " +
+               "READ_ONLY is a secondary's normal state, not a fault, and its Query Store is the primary's, replicated. " +
+               "An empty read here means nothing was collected, not that nothing ran.";
+    }
+
     /// <summary>
     /// The sentence a Query Store read that found nothing appends when the newest <c>query_store_health</c> row of a
     /// database in scope is not READ_WRITE (#6074), or <c>null</c> when every database in scope is collecting (or no row
