@@ -593,6 +593,12 @@ public class CollectorMeasurementSeamTests
                 CollectorContext.StatementScrubTimeoutsMeasurement,
                 CollectorContext.StatementScrubUnjudgedMeasurement,
                 CollectorContext.StatementScrubMsMeasurement,
+                /* #6441: SQL Server truncated the ring buffer's XML. Measured through RingBufferXml.MeasureTruncation on
+                   behalf of system_health_events, long_query_completions, deadlocks and blocked_process_report, which
+                   is why the consts live in RingBufferXml.cs. Written only on a truncated read. */
+                RingBufferXml.TruncatedMeasurement,
+                RingBufferXml.EventsHiddenMeasurement,
+                RingBufferXml.NewestVisibleAgeMeasurement,
             }.OrderBy(l => l, StringComparer.Ordinal).ToList(),
             resolved.Distinct(StringComparer.Ordinal).OrderBy(l => l, StringComparer.Ordinal).ToList());
     }
