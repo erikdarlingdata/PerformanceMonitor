@@ -131,10 +131,10 @@ Full entries: [docs/changelog/3.11.md](docs/changelog/3.11.md)
 - **An MCP client can create and edit notification routes and dismiss alert history** ([#6231])
 - **MCP route tools set a route's own destinations** ([#6241])
 - **The web dashboard can create, edit and delete agent routes and edit environment profiles** ([#6264])
-- **The web dashboard charts file I/O throughput, tempdb size and I/O, and collector duration** ([#6296], [#6297], [#6298])
+- **The web dashboard charts file I/O throughput, tempdb size and I/O, and collector duration** ([#6296], [#6297], [#6298], [#6443])
 - **The web dashboard compares Top Queries, Top Procedures and Query Store with an earlier period** ([#6300])
 - **The web Blocking page shows the lead-blocker tree of a blocked process report** ([#6292])
-- **The web System Events tab charts the corruption and contention counters** ([#6295])
+- **The web System Events tab charts the corruption and contention counters** ([#6295], [#6443])
 - **The web Active Queries tab picks a stored snapshot** ([#6302])
 - **Alerts show how many days in a row they fired at the same time of day** ([#6261])
 - **The web server page shows the Daily Health Calendar as a month calendar** ([#6294])
@@ -345,6 +345,8 @@ Full entries: [docs/changelog/3.11.md](docs/changelog/3.11.md)
 - **The default trace collector no longer logs a spurious "unexpected end of trace file" error on SQL Server on Linux** ([#6381])
 - **File I/O no longer invents reads and writes on Azure SQL Database Hyperscale** ([#6438])
 - **Lite's Top Queries by CPU no longer ranks the whole procedure archive** ([#6096])
+- **The web Job History Category list shows only the selected server's categories** ([#6443])
+- **Editing or adding a server in the web dashboard right after another edit is no longer refused as busy** ([#6450])
 
 ## [3.10.0] - 2026-10-09
 
@@ -5833,3 +5835,5 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#6383]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6383
 [#6438]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6438
 [#6447]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/6447
+[#6443]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/6443
+[#6450]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/6450
