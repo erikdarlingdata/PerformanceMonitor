@@ -547,12 +547,17 @@ AND   event_xml IS NOT NULL";
         using var command = connection.CreateCommand();
 
         command.CommandText = @"
-SELECT CASE WHEN status = 'SUCCESS' THEN error_message END
-FROM v_collection_log
-WHERE server_id = $1
-AND   collector_name = $2
-ORDER BY collection_time DESC
-LIMIT 1";
+SELECT CASE WHEN cl.status = 'SUCCESS' THEN cl.error_message END
+FROM v_collection_log AS cl
+WHERE cl.server_id = $1
+AND   cl.collector_name = $2
+AND   cl.collection_time =
+      (
+          SELECT MAX(n.collection_time)
+          FROM v_collection_log AS n
+          WHERE n.server_id = $1
+          AND   n.collector_name = $2
+      )";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = collectorName });
