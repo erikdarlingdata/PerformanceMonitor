@@ -536,6 +536,23 @@ AND   event_xml IS NOT NULL";
     /// <c>DarlingSystemHealthReader.GetLastCaptureOfTypeAsync</c>. Reads the rows directly, not through
     /// <see cref="StoredEventCopies"/>, for the same reason as <see cref="GetLastSystemHealthCaptureAsync"/>.</para>
     /// </summary>
+    public async Task<DateTime?> GetLastSystemHealthCaptureOfTypeAsync(int serverId, string eventType)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        command.CommandText = @"
+SELECT MAX(collection_time)
+FROM v_system_health_events
+WHERE server_id = $1
+AND   event_type = $2
+AND   event_xml IS NOT NULL";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = eventType });
+        return await command.ExecuteScalarAsync() is DateTime stamp ? stamp : null;
+    }
+
     /// <summary>
     /// #6441: the note the collector's NEWEST run left, when that run succeeded (null otherwise). A truncated ring buffer
     /// is recorded only there (<see cref="PerformanceMonitor.Common.RingBufferTruncationNote"/>): the run is SUCCESS,
@@ -562,23 +579,6 @@ AND   cl.collection_time =
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = collectorName });
         return await command.ExecuteScalarAsync() as string;
-    }
-
-    public async Task<DateTime?> GetLastSystemHealthCaptureOfTypeAsync(int serverId, string eventType)
-    {
-        using var connection = await OpenConnectionAsync();
-        using var command = connection.CreateCommand();
-
-        command.CommandText = @"
-SELECT MAX(collection_time)
-FROM v_system_health_events
-WHERE server_id = $1
-AND   event_type = $2
-AND   event_xml IS NOT NULL";
-
-        command.Parameters.Add(new DuckDBParameter { Value = serverId });
-        command.Parameters.Add(new DuckDBParameter { Value = eventType });
-        return await command.ExecuteScalarAsync() is DateTime stamp ? stamp : null;
     }
 
     /// <summary>
