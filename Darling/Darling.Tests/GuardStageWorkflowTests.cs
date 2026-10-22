@@ -481,7 +481,7 @@ public sealed class GuardStageWorkflowTests
             .Take(2)
             .ToList();
 
-        Assert.StartsWith("name: Fail when CI did not run", steps[0], StringComparison.Ordinal);
+        Assert.StartsWith("name: Report when CI did not run", steps[0], StringComparison.Ordinal);
         Assert.StartsWith("uses: actions/checkout@v7", steps[1], StringComparison.Ordinal);
     }
 
