@@ -127,6 +127,70 @@ public sealed class TuningStartPathOneBuildTests
         Assert.DoesNotContain(start.Lines, l => l.Contains("is missing", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// #6460 review: the start-path emptiness check is a bare SELECT and queues behind an ACCESS EXCLUSIVE holder
+    /// (drop_chunks, decompress_chunk, VACUUM FULL). It must give up at the create lock bound, not at the 300 s setup
+    /// timeout, then fail closed onto the one-build budget (with a Warning naming the table), and the connection must stay
+    /// usable: the sweep goes on to the CREATE on the same connection, which finds the table busy too, and a later start builds the index.
+    /// </summary>
+    [Fact]
+    public async Task AnEmptinessCheck_ThatFindsTheTableLockedExclusively_GivesUpQuickly_AndALaterSweepBuildsTheIndex()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the locked-table emptiness-check live test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        PgTableTuning.ResetHourlyMissingWarnings();
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var body = new NpgsqlConnection(scratch.ConnectionString);
+        await body.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(body, ct);
+        await TuningStartPasses.ConvergeAsync(body, ct);
+        await SeedStatsRowsAsync(body, ct);
+        await Exec(body, "DROP INDEX collect." + PgTableTuning.QueryStatsRestartRowIndexName, ct);
+
+        await using var holder = new NpgsqlConnection(scratch.ConnectionString);
+        await holder.OpenAsync(ct);
+        await Exec(holder, "BEGIN", ct);
+        try
+        {
+            await Exec(holder, "LOCK TABLE collect.query_stats IN ACCESS EXCLUSIVE MODE", ct);
+            var busy = new CapturingTestLogger();
+
+            /* The sweep's later ALTER TABLE ... SET statements are unbounded and queue behind this lock for the full
+               setup timeout (a separate, older gap), so the sweep is cut off at 40 s. By then the bounded emptiness check
+               (5 s) and the bounded CREATE (5 s) have both given up and logged; with the old 300 s check, neither has. */
+            using var cut = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cut.CancelAfter(TimeSpan.FromSeconds(40));
+            try
+            {
+                await PgTableTuning.ApplyAsync(body, busy, cut.Token);
+            }
+            catch (OperationCanceledException) when (cut.IsCancellationRequested && !ct.IsCancellationRequested)
+            {
+            }
+
+            Assert.Contains(busy.Lines, l => l.StartsWith("Warning:", StringComparison.Ordinal)
+                && l.Contains("collect.query_stats", StringComparison.Ordinal)
+                && l.Contains("Could not tell whether", StringComparison.Ordinal));
+            Assert.Contains(busy.Lines, l => l.StartsWith("Information:", StringComparison.Ordinal)
+                && l.Contains(PgTableTuning.QueryStatsRestartRowIndexName, StringComparison.Ordinal)
+                && l.Contains("table was busy", StringComparison.Ordinal));
+        }
+        finally
+        {
+            await Exec(holder, "ROLLBACK", CancellationToken.None);
+        }
+
+        /* A later start (a fresh connection: the cut-off one is not reused) builds the index once the lock is gone. */
+        await using var restart = new NpgsqlConnection(scratch.ConnectionString);
+        await restart.OpenAsync(ct);
+        var later = new CapturingTestLogger();
+        await PgTableTuning.ApplyAsync(restart, later, ct);
+        Assert.True(await IndexExistsAsync(restart, PgTableTuning.QueryStatsRestartRowIndexName, ct), later.Joined);
+    }
+
     /// <summary>The first-missing index in list order is the earliest start-path index, so the legacy-row index goes before the restart-row ones.</summary>
     [Fact]
     public void TheLegacyRowIndex_IsListedBeforeTheRestartRowIndexes_AndAllThreeShareTheBudget()
@@ -175,12 +239,12 @@ public sealed class TuningStartPathOneBuildTests
 INSERT INTO collect.procedure_stats
     (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name, sql_handle,
      delta_worker_time, delta_elapsed_time, delta_execution_count, sample_interval_seconds)
-VALUES (6460000, now(), -6460, 'Seed', 'Db', 'dbo', 'usp_Seed', '0x01', 1, 1, 1, 300)", ct);
+VALUES (6460000, now() AT TIME ZONE 'UTC', -6460, 'Seed', 'Db', 'dbo', 'usp_Seed', '0x01', 1, 1, 1, 300)", ct);
         await Exec(c, @"
 INSERT INTO collect.query_stats
     (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle,
      delta_worker_time, delta_elapsed_time, delta_execution_count, sample_interval_seconds)
-VALUES (6460001, now(), -6460, 'Seed', 'Db', 'QH6460', '0x01', 1, 1, 1, 300)", ct);
+VALUES (6460001, now() AT TIME ZONE 'UTC', -6460, 'Seed', 'Db', 'QH6460', '0x01', 1, 1, 1, 300)", ct);
     }
 
     private static async Task<string> OidsAsync(NpgsqlConnection c, CancellationToken ct)

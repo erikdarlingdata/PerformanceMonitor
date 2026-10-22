@@ -104,6 +104,14 @@ public static class PgTableTuning
     /// </summary>
     private const string CreateLockTimeoutSeconds = "5s";
 
+    /// <summary>
+    /// The same bound as <see cref="CreateLockTimeoutSeconds"/>, as the <c>CommandTimeout</c> (seconds) of the start-path
+    /// emptiness check. That check is a bare SELECT, so it takes ACCESS SHARE on the table and queues behind an ACCESS EXCLUSIVE
+    /// holder (drop_chunks, decompress_chunk, VACUUM FULL) the way a CREATE does; with <see cref="SetupTimeoutSeconds"/> it
+    /// would hold the start for 300 s. It gives up here instead and fails closed onto the one-build budget (#6460).
+    /// </summary>
+    private const int EmptinessCheckTimeoutSeconds = 5;
+
     private const string CreateIndexPrefix = "CREATE INDEX IF NOT EXISTS ";
 
     /// <summary>
@@ -146,18 +154,21 @@ public static class PgTableTuning
 
     /// <summary>
     /// True when <paramref name="table"/> (a <c>schema.table</c> taken from <see cref="Statements"/>, never from input) has no
-    /// row at all. A failed check answers false, so the index keeps the one-build budget.
+    /// row at all. A failed check, including one that gives up on a busy table after <see cref="EmptinessCheckTimeoutSeconds"/>,
+    /// answers false, so the index keeps the one-build budget; the command is cancelled on the server and the connection stays usable.
     /// </summary>
     private static async Task<bool> TableIsEmptyAsync(NpgsqlConnection connection, string table, ILogger? logger, CancellationToken cancellationToken)
     {
         try
         {
-            using var command = new NpgsqlCommand("SELECT NOT EXISTS (SELECT 1 FROM " + table + ")", connection) { CommandTimeout = SetupTimeoutSeconds };
+            using var command = new NpgsqlCommand("SELECT NOT EXISTS (SELECT 1 FROM " + table + ")", connection) { CommandTimeout = EmptinessCheckTimeoutSeconds };
             return await command.ExecuteScalarAsync(cancellationToken) is true;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger?.LogDebug(ex, "Could not tell whether {Table} is empty; its index counts against the one-build budget", table);
+            logger?.LogWarning(
+                "Could not tell whether {Table} is empty, so its index counts against the one-build budget this start: {Message}",
+                table, ex.Message);
             return false;
         }
     }
