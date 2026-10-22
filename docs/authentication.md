@@ -7,17 +7,19 @@ Part of the [Performance Monitor documentation](../README.md#documentation).
 | Type | Editions | Interactive? | Credential stored? | Where |
 |---|---|---|---|---|
 | Windows | Lite, Darling | No | None | — |
-| SQL Server | Lite, Darling | No | Password | Windows Credential Manager |
+| SQL Server | Lite, Darling | No | Password | Lite: Windows Credential Manager. Darling: see below |
 | Entra ID (MFA) | Lite | Yes, once per session | None | — |
-| Service Principal | Lite | No | Client secret | Windows Credential Manager |
+| Service Principal | Lite | No | Client secret | Lite: Windows Credential Manager. Darling: see below |
 | Managed Identity | Lite | No | None | — |
 | Existing Azure Sign-In | Lite | No | None | — (established outside the app, e.g. `az login`) |
 | Device Code | Lite | Yes, once per session | None | — (entered in a browser, on any device) |
 
+**Where Darling keeps a SQL password or a client secret.** A server in `darling.json` holds it in one of three forms. `encryptedPassword` is a LocalMachine DPAPI blob that `--encrypt-password` produces. `password` holds an `env:NAME` or `file:PATH` reference, or the value itself. A server added in the Darling Viewer keeps a DPAPI blob in the store.
+
 **Managed Identity and Service Principal** are non-interactive Azure AD (Entra ID) authentication modes, added for fleet onboarding of Azure SQL Database / Managed Instance without a per-server interactive MFA prompt (see [#1038](https://github.com/erikdarlingdata/PerformanceMonitor/issues/1038)). Both map directly to `Microsoft.Data.SqlClient`'s native `SqlAuthenticationMethod` (`ActiveDirectoryServicePrincipal` / `ActiveDirectoryManagedIdentity`) — PerformanceMonitor never acquires, caches, or stores a token itself; the official Microsoft driver handles that internally.
 
 - **Managed Identity** requires the machine running the app/service to itself be an Azure resource (VM, App Service, etc.) with a system- or user-assigned managed identity. That identity is then provisioned as a user directly on each target database (see [Permissions](permissions.md#permissions) below). Nothing is stored locally.
-- **Service Principal** uses an Entra app registration's client id + secret. The client id is non-secret and stored in config; the secret is stored only in Windows Credential Manager, same as a SQL auth password.
+- **Service Principal** uses an Entra app registration's client id + secret. The client id is non-secret and stored in config. In Lite the secret is stored only in Windows Credential Manager, same as a SQL auth password. Darling keeps it the way it keeps a SQL password (above).
 
 ### Existing Azure Sign-In (Lite only, `ActiveDirectoryDefault`)
 

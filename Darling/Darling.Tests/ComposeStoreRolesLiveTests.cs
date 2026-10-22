@@ -182,8 +182,8 @@ public sealed class ComposeStoreRolesLiveTests
             {
                 postgres = new { managed = false, connectionString = owner },
                 servers = new[] { new { name = "sql-3914", host = "127.0.0.1,1", auth = "integrated" } },
-                web = new { enabled = true, port = webPort },
-                mcp = new { enabled = true, port = mcpPort },
+                web = new { enabled = true, port = webPort, allowTokenlessLoopback = true },
+                mcp = new { enabled = true, port = mcpPort, allowTokenlessLoopback = true },
             }));
             Environment.SetEnvironmentVariable("DARLING_CONFIG", configPath);
             Environment.SetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER", "true");

@@ -3212,9 +3212,9 @@ public static partial class DarlingCliCommands
     private static async Task<int> DisableExposureAsync(
         string resolvedPath, string originalText, TextReader input, TextWriter output, TextWriter error, CancellationToken cancellationToken)
     {
-        var newText = DarlingNetworkConfigEditor.RemoveNetworkBlock(originalText, "postgres");
-        newText = DarlingNetworkConfigEditor.RemoveNetworkBlock(newText, "mcp");
-        newText = DarlingNetworkConfigEditor.RemoveNetworkBlock(newText, "web");
+        var afterPostgres = DarlingNetworkConfigEditor.RemoveNetworkBlock(originalText, "postgres");
+        var afterMcp = DarlingNetworkConfigEditor.RemoveNetworkBlock(afterPostgres, "mcp");
+        var newText = DarlingNetworkConfigEditor.RemoveNetworkBlock(afterMcp, "web");
 
         if (string.Equals(newText, originalText, StringComparison.Ordinal))
         {
@@ -3251,6 +3251,23 @@ public static partial class DarlingCliCommands
         }
 
         output.WriteLine("Network exposure removed. The service reconciles the endpoints OFF (pg_hba rule, firewall, ssl) on its next start.");
+
+        /* The removed mcp/web blocks held those endpoints' tokens, and an enabled endpoint needs one on loopback too
+           unless its allowTokenlessLoopback is on, so name what to add before the restart. */
+        foreach (var (section, removed, optOut) in new[]
+        {
+            ("mcp", !string.Equals(afterMcp, afterPostgres, StringComparison.Ordinal), reparsed.Mcp.AllowTokenlessLoopback),
+            ("web", !string.Equals(newText, afterMcp, StringComparison.Ordinal), reparsed.Web.AllowTokenlessLoopback),
+        })
+        {
+            if (removed && !optOut)
+            {
+                output.WriteLine(
+                    $"NOTE: removing the {section} network block also removed any token it held. If {section} is turned on, it needs a token on loopback too: " +
+                    $"add \"{section}\": {{ \"network\": {{ \"encryptedToken\": \"...\" }} }} (no listen) or set {section}.allowTokenlessLoopback " +
+                    "to true, or it will not start.");
+            }
+        }
         await OfferRestartAsync(input, output, error, cancellationToken);
         return 0;
     }
@@ -3676,6 +3693,25 @@ public static partial class DarlingCliCommands
         Handoff,
     }
 
+    /// <summary>
+    /// PURE: the line <c>--enable-mcp</c> / <c>--enable-web</c> prints when darling.json gives that endpoint no token and
+    /// its <c>allowTokenlessLoopback</c> is off, because the service then does not start it; null when a token is set or
+    /// the opt-out is on. Reads only whether a token value is present, never the token.
+    /// </summary>
+    internal static string? EnableTokenNote(bool mcp, DarlingConfig config)
+    {
+        var section = mcp ? "mcp" : "web";
+        var hasToken = mcp
+            ? !string.IsNullOrWhiteSpace(config.Mcp.Network?.EncryptedToken) || !string.IsNullOrWhiteSpace(config.Mcp.Network?.Token)
+            : !string.IsNullOrWhiteSpace(config.Web.Network?.EncryptedToken) || !string.IsNullOrWhiteSpace(config.Web.Network?.Token);
+        var optOut = mcp ? config.Mcp.AllowTokenlessLoopback : config.Web.AllowTokenlessLoopback;
+        return hasToken || optOut
+            ? null
+            : $"NOTE: darling.json gives {section} no token, so the service will not start it. Set {section}.network.encryptedToken " +
+              $"(from --encrypt-password) or {section}.network.token and restart the service, or set {section}.allowTokenlessLoopback " +
+              "to true to serve loopback with no token.";
+    }
+
     /// <summary>PURE firewall-step decision for a toggle verb (unit-tested): a loopback-only endpoint needs no
     /// rule; an exposed endpoint runs the rule when elevated, otherwise hands the exact command off. Shared by
     /// enable and disable alike (disable just runs/hands-off the removal command instead of the open command).</summary>
@@ -3871,6 +3907,13 @@ public static partial class DarlingCliCommands
         output.WriteLine(
             "The running service applies this LIVE within one collection sweep (the write self-bumps the reload " +
             "beacon) — no restart needed.");
+
+        /* An enabled endpoint with no token and no allowTokenlessLoopback does not start (the host logs why at every
+           service start); say so here too, where the operator has just turned it on. */
+        if (enable && EnableTokenNote(endpoint == EndpointKind.Mcp, config) is { } tokenNote)
+        {
+            output.WriteLine(tokenNote);
+        }
 
         /* #2414: the SAME resolver the two host supervisors bind on, fed the row this verb just wrote. It carries
            the provenance as well as the value, so the firewall step can state on whose authority it picked a port

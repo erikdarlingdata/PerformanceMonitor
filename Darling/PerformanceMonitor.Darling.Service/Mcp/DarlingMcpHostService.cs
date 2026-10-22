@@ -46,8 +46,9 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// any one client and serves concurrent clients) apply MORE to a 24/7 headless service.
 ///
 /// <para><b>Network exposure — off by default, secure by default (darling-network-endpoints, D3):</b>
-/// with no <c>mcp.network</c> block the server binds loopback only and is TOKENLESS — byte-for-byte
-/// today's local MCP, so existing local clients are unaffected. A token the operator configured
+/// with no <c>mcp.network</c> listen the server binds loopback only, and it needs a bearer token there too: with none
+/// configured it does not start, unless <c>mcp.allowTokenlessLoopback</c> is on, which serves local clients tokenless
+/// as earlier builds did. A token the operator configured
 /// (<c>mcp.network.encryptedToken</c> / <c>token</c>) gates the loopback-only listener too, whatever the bind mode
 /// (<see cref="ResolveLoopbackOnlyToken"/>). An opt-in <c>mcp.network</c> block
 /// (MANAGED MODE ONLY) binds the specified LAN interface (plus both loopback families) behind two
@@ -113,6 +114,10 @@ public sealed class DarlingMcpHostService : BackgroundService
     private WebApplication? _app;
     private NpgsqlDataSource? _appDataSource;
     private int _runningPort;
+
+    /// <summary>Whether this process has logged <see cref="MissingTokenMessage"/>: a start with no token fails the same
+    /// way on every retry until the config changes, which needs a restart, so the line is logged once.</summary>
+    private bool _missingTokenReported;
 
     /// <summary>How often the supervisor re-reads the live control-plane state (#1560).</summary>
     internal static readonly TimeSpan SupervisorPollInterval = TimeSpan.FromSeconds(5);
@@ -501,12 +506,16 @@ public sealed class DarlingMcpHostService : BackgroundService
             {
                 /* A loopback-only start (no mcp.network.listen, or one the ladder refused) resolves a token the operator
                    configured too, and the pipeline then gates the loopback listener on it exactly as it gates a
-                   degraded one. No token configured leaves bearerToken empty and the listener open to local clients,
-                   as it has always been. A configured token that cannot be used stops this start, because serving
-                   the listener open would drop the credential the operator asked every client to present. */
-                var loopbackToken = ResolveLoopbackOnlyToken(config.Mcp.Network, _logger);
+                   degraded one. No token configured stops this start unless mcp.allowTokenlessLoopback is on, which
+                   leaves bearerToken empty and the listener open to local clients as earlier builds served it. The
+                   no-token line is logged once per process: the config is held for the process lifetime, so the 30s
+                   retries would only repeat it. A configured token that cannot be used stops this start, because
+                   serving the listener open would drop the credential the operator asked every client to present. */
+                var loopbackToken = ResolveLoopbackOnlyToken(
+                    config.Mcp.Network, config.Mcp.AllowTokenlessLoopback, _logger, reportMissingToken: !_missingTokenReported);
                 if (loopbackToken.Refuse)
                 {
+                    _missingTokenReported |= loopbackToken.MissingToken;
                     await DisposeFailedStartAsync();
                     return false;
                 }
@@ -847,7 +856,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                said every client presents it. bearerToken holds the resolved token in both branches above (the network
                branch, and the loopback-only branch via ResolveLoopbackOnlyToken), so "not network mode, token set"
                covers that state and a loopback-only start whose configured token resolved. A start with no token
-               configured leaves it empty and stays tokenless; a configured token that cannot be used never gets here,
+               configured gets here only with mcp.allowTokenlessLoopback on, leaves it empty and stays tokenless; a configured token that cannot be used never gets here,
                the start stops in every mode. */
             var requireTokenWhenLoopbackOnly = RequireTokenWhenLoopbackOnly(networkMode, bearerToken);
 
@@ -1812,25 +1821,53 @@ public sealed class DarlingMcpHostService : BackgroundService
         => networkMode ? networkListenIp : null;
 
     /// <summary>The answer of <see cref="ResolveLoopbackOnlyToken"/>: the token the loopback-only listener's bearer gate
-    /// compares against (empty when none is configured, which leaves the listener open to local clients), and whether
-    /// the start must stop because a token that IS configured cannot be used.</summary>
-    internal readonly record struct LoopbackTokenResolution(bool Refuse, string Token);
+    /// compares against (empty only when none is configured and <c>mcp.allowTokenlessLoopback</c> is on, which leaves
+    /// the listener open to local clients), whether the start must stop, and whether it stops because no token is
+    /// configured at all.</summary>
+    internal readonly record struct LoopbackTokenResolution(bool Refuse, string Token, bool MissingToken = false);
+
+    /// <summary>The line a start with no token logs when it does not serve MCP: the settings to add, how a client
+    /// presents the token, and the opt-out.</summary>
+    internal const string MissingTokenMessage =
+        "The MCP server is enabled but has no token, so it is not started. Set mcp.network.encryptedToken (from "
+        + "--encrypt-password) or mcp.network.token (the token, env:NAME or file:PATH) in darling.json and restart the "
+        + "service; each MCP client then sends the header \"Authorization: Bearer <token>\". To serve local clients "
+        + "without a token as before, set mcp.allowTokenlessLoopback to true instead.";
+
+    /// <summary>The line every start logs while the opt-out serves MCP with no token.</summary>
+    internal const string TokenlessLoopbackMessage =
+        "mcp.allowTokenlessLoopback is on: the MCP server serves http://localhost with no token. Set "
+        + "mcp.network.encryptedToken or mcp.network.token to require one.";
 
     /// <summary>
     /// The bearer token for a loopback-only start (no <c>mcp.network.listen</c>, or one the bind ladder refused). A
     /// token the operator configured gates the loopback listener whatever the bind mode: every client presents it,
-    /// exactly as on a network-exposed start. No token configured is <c>(false, "")</c> and the listener serves local
-    /// clients without one, as it always has. A configured token that resolves to nothing or cannot be decrypted
-    /// returns <c>Refuse</c> with one Critical line shaped like the network-mode token lines, because serving the
-    /// listener open would drop the credential the operator asked every client to present. The caller owns what a
-    /// refusal does (it fails the start). Reads the configured values only, never logs the token.
+    /// exactly as on a network-exposed start. No token configured refuses the start (<c>MissingToken</c>), and logs
+    /// <see cref="MissingTokenMessage"/> when <paramref name="reportMissingToken"/> is set, unless
+    /// <paramref name="allowTokenlessLoopback"/> is on: then it is <c>(false, "")</c>, the listener serves local clients
+    /// without a token, and the start logs <see cref="TokenlessLoopbackMessage"/>. A configured token that resolves to
+    /// nothing or cannot be decrypted returns <c>Refuse</c> with one Critical line shaped like the network-mode token
+    /// lines, because serving the listener open would drop the credential the operator asked every client to present.
+    /// The caller owns what a refusal does (it fails the start). Reads the configured values only, never logs the token.
     /// </summary>
-    internal static LoopbackTokenResolution ResolveLoopbackOnlyToken(McpNetworkConfig? network, ILogger logger)
+    internal static LoopbackTokenResolution ResolveLoopbackOnlyToken(
+        McpNetworkConfig? network, bool allowTokenlessLoopback, ILogger logger, bool reportMissingToken = true)
     {
         if (network is null
             || (string.IsNullOrWhiteSpace(network.EncryptedToken) && string.IsNullOrWhiteSpace(network.Token)))
         {
-            return new LoopbackTokenResolution(false, "");
+            if (allowTokenlessLoopback)
+            {
+                logger.LogWarning("{Message}", TokenlessLoopbackMessage);
+                return new LoopbackTokenResolution(false, "");
+            }
+
+            if (reportMissingToken)
+            {
+                logger.LogCritical("{Message}", MissingTokenMessage);
+            }
+
+            return new LoopbackTokenResolution(true, "", MissingToken: true);
         }
 
         try

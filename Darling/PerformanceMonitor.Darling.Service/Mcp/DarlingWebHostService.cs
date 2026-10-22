@@ -58,7 +58,8 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <para><b>Browser auth (network mode only):</b> in network mode EVERY request authenticates, loopback
 /// included — the MCP host's exposed-mode loopback-token SSRF guard, now mirrored here (#1649). Loopback is
 /// exempt from the CIDR test only (127.0.0.1 is not in a LAN CIDR), never from the credential. A
-/// loopback-only dashboard with no token configured registers no auth middleware at all and remains tokenless; one
+/// loopback-only dashboard with no token configured does not start unless <c>web.allowTokenlessLoopback</c> is on, which
+/// registers no auth middleware at all and serves local browsers tokenless as earlier builds did; one
 /// with a configured <c>web.network.encryptedToken</c> / <c>token</c> (or that network mode fell back to after its token
 /// resolved, a refused TLS certificate) has this same token-to-cookie gate, because the operator's config says every
 /// client presents the token (<see cref="ResolveLoopbackOnlyToken"/>). A request needs either a valid session
@@ -119,6 +120,10 @@ public sealed class DarlingWebHostService : BackgroundService
     private DarlingWebOidcClient? _oidcClient;
 
     private int _runningPort;
+
+    /// <summary>Whether this process has logged <see cref="MissingTokenMessage"/>: a start with no token fails the same
+    /// way on every retry until the config changes, which needs a restart, so the line is logged once.</summary>
+    private bool _missingTokenReported;
 
     /// <summary>How often the supervisor re-reads the live control-plane state (#1562, mirrors the MCP host).</summary>
     internal static readonly TimeSpan SupervisorPollInterval = TimeSpan.FromSeconds(5);
@@ -430,25 +435,53 @@ public sealed class DarlingWebHostService : BackgroundService
     }
 
     /// <summary>The answer of <see cref="ResolveLoopbackOnlyToken"/>: the token the loopback-only dashboard's
-    /// token-to-cookie gate compares against (empty when none is configured, which leaves the dashboard open to local
-    /// browsers), and whether the start must stop because a token that IS configured cannot be used.</summary>
-    internal readonly record struct LoopbackTokenResolution(bool Refuse, string Token);
+    /// token-to-cookie gate compares against (empty only when none is configured and <c>web.allowTokenlessLoopback</c>
+    /// is on, which leaves the dashboard open to local browsers), whether the start must stop, and whether it stops
+    /// because no token is configured at all.</summary>
+    internal readonly record struct LoopbackTokenResolution(bool Refuse, string Token, bool MissingToken = false);
+
+    /// <summary>The line a start with no token logs when it does not serve the dashboard: the settings to add, how a
+    /// browser presents the token, and the opt-out.</summary>
+    internal const string MissingTokenMessage =
+        "The web dashboard is enabled but has no token, so it is not started. Set web.network.encryptedToken (from "
+        + "--encrypt-password) or web.network.token (the token, env:NAME or file:PATH) in darling.json and restart the "
+        + "service; the dashboard's sign-in page then asks for it. To serve local browsers without a token as before, set "
+        + "web.allowTokenlessLoopback to true instead.";
+
+    /// <summary>The line every start logs while the opt-out serves the dashboard with no token.</summary>
+    internal const string TokenlessLoopbackMessage =
+        "web.allowTokenlessLoopback is on: the web dashboard serves http://localhost with no token. Set "
+        + "web.network.encryptedToken or web.network.token to require one.";
 
     /// <summary>
     /// The access token for a loopback-only start (no <c>web.network.listen</c>, or one the bind ladder refused). A
     /// token the operator configured gates the loopback dashboard whatever the bind mode, through the same
-    /// token-to-cookie gate a network-exposed start uses. No token configured is <c>(false, "")</c> and the dashboard
-    /// serves local browsers without one, as it always has. A configured token that resolves to nothing or cannot be
-    /// decrypted returns <c>Refuse</c> with one Critical line shaped like the network-mode token lines, because serving
-    /// the dashboard open would drop the credential the operator asked every client to present. The caller owns what a
-    /// refusal does (it fails the start). Never logs the token.
+    /// token-to-cookie gate a network-exposed start uses. No token configured refuses the start
+    /// (<c>MissingToken</c>), and logs <see cref="MissingTokenMessage"/> when <paramref name="reportMissingToken"/> is
+    /// set, unless <paramref name="allowTokenlessLoopback"/> is on: then it is <c>(false, "")</c>, the dashboard serves
+    /// local browsers without a token, and the start logs <see cref="TokenlessLoopbackMessage"/>. A configured token that
+    /// resolves to nothing or cannot be decrypted returns <c>Refuse</c> with one Critical line shaped like the
+    /// network-mode token lines, because serving the dashboard open would drop the credential the operator asked every
+    /// client to present. The caller owns what a refusal does (it fails the start). Never logs the token.
     /// </summary>
-    internal static LoopbackTokenResolution ResolveLoopbackOnlyToken(WebNetworkConfig? network, ILogger logger)
+    internal static LoopbackTokenResolution ResolveLoopbackOnlyToken(
+        WebNetworkConfig? network, bool allowTokenlessLoopback, ILogger logger, bool reportMissingToken = true)
     {
         if (network is null
             || (string.IsNullOrWhiteSpace(network.EncryptedToken) && string.IsNullOrWhiteSpace(network.Token)))
         {
-            return new LoopbackTokenResolution(false, "");
+            if (allowTokenlessLoopback)
+            {
+                logger.LogWarning("{Message}", TokenlessLoopbackMessage);
+                return new LoopbackTokenResolution(false, "");
+            }
+
+            if (reportMissingToken)
+            {
+                logger.LogCritical("{Message}", MissingTokenMessage);
+            }
+
+            return new LoopbackTokenResolution(true, "", MissingToken: true);
         }
 
         try
@@ -565,13 +598,17 @@ public sealed class DarlingWebHostService : BackgroundService
             {
                 /* A loopback-only start (no web.network.listen, or one the ladder refused) resolves a token the
                    operator configured too, and the pipeline then gates the loopback dashboard on it through the
-                   token-to-cookie gate, as it gates one that network mode fell back to. No token configured leaves accessToken empty and
-                   the dashboard open to local browsers, as it has always been. A configured token that cannot be used
-                   stops this start, because serving the dashboard open would drop the credential the operator asked
-                   every client to present. */
-                var loopbackToken = ResolveLoopbackOnlyToken(network, _logger);
+                   token-to-cookie gate, as it gates one that network mode fell back to. No token configured stops this
+                   start unless web.allowTokenlessLoopback is on, which leaves accessToken empty and the dashboard open
+                   to local browsers as earlier builds served it. The no-token line is logged once per process: the
+                   config is held for the process lifetime, so the 30s retries would only repeat it. A configured token
+                   that cannot be used stops this start, because serving the dashboard open would drop the credential
+                   the operator asked every client to present. */
+                var loopbackToken = ResolveLoopbackOnlyToken(
+                    network, web.AllowTokenlessLoopback, _logger, reportMissingToken: !_missingTokenReported);
                 if (loopbackToken.Refuse)
                 {
+                    _missingTokenReported |= loopbackToken.MissingToken;
                     await DisposeFailedStartAsync();
                     return false;
                 }
@@ -888,8 +925,8 @@ public sealed class DarlingWebHostService : BackgroundService
                config said every client presents the token. accessToken holds the resolved token in both branches above
                (the network branch, and the loopback-only branch via ResolveLoopbackOnlyToken), so "not network mode,
                token set" covers that state and a loopback-only start whose configured token resolved. A start
-               with no token configured leaves it empty and stays tokenless; a configured token that cannot be used
-               never gets here, the start stops in every mode. */
+               with no token configured gets here only with web.allowTokenlessLoopback on, leaves it empty and stays
+               tokenless; a configured token that cannot be used never gets here, the start stops in every mode. */
             var requireTokenWhenLoopbackOnly = !networkMode && accessToken.Length > 0;
 
             /* #6265: a web token with the MCP token's value is refused for web sign-in (the pipeline checks each posted token). The
