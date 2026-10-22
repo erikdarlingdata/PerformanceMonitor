@@ -2285,7 +2285,7 @@ function Invoke-DarlingOperatorStep([string]$groupName, [string]$addOperator, [b
     try { $missing = @(Grant-DarlingOperatorDirect $sid $configPath $storeFolder) }
     catch { $missing = @($configPath) }
     if ($missing.Count -eq 0) {
-        Write-Host "$name also has a direct grant of the same access, so the Viewer and the CLI work in the session that is already open. The service drops it when it next rewrites those permissions at a start, and uninstall-darling.ps1 removes it; to remove it now run icacls <darling.json, the store folder, each credential file> /remove *$($sid.Value)"
+        Write-Host "$name also has a direct grant of the same access, so the Viewer and the CLI work in the session that is already open. The service drops it the next time it starts; from then on the group covers $name only after $name signs out and back in (a reboot does that, a service restart or an upgrade does not). uninstall-darling.ps1 removes it; to remove it now run icacls <darling.json, the store folder, each credential file> /remove *$($sid.Value)"
     }
     else {
         Write-Host "$name is in the group, but the direct grant could not be confirmed on: $($missing -join ', '). $name has to sign out and back in before the Viewer and the CLI work without elevation." -ForegroundColor Yellow
