@@ -10,7 +10,7 @@ Nothing is installed on the target server. Below is the full least-privilege gra
 USE [master];
 
 /* Create the login first. Skip this statement if the login already exists. For Windows
-   authentication use CREATE LOGIN [DOMAINccount] FROM WINDOWS; instead. In Darling with integrated
+   authentication use CREATE LOGIN [DOMAIN\account] FROM WINDOWS; instead. In Darling with integrated
    authentication, the account is the one the service runs as (see the Darling operator guide). */
 CREATE LOGIN [YourLogin] WITH PASSWORD = N'<strong password>';
 
