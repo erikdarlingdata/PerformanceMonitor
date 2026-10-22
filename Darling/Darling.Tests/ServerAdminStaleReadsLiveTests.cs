@@ -127,7 +127,16 @@ VALUES (11, 'keep-host', 'keep-host', 'integrated', TRUE, 'sqlserver'),
         await using var scratchHold = scratch;
         await using var ownerHold = owner;
         {
-            await ExecAsync(owner, @"
+            await SeedScheduleRowsAsync(owner, ct);
+
+            using var removed = JsonDocument.Parse(await DarlingMcpServerAdminTools.RemoveServer(owner, "sched-drop"));
+            Assert.Equal("removed", removed.RootElement.GetProperty("status").GetString());
+
+            await AssertOnlyTheRemovedServersScheduleRowsAreGoneAsync(owner, ct);
+        }
+    }
+
+    private static Task SeedScheduleRowsAsync(NpgsqlDataSource owner, CancellationToken ct) => ExecAsync(owner, @"
 INSERT INTO config.config_monitored_servers (server_id, name, host, auth, is_enabled, engine)
 VALUES (21, 'sched-keep', 'sched-keep', 'integrated', TRUE, 'sqlserver'),
        (22, 'sched-drop', 'sched-drop', 'integrated', TRUE, 'sqlserver');
@@ -139,13 +148,32 @@ VALUES (NULL, 'wait_stats', TRUE, 5, NULL),
 INSERT INTO config.config_collector_run_times (server_id, collector_name, run_at_minute)
 VALUES (NULL, 'daily_thing', 60), (21, 'daily_thing', 120), (22, 'daily_thing', 180);", ct);
 
-            using var removed = JsonDocument.Parse(await DarlingMcpServerAdminTools.RemoveServer(owner, "sched-drop"));
-            Assert.Equal("removed", removed.RootElement.GetProperty("status").GetString());
+    private static async Task AssertOnlyTheRemovedServersScheduleRowsAreGoneAsync(NpgsqlDataSource owner, CancellationToken ct)
+    {
+        Assert.Equal(0L, await CountAsync(owner, "SELECT count(*) FROM config.config_collector_schedules WHERE server_id = 22", ct));
+        Assert.Equal(0L, await CountAsync(owner, "SELECT count(*) FROM config.config_collector_run_times WHERE server_id = 22", ct));
+        Assert.Equal(2L, await CountAsync(owner, "SELECT count(*) FROM config.config_collector_schedules WHERE server_id IS NULL OR server_id = 21", ct));
+        Assert.Equal(2L, await CountAsync(owner, "SELECT count(*) FROM config.config_collector_run_times WHERE server_id IS NULL OR server_id = 21", ct));
+    }
 
-            Assert.Equal(0L, await CountAsync(owner, "SELECT count(*) FROM config.config_collector_schedules WHERE server_id = 22", ct));
-            Assert.Equal(0L, await CountAsync(owner, "SELECT count(*) FROM config.config_collector_run_times WHERE server_id = 22", ct));
-            Assert.Equal(2L, await CountAsync(owner, "SELECT count(*) FROM config.config_collector_schedules WHERE server_id IS NULL OR server_id = 21", ct));
-            Assert.Equal(2L, await CountAsync(owner, "SELECT count(*) FROM config.config_collector_run_times WHERE server_id IS NULL OR server_id = 21", ct));
+    [Fact]
+    public async Task TheViewersRemove_ClearsTheServersCollectorOverridesAndRunTimes_AndKeepsTheFleetRowsAndOtherServers()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, owner) = await OpenAsync(ct);
+        await using var scratchHold = scratch;
+        await using var ownerHold = owner;
+        {
+            await SeedScheduleRowsAsync(owner, ct);
+
+            var viewerString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { SearchPath = PgSchemaGenerator.SearchPath }.ConnectionString;
+            await using (var viewer = new PerformanceMonitor.Darling.Viewer.ViewerDataService(viewerString))
+            {
+                await viewer.DeleteMonitoredServerAsync(22, ct);
+            }
+
+            Assert.Equal(0L, await CountAsync(owner, "SELECT count(*) FROM config.config_monitored_servers WHERE server_id = 22", ct));
+            await AssertOnlyTheRemovedServersScheduleRowsAreGoneAsync(owner, ct);
         }
     }
 

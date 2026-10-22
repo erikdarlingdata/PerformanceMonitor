@@ -400,14 +400,6 @@ public sealed partial class DarlingMcpServerAdminTools
         }
     }
 
-    /// <summary>#6454: the statements remove_server runs to clear a removed server's collector overrides and run times. One server's rows by
-    /// id, never the fleet-wide ones.</summary>
-    internal static readonly string[] CollectorScheduleClearSqls =
-    {
-        "DELETE FROM config_collector_schedules WHERE server_id = $1",
-        "DELETE FROM config_collector_run_times WHERE server_id = $1",
-    };
-
     [McpServerTool(Name = "remove_server"), Description(
         "Deletes a monitored server's definition from the shared central store (config_monitored_servers) " +
         "immediately, no confirm step; the service drops it from collection within one sweep. Already-collected " +
@@ -579,7 +571,7 @@ public sealed partial class DarlingMcpServerAdminTools
                     /* #6454: the server's collector overrides and run times go too, same transaction and same reason: set-and-clear
                        left an all-null override row behind, and a set one would come back when the server is re-added. Only this
                        server's rows; the fleet-wide rows (server_id NULL) stay. */
-                    foreach (var scheduleSql in CollectorScheduleClearSqls)
+                    foreach (var scheduleSql in CollectorScheduleSql.ClearForServerSqls)
                     {
                         await using var scheduleClear = new NpgsqlCommand(scheduleSql, connection) { Transaction = transaction };
                         scheduleClear.CommandTimeout = McpCommandDeadlines.ReadSeconds;
