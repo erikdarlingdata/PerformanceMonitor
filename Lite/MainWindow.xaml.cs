@@ -263,7 +263,7 @@ public partial class MainWindow : Window
             StatusText.Text = "Initializing database...";
 
             // Initialize the DuckDB database
-            await NotificationRouteCache.InitializeStoreThenConfigureAsync(_databaseInitializer.InitializeAsync, _routeLoader);
+            await NotificationRouteCache.InitializeStoreThenConfigureAsync(() => _databaseInitializer.InitializeAsync(), _routeLoader);
 
             /* #5775: remove route credentials no route points at (a crash between writing a new generation and the row, or a
                delete that failed). Off the UI thread and not awaited: the sweep takes the write lock briefly, logs only a count
