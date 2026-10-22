@@ -479,6 +479,43 @@ public sealed class InvestigationToolsLiveTests
         });
     }
 
+    /// <summary>#6551: a change-watch request has no alert row in the history, so the list and the wait answer carry its detail
+    /// (what changed, the database of each query measure, which measure moved) as <c>detail_text</c>; an alert's request carries none.</summary>
+    [Fact]
+    public async Task ListAndWait_CarryAChangeWatchRequestsDetail_AndAnAlertRequestsCarryNone()
+    {
+        await RunAsync(async (store, dataSource, connection, ct) =>
+        {
+            var signal = new InvestigationOpenSignal();
+            var start = _now;
+            var cursor = Root(await DarlingMcpInvestigationTools.WaitAsync(store.OpenedSinceAsync, signal, () => _now, null, null, 0, ct))
+                .GetProperty("cursor").GetString();
+            const string detail = "After a recorded change: 10:00 plan 9 of query 5 in Sales: forced; query_avg_duration_ms:0xABC before 10 after 40 (read from the plan cache, query_hash 0xABC in database Sales)";
+            _now = _now.AddSeconds(1);
+            var watch = (await store.OpenOrJoinAsync(
+                new InvestigationAlert(1, 7, "srv-7", "query_performance", InvestigationTriggerKinds.ChangeWatchMetric, _now, new[] { "change-watch:1" }, null, 20, 100,
+                    LeaseMinutes: 15, ExpiryMinutes: 240, Facts: new InvestigationAlertFacts(1, 1, false, detail, null))
+                { TriggerKind = InvestigationTriggerKinds.ChangeWatch }, ct)).RequestId!.Value;
+            _now = _now.AddSeconds(1);
+            var alert = (await store.OpenOrJoinAsync(
+                new InvestigationAlert(2, 8, "srv-8", "resources", "High CPU", _now, new[] { "key-cpu" }, null, 20, 100,
+                    LeaseMinutes: 15, ExpiryMinutes: 240, Facts: new InvestigationAlertFacts(95, 90, false, "CPU is high", null)), ct)).RequestId!.Value;
+
+            var listed = Root(await DarlingMcpInvestigationTools.ListInvestigationRequests(dataSource, cancellationToken: ct))
+                .GetProperty("requests").EnumerateArray().ToDictionary(r => r.GetProperty("request_id").GetGuid());
+            Assert.Equal(detail, listed[watch].GetProperty("detail_text").GetString());
+            Assert.False(listed[alert].TryGetProperty("detail_text", out _));
+
+            var rows = (await store.OpenedSinceAsync(start, null, 10, ct)).ToDictionary(r => r.RequestId);
+            Assert.Equal(detail, rows[watch].DetailText);
+            Assert.Null(rows[alert].DetailText);
+            var answer = Root(await DarlingMcpInvestigationTools.WaitAsync(store.OpenedSinceAsync, signal, () => _now, null, cursor, 0, ct));
+            var byId = answer.GetProperty("requests").EnumerateArray().ToDictionary(r => r.GetProperty("request_id").GetGuid());
+            Assert.Equal(detail, byId[watch].GetProperty("detail_text").GetString());
+            Assert.False(byId[alert].TryGetProperty("detail_text", out _));
+        });
+    }
+
     /* #5834: both reads are pages, and each says when the window held more than the page (the #3699 shape). At the bound:
        101 requests answer 100 returned and truncated; 100 answer 100 and not truncated, on the reports read and the list
        alike; and 201 journal rows on the page's requests answer 200 and journal_truncated, 200 answer 200 and not. */

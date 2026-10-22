@@ -532,6 +532,10 @@ internal static class InvestigationToolCore
             payload["display_name"] = displayName;
         if (r.InstanceName is { } instanceName)
             payload["instance_name"] = instanceName;
+        /* #6551: a change-watch request has no alert row in get_alert_history, so its detail (what changed, on which database, which
+           measure moved) rides the answer under the key an alert's brief row uses; the mcp.dataDetail filter masks detail_text by key. */
+        if (r.DetailText is { } detailText)
+            payload["detail_text"] = detailText;
         return payload;
     }
 

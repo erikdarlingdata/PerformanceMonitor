@@ -86,7 +86,7 @@ A Change Watch request opens when a watch window saw the measures move after a r
 
 A Change Watch request is routed like an alert. Without a route of its own it matches the route for the `performance` alert family, or a route for every metric, and it spends that route's hourly and daily limits next to real alerts. A burst of forced-plan changes can use most of an hourly limit and leave a CPU alert with no request. To keep the two apart, add a route whose metric is exactly `Change Watch` and give it its own agent, level and limits. A route that names the metric exactly wins over a route for the family or for every metric.
 
-The request has no alert row in `get_alert_history`. The changes the watch named, and the query measures that moved, are in the request's brief after a claim. Each query measure names its database and the read it came from (the plan cache or Query Store).
+The request has no alert row in `get_alert_history`. The changes the watch named, and the query measures that moved, are in the request's brief after a claim, and in `detail_text` on its row in `list_investigation_requests` and `wait_for_investigation_requests`, so an agent can triage the request before it claims. Each query measure names its database and the read it came from (the plan cache or Query Store).
 
 When a server is a readable secondary of an availability group, the plan changes its Query Store shows are the primary's, replicated. Darling does not open a request for them on the secondary: the primary's own watch reports the change once. A forced plan the plan-force ledger recorded on the secondary itself still counts.
 
