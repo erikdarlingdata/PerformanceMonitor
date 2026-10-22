@@ -146,7 +146,7 @@ public sealed class ComposeQueryStoreWideExactnessLiveTests
 
         /* passing case first */
         var (passing, _) = await QueryStoreIntervalWide.ReadsTableAsync(
-            connection, ServerId1, WindowStart, WindowEnd, null, QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct);
+            connection, ServerId1, WindowStart, WindowEnd, null, QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow);
         Assert.True(passing, "expected the gate to pick the table for the seeded, forced-covered window");
 
         /* a pending batch must route raw */
@@ -154,13 +154,13 @@ public sealed class ComposeQueryStoreWideExactnessLiveTests
             "INSERT INTO collect.query_store_interval_wide_pending (server_id, collection_time, database_name, recorded_at) VALUES ($1, $2, 'qswide-exact-1-a', $2)",
             ServerId1, WindowStart, ct);
         var (pendingRoutes, _) = await QueryStoreIntervalWide.ReadsTableAsync(
-            connection, ServerId1, WindowStart, WindowEnd, null, QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct);
+            connection, ServerId1, WindowStart, WindowEnd, null, QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow);
         Assert.False(pendingRoutes, "a pending batch must read raw regardless of coverage");
         await ExecAsync(connection, "DELETE FROM collect.query_store_interval_wide_pending WHERE server_id = $1", ServerId1, ct);
 
         /* a literal end before applied_through must route raw */
         var (literalEndRoutes, _) = await QueryStoreIntervalWide.ReadsTableAsync(
-            connection, ServerId1, WindowStart, WindowEnd, appliedThrough.AddMinutes(-1), QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct);
+            connection, ServerId1, WindowStart, WindowEnd, appliedThrough.AddMinutes(-1), QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow);
         Assert.False(literalEndRoutes, "a literal end before applied_through must read raw");
     }
 

@@ -189,7 +189,7 @@ public sealed class ReadScopeTests
         var end = new DateTime(2026, 9, 15, 0, 0, 0, DateTimeKind.Utc);
 
         var plan = await QueryStoreIntervalWide.ResolveReadAsync(
-            connection, 1, end.AddHours(-48), end, end, TimeSpan.FromHours(24), 5, logger, TestContext.Current.CancellationToken);
+            connection, 1, end.AddHours(-48), end, end, TimeSpan.FromHours(24), 5, logger, TestContext.Current.CancellationToken, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow);
 
         Assert.False(plan.UseTable);
         Assert.True(plan.DecisionFailed);

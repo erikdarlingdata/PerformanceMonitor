@@ -5987,7 +5987,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
                 var plan = await QueryStoreIntervalWide.ResolveReadAsync(
                     connection, serverId, start, end, literalWindowEnd, ComposeQueryStoreWideMinWindow,
-                    McpCommandDeadlines.ReadSeconds, ReadScope.Current?.Logger, cancellationToken, storeWide);
+                    McpCommandDeadlines.ReadSeconds, ReadScope.Current?.Logger, cancellationToken, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow, storeWide: storeWide);
                 if (!plan.UseTable)
                 {
                     if (plan.DecisionFailed)

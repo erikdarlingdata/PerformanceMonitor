@@ -488,7 +488,7 @@ WHERE t.server_id = $1;";
     /// chunks are still read by the columnar scan on their server_id segment index, which this index does not
     /// reach. It stays an exact read, not a cached answer, because the collector can still store a NULL start
     /// on a catalog join miss.
-    /// <para><b>Opt-in (#6267 follow-up).</b> Only a caller that passes <c>requireNoLegacyRows: true</c> to
+    /// <para><b>Opt-in (#6267 follow-up).</b> Only a caller that passes <c>LegacyRows.Refuse</c> to
     /// <see cref="ResolveReadAsync"/> or <see cref="ReadsTableAsync"/> pays this probe. Today that is the
     /// Viewer's duration trend (<c>ViewerDataService.GetQueryStoreDurationTrendAsync</c>) alone, because its arm 2 places a
     /// legacy row at every <c>collection_time</c> it was stored at, and the table kept one. Every other reader keeps ONE
@@ -827,7 +827,7 @@ FROM (
     /// viewer's own connection probe), and clause 6 (a 2026 field review) — the window must hold no legacy row
     /// (<c>interval_start_time_utc IS NULL</c>, see <see cref="HasLegacyRowSql"/>) — checked once clauses 1-5 already
     /// say "table", so a store refused for any other reason never pays the probe. Clause 6 runs only for a caller that
-    /// passes <c>requireNoLegacyRows</c> to <see cref="ResolveReadAsync"/> or <see cref="ReadsTableAsync"/>: the duration trend,
+    /// passes <c>LegacyRows.Refuse</c> to <see cref="ResolveReadAsync"/> or <see cref="ReadsTableAsync"/>: the duration trend,
     /// whose arm 2 needs every snapshot of a legacy row. The other readers keep the newest snapshot per interval, which the
     /// table holds for a legacy row as well, so they do not ask for it.
     /// <list type="number">
@@ -930,6 +930,19 @@ FROM (
         /// whenever the table serves. NULL when the table does not serve (the gate could not decide), because the
         /// surface then reports the raw tier's own reach.</summary>
         public DateTime? EffectiveStart => UseTable ? ReadStart : null;
+    }
+
+    /// <summary>
+    /// Whether the gate may route a window holding a legacy row (<c>interval_start_time_utc IS NULL</c>) to the table.
+    /// A required argument of <see cref="ResolveReadAsync"/> and <see cref="ReadsTableAsync"/>, so a new reader cannot
+    /// reach the cheap path by leaving it out. See <see cref="HasLegacyRowSql"/> for which readers need which.
+    /// </summary>
+    public enum LegacyRows
+    {
+        /// <summary>The reader keeps the newest snapshot per interval, which the table holds for a legacy row too. Clause 6 is skipped.</summary>
+        Allow,
+        /// <summary>The reader places a row at every <c>collection_time</c> it was stored at, which the table cannot give back. Clause 6 refuses the table when the window holds a legacy row.</summary>
+        Refuse,
     }
 
     /// <summary>#4689: which bound set a <c>_wide</c> read's lower bound.</summary>
@@ -1187,7 +1200,7 @@ FROM (
     /// <see cref="ResolveReadAsync"/> reduced to the gate's answer and the clamp (<see cref="ClampedStart"/>): the
     /// table read's lower bound at and above raw's chunk floor. A caller that reads the table below the floor uses
     /// <see cref="ResolveReadAsync"/> and binds <see cref="WideReadPlan.ReadStart"/> instead.
-    /// <paramref name="requireNoLegacyRows"/> turns clause 6 on (see <see cref="ResolveReadAsync"/>).
+    /// <paramref name="legacyRows"/> is required: <see cref="LegacyRows.Refuse"/> turns clause 6 on (see <see cref="ResolveReadAsync"/>).
     /// </summary>
     public static async Task<(bool UseTable, DateTime ClampedStart)> ReadsTableAsync(
         NpgsqlConnection connection,
@@ -1199,11 +1212,11 @@ FROM (
         int commandTimeoutSeconds,
         ILogger? logger,
         CancellationToken cancellationToken,
-        bool requireNoLegacyRows = false)
+        LegacyRows legacyRows)
     {
         var p = await ResolveReadAsync(
             connection, serverId, windowStart, windowEnd, literalWindowEnd, minWindow,
-            commandTimeoutSeconds, logger, cancellationToken, requireNoLegacyRows: requireNoLegacyRows);
+            commandTimeoutSeconds, logger, cancellationToken, legacyRows);
         return (p.UseTable, p.ClampedStart);
     }
 
@@ -1231,11 +1244,12 @@ FROM (
     /// lower bound the table read may bind (<see cref="WideReadPlan.ReadStart"/>), which reaches below raw's chunk
     /// floor down to <see cref="ExactBelowFloorStart"/> — all computed from the SAME <c>rawFloor</c> this decision
     /// read, on the SAME connection, so the decision and the bound cannot see different snapshots.
-    /// <para><paramref name="requireNoLegacyRows"/> (default false) runs clause 6, <see cref="HasLegacyRowSql"/>, and refuses
-    /// the table when the window holds a legacy row. Pass true only when the read would be WRONG with one: a reader that
-    /// places a row at every <c>collection_time</c> it was stored at (the Viewer's duration trend). A reader that keeps the
-    /// newest snapshot per interval gets the same answer from the table, so it leaves this false and never pays the probe,
-    /// which on compressed chunks decompresses every batch of the server to prove there are none.</para>
+    /// <para><paramref name="legacyRows"/> has no default, so a new reader must choose. <see cref="LegacyRows.Refuse"/> runs
+    /// clause 6, <see cref="HasLegacyRowSql"/>, and refuses the table when the window holds a legacy row. Choose it when the
+    /// read would be WRONG with one: a reader that places a row at every <c>collection_time</c> it was stored at (the
+    /// Viewer's duration trend). A reader that keeps the newest snapshot per interval gets the same answer from the table,
+    /// so it passes <see cref="LegacyRows.Allow"/> and never pays the probe, which on compressed chunks decompresses every
+    /// batch of the server to prove there are none.</para>
     /// </summary>
     public static async Task<WideReadPlan> ResolveReadAsync(
         NpgsqlConnection connection,
@@ -1247,8 +1261,8 @@ FROM (
         int commandTimeoutSeconds,
         ILogger? logger,
         CancellationToken cancellationToken,
-        StoreWideInputsCache? storeWide = null,
-        bool requireNoLegacyRows = false)
+        LegacyRows legacyRows,
+        StoreWideInputsCache? storeWide = null)
     {
         /* The probes bind these as timestamp-without-time-zone, which Npgsql refuses for Kind=Utc; a caller that
            resolves its window from DateTime.UtcNow (the MCP tool) would otherwise fail every decision and read raw. */
@@ -1322,13 +1336,13 @@ FROM (
 
             /* Clause 6 (2026 field review): only checked once clauses 1-5 already say "table" — a store
                refused for any other reason never pays this probe — and only for a caller that asked
-               (requireNoLegacyRows). See HasLegacyRowSql's remarks for why a legacy row
+               (LegacyRows.Refuse). See HasLegacyRowSql's remarks for why a legacy row
                (interval_start_time_utc IS NULL) makes the table's answer wrong for ONE kind of reader, not merely stale:
                the upsert's identity carries no collection_time, so a legacy interval re-fetched across several
                cycles keeps only its latest snapshot, and a caller that places these rows at collection_time
                needs every one of them. A caller that keeps the newest snapshot per interval reads the same rows
                either way and skips the probe. */
-            if (useTable && requireNoLegacyRows)
+            if (useTable && legacyRows == LegacyRows.Refuse)
             {
                 await using var legacy = new NpgsqlCommand(HasLegacyRowSql, connection) { CommandTimeout = commandTimeoutSeconds };
                 legacy.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });

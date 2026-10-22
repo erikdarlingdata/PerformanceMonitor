@@ -119,7 +119,7 @@ public sealed class QueryStoreTopLiteralEndStraddleLiveTests
            SQL ReadsTableAsync uses — instead of leaving the next reader to re-derive them from the source. ---- */
         var (useTableOpenEnd, _) = await QueryStoreIntervalWide.ReadsTableAsync(
             connection, ServerId, WindowStart, WindowEnd, literalWindowEnd: null,
-            DarlingDataReader.QueryStoreTopMinWindow, 30, null, ct);
+            DarlingDataReader.QueryStoreTopMinWindow, 30, null, ct, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow);
         if (!useTableOpenEnd)
         {
             var pendingCount = await ScalarLongAsync(connection,
@@ -141,7 +141,7 @@ public sealed class QueryStoreTopLiteralEndStraddleLiveTests
 
         var (useTableStraddle, _) = await QueryStoreIntervalWide.ReadsTableAsync(
             connection, ServerId, WindowStart, WindowEnd, literalWindowEnd: LiteralEnd,
-            DarlingDataReader.QueryStoreTopMinWindow, 30, null, ct);
+            DarlingDataReader.QueryStoreTopMinWindow, 30, null, ct, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow);
         Assert.False(useTableStraddle, "clause 4 alone must refuse the table for the straddling literal end");
 
         var beforeOpenEnd = await WideTableScanCountsAsync();

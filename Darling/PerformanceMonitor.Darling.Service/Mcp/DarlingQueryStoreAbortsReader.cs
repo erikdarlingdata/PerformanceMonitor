@@ -200,7 +200,7 @@ internal static class DarlingQueryStoreAbortsReader
 
             var plan = await QueryStoreIntervalWide.ResolveReadAsync(
                 connection, serverId, startUtc, endUtc, endUtc, DarlingDataReader.QueryStoreTopMinWindow,
-                McpCommandDeadlines.ReadSeconds, ReadScope.Current?.Logger, cancellationToken);
+                McpCommandDeadlines.ReadSeconds, ReadScope.Current?.Logger, cancellationToken, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow);
             if (!plan.UseTable)
             {
                 if (plan.DecisionFailed)

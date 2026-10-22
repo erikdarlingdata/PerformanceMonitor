@@ -324,7 +324,7 @@ public sealed partial class ViewerDataService
     /// before tier 2 assigned intervals their own identity, or any interval whose catalog join missed — keeps
     /// only its LATEST snapshot in the table, the same running-maximum guard arm 1 relies on; this arm places
     /// every snapshot at its OWN collection_time and needs every one of them, not the running maximum. This is
-    /// why <see cref="QueryStoreIntervalWide.ReadsTableAsync"/>'s clause 6 (opt-in, and this read opts in) refuses the table outright when the
+    /// why <see cref="QueryStoreIntervalWide.ReadsTableAsync"/>'s clause 6 (this read passes LegacyRows.Refuse) refuses the table outright when the
     /// window holds any legacy row, rather than trusting this arm to read them un-deduped the way raw's own
     /// arm 2 does.</para>
     /// $1 server_id, $2 the gate's own clamp (<see cref="QueryStoreIntervalWide.ClampedStart"/>), $3/$4 window
@@ -644,12 +644,12 @@ public sealed partial class ViewerDataService
             /* Stays on the clamp (ReadsTableAsync, not ResolveReadAsync): _wide can hold legacy NULL
                interval_start_time_utc rows (QueryStoreCollector.cs:805), which make the table differ from raw
                for this read, and below raw's floor they can't be checked without a probe that walks every
-               server's rows. This is the one reader that asks for clause 6 (requireNoLegacyRows): arm 2 places
+               server's rows. This is the one reader that passes LegacyRows.Refuse (clause 6): arm 2 places
                a legacy row at every collection_time it was stored at, and the table keeps one snapshot of it. */
             var (useTable, clampedStart) = await QueryStoreIntervalWide.ReadsTableAsync(
                 connection, serverId, startUtc, endUtc, literalEndUtc, QueryStoreDurationTrendMinWindow,
                 ViewerCommandDeadlines.CurrentInteractiveReadSeconds, logger: null, cancellationToken,
-                requireNoLegacyRows: true);
+                legacyRows: QueryStoreIntervalWide.LegacyRows.Refuse);
             if (!useTable)
             {
                 return null;

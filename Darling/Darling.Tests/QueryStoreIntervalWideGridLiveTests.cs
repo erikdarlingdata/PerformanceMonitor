@@ -71,7 +71,7 @@ public sealed class QueryStoreIntervalWideGridLiveTests
         /* Open end (a WPF preset): the gate picks the table, and the table read at the gate's own clamp equals
            raw over every returned column, both ways. */
         var (useTableOpen, clampOpen) = await QueryStoreIntervalWide.ReadsTableAsync(
-            connection, ServerId, WindowStart, WindowEnd, null, QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct);
+            connection, ServerId, WindowStart, WindowEnd, null, QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow);
         Assert.True(useTableOpen, "expected the gate to pick the table for the seeded, forced-covered window");
         await AssertRawEqualsTableAsync(connection, WindowStart, WindowEnd, clampOpen, null, TestTop, ct);
 
@@ -79,7 +79,7 @@ public sealed class QueryStoreIntervalWideGridLiveTests
            claim): clause 4 does not refuse it (NOT strictly less than), so the table is still picked and still
            equal. */
         var (useTableLiteral, clampLiteral) = await QueryStoreIntervalWide.ReadsTableAsync(
-            connection, ServerId, WindowStart, WindowEnd, appliedThrough, QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct);
+            connection, ServerId, WindowStart, WindowEnd, appliedThrough, QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow);
         Assert.True(useTableLiteral, "expected the gate to pick the table when the literal end exactly matches applied_through");
         await AssertRawEqualsTableAsync(connection, WindowStart, WindowEnd, clampLiteral, appliedThrough, TestTop, ct);
 
@@ -101,23 +101,23 @@ public sealed class QueryStoreIntervalWideGridLiveTests
         /* ---- the live gate: each refusal clause on a real connection, then the passing case restored ---- */
 
         Assert.False((await QueryStoreIntervalWide.ReadsTableAsync(
-            connection, ServerId, WindowEnd.AddHours(-1), WindowEnd, null, QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct)).UseTable,
+            connection, ServerId, WindowEnd.AddHours(-1), WindowEnd, null, QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow)).UseTable,
             "a window under 12 hours must read raw");
 
         Assert.False((await QueryStoreIntervalWide.ReadsTableAsync(
-            connection, ServerId, WindowStart, WindowEnd, appliedThrough.AddMinutes(-1), QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct)).UseTable,
+            connection, ServerId, WindowStart, WindowEnd, appliedThrough.AddMinutes(-1), QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow)).UseTable,
             "a literal end before applied_through must read raw");
 
         await ExecAsync(connection,
             "INSERT INTO collect.query_store_interval_wide_pending (server_id, collection_time, database_name, recorded_at) VALUES (@server_id, @cutoff, 'qsA', @cutoff)",
             WindowStart, ct);
         Assert.False((await QueryStoreIntervalWide.ReadsTableAsync(
-            connection, ServerId, WindowStart, WindowEnd, null, QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct)).UseTable,
+            connection, ServerId, WindowStart, WindowEnd, null, QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow)).UseTable,
             "a pending batch must read raw regardless of coverage");
         await ExecAsync(connection, "DELETE FROM collect.query_store_interval_wide_pending WHERE server_id = @server_id", ct);
 
         Assert.True((await QueryStoreIntervalWide.ReadsTableAsync(
-            connection, ServerId, WindowStart, WindowEnd, null, QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct)).UseTable,
+            connection, ServerId, WindowStart, WindowEnd, null, QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow)).UseTable,
             "the passing case, restored, must read the table again");
     }
 
@@ -186,7 +186,7 @@ public sealed class QueryStoreIntervalWideGridLiveTests
 
         /* The gate itself, under the ruled minimum window (12h): must return "raw" with no round trip at all. */
         var (useTable, _) = await QueryStoreIntervalWide.ReadsTableAsync(
-            connection, ServerId, WindowStart, shortWindowEnd, null, QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct);
+            connection, ServerId, WindowStart, shortWindowEnd, null, QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow);
         Assert.False(useTable, "a 6h window is under the grid's 12h minimum and must read raw");
 
         /* End to end through the viewer, the same surface the review named: no extra connection or transaction
@@ -216,7 +216,7 @@ public sealed class QueryStoreIntervalWideGridLiveTests
     /// clauses 1-5 alone would otherwise route to the table.
     /// </summary>
     [Fact]
-    public async Task LegacyRowInWindow_RefusesTheTable_AndTheTier2SeedDoesNot()
+    public async Task TheDurationTrendsGate_RefusesALegacyWindow_AndTheTier2SeedAndAReaderThatAllowsLegacyRowsGetTheTable()
     {
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #4310 site 3 clause 6 legacy-row live test.");
@@ -231,7 +231,7 @@ public sealed class QueryStoreIntervalWideGridLiveTests
         await SeedGridAsync(runnerTier2, ServerId, WindowStart, ct);
         await ForceFilledSinceAsync(connectionTier2, WindowStart.AddDays(-1), ct);
         var (useTableTier2, clampTier2) = await QueryStoreIntervalWide.ReadsTableAsync(
-            connectionTier2, ServerId, WindowStart, WindowEnd, null, QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct, requireNoLegacyRows: true);
+            connectionTier2, ServerId, WindowStart, WindowEnd, null, QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct, legacyRows: QueryStoreIntervalWide.LegacyRows.Refuse);
         Assert.True(useTableTier2, "the tier-2 seed carries no legacy row; clause 6 must not refuse it");
         await AssertRawEqualsTableAsync(connectionTier2, WindowStart, WindowEnd, clampTier2, null, TestTop, ct);
 
@@ -245,12 +245,12 @@ public sealed class QueryStoreIntervalWideGridLiveTests
         await SeedGridLegacyAsync(runnerLegacy, ServerId, WindowStart, ct);
         await ForceFilledSinceAsync(connectionLegacy, WindowStart.AddDays(-1), ct);
         var (useTableLegacy, _) = await QueryStoreIntervalWide.ReadsTableAsync(
-            connectionLegacy, ServerId, WindowStart, WindowEnd, null, QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct, requireNoLegacyRows: true);
+            connectionLegacy, ServerId, WindowStart, WindowEnd, null, QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct, legacyRows: QueryStoreIntervalWide.LegacyRows.Refuse);
         Assert.False(useTableLegacy, "every row in this seed is legacy (interval_start_time_utc IS NULL); clause 6 must refuse the table");
-        /* Clause 6 is opt-in: a reader that keeps the newest snapshot per interval does not ask, and gets the table over the same window. */
+        /* A reader that keeps the newest snapshot per interval passes LegacyRows.Allow, and gets the table over the same window. */
         var (useTableNotAsked, _) = await QueryStoreIntervalWide.ReadsTableAsync(
-            connectionLegacy, ServerId, WindowStart, WindowEnd, null, QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct);
-        Assert.True(useTableNotAsked, "without requireNoLegacyRows the legacy rows must not refuse the table");
+            connectionLegacy, ServerId, WindowStart, WindowEnd, null, QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow);
+        Assert.True(useTableNotAsked, "with LegacyRows.Allow the legacy rows must not refuse the table");
     }
 
     /// <summary>

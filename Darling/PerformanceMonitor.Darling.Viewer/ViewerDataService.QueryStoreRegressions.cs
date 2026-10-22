@@ -259,7 +259,7 @@ public sealed partial class ViewerDataService
 
             var plan = await QueryStoreIntervalWide.ResolveReadAsync(
                 connection, serverId, baselineStartUtc, endUtc, literalEndUtc, QueryStoreIntervalWide.GridWideMinWindow,
-                ViewerCommandDeadlines.CurrentInteractiveReadSeconds, logger: null, cancellationToken);
+                ViewerCommandDeadlines.CurrentInteractiveReadSeconds, logger: null, cancellationToken, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow);
             if (!plan.UseTable)
             {
                 return null;

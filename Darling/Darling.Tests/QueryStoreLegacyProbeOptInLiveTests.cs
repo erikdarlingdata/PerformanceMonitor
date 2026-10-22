@@ -26,7 +26,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// Clause 6 of the wide-table gate (<see cref="QueryStoreIntervalWide.HasLegacyRowSql"/>) is opt-in
-/// (<c>requireNoLegacyRows</c>). Only a reader that places every snapshot of a legacy row at its own
+/// (<c>LegacyRows.Refuse</c>). Only a reader that places every snapshot of a legacy row at its own
 /// <c>collection_time</c> (the Viewer's duration trend) needs it. Every other reader keeps the newest snapshot per interval,
 /// which the table holds for a legacy row too, so it must not pay the probe: on compressed chunks the probe decompresses every
 /// batch of the server to prove there are none, and the analysis pass ran it on every pass for every server.
@@ -202,10 +202,10 @@ FROM generate_series(@from, @to, INTERVAL '5 minutes') AS t",
         /* The gate, as the failure read calls it (no opt-in): the table. And with the probe asked for, the same window is refused. */
         var windowStart = end.AddDays(-14).AddHours(-1);
         var (useTable, _) = await QueryStoreIntervalWide.ReadsTableAsync(
-            rig.Connection, ServerId, windowStart, end, null, QueryStoreIntervalWide.TopMinWindow, 30, null, ct);
+            rig.Connection, ServerId, windowStart, end, null, QueryStoreIntervalWide.TopMinWindow, 30, null, ct, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow);
         Assert.True(useTable, "a window holding legacy rows must still route the failure read to the table");
         var (forcedProbe, _) = await QueryStoreIntervalWide.ReadsTableAsync(
-            rig.Connection, ServerId, windowStart, end, null, QueryStoreIntervalWide.TopMinWindow, 30, null, ct, requireNoLegacyRows: true);
+            rig.Connection, ServerId, windowStart, end, null, QueryStoreIntervalWide.TopMinWindow, 30, null, ct, legacyRows: QueryStoreIntervalWide.LegacyRows.Refuse);
         Assert.False(forcedProbe, "with the probe on, the legacy rows must refuse the table (the control for the assertion above)");
 
         /* The two forms of the failure read, same bounds, compared on every column. */
@@ -291,11 +291,11 @@ FROM generate_series(@from, @to, INTERVAL '5 minutes') AS t",
         var start = rig.End.AddDays(-6);
 
         var (asked, _) = await QueryStoreIntervalWide.ReadsTableAsync(
-            rig.Connection, ServerId, start, rig.End, null, TimeSpan.FromHours(48), 30, null, ct, requireNoLegacyRows: true);
+            rig.Connection, ServerId, start, rig.End, null, TimeSpan.FromHours(48), 30, null, ct, legacyRows: QueryStoreIntervalWide.LegacyRows.Refuse);
         Assert.False(asked, "a legacy row in the window must refuse the table for a reader that places every snapshot");
 
         var (notAsked, _) = await QueryStoreIntervalWide.ReadsTableAsync(
-            rig.Connection, ServerId, start, rig.End, null, TimeSpan.FromHours(48), 30, null, ct);
+            rig.Connection, ServerId, start, rig.End, null, TimeSpan.FromHours(48), 30, null, ct, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow);
         Assert.True(notAsked, "the same window must route a reader that keeps the newest snapshot per interval to the table");
     }
 
