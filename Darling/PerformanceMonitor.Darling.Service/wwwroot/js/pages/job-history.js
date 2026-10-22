@@ -82,8 +82,13 @@ function selectionInside(node) {
 /* The filter state, kept across the 60 s rebuild. `jobDraft` is the job text as typed, applied on Enter or when
    the box loses focus; `job` is the text the last read used. */
 const state = { server: "", spec: relativeSpec(DEFAULT_HOURS * 3600000), status: "", category: "", limit: 100, job: "", jobDraft: "", jobFocused: false, jobCaret: null };
-/* The categories seen in any answer, so the Category choices survive a filter that narrows the next answer. */
-const seenCategories = new Set();
+/* The categories seen in any answer, kept per selected server ("" is the all-servers view), so the Category choices survive a
+   filter that narrows the next answer yet never list another server's categories (#6439). */
+const seenCategories = new Map();
+function seenFor(server) {
+  if (!seenCategories.has(server)) seenCategories.set(server, new Set());
+  return seenCategories.get(server);
+}
 /* The server choices from the last list_servers read, so the rebuild paints its select at once. */
 let knownServers = [];
 let pageSeq = 0;
@@ -136,8 +141,9 @@ function serverOptions() {
 }
 
 function categoryOptions() {
-  const names = [...seenCategories];
-  if (state.category && !seenCategories.has(state.category)) names.push(state.category);
+  const seen = seenFor(state.server);
+  const names = [...seen];
+  if (state.category && !seen.has(state.category)) names.push(state.category);
   names.sort((a, b) => a.localeCompare(b));
   return [{ value: "", label: "All categories" }, ...names.map((n) => ({ value: n, label: n }))];
 }
@@ -265,6 +271,8 @@ export function renderJobHistory(main) {
   const win = { label: el("div", { class: "range-control" }, [el("span", { text: "Window" }), rangePicker.node]) };
   const server = select("Server", serverOptions(), state.server, (v) => {
     state.server = v;
+    /* A category picked for the last server may not exist on this one; the new server starts on all of its categories. */
+    state.category = "";
     reload();
   });
   const status = select("Status", STATUSES, state.status, (v) => {
@@ -351,9 +359,11 @@ export function renderJobHistory(main) {
       const kept = keptWindowStrip(res);
       showAgent(res.kind === "empty" ? res.hints : data);
       if (res.kind === "empty") {
+        /* An answer with no runs (an Azure SQL Database has no SQL Agent) offers only the categories this server has been seen to have. */
+        fill(category.sel, categoryOptions(), state.category);
         return mount(body, [kept, noticeFor(retainedNote(res.hints)), emptyStrip(noAgentLine(res) || res.message)]);
       }
-      for (const r of data.runs || []) if (r.category) seenCategories.add(r.category);
+      for (const r of data.runs || []) if (r.category) seenFor(state.server).add(r.category);
       fill(category.sel, categoryOptions(), state.category);
       /* The detail pane (W2): a click, or Enter, on a run opens its whole message above the grid. */
       const pane = el("div", { class: "jh-detail" });

@@ -340,6 +340,36 @@ try {
     none: noAgentLine(null),
   };
 
+  // #6439: the Category choices are the selected server's own. A server whose answer has no runs (an Azure SQL Database) lists none,
+  // the fleet view keeps the union, and a category picked on one server is not carried to the next.
+  const cat = new FakeNode("div");
+  cat.isRoot = true;
+  historyBody = JSON.stringify(run);
+  renderJobHistory(cat);
+  await settle();
+  const catOptions = () => byLabel(cat, "Category").children.map((o) => o.attrs.value);
+  const pickServer = async (name, body) => {
+    historyBody = JSON.stringify(body);
+    byLabel(cat, "Server").value = name;
+    byLabel(cat, "Server").handlers.change();
+    await settle();
+  };
+  await pickServer("", run);
+  const fleetCats = catOptions();
+  // srv-b has never answered with a run: it lists no category, not the fleet's.
+  await pickServer("srv-b", { status: "not_collected", message: "srv-b runs on Azure SQL Database (EngineEdition 5). This is a permanent engine capability gap" });
+  const noRunsCats = catOptions();
+  // Then it answers with one category: only that one is offered, and picking it sends it.
+  await pickServer("srv-b", { ...run, runs: [run.runs[1]] });
+  const oneServerCats = catOptions();
+  byLabel(cat, "Category").value = "Backup";
+  byLabel(cat, "Category").handlers.change();
+  await settle();
+  const pickedSent = historyCalls().pop().q.category || null;
+  // Back to the fleet: the pick is not carried over, and the union is offered again.
+  await pickServer("", run);
+  out.categoryChoices = { fleet: fleetCats, noRuns: noRunsCats, oneServer: oneServerCats, pickedSent, backToFleet: catOptions(), fleetCategorySent: historyCalls().pop().q.category || null };
+
   out.columns = JOB_HISTORY_COLUMNS.map((c) => c.label);
   console.log(JSON.stringify(out));
 } finally {
