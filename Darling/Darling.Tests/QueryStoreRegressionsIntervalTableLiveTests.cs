@@ -256,6 +256,12 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         await SeedAsync(postgres, baselineStart, start, ct);
         /* The window ends now, as the MCP tool's does: at or after the coverage row's applied_through (the gate's clause 4). */
         var end = LiveClock.Now();
+        /* #6374: the seed's writer stamps the coverage row's applied_through with the REAL clock (the product's own
+           DateTime.UtcNow), not LiveClock, so a DARLING_TEST_CLOCK_UTC behind the real clock put the window's end before
+           applied_through, clause 4 sent the read to raw, and the interval path did not serve. The end is therefore never
+           before the real clock; the hour the window sits at still comes from LiveClock. */
+        var realNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        end = end > realNow ? end : realNow;
         end = end.AddTicks(-(end.Ticks % TimeSpan.TicksPerSecond)).AddSeconds(1);
         await QueryStoreIntervalWideBelowFloorLiveTests.SeedQueryStoreLogAsync(connection, ServerId, baselineStart.AddDays(-5), end, null, null, ct);
         await QueryStoreIntervalWideBelowFloorLiveTests.ForceFilledSinceAsync(connection, baselineStart.AddDays(-3), ct);
