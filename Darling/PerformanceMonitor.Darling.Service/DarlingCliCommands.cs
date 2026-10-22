@@ -6572,7 +6572,7 @@ public static partial class DarlingCliCommands
         Environment.NewLine +
         "servers.json, SQL Server and PostgreSQL:" + Environment.NewLine +
         "  [" + Environment.NewLine +
-        "    {\"host\":\"sql01\",\"auth\":\"integrated\"}," + Environment.NewLine +
+        "    {\"host\":\"sql01\",\"auth\":\"Windows\"}," + Environment.NewLine +
         "    {\"host\":\"aurora.cluster-abc.us-east-1.rds.amazonaws.com\",\"engine\":\"postgres\"," + Environment.NewLine +
         "     \"auth\":\"SQL\",\"username\":\"darling_monitor\",\"password\":\"...\"}" + Environment.NewLine +
         "  ]";
@@ -6754,7 +6754,7 @@ public static partial class DarlingCliCommands
         {
             /* The password is asked for here, after the store is known usable, and only for a login that has one. It is read hidden and goes
                into the request text and nowhere else: never to the output, the error stream or a log. */
-            var (built, problem) = BuildAddServerJson(flags!, readPassword ?? (label => ReadPasswordFromConsole(label, input, output)));
+            var (built, problem) = BuildAddServerJson(flags!, readPassword ?? (label => ReadPasswordFromConsole(label, input ?? TextReader.Null, output)));
             if (problem is not null)
             {
                 error.WriteLine(problem);

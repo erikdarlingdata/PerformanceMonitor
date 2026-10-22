@@ -166,7 +166,7 @@ public sealed class DarlingServiceConnectionTestTests
     }
 
     /// <summary>A queue that answers with a canned row after a number of reads (never, when null) and records what was done to it.</summary>
-    private sealed class FakeQueue : DarlingServiceConnectionTest.IServiceCommandQueue
+    private sealed class FakeQueue : DarlingServiceConnectionTest.IServiceCommandPlane
     {
         private readonly (string Status, string? ResultStatus, string? ResultJson)? _reply;
         private readonly int _readsBeforeReply;

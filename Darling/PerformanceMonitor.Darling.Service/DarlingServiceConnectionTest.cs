@@ -82,7 +82,7 @@ public static class DarlingServiceConnectionTest
         "         Tested by the running service, as the account it runs under: this is the identity collection will use.";
 
     /// <summary>The store queue the test goes through. A seam so the wait, cancel and cleanup logic runs under test without a store.</summary>
-    public interface IServiceCommandQueue
+    public interface IServiceCommandPlane
     {
         Task<long> EnqueueAsync(string commandType, string argsJson, CancellationToken cancellationToken);
 
@@ -112,7 +112,7 @@ public static class DarlingServiceConnectionTest
     /// </summary>
     internal sealed class QueuedServiceConnectionTester : IServiceConnectionTester
     {
-        private readonly IServiceCommandQueue _queue;
+        private readonly IServiceCommandPlane _queue;
         private readonly Func<CancellationToken, Task<string>> _serviceState;
         private readonly TimeSpan _budget;
         private readonly TimeSpan _pollInterval;
@@ -120,7 +120,7 @@ public static class DarlingServiceConnectionTest
         private bool _stateChecked;
 
         internal QueuedServiceConnectionTester(
-            IServiceCommandQueue queue, Func<CancellationToken, Task<string>> serviceState, TimeSpan budget, TimeSpan? pollInterval = null)
+            IServiceCommandPlane queue, Func<CancellationToken, Task<string>> serviceState, TimeSpan budget, TimeSpan? pollInterval = null)
         {
             _queue = queue;
             _serviceState = serviceState;
@@ -136,7 +136,7 @@ public static class DarlingServiceConnectionTest
                 var state = await _serviceState(cancellationToken);
                 if (!string.Equals(state, "Running", StringComparison.OrdinalIgnoreCase))
                 {
-                    _unavailable = $"The service is not running ({state}), so it could not be asked.";
+                    _unavailable = $"The service is not running (state: {state}), so it could not be asked.";
                 }
             }
 
@@ -272,7 +272,7 @@ public static class DarlingServiceConnectionTest
         root.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.True;
 
     /// <summary>The queue over the store's <c>config.config_command</c>, the same rows and statements shape the Viewer queues.</summary>
-    internal sealed class PostgresServiceCommandQueue : IServiceCommandQueue
+    internal sealed class PostgresServiceCommandPlane : IServiceCommandPlane
     {
         private const string EnqueueSql =
             "INSERT INTO config.config_command (requested_by, command_type, target_server_id, args_json, status, created_at) " +
@@ -291,7 +291,7 @@ public static class DarlingServiceConnectionTest
 
         private readonly NpgsqlDataSource _postgres;
 
-        internal PostgresServiceCommandQueue(NpgsqlDataSource postgres) => _postgres = postgres;
+        internal PostgresServiceCommandPlane(NpgsqlDataSource postgres) => _postgres = postgres;
 
         public async Task<long> EnqueueAsync(string commandType, string argsJson, CancellationToken cancellationToken)
         {
@@ -392,7 +392,7 @@ public static class DarlingServiceConnectionTest
                         DarlingStoreConnection.PinSessionTimeZoneUtc(
                             DarlingStoreConnection.WithApplicationName(_connectionString, DarlingManagedPostgres.CliApplicationName)));
                     _inner = new QueuedServiceConnectionTester(
-                        new PostgresServiceCommandQueue(_dataSource),
+                        new PostgresServiceCommandPlane(_dataSource),
                         token => OperatingSystem.IsWindows()
                             ? DarlingCliCommands.DescribeServiceStateAsync(token)
                             : Task.FromResult("not a Windows host"),
