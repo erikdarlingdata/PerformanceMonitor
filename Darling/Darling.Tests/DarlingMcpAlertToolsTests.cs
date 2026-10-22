@@ -700,9 +700,10 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         /* #5825: the delivery read also carries the per-channel resolution flags, so it returns a DeliveryRead. */
         Assert.Contains("private static async Task<DeliveryRead?> ReadDeliveryAsync", reader, StringComparison.Ordinal);
 
-        /* And both tool paths go through the combined entry point -- get_alert_settings and the post-write
-           re-read, which is the one described to the caller as the authoritative merged state. */
-        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(
+        /* And every tool path goes through the combined entry point -- get_alert_settings, the pre-write read that names the
+           previous values for the undo (#6403), and the post-write re-read, which is the one described to the caller as the
+           authoritative merged state. */
+        Assert.Equal(3, System.Text.RegularExpressions.Regex.Matches(
             tools, @"GetAlertConfigurationAsync\(postgres(, cancellationToken)?\)").Count);
     }
 
