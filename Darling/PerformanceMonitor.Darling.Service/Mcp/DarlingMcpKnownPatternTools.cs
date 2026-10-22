@@ -92,6 +92,8 @@ public sealed class DarlingMcpKnownPatternTools
                     note = e.Note,
                     created_by = e.CreatedBy,
                     created_at_utc = e.CreatedAtUtc.ToString("o", CultureInfo.InvariantCulture),
+                    updated_by = e.UpdatedBy,
+                    updated_at_utc = e.UpdatedAtUtc?.ToString("o", CultureInfo.InvariantCulture),
                     expires_at_utc = e.ExpiresAtUtc?.ToString("o", CultureInfo.InvariantCulture),
                     expired = e.ExpiresAtUtc is { } x && DateTime.SpecifyKind(x, DateTimeKind.Utc) <= now,
                 }),

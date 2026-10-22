@@ -175,6 +175,8 @@ public sealed class ViewerKnownPatternEditorLivePostgresTests
         Assert.Equal(KnownPatternMatcher.DefaultWindowMinutes, listed.WindowMinutes);
         Assert.Equal("nightly index job", listed.Note);
         Assert.EndsWith("(viewer)", listed.CreatedBy, StringComparison.Ordinal);
+        Assert.Null(listed.UpdatedBy);
+        Assert.Null(listed.UpdatedAtUtc);
         Assert.Equal(DateTimeKind.Utc, listed.CreatedAtUtc.Kind);
         Assert.NotNull(listed.ExpiresAtUtc);
         Assert.True(Math.Abs((listed.ExpiresAtUtc!.Value - expires).TotalSeconds) < 1, "the expiry must read back as the UTC instant written");
@@ -186,6 +188,15 @@ public sealed class ViewerKnownPatternEditorLivePostgresTests
         Assert.Null(edited.TimeOfDay);
         Assert.Equal(30, edited.WindowMinutes);
         Assert.Null(edited.ExpiresAtUtc);
+        Assert.EndsWith("(viewer)", edited.UpdatedBy, StringComparison.Ordinal);
+        Assert.NotNull(edited.UpdatedAtUtc);
+        Assert.Equal(listed.CreatedBy, edited.CreatedBy);
+
+        // A server that is not registered is refused with the store's sentence, and nothing changes.
+        var unknownServer = await Assert.ThrowsAsync<ArgumentException>(() => viewer.UpdateKnownPatternAsync(id, new KnownPatternInput(987654, null, null, null, null, "ghost server", null), ct));
+        Assert.Contains("No monitored server", unknownServer.Message, StringComparison.Ordinal);
+        await Assert.ThrowsAsync<ArgumentException>(() => viewer.InsertKnownPatternAsync(new KnownPatternInput(987654, null, null, null, null, "ghost server", null), ct));
+        Assert.Equal("edited note", Assert.Single(await viewer.GetKnownPatternsAsync(ct)).Note);
 
         // A refused input throws the shared Validate text and writes nothing.
         var refused = new KnownPatternInput(null, null, null, null, null, "   ", null);

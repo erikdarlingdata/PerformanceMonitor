@@ -125,6 +125,11 @@ public sealed class KnownPatternRow
 
     public string CreatedBy => Entry.CreatedBy ?? "";
 
+    /// <summary>The last editor and when (UTC), or empty for an entry never edited.</summary>
+    public string UpdatedDisplay => Entry.UpdatedBy is null && Entry.UpdatedAtUtc is null
+        ? ""
+        : (Entry.UpdatedBy ?? "") + (Entry.UpdatedAtUtc is { } edited ? ", " + edited.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " UTC" : "");
+
     public string ExpiresDisplay => Entry.ExpiresAtUtc is { } at
         ? at.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " UTC"
         : "Never";

@@ -276,6 +276,7 @@ INSERT INTO config.agent_environment_profiles (scope_server_id, profile_text) VA
             var secondTime = new TimeOnly(second.Hour, second.Minute);
             await DarlingMcpTestData.ExecAsync(connection, ct, "INSERT INTO config.config_service (id) VALUES (1) ON CONFLICT (id) DO NOTHING");
             await DarlingMcpTestData.ExecAsync(connection, ct, DarlingManagedRoles.BuildKnownPatternFunctionsSql("config"));
+            await DarlingMcpTestData.ExecAsync(connection, ct, $"INSERT INTO config.config_monitored_servers (server_id, name, host, is_enabled) VALUES ({ServerId}, 'kp-a', 'kp-a', TRUE), ({ServerId + 1}, 'kp-b', 'kp-b', TRUE) ON CONFLICT DO NOTHING");
             var patterns = new PgKnownPatternStore(dataSource);
             var blockingAtFirst = await patterns.InsertAsync(new KnownPatternInput(ServerId, "Blocking", firstTime, null, 2, "blocking at T", null), "erik", ct);
             var deadlocksAtFirst = await patterns.InsertAsync(new KnownPatternInput(ServerId, "Deadlocks", firstTime, null, 2, "deadlocks at T", null), "erik", ct);

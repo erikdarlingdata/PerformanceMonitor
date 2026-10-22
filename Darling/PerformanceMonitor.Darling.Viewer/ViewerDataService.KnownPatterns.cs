@@ -34,12 +34,12 @@ public sealed partial class ViewerDataService
         "Known patterns need a newer store (schema v214 or later). Update or restart the Darling service so it migrates the store, then reopen the viewer.";
 
     public const string KnownPatternsSelectSql =
-        "SELECT id, server_id, metric_name, time_of_day, time_zone, window_minutes, note, created_by, created_at_utc, expires_at_utc " +
+        "SELECT id, server_id, metric_name, time_of_day, time_zone, window_minutes, note, created_by, created_at_utc, expires_at_utc, updated_by, updated_at_utc " +
         "FROM config.config_known_patterns ORDER BY id";
 
     public const string KnownPatternInsertSql = "SELECT config.insert_known_pattern($1, $2, $3, $4, $5, $6, $7, $8)";
 
-    public const string KnownPatternUpdateSql = "SELECT config.update_known_pattern($1, $2, $3, $4, $5, $6, $7, $8)";
+    public const string KnownPatternUpdateSql = "SELECT config.update_known_pattern($1, $2, $3, $4, $5, $6, $7, $8, $9)";
 
     public const string KnownPatternDeleteSql = "SELECT config.delete_known_pattern($1)";
 
@@ -80,17 +80,28 @@ public sealed partial class ViewerDataService
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
-                entries.Add(new KnownPattern(
-                    reader.GetInt64(0),
-                    reader.IsDBNull(1) ? null : reader.GetInt32(1),
-                    reader.IsDBNull(2) ? null : reader.GetString(2),
-                    reader.IsDBNull(3) ? null : reader.GetFieldValue<TimeOnly>(3),
-                    reader.IsDBNull(4) ? null : reader.GetString(4),
-                    reader.GetInt32(5),
-                    reader.GetString(6),
-                    reader.IsDBNull(7) ? null : reader.GetString(7),
-                    DateTime.SpecifyKind(reader.GetDateTime(8), DateTimeKind.Utc),
-                    reader.IsDBNull(9) ? null : DateTime.SpecifyKind(reader.GetDateTime(9), DateTimeKind.Utc)));
+                var id = reader.GetInt64(0);
+                try
+                {
+                    entries.Add(new KnownPattern(
+                        id,
+                        reader.IsDBNull(1) ? null : reader.GetInt32(1),
+                        reader.IsDBNull(2) ? null : reader.GetString(2),
+                        reader.IsDBNull(3) ? null : reader.GetFieldValue<TimeOnly>(3),
+                        reader.IsDBNull(4) ? null : reader.GetString(4),
+                        reader.GetInt32(5),
+                        reader.GetString(6),
+                        reader.IsDBNull(7) ? null : reader.GetString(7),
+                        DateTime.SpecifyKind(reader.GetDateTime(8), DateTimeKind.Utc),
+                        reader.IsDBNull(9) ? null : DateTime.SpecifyKind(reader.GetDateTime(9), DateTimeKind.Utc),
+                        reader.IsDBNull(10) ? null : reader.GetString(10),
+                        reader.IsDBNull(11) ? null : DateTime.SpecifyKind(reader.GetDateTime(11), DateTimeKind.Utc)));
+                }
+                catch (Exception ex) when (ex is InvalidCastException or ArgumentException or OverflowException or FormatException or InvalidOperationException)
+                {
+                    /* One row the model cannot hold must not hide every other entry; the table's CHECKs keep such rows out of a current store. */
+                    ViewerLogger.Warn("KnownPatterns", $"Known pattern {id} cannot be read and is skipped: {ex.Message}");
+                }
             }
 
             return entries;
@@ -125,6 +136,8 @@ public sealed partial class ViewerDataService
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = id });
             AddKnownPatternScope(command, clean);
             AddNullableTimestamp(command, clean.ExpiresAtUtc);
+            /* The same label an add records as the author; the function stamps it with the time of the edit. */
+            AddNullableText(command, RequestedBy());
             return (bool)(await ExecuteWriteScalarAsync(command, cancellationToken))!;
         });
     }
@@ -169,6 +182,11 @@ public sealed partial class ViewerDataService
         try
         {
             return await call();
+        }
+        catch (PostgresException ex) when (ex.SqlState == "DL404")
+        {
+            /* The store refused a server id that names no registered server (another operator removed it): the editor shows the sentence. */
+            throw new ArgumentException(ex.MessageText);
         }
         catch (PostgresException ex) when (ex.SqlState is UndefinedColumnSqlState or UndefinedTableSqlState or "42883")
         {

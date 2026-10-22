@@ -500,7 +500,7 @@ ORDER BY m.metric_name, f.day DESC";
                     foreach (var entry in KnownPatternMatcher.Match(entries, request.ServerId, item.MetricName, item.AroundUtc,
                         message => _logger?.LogWarning("{Message}", message)))
                     {
-                        knownPatterns.Add(new InvestigationKnownPatternMatch(item.MetricName, entry.Id, entry.Note, entry.CreatedBy));
+                        knownPatterns.Add(new InvestigationKnownPatternMatch(item.MetricName, entry.Id, entry.Note, entry.CreatedBy, entry.UpdatedBy));
                     }
                 }
             }

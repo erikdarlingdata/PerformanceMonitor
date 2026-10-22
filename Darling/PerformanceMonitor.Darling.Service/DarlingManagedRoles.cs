@@ -2401,7 +2401,7 @@ FROM (
     internal const string InsertKnownPatternSignature = "integer, text, time, text, integer, text, text, timestamp";
 
     /// <summary>The argument types of <c>config.update_known_pattern</c> (#6334), in order.</summary>
-    internal const string UpdateKnownPatternSignature = "bigint, integer, text, time, text, integer, text, timestamp";
+    internal const string UpdateKnownPatternSignature = "bigint, integer, text, time, text, integer, text, timestamp, text";
 
     /// <summary>
     /// The <c>SECURITY DEFINER</c> functions (#6334) that are the writes of the known-pattern entries
@@ -2411,8 +2411,9 @@ FROM (
     /// Returns the <c>CREATE OR REPLACE FUNCTION</c> statements plus the <c>REVOKE ALL ... FROM PUBLIC</c> of each (a new function is
     /// EXECUTE-able by PUBLIC); the caller adds the <c>GRANT EXECUTE</c>. Because the body runs as the owner, the table's
     /// <c>config_version</c> trigger bumps the beacon as the owner, so the caller needs no grant on <c>config_service</c>. Pinned
-    /// <c>search_path</c>, fixed statements, no dynamic SQL; the table's CHECKs hold the note to 1-500 characters and the window to 0-720
-    /// minutes whatever the caller sends. Same builder for the managed batch, the script's text and the live tests, so none drifts.
+    /// <c>search_path</c>, fixed statements, no dynamic SQL; the table's CHECKs hold every column to what a reader can load whatever the caller sends, and
+    /// both writes refuse a server_id that names no registered server (DL404). <c>update_known_pattern</c> alone stamps updated_by and
+    /// updated_at_utc. Same builder for the managed batch, the script's text and the live tests, so none drifts.
     /// </summary>
     internal static string BuildKnownPatternFunctionsSql(string config) => $@"
 CREATE OR REPLACE FUNCTION {config}.insert_known_pattern(
@@ -2425,17 +2426,26 @@ CREATE OR REPLACE FUNCTION {config}.insert_known_pattern(
    p_created_by text,
    p_expires_at_utc timestamp)
 RETURNS bigint
-LANGUAGE sql
+LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $fn$
+DECLARE
+   v_id bigint;
+BEGIN
+   IF p_server_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {config}.config_monitored_servers WHERE server_id = p_server_id) THEN
+      RAISE EXCEPTION 'No monitored server with that id.' USING ERRCODE = 'DL404';
+   END IF;
    INSERT INTO {config}.config_known_patterns
       (server_id, metric_name, time_of_day, time_zone, window_minutes, note, created_by, expires_at_utc)
    VALUES
       (p_server_id, p_metric_name, p_time_of_day, p_time_zone, p_window_minutes, p_note, p_created_by, p_expires_at_utc)
-   RETURNING id;
+   RETURNING id INTO v_id;
+   RETURN v_id;
+END;
 $fn$;
 REVOKE ALL ON FUNCTION {config}.insert_known_pattern({InsertKnownPatternSignature}) FROM PUBLIC;
+DROP FUNCTION IF EXISTS {config}.update_known_pattern(bigint, integer, text, time, text, integer, text, timestamp);
 CREATE OR REPLACE FUNCTION {config}.update_known_pattern(
    p_id bigint,
    p_server_id integer,
@@ -2444,19 +2454,27 @@ CREATE OR REPLACE FUNCTION {config}.update_known_pattern(
    p_time_zone text,
    p_window_minutes integer,
    p_note text,
-   p_expires_at_utc timestamp)
+   p_expires_at_utc timestamp,
+   p_updated_by text)
 RETURNS boolean
-LANGUAGE sql
+LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $fn$
-   WITH changed AS (
-      UPDATE {config}.config_known_patterns
-         SET server_id = p_server_id, metric_name = p_metric_name, time_of_day = p_time_of_day, time_zone = p_time_zone,
-             window_minutes = p_window_minutes, note = p_note, expires_at_utc = p_expires_at_utc
-       WHERE id = p_id
-      RETURNING 1)
-   SELECT EXISTS (SELECT 1 FROM changed);
+DECLARE
+   v_rows bigint;
+BEGIN
+   IF p_server_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {config}.config_monitored_servers WHERE server_id = p_server_id) THEN
+      RAISE EXCEPTION 'No monitored server with that id.' USING ERRCODE = 'DL404';
+   END IF;
+   UPDATE {config}.config_known_patterns
+      SET server_id = p_server_id, metric_name = p_metric_name, time_of_day = p_time_of_day, time_zone = p_time_zone,
+          window_minutes = p_window_minutes, note = p_note, expires_at_utc = p_expires_at_utc,
+          updated_by = p_updated_by, updated_at_utc = pg_catalog.now() AT TIME ZONE 'UTC'
+    WHERE id = p_id;
+   GET DIAGNOSTICS v_rows = ROW_COUNT;
+   RETURN v_rows > 0;
+END;
 $fn$;
 REVOKE ALL ON FUNCTION {config}.update_known_pattern({UpdateKnownPatternSignature}) FROM PUBLIC;
 CREATE OR REPLACE FUNCTION {config}.delete_known_pattern(p_id bigint)

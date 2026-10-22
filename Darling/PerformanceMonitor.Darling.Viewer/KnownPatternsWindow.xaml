@@ -44,6 +44,7 @@
                     <DataGridTextColumn Header="Window" Binding="{Binding WindowMinutes}" Width="65"/>
                     <DataGridTextColumn Header="Note" Binding="{Binding Note}" Width="*"/>
                     <DataGridTextColumn Header="Created by" Binding="{Binding CreatedBy}" Width="110"/>
+                    <DataGridTextColumn Header="Edited by" Binding="{Binding UpdatedDisplay}" Width="170"/>
                     <DataGridTextColumn Header="Expires" Binding="{Binding ExpiresDisplay}" Width="130"/>
                 </DataGrid.Columns>
             </DataGrid>

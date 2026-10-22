@@ -761,13 +761,14 @@ public sealed class InvestigationBriefComposer
     }
 
     /// <summary>A known-pattern match (#6334): the linked metric, the entry's id, its operator-written note (free text, masked) and
-    /// its creator.</summary>
+    /// its creator and, once edited, its last editor.</summary>
     private static JsonObject KnownPatternNode(InvestigationKnownPatternMatch match, McpDataDetailMasker masker, CutCounter cut) =>
         Masked(new JsonObject
         {
             ["metric"] = match.MetricName,
             ["id"] = match.EntryId,
             ["created_by"] = masker.Field("login_name", match.CreatedBy),
+            ["updated_by"] = masker.Field("login_name", match.UpdatedBy),
             ["note"] = null,
         }, masker, cut, ("note", match.Note));
 

@@ -66,6 +66,9 @@ VALUES ($1, $2, $3, $4, 45, 30, TRUE, 'email', NULL, FALSE, FALSE, NULL, NULL)",
         await DarlingMcpTestData.ExecAsync(connection, ct, "INSERT INTO config.config_service (id) VALUES (1) ON CONFLICT (id) DO NOTHING");
         await DarlingMcpTestData.ExecAsync(connection, ct, DarlingManagedRoles.BuildKnownPatternFunctionsSql("config"));
         await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+        await DarlingMcpTestData.RegisterServerAsync(connection, OtherServerId, "other-server", ct);
+        /* The write functions refuse a server id the registry (config_monitored_servers) does not hold. */
+        await DarlingMcpTestData.ExecAsync(connection, ct, $"INSERT INTO config.config_monitored_servers (server_id, name, host, is_enabled) VALUES ({ServerId}, 'kp-a', 'kp-a', TRUE), ({OtherServerId}, 'kp-b', 'kp-b', TRUE) ON CONFLICT DO NOTHING");
 
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
         var store = new PgKnownPatternStore(dataSource);
@@ -123,12 +126,14 @@ VALUES ($1, $2, $3, $4, 45, 30, TRUE, 'email', NULL, FALSE, FALSE, NULL, NULL)",
         var longNote = new string('x', KnownPatternMatcher.MaxNoteLength + 1);
         await Assert.ThrowsAsync<ArgumentException>(() => store.InsertAsync(new KnownPatternInput(null, null, null, null, null, longNote, null), "erik", ct));
         await Assert.ThrowsAsync<ArgumentException>(() => store.InsertAsync(new KnownPatternInput(null, null, new TimeOnly(1, 0), "Not/AZone", null, "bad zone", null), "erik", ct));
-        Assert.True(await store.UpdateAsync(nightly, new KnownPatternInput(ServerId, Metric, new TimeOnly(2, 10), null, 5, "now narrower", null), ct));
-        Assert.False(await store.UpdateAsync(long.MaxValue, new KnownPatternInput(null, null, null, null, null, "none", null), ct));
+        Assert.True(await store.UpdateAsync(nightly, new KnownPatternInput(ServerId, Metric, new TimeOnly(2, 10), null, 5, "now narrower", null), "priya", ct));
+        Assert.False(await store.UpdateAsync(long.MaxValue, new KnownPatternInput(null, null, null, null, null, "none", null), "priya", ct));
         var updated = (await store.LoadAllAsync(ct)).Single(e => e.Id == nightly);
         Assert.Equal("now narrower", updated.Note);
         Assert.Equal(5, updated.WindowMinutes);
         Assert.Equal("erik", updated.CreatedBy);
+        Assert.Equal("priya", updated.UpdatedBy);
+        Assert.NotNull(updated.UpdatedAtUtc);
 
         var beforeDelete = await BeaconAsync(connection, ct);
         Assert.True(await store.DeleteAsync(nightly, ct));

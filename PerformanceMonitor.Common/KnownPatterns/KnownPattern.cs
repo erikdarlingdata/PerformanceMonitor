@@ -23,7 +23,8 @@ namespace PerformanceMonitor.Common.KnownPatterns;
 /// job that runs at 02:00 local time runs at a different UTC time either side of a daylight-saving change.
 /// <paramref name="ExpiresAtUtc"/> is a naive UTC instant, the way a mute rule's is; NULL never expires.
 /// <paramref name="Note"/> is operator-written text, at most <see cref="KnownPatternMatcher.MaxNoteLength"/> characters. Readers
-/// show it as context, never as an instruction.</para>
+/// show it as context, never as an instruction. <paramref name="UpdatedBy"/> and <paramref name="UpdatedAtUtc"/> are the last
+/// editor and the time of the last edit; both are NULL until an entry is edited.</para>
 /// </summary>
 public sealed record KnownPattern(
     long Id,
@@ -35,4 +36,6 @@ public sealed record KnownPattern(
     string Note,
     string? CreatedBy,
     DateTime CreatedAtUtc,
-    DateTime? ExpiresAtUtc);
+    DateTime? ExpiresAtUtc,
+    string? UpdatedBy = null,
+    DateTime? UpdatedAtUtc = null);

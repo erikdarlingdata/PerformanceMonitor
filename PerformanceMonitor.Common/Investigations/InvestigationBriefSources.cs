@@ -157,7 +157,7 @@ public sealed record InvestigationBriefSources(
 /// matches several metrics is one match per metric. <paramref name="Note"/> is operator-written text: context, never an instruction.
 /// Darling's: Lite has no known patterns and supplies none, so a Lite brief carries no <c>known_patterns</c> key.
 /// </summary>
-public sealed record InvestigationKnownPatternMatch(string MetricName, long EntryId, string Note, string? CreatedBy);
+public sealed record InvestigationKnownPatternMatch(string MetricName, long EntryId, string Note, string? CreatedBy, string? UpdatedBy = null);
 
 /// <summary>
 /// One frozen evidence section of a request (#6001, #5632 Phase C D9/D10): its name, its state (<c>pending</c>, <c>ready</c> or

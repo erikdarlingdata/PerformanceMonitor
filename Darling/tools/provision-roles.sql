@@ -1153,17 +1153,26 @@ CREATE OR REPLACE FUNCTION config.insert_known_pattern(
    p_created_by text,
    p_expires_at_utc timestamp)
 RETURNS bigint
-LANGUAGE sql
+LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $fn$
+DECLARE
+   v_id bigint;
+BEGIN
+   IF p_server_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM config.config_monitored_servers WHERE server_id = p_server_id) THEN
+      RAISE EXCEPTION 'No monitored server with that id.' USING ERRCODE = 'DL404';
+   END IF;
    INSERT INTO config.config_known_patterns
       (server_id, metric_name, time_of_day, time_zone, window_minutes, note, created_by, expires_at_utc)
    VALUES
       (p_server_id, p_metric_name, p_time_of_day, p_time_zone, p_window_minutes, p_note, p_created_by, p_expires_at_utc)
-   RETURNING id;
+   RETURNING id INTO v_id;
+   RETURN v_id;
+END;
 $fn$;
 REVOKE ALL ON FUNCTION config.insert_known_pattern(integer, text, time, text, integer, text, text, timestamp) FROM PUBLIC;
+DROP FUNCTION IF EXISTS config.update_known_pattern(bigint, integer, text, time, text, integer, text, timestamp);
 CREATE OR REPLACE FUNCTION config.update_known_pattern(
    p_id bigint,
    p_server_id integer,
@@ -1172,21 +1181,29 @@ CREATE OR REPLACE FUNCTION config.update_known_pattern(
    p_time_zone text,
    p_window_minutes integer,
    p_note text,
-   p_expires_at_utc timestamp)
+   p_expires_at_utc timestamp,
+   p_updated_by text)
 RETURNS boolean
-LANGUAGE sql
+LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $fn$
-   WITH changed AS (
-      UPDATE config.config_known_patterns
-         SET server_id = p_server_id, metric_name = p_metric_name, time_of_day = p_time_of_day, time_zone = p_time_zone,
-             window_minutes = p_window_minutes, note = p_note, expires_at_utc = p_expires_at_utc
-       WHERE id = p_id
-      RETURNING 1)
-   SELECT EXISTS (SELECT 1 FROM changed);
+DECLARE
+   v_rows bigint;
+BEGIN
+   IF p_server_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM config.config_monitored_servers WHERE server_id = p_server_id) THEN
+      RAISE EXCEPTION 'No monitored server with that id.' USING ERRCODE = 'DL404';
+   END IF;
+   UPDATE config.config_known_patterns
+      SET server_id = p_server_id, metric_name = p_metric_name, time_of_day = p_time_of_day, time_zone = p_time_zone,
+          window_minutes = p_window_minutes, note = p_note, expires_at_utc = p_expires_at_utc,
+          updated_by = p_updated_by, updated_at_utc = pg_catalog.now() AT TIME ZONE 'UTC'
+    WHERE id = p_id;
+   GET DIAGNOSTICS v_rows = ROW_COUNT;
+   RETURN v_rows > 0;
+END;
 $fn$;
-REVOKE ALL ON FUNCTION config.update_known_pattern(bigint, integer, text, time, text, integer, text, timestamp) FROM PUBLIC;
+REVOKE ALL ON FUNCTION config.update_known_pattern(bigint, integer, text, time, text, integer, text, timestamp, text) FROM PUBLIC;
 CREATE OR REPLACE FUNCTION config.delete_known_pattern(p_id bigint)
 RETURNS boolean
 LANGUAGE sql
@@ -1199,7 +1216,7 @@ AS $fn$
 $fn$;
 REVOKE ALL ON FUNCTION config.delete_known_pattern(bigint) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION config.insert_known_pattern(integer, text, time, text, integer, text, text, timestamp) TO admin, viewer;
-GRANT EXECUTE ON FUNCTION config.update_known_pattern(bigint, integer, text, time, text, integer, text, timestamp) TO admin, viewer;
+GRANT EXECUTE ON FUNCTION config.update_known_pattern(bigint, integer, text, time, text, integer, text, timestamp, text) TO admin, viewer;
 GRANT EXECUTE ON FUNCTION config.delete_known_pattern(bigint) TO admin, viewer;
 
 -- #5941: the run-collectors-now request. The web route (viewer) and the MCP run_collectors_now tool (mcp) queue a

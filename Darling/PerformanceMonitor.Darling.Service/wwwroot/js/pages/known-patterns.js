@@ -234,7 +234,8 @@ function entryRow(e, canEdit) {
     /* The note is operator-written text: a text node only, never markup. */
     el("td", { class: "known-pattern-note", text: e.note || "" }),
     el("td", { text: e.expires_at_utc ? localTime(e.expires_at_utc) : "Never" }),
-    el("td", { text: (e.created_by || "—") + (e.created_at_utc ? ", " + localTime(e.created_at_utc) : "") }),
+    el("td", { text: (e.created_by || "—") + (e.created_at_utc ? ", " + localTime(e.created_at_utc) : "")
+      + (e.updated_at_utc || e.updated_by ? " (edited by " + (e.updated_by || "—") + (e.updated_at_utc ? ", " + localTime(e.updated_at_utc) : "") + ")" : "") }),
   ];
   if (canEdit) {
     cells.push(el("td", { class: "mute-actions" }, [

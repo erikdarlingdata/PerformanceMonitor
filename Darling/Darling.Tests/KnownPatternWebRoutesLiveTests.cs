@@ -55,6 +55,8 @@ public sealed class KnownPatternWebRoutesLiveTests
             await connection.OpenAsync(ct);
             await PgMigrations.MigrateAsync(connection, ct);
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            /* The write functions refuse a server id the registry (config_monitored_servers) does not hold. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, $"INSERT INTO config.config_monitored_servers (server_id, name, host, is_enabled) VALUES ({ServerId}, 'kp-a', 'kp-a', TRUE) ON CONFLICT DO NOTHING");
             /* The three store functions are provisioning SQL, not a migration: create them as the store owner, before the viewer replay grants EXECUTE on them. */
             await DarlingMcpTestData.ExecAsync(connection, ct, "INSERT INTO config.config_service (id) VALUES (1) ON CONFLICT (id) DO NOTHING");
             await DarlingMcpTestData.ExecAsync(connection, ct, DarlingManagedRoles.BuildKnownPatternFunctionsSql("config"));

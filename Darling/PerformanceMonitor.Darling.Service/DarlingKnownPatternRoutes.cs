@@ -45,7 +45,8 @@ internal static class DarlingKnownPatternRoutes
 
     internal static void Map(WebApplication app, NpgsqlDataSource postgres, ILogger logger)
     {
-        var store = new PgKnownPatternStore(postgres);
+        PgKnownPatternStore.UseSharedLogger(logger);
+        var store = new PgKnownPatternStore(postgres, logger);
         Func<int, Task<string?>> serverLookup = id => Mcp.DarlingMcpAlertTools.MonitoredServerDisplayNameAsync(postgres, id);
 
         app.MapPost("/api/known-patterns", async (HttpContext context) =>
@@ -96,12 +97,13 @@ internal static class DarlingKnownPatternRoutes
                     return ErrorResult("invalid", StatusCodes.Status400BadRequest, refusal!);
                 }
 
-                if (!await store.UpdateAsync(id, input, context.RequestAborted))
+                var editor = DarlingWebSeat.FromContext(context).EditorPrincipal;
+                if (!await store.UpdateAsync(id, input, editor, context.RequestAborted))
                 {
                     return NotFoundResult();
                 }
 
-                logger.LogInformation("Known pattern edit by {Principal}: id {Id}", DarlingWebSeat.FromContext(context).EditorPrincipal, id);
+                logger.LogInformation("Known pattern edit by {Principal}: id {Id}", editor, id);
                 return IdReceiptResult("updated", id);
             }
             catch (ArgumentException ex)

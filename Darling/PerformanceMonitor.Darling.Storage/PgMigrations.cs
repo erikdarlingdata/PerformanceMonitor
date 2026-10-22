@@ -2225,8 +2225,12 @@ ALTER TABLE collect.servers
     /// UTC) and matches within <c>window_minutes</c> either side, wrapping past midnight; the shared
     /// <c>KnownPatternMatcher</c> in PerformanceMonitor.Common is the one place that rule lives. <c>expires_at_utc</c> is a naive UTC
     /// <c>timestamp</c> like the mute rules' (NULL never expires). <c>note</c> is operator-written text, held to 1-500 characters by a
-    /// CHECK so a write that skips the store's function still cannot store more. The time zone is not checked here: PostgreSQL's zone
-    /// names and .NET's differ at the edges, so the write path checks it with the matcher's own rule.</para>
+    /// CHECK so a write that skips the store's function still cannot store more. Further CHECKs hold every column to what a reader can
+    /// load, so a direct call to a write function (or the owner's own SQL) cannot store a row that breaks the read of every entry: a
+    /// time of day below 24:00, a finite expiry before year 10000, a time zone that is a bounded IANA-shaped id (the shape only: the
+    /// zone's existence is the matcher's call, because PostgreSQL's names and .NET's differ at the edges), a metric name of at most 128
+    /// characters, an author of at most 256 and a note with some non-blank text. <c>updated_by</c> and <c>updated_at_utc</c> are NULL
+    /// until an edit; only <c>config.update_known_pattern</c> sets them.</para>
     ///
     /// <para><b>The table joins the <c>config_version</c> reload beacon</b> with V117's statement-level trigger on V17's shared
     /// <c>config.config_bump_version()</c> function, so a write from any path (the web editor, the Viewer, hand-written SQL) moves the
@@ -2247,8 +2251,17 @@ CREATE TABLE IF NOT EXISTS config.config_known_patterns
     created_by text,
     created_at_utc timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC'),
     expires_at_utc timestamp,
-    CONSTRAINT ck_known_patterns_note CHECK (char_length(note) BETWEEN 1 AND 500),
-    CONSTRAINT ck_known_patterns_window CHECK (window_minutes BETWEEN 0 AND 720)
+    updated_by text,
+    updated_at_utc timestamp,
+    CONSTRAINT ck_known_patterns_note CHECK (char_length(note) BETWEEN 1 AND 500 AND btrim(note, E' 	
+') <> ''),
+    CONSTRAINT ck_known_patterns_window CHECK (window_minutes BETWEEN 0 AND 720),
+    CONSTRAINT ck_known_patterns_time_of_day CHECK (time_of_day < '24:00'),
+    CONSTRAINT ck_known_patterns_expires CHECK (expires_at_utc IS NULL OR (isfinite(expires_at_utc) AND expires_at_utc < '10000-01-01')),
+    CONSTRAINT ck_known_patterns_time_zone CHECK (time_zone IS NULL OR (char_length(time_zone) <= 64 AND time_zone ~ '^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$')),
+    CONSTRAINT ck_known_patterns_metric CHECK (char_length(metric_name) <= 128),
+    CONSTRAINT ck_known_patterns_created_by CHECK (char_length(created_by) <= 256),
+    CONSTRAINT ck_known_patterns_updated_by CHECK (char_length(updated_by) <= 256)
 );
 
 DROP TRIGGER IF EXISTS trg_bump_known_patterns ON config.config_known_patterns;

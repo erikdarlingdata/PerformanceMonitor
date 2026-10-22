@@ -7,9 +7,11 @@
  */
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Common.KnownPatterns;
@@ -34,16 +36,32 @@ public sealed class PgKnownPatternStore
     private const int CommandTimeoutSeconds = 30;
 
     private const string SelectColumns =
-        "id, server_id, metric_name, time_of_day, time_zone, window_minutes, note, created_by, created_at_utc, expires_at_utc";
+        "id, server_id, metric_name, time_of_day, time_zone, window_minutes, note, created_by, created_at_utc, expires_at_utc, updated_by, updated_at_utc";
+
+    /// <summary>Rows already reported as unreadable (id and reason), so a row that stays bad is logged once per process, not once per read.</summary>
+    private static readonly ConcurrentDictionary<string, byte> ReportedUnreadable = new(StringComparer.Ordinal);
+
+    /// <summary>The service's logger for rows the reader skips; set once at startup by the first host that has one.</summary>
+    private static ILogger? _sharedLogger;
 
     private readonly NpgsqlDataSource _postgres;
+    private readonly ILogger? _logger;
 
-    public PgKnownPatternStore(NpgsqlDataSource postgres)
+    public PgKnownPatternStore(NpgsqlDataSource postgres, ILogger? logger = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
+        _logger = logger;
     }
 
-    /// <summary>Every entry, oldest id first. A store fault propagates: an empty list must mean "no entries", never "could not read them".</summary>
+    /// <summary>Gives rows skipped by readers that were built without a logger (the MCP tools) somewhere to report. First caller wins.</summary>
+    internal static void UseSharedLogger(ILogger logger) => Interlocked.CompareExchange(ref _sharedLogger, logger, null);
+
+    /// <summary>
+    /// Every entry that can be read, oldest id first. A store fault propagates: an empty list must mean "no entries", never "could not
+    /// read them". A single row that cannot be read (a value the model cannot hold) is skipped and reported once with its id and the
+    /// reason, so one bad row never breaks the read of every other entry (the table's CHECKs keep such rows out, but a store older than
+    /// them, or a restore, can still hold one).
+    /// </summary>
     public async Task<IReadOnlyList<KnownPattern>> LoadAllAsync(CancellationToken cancellationToken = default)
     {
         var entries = new List<KnownPattern>();
@@ -53,20 +71,41 @@ public sealed class PgKnownPatternStore
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            entries.Add(new KnownPattern(
-                reader.GetInt64(0),
-                reader.IsDBNull(1) ? null : reader.GetInt32(1),
-                reader.IsDBNull(2) ? null : reader.GetString(2),
-                reader.IsDBNull(3) ? null : reader.GetFieldValue<TimeOnly>(3),
-                reader.IsDBNull(4) ? null : reader.GetString(4),
-                reader.GetInt32(5),
-                reader.GetString(6),
-                reader.IsDBNull(7) ? null : reader.GetString(7),
-                reader.GetDateTime(8),
-                reader.IsDBNull(9) ? null : reader.GetDateTime(9)));
+            var id = reader.GetInt64(0);
+            try
+            {
+                entries.Add(new KnownPattern(
+                    id,
+                    reader.IsDBNull(1) ? null : reader.GetInt32(1),
+                    reader.IsDBNull(2) ? null : reader.GetString(2),
+                    reader.IsDBNull(3) ? null : reader.GetFieldValue<TimeOnly>(3),
+                    reader.IsDBNull(4) ? null : reader.GetString(4),
+                    reader.GetInt32(5),
+                    reader.GetString(6),
+                    reader.IsDBNull(7) ? null : reader.GetString(7),
+                    reader.GetDateTime(8),
+                    reader.IsDBNull(9) ? null : reader.GetDateTime(9),
+                    reader.IsDBNull(10) ? null : reader.GetString(10),
+                    reader.IsDBNull(11) ? null : reader.GetDateTime(11)));
+            }
+            catch (Exception ex) when (ex is InvalidCastException or ArgumentException or OverflowException or FormatException or InvalidOperationException)
+            {
+                ReportUnreadable(id, ex);
+            }
         }
 
         return entries;
+    }
+
+    private void ReportUnreadable(long id, Exception ex)
+    {
+        var reason = ex.Message.Length > 200 ? ex.Message[..200] : ex.Message;
+        if (!ReportedUnreadable.TryAdd(id.ToString(System.Globalization.CultureInfo.InvariantCulture) + ":" + reason, 0))
+        {
+            return;
+        }
+
+        (_logger ?? _sharedLogger)?.LogWarning("Known pattern {Id} cannot be read and is skipped: {Reason}", id, reason);
     }
 
     /// <summary>Adds an entry and returns its id. Throws <see cref="ArgumentException"/> with the reason when the input is refused.</summary>
@@ -79,20 +118,36 @@ public sealed class PgKnownPatternStore
         AddScope(command, clean);
         command.Parameters.Add(Text(string.IsNullOrWhiteSpace(createdBy) ? null : createdBy.Trim()));
         command.Parameters.Add(Timestamp(clean.ExpiresAtUtc));
-        return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture);
+        try
+        {
+            return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture);
+        }
+        catch (PostgresException ex) when (ex.SqlState == "DL404")
+        {
+            throw new ArgumentException(ex.MessageText, nameof(input));
+        }
     }
 
-    /// <summary>Replaces an entry's scope, window, note and expiry (not its creator or creation time). False when no such entry exists.</summary>
-    public async Task<bool> UpdateAsync(long id, KnownPatternInput input, CancellationToken cancellationToken = default)
+    /// <summary>Replaces an entry's scope, window, note and expiry (not its creator or creation time) and stamps the editor and the time of
+    /// the edit. False when no such entry exists. A server id that names no registered server throws <see cref="ArgumentException"/>.</summary>
+    public async Task<bool> UpdateAsync(long id, KnownPatternInput input, string? updatedBy, CancellationToken cancellationToken = default)
     {
         var clean = Checked(input);
         await using var command = _postgres.CreateCommand(
-            "SELECT config.update_known_pattern($1, $2, $3, $4, $5, $6, $7, $8)");
+            "SELECT config.update_known_pattern($1, $2, $3, $4, $5, $6, $7, $8, $9)");
         command.CommandTimeout = CommandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = id });
         AddScope(command, clean);
         command.Parameters.Add(Timestamp(clean.ExpiresAtUtc));
-        return (bool)(await command.ExecuteScalarAsync(cancellationToken))!;
+        command.Parameters.Add(Text(string.IsNullOrWhiteSpace(updatedBy) ? null : updatedBy.Trim()));
+        try
+        {
+            return (bool)(await command.ExecuteScalarAsync(cancellationToken))!;
+        }
+        catch (PostgresException ex) when (ex.SqlState == "DL404")
+        {
+            throw new ArgumentException(ex.MessageText, nameof(input));
+        }
     }
 
     /// <summary>Deletes an entry. False when no such entry exists.</summary>
