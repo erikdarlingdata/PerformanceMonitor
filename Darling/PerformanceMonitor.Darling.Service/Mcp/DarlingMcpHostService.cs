@@ -86,7 +86,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// store; on any other store as <c>postgres.mcpConnectionString</c>, or as the owner with a startup warning when
 /// that is unset (<see cref="DarlingStoreLogins"/>, #3914). As mcp it is NOT the superuser owner, so a token-holder (or a
 /// future/buggy tool) reaches only the viewer read surface plus the <c>analysis_findings</c> /
-/// <c>analysis_muted</c> INSERTs the tools persist, never the <c>config_command</c> service-credential
+/// <c>analysis_muted</c> INSERT and DELETE the mute tools persist, never the <c>config_command</c> service-credential
 /// pivot or the carved secret columns. It also gets its own <see cref="DarlingAnalysisService"/>. Store
 /// migration + role provisioning are the WORKER's job; the <c>mcp</c>-role credential is written AFTER
 /// migration (later than the owner's), so the first-boot poll budget tolerates the delay. The plan fetcher

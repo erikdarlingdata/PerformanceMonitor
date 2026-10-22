@@ -102,7 +102,7 @@ public static class DarlingWebEndpoints
     };
 
     /// <summary>The tool names deliberately absent from the <c>/api/read/*</c> 1:1 read surface. <c>analyze_server</c>
-    /// makes a live monitored-server connection; <c>mute_analysis_finding</c> writes; the <c>analyze_*_plan</c> family
+    /// makes a live monitored-server connection; <c>mute_analysis_finding</c> and <c>unmute_analysis_finding</c> (#6383) write; the <c>analyze_*_plan</c> family
     /// is the compute-heavy plan-analysis phase-2 work; the Custom Views tools (#1599) are served by their OWN
     /// richer web endpoints (<c>/api/views</c> CRUD + <c>/api/compose/run</c> + the <c>/api/catalog</c> compose
     /// vocabulary that <c>describe_custom_view_catalog</c> mirrors), not a <c>/api/read/{tool}</c> query-string mirror;
@@ -127,6 +127,7 @@ public static class DarlingWebEndpoints
     {
         "analyze_server",
         "mute_analysis_finding",
+        "unmute_analysis_finding",
         "analyze_query_plan",
         "analyze_procedure_plan",
         "analyze_query_store_plan",

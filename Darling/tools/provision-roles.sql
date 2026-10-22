@@ -1870,15 +1870,15 @@ GRANT INSERT, UPDATE, DELETE ON config.custom_alert_rules TO viewer;
 GRANT INSERT, UPDATE, DELETE ON config.custom_alert_rules TO mcp;
 
 -- 3f. The rest of the MCP tools' writes, mirroring managed provisioning's grants exactly:
---     analyze_server persists its findings and mute_analysis_finding records a mute (INSERT only: there is no
---     MCP unmute); update_alert_settings writes the singleton alert-settings row and the ONE non-secret
+--     analyze_server persists its findings and mute_analysis_finding records a mute (INSERT, and DELETE for
+--     unmute_analysis_finding, #6383); update_alert_settings writes the singleton alert-settings row and the ONE non-secret
 --     column of config_notification it spans, email_cooldown_minutes (COLUMN-level: the row holds the SMTP
 --     password and the webhook URLs, which mcp can neither read nor write); set_notification_route_enabled
 --     and delete_notification_route take a route out of force or remove it (never INSERT, never a
 --     destination column: a route IS a destination); add_servers / remove_server edit the monitored-server
 --     registry (whose credential column stays carved, so mcp can WRITE a password blob and never READ one).
 GRANT INSERT ON collect.analysis_findings TO mcp;
-GRANT INSERT ON config.analysis_muted TO mcp;
+GRANT INSERT, DELETE ON config.analysis_muted TO mcp;
 GRANT UPDATE ON config.config_alert_settings TO mcp;
 GRANT UPDATE (email_cooldown_minutes) ON config.config_notification TO mcp;
 -- #5825 (V187): update_alert_settings writes delivery.send_resolutions, the four per-channel resolution flags.

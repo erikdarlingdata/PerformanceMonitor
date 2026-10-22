@@ -54,8 +54,8 @@ namespace PerformanceMonitor.Darling.Service;
 /// <item><b><c>mcp</c></b> — the (optionally network-exposed) MCP host's store identity
 /// (darling-network-endpoints, D3-role): the SAME read surface as <c>viewer</c> (SELECT on
 /// <c>collect</c> + <c>config</c>-minus-the-secret-columns) PLUS a NARROW, enumerated set of writes —
-/// INSERT on <c>collect.analysis_findings</c> and <c>config.analysis_muted</c> (what <c>analyze_server</c>
-/// persists + the <c>mute</c> tool need), INSERT/UPDATE/DELETE on <c>config.custom_views</c> (the
+/// INSERT on <c>collect.analysis_findings</c> and INSERT/DELETE on <c>config.analysis_muted</c> (what <c>analyze_server</c>
+/// persists + the mute and unmute tools need, #6383), INSERT/UPDATE/DELETE on <c>config.custom_views</c> (the
 /// custom-view tools, #1599), the alert-tuning writes (INSERT/UPDATE/DELETE on
 /// <c>config.config_mute_rules</c> + UPDATE on the singleton <c>config.config_alert_settings</c> + UPDATE on
 /// the single non-secret <c>email_cooldown_minutes</c> column of <c>config.config_notification</c>, plus the
@@ -1420,7 +1420,7 @@ GRANT SELECT ON ALL TABLES IN SCHEMA {config}  TO {admin}, {viewer};
 --     PRIVILEGES already landed on these tables when they were created.
 {viewerColumnAcl}
 
--- 3. config writes -- admin gets the whole schema. (mcp gets ONLY a narrow config.analysis_muted INSERT
+-- 3. config writes -- admin gets the whole schema. (mcp gets ONLY a narrow config.analysis_muted INSERT and DELETE
 --    in section 6, never the config_command/monitored_servers/notification pivot tables; viewer: none.)
 GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {config} TO {admin};
 
@@ -1447,9 +1447,10 @@ GRANT CONNECT ON DATABASE {database} TO {admin}, {viewer};
 --    token) from the optional network MCP surface, so it is deliberately NOT admin. It gets viewer's exact
 --    READ surface (SELECT on collect + config-minus-secret-columns) as SEPARATE 'TO mcp' statements -- the
 --    'TO admin, viewer' grant lines above are pinned verbatim by tests, so mcp is never appended to them --
---    PLUS exactly two narrow analysis INSERTs HERE: what analyze_server persists (collect.analysis_findings)
---    and what the mute tool writes (config.analysis_muted) -- no UPDATE/DELETE on EITHER analysis target (no
---    MCP unmute tool exists; DELETE/unmute is viewer/admin only). The mcp role ALSO gets the narrow
+--    PLUS the narrow analysis writes HERE: what analyze_server persists (collect.analysis_findings, INSERT only)
+--    and what the mute and unmute tools write (config.analysis_muted: INSERT for mute_analysis_finding, DELETE for
+--    unmute_analysis_finding, #6383) -- no UPDATE on either analysis target and no DELETE on analysis_findings.
+--    The mcp role ALSO gets the narrow
 --    config.custom_views write in section 7 (for the MCP custom-view tools) -- likewise a single non-secret
 --    config table, never the config_command pivot or the carved secret columns. EXPLICIT single-table WRITE grants
 --    with NO ALTER DEFAULT PRIVILEGES: ADP has no per-table
@@ -1469,7 +1470,7 @@ ALTER DEFAULT PRIVILEGES FOR ROLE {owner} IN SCHEMA {collect}
    GRANT SELECT ON TABLES TO {mcp};
 {mcpColumnAcl}
 GRANT INSERT ON {collect}.analysis_findings TO {mcp};
-GRANT INSERT ON {config}.analysis_muted TO {mcp};
+GRANT INSERT, DELETE ON {config}.analysis_muted TO {mcp};
 -- NOT granted (Round 4 #9): collect.analysis_state. MCP analyze_server calls AnalyzeAsync directly and never
 -- writes the analysis_state marker -- only the worker's RunAnalysisPassAsync wrapper does, as the owner
 -- (the Analysis project cannot reference the Service-project observability writer), so mcp needs no grant on it.
