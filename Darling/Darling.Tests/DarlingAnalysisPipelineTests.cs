@@ -178,8 +178,9 @@ public sealed class DarlingAnalysisPipelineTests
            store for: its DuckDB keeps no latest-snapshot interval table. And the parameter-sensitivity
            drill-down's text read (#4821): its main read runs before the cap, so resolving text there would
            resolve it for every plan its rough filter passes; Lite carries that text inline and has no such
-           second statement. */
-        Assert.Equal(LiteDrillDownMethodSurface.Length + 3, PgDrillDownCollector.AllSql.Count);
+           second statement. #5794 adds the per-day twin of the table read, which Lite has no store for either. */
+        Assert.Equal(LiteDrillDownMethodSurface.Length + 4, PgDrillDownCollector.AllSql.Count);
+        Assert.Contains(PgDrillDownCollector.RegressedQueriesDailySql, PgDrillDownCollector.AllSql);
         Assert.Contains(PgDrillDownCollector.RegressedQueriesTableSql, PgDrillDownCollector.AllSql);
         Assert.Contains(PgDrillDownCollector.ParameterSensitiveTextSql, PgDrillDownCollector.AllSql);
     }
@@ -251,7 +252,7 @@ public sealed class DarlingAnalysisPipelineTests
            against a table that no longer exists. query_text_dim is the second (#3902): the
            parameter-sensitivity drill-down resolves text for its five output rows by digest rather than
            reading v_query_stats, whose join resolves it for every row in the window. */
-        var sideTables = new[] { QueryStoreTextStore.TableName, PayloadDimensions.QueryTextDimTable, QueryStoreIntervalLatest.TableName }
+        var sideTables = new[] { QueryStoreTextStore.TableName, PayloadDimensions.QueryTextDimTable, QueryStoreIntervalLatest.TableName, "collect.plan_regression_daily" }
             .Select(t => t.Contains('.', StringComparison.Ordinal) ? t.Split('.')[^1] : t)
             .ToHashSet(StringComparer.Ordinal);
 
@@ -271,6 +272,10 @@ public sealed class DarlingAnalysisPipelineTests
                real relation reference resolves, and that must stay exact. */
             var scanSql = Regex.Replace(sql, @"--[^\n]*", " ");
             scanSql = Regex.Replace(scanSql, @"\bIS\s+(?:NOT\s+)?DISTINCT\s+FROM\b", " ", RegexOptions.IgnoreCase);
+
+            /* #5794: JOIN LATERAL (subquery) names no relation, and unnest() is a set-returning function, not a table. */
+            scanSql = Regex.Replace(scanSql, @"\bLATERAL\b", " ", RegexOptions.IgnoreCase);
+            scanSql = Regex.Replace(scanSql, @"\bFROM\s+unnest\s*\(", "FROM (", RegexOptions.IgnoreCase);
 
             /* CTE names defined by this query are legal FROM targets too (WITH x AS ( / , y AS (). */
             var ctes = Regex.Matches(scanSql, @"(?:WITH|,)\s*(\w+)\s+AS\s*\(", RegexOptions.Singleline)
