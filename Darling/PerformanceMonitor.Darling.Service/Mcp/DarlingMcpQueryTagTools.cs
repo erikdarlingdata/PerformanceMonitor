@@ -284,7 +284,7 @@ public sealed class DarlingMcpQueryTagTools
     {
         try
         {
-            var key = BuildKey(kind, queryHash, databaseName, schemaName, objectName, serverId, out var keyRefusal);
+            var key = BuildKey(kind, queryHash, databaseName, schemaName, objectName, serverId, out var keyRefusal, requireHashShape: true);
             if (keyRefusal is not null)
             {
                 return keyRefusal;
@@ -473,7 +473,8 @@ public sealed class DarlingMcpQueryTagTools
 
     /// <summary>Validates and trims a key's arguments. Null key plus a ready envelope when the arguments cannot be used.</summary>
     private static QueryTagKey? BuildKey(
-        string? kind, string? queryHash, string? databaseName, string? schemaName, string? objectName, int? serverId, out string? refusal)
+        string? kind, string? queryHash, string? databaseName, string? schemaName, string? objectName, int? serverId, out string? refusal,
+        bool requireHashShape = false)
     {
         refusal = null;
         var cleanKind = kind?.Trim().ToLowerInvariant();
@@ -512,6 +513,14 @@ public sealed class DarlingMcpQueryTagTools
                 return null;
             }
 
+            /* #6455: a NEW assignment must name something a query hash can be; unassign skips this so a key stored before the check
+               can still be removed. */
+            if (requireHashShape && !IsHashText(hash))
+            {
+                refusal = Refusal("invalid", "bad_key", "query_hash must be hexadecimal: 0x followed by 1 to 16 hex digits (for example 0x1A2B3C4D5E6F7081), or the decimal number the long-query trace stores.");
+                return null;
+            }
+
             /* The resolver matches a hash ignoring case, so the key stores one spelling of it (#6020). A hash that is not a
                hash at all (all zeros, or neither hex nor decimal) is kept as typed. */
             return new QueryTagKey(KindHash, serverId, QueryHashIdentity.CanonicalKey(hash) ?? hash, null, null, null);
@@ -531,6 +540,18 @@ public sealed class DarlingMcpQueryTagTools
         }
 
         return new QueryTagKey(KindObject, serverId, null, database, schema, obj);
+    }
+
+    /// <summary>True when the text can be a query hash (#6455): <c>0x</c> and 1 to 16 hex digits, or up to 20 decimal digits that fit an unsigned 64-bit number.</summary>
+    internal static bool IsHashText(string hash)
+    {
+        if (hash.Length > 2 && hash[0] == '0' && (hash[1] == 'x' || hash[1] == 'X'))
+        {
+            var digits = hash.AsSpan(2);
+            return digits.Length <= 16 && digits.ToString().All(Uri.IsHexDigit);
+        }
+
+        return ulong.TryParse(hash, NumberStyles.None, CultureInfo.InvariantCulture, out _);
     }
 
     private static string? Clean(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
