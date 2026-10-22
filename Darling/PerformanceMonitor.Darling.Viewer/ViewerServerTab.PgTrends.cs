@@ -205,13 +205,14 @@ public partial class ViewerServerTab
             ? PanelNote("pg_io_stats", 0,
                 "No I/O samples for the busiest backend and context in this window. A trend needs at least two snapshots to difference, so a short window is legitimately empty here.")
             : $"I/O Trend: {trend.Subject}, the busiest backend and context in this window, per second, {BucketSentence(trend.BucketMinutes)}. "
-              + "Avg read ms is blank unless the server has track_io_timing on, which is off by default.";
+              + "Avg read ms is blank unless the server has track_io_timing on, which is off by default."
+              + (trend.WriteCountersTracked ? "" : " This server has no write counters (Amazon Aurora does not write data files), so writes are not plotted.");
         RenderPgTrendPanels(PgIoTrendHost, new[]
         {
             new PgTrendPanel("PgIo_Ops", "Operations/sec", "ops/s", p.Count == 0 ? Array.Empty<PgTrendLine>() : Measured(
                 new PgTrendLine("Reads/sec", Times(p, x => x.CollectionTimeUtc), Values(p, x => x.ReadsPerSecond)),
                 new PgTrendLine("Peak Reads/sec", Times(p, x => x.CollectionTimeUtc), Values(p, x => x.PeakReadsPerSecond)),
-                new PgTrendLine("Writes/sec", Times(p, x => x.CollectionTimeUtc), Values(p, x => x.WritesPerSecond)),
+                new PgTrendLine("Writes/sec", Times(p, x => x.CollectionTimeUtc), Values(p, x => trend.WritesPerSecondOf(x))),
                 new PgTrendLine("Evictions/sec", Times(p, x => x.CollectionTimeUtc), Values(p, x => x.IntervalSeconds > 0 ? x.Evictions / x.IntervalSeconds : null))).ToList()),
             new PgTrendPanel("PgIo_Hit", "Hit %", "%", p.Count == 0 ? Array.Empty<PgTrendLine>() : Measured(
                 new PgTrendLine("Hit %", Times(p, x => x.CollectionTimeUtc), Values(p, x => x.CacheHitPct))).ToList()),

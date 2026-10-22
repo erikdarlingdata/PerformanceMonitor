@@ -81,7 +81,15 @@ public sealed partial class ViewerDataService
     /// about the configuration, not the disk, so the chart draws no latency line then.</summary>
     public sealed record PgIoTrend(
         string? Subject, int BucketMinutes, IReadOnlyList<DarlingPgTrendReader.PgIoTrendPoint> Points,
-        bool TimingTracked, bool BytesShown);
+        bool TimingTracked, bool BytesShown, bool WriteCountersTracked = true)
+    {
+        /// <summary>The write rate to plot for <paramref name="point"/>. Null when the server has no write counters
+        /// (Amazon Aurora: backends do not write data files, the reader coalesces the NULL side to 0), exactly as
+        /// the web's <c>get_pg_io_trend</c> nulls <c>writes_per_second</c> on <c>write_counters_tracked</c> false,
+        /// so the chart draws no line instead of a flat zero that reads as "idle".</summary>
+        public double? WritesPerSecondOf(DarlingPgTrendReader.PgIoTrendPoint point) =>
+            WriteCountersTracked ? point.WritesPerSecond : null;
+    }
 
     /// <summary>The I/O trend of the window's busiest (backend type, context) pair, bucketed as the web's chart is.
     /// The subject reads as "backend / context".</summary>
@@ -109,7 +117,7 @@ public sealed partial class ViewerDataService
         var bytesMeasured = points.Any(p => p.BytesMeasured);
         var bytesShown = bytesMeasured || points.Any(p => p.BytesEstimable);
         return new($"{dominant.Value.BackendType} / {dominant.Value.Context}", bucketMinutes, points,
-            timingSetting ?? timingObserved, bytesShown);
+            timingSetting ?? timingObserved, bytesShown, points.Any(p => p.WriteCountersTracked));
     }
 
     /// <summary>The database trend of the window's busiest database, bucketed as the web's chart is.</summary>
