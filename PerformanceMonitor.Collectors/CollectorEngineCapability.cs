@@ -668,7 +668,7 @@ public static class CollectorEngineCapability
            axis above keeps its own wording, because its gaps are Aurora-only surfaces and extensions, not an
            engine that lacks the feature outright. */
         return $"{serverName} runs on {DescribeEngineEdition(engineEdition)} (EngineEdition {engineEdition}), " +
-               $"which does not have {CapturePathOf(collectorName)} that this server can read, so this server does not collect it, and never will. " +
+               $"which does not have {CapturePathOf(collectorName)} that this server can read, so this server does not collect {CapturePathOf(collectorName)}, and never will. " +
                PermanentGapEpilogue + $" (The collector for it is {collectorName}.)" + CoveredInsteadSuffix(collectorName);
     }
 
