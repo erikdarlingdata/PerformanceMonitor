@@ -3011,48 +3011,40 @@ public class CrossAppGuardCiGateTests
     }
 
     /// <summary>
-    /// A pull request whose CI the gate declined must not read as passing when the cause is the merge-train label:
-    /// a skipped job counts as a pass for a required check, so <c>build</c> still starts and fails its first step,
-    /// and both result jobs exit 1 on a pull request whose gate output is not true. A DRAFT is the exception: it
-    /// reports success with a notice (marking it ready starts the run), so a draft does not teach people to ignore red.
+    /// A pull request whose CI the gate declined (a draft, or one carrying the merge-train label) must not
+    /// read as passing: a skipped job counts as a pass for a required check. <c>build</c> still starts and
+    /// fails its first step, and both result jobs exit 1 on a pull request whose gate output is not true.
     /// </summary>
     [Fact]
-    public void ADeclinedRun_FailsBuildAndBothResultJobsForTheMergeTrainLabel_AndPassesForADraft()
+    public void ADeclinedRun_FailsBuildAndBothResultJobs_InsteadOfReadingAsGreen()
     {
         var yaml = ReadBuildYaml(RepoRoot());
-        const string labelError =
-            "::error title=CI not run::This pull request carries the merge-train label, so its CI was skipped "
-          + "(the train's own run covered it). It can be merged only by an admin override.";
-        const string draftNotice =
-            "::notice title=Draft PR::Draft PR: CI runs when the PR is marked ready for review.";
+        const string message =
+            "::error title=CI not run::This pull request's CI was skipped (draft or merge-train label). "
+          + "It can be merged only by an admin override after a merge train covered it.";
 
         foreach (var jobKey in new[] { "darling-pg-result", "lite-tests-result" })
         {
             var job = JobBlock(yaml, jobKey);
             Assert.Contains("GATE_RUN: ${{ needs.gate.outputs.run }}", job, StringComparison.Ordinal);
-            Assert.Contains("DECLINED: ${{ needs.gate.outputs.declined }}", job, StringComparison.Ordinal);
             Assert.Contains("EVENT_NAME: ${{ github.event_name }}", job, StringComparison.Ordinal);
             Assert.Contains(
                 "if [ \"${EVENT_NAME}\" = \"pull_request\" ] && [ \"${GATE_RUN}\" != \"true\" ]; then\n"
-              + "            if [ \"${DECLINED}\" = \"draft\" ]; then\n"
-              + "              echo \"" + draftNotice + "\"\n              exit 0\n            fi\n"
-              + "            echo \"" + labelError + "\"\n            exit 1\n          fi\n",
+              + "            echo \"" + message + "\"\n            exit 1\n          fi\n",
                 job,
                 StringComparison.Ordinal);
             Assert.Contains("needs: [gate, ", job, StringComparison.Ordinal);
         }
 
         /* `build` is a required check that would otherwise be merely skipped. It must start whatever the
-           gate said, and its first step must fail when the gate declined the run for the label. */
+           gate said, and its first step must fail when the gate declined the run. */
         var build = JobBlock(yaml, "build");
         Assert.Contains("\n    if: ${{ !cancelled() }}\n", build, StringComparison.Ordinal);
         var first = build[build.IndexOf("    steps:\n", StringComparison.Ordinal)..];
         first = first[..first.IndexOf("\n      - uses: actions/checkout@v7", StringComparison.Ordinal)];
-        Assert.Contains("- name: Report when CI did not run", first, StringComparison.Ordinal);
+        Assert.Contains("- name: Fail when CI did not run", first, StringComparison.Ordinal);
         Assert.Contains("if: ${{ needs.gate.outputs.run != 'true' }}", first, StringComparison.Ordinal);
-        Assert.Contains("if [ \"${DECLINED}\" = \"draft\" ]; then", first, StringComparison.Ordinal);
-        Assert.Contains(draftNotice, first, StringComparison.Ordinal);
-        Assert.Contains(labelError, first, StringComparison.Ordinal);
+        Assert.Contains(message, first, StringComparison.Ordinal);
         Assert.Contains("exit 1", first, StringComparison.Ordinal);
     }
 
