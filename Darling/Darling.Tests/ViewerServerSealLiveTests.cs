@@ -88,8 +88,8 @@ public sealed class ViewerServerSealLiveTests
             reader.IsDBNull(2) ? null : reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetString(3),
             !reader.IsDBNull(4) && reader.GetBoolean(4), reader.IsDBNull(5) ? null : reader.GetString(5),
             reader.IsDBNull(6) ? null : reader.GetString(6), reader.IsDBNull(7) ? null : reader.GetString(7),
-            !reader.IsDBNull(8) && reader.GetBoolean(8), !reader.IsDBNull(9) && reader.GetBoolean(9));
-        return (identity, reader.GetString(10));
+            !reader.IsDBNull(8) && reader.GetBoolean(8), !reader.IsDBNull(9) && reader.GetBoolean(9), reader.IsDBNull(10) ? null : reader.GetString(10));
+        return (identity, reader.GetString(11));
     }
 
     [Fact]

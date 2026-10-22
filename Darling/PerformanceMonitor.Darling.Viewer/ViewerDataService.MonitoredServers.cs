@@ -54,12 +54,15 @@ public sealed partial class ViewerDataService
         "server_id, name, host, database, auth, username, encrypted_password, encrypt_mode, " +
         "trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases, " +
         "monthly_cost_usd, capture_plans, is_enabled, alert_delivery_mode_override, engine, port, " +
-        "aws_role_arn, aws_external_id";
+        "aws_role_arn, aws_external_id, query_store_replica";
 
-    /* #5452: aws_role_arn and aws_external_id ($19, $20) are the per-server AWS role. aws_external_id_set is NOT a
+    /* #6254: query_store_replica ($21) is the host (or listener) a Query Store read may use instead of the primary. The viewer
+       reads it into every row and writes it back normalized (QueryStoreReplicaSetting), because the password it seals is bound
+       to it: a viewer that dropped or changed it would seal a password the service cannot open.
+       #5452: aws_role_arn and aws_external_id ($19, $20) are the per-server AWS role. aws_external_id_set is NOT a
        column a write names: the store computes it (a stored generated column), so an INSERT that listed it would fail. */
     private const string MonitoredServerValues =
-        "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, " +
+        "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, " +
         "(now() AT TIME ZONE 'UTC'), (now() AT TIME ZONE 'UTC')";
 
     /// <summary>Upsert by <c>server_id</c> — the Edit save. ON CONFLICT rewrites every field but
@@ -88,12 +91,13 @@ ON CONFLICT (server_id) DO UPDATE SET
     engine = EXCLUDED.engine,
     port = EXCLUDED.port,
     aws_role_arn = EXCLUDED.aws_role_arn,
-    /* The stored external ID is never read back to this seat: it is replaced only when $21 says one was typed or the
+    query_store_replica = EXCLUDED.query_store_replica,
+    /* The stored external ID is never read back to this seat: it is replaced only when $22 says one was typed or the
        box was cleared, and a cleared role takes it along (the table's check needs a role for an ID). A role that
        changes with nothing typed clears it too, because an external ID belongs to the role it was set for. */
     aws_external_id = CASE
         WHEN EXCLUDED.aws_role_arn IS NULL THEN NULL
-        WHEN $21 THEN EXCLUDED.aws_external_id
+        WHEN $22 THEN EXCLUDED.aws_external_id
         WHEN EXCLUDED.aws_role_arn IS DISTINCT FROM config_monitored_servers.aws_role_arn THEN NULL
         ELSE config_monitored_servers.aws_external_id END,
     modified_at = (now() AT TIME ZONE 'UTC')";
@@ -140,7 +144,7 @@ ON CONFLICT (server_id) DO NOTHING";
 SELECT server_id, name, host, database, auth, username, encrypt_mode,
        trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases,
        monthly_cost_usd, capture_plans, is_enabled, created_at, alert_delivery_mode_override, engine, port,
-       aws_role_arn, aws_external_id_set
+       aws_role_arn, aws_external_id_set, query_store_replica
 FROM config_monitored_servers
 ORDER BY name";
 
@@ -152,7 +156,7 @@ ORDER BY name";
 SELECT server_id, name, host, database, auth, username, encrypted_password, encrypt_mode,
        trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases,
        monthly_cost_usd, capture_plans, is_enabled, created_at, alert_delivery_mode_override, engine, port,
-       aws_role_arn, aws_external_id_set
+       aws_role_arn, aws_external_id_set, query_store_replica
 FROM config_monitored_servers
 WHERE server_id = $1";
 
@@ -165,7 +169,7 @@ WHERE server_id = $1";
 SELECT server_id, name, host, database, auth, username, encrypt_mode,
        trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases,
        monthly_cost_usd, capture_plans, is_enabled, created_at, alert_delivery_mode_override, engine, port,
-       aws_role_arn, aws_external_id_set
+       aws_role_arn, aws_external_id_set, query_store_replica
 FROM config_monitored_servers
 WHERE server_id = $1";
 
@@ -205,7 +209,7 @@ WHERE server_id = $1";
 SELECT server_id, name, host, database, auth, username, encrypt_mode,
        trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases,
        monthly_cost_usd, capture_plans, is_enabled, created_at, alert_delivery_mode_override, engine, port,
-       aws_role_arn, aws_external_id_set
+       aws_role_arn, aws_external_id_set, query_store_replica
 FROM config_monitored_servers
 WHERE host = $1
 AND   database IS NOT DISTINCT FROM $2
@@ -524,7 +528,7 @@ GROUP BY s.server_id";
         await using var command = new NpgsqlCommand(MonitoredServerUpsertSql, connection, transaction);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         BindMonitoredServer(command, row);
-        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = row.AwsExternalIdSent });       // $21
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = row.AwsExternalIdSent });       // $22
         try
         {
             await ExecuteWriteAsync(command, cancellationToken);
@@ -578,7 +582,8 @@ GROUP BY s.server_id";
     public const string MonitoredServerStoredReachSql = @"
 SELECT host, COALESCE(port, 0), engine, database, read_only_intent, auth, username, encrypt_mode, trust_server_certificate,
        multi_subnet_failover, COALESCE(encrypted_password = $2, false),
-       (COALESCE(remediation_encrypted_password, '') <> '' OR COALESCE(hypothetical_index_encrypted_password, '') <> '')
+       (COALESCE(remediation_encrypted_password, '') <> '' OR COALESCE(hypothetical_index_encrypted_password, '') <> ''),
+       query_store_replica
 FROM config_monitored_servers
 WHERE server_id = $1";
 
@@ -627,7 +632,7 @@ WHERE server_id = $1";
                 reader.IsDBNull(3) ? null : reader.GetString(3), !reader.IsDBNull(4) && reader.GetBoolean(4),
                 reader.IsDBNull(5) ? null : reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6),
                 reader.IsDBNull(7) ? null : reader.GetString(7), !reader.IsDBNull(8) && reader.GetBoolean(8),
-                !reader.IsDBNull(9) && reader.GetBoolean(9));
+                !reader.IsDBNull(9) && reader.GetBoolean(9), reader.IsDBNull(12) ? null : reader.GetString(12));
             carriesStoredBlob = reader.GetBoolean(10);
             holdsRemediationSecret = reader.GetBoolean(11);
         }
@@ -930,9 +935,16 @@ WHERE server_id = $1";
         await ExecuteWriteAsync(command, cancellationToken);
     }
 
-    /// <summary>Binds the 20 upsert/insert parameters ($1..$20) from a row (created_at/modified_at are server-side).</summary>
+    /// <summary>Binds the 21 upsert/insert parameters ($1..$21) from a row (created_at/modified_at are server-side).</summary>
     private static void BindMonitoredServer(NpgsqlCommand command, MonitoredServerRow row)
     {
+        /* #6254: every write of a row binds here. A replica with a protocol prefix or a path is a connection the service would open with
+           its own credentials to a machine the writer names, so it is never stored, whatever surface the row came from. */
+        if (QueryStoreReplicaSetting.Refusal(row.QueryStoreReplica) is { } replicaRefusal)
+        {
+            throw new ArgumentException(replicaRefusal, nameof(row));
+        }
+
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = row.ServerId });                 // $1
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = row.Name });                  // $2
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = row.Host });                  // $3
@@ -957,6 +969,8 @@ WHERE server_id = $1";
         /* #5452: the per-server AWS role and its optional external ID; null = "use the service's own credentials". */
         AddNullableText(command, row.AwsRoleArn);                                                        // $19
         AddNullableText(command, row.AwsExternalId);                                                     // $20
+        /* #6254: written normalized (trimmed, blank = NULL), the form the service binds the password under. */
+        AddNullableText(command, QueryStoreReplicaSetting.Normalize(row.QueryStoreReplica));            // $21
     }
 
     private static MonitoredServerRow ReadMonitoredServerRow(NpgsqlDataReader reader) => new()
@@ -982,6 +996,7 @@ WHERE server_id = $1";
         Port = reader.GetInt32(18),
         AwsRoleArn = reader.IsDBNull(19) ? null : reader.GetString(19),
         AwsExternalIdSet = reader.GetBoolean(20),
+        QueryStoreReplica = reader.IsDBNull(21) ? null : reader.GetString(21),
     };
 
     /// <summary>
@@ -1016,6 +1031,7 @@ WHERE server_id = $1";
         /* #5452: the role and whether an external ID is stored; never the ID itself, which the read-only roles cannot select. */
         AwsRoleArn = reader.IsDBNull(18) ? null : reader.GetString(18),
         AwsExternalIdSet = reader.GetBoolean(19),
+        QueryStoreReplica = reader.IsDBNull(20) ? null : reader.GetString(20),
     };
 
     private static void AddTextArray(NpgsqlCommand command, IEnumerable<string>? values) =>
@@ -1124,6 +1140,10 @@ public sealed class MonitoredServerRow
     /// <summary>Whether an external ID is stored (<c>aws_external_id_set</c>, which the store computes). It is not
     /// written.</summary>
     public bool AwsExternalIdSet { get; set; }
+
+    /// <summary>The host (or listener), optionally with a port, a Query Store read may use instead of the primary (#6254); null
+    /// or blank = off. Stored in <c>query_store_replica</c> and a field of the connection identity: the password is sealed for it.</summary>
+    public string? QueryStoreReplica { get; set; }
 
     /// <summary>Server-set creation time (read-only, from the store's <c>created_at</c>); null when not read.</summary>
     public DateTime? CreatedAt { get; set; }

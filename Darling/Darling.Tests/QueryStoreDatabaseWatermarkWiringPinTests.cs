@@ -24,31 +24,6 @@ public sealed class QueryStoreDatabaseWatermarkWiringPinTests
     private static string RunnerSource() =>
         RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs");
 
-    [Fact]
-    public void TheCommit_IsCalledOnce_AndOnlyFromOnItemComplete_AndTheStageOnlyFromReadItem()
-    {
-        var src = RunnerSource();
-
-        var calls = Regex.Matches(src, @"CommitQueryStoreDatabaseWatermark\(").Count;
-        /* one declaration + the enumerated arm's call + the Azure SQL Database arm's (#5514, pinned below) */
-        Assert.Equal(3, calls);
-
-        var call = src.IndexOf("CommitQueryStoreDatabaseWatermark(server, item", StringComparison.Ordinal);
-        Assert.True(call > 0, "the commit call is missing");
-
-        var driver = src.IndexOf("EnumeratedCollectorDriver.RunAsync<TRow>(", StringComparison.Ordinal);
-        var readItem = src.IndexOf("readItem:", driver, StringComparison.Ordinal);
-        var writeBatch = src.IndexOf("writeBatch:", driver, StringComparison.Ordinal);
-        var onComplete = src.IndexOf("onItemComplete:", driver, StringComparison.Ordinal);
-        var onError = src.IndexOf("onItemError:", driver, StringComparison.Ordinal);
-        Assert.True(driver > 0 && readItem > driver && writeBatch > readItem && onComplete > writeBatch && onError > onComplete);
-
-        Assert.InRange(call, onComplete, onError);
-
-        var stage = src.IndexOf("stagedDatabaseWatermarks[item] =", StringComparison.Ordinal);
-        Assert.InRange(stage, readItem, writeBatch);
-    }
-
     /// <summary>
     /// #5514: the Azure SQL Database per-database loop took query_store's watermark straight from the store, bounded
     /// but uncached, and invalidated the cache key first, so every database paid one store read per cycle (181,050

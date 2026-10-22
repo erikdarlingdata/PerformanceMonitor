@@ -367,6 +367,9 @@ public class PostgresTargetConfigTests
                by the registry read, like the remediation credential above. */
             ("HypotheticalIndexUsername", "hypothetical_index_username"),
             ("HypotheticalIndexEncryptedPassword", "hypothetical_index_encrypted_password"),
+            /* V213 (#6254): the readable replica Query Store is read from. Settable from darling.json and read back by the
+               registry read, like the connection fields above. */
+            ("QueryStoreReplica", "query_store_replica"),
         };
 
         /* Password is the deliberate exception: a plaintext dev password is never persisted, and is

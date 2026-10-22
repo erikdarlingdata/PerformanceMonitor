@@ -32,7 +32,7 @@ namespace Darling.Tests;
 public sealed class PasswordBindingCensusTests
 {
     private static readonly ServerConnectionIdentity Base =
-        new("example-sql-01", 1433, "sqlserver", "example_db", false, "sql", "example_login", "Mandatory", false, false);
+        new("example-sql-01", 1433, "sqlserver", "example_db", false, "sql", "example_login", "Mandatory", false, false, "example-replica-01");
 
     private static string[] IdentityProperties() =>
         typeof(ServerConnectionIdentity).GetProperties(BindingFlags.Public | BindingFlags.Instance)
@@ -56,6 +56,7 @@ public sealed class PasswordBindingCensusTests
         [nameof(ServerConnectionIdentity.EncryptMode)] = Base with { EncryptMode = "Optional" },
         [nameof(ServerConnectionIdentity.TrustServerCertificate)] = Base with { TrustServerCertificate = true },
         [nameof(ServerConnectionIdentity.MultiSubnetFailover)] = Base with { MultiSubnetFailover = true },
+        [nameof(ServerConnectionIdentity.QueryStoreReplica)] = Base with { QueryStoreReplica = "other-replica" },
     };
 
     [Fact]
@@ -99,14 +100,14 @@ public sealed class PasswordBindingCensusTests
     [Fact]
     public void A_raw_row_maps_with_nulls_as_empty_text_and_zero_and_no_trimming_or_case_change()
     {
-        var empty = ServerConnectionIdentity.FromStoredColumns(null, null, null, null, false, null, null, null, false, false);
+        var empty = ServerConnectionIdentity.FromStoredColumns(null, null, null, null, false, null, null, null, false, false, null);
         var row = ServerConnectionIdentity.FromStoredColumns(
-            " Example-SQL-01 ", 1433, "SqlServer", "Example_Db", true, "SQL", "Example_Login", "Mandatory", true, true);
+            " Example-SQL-01 ", 1433, "SqlServer", "Example_Db", true, "SQL", "Example_Login", "Mandatory", true, true, null);
 
-        Assert.Equal(new ServerConnectionIdentity("", 0, "", "", false, "", "", "", false, false), empty);
+        Assert.Equal(new ServerConnectionIdentity("", 0, "", "", false, "", "", "", false, false, ""), empty);
         Assert.Equal(
             new ServerConnectionIdentity(
-                " Example-SQL-01 ", 1433, "SqlServer", "Example_Db", true, "SQL", "Example_Login", "Mandatory", true, true),
+                " Example-SQL-01 ", 1433, "SqlServer", "Example_Db", true, "SQL", "Example_Login", "Mandatory", true, true, ""),
             row);
     }
 
@@ -117,6 +118,9 @@ public sealed class PasswordBindingCensusTests
         {
             "DisplayName", "UsesSqlAuth", "UsesServicePrincipal", "UsesManagedIdentity", "IsPostgres",
             "HasRemediationCredential", "RemediationUsername",
+            /* #6254: the replica builder takes the replica from the identity the password seal is opened with (the binding itself,
+               not a setting) and the password from DarlingSecrets, which opens the seal against that same identity. */
+            "ConnectionIdentity",
         };
         var bound = IdentityProperties().ToHashSet(StringComparer.Ordinal);
         var read = Regex.Matches(Source("PerformanceMonitor.Darling.Service/MonitoredServerConnection.cs"), @"\bserver\.([A-Za-z_]\w*)")
@@ -227,7 +231,7 @@ public sealed class PasswordBindingCensusTests
     [Fact]
     public void Each_purpose_binds_its_fixed_number_of_fields_in_the_documented_text_form()
     {
-        var server = PasswordBinding.ForServer(Base with { Auth = "SQL", EncryptMode = "Mandatory", Engine = "SqlServer", ReadOnlyIntent = true });
+        var server = PasswordBinding.ForServer(Base with { Auth = "SQL", EncryptMode = "Mandatory", Engine = "SqlServer", ReadOnlyIntent = true, QueryStoreReplica = null });
         var remediation = PasswordBinding.ForRemediation(Base with { Engine = "SqlServer" }, "example_fix");
         var smtp = PasswordBinding.ForSmtp("omega-01", 587, false, "example_mail_user");
 

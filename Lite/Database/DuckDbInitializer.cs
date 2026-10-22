@@ -423,7 +423,7 @@ public partial class DuckDbInitializer : IDisposable
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 77;
+    internal const int CurrentSchemaVersion = 78;
 
     private readonly string _archivePath;
 
@@ -3085,6 +3085,16 @@ public partial class DuckDbInitializer : IDisposable
             _logger?.LogInformation("Running migration to v77: adding ag_replica_states.primary_replica");
             await AddMissingColumnsAsync(connection, AddedColumnsForVersion(77));
         }
+
+        if (fromVersion < 78)
+        {
+            /* v78 (#6254): collection_log.read_source, which server a run's Query Store rows were read from: the replica's name when the run
+               read the Query Store replica, the primary's otherwise. VARCHAR, nullable, the LAST column (the shared added-columns list). NULL on a
+               row stored before v78 and on every collector that does not choose a source. The archive views union parquet by name, so a parquet
+               file written before v78 reads NULL for it. */
+            _logger?.LogInformation("Running migration to v78: adding collection_log.read_source");
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(78));
+        }
     }
 
     /* #5990: set when a migration step failed in a way that must be retried at the next start; the stamp then stops at this
@@ -3163,6 +3173,8 @@ public partial class DuckDbInitializer : IDisposable
         (76, "dmv_blocking_snapshots", "blocking_tran_log_bytes_used", "BIGINT"),
         /* #6159: the primary replica's name (Darling's V202 column). NULL on a row stored before v77, which a reader shows as "primary not known". */
         (77, "ag_replica_states", "primary_replica", "VARCHAR"),
+        /* #6254: which server a collector run read its Query Store rows from (the Query Store replica or the primary). NULL on a row stored before v78. */
+        (78, "collection_log", "read_source", "VARCHAR"),
     };
 
     internal static IEnumerable<(int Version, string Table, string Column, string Type)> AddedColumnsForVersion(int version) =>

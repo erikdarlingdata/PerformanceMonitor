@@ -5609,6 +5609,9 @@ const COLLECTOR_COLUMNS = [
   /* #5646: a collector that recovered (its newest 3 runs succeeded after failures) is HEALTHY, and this says so with the
      time of the last failure. Partial rows carry no note_summary, so the sentence rides in its own field. */
   { key: "recovered_note", label: "Recovered", clamp: true, localizeText: true, plain: true, hideWhenEmpty: true },
+  /* #6254: where the Query Store collector's newest run read its rows from ("replica 12, primary 2"). Only a server with the Query
+     Store replica setting on has one, so the column is left out unless a row has it and every other server's table is as it was. */
+  { key: "read_source", label: "Read source", clamp: true, hideWhenEmpty: true },
   /* #3017: which of the two zero-output readings a collector that spent and stored nothing is — read and
      found nothing, or could not read. Blank whenever Rows is positive, for the same reason the Note
      column is blank on a plainly healthy collector. Composed server-side from the shared formatter, so

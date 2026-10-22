@@ -177,6 +177,15 @@ SELECT /* PerformanceMonitorLite */
                "Manage Servers, or the 'database' field for it in darling.json.";
     }
 
+    /// <summary>
+    /// #6254: the connection string for the server's Query Store replica, null when none is set. The same secret resolution as
+    /// <see cref="ResolveConnectionString"/>; the builder is <see cref="MonitoredServerConnection.BuildQueryStoreReplicaConnectionString"/>.
+    /// </summary>
+    public static string? ResolveQueryStoreReplicaConnectionString(MonitoredServer config, bool isAzureSqlDatabase, ILogger? logger = null) =>
+        /* The builder takes the replica from the identity the password seal opens with and resolves the password itself (a stored
+           reference only when darling.json declares it), and returns null for an Azure SQL Database. */
+        MonitoredServerConnection.BuildQueryStoreReplicaConnectionString(config, isAzureSqlDatabase);
+
     public static string ResolveConnectionString(MonitoredServer config, ILogger? logger = null)
     {
         string? password = null;
@@ -738,6 +747,9 @@ FROM pg_catalog.pg_control_system() AS s";
         {
             var runtime = await ConnectAsync(config, logger, cancellationToken);
             var isPostgres = runtime.Target.Engine == CollectorTargetEngine.PostgreSql;
+            /* #6254: a server with a Query Store replica is tested on both connections, so a replica that cannot be reached shows now
+               and not as a collection that quietly reads the primary. Its failure is a warning: the primary answered. */
+            var (replicaHost, replicaError) = await ProbeQueryStoreReplicaAsync(config, runtime.Target.IsAzureSqlDb, logger, cancellationToken);
             return new ConnectionProbeResult(
                 Success: true,
                 MajorVersion: runtime.Target.SqlMajorVersion,
@@ -758,7 +770,9 @@ FROM pg_catalog.pg_control_system() AS s";
                 PostgresVersionNum: runtime.Target.PostgresVersionNum,
                 IsAurora: runtime.Target.IsAurora,
                 IsInRecovery: runtime.Target.IsInRecovery,
-                HasPgWaitSamplingExtension: runtime.Target.HasPgWaitSamplingExtension);
+                HasPgWaitSamplingExtension: runtime.Target.HasPgWaitSamplingExtension,
+                QueryStoreReplica: replicaHost,
+                QueryStoreReplicaError: replicaError);
         }
         catch (OperationCanceledException)
         {
@@ -780,6 +794,70 @@ FROM pg_catalog.pg_control_system() AS s";
                 Error: SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ex.Message,
                 SqlClientNativeLoadFailed: SqlClientNativeLoadFailure.IsMatch(ex));
         }
+    }
+
+    /// <summary>
+    /// #6254: opens the server's Query Store replica connection the way collection opens it: the string comes from
+    /// <see cref="ResolveQueryStoreReplicaConnectionString"/> (the same builder: the replica host, <c>ApplicationIntent=ReadOnly</c>,
+    /// the server's login and authentication) and the connection is the SQL Server target provider's own <see cref="SqlConnection"/>.
+    /// Returns <c>(null, null)</c> for a server with no replica, a PostgreSQL target or an Azure SQL Database, <c>(host, null)</c> when the
+    /// replica opened, and <c>(host, error)</c> when it did not (a refused login, an unreachable host, a password the builder would not
+    /// release). Never throws except for cancellation. <paramref name="createConnection"/> is a test seam; null opens a SqlConnection.
+    /// </summary>
+    internal static async Task<(string? Host, string? Error)> ProbeQueryStoreReplicaAsync(
+        MonitoredServer config, bool isAzureSqlDatabase, ILogger? logger, CancellationToken cancellationToken,
+        Func<string, System.Data.Common.DbConnection>? createConnection = null)
+    {
+        if (config.IsPostgres || isAzureSqlDatabase
+            || PerformanceMonitor.Darling.Storage.QueryStoreReplicaSetting.Normalize(config.ConnectionIdentity.QueryStoreReplica) is not { } host)
+        {
+            return (null, null);
+        }
+
+        try
+        {
+            var connectionString = ResolveQueryStoreReplicaConnectionString(config, isAzureSqlDatabase, logger);
+            if (connectionString is null)
+            {
+                return (null, null);
+            }
+
+            await using var connection = createConnection is null ? new SqlConnection(connectionString) : createConnection(connectionString);
+            await connection.OpenAsync(cancellationToken);
+            return (host, null);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            return (host, SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// #6254: the one line a connection test says about the Query Store replica, or null when the probed server has none.
+    /// <paramref name="revealError"/> says whether the driver's text may be shown (the CLI and the Viewer, the operator's own
+    /// surfaces, as for the primary); a caller that must not echo it (MCP and web replies) gets a fixed sentence and logs the text.
+    /// A failing replica is a warning: collection reads the primary, and the line says so.
+    /// </summary>
+    public static string? DescribeQueryStoreReplica(ConnectionProbeResult probe, bool revealError = true)
+    {
+        ArgumentNullException.ThrowIfNull(probe);
+        if (string.IsNullOrEmpty(probe.QueryStoreReplica))
+        {
+            return null;
+        }
+
+        if (string.IsNullOrEmpty(probe.QueryStoreReplicaError))
+        {
+            return $"Query Store replica {probe.QueryStoreReplica}: connected.";
+        }
+
+        return revealError
+            ? $"Query Store replica {probe.QueryStoreReplica}: could not connect ({probe.QueryStoreReplicaError}). Collection reads Query Store from the primary until it can."
+            : $"Query Store replica {probe.QueryStoreReplica}: could not connect. Collection reads Query Store from the primary until it can. The service log has the details.";
     }
 
     /// <summary>
@@ -882,7 +960,12 @@ public sealed record ConnectionProbeResult(
     /* #6285: the machine and instance name the SQL Server reached calls itself (SERVERPROPERTY('ServerName')), read on this
        same connection, so add_servers and edit_server can tell one machine reached under two names. Null when the probe
        read none: a failed connection, an Azure SQL Database, or a PostgreSQL role that may not read the cluster identity (#6339). Trailing and defaulted, like the fields above. */
-    string? MachineIdentity = null)
+    string? MachineIdentity = null,
+    /* #6254: the Query Store replica host the test also opened, and the error when it would not open. Null host: the server has no
+       replica (or is a PostgreSQL target or an Azure SQL Database). A set error leaves Success alone, because collection reads
+       the primary when the replica cannot be reached. Trailing and defaulted, like the fields above. */
+    string? QueryStoreReplica = null,
+    string? QueryStoreReplicaError = null)
 {
     /// <summary>
     /// Rebuilds the gate's-eye view of this target, so a caller can ask which collectors would actually

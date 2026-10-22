@@ -415,7 +415,8 @@ internal static class DarlingPasswordKeySelfCheck
         }
 
         return new ServerConnectionIdentity(
-            host, port.GetInt32(), engine, Text(b, "database"), readOnly, auth, username + usernameSuffix, encrypt, trust, multiSubnet);
+            host, port.GetInt32(), engine, Text(b, "database"), readOnly, auth, username + usernameSuffix, encrypt, trust, multiSubnet,
+            Text(b, "queryStoreReplica"));
     }
 
     private static bool Flag(JsonElement element, string name, out bool value)
