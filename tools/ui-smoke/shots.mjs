@@ -98,6 +98,10 @@ async function shoot(browser, spec, ctx) {
     timezoneId: "UTC",
     bypassCSP: true,
   });
+  /* The dashboard asks for its token on loopback too: run-ui-smoke.ps1 signs in once and passes the session cookie. */
+  if (process.env.UI_SMOKE_SESSION_COOKIE) {
+    await context.addCookies([{ name: "darling_web_session", value: process.env.UI_SMOKE_SESSION_COOKIE, url: baseUrl }]);
+  }
   const page = await context.newPage();
   const asOf = new Date(anchorMs + AS_OF_AFTER_ANCHOR_MS).toISOString();
   let shiftedCount = 0;

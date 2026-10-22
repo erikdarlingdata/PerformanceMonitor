@@ -297,4 +297,166 @@ public sealed class DarlingLoopbackTokenStartTests
             await host.DisposeFailedStartAsync();
         }
     }
+
+    private static async Task<(HttpStatusCode Status, string Body)> SendAsync(HttpClient client, HttpMethod method, string path, string? cookie)
+    {
+        using var request = new HttpRequestMessage(method, path);
+        if (method != HttpMethod.Get)
+        {
+            request.Content = new StringContent("{}", Encoding.UTF8, "application/json");
+        }
+
+        if (cookie is not null)
+        {
+            request.Headers.Add("Cookie", cookie);
+        }
+
+        using var response = await client.SendAsync(request);
+        return (response.StatusCode, await response.Content.ReadAsStringAsync());
+    }
+
+    private static async Task<string> SignInCookieAsync(HttpClient client, string token)
+    {
+        using var right = await WebSignInAsync(client, token);
+        Assert.Equal(HttpStatusCode.Redirect, right.StatusCode);
+        var cookie = right.Headers.GetValues("Set-Cookie").Single();
+        return cookie[..cookie.IndexOf(';')];
+    }
+
+    /// <summary>The opt-out serves reads only: a read is served, the session says it cannot edit, and a write (adding a
+    /// server) is refused before it reaches the route, with a message that names the token setting.</summary>
+    [Fact]
+    public async Task Web_OptOut_ServesReads_AndRefusesAWrite_NamingTheTokenSetting()
+    {
+        var port = ClosedPort();
+        var log = new CapturingTestLogger();
+        var host = NewWebHost(log);
+        try
+        {
+            Assert.True(await TryStartAsync(host, Config("web", port, ", 'allowTokenlessLoopback': true"), port), log.Joined);
+            using var client = Client(port);
+
+            var session = await SendAsync(client, HttpMethod.Get, "/api/session", cookie: null);
+            Assert.Equal(HttpStatusCode.OK, session.Status);
+            Assert.Contains("\"can_edit\":false", session.Body.Replace(" ", ""), StringComparison.Ordinal);
+
+            var add = await SendAsync(client, HttpMethod.Post, "/api/servers", cookie: null);
+            Assert.Equal(HttpStatusCode.Forbidden, add.Status);
+            Assert.Contains("web.allowTokenlessLoopback", add.Body, StringComparison.Ordinal);
+            Assert.Contains("web.network.encryptedToken", add.Body, StringComparison.Ordinal);
+
+            Assert.Contains("reads only", DarlingWebHostService.TokenlessLoopbackMessage, StringComparison.Ordinal);
+        }
+        finally
+        {
+            await host.DisposeFailedStartAsync();
+        }
+    }
+
+    /// <summary>A loopback token under the length floor still signs a browser in, but the dashboard serves reads only with
+    /// it, and the start says why in one line; a token that clears the floor keeps the edit seat.</summary>
+    [Fact]
+    public async Task Web_ShortLoopbackToken_SignsIn_ButKeepsWritesOff_AndSaysWhy()
+    {
+        const string shortToken = "short-token-12";
+        var port = ClosedPort();
+        var log = new CapturingTestLogger();
+        var host = NewWebHost(log);
+        try
+        {
+            Assert.True(await TryStartAsync(host, Config("web", port, ", 'network': { 'token': '" + shortToken + "' }"), port), log.Joined);
+            using var client = Client(port);
+            var cookie = await SignInCookieAsync(client, shortToken);
+
+            var session = await SendAsync(client, HttpMethod.Get, "/api/session", cookie);
+            Assert.Equal(HttpStatusCode.OK, session.Status);
+            Assert.Contains("\"can_edit\":false", session.Body.Replace(" ", ""), StringComparison.Ordinal);
+
+            var add = await SendAsync(client, HttpMethod.Post, "/api/servers", cookie);
+            Assert.Equal(HttpStatusCode.Forbidden, add.Status);
+            Assert.Contains("needs at least " + DarlingHostBinding.MinimumTokenLength + " characters", add.Body, StringComparison.Ordinal);
+
+            Assert.Single(log.Lines, l => l.Contains("shorter than " + DarlingHostBinding.MinimumTokenLength, StringComparison.Ordinal)
+                && l.Contains("serves reads only", StringComparison.Ordinal));
+            Assert.DoesNotContain(log.Lines, l => l.Contains(shortToken, StringComparison.Ordinal));
+        }
+        finally
+        {
+            await host.DisposeFailedStartAsync();
+        }
+
+        port = ClosedPort();
+        var longLog = new CapturingTestLogger();
+        var longHost = NewWebHost(longLog);
+        try
+        {
+            Assert.True(await TryStartAsync(longHost, Config("web", port, ", 'network': { 'token': '" + Token + "' }"), port), longLog.Joined);
+            using var client = Client(port);
+            var cookie = await SignInCookieAsync(client, Token);
+            var session = await SendAsync(client, HttpMethod.Get, "/api/session", cookie);
+            Assert.Contains("\"can_edit\":true", session.Body.Replace(" ", ""), StringComparison.Ordinal);
+        }
+        finally
+        {
+            await longHost.DisposeFailedStartAsync();
+        }
+    }
+
+    /// <summary>The MCP twin: a short loopback token still gates every request, and with neither the writes nor the
+    /// investigation tools asked for, the start names the problem once.</summary>
+    [Fact]
+    public async Task Mcp_ShortLoopbackToken_StillGates_AndSaysWhyOnce()
+    {
+        const string shortToken = "short-token-12";
+        var port = ClosedPort();
+        var log = new CapturingTestLogger();
+        var host = NewMcpHost(log);
+        try
+        {
+            Assert.True(await TryStartAsync(host, Config("mcp", port, ", 'network': { 'token': '" + shortToken + "' }"), port), log.Joined);
+            using var client = Client(port);
+            Assert.Equal(HttpStatusCode.Unauthorized, await McpToolsListAsync(client, bearer: null));
+            Assert.Equal(HttpStatusCode.OK, await McpToolsListAsync(client, shortToken));
+            Assert.Single(log.Lines, l => l.Contains("MCP token (mcp.network.encryptedToken or mcp.network.token) is shorter than", StringComparison.Ordinal));
+            Assert.DoesNotContain(log.Lines, l => l.Contains(shortToken, StringComparison.Ordinal));
+        }
+        finally
+        {
+            await host.DisposeFailedStartAsync();
+        }
+    }
+
+    /// <summary>Turning network exposure off keeps the mcp and web tokens, so each endpoint keeps asking for its token on
+    /// loopback: only listen, allowFrom, tls, hostName, trustedProxies and oidc go, and a block with nothing else goes whole.</summary>
+    [Fact]
+    public void DisableNetwork_KeepsTheTokens_AndRemovesOnlyTheExposureKeys()
+    {
+        var original = ("{ 'postgres': { 'managed': true, 'network': { 'listen': '192.168.1.5', 'allowFrom': '192.168.1.0/24', 'role': 'viewer' } },\n"
+            + "  'servers': [ { 'host': 'SQL2022' } ],\n"
+            + "  'mcp': {\n    'enabled': true,\n    'network': {\n      'listen': '192.168.1.5',\n      'allowFrom': '192.168.1.0/24',\n"
+            + "      'token': 'env:MCP_TOKEN', // kept\n      'hostName': 'box.example'\n    }\n  },\n"
+            + "  'web': {\n    'enabled': true,\n    'network': {\n      'listen': '192.168.1.5',\n      'allowFrom': '192.168.1.0/24',\n"
+            + "      'encryptedToken': 'AQAAAblob',\n      'trustedProxies': [ '10.0.0.5' ],\n      'tls': { 'pfxPath': 'c:/x.pfx' },\n"
+            + "      'hsts': true\n    }\n  }\n}").Replace('\'', '"');
+
+        var (afterPostgres, afterMcp, text) = DarlingCliCommands.DisabledExposureText(original);
+        var config = DarlingConfig.Parse(text);
+
+        Assert.Null(config.Postgres.Network);
+        Assert.Equal("env:MCP_TOKEN", config.Mcp.Network?.Token);
+        Assert.Null(config.Mcp.Network?.Listen);
+        Assert.Null(config.Mcp.Network?.AllowFrom);
+        Assert.Null(config.Mcp.Network?.HostName);
+        Assert.Equal("AQAAAblob", config.Web.Network?.EncryptedToken);
+        Assert.Null(config.Web.Network?.Listen);
+        Assert.Null(config.Web.Network?.Tls);
+        Assert.Null(config.Web.Network?.TrustedProxies);
+        Assert.True(config.Web.Network?.Hsts);
+        Assert.Contains("// kept", text, StringComparison.Ordinal);
+        Assert.NotEqual(afterPostgres, afterMcp);
+        Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, DarlingWebHostService.ResolveWebBind(config.Web, config.Postgres.Managed).Mode);
+
+        var noToken = "{ \"servers\": [ { \"host\": \"SQL2022\" } ], \"mcp\": { \"network\": { \"listen\": \"192.168.1.5\", \"allowFrom\": \"192.168.1.0/24\" } } }";
+        Assert.Null(DarlingConfig.Parse(DarlingCliCommands.DisabledExposureText(noToken).NewText).Mcp.Network);
+    }
 }

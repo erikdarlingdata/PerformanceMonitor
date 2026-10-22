@@ -1440,8 +1440,8 @@ public sealed class McpConfig
     /// Default OFF. A loopback-only MCP server needs a bearer token like an exposed one: with no
     /// <see cref="McpNetworkConfig.EncryptedToken"/> or <see cref="McpNetworkConfig.Token"/>, an enabled MCP server does not
     /// start, and the log names the settings to add. On, a loopback-only server with no token serves local clients
-    /// without one, as builds before this setting did, and every start logs one line saying so. A configured token
-    /// always gates, whatever this says. File-only and restart-only.
+    /// without one, with the write and investigation tools off (they need the token), and every start logs one line
+    /// saying so. A configured token always gates, whatever this says. File-only and restart-only.
     /// </summary>
     [JsonPropertyName("allowTokenlessLoopback")]
     public bool AllowTokenlessLoopback { get; set; }
@@ -1799,7 +1799,7 @@ public sealed class McpNetworkConfig
 /// required token → HMAC session cookie + an in-app CIDR check (darling-network-endpoints, managed-mode only).
 /// A SEPARATE surface from <see cref="McpConfig"/> — its own enable flag, port, token, and exposure block —
 /// because the two gate different blast radii (MCP's token guards analyze_server's live outbound SQL
-/// connections; the web dashboard is read-only over the store).
+/// connections; the web dashboard works on the collected store and changes only monitoring settings).
 /// </summary>
 public sealed class WebConfig
 {
@@ -1827,8 +1827,8 @@ public sealed class WebConfig
     /// Default OFF. A loopback-only dashboard needs a token like an exposed one: with no
     /// <see cref="WebNetworkConfig.EncryptedToken"/> or <see cref="WebNetworkConfig.Token"/>, an enabled dashboard does not
     /// start, and the log names the settings to add. On, a loopback-only dashboard with no token serves local browsers
-    /// without one, as builds before this setting did, and every start logs one line saying so. A configured token
-    /// always gates, whatever this says. File-only and restart-only.
+    /// without one, for reads only (a change is refused with a message naming the token setting), and every start logs
+    /// one line saying so. A configured token always gates, whatever this says. File-only and restart-only.
     /// </summary>
     [JsonPropertyName("allowTokenlessLoopback")]
     public bool AllowTokenlessLoopback { get; set; }

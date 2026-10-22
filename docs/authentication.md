@@ -2,19 +2,19 @@
 
 Part of the [Performance Monitor documentation](../README.md#documentation).
 
-`PerformanceMonitor.Common.AuthenticationTypes` supports seven authentication types, defined once there and named the same way in every edition. **Not every edition connects with all seven**, so the table says which does what: Lite offers all of them, while the Darling service builds Windows-integrated or SQL-login connections only and acquires no tokens at all, so its viewer rejects every Azure mode at the credential step.
+`PerformanceMonitor.Common.AuthenticationTypes` supports seven authentication types, defined once there and named the same way in every edition. **Not every edition connects with all seven**, so the table says which does what: Lite offers all of them. The Darling service and its Viewer connect with four: Windows, SQL Server, Service Principal and Managed Identity (`auth` set to `integrated`, `sql`, `serviceprincipal` or `managedidentity` in `darling.json`). The service runs headless, so it refuses the other three, which need a person at the machine or their own sign-in on it.
 
 | Type | Editions | Interactive? | Credential stored? | Where |
 |---|---|---|---|---|
 | Windows | Lite, Darling | No | None | — |
 | SQL Server | Lite, Darling | No | Password | Lite: Windows Credential Manager. Darling: see below |
 | Entra ID (MFA) | Lite | Yes, once per session | None | — |
-| Service Principal | Lite | No | Client secret | Lite: Windows Credential Manager. Darling: see below |
-| Managed Identity | Lite | No | None | — |
+| Service Principal | Lite, Darling | No | Client secret | Lite: Windows Credential Manager. Darling: see below |
+| Managed Identity | Lite, Darling | No | None | — |
 | Existing Azure Sign-In | Lite | No | None | — (established outside the app, e.g. `az login`) |
 | Device Code | Lite | Yes, once per session | None | — (entered in a browser, on any device) |
 
-**Where Darling keeps a SQL password or a client secret.** A server in `darling.json` holds it in one of three forms. `encryptedPassword` is a LocalMachine DPAPI blob that `--encrypt-password` produces. `password` holds an `env:NAME` or `file:PATH` reference, or the value itself. A server added in the Darling Viewer keeps a DPAPI blob in the store.
+**Where Darling keeps a SQL password or a client secret.** A server in `darling.json` holds it in one of three forms. `encryptedPassword` is a LocalMachine DPAPI blob that `--encrypt-password` produces. `password` holds an `env:NAME` or `file:PATH` reference, or the value itself. A server added in the Darling Viewer keeps its password or secret in the store, sealed to the service's RSA-3072 password key, so only the service can read it, and only for that server's connection settings.
 
 **Managed Identity and Service Principal** are non-interactive Azure AD (Entra ID) authentication modes, added for fleet onboarding of Azure SQL Database / Managed Instance without a per-server interactive MFA prompt (see [#1038](https://github.com/erikdarlingdata/PerformanceMonitor/issues/1038)). Both map directly to `Microsoft.Data.SqlClient`'s native `SqlAuthenticationMethod` (`ActiveDirectoryServicePrincipal` / `ActiveDirectoryManagedIdentity`) — PerformanceMonitor never acquires, caches, or stores a token itself; the official Microsoft driver handles that internally.
 
