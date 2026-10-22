@@ -1272,10 +1272,9 @@ ORDER BY t.regression_factor DESC";
             readsDays ? RegressedQueriesDailySql : readsTable ? RegressedQueriesTableSql : RegressedQueriesSql,
             connection,
             /* A failed built-days read leaves the snapshot aborted, so the table read runs without it. */
-            readsDays ? snapshot : null);
+            readsDays ? snapshot : null) { CommandTimeout = DrillDownCommandTimeoutSeconds };
         if (!readsDays && snapshot is not null)
             await snapshot.RollbackAsync(context.CancellationToken);
-        cmd.CommandTimeout = DrillDownCommandTimeoutSeconds;
         cmd.Parameters.AddWithValue(context.ServerId);
         cmd.Parameters.AddWithValue(windowStart);
         /* $3/$4: the STANDARD analysis window for the psp_signature CTE — deliberately not the 14-day
