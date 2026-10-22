@@ -144,6 +144,24 @@ public static class PgTableTuning
         return end < 0 ? rest : rest.Substring(0, end);
     }
 
+    /// <summary>
+    /// True when <paramref name="table"/> (a <c>schema.table</c> taken from <see cref="Statements"/>, never from input) has no
+    /// row at all. A failed check answers false, so the index keeps the one-build budget.
+    /// </summary>
+    private static async Task<bool> TableIsEmptyAsync(NpgsqlConnection connection, string table, ILogger? logger, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var command = new NpgsqlCommand("SELECT NOT EXISTS (SELECT 1 FROM " + table + ")", connection) { CommandTimeout = SetupTimeoutSeconds };
+            return await command.ExecuteScalarAsync(cancellationToken) is true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug(ex, "Could not tell whether {Table} is empty; its index counts against the one-build budget", table);
+            return false;
+        }
+    }
+
     /// <summary>NULL when no such index exists in <c>collect</c>, otherwise whether it is valid.</summary>
     private const string IndexValidSql =
         "SELECT i.indisvalid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
@@ -527,7 +545,11 @@ public static class PgTableTuning
                         continue;
                     }
 
-                    var oneBuildPerStart = IsOneBuildPerStart(indexName);
+                    /* #6460: a table with no rows builds its index in no time and pauses nothing, so it does not use the
+                       one-build budget. Without this a brand-new store built one of the three large indexes at its first
+                       start and deferred the other two, and the first hourly pass then warned that they were missing. */
+                    var oneBuildPerStart = IsOneBuildPerStart(indexName)
+                        && !await TableIsEmptyAsync(connection, CreatedIndexTable(statement), logger, cancellationToken);
                     if (oneBuildPerStart && buildIssued)
                     {
                         logger?.LogInformation(

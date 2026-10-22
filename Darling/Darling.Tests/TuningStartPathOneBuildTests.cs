@@ -51,6 +51,9 @@ public sealed class TuningStartPathOneBuildTests
             Assert.True(await IndexExistsAsync(body, name, ct), name + " should exist after the start passes");
         }
 
+        /* A table with rows is what the budget guards: an empty table builds at once and uses none (#6460), so give both a row. */
+        await SeedStatsRowsAsync(body, ct);
+
         /* The hourly pass never builds any of them, however many are missing. */
         await Exec(body, "DROP INDEX collect." + PgTableTuning.QueryStatsRestartRowIndexName, ct);
         await Exec(body, "DROP INDEX collect." + PgTableTuning.ProcedureStatsRestartRowIndexName, ct);
@@ -82,6 +85,46 @@ public sealed class TuningStartPathOneBuildTests
         Assert.Equal(oids, await OidsAsync(body, ct));
         Assert.DoesNotContain(start3.Lines, l => l.Contains("built at the next start", StringComparison.Ordinal));
         Assert.Equal(0, start3.CountAtLevel(LogLevel.Warning));
+    }
+
+    /// <summary>
+    /// #6460: a first start on a brand-new, empty store builds all three large start-path indexes in ONE pass (an empty table
+    /// builds instantly, so none of them uses the one-build budget), so the start logs no deferral and the first hourly pass
+    /// finds nothing missing to warn about. Before, the first start built one and deferred the other two, and the hourly pass
+    /// 30 s later logged two Warnings that read like a fault.
+    /// </summary>
+    [Fact]
+    public async Task AFirstStartOnAnEmptyStore_BuildsEveryLargeIndex_AndLogsNothingThatReadsLikeAFault()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the first-start live test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        PgTableTuning.ResetHourlyMissingWarnings();
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var body = new NpgsqlConnection(scratch.ConnectionString);
+        await body.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(body, ct);
+        foreach (var name in Deferred)
+        {
+            await Exec(body, "DROP INDEX IF EXISTS collect." + name, ct);
+        }
+
+        var start = new CapturingTestLogger();
+        await PgTableTuning.ApplyAsync(body, start, ct);
+        foreach (var name in Deferred)
+        {
+            Assert.True(await IndexExistsAsync(body, name, ct), name + " should be built by the one start pass: " + start.Joined);
+        }
+
+        var hourly = new CapturingTestLogger();
+        await PgTableTuning.ApplyAsync(body, hourly, hourly: true, ct);
+        Assert.Equal(0, start.CountAtLevel(LogLevel.Warning));
+        Assert.Equal(0, hourly.CountAtLevel(LogLevel.Warning));
+        Assert.DoesNotContain(start.Lines, l => l.Contains("built at the next start", StringComparison.Ordinal));
+        Assert.DoesNotContain(hourly.Lines, l => l.Contains("is missing", StringComparison.Ordinal));
+        Assert.DoesNotContain(start.Lines, l => l.Contains("is missing", StringComparison.Ordinal));
     }
 
     /// <summary>The first-missing index in list order is the earliest start-path index, so the legacy-row index goes before the restart-row ones.</summary>
@@ -124,6 +167,20 @@ public sealed class TuningStartPathOneBuildTests
         Assert.Contains("statement.StartsWith(CreateIndexPrefix, StringComparison.Ordinal) && IsBuildTimeout(ex)", src, StringComparison.Ordinal);
         Assert.Contains("BuildTimeoutMessage(", src, StringComparison.Ordinal);
         Assert.Contains("Composer performance-tuning statement failed", src, StringComparison.Ordinal);
+    }
+
+    private static async Task SeedStatsRowsAsync(NpgsqlConnection c, CancellationToken ct)
+    {
+        await Exec(c, @"
+INSERT INTO collect.procedure_stats
+    (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name, sql_handle,
+     delta_worker_time, delta_elapsed_time, delta_execution_count, sample_interval_seconds)
+VALUES (6460000, now(), -6460, 'Seed', 'Db', 'dbo', 'usp_Seed', '0x01', 1, 1, 1, 300)", ct);
+        await Exec(c, @"
+INSERT INTO collect.query_stats
+    (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle,
+     delta_worker_time, delta_elapsed_time, delta_execution_count, sample_interval_seconds)
+VALUES (6460001, now(), -6460, 'Seed', 'Db', 'QH6460', '0x01', 1, 1, 1, 300)", ct);
     }
 
     private static async Task<string> OidsAsync(NpgsqlConnection c, CancellationToken ct)
