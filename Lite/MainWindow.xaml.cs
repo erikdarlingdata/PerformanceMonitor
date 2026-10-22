@@ -253,6 +253,57 @@ public partial class MainWindow : Window
         Activate();
     }
 
+    /// <summary>
+    /// The server_name values in this user's collector tables: the storage name (host, database and read-only intent) each
+    /// server's rows were collected under, so which hosts this user collected from. collection_log is not read: it keeps the
+    /// display name. A table that cannot be read counts as none, so its servers wait for their settings to be confirmed
+    /// instead of being bound.
+    /// </summary>
+    private IReadOnlyCollection<string> ReadStoredServerNames()
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            using var readLock = _databaseInitializer.AcquireReadLock();
+            using var connection = _databaseInitializer.CreateConnection();
+            connection.Open();
+            foreach (var table in DuckDbSchemaGenerator.CollectorTableNames())
+            {
+                try
+                {
+                    using var command = connection.CreateCommand();
+                    command.CommandText = $"SELECT DISTINCT server_name FROM {table} WHERE server_name IS NOT NULL";
+                    using var reader = command.ExecuteReader();
+                    while (reader.Read())
+                        names.Add(reader.GetString(0));
+                }
+                catch (Exception ex)
+                {
+                    AppLogger.Debug("ServerHostBindings", $"Could not read the server names in {table}: {ex.Message}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Debug("ServerHostBindings", $"Could not open the local store to read the server names: {ex.Message}");
+        }
+
+        return names;
+    }
+
+    private bool _hostRecordProblemShown;
+
+    /// <summary>Shows, once per run, that the record of confirmed server settings could not be written; the status line
+    /// carries it every time.</summary>
+    private void ShowHostRecordSaveProblem(string message)
+    {
+        StatusText.Text = message;
+        if (_hostRecordProblemShown)
+            return;
+        _hostRecordProblemShown = true;
+        MessageBox.Show(this, message, "Server settings not saved", MessageBoxButton.OK, MessageBoxImage.Warning);
+    }
+
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
         try
@@ -261,6 +312,13 @@ public partial class MainWindow : Window
 
             // Initialize the DuckDB database
             await _databaseInitializer.InitializeAsync();
+
+            /* The first run of the per-user record of confirmed server settings, before anything below connects: a user who
+               used an earlier Lite gets bound the servers whose current host has rows in this store; a new user, and a
+               server with only a saved password, confirms each one. A record that cannot be written is shown, not passed over. */
+            _serverManager.HostRecordSaveFailed += message => Dispatcher.BeginInvoke(() => ShowHostRecordSaveProblem(message));
+            var storedServerNames = App.HadLiteDataAtStart ? await Task.Run(ReadStoredServerNames) : [];
+            _serverManager.BindHostsOnFirstRun(App.HadLiteDataAtStart, storedServerNames);
 
             /* #5775: remove route credentials no route points at (a crash between writing a new generation and the row, or a
                delete that failed). Off the UI thread and not awaited: the sweep takes the write lock briefly, logs only a count
@@ -770,6 +828,7 @@ public partial class MainWindow : Window
         foreach (var server in servers)
         {
             server.IsOnline = _serverManager.GetConnectionStatus(server.Id).IsOnline;
+            server.HostChangeNotice = _serverManager.HostChange(server)?.Describe(server);
             server.HasCollectorErrors = _collectorService != null
                 && server.IsOnline == true
                 && _collectorService.GetHealthSummary(server).ErroringCollectors > 0;
@@ -1288,6 +1347,23 @@ public partial class MainWindow : Window
                 await openTab.ShowIncidentAsync(shown.View, shown.FromUtc, shown.ToUtc, reload: true);
             }
             return;
+        }
+
+        /* A server whose host this user has not confirmed opens Edit Server instead, once, with the sentence saying what
+           changed: saving it (with the password entered again where the server has one) confirms the host, and only then
+           does this connect. Closing it connects to nothing. */
+        if (_serverManager.HostChange(server) is { } hostChange)
+        {
+            StatusText.Text = hostChange.Describe(server);
+            var confirmDialog = new AddServerDialog(_serverManager, _profileManager, server) { Owner = this };
+            var saved = confirmDialog.ShowDialog() == true;
+            RefreshServerList();
+            if (!saved || _serverManager.HostChange(server) != null)
+            {
+                return;
+            }
+
+            StatusText.Text = string.Empty;
         }
 
         /* Clear a previously declined interactive sign-in when the user explicitly connects: opening
@@ -2389,6 +2465,7 @@ public partial class MainWindow : Window
             {
                 var status = _serverManager.GetConnectionStatus(server.Id);
                 server.IsOnline = status?.IsOnline;
+                server.HostChangeNotice = _serverManager.HostChange(server)?.Describe(server);
                 if (status?.IsOnline == null) continue;
 
                 bool isOnline = status.IsOnline == true;
