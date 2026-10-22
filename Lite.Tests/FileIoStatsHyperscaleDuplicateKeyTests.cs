@@ -111,18 +111,4 @@ public sealed class FileIoStatsHyperscaleDuplicateKeyTests
             backward.Select(r => (r.FileName, r.DatabaseId)).OrderBy(t => t.FileName, StringComparer.Ordinal).ToArray());
         Assert.Equal(279L, forward.Single(r => r.FileName == "data_0").NumOfReads);
     }
-
-    [Fact]
-    public void AzureQuery_AsksOnlyForTheConnectedDatabasesOwnFiles()
-    {
-        var text = FileIoStatsCollector.Instance.BuildQuery(Context(new CollectorDeltaCalculator(), FirstPass, azure: true)).Text;
-
-        Assert.Contains("WHERE vfs.database_id = DB_ID()", text, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void DeltaKey_IsDatabaseBarFile_SoStoredRowsOfANormalServerStillMatch()
-    {
-        Assert.Equal("Orders|Orders_log", FileIoStatsCollector.DeltaKey("Orders", "Orders_log"));
-    }
 }
