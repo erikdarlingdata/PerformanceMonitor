@@ -110,6 +110,42 @@ WHERE rp.server_id = $1
 ORDER BY rp.submitted_at DESC
 LIMIT $4";
 
+    /* #6565: the reports of other requests on the same server and family, reported in the last SameRootCauseHours hours, whose analysis
+       story has the same root fact (key and database) as this request's story. The story hash is not the key: it changes with every run
+       of a story, while the root fact (for example the regressed query's hash and database) stays. Computed here, when the brief is
+       composed, from analysis_findings: a request stores only its story hash. $1 server, $2 family, $3 this request, $4 limit,
+       $5 now (the live-practice filter), $6 this request's story hash (null: no rows), $7 reported since. Same practice exclusions as
+       EarlierReportsSql. */
+    internal static readonly string SameRootCauseReportsSql = @"
+WITH root AS (
+    SELECT f.root_fact_key, f.database_name
+    FROM analysis_findings AS f
+    WHERE f.server_id = $1 AND f.story_path_hash = $6
+    ORDER BY f.analysis_time DESC
+    LIMIT 1
+)
+SELECT rp.request_id, rp.submitted_at, rp.agent_id, rp.verdict, rp.root_cause, rp.root_cause_found, rp.summary
+FROM root
+JOIN config.investigation_requests AS rq ON true
+JOIN config.investigation_reports AS rp ON rp.request_id = rq.request_id
+WHERE rq.server_id = $1
+  AND rq.family = $2
+  AND rq.request_id <> $3
+  AND rq.practice_of IS NULL
+  AND rp.submitted_at > $7
+  AND NOT EXISTS (SELECT 1 FROM (" + InvestigationRequestStore.LivePracticeRequestsSql("$5") + @") AS lp WHERE lp.practice_of = rp.request_id)
+  AND EXISTS (
+        SELECT 1 FROM analysis_findings AS f2
+        WHERE f2.server_id = rq.server_id
+          AND f2.story_path_hash = rq.story_path_hash
+          AND f2.root_fact_key = root.root_fact_key
+          AND f2.database_name IS NOT DISTINCT FROM root.database_name)
+ORDER BY rp.submitted_at DESC
+LIMIT $4";
+
+    /// <summary>#6565: how many same-root-cause reports a brief names at most (the newest first).</summary>
+    public const int MaxSameRootCauseReports = 3;
+
     /* #6001: the evidence the capture froze for the request, in the order the sections were written. */
     internal const string EvidenceSql = @"
 SELECT section, state, content::text, captured_at
@@ -362,6 +398,36 @@ ORDER BY m.metric_name, f.day DESC";
                     reader.GetString(4),
                     reader.GetBoolean(5),
                     reader.IsDBNull(6) ? null : reader.GetString(6)));
+            }
+        }
+
+        /* #6565: a reported request with the same root fact under another story hash comes first, marked, so the brief names it even when
+           ten newer reports crowd it out of the list. A practice request reads none (above). */
+        if (practiceOf is null && request.StoryPathHash is { } storyHash)
+        {
+            var sameRoot = new List<InvestigationEarlierReport>();
+            await using (var command = Command(connection, SameRootCauseReportsSql, request.ServerId, request.Family, requestId,
+                MaxSameRootCauseReports, now, storyHash, now.AddHours(-InvestigationBriefComposer.SameRootCauseHours)))
+            await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+            {
+                while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    sameRoot.Add(new InvestigationEarlierReport(
+                        reader.GetGuid(0),
+                        reader.GetFieldValue<DateTime>(1),
+                        reader.GetString(2),
+                        reader.GetString(3),
+                        reader.GetString(4),
+                        reader.GetBoolean(5),
+                        reader.IsDBNull(6) ? null : reader.GetString(6),
+                        SameRootCause: true));
+                }
+            }
+
+            if (sameRoot.Count > 0)
+            {
+                var ids = sameRoot.Select(r => r.RequestId).ToHashSet();
+                earlier = sameRoot.Concat(earlier.Where(r => !ids.Contains(r.RequestId))).Take(Math.Max(MaxEarlierReports, sameRoot.Count)).ToList();
             }
         }
 

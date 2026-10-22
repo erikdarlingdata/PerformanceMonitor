@@ -101,6 +101,58 @@ VALUES ($1, $2, $3, $4, 'Blocking', $5, $6, $7, $8, $9, $10)",
         },
     });
 
+    /// <summary>
+    /// #6565, the twin of Darling's: the brief of a request names the report of another request on the same server and family that was
+    /// reported in the last 24 hours and whose story has the same root fact (key and database), under another story hash, first and
+    /// marked same_root_cause. Another root query, another database and a report 25 hours old are not marked.
+    /// </summary>
+    [Fact]
+    public async Task SameRootFactUnderAnotherStoryHash_ReportedWithin24Hours_IsNamedFirstAndMarked_OthersAreNot()
+    {
+        var reportId = 100L;
+        async Task<Guid> ReportedAsync(string hash, DateTime at, string rootKey, string database)
+        {
+            var id = Guid.NewGuid();
+            await InsertRequestAsync(id, at, state: "reported", storyPathHash: hash);
+            await ExecAsync(@"
+INSERT INTO analysis_findings
+    (finding_id, analysis_time, server_id, server_name, database_name, severity, confidence, category, story_path, story_path_hash, story_text, root_fact_key, fact_count)
+VALUES ($1, $2, $3, $4, $5, 0.8, 0.6, 'queries', $6, $7, 'story', $8, 2)",
+                reportId, Micros(at), ServerId, ServerName, database, "path-" + hash, hash, rootKey);
+            await ExecAsync(@"
+INSERT INTO investigation_reports
+    (report_id, request_id, report_format, agent_id, claim_id, submitted_at, verdict, root_cause, root_cause_found, summary,
+     evidence, server_id, metric_name)
+VALUES ($1, $2, 1, 'agent-a', $3, $4, 'real', 'a regressed plan', true, NULL, '[{""tool"":""get_query_store_top""}]', $5, 'Blocking')",
+                reportId, id, Guid.NewGuid(), Micros(at), ServerId);
+            reportId++;
+            return id;
+        }
+
+        var first = await ReportedAsync("hashA0001", Now.AddMinutes(-45), "BAD_ACTOR_q1", "Sales");
+        var otherQuery = await ReportedAsync("hashC0003", Now.AddMinutes(-50), "BAD_ACTOR_q2", "Sales");
+        var otherDatabase = await ReportedAsync("hashD0004", Now.AddMinutes(-40), "BAD_ACTOR_q1", "Hr");
+        var tooOld = await ReportedAsync("hashE0005", Now.AddHours(-25), "BAD_ACTOR_q1", "Sales");
+
+        var second = Guid.NewGuid();
+        await InsertRequestAsync(second, Now, storyPathHash: "hashB0002");
+        await ExecAsync(@"
+INSERT INTO analysis_findings
+    (finding_id, analysis_time, server_id, server_name, database_name, severity, confidence, category, story_path, story_path_hash, story_text, root_fact_key, fact_count)
+VALUES (99, $1, $2, $3, 'Sales', 0.8, 0.6, 'queries', 'path-hashB0002', 'hashB0002', 'story', 'BAD_ACTOR_q1', 2)", Micros(Now), ServerId, ServerName);
+
+        var sources = await new DuckDbInvestigationBriefSourceReader(_initializer, () => Now).ReadAsync(second, TestContext.Current.CancellationToken);
+
+        var marked = Assert.Single(sources!.EarlierReports, r => r.SameRootCause);
+        Assert.Equal(first, marked.RequestId);
+        Assert.Equal(first, sources.EarlierReports[0].RequestId);
+        Assert.Equal(new[] { otherQuery, otherDatabase, tooOld }.OrderBy(g => g), sources.EarlierReports.Where(r => !r.SameRootCause).Select(r => r.RequestId).OrderBy(g => g));
+
+        var brief = InvestigationBriefComposer.Compose(sources, LiteInvestigationBriefTools.Tools, McpDataDetail.Full, Now);
+        Assert.Contains("\"same_root_cause\":true", brief, StringComparison.Ordinal);
+        Assert.Contains("is marked same_root_cause", brief, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task EverySource_ComesBackFromAPlantedStore_AndTheComposedBriefMasksItsLiterals()
     {

@@ -77,6 +77,9 @@ public sealed record InvestigationBriefFinding(
     IReadOnlyList<InvestigationNextCall> NextTools);
 
 /// <summary>An earlier report for the same server and family: what an agent said, not reviewed by a person.</summary>
+/// <param name="SameRootCause">#6565: the earlier request was reported within <see cref="InvestigationBriefComposer.SameRootCauseHours"/> hours
+/// and its analysis story has the same root fact (key and database) as this request's story, whatever its story hash. The reader puts
+/// these first; the brief marks them and tells the agent to read the verdict before it starts. False for every other earlier report.</param>
 public sealed record InvestigationEarlierReport(
     Guid RequestId,
     DateTime SubmittedAtUtc,
@@ -84,7 +87,8 @@ public sealed record InvestigationEarlierReport(
     string Verdict,
     string RootCause,
     bool RootCauseFound,
-    string? Summary);
+    string? Summary,
+    bool SameRootCause = false);
 
 /// <summary>A recent change on the monitoring side: a mute rule, an analysis mute, a plan-force action.</summary>
 /// <param name="Pattern">A mute rule's query text pattern, masked as statement text; null for other kinds.</param>
