@@ -347,6 +347,10 @@ Full entries: [docs/changelog/3.11.md](docs/changelog/3.11.md)
 - **Lite's Top Queries by CPU no longer ranks the whole procedure archive** ([#6096])
 - **The web Job History Category list shows only the selected server's categories** ([#6443])
 - **Editing or adding a server in the web dashboard right after another edit is no longer refused as busy** ([#6450])
+- **`get_wait_trend` says `empty`, not `not_collected`, when a collected wait type had no waiting in the window** ([#6446])
+- **The web dashboard no longer tells managed-store users to use an option their store refuses** ([#6451])
+- **Known Patterns and Threshold Overrides server boxes show the server name, and the Metric box shows its value** ([#6452])
+- **Viewer Job History can pick an Azure SQL Database, says it has no SQL Agent, and lists only that server's categories** ([#6391])
 
 ## [3.10.0] - 2026-10-09
 
@@ -5837,3 +5841,7 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#6447]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/6447
 [#6443]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/6443
 [#6450]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/6450
+[#6446]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6446
+[#6451]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/6451
+[#6452]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6452
+[#6391]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6391
