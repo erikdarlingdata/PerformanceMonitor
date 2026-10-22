@@ -55,8 +55,9 @@ public sealed class SystemHealthEventFileTests
     private static object[] RingRow(DateTime time, string type) =>
         new object[] { time, type, "<event name=\"" + type + "\"/>", DBNull.Value, DBNull.Value };
 
-    private static object[] Trailer(bool truncated, long hidden, object age, bool fileRead) =>
-        new object[] { truncated, hidden, age, fileRead };
+    private static object[] Trailer(
+        bool truncated, long hidden, object age, bool fileRead, object? error = null, bool bookmarkRefused = false) =>
+        new object[] { truncated, hidden, age, fileRead, error ?? DBNull.Value, bookmarkRefused };
 
     [Fact]
     public async Task AFileRead_LeavesTheBookmarkOfTheNewestEvent_AndCountsTheEvents()
@@ -119,6 +120,95 @@ public sealed class SystemHealthEventFileTests
             CollectorMeasurementNote.Render(context.Measurements),
             StringComparison.Ordinal);
         Assert.Empty(context.PendingState);
+    }
+
+    [Fact]
+    public async Task AFallbackCausedByAnError_RecordsTheErrorNumberNextToTheFallback()
+    {
+        var context = MakeContext();
+        using var reader = FakeCollectorDataReader.WithResultSets(
+            new[] { RingRow(s_watermark.AddMinutes(1), "error_reported") },
+            new[] { Trailer(false, 0, DBNull.Value, false, error: 297) });
+
+        await SystemHealthEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Equal(1, Measured(context, "event_file_fallback"));
+        Assert.Equal(297, Measured(context, "event_file_error"));
+        Assert.StartsWith(
+            "event_file_fallback=1 event_file_error=297",
+            CollectorMeasurementNote.Render(context.Measurements),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AFallbackWithNoError_RecordsNoErrorNumber()
+    {
+        /* No event_file target at all: the read never started, so there is no error to report. */
+        var context = MakeContext();
+        using var reader = FakeCollectorDataReader.WithResultSets(
+            new[] { RingRow(s_watermark.AddMinutes(1), "error_reported") },
+            new[] { Trailer(false, 0, DBNull.Value, false) });
+
+        await SystemHealthEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Equal(1, Measured(context, "event_file_fallback"));
+        Assert.Null(Measured(context, "event_file_error"));
+    }
+
+    [Fact]
+    public async Task ARefusedBookmarkThatNothingReplaces_IsDropped_SoTheNextPassDoesNotTryItFirstForEver()
+    {
+        /* The bookmark's file was deleted (error 25717) and the current file has nothing newer: the pass is quiet, but the
+           bookmark must not be left in place. An empty value reads back as no bookmark. */
+        var context = MakeContext();
+        using var reader = FakeCollectorDataReader.WithResultSets(
+            Array.Empty<object[]>(),
+            new[] { Trailer(false, 0, DBNull.Value, true, bookmarkRefused: true) });
+
+        await SystemHealthEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Equal(string.Empty, context.PendingState[SystemHealthEventsCollector.BookmarkStateKey]);
+        Assert.Null(SystemHealthEventsCollector.TryUseBookmark(
+            context.PendingState, s_watermark.AddMinutes(30)));
+    }
+
+    [Fact]
+    public async Task ARefusedBookmarkThatTheCurrentFileReplaces_LeavesTheNewBookmark()
+    {
+        var context = MakeContext();
+        var newest = s_watermark.AddMinutes(4);
+        using var reader = FakeCollectorDataReader.WithResultSets(
+            new[] { FileRow(newest, "wait_info", FileB, 4_096) },
+            new[] { Trailer(false, 0, DBNull.Value, true, bookmarkRefused: true) });
+
+        await SystemHealthEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Equal(
+            SystemHealthEventsCollector.FormatBookmark(newest, 4_096, FileB),
+            context.PendingState[SystemHealthEventsCollector.BookmarkStateKey]);
+    }
+
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(13, false)]
+    [InlineData(14, true)]
+    [InlineData(15, true)]
+    [InlineData(17, true)]
+    public void TheTimestampUtcBatch_IsChosenFrom2017_AndThe2016BatchNeverNamesTheColumn(int major, bool expectsTimestampUtc)
+    {
+        /* Naming sys.fn_xe_file_target_read_file's timestamp_utc on 2016 fails the whole batch (the column is not there). */
+        var context = MakeContext();
+        var query = SystemHealthEventsCollector.Instance.BuildQuery(new CollectorContext
+        {
+            ServerId = context.ServerId,
+            ServerName = context.ServerName,
+            CollectionTime = context.CollectionTime,
+            Deltas = new RecordingCollectorDeltaCalculator(),
+            Target = new CollectorTargetInfo { SqlMajorVersion = major },
+        });
+
+        Assert.Equal(expectsTimestampUtc, query.Text.Contains("timestamp_utc", StringComparison.Ordinal));
+        Assert.Equal(SystemHealthEventsCollector.MaxEventsPerPass, query.Parameters.Single(p => p.Name == "@max_events").Value);
     }
 
     [Fact]

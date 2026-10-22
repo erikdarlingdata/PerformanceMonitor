@@ -604,6 +604,7 @@ public class CollectorMeasurementSeamTests
                    .Measure( calls. */
                 SystemHealthEventsCollector.EventFileEventsMeasurement,
                 SystemHealthEventsCollector.EventFileFallbackMeasurement,
+                SystemHealthEventsCollector.EventFileErrorMeasurement,
             }.OrderBy(l => l, StringComparer.Ordinal).ToList(),
             resolved.Distinct(StringComparer.Ordinal).OrderBy(l => l, StringComparer.Ordinal).ToList());
     }
