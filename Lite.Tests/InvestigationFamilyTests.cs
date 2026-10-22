@@ -80,6 +80,7 @@ public sealed class InvestigationFamilyTests
     [InlineData("Analysis: blocking [1a2b3c4d]", "blocking")]
     [InlineData("Analysis: CPU_PRESSURE [1a2b3c4d]", "resources")]
     [InlineData("Analysis: replication_risk [1a2b3c4d]", "availability")]
+    [InlineData("Analysis: anomaly [0123abcd]", "resources")]
     [InlineData("Analysis: config_issue [1a2b3c4d]", "other")]
     [InlineData("Analysis: something_new [1a2b3c4d]", "other")]
     public void TheDraftTableAndTheRulingHold(string metric, string family)

@@ -123,6 +123,9 @@ public static class InvestigationFamily
         ["tempdb_pressure"] = Resources,
         ["bloat_growth"] = Resources,
         ["object_growth"] = Resources,
+        /* An anomaly is a spike against the server's own baseline in CPU, waits, I/O or latency, so resources is the
+           closest family. One caused by blocking or a query story is still reported by the agent that gets it. */
+        ["anomaly"] = Resources,
 
         ["ag_health"] = Availability,
         ["replication_risk"] = Availability,
