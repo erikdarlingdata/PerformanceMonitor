@@ -1656,6 +1656,62 @@ public sealed partial class DarlingMcpAlertTools
         }
     }
 
+    [McpServerTool(Name = "purge_expired_mute_rules"), Description(
+        "Deletes every EXPIRED alert mute rule (an end time at or before now), the Viewer's Purge Expired button. Expired rules already suppress nothing, so this only tidies the list; active, upcoming, disabled-but-unexpired and no-end-time rules are left alone. Permanent. Returns each rule it deleted as it was, a count, and undo null.<<GUIDE>>" +
+        "Takes no arguments. Expired means the rule's expires_at is at or before now, the same test the Viewer's Purge Expired uses; " +
+        "every other rule is untouched. Answer: {status:\"purged\", count, previous:[each deleted rule as get_mute_rules shows it], " +
+        "undo:null, undo_note}, or {status:\"none_expired\", count:0} when nothing had expired. There is no undo because an expired rule " +
+        "had no effect; call create_mute_rule with a fresh expiry if one is wanted again. Needs mcp.allowWrites; an agent " +
+        "investigation arm can never call it.")]
+    public static async Task<string> PurgeExpiredMuteRules(
+        NpgsqlDataSource postgres,
+        ILogger? logger = null)
+    {
+        var answer = await PurgeExpiredMuteRulesCore(new PgMuteRuleStore(postgres), DateTime.UtcNow);
+        if (logger is not null && logger.IsEnabled(LogLevel.Information))
+        {
+            logger.LogInformation("MCP write purge_expired_mute_rules: {Answer}", answer.Length > 200 ? answer[..200] : answer);
+        }
+
+        return answer;
+    }
+
+    /// <summary>
+    /// purge_expired_mute_rules' body over the <see cref="IMuteRuleStore"/> seam (#6399). The rules to delete come from
+    /// <see cref="MuteRulePurge.SelectExpired"/> and the delete is the store's own (<see cref="MuteRulePurge.DeleteByIdSql"/>), the
+    /// same pair the Viewer's Purge Expired runs, so this is not a second copy of either.
+    /// </summary>
+    internal static async Task<string> PurgeExpiredMuteRulesCore(IMuteRuleStore store, DateTime nowUtc)
+    {
+        try
+        {
+            var expired = MuteRulePurge.SelectExpired(await store.LoadAllAsync(), nowUtc);
+            if (expired.Count == 0)
+            {
+                return JsonSerializer.Serialize(new
+                {
+                    status = "none_expired",
+                    count = 0,
+                    message = "No mute rule has expired, so nothing was deleted.",
+                }, McpHelpers.JsonOptions);
+            }
+
+            await store.DeleteExpiredAsync(expired.Select(r => r.Id).ToList());
+            return JsonSerializer.Serialize(new
+            {
+                status = "purged",
+                count = expired.Count,
+                previous = expired.Select(r => BuildMuteRuleWithState(r, nowUtc)).ToList(),
+                undo = (object?)null,
+                undo_note = "None needed: an expired rule had no effect, so deleting it changes nothing the service delivers; create_mute_rule makes a new rule with a fresh expiry if one is wanted again.",
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return McpHelpers.FormatError("purge_expired_mute_rules", ex);
+        }
+    }
+
     [McpServerTool(Name = "set_mute_rule_enabled"), Description(
         "Agent arm: needs agent_action, request's server only. Enables or disables an existing mute rule by id, WITHOUT deleting it. Changes shared alert configuration the service delivers on. A disabled rule suppresses nothing but keeps its id, scope, reason and creation date, so silencing and restoring later is one reversible change, unlike delete+create, which loses those and resets the Stale Mute Rules age clock. Returns updated (rule as stored), unchanged (already that value, safe to retry), or not_found." +
         "<<GUIDE>>" +
