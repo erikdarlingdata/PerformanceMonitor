@@ -1,0 +1,257 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor Lite.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Lite.Tests.Helpers;
+using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
+using Xunit;
+
+namespace Lite.Tests;
+
+/// <summary>
+/// #6441 part 2. The system_health collector (one definition, shared by Lite and Darling) reads the session's event_file
+/// target from a (file name, buffer offset) bookmark, because the ring buffer's XML is cut at about 4 MB and keeps the
+/// OLDEST events. These tests run the collector's own code: what it asks the server (<c>BuildQuery</c>), what it
+/// records from the answer (<c>ReadAsync</c>: the bookmark, the source counts, the ring-buffer fallback with its truncation
+/// counts), and that an event read from the file parses to the same values as the same event read from the ring buffer.
+/// </summary>
+public sealed class SystemHealthEventFileTests
+{
+    private const string FileA = @"C:\sql\Log\system_health_0_134370637615340000.xel";
+    private const string FileB = @"C:\sql\Log\system_health_0_134370999999990000.xel";
+
+    private static readonly DateTime s_watermark = new(2026, 10, 22, 9, 0, 0, DateTimeKind.Utc);
+
+    private static CollectorContext MakeContext(
+        IReadOnlyDictionary<string, string>? state = null,
+        DateTime? watermark = null)
+        => new()
+        {
+            ServerId = 42,
+            ServerName = "test-server",
+            CollectionTime = new DateTime(2026, 10, 22, 9, 30, 0, DateTimeKind.Utc),
+            Deltas = new RecordingCollectorDeltaCalculator(),
+            Target = new CollectorTargetInfo(),
+            Watermark = watermark,
+            State = state ?? CollectorContext.NoState,
+        };
+
+    private static long? Measured(CollectorContext context, string label) =>
+        context.Measurements.Where(m => m.Label == label).Select(m => (long?)m.Value).FirstOrDefault();
+
+    private static object[] FileRow(DateTime time, string type, string file, long offset) =>
+        new object[] { time, type, "<event name=\"" + type + "\"/>", file, offset };
+
+    private static object[] RingRow(DateTime time, string type) =>
+        new object[] { time, type, "<event name=\"" + type + "\"/>", DBNull.Value, DBNull.Value };
+
+    private static object[] Trailer(bool truncated, long hidden, object age, bool fileRead) =>
+        new object[] { truncated, hidden, age, fileRead };
+
+    [Fact]
+    public async Task AFileRead_LeavesTheBookmarkOfTheNewestEvent_AndCountsTheEvents()
+    {
+        var context = MakeContext();
+        var newest = s_watermark.AddMinutes(7);
+        using var reader = FakeCollectorDataReader.WithResultSets(
+            new[]
+            {
+                FileRow(s_watermark.AddMinutes(1), "error_reported", FileA, 6_000_000),
+                FileRow(newest, "sp_server_diagnostics_component_result", FileB, 4_096),
+                FileRow(s_watermark.AddMinutes(3), "wait_info", FileB, 2_048),
+            },
+            new[] { Trailer(false, 0, DBNull.Value, true) });
+
+        var rows = await SystemHealthEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Equal(3, rows.Count);
+        Assert.Equal(3, Measured(context, "event_file_events"));
+        Assert.Null(Measured(context, "event_file_fallback"));
+        Assert.Null(Measured(context, RingBufferTruncationNote.TruncatedLabel));
+        Assert.Equal(
+            SystemHealthEventsCollector.FormatBookmark(newest, 4_096, FileB),
+            context.PendingState[SystemHealthEventsCollector.BookmarkStateKey]);
+    }
+
+    [Fact]
+    public async Task AQuietFilePass_CountsZeroEvents_AndLeavesTheBookmarkAlone()
+    {
+        var context = MakeContext();
+        using var reader = FakeCollectorDataReader.WithResultSets(
+            Array.Empty<object[]>(),
+            new[] { Trailer(false, 0, DBNull.Value, true) });
+
+        var rows = await SystemHealthEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Empty(rows);
+        Assert.Equal(0, Measured(context, "event_file_events"));
+        Assert.DoesNotContain(SystemHealthEventsCollector.BookmarkStateKey, context.PendingState.Keys);
+    }
+
+    [Fact]
+    public async Task TheRingBufferFallback_RecordsTheFallback_KeepsTheTruncationCounts_AndLeavesNoBookmark()
+    {
+        var context = MakeContext();
+        using var reader = FakeCollectorDataReader.WithResultSets(
+            new[] { RingRow(s_watermark.AddMinutes(1), "error_reported") },
+            new[] { Trailer(true, 773, 19380L, false) });
+
+        var rows = await SystemHealthEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Single(rows);
+        Assert.Null(rows[0].SourceFile);
+        Assert.Equal(1, Measured(context, "event_file_fallback"));
+        Assert.Null(Measured(context, "event_file_events"));
+        Assert.Equal(1, Measured(context, RingBufferTruncationNote.TruncatedLabel));
+        Assert.Equal(773, Measured(context, RingBufferTruncationNote.EventsHiddenLabel));
+        Assert.Equal(
+            "ring_buffer_truncated=1 ring_buffer_events_hidden=773 newest_visible_event_age_s=19380 event_file_fallback=1",
+            CollectorMeasurementNote.Render(context.Measurements));
+        Assert.Empty(context.PendingState);
+    }
+
+    [Fact]
+    public async Task APassIsReadFromTheBookmarkItLeftBehind_AndTheStoredRowsAreUnchanged()
+    {
+        var newest = s_watermark.AddMinutes(7);
+        var first = MakeContext();
+        using var firstReader = FakeCollectorDataReader.WithResultSets(
+            new[] { FileRow(newest, "error_reported", FileB, 8_192) },
+            new[] { Trailer(false, 0, DBNull.Value, true) });
+        var rows = await SystemHealthEventsCollector.Instance.ReadAsync(firstReader, first, CancellationToken.None);
+
+        /* The store keeps the event, so its watermark is the event's time; the next pass resumes from the bookmark. */
+        var second = MakeContext(first.PendingState, watermark: newest);
+        var query = SystemHealthEventsCollector.Instance.BuildQuery(second);
+
+        Assert.Equal(FileB, query.Parameters.Single(p => p.Name == "@bookmark_file").Value);
+        Assert.Equal(8_192L, query.Parameters.Single(p => p.Name == "@bookmark_offset").Value);
+        Assert.Equal(newest, query.Parameters.Single(p => p.Name == "@cutoff_time").Value);
+
+        /* The payload the store sees is the same three columns as before. */
+        var writer = new RecordingCollectorRowWriter();
+        SystemHealthEventsCollector.Instance.WritePayload(rows[0], writer, first);
+        Assert.Equal(3, writer.Values.Count);
+        Assert.Equal(newest, writer.Values[0]);
+        Assert.Equal("error_reported", writer.Values[1]);
+    }
+
+    [Fact]
+    public void ABookmarkAheadOfTheStoredWatermark_IsNotUsed()
+    {
+        /* A failed write, or a purged store: the bookmark already skipped events the store never got. */
+        var state = new Dictionary<string, string>
+        {
+            [SystemHealthEventsCollector.BookmarkStateKey] =
+                SystemHealthEventsCollector.FormatBookmark(s_watermark.AddMinutes(5), 4_096, FileB),
+        };
+        var query = SystemHealthEventsCollector.Instance.BuildQuery(MakeContext(state, watermark: s_watermark));
+
+        Assert.Null(query.Parameters.Single(p => p.Name == "@bookmark_file").Value);
+        Assert.Null(query.Parameters.Single(p => p.Name == "@bookmark_offset").Value);
+    }
+
+    [Fact]
+    public void ABookmarkBehindTheCutoff_IsUsed_WithOrWithoutAStoredWatermark()
+    {
+        var state = new Dictionary<string, string>
+        {
+            [SystemHealthEventsCollector.BookmarkStateKey] =
+                SystemHealthEventsCollector.FormatBookmark(s_watermark.AddMinutes(-5), 4_096, FileB),
+        };
+
+        var behind = SystemHealthEventsCollector.Instance.BuildQuery(MakeContext(state, watermark: s_watermark));
+        Assert.Equal(FileB, behind.Parameters.Single(p => p.Name == "@bookmark_file").Value);
+        Assert.Equal(4_096L, behind.Parameters.Single(p => p.Name == "@bookmark_offset").Value);
+
+        /* No stored watermark: the cutoff is the ten-minute fallback window (09:20 here), and this bookmark (08:55)
+           is behind it. */
+        var noWatermark = SystemHealthEventsCollector.Instance.BuildQuery(MakeContext(state));
+        Assert.Equal(FileB, noWatermark.Parameters.Single(p => p.Name == "@bookmark_file").Value);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("garbage")]
+    [InlineData("2026-10-22T09:00:00.0000000|notanumber|C:\\x.xel")]
+    [InlineData("2026-10-22T09:00:00.0000000|4096|")]
+    [InlineData("2026-10-22T09:00:00.0000000|-4096|C:\\x.xel")]
+    public void AMalformedBookmark_IsNotUsed(string raw)
+    {
+        var state = new Dictionary<string, string> { [SystemHealthEventsCollector.BookmarkStateKey] = raw };
+
+        Assert.Null(SystemHealthEventsCollector.TryUseBookmark(state, s_watermark));
+    }
+
+    [Fact]
+    public void ABookmarkTimeIsComparedAtTheMicrosecondTheStoresKeep()
+    {
+        /* The store keeps microseconds, so a watermark read back is the event time with its last digit cut. */
+        var eventTime = new DateTime(2026, 10, 22, 9, 0, 0, DateTimeKind.Utc).AddTicks(1_234_567);
+        var stored = new DateTime(eventTime.Ticks - (eventTime.Ticks % 10), DateTimeKind.Utc);
+        var state = new Dictionary<string, string>
+        {
+            [SystemHealthEventsCollector.BookmarkStateKey] = SystemHealthEventsCollector.FormatBookmark(eventTime, 4_096, FileB),
+        };
+
+        Assert.NotNull(SystemHealthEventsCollector.TryUseBookmark(state, stored));
+    }
+
+    [Fact]
+    public async Task ARowWithNoSourceColumns_StillReads_AsARingBufferRow()
+    {
+        /* A reader with the old three-column shape (a test fake, an older batch) is a ring-buffer read. */
+        var context = MakeContext();
+        using var reader = FakeCollectorDataReader.WithResultSets(
+            new[] { new object[] { s_watermark.AddMinutes(1), "wait_info", "<event name=\"wait_info\"/>" } });
+
+        var rows = await SystemHealthEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Single(rows);
+        Assert.Null(rows[0].SourceFile);
+        Assert.Empty(context.PendingState);
+    }
+
+    /* The same sp_server_diagnostics_component_result event as sql2019 returns it from each source: the ring buffer
+       keeps a <type> element inside every <data> element, the event file does not. */
+    private const string RingEvent =
+        "<event name=\"sp_server_diagnostics_component_result\" package=\"sqlserver\" timestamp=\"2026-10-22T10:07:44.268Z\">"
+        + "<data name=\"component\"><type name=\"sp_server_diagnostics_component\" package=\"sqlserver\"/><value>0</value><text>SYSTEM</text></data>"
+        + "<data name=\"state\"><type name=\"sp_server_diagnostics_state\" package=\"sqlserver\"/><value>1</value><text>CLEAN</text></data>"
+        + "<data name=\"data\"><type name=\"xml\" package=\"package0\"/><value><system spinlockBackoffs=\"4\" sickSpinlockType=\"none\" sickSpinlockTypeAfterAv=\"none\" latchWarnings=\"1\" isAccessViolationOccurred=\"0\" writeAccessViolationCount=\"0\" totalDumpRequests=\"2\" intervalDumpRequests=\"0\" nonYieldingTasksReported=\"3\" pageFaults=\"712\" systemCpuUtilization=\"9\" sqlCpuUtilization=\"7\" BadPagesDetected=\"0\" BadPagesFixed=\"0\" LastBadPageAddress=\"0x0\"/></value></data></event>";
+
+    private const string FileEvent =
+        "<event name=\"sp_server_diagnostics_component_result\" package=\"sqlserver\" timestamp=\"2026-10-22T10:07:44.268Z\">"
+        + "<data name=\"component\"><value>0</value><text>SYSTEM</text></data>"
+        + "<data name=\"state\"><value>1</value><text>CLEAN</text></data>"
+        + "<data name=\"data\"><value><system spinlockBackoffs=\"4\" sickSpinlockType=\"none\" sickSpinlockTypeAfterAv=\"none\" latchWarnings=\"1\" isAccessViolationOccurred=\"0\" writeAccessViolationCount=\"0\" totalDumpRequests=\"2\" intervalDumpRequests=\"0\" nonYieldingTasksReported=\"3\" pageFaults=\"712\" systemCpuUtilization=\"9\" sqlCpuUtilization=\"7\" BadPagesDetected=\"0\" BadPagesFixed=\"0\" LastBadPageAddress=\"0x0\"/></value></data></event>";
+
+    [Fact]
+    public void AnEventReadFromTheFile_ParsesLikeTheSameEventReadFromTheRingBuffer()
+    {
+        var fromRing = SystemHealthParser.ParseSystemHealth(RingEvent);
+        var fromFile = SystemHealthParser.ParseSystemHealth(FileEvent);
+
+        Assert.NotNull(fromRing);
+        Assert.NotNull(fromFile);
+        Assert.Equal(fromRing!.EventTime, fromFile!.EventTime);
+        Assert.Equal(fromRing.State, fromFile.State);
+        Assert.Equal(fromRing.SpinlockBackoffs, fromFile.SpinlockBackoffs);
+        Assert.Equal(fromRing.NonYieldingTasksReported, fromFile.NonYieldingTasksReported);
+        Assert.Equal(fromRing.PageFaults, fromFile.PageFaults);
+        Assert.Equal(fromRing.SystemCpuUtilization, fromFile.SystemCpuUtilization);
+        Assert.Equal(fromRing.SqlCpuUtilization, fromFile.SqlCpuUtilization);
+        Assert.Equal(4, fromFile.SpinlockBackoffs);
+        Assert.Equal("CLEAN", fromFile.State);
+    }
+}
