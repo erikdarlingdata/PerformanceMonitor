@@ -179,16 +179,9 @@ public sealed class McpWaitTools
                 /* Same shape as get_perfmon_trend: tell the caller whether the wait type is just
                    unknown here vs. nothing collected at all, and hand back the ones that do have data. */
                 var collected = await dataService.GetDistinctWaitTypesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
-                if (collected.Count == 0)
-                    return McpHelpers.Status(
-                        "unavailable",
-                        $"No trend data for wait type '{wait_type}'. No wait stats have been collected for this server in the last {hours_back}h yet " +
-                        "(the collector may not have run, or delta wait stats need a second collection cycle).");
-
-                return McpHelpers.Status(
-                    "not_collected",
-                    $"No trend data for wait type '{wait_type}'. It may not be a wait type observed on this server in this window — see hints.collected_wait_types for the {collected.Count} that have data.",
-                    new { collected_wait_types = collected });
+                /* #6446: the collector skips the ignored (benign) waits, so only those are never collected; a wait type it would
+                   store that had no waiting in the window is empty, not not_collected. The hint stays for a typo. */
+                return TrendPayloads.WaitTrendMiss(wait_type, hours_back, IgnoredWaitTypes.Load(), collected);
             }
 
             /* #3653 A5: wait_stats is the first identity-epoch carrier, so this is the trend whose step a restart
