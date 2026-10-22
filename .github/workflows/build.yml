@@ -74,17 +74,12 @@ jobs:
   #   - any other pull request: yes.
   #
   # A skipped job reports as skipped, and GitHub counts skipped as passing for a required check. A run
-  # the gate declined for a MERGE-TRAIN LABEL therefore must not read as green, so three jobs turn it
-  # into a FAILURE on a pull request: `build` (its first step), `Darling PostgreSQL tests` and `Lite
-  # tests (result)`. Those are the required checks, and each keeps its own name. The failure is the
-  # intended outcome: a merge-train member shows red until an admin merges it after the train covered
-  # it. Branch protection does not bind admins, so `gh pr merge --admin` still works.
-  #
-  # A DRAFT pull request is different: GitHub does not merge a draft whatever its checks say, and
-  # marking it ready starts a fresh run (`ready_for_review`), so a red check there only taught people
-  # to ignore red (1,037 of 1,294 failed Build runs in 14 days were drafts). The same three jobs report
-  # SUCCESS with a notice instead. The `declined` output tells the two causes apart; the label wins
-  # when a draft carries it, because that member must still fail.
+  # the gate declined therefore must not read as green, so three jobs turn it into a FAILURE on a pull
+  # request: `build` (its first step), `Darling PostgreSQL tests` and `Lite tests (result)`. Those are the
+  # required checks, and each keeps its own name. The failure is the intended outcome: a draft or
+  # merge-train pull request shows red until it is marked ready (or, for a merge-train member, until an
+  # admin merges it after the train covered it). Branch protection does not bind admins, so
+  # `gh pr merge --admin` still works.
   gate:
     name: Decide whether CI runs
     runs-on: ubuntu-latest
@@ -96,7 +91,6 @@ jobs:
       contents: read
     outputs:
       run: ${{ steps.decide.outputs.run }}
-      declined: ${{ steps.decide.outputs.declined }}
       lite_timing_run: ${{ steps.timing.outputs.run_id }}
       lite_timing_artifacts: ${{ steps.timing.outputs.artifacts }}
       test_map_run: ${{ steps.testmap.outputs.run_id }}
@@ -113,21 +107,19 @@ jobs:
         run: |
           set -euo pipefail
 
-          declined=""
           if [ "${EVENT_NAME}" != "pull_request" ]; then
             run=true; why="a ${EVENT_NAME} event always runs."
           elif [[ "${HEAD_REF}" == train/* ]]; then
             run=true; why="a merge-train pull request exists to run CI."
           elif [ "${HAS_MERGE_TRAIN_LABEL}" = "true" ]; then
-            run=false; declined=merge-train; why="the pull request carries the merge-train label, so its train run already covered it."
+            run=false; why="the pull request carries the merge-train label, so its train run already covered it."
           elif [ "${IS_DRAFT}" = "true" ]; then
-            run=false; declined=draft; why="the pull request is a draft. Marking it ready for review starts the run."
+            run=false; why="the pull request is a draft. Marking it ready for review starts the run."
           else
             run=true; why="a pull request that is ready for review runs."
           fi
 
           echo "run=${run}" >> "$GITHUB_OUTPUT"
-          echo "declined=${declined}" >> "$GITHUB_OUTPUT"
           if [ "${run}" = "true" ]; then
             echo "::notice title=CI runs::${why}"
           else
@@ -852,9 +844,8 @@ jobs:
     # runs, whatever that job did (`!cancelled()` below), and runs everything when there is no usable selection.
     needs: [gate, test-map-select]
     # `build` is a required check, so it has to run to report anything but "skipped" (which counts as
-    # passing). When the gate declines the run the job still starts, on a cheap Linux runner. Its first
-    # step fails for a merge-train label and passes for a draft; every later step carries the gate's
-    # `run == 'true'` in its own `if`, so a declined run does nothing else either way.
+    # passing). When the gate declines the run the job still starts, on a cheap Linux runner, and its
+    # first step fails; no later step has an `always()`/`failure()` condition, so the rest are skipped.
     if: ${{ !cancelled() }}
     # #5949: `build` no longer waits for the Guard stage, so it cannot read the guard's result. A guard that fails on
     # a pull request cancels the run (guard-cancel), and the two aggregate result jobs carry the guard's failure.
@@ -875,30 +866,24 @@ jobs:
       docs-fastpath: ${{ steps.fastpath.outputs.engaged }}
 
     steps:
-      - name: Report when CI did not run
+      - name: Fail when CI did not run
         if: ${{ needs.gate.outputs.run != 'true' }}
         shell: bash
         env:
           GATE_RESULT: ${{ needs.gate.result }}
-          DECLINED: ${{ needs.gate.outputs.declined }}
         run: |
           if [ "${GATE_RESULT}" != "success" ]; then
             echo "::error title=CI gate failed::needs.gate.result='${GATE_RESULT}' - the job that decides whether CI runs did not succeed, so nothing ran. Re-run the workflow."
             exit 1
           fi
-          if [ "${DECLINED}" = "draft" ]; then
-            echo "::notice title=Draft PR::Draft PR: CI runs when the PR is marked ready for review."
-            exit 0
-          fi
-          echo "::error title=CI not run::This pull request carries the merge-train label, so its CI was skipped (the train's own run covered it). It can be merged only by an admin override. (gate result: ${GATE_RESULT})"
+          echo "::error title=CI not run::This pull request's CI was skipped (draft or merge-train label). It can be merged only by an admin override after a merge train covered it. (gate result: ${GATE_RESULT})"
           exit 1
 
       - uses: actions/checkout@v7
-        if: needs.gate.outputs.run == 'true'
 
       - name: Detect changed paths
         id: filter
-        if: ${{ needs.gate.outputs.run == 'true' && (github.event_name != 'release') }}
+        if: github.event_name != 'release'
         uses: dorny/paths-filter@v4
         with:
           # On push events, compare against the previous commit on this branch
@@ -1147,7 +1132,6 @@ jobs:
       # and vetoes the fast path via the areas guard above), so nothing this restore
       # validates could have moved since the push that last validated it.
       - name: Classify change for the docs fast path
-        if: needs.gate.outputs.run == 'true'
         id: fastpath
         shell: bash
         env:
@@ -1182,12 +1166,12 @@ jobs:
       # as success, so the gate would fail open. It runs on every change the docs fast path does not
       # engage for (about two seconds), so a docs-only change stays fast.
       - name: Parse and link every wwwroot/js module
-        if: ${{ needs.gate.outputs.run == 'true' && (steps.fastpath.outputs.engaged != 'true') }}
+        if: steps.fastpath.outputs.engaged != 'true'
         shell: bash
         run: bash .github/scripts/check-web-js.sh
 
       - name: Setup .NET 10.0
-        if: ${{ needs.gate.outputs.run == 'true' && (steps.fastpath.outputs.engaged != 'true') }}
+        if: steps.fastpath.outputs.engaged != 'true'
         uses: actions/setup-dotnet@v6
         with:
           global-json-file: global.json
@@ -1224,7 +1208,7 @@ jobs:
       # makes this restore mandatory and a second project taking an SDK-coupled reference fails rather than
       # joining the exemption quietly.
       - name: Restore dependencies
-        if: ${{ needs.gate.outputs.run == 'true' && (steps.fastpath.outputs.engaged != 'true') }}
+        if: steps.fastpath.outputs.engaged != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -1246,11 +1230,11 @@ jobs:
           dotnet restore tools/ui-smoke-wpf/UiSmokeWpf.csproj --locked-mode
 
       - name: Build Lite.Tests
-        if: ${{ needs.gate.outputs.run == 'true' && (steps.filter.outputs.lite == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release') }}
+        if: steps.filter.outputs.lite == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
         run: dotnet build Lite.Tests/Lite.Tests.csproj -c Release --no-restore
 
       - name: Build Installer.Tests
-        if: ${{ needs.gate.outputs.run == 'true' && (steps.filter.outputs.installer == 'true' || steps.filter.outputs.installer_core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release') }}
+        if: steps.filter.outputs.installer == 'true' || steps.filter.outputs.installer_core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
         run: dotnet build deprecated/Installer.Tests/Installer.Tests.csproj -c Release --no-restore
 
       # The 'dashboard' path filter was defined when the Full Dashboard moved to deprecated/ (#1612) but
@@ -1261,11 +1245,11 @@ jobs:
       # installer_core too: the Dashboard references Installer.Core, and the filter's own comment says a
       # change there rebuilds both products, which only held for the CLI Installer until now.
       - name: Build Dashboard.Tests
-        if: ${{ needs.gate.outputs.run == 'true' && (steps.filter.outputs.dashboard == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.installer_core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release') }}
+        if: steps.filter.outputs.dashboard == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.installer_core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
         run: dotnet build deprecated/Dashboard.Tests/Dashboard.Tests.csproj -c Release --no-restore
 
       - name: Build Darling
-        if: ${{ needs.gate.outputs.run == 'true' && (steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release') }}
+        if: steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
         run: |
           dotnet build Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-restore
           dotnet build Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj -c Release --no-restore
@@ -1285,17 +1269,17 @@ jobs:
       # to be maintained. Releases keep this single unsharded
       # pass so the artifact-producing run still executes the suite whole, in one log.
       - name: Run Lite tests
-        if: ${{ needs.gate.outputs.run == 'true' && (github.event_name == 'release') }}
+        if: github.event_name == 'release'
         run: dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build -- -xml TestResults/lite-timing-release.xml
 
       # #5208: per-test timings of the unsharded release pass, same shape as the lite-tests shards.
       - name: Lite test timing summary
-        if: ${{ needs.gate.outputs.run == 'true' && (always() && github.event_name == 'release') }}
+        if: always() && github.event_name == 'release'
         continue-on-error: true
         run: python .github/scripts/lite-timing-top.py TestResults
 
       - name: Upload Lite test timings
-        if: ${{ needs.gate.outputs.run == 'true' && (always() && github.event_name == 'release') }}
+        if: always() && github.event_name == 'release'
         continue-on-error: true
         uses: actions/upload-artifact@v6
         with:
@@ -1307,11 +1291,11 @@ jobs:
           if-no-files-found: ignore
 
       - name: Run Installer tests
-        if: ${{ needs.gate.outputs.run == 'true' && (steps.filter.outputs.installer == 'true' || steps.filter.outputs.installer_core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release') }}
+        if: steps.filter.outputs.installer == 'true' || steps.filter.outputs.installer_core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
         run: dotnet run --project deprecated/Installer.Tests/Installer.Tests.csproj -c Release --no-build -- -class- "Installer.Tests.VersionDetectionTests" -class- "Installer.Tests.IdempotencyTests" -class- "Installer.Tests.AdversarialTests"
 
       - name: Run Dashboard tests
-        if: ${{ needs.gate.outputs.run == 'true' && (steps.filter.outputs.dashboard == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.installer_core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release') }}
+        if: steps.filter.outputs.dashboard == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.installer_core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
         run: dotnet run --project deprecated/Dashboard.Tests/Dashboard.Tests.csproj -c Release --no-build
 
       # #5459 cut 3b: the PostgreSQL shards run EVERY Darling.Tests class, with a live store, whenever the Darling
@@ -1321,7 +1305,7 @@ jobs:
       # .github/scripts/ci-select.py holds the rule (darling_scope); the replay of the failure corpus checks it.
       - name: Detect the Darling PostgreSQL gate
         id: darling-gate
-        if: ${{ needs.gate.outputs.run == 'true' && (github.event_name != 'release' && (steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true')) }}
+        if: github.event_name != 'release' && (steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true')
         uses: dorny/paths-filter@v4
         with:
           base: ${{ github.event_name == 'push' && github.event.before || '' }}
@@ -1329,7 +1313,7 @@ jobs:
 
       - name: Decide the Darling test scope
         id: darling-scope
-        if: ${{ needs.gate.outputs.run == 'true' && (steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release') }}
+        if: steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -1346,7 +1330,7 @@ jobs:
       # failed download) leaves TEST_MAP_SELECTION empty in the test step below, and an empty one means every class runs.
       - name: Download the test map selection
         id: map-selection
-        if: ${{ needs.gate.outputs.run == 'true' && (github.event_name == 'pull_request' && needs.test-map-select.result == 'success') }}
+        if: github.event_name == 'pull_request' && needs.test-map-select.result == 'success'
         continue-on-error: true
         uses: actions/download-artifact@v6
         with:
@@ -1355,7 +1339,7 @@ jobs:
 
       - name: Run Darling tests
         id: darling-tests
-        if: ${{ needs.gate.outputs.run == 'true' && (steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release') }}
+        if: steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
         env:
           DARLING_SCOPE_FILTER: ${{ steps.darling-scope.outputs.filter }}
           DARLING_SCOPE: ${{ steps.darling-scope.outputs.scope }}
@@ -1426,7 +1410,7 @@ jobs:
       # variable. Darling.Tests is already built (Release) by the build step above, so this runs
       # the one test by name and nothing else.
       - name: Statement filter release gate
-        if: ${{ needs.gate.outputs.run == 'true' && (github.event_name == 'release') }}
+        if: github.event_name == 'release'
         env:
           DARLING_RELEASE_CUT: '1'
         shell: pwsh
@@ -1441,7 +1425,7 @@ jobs:
           }
 
       - name: Get version
-        if: ${{ needs.gate.outputs.run == 'true' && (steps.fastpath.outputs.engaged != 'true') }}
+        if: steps.fastpath.outputs.engaged != 'true'
         id: version
         shell: pwsh
         run: |
@@ -1468,23 +1452,23 @@ jobs:
       # Lite/PerformanceMonitorLite.csproj declares RuntimeIdentifiers so the committed lock
       # file covers this RID; see the comment there before removing either half.
       - name: Publish Lite
-        if: ${{ needs.gate.outputs.run == 'true' && (steps.filter.outputs.lite == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release') }}
+        if: steps.filter.outputs.lite == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
         run: dotnet publish Lite/PerformanceMonitorLite.csproj -c Release -r win-x64 --self-contained -o publish/Lite
 
       - name: Publish Lite (self-contained for Velopack)
-        if: ${{ needs.gate.outputs.run == 'true' && (github.event_name == 'release') }}
+        if: github.event_name == 'release'
         run: dotnet publish Lite/PerformanceMonitorLite.csproj -c Release -r win-x64 --self-contained -o publish/Lite-velopack
 
       - name: Publish Darling Service
-        if: ${{ needs.gate.outputs.run == 'true' && (steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release') }}
+        if: steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
         run: dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release -o publish/DarlingService
 
       - name: Publish Darling Viewer
-        if: ${{ needs.gate.outputs.run == 'true' && (steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release') }}
+        if: steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
         run: dotnet publish Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj -c Release -o publish/DarlingViewer
 
       - name: Publish Darling Viewer (self-contained for Velopack)
-        if: ${{ needs.gate.outputs.run == 'true' && (github.event_name == 'release') }}
+        if: github.event_name == 'release'
         run: dotnet publish Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj -c Release -r win-x64 --self-contained -o publish/DarlingViewer-velopack
 
       # Darling bundles a PostgreSQL 18 + TimescaleDB runtime (pg-runtime.zip) that ships beside
@@ -1494,7 +1478,7 @@ jobs:
       # unchanged pins restores the assembled zip and skips both the download and the assembly,
       # and any pin/version bump edits the script and invalidates the cache automatically.
       - name: Cache Darling pg-runtime.zip
-        if: ${{ needs.gate.outputs.run == 'true' && (github.event_name == 'release') }}
+        if: github.event_name == 'release'
         id: cache-pg-runtime
         uses: actions/cache@v6
         with:
@@ -1502,12 +1486,12 @@ jobs:
           key: pg-runtime-${{ runner.os }}-${{ hashFiles('Darling/tools/fetch-pg-runtime.ps1') }}
 
       - name: Build Darling pg-runtime.zip
-        if: ${{ needs.gate.outputs.run == 'true' && (github.event_name == 'release' && steps.cache-pg-runtime.outputs.cache-hit != 'true') }}
+        if: github.event_name == 'release' && steps.cache-pg-runtime.outputs.cache-hit != 'true'
         shell: pwsh
         run: ./Darling/tools/fetch-pg-runtime.ps1
 
       - name: Package release artifacts
-        if: ${{ needs.gate.outputs.run == 'true' && (github.event_name == 'release') }}
+        if: github.event_name == 'release'
         shell: pwsh
         run: |
           $version = "${{ steps.version.outputs.VERSION }}"
@@ -1523,7 +1507,7 @@ jobs:
       # bump surfaces at release time — bump only alongside a validated real signing run.
       # Dependabot is configured to skip this major (see .github/dependabot.yml).
       - name: Upload Lite for signing
-        if: ${{ needs.gate.outputs.run == 'true' && (github.event_name == 'release') }}
+        if: github.event_name == 'release'
         id: upload-lite
         uses: actions/upload-artifact@v6
         with:
@@ -1531,7 +1515,7 @@ jobs:
           path: publish/Lite/
 
       - name: Stage Darling for signing
-        if: ${{ needs.gate.outputs.run == 'true' && (github.event_name == 'release') }}
+        if: github.event_name == 'release'
         shell: pwsh
         run: |
           $stage = 'publish/Darling-signing'
@@ -1541,7 +1525,7 @@ jobs:
           Copy-Item 'publish/DarlingViewer/*' "$stage/viewer" -Recurse
 
       - name: Upload Darling for signing
-        if: ${{ needs.gate.outputs.run == 'true' && (github.event_name == 'release') }}
+        if: github.event_name == 'release'
         id: upload-darling
         uses: actions/upload-artifact@v6
         with:
@@ -1555,7 +1539,7 @@ jobs:
       # since 2026-09-24. SignPath signs only a run's first 3 attempts: if signing keeps
       # failing, fix the cause and start a fresh release run instead of re-running this one.
       - name: Sign Lite
-        if: ${{ needs.gate.outputs.run == 'true' && (github.event_name == 'release') }}
+        if: github.event_name == 'release'
         uses: signpath/github-action-submit-signing-request@v3
         with:
           api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
@@ -1568,7 +1552,7 @@ jobs:
           output-artifact-directory: 'signed/Lite'
 
       - name: Sign Darling
-        if: ${{ needs.gate.outputs.run == 'true' && (github.event_name == 'release') }}
+        if: github.event_name == 'release'
         uses: signpath/github-action-submit-signing-request@v3
         with:
           api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
@@ -1581,7 +1565,7 @@ jobs:
           output-artifact-directory: 'signed/Darling'
 
       - name: Replace with signed artifacts
-        if: ${{ needs.gate.outputs.run == 'true' && (github.event_name == 'release') }}
+        if: github.event_name == 'release'
         shell: pwsh
         run: |
           $version = "${{ steps.version.outputs.VERSION }}"
@@ -1590,7 +1574,7 @@ jobs:
           Compress-Archive -Path 'signed/Lite/*' -DestinationPath "releases/PerformanceMonitorLite-$version.zip" -Force
 
       - name: Package Darling (signed)
-        if: ${{ needs.gate.outputs.run == 'true' && (github.event_name == 'release') }}
+        if: github.event_name == 'release'
         shell: pwsh
         run: |
           $version = "${{ steps.version.outputs.VERSION }}"
@@ -1611,7 +1595,7 @@ jobs:
       # signature on lib/app/<App>.exe inside each .nupkg and on current/<App>.exe inside each
       # Portable.zip; `vpk pack` below reads the signed output, not the raw publish directory.
       - name: Upload Lite (Velopack) for signing
-        if: ${{ needs.gate.outputs.run == 'true' && (github.event_name == 'release') }}
+        if: github.event_name == 'release'
         id: upload-lite-velopack
         uses: actions/upload-artifact@v6
         with:
@@ -1619,7 +1603,7 @@ jobs:
           path: publish/Lite-velopack/
 
       - name: Upload Darling Viewer (Velopack) for signing
-        if: ${{ needs.gate.outputs.run == 'true' && (github.event_name == 'release') }}
+        if: github.event_name == 'release'
         id: upload-darlingviewer-velopack
         uses: actions/upload-artifact@v6
         with:
@@ -1627,7 +1611,7 @@ jobs:
           path: publish/DarlingViewer-velopack/
 
       - name: Sign Lite (Velopack)
-        if: ${{ needs.gate.outputs.run == 'true' && (github.event_name == 'release') }}
+        if: github.event_name == 'release'
         uses: signpath/github-action-submit-signing-request@v3
         with:
           api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
@@ -1645,7 +1629,7 @@ jobs:
       # workflow lives outside the repo on signpath.io, and a step naming a slug that does not
       # exist fails the release — the standing #1340 SignPath prerequisite.
       - name: Sign Darling Viewer (Velopack)
-        if: ${{ needs.gate.outputs.run == 'true' && (github.event_name == 'release') }}
+        if: github.event_name == 'release'
         uses: signpath/github-action-submit-signing-request@v3
         with:
           api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
@@ -1658,7 +1642,7 @@ jobs:
           output-artifact-directory: 'signed/DarlingViewer-Velopack'
 
       - name: Create Velopack releases (Lite + Darling Viewer)
-        if: ${{ needs.gate.outputs.run == 'true' && (github.event_name == 'release') }}
+        if: github.event_name == 'release'
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -1703,13 +1687,13 @@ jobs:
       # carries. The staging layout gives each product its own subdirectory because both
       # portable archives contain an Update.exe and a flat batch would collide.
       - name: Collect the executables Velopack generates
-        if: ${{ needs.gate.outputs.run == 'true' && (github.event_name == 'release') }}
+        if: github.event_name == 'release'
         shell: pwsh
         run: |
           python3 .github/scripts/postpack_signing.py collect --stage postpack/unsigned --manifest postpack/manifest.json --product lite=releases/velopack-lite --product darlingviewer=releases/velopack-darlingviewer
 
       - name: Upload the Velopack-generated executables for signing
-        if: ${{ needs.gate.outputs.run == 'true' && (github.event_name == 'release') }}
+        if: github.event_name == 'release'
         id: upload-postpack
         uses: actions/upload-artifact@v6
         with:
@@ -1722,7 +1706,7 @@ jobs:
       # the per-product configurations refuse with min-matches="1"; postpack_signing.py's
       # collect mode asserts a non-empty staging set for exactly that reason.
       - name: Sign the executables Velopack generates
-        if: ${{ needs.gate.outputs.run == 'true' && (github.event_name == 'release') }}
+        if: github.event_name == 'release'
         uses: signpath/github-action-submit-signing-request@v3
         with:
           api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
@@ -1738,7 +1722,7 @@ jobs:
       # it does not replace keeps its local header, name, extra field and raw compressed bytes,
       # and the rebuild is verified against a snapshot of the original before it replaces it.
       - name: Write the signed Velopack executables back
-        if: ${{ needs.gate.outputs.run == 'true' && (github.event_name == 'release') }}
+        if: github.event_name == 'release'
         shell: pwsh
         run: |
           python3 .github/scripts/postpack_signing.py apply --signed postpack/signed --manifest postpack/manifest.json
@@ -1749,7 +1733,7 @@ jobs:
       # here. releases.<channel>.json is the integrity record for the .nupkg files, and nothing
       # publishes a checksum for the two files the step above signs.
       - name: Generate checksums
-        if: ${{ needs.gate.outputs.run == 'true' && (github.event_name == 'release') }}
+        if: github.event_name == 'release'
         shell: pwsh
         run: |
           $checksums = Get-ChildItem releases/*.zip | ForEach-Object {
@@ -1781,7 +1765,7 @@ jobs:
       # Darling zip must be there, and it must hold install-, uninstall- and upgrade-darling.ps1 at its
       # root (status 2 when one is missing, when there is no Darling zip, or when a file cannot be read).
       - name: Assert every published executable is signed
-        if: ${{ needs.gate.outputs.run == 'true' && (github.event_name == 'release') }}
+        if: github.event_name == 'release'
         shell: pwsh
         run: python3 .github/scripts/verify_release_signatures.py --verify-dir releases
 
@@ -1791,7 +1775,7 @@ jobs:
       # SignPath Foundation certificate the release is signed with. Anything else, or a script that is not there,
       # fails the release. Each script's signer, thumbprint and timestamper are printed for the log.
       - name: Assert the Darling scripts carry a valid Authenticode signature
-        if: ${{ needs.gate.outputs.run == 'true' && (github.event_name == 'release') }}
+        if: github.event_name == 'release'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -1839,14 +1823,14 @@ jobs:
           }
 
       - name: Upload release assets
-        if: ${{ needs.gate.outputs.run == 'true' && (github.event_name == 'release') }}
+        if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release upload ${{ github.event.release.tag_name }} releases/*.zip releases/SHA256SUMS.txt --clobber
 
       - name: Upload Lite Velopack artifacts
-        if: ${{ needs.gate.outputs.run == 'true' && (github.event_name == 'release') }}
+        if: github.event_name == 'release'
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -1866,7 +1850,7 @@ jobs:
           gh release upload "${{ github.event.release.tag_name }}" $files --clobber
 
       - name: Upload Darling Viewer Velopack artifacts
-        if: ${{ needs.gate.outputs.run == 'true' && (github.event_name == 'release') }}
+        if: github.event_name == 'release'
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -2519,7 +2503,6 @@ jobs:
           LINT_RESULT: ${{ needs.workflow-lint.result }}
           GATE_RESULT: ${{ needs.gate.result }}
           GATE_RUN: ${{ needs.gate.outputs.run }}
-          DECLINED: ${{ needs.gate.outputs.declined }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
@@ -2528,14 +2511,9 @@ jobs:
             echo "::error title=CI gate failed::needs.gate.result='${GATE_RESULT}' - the job that decides whether CI runs did not succeed, so nothing ran. Re-run the workflow."
             exit 1
           fi
-          # A declined run leaves every job skipped, which would also read as green. A draft reports success
-          # with a notice (marking it ready starts the run); a merge-train label must still fail.
+          # A declined run (draft or merge-train) leaves every job skipped, which would also read as green.
           if [ "${EVENT_NAME}" = "pull_request" ] && [ "${GATE_RUN}" != "true" ]; then
-            if [ "${DECLINED}" = "draft" ]; then
-              echo "::notice title=Draft PR::Draft PR: CI runs when the PR is marked ready for review."
-              exit 0
-            fi
-            echo "::error title=CI not run::This pull request carries the merge-train label, so its CI was skipped (the train's own run covered it). It can be merged only by an admin override."
+            echo "::error title=CI not run::This pull request's CI was skipped (draft or merge-train label). It can be merged only by an admin override after a merge train covered it."
             exit 1
           fi
           # The Guard tests run beside the shards on a pull request (#5949; first, before that). When they did not
@@ -3656,7 +3634,6 @@ jobs:
           LINT_RESULT: ${{ needs.workflow-lint.result }}
           GATE_RESULT: ${{ needs.gate.result }}
           GATE_RUN: ${{ needs.gate.outputs.run }}
-          DECLINED: ${{ needs.gate.outputs.declined }}
           EVENT_NAME: ${{ github.event_name }}
           LITE_SCOPE_MODE: ${{ needs.lite-scope.outputs.mode }}
         run: |
@@ -3666,14 +3643,9 @@ jobs:
             echo "::error title=CI gate failed::needs.gate.result='${GATE_RESULT}' - the job that decides whether CI runs did not succeed, so nothing ran. Re-run the workflow."
             exit 1
           fi
-          # A declined run leaves every job skipped, which would also read as green. A draft reports success
-          # with a notice (marking it ready starts the run); a merge-train label must still fail.
+          # A declined run (draft or merge-train) leaves every job skipped, which would also read as green.
           if [ "${EVENT_NAME}" = "pull_request" ] && [ "${GATE_RUN}" != "true" ]; then
-            if [ "${DECLINED}" = "draft" ]; then
-              echo "::notice title=Draft PR::Draft PR: CI runs when the PR is marked ready for review."
-              exit 0
-            fi
-            echo "::error title=CI not run::This pull request carries the merge-train label, so its CI was skipped (the train's own run covered it). It can be merged only by an admin override."
+            echo "::error title=CI not run::This pull request's CI was skipped (draft or merge-train label). It can be merged only by an admin override after a merge train covered it."
             exit 1
           fi
           # The Guard tests run beside the shards on a pull request (#5949; first, before that). When they did not
