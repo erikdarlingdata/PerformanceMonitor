@@ -28,9 +28,26 @@ name: Claude review guard
 # the next release -- so a guard living inside the file it protects would disable review each time
 # it was touched. Nothing here invokes claude-code-action, so this file can be edited freely.
 #
-# It polls rather than using `on: workflow_run` because workflow_run only ever fires from the copy
-# of a workflow that is on the default branch: that variant would be dormant, and untestable, until
-# a release shipped it.
+# It polls a review that is RUNNING rather than using `on: workflow_run` because workflow_run only
+# ever fires from the copy of a workflow that is on the default branch: that variant would be
+# dormant, and untestable, until a release shipped it.
+#
+# #6549: it does not poll a review that is WAITING for a runner. A guard that did held a runner for
+# its whole 35-minute budget, and with 30 pull requests armed the guards took the runners the
+# reviews they waited for needed (102 review runs on 2026-10-22: the decide job waited 3.9 minutes
+# at the median and 46.7 at p90, the review job another 1.2 and 34.9). After about three minutes of
+# a review that has not started, the check FAILS with the run it waits for named, and gives its
+# runner back. It is not a pass and it is not a verdict: the verdict comes from a re-run of this same
+# run, started by claude-review-guard-rerun.yml, which re-runs the newest guard run of the head when
+# the review's verdict is newer than that run's result. That file listens for the bot's verdict
+# review (pull_request_review, which runs the pull request's copy, so it works on dev now) and for
+# the review run completing (workflow_run, dormant until a release puts the file on the default
+# branch). Until then, a review run that ends with no verdict review -- a push after the follow-up,
+# a review the action skipped, a failed review -- re-runs nothing, and that check waits for a human
+# re-run, as its message says. A re-run keeps this run's check suite, check-run name and head SHA,
+# so its result is the one branch protection reads; the re-run workflow's own job has another name,
+# because a second job named "Claude review guard" (and a SKIPPED one passes) would report on the
+# same head from another check suite.
 #
 # #3657's landing produced a third case the never-ran arm had no name for. That arm read "Claude
 # never ran and this PR does not touch claude-review.yml" as one thing -- an unreviewed edit to the
@@ -319,6 +336,75 @@ jobs:
               --jq "[.workflow_runs[] | select(.conclusion != \"skipped\" and .id > $1)][0] // empty
                     | \"\(.id) \(.status) \(.conclusion // \"-\") \(.created_at)\""
           }
+          # #6549: a review that is waiting for a runner is not a review this check can judge yet, and
+          # a guard that polls it holds a runner of its own the whole time: with 30 pull requests
+          # armed, the guards took the slots the reviews, builds and tests they waited for needed,
+          # and each one ran out its 35 minutes. So the poll counts the polls on which the review has
+          # not started: the run is still queued (its decide job has no runner yet), or the decide
+          # job finished and the review job it passed the run to is still queued. After
+          # QUEUED_POLLS_MAX of them (about three minutes, so a short queue is still waited out) the
+          # check gives its runner back through review_queued(), which FAILS it: a review that has
+          # not run is not a verdict, and a red check is not one either, so nothing merges on it.
+          # The verdict comes from a re-run of this same run, started by claude-review-guard-rerun.yml
+          # when the review posts its verdict review (pull_request_review, which works on dev now) or
+          # when the review run completes (workflow_run, only once that file is on the default
+          # branch). A re-run keeps this run's check suite, check-run name and head SHA, so its
+          # result is the one branch protection reads, as a re-run by hand is today. A review that
+          # is running (not waiting) is polled as before, within the same 35-minute budget.
+          QUEUED_POLLS_MAX=6
+          RERUN_WF=.github/workflows/claude-review-guard-rerun.yml
+          queued_polls=0; waiting_on=''; started_run=''
+          not_started() { case "$1" in queued|waiting|pending|requested) return 0 ;; esac; return 1; }
+          # $1 is the run's status. Counts this poll when the run, or its review job once the decide
+          # job is done, has not started. The job read is skipped once the review job of this run
+          # has been seen started, and a job read that fails counts nothing (#2309: one poll lost).
+          count_queued() {
+            local review_status others queued_jq
+            if not_started "$1"; then
+              queued_polls=$((queued_polls + 1)); waiting_on="the run itself (its decide job)"
+              return 0
+            fi
+            if [ "$1" != "in_progress" ] || [ "$started_run" = "$run_id" ]; then return 0; fi
+            # One line: the review job's status ("-" while the run lists no such job), then how many
+            # of the run's other jobs (the decide job) have not completed.
+            # shellcheck disable=SC2016 # the single quotes hold a jq program, not a shell expansion
+            queued_jq='"\(([.jobs[] | select(.name == env.REVIEW_JOB)] | .[0].status) // "-")"
+              + " \([.jobs[] | select(.name != env.REVIEW_JOB and .status != "completed")] | length)"'
+            gh_capture "repos/$R/actions/runs/$run_id/jobs" --jq "$queued_jq" || return 0
+            read -r review_status others <<<"$LOOKUP_OUT"
+            if not_started "$review_status" && [ "$others" = "0" ]; then
+              queued_polls=$((queued_polls + 1)); waiting_on="its '$REVIEW_JOB' job"
+            elif [ "$review_status" != "-" ] && ! not_started "$review_status"; then
+              started_run=$run_id
+            fi
+          }
+          # Ends the step, failing the check, with the run it waits for named. Whether a completed run
+          # re-runs this check depends on claude-review-guard-rerun.yml being on the default branch
+          # (workflow_run fires only from that copy), so the message reads which is true instead of
+          # promising it. That read only words the message: a read that fails says "not yet".
+          review_queued() {
+            local url="https://github.com/$R/actions/runs/$run_id" on_completion='' then_what
+            if gh_capture "repos/$R/contents/$RERUN_WF?ref=$DEFAULT_BRANCH" --jq '.sha // empty' \
+                && [ -n "$LOOKUP_OUT" ]; then
+              on_completion=1
+            fi
+            if [ -n "$on_completion" ]; then
+              then_what="This check runs again by itself when run $run_id completes, whatever it does."
+            else
+              then_what="This check runs again by itself when the review posts its verdict. A run that"
+              then_what+=" ends with no verdict (a push after the follow-up, a review the action skipped,"
+              then_what+=" a failed review) re-runs nothing until $RERUN_WF reaches $DEFAULT_BRANCH:"
+              then_what+=" re-run this check by hand once run $run_id has finished."
+            fi
+            echo "::error title=Review run not started::Review run $run_id for $SHA ($url) has not"\
+              "started: $waiting_on was still waiting for a runner after $queued_polls polls 30 seconds"\
+              "apart. A review that has not run is not a verdict, so this check fails, and it gives"\
+              "its runner back instead of holding it while the review waits for one (#6549). $then_what"
+            summary "### Review run $run_id has not started; this check gave its runner back (#6549)"
+            summary "- $url: $waiting_on is waiting for a runner. $then_what"
+            exit 1
+          }
+
           # One 35-minute budget for the whole step: a cancelled review that a newer run replaced is
           # followed with what is left of it, so the step stays inside its own timeout.
           run_id=''; status=''; conclusion=''; created=''; seen=''; attempt=0
@@ -332,6 +418,8 @@ jobs:
                 read -r run_id status conclusion created <<<"$line"
                 seen=1
                 [ "$status" = "completed" ] && break
+                count_queued "$status"
+                if [ "$queued_polls" -ge "$QUEUED_POLLS_MAX" ]; then review_queued; fi
               # Keyed on never having seen a run, not on this poll being empty: a transient empty
               # listing after one was found must not be read as "review is not operating here".
               elif [ -z "$seen" ] && [ -n "$listed" ] && [ "$attempt" -ge 6 ]; then
