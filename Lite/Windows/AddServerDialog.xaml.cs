@@ -472,16 +472,18 @@ public partial class AddServerDialog : Window
                 }
             }
 
-            /* #6459: the engine edition rides on the same round trip, so the replica test can say an Azure SQL Database never reads one. */
-            using var cmd = new SqlCommand("SELECT @@VERSION, CONVERT(int, SERVERPROPERTY('EngineEdition'));", connection);
+            /* #6459: the engine edition rides on the same round trip (the shared detection query, read by column name), so the replica test can say an Azure SQL Database never reads one. */
+            using var cmd = new SqlCommand(ServerManager.DetectionQueryText, connection);
             string? version = null;
             _testedEngineEdition = 0;
             using (var reader = await cmd.ExecuteReaderAsync())
             {
                 if (await reader.ReadAsync())
                 {
-                    version = reader.IsDBNull(0) ? null : reader.GetString(0);
-                    _testedEngineEdition = reader.IsDBNull(1) ? 0 : reader.GetInt32(1);
+                    var versionOrdinal = reader.GetOrdinal("sql_version");
+                    var editionOrdinal = reader.GetOrdinal("engine_edition");
+                    version = reader.IsDBNull(versionOrdinal) ? null : reader.GetString(versionOrdinal);
+                    _testedEngineEdition = reader.IsDBNull(editionOrdinal) ? 0 : reader.GetInt32(editionOrdinal);
                 }
             }
 
@@ -842,9 +844,17 @@ public partial class AddServerDialog : Window
         }
 
         // Test connection when data collection is enabled
+        string? azureReplicaNote = null;
         if (EnabledCheckBox.IsChecked == true)
         {
             var (connected, errorMessage, signInCancelled, _, brokerFailure, ambientFailure) = await RunConnectionTestAsync();
+
+            /* #6459: the test just ran on this save; if it found an Azure SQL Database and a replica is typed, the setting is
+               saved but never read, and the note is shown once the save has gone through. */
+            if (connected)
+            {
+                azureReplicaNote = QueryStoreReplicaConnectionTest.IgnoredOnAzureSqlDatabaseNote(_testedEngineEdition, QueryStoreReplicaBox.Text);
+            }
 
             if (!connected)
             {
@@ -970,6 +980,11 @@ public partial class AddServerDialog : Window
                 {
                     _serverManager.AddServer(AddedServer, username, password);
                 }
+            }
+
+            if (azureReplicaNote is not null)
+            {
+                MessageBox.Show(azureReplicaNote, "Server saved, replica setting not used", MessageBoxButton.OK, MessageBoxImage.Warning);
             }
 
             DialogResult = true;
