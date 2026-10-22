@@ -87,7 +87,7 @@ The agent calls these tools in order:
 1. `wait_for_investigation_requests` waits up to 25 seconds for a request to open on the routes you name. It answers each new request's id, route, server, family and time, with a cursor. Call it again with the cursor. `list_investigation_requests` lists the open requests instead.
 2. `claim_investigation_request` takes one request. The first claim wins. The answer holds a `claim_id` and the brief. To keep a request past its lease, claim it again with the same `claim_id`.
 3. The agent calls the read tools that the brief names. The brief has a budget of minutes and tool calls.
-4. `get_investigation_evidence` reads the evidence sections that Darling froze for the request. A section that is still collecting says `pending`. The call never waits.
+4. `get_investigation_evidence` reads the evidence sections that Darling froze for the request. A section that is still collecting says `pending`. The call never waits. A request that a Client Timeouts alert opened also gets a `client_timeouts` section. It lists the top client applications, client hosts, databases and statements of the alert window, and the brief names `get_client_timeouts` first in `next_calls`.
 5. `submit_investigation_report` ends the work.
 
 ### The brief

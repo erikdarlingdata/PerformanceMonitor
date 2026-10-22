@@ -49,6 +49,60 @@ public sealed class InvestigationEvidenceFamiliesLiveTests
         new(1, ServerId, ServerName, family, metric, at, new[] { ServerId + ":" + metric }, null, 20, 100, LeaseMinutes: 15, ExpiryMinutes: 240);
 
     [Fact]
+    public async Task AClientTimeoutsRequest_FreezesTheTopAppsHostsAndStatements_OfTheAlertWindow()
+    {
+        await RunAsync(async (setup, ct) =>
+        {
+            /* #6553: 3 sampled timeouts from WS-ERIK and 1 from APP01 in the window, plus a row OUTSIDE it that must not count. */
+            await PlantAttentionAsync(setup.Connection, ct, 1, AlertAt.AddMinutes(-2), "count", 4, null, null, null, null, null);
+            await PlantAttentionAsync(setup.Connection, ct, 2, AlertAt.AddMinutes(-2), "sample", 0, Db, "SSMS", "WS-ERIK", "fp-a", "SELECT 1");
+            await PlantAttentionAsync(setup.Connection, ct, 3, AlertAt.AddMinutes(-2), "sample", 0, Db, "SSMS", "WS-ERIK", "fp-a", "SELECT 1");
+            await PlantAttentionAsync(setup.Connection, ct, 4, AlertAt.AddMinutes(-2), "sample", 0, Db, "SSMS", "WS-ERIK", "fp-a", "SELECT 1");
+            await PlantAttentionAsync(setup.Connection, ct, 5, AlertAt.AddMinutes(-2), "sample", 0, Db, "web", "APP01", "fp-b", "SELECT 2");
+            await PlantAttentionAsync(setup.Connection, ct, 6, AlertAt.AddHours(-3), "sample", 0, Db, "old-app", "OLD01", "fp-old", "SELECT 3");
+            var requestId = (await setup.Requests.OpenOrJoinAsync(
+                Alert(InvestigationFamily.QueryPerformance, AlertFamily.ClientTimeoutsMetric, AlertAt), ct)).RequestId!.Value;
+            await PlantRunAsync(setup.Connection, ct, "attention", WindowEnd.AddSeconds(5));
+            await setup.Capture.CaptureOnceAsync(ct);
+
+            var row = Assert.Single(Rows(await setup.Requests.ReadEvidenceAsync(requestId, ct), "client_timeouts"));
+            Assert.Equal(4, row["count"]!.GetValue<long>());
+            var hosts = row["top_hosts"]!.AsArray();
+            Assert.Equal(new[] { "WS-ERIK", "APP01" }, hosts.Select(h => h!["client_hostname"]!.GetValue<string>()));
+            Assert.Equal(3, hosts[0]!["sampled_events"]!.GetValue<long>());
+            Assert.Equal(new[] { "SSMS", "web" }, row["top_client_apps"]!.AsArray().Select(a => a!["client_app_name"]!.GetValue<string>()));
+            var statements = row["top_statements"]!.AsArray();
+            Assert.Equal(new[] { "fp-a", "fp-b" }, statements.Select(s => s!["statement_fingerprint"]!.GetValue<string>()));
+            Assert.Equal("SELECT 1", statements[0]!["sample_statement"]!.GetValue<string>());
+        });
+    }
+
+    [Fact]
+    public async Task AClientTimeoutsRequest_WithNoTimeoutsInTheWindow_FreezesAnEmptySection()
+    {
+        await RunAsync(async (setup, ct) =>
+        {
+            var requestId = (await setup.Requests.OpenOrJoinAsync(
+                Alert(InvestigationFamily.QueryPerformance, AlertFamily.ClientTimeoutsMetric, AlertAt), ct)).RequestId!.Value;
+            await PlantRunAsync(setup.Connection, ct, "attention", WindowEnd.AddSeconds(5));
+            await setup.Capture.CaptureOnceAsync(ct);
+
+            var section = Assert.Single(await setup.Requests.ReadEvidenceAsync(requestId, ct), r => r.Section == "client_timeouts");
+            Assert.Equal("ready", section.State);
+            Assert.Equal("empty", JsonNode.Parse(section.ContentJson!)!["status"]!.GetValue<string>());
+        });
+    }
+
+    private static Task PlantAttentionAsync(
+        NpgsqlConnection connection, CancellationToken ct, long id, DateTime at, string kind, int count,
+        string? db, string? app, string? host, string? fingerprint, string? text) =>
+        DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO attention_events
+    (attention_event_id, collection_time, server_id, server_name, event_kind, attention_count, database_name, client_app_name, client_hostname, statement_fingerprint, statement_text)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+            id, DarlingMcpTestData.Naive(at), ServerId, ServerName, kind, count, db, app, host, fingerprint, text);
+
+    [Fact]
     public async Task ATemporaryObjectDeadlock_KeepsItsObjectAndIndexNames_AfterTheGraphRowIsGone()
     {
         await RunAsync(async (setup, ct) =>

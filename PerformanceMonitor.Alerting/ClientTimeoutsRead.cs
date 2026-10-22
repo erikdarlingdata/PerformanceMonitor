@@ -53,7 +53,7 @@ public static class ClientTimeoutsRead
 {
     /// <summary>The sentence every data answer carries beside the sampled lists.</summary>
     public const string SamplesAreNotTheTotal =
-        "count and rate_per_minute are exact (the session's event_counter). top_statements, top_databases, top_client_apps and sampled_events " +
+        "count and rate_per_minute are exact (the session's event_counter). top_statements, top_databases, top_client_apps, top_hosts and sampled_events " +
         "come from sampled ring-buffer events, which are a subset: they show what the timeouts looked like, never how many there were. " +
         "A statement's text is returned once: a sampled event whose text is already in top_statements (or in an earlier event) has " +
         "statement null and statement_shown_in saying where to read it.";
@@ -168,6 +168,7 @@ public static class ClientTimeoutsRead
             sampled_events_in_range = reading.SampleTotal,
             samples_note = SamplesAreNotTheTotal,
             top_statements = topStatements,
+            top_hosts = window.Hosts.Select(t => new { client_hostname = t.Name, sampled_events = t.Samples }).ToList(),
             top_databases = window.TopDatabases.Select(t => new { database_name = t.Name, sampled_events = t.Samples }).ToList(),
             top_client_apps = window.TopApplications.Select(t => new { client_app_name = t.Name, sampled_events = t.Samples }).ToList(),
             sampled_events_returned = Math.Min(samples.Count, limit),

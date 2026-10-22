@@ -14,6 +14,7 @@ using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Investigations;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -336,6 +337,39 @@ public sealed class InvestigationBriefComposerTests
         }
 
         Assert.Equal("LCK_M_X", (string?)calls.Single(c => (string?)c!["tool"] == "get_wait_trend")!["arguments"]!["wait_type"]);
+    }
+
+    [Fact]
+    public void AClientTimeoutsRequest_NamesGetClientTimeoutsFirst_AndOtherRequestsDoNot()
+    {
+        var timeouts = Request(InvestigationFamily.QueryPerformance) with { FirstMetric = AlertFamily.ClientTimeoutsMetric };
+        var calls = Brief(Sources(request: timeouts))["next_calls"]!.AsArray();
+        Assert.Equal("get_client_timeouts", (string?)calls[0]!["tool"]);
+        Assert.Equal("SQLPROD01", (string?)calls[0]!["arguments"]!["server_name"]);
+        Assert.Equal(1, calls.Count(c => (string?)c!["tool"] == "get_client_timeouts"));
+
+        var other = Brief(Sources(request: Request(InvestigationFamily.QueryPerformance)))["next_calls"]!.AsArray();
+        Assert.DoesNotContain(other, c => (string?)c!["tool"] == "get_client_timeouts");
+    }
+
+    [Fact]
+    public void TheClientHostsOfAClientTimeoutsAlert_AreNumberedUnderMetadataOnly()
+    {
+        /* #6553: every "Client Host" line is classed as a host by its label, so a host name never reaches an agent in clear text. */
+        var window = new AttentionWindow(
+            Array.Empty<DateTime>(), Array.Empty<AttentionCountRow>(), Array.Empty<AttentionSampleGroup>(),
+            Array.Empty<AttentionTopItem>(), Array.Empty<AttentionTopItem>(), Array.Empty<AttentionTopItem>(),
+            TopHosts: new[] { new AttentionTopItem(HostCanary, 40), new AttentionTopItem(HostCanary + "-2", 10) });
+        var finding = new AttentionEvaluator.Finding(AlertSeverityLevel.Warning, 12.5, 10, 150, 150, 12, 5, 40, false, false, Now);
+        var items = AlertContextBuilders.BuildClientTimeoutItems(finding, window)
+            .Select(i => new InvestigationBriefContextItem(i.Heading, i.Fields.Select(f => new KeyValuePair<string, string>(f.Label, f.Value)).ToList()))
+            .ToArray();
+        var alert = new InvestigationBriefAlert(Now.AddMinutes(-1), AlertFamily.ClientTimeoutsMetric, 12.5, 10, false, null, null, items);
+
+        var masked = Brief(Sources(alerts: new[] { alert }), McpDataDetail.MetadataOnly).ToJsonString();
+        Assert.DoesNotContain(HostCanary, masked, StringComparison.Ordinal);
+        Assert.Contains("Top client hosts", masked, StringComparison.Ordinal);
+        Assert.Contains(HostCanary, Brief(Sources(alerts: new[] { alert })).ToJsonString(), StringComparison.Ordinal);
     }
 
     [Fact]
