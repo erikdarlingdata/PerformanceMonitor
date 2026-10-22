@@ -423,8 +423,7 @@ public sealed class InvestigationFeedbackLiveTests
         {
             var answer = await Send("PUT", "/api/investigation-feedback/" + request, "application/json", "{\"verdict\":\"wrong\"}");
             Assert.Equal(403, answer.Status);
-            Assert.Equal(DarlingWebEndpoints.FeedbackRefusedMessage, (string)answer.Body!["error"]!);
-            Assert.Contains("admin role", (string)answer.Body["error"]!, StringComparison.Ordinal);
+            Assert.Equal(DarlingWebEndpoints.FeedbackRefusedMessage(false), (string)answer.Body!["error"]!);
             Assert.Contains("Viewer", (string)answer.Body["error"]!, StringComparison.Ordinal);
             Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_feedback", ct));
 

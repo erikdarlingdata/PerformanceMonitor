@@ -573,7 +573,7 @@ public sealed class InvestigationFeedbackExportLiveTests
             await Recorded(owner, request, ct);
             var refused = Decode(await Send("GET", "/api/investigation-export", null, null));
             Assert.Equal(403, refused.Status);
-            Assert.Equal(DarlingWebEndpoints.InvestigationExportRefusedMessage, (string)JsonNode.Parse(refused.Text)!["error"]!);
+            Assert.Equal(DarlingWebEndpoints.InvestigationExportRefusedMessage(false), (string)JsonNode.Parse(refused.Text)!["error"]!);
             Assert.DoesNotContain(request.ToString(), refused.Text, StringComparison.Ordinal);
         });
     }

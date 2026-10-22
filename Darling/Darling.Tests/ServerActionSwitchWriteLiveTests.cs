@@ -288,7 +288,7 @@ public sealed class ServerActionSwitchWriteLiveTests
 
             var refused = await Send("PUT", "/api/servers/1/actions/force_plan", "application/json", "{\"enabled\":true}");
             Assert.Equal(403, refused.Status);
-            Assert.Equal(DarlingWebEndpoints.ServerActionRefusedMessage, (string)refused.Body!["error"]!);
+            Assert.Equal(DarlingWebEndpoints.ServerActionRefusedMessage(false), (string)refused.Body!["error"]!);
             Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.config_server_actions", ct));
             Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal", ct));
         });

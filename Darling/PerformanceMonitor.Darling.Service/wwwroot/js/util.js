@@ -186,6 +186,17 @@ export function errorStrip(message) {
 export function emptyStrip(message) {
   return el("div", { class: "strip empty" }, [localizeIsoText(plainText(message))]);
 }
+/** #6445: the note a page that lists only shows. The advice depends on the store: a managed store refuses postgres.webConnectionString,
+    so it says only that this dashboard lists and the Viewer app makes the change; a store you brought yourself may give the web an
+    admin store login. `lists` finishes "so ..." and `toChange` starts the sentence that names the Viewer. The service's own 403
+    sentences come from DarlingWebStoreWrites and say the same. */
+export function listOnlyNote(managedStore, lists, toChange) {
+  return managedStore === true
+    ? "This dashboard lists only on this store, so " + lists + ". " + toChange + ", use the Viewer app."
+    : "This dashboard's store login cannot make changes, so " + lists + ". " + toChange +
+      ", use the Viewer app, or give the web an admin store login (set postgres.webConnectionString to an admin login).";
+}
+
 /** A non-fatal caveat about otherwise-good data (e.g. the #1665 partial-window notice). The sentence may be one the service
     wrote for an MCP caller (a width note, a truncation note), so it passes through plainText like every message (#5644 W8). */
 export function noticeStrip(message) {
