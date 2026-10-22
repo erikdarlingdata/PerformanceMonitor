@@ -498,6 +498,11 @@ ALTER TABLE IF EXISTS collect.collection_log DROP COLUMN IF EXISTS read_source;
 DO $$ BEGIN IF to_regclass('collect.collection_log') IS NOT NULL THEN
   EXECUTE 'CREATE VIEW collect.v_collection_log AS SELECT * FROM collect.collection_log';
 END IF; END $$;"),
+        // V214 (#6334): the known-pattern entries. The table is the probe's newest sentinel. The rewind drops it (and its trigger with it), so a re-run
+        // of V214 builds both again. Safe on a store that never had it.
+        new(214, "hasKnownPatterns",
+            @"
+DROP TABLE IF EXISTS config.config_known_patterns;"),
     ];
 
     /// <summary>

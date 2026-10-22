@@ -335,8 +335,8 @@ public static class PgTableTuning
            may be its unforced one), so that index needs the statement reshaped and its first-sighting
            semantics changed — the cheaper long-run shape, deferred rather than smuggled in. */
         "CREATE INDEX IF NOT EXISTS " + ForcePlanFailuresIndexName + " ON collect.query_store_stats (server_id, collection_time DESC) INCLUDE (database_name, query_id, plan_id, force_failure_count, is_forced_plan, plan_forcing_type, last_force_failure_reason)",
-        /* The legacy-row check (QueryStoreIntervalWide.HasLegacyRowSql, clause 6 of ReadsTableAsync, run once
-           per server by the fleet panels) asks whether the server's window holds a row with no interval start.
+        /* The legacy-row check (QueryStoreIntervalWide.HasLegacyRowSql, clause 6 of ReadsTableAsync, which only
+           the Viewer's duration trend asks for since #6267's follow-up) asks whether the server's window holds a row with no interval start.
            On a field store it holds none, and with only the (server_id, collection_time) index that "no" costs
            a fetch of every heap tuple the window touches: a mean of 4.1 s and 6.8 M blocks per call over a
            day on the largest store measured (#4969), most of it heap fetches in the uncompressed chunks. The read stays exact, because the collector can still store a NULL start when the

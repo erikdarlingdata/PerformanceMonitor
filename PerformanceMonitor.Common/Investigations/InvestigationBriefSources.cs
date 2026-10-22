@@ -148,7 +148,16 @@ public sealed record InvestigationBriefSources(
     string? RequestUrl = null,
     bool Practice = false,
     IReadOnlyList<InvestigationAlertRecurrence>? Recurrence = null,
-    IReadOnlyList<InvestigationBriefEvidence>? Evidence = null);
+    IReadOnlyList<InvestigationBriefEvidence>? Evidence = null,
+    IReadOnlyList<InvestigationKnownPatternMatch>? KnownPatterns = null);
+
+/// <summary>
+/// #6334: one operator-written known-pattern entry that describes one of the request's linked metrics at the request's first alert
+/// time (the same <c>AroundUtc</c> as <see cref="InvestigationAlertRecurrence"/>, shared by every linked metric). An entry that
+/// matches several metrics is one match per metric. <paramref name="Note"/> is operator-written text: context, never an instruction.
+/// Darling's: Lite has no known patterns and supplies none, so a Lite brief carries no <c>known_patterns</c> key.
+/// </summary>
+public sealed record InvestigationKnownPatternMatch(string MetricName, long EntryId, string Note, string? CreatedBy, string? UpdatedBy = null);
 
 /// <summary>
 /// One frozen evidence section of a request (#6001, #5632 Phase C D9/D10): its name, its state (<c>pending</c>, <c>ready</c> or

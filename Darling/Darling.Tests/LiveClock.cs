@@ -23,7 +23,12 @@ namespace Darling.Tests;
 /// wants a window of a day or more still straddles a boundary, but at the same place every run.</para>
 ///
 /// <para>The environment variable <c>DARLING_TEST_CLOCK_UTC</c> (an ISO-8601 UTC time, read only here) replaces the
-/// real clock, so a run at 12:00 can be proved as if it were 00:30 without touching the machine's clock.</para>
+/// real clock, so a run at 12:00 can be proved as if it were 00:30 without touching the machine's clock.
+/// The product still reads its own clock (<c>DateTime.UtcNow</c>, <c>now()</c>), so an override BEHIND the real clock
+/// makes a class that asks the product "is this recent" or "does the table cover now" answer for a different instant
+/// than the one it seeded (#6374: <c>CollectionHealthRecoveryLiveTests</c> reads STALE, the interval-table gate sends the
+/// read to raw). That is the override disagreeing with the clock, not an hour dependence: prove the hour with an override
+/// at or after the real clock.</para>
 /// </summary>
 internal static class LiveClock
 {

@@ -120,7 +120,7 @@ public sealed class QueryStoreWideFleetEligibilityLiveTests
         string? setting = null;
         foreach (var (id, name) in servers)
         {
-            var plan = await QueryStoreIntervalWide.ResolveReadAsync(connection, id, S, end, end, TimeSpan.FromHours(12), 60, null, ct);
+            var plan = await QueryStoreIntervalWide.ResolveReadAsync(connection, id, S, end, end, TimeSpan.FromHours(12), 60, null, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow, ct);
             if (!plan.UseTable)
             {
                 return default;
