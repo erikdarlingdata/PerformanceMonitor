@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Net;
 using System.Runtime.Versioning;
 using System.Threading;
@@ -454,9 +455,15 @@ public sealed class DarlingMcpHostService : BackgroundService
 
                 try
                 {
-                    var token = config.Mcp.Network.ResolveToken(out var usedPlaintext);
+                    /* #6542: with only named tokens (mcp.tokens) there is no legacy token to resolve: the named ones gate the
+                       listener, and a start where none of them can be served stops below. */
+                    var namedOnly = config.Mcp.HasNamedTokens
+                        && string.IsNullOrWhiteSpace(config.Mcp.Network.EncryptedToken)
+                        && string.IsNullOrWhiteSpace(config.Mcp.Network.Token);
+                    var usedPlaintext = false;
+                    var token = namedOnly ? "" : config.Mcp.Network.ResolveToken(out usedPlaintext);
 
-                    if (string.IsNullOrWhiteSpace(token))
+                    if (!namedOnly && string.IsNullOrWhiteSpace(token))
                     {
                         _logger.LogCritical(
                             "MCP network token resolved to empty after decryption; MCP server not started.");
@@ -468,18 +475,22 @@ public sealed class DarlingMcpHostService : BackgroundService
                        file:/env: reference or a plaintext "token"). It is not used to gate the network: Critical,
                        then loopback-only, with the token still resolved so it keeps gating the loopback listener,
                        the way a refused TLS certificate degrades. */
-                    var floor = DarlingHostBinding.ApplyTokenFloor(token, networkMode);
-                    if (floor.Problem is not null)
+                    var floor = namedOnly ? default : DarlingHostBinding.ApplyTokenFloor(token!, networkMode);
+                    if (namedOnly)
+                    {
+                        bearerToken = "";
+                    }
+                    else if (floor.Problem is not null)
                     {
                         _logger.LogCritical(
                             "MCP network token (mcp.network.token / mcp.network.encryptedToken) {Problem} — refusing to expose; binding loopback-only.",
                             floor.Problem);
                         networkMode = floor.NetworkMode;
-                        bearerToken = token;
+                        bearerToken = token!;
                     }
                     else
                     {
-                        bearerToken = token;
+                        bearerToken = token!;
                         if (usedPlaintext)
                         {
                             _logger.LogWarning(
@@ -615,6 +626,27 @@ public sealed class DarlingMcpHostService : BackgroundService
                why. The token gate (requireTokenWhenLoopbackOnly) and the wrong-token throttle (DarlingSignInThrottle) in
                front of every request cover them as they cover the writes, since they are only served with a token. */
             LogInvestigationsGate(_logger, config.Mcp, writes, writeTokenProblem);
+
+            /* #6542: the named tokens (mcp.tokens), each with its own role. With none configured the set holds only the legacy token
+               and its policy, and the start serves exactly what it served before. A named token that cannot be served (a bad name or
+               role, unreadable, under the length floor, a shared name or value) is left out with one Critical line. Named tokens were
+               configured and none can be served, with no legacy token: the start stops, because serving the listener open would drop
+               the credentials the operator asked every client to present. */
+            var tokenSet = DarlingMcpTokenSet.Resolve(config.Mcp, bearerToken, writes, _logger);
+            if (config.Mcp.HasNamedTokens && !tokenSet.HasAnyToken)
+            {
+                _logger.LogCritical("MCP named tokens (mcp.tokens) are set but none can be served, and no legacy token is set; MCP server not started.");
+                await DisposeFailedStartAsync();
+                return false;
+            }
+
+            if (tokenSet.HasNamed)
+            {
+                _logger.LogWarning(
+                    "MCP named tokens are served: {Tokens}. Each request's tools follow its token's role; every MCP request, loopback included, must present a token.",
+                    string.Join(", ", tokenSet.Named.Select(t => t.Name + " (" + t.Role + ")")));
+                writes = tokenSet.Union;
+            }
 
             /* The REAL primary bind address (network IP when exposed, else loopback): both the port precheck
                and the Kestrel bind use it, so the precheck probes the actual address, not always loopback. */
@@ -829,7 +861,8 @@ public sealed class DarlingMcpHostService : BackgroundService
                 new DarlingMcpAddServersPolicy(config.Mcp.AllowWindowsAuthOverUnverifiedTls), _readAdmission,
                 /* #5914: a brief's request_url, the alert's triage page, only while the dashboard serves it: the one definition
                    of TriageBaseUrl, not a copy of it. */
-                DarlingAlertSettings.TriageBaseUrlOf(config));
+                DarlingAlertSettings.TriageBaseUrlOf(config),
+                tokenSet);
 
             _app = builder.Build();
 
@@ -849,13 +882,13 @@ public sealed class DarlingMcpHostService : BackgroundService
                covers that state and a loopback-only start whose configured token resolved. A start with no token
                configured leaves it empty and stays tokenless; a configured token that cannot be used never gets here,
                the start stops in every mode. */
-            var requireTokenWhenLoopbackOnly = RequireTokenWhenLoopbackOnly(networkMode, bearerToken);
+            var requireTokenWhenLoopbackOnly = RequireTokenWhenLoopbackOnly(networkMode, bearerToken) || (!networkMode && tokenSet.HasNamed);
 
             /* #5288: the Host guard admits the listen address only while the server is exposed on it. networkListenIp
                was parsed before any degrade and still holds it afterwards, so it goes through
                ResolveHostGuardListenIp with the final mode: a start that fell back to loopback-only admits loopback
                names only, whatever it parsed. */
-            ConfigurePipeline(_app, networkMode, ResolveHostGuardListenIp(networkMode, networkListenIp), allowedCidr, bearerToken, allowedHostName, requireTokenWhenLoopbackOnly);
+            ConfigurePipeline(_app, networkMode, ResolveHostGuardListenIp(networkMode, networkListenIp), allowedCidr, bearerToken, allowedHostName, requireTokenWhenLoopbackOnly, tokens: tokenSet);
 
             /* #2389: name the authority for each half of what is being started. enabled/port come from
                whichever plane the supervisor resolved; listen/allowFrom/token are always darling.json. */
@@ -1189,8 +1222,14 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// Every line below is identical to before the extraction; only the receiver (<c>builder.Services</c>
     /// there vs. the parameter here) changes.
     /// </summary>
-    internal static void ConfigureMcpServices(IServiceCollection services, DarlingPeerDirectory.Snapshot declaredPeers, ReadLatencyAccumulator? readLatency = null, ILogger? readLatencyLogger = null, SlowReadLog? slowReads = null, DarlingMcpWritePolicy.Effective writes = default, DarlingMcpAddServersPolicy? addServers = null, ReadAdmission? readAdmission = null, string? publicBaseUrl = null)
+    internal static void ConfigureMcpServices(IServiceCollection services, DarlingPeerDirectory.Snapshot declaredPeers, ReadLatencyAccumulator? readLatency = null, ILogger? readLatencyLogger = null, SlowReadLog? slowReads = null, DarlingMcpWritePolicy.Effective writes = default, DarlingMcpAddServersPolicy? addServers = null, ReadAdmission? readAdmission = null, string? publicBaseUrl = null, DarlingMcpTokenSet? tokens = null)
     {
+        /* #6542: with named tokens served, the policy a tool sees is the one its request's token is served (the bearer gate stored
+           the caller on the request), not the start-wide union. Without them it is the start's policy, a singleton, as before. */
+        var perRequest = tokens is { HasNamed: true };
+        DarlingMcpWritePolicy.Effective PolicyOf(IServiceProvider sp) =>
+            DarlingMcpTokenSet.CallerOf(sp.GetService<IHttpContextAccessor>())?.Policy ?? tokens!.LegacyPolicy;
+
         /* add_servers takes its caller policy as a service parameter, so the registration has to exist wherever the
            tools are registered: without it the SDK would serve the parameter as a client argument. Every setting
            off unless the host passes the one built from darling.json. */
@@ -1204,7 +1243,10 @@ public sealed class DarlingMcpHostService : BackgroundService
         /* #5915: the Level 2 mute and custom-rule tools read the served policy through this seat, so under the investigations
            arm they go through the agent_action gate and under the writes arm they write as before. A service parameter, so a
            client cannot supply it. */
-        services.AddSingleton<DarlingAgentActionSeat>(new DarlingAgentActionSeat(writes));
+        if (perRequest)
+            services.AddTransient<DarlingAgentActionSeat>(sp => new DarlingAgentActionSeat(PolicyOf(sp)));
+        else
+            services.AddSingleton<DarlingAgentActionSeat>(new DarlingAgentActionSeat(writes));
 
         /* #4442 scope 2: the per-tool latency filter needs the SAME accumulator singleton the web host and
            worker flush use (Program.cs registers ONE ReadLatencyAccumulator for the whole process) -- an
@@ -1245,7 +1287,10 @@ public sealed class DarlingMcpHostService : BackgroundService
 
         /* #5918: get_investigation_reports hides the case a live practice request replays under the investigations arm. The arm is
            the policy the host started with, so the tool takes it as a service parameter. */
-        services.AddSingleton<InvestigationReadPolicy>(new InvestigationReadPolicy(writes.Investigations));
+        if (perRequest)
+            services.AddTransient<InvestigationReadPolicy>(sp => new InvestigationReadPolicy(PolicyOf(sp).Investigations));
+        else
+            services.AddSingleton<InvestigationReadPolicy>(new InvestigationReadPolicy(writes.Investigations));
 
         /* #5822: wait_for_investigation_requests waits on the signal the worker's dispatcher fires when a request opens, a
            service parameter, so it is registered wherever the tools are: the process's one signal, so the worker and this
@@ -1254,7 +1299,10 @@ public sealed class DarlingMcpHostService : BackgroundService
 
         /* #5916: set_alert_threshold_override is a Level 2 action tool offered under both arms and takes the served policy as a
            service parameter to tell them apart. */
-        services.AddSingleton<DarlingMcpServedPolicy>(new DarlingMcpServedPolicy(writes));
+        if (perRequest)
+            services.AddTransient<DarlingMcpServedPolicy>(sp => new DarlingMcpServedPolicy(PolicyOf(sp)));
+        else
+            services.AddSingleton<DarlingMcpServedPolicy>(new DarlingMcpServedPolicy(writes));
 
         /* The write switch (DarlingMcpWritePolicy). Once the SDK has gathered every registered tool into
            McpServerOptions.ToolCollection, drop the writes the settings do not offer and stamp every tool's
@@ -1307,6 +1355,15 @@ public sealed class DarlingMcpHostService : BackgroundService
                 options.Stateless = true;
                 options.ConfigureSessionOptions = (context, sessionOptions, _) =>
                 {
+                    /* #6542: with named tokens served, each request gets its own token's tool set: tools/list shows it, and a call
+                       outside it fails as an unknown tool, because tools/call dispatches over this same collection. The legacy
+                       token, when one is served beside them, gets the set its settings give it. */
+                    if (tokens is { HasNamed: true })
+                    {
+                        var policy = DarlingMcpTokenSet.CallerOf(context)?.Policy ?? tokens.LegacyPolicy;
+                        sessionOptions.ToolCollection = DarlingMcpWritePolicy.FilterToolCollection(sessionOptions.ToolCollection, policy);
+                    }
+
                     if (DarlingCoreToolProfile.IsCorePath(context.Request.Path))
                     {
                         sessionOptions.ToolCollection = DarlingCoreToolProfile.FilterToolCollection(sessionOptions.ToolCollection);
@@ -1906,7 +1963,8 @@ public sealed class DarlingMcpHostService : BackgroundService
         string bearerToken,
         string? allowedHostName = null,
         bool requireTokenWhenLoopbackOnly = false,
-        Func<DateTime>? utcNow = null)
+        Func<DateTime>? utcNow = null,
+        DarlingMcpTokenSet? tokens = null)
     {
         Func<DateTime> clock = utcNow ?? (() => DateTime.UtcNow);
 
@@ -2071,7 +2129,24 @@ public sealed class DarlingMcpHostService : BackgroundService
                     }
                 }
 
-                var authorized = IsBearerTokenAuthorized(authorization, token);
+                /* #6542: with named tokens served, the presented token is compared with every served token (each in constant
+                   time, never stopping early) and the caller it matches is stored on the request: its tool set and identity
+                   follow from it. With none, the one legacy token is compared exactly as before. */
+                bool authorized;
+                if (tokens is { HasNamed: true })
+                {
+                    var caller = tokens.Match(ExtractBearerToken(authorization));
+                    authorized = caller is not null;
+                    if (caller is not null)
+                    {
+                        context.Items[DarlingMcpTokenSet.CallerKey] = caller;
+                    }
+                }
+                else
+                {
+                    authorized = IsBearerTokenAuthorized(authorization, token);
+                }
+
                 if (!authorized)
                 {
                     /* The reserved attempt's miss is recorded now: the wait is computed from recorded misses,
@@ -2196,8 +2271,8 @@ public sealed class DarlingMcpHostService : BackgroundService
         var decision = DarlingHostBinding.ResolveBind(
             network?.Listen,
             network?.AllowFrom,
-            tokenPresent: network is not null
-                && (!string.IsNullOrWhiteSpace(network.EncryptedToken) || !string.IsNullOrWhiteSpace(network.Token)),
+            tokenPresent: mcp.HasNamedTokens || (network is not null
+                && (!string.IsNullOrWhiteSpace(network.EncryptedToken) || !string.IsNullOrWhiteSpace(network.Token))),
             networkConfigured: network is { IsConfigured: true },
             managed: managed,
             /* #1804: tests pass this explicitly; the running host takes the ambient container marker. */

@@ -1466,6 +1466,55 @@ public sealed class McpConfig
     /// </summary>
     [JsonPropertyName("network")]
     public McpNetworkConfig? Network { get; set; }
+
+    /// <summary>
+    /// Named bearer tokens, each with a role (#6542), so one service serves an operator and its investigation agents at once.
+    /// Null or empty keeps the legacy single token (<see cref="McpNetworkConfig.Token"/> or <see cref="McpNetworkConfig.EncryptedToken"/>)
+    /// exactly as before. With entries, the token on each request picks the tool set: <c>operator</c> gets the reads and the write
+    /// tools (never the claim or submit tools), <c>agent</c> gets the reads, the investigation tools and the Level 2 action tools
+    /// (never a tool in <c>DarlingMcpWritePolicy.NeverAgentTools</c>), and an agent's identity is the entry's name. A legacy token
+    /// set beside them keeps its role from <see cref="AllowWrites"/> and <see cref="AllowInvestigations"/>. File-only and restart-only.
+    /// </summary>
+    [JsonPropertyName("tokens")]
+    public List<McpTokenEntry>? Tokens { get; set; }
+
+    /// <summary>True when <see cref="Tokens"/> has an entry that sets a token value.</summary>
+    [JsonIgnore]
+    public bool HasNamedTokens =>
+        Tokens is { Count: > 0 } && Tokens.Any(t => t is not null && (!string.IsNullOrWhiteSpace(t.EncryptedToken) || !string.IsNullOrWhiteSpace(t.Token)));
+}
+
+/// <summary>
+/// One named MCP bearer token (#6542): a <see cref="Name"/> (1 to 64 of <c>A-Za-z0-9._:-</c>), the token itself
+/// (<see cref="EncryptedToken"/> or <see cref="Token"/>, the same rules as <c>mcp.network</c>'s), and a <see cref="Role"/>,
+/// <c>operator</c> or <c>agent</c>. The name is what logs and the journal record; the value is never logged.
+/// </summary>
+public sealed class McpTokenEntry
+{
+    /// <summary>The <c>operator</c> role.</summary>
+    public const string OperatorRole = "operator";
+
+    /// <summary>The <c>agent</c> role.</summary>
+    public const string AgentRole = "agent";
+
+    [JsonPropertyName("name")]
+    public string? Name { get; set; }
+
+    /// <summary>The DPAPI-encrypted token (Windows), as <c>--encrypt-password</c> writes it. Preferred over <see cref="Token"/>.</summary>
+    [JsonPropertyName("encryptedToken")]
+    public string? EncryptedToken { get; set; }
+
+    /// <summary>The plaintext token, or an <c>env:</c>/<c>file:</c> reference.</summary>
+    [JsonPropertyName("token")]
+    public string? Token { get; set; }
+
+    [JsonPropertyName("role")]
+    public string? Role { get; set; }
+
+    /// <summary>The token, preferring <see cref="EncryptedToken"/> over <see cref="Token"/>; null when neither is set. Throws when an
+    /// encrypted token cannot be read.</summary>
+    public string? ResolveToken() =>
+        new McpNetworkConfig { EncryptedToken = EncryptedToken, Token = Token }.ResolveToken(out _);
 }
 
 /// <summary>

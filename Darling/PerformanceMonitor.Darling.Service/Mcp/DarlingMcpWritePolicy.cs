@@ -224,8 +224,10 @@ internal static class DarlingMcpWritePolicy
 
     internal static bool IsServerAdmin(string toolName) => ServerAdminTools.Contains(toolName);
 
-    /// <summary>What the host actually offers, after the settings and the token are reconciled.</summary>
-    internal readonly record struct Effective(bool Writes, bool ServerAdmin, bool Investigations = false)
+    /// <summary>What the host actually offers, after the settings and the token are reconciled. <see cref="TokenName"/> is the
+    /// name of the named token (#6542) a request presented, or null for the legacy single token and for the start-wide policy: an
+    /// agent token's name is its identity, and an operator token's name is what its route journal rows record.</summary>
+    internal readonly record struct Effective(bool Writes, bool ServerAdmin, bool Investigations = false, string? TokenName = null)
     {
         internal static readonly Effective Off = new(false, false);
 
