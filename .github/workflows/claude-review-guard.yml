@@ -437,38 +437,47 @@ jobs:
           # per page of the jobs list. It is safe here: a run of the review workflow has two jobs
           # (decide and review), so the list is one page, and the step and the job named each
           # appear in it once.
-          # One read gives three fields: the review job's conclusion, how many steps the API lists
-          # under that job, and the review step's conclusion ("-" stands for a field that is absent).
+          # One read gives four fields: the review job's conclusion, how many steps the API lists
+          # under that job, whether that list includes the job's last step (`Complete job`: 1 or 0),
+          # and the review step's conclusion ("-" stands for a field that is absent).
           # The count matters because the jobs API can list a finished job with an EMPTY steps list
           # for many minutes after the run completed (#5783: a successful run whose bot verdict was
           # already on the head listed `steps: []` for both its jobs, and so did a Build run of the
           # same minute). A job that ran always has steps, so an empty list under a review job that
-          # did not skip means "not listed yet", not "the step was renamed".
+          # did not skip means "not listed yet", not "the step was renamed". A PARTIAL list does the
+          # same: run 39787226488 attempt 1 read the jobs 46 seconds after the review job ended and
+          # got 5 of its 11 steps, without `Claude review`. Every job ends with `Complete job`, so a
+          # concluded job whose list lacks it is still being listed.
           # shellcheck disable=SC2016 # the single quotes hold a jq program: $j is a jq variable, not a shell one
           jobs_jq='([.jobs[] | select(.name == env.REVIEW_JOB)] | .[0]) as $j
             | "\($j.conclusion // "-") \(($j.steps // []) | length)"
+              + " \(if ([($j.steps // [])[] | select(.name == "Complete job")] | length) > 0 then 1 else 0 end)"
               + " \(([.jobs[].steps[]? | select(.name == env.REVIEW_STEP)] | .[0].conclusion) // "-")"'
           lookup "review-run jobs (step conclusion)" "repos/$R/actions/runs/$run_id/jobs" --paginate \
             --jq "$jobs_jq"
-          read -r review_job review_steps step <<<"$LOOKUP_OUT"
+          read -r review_job review_steps review_complete step <<<"$LOOKUP_OUT"
           if [ "$step" = "-" ]; then step=''; fi
 
-          # #5783: the review job finished without skipping and the API lists no steps under it. Ask
-          # again every 30 seconds, for about ten minutes, before deciding anything. A read that fails
-          # here uses up one try and keeps the last answer, as the run poll above does (#2309).
+          # #5783: the review job finished without skipping and the API lists no steps under it, or
+          # lists them without `Complete job`. Ask again every 30 seconds, for about ten minutes,
+          # before deciding anything. A read that fails here uses up one try and keeps the last
+          # answer, as the run poll above does (#2309). A partial list that already holds the review
+          # step does not wait: that step's conclusion is the answer, and the fallback below must
+          # not replace it.
           steps_unlisted() {
-            [ "$review_job" != "-" ] && [ "$review_job" != "skipped" ] && [ "$review_steps" = "0" ]
+            [ "$review_job" != "-" ] && [ "$review_job" != "skipped" ] \
+              && { [ "$review_steps" = "0" ] || { [ "$review_complete" != "1" ] && [ -z "$step" ]; }; }
           }
           steps_tries=0
           while steps_unlisted && [ "$steps_tries" -lt 20 ]; do
             steps_tries=$((steps_tries + 1))
             echo "::notice title=Waiting for the review job's steps::Try $steps_tries of 20: the"\
-              "'$REVIEW_JOB' job of run $run_id concluded '$review_job', but the jobs API lists no"\
-              "steps under it yet (#5783). Asking again in 30 seconds."
+              "'$REVIEW_JOB' job of run $run_id concluded '$review_job', but the jobs API has not"\
+              "listed all of its steps yet ($review_steps listed, #5783). Asking again in 30 seconds."
             sleep 30
             if gh_capture "repos/$R/actions/runs/$run_id/jobs" --paginate --jq "$jobs_jq" \
                 && [ -n "$LOOKUP_OUT" ]; then
-              read -r review_job review_steps step <<<"$LOOKUP_OUT"
+              read -r review_job review_steps review_complete step <<<"$LOOKUP_OUT"
               if [ "$step" = "-" ]; then step=''; fi
             fi
           done
@@ -479,7 +488,7 @@ jobs:
             # succeeded and a review on $SHA mean the review step ran and posted, so the checks below
             # go on as for a step that reported success. Anything else cannot be told apart from a
             # skipped step or a silent run, so the check fails and says why.
-            summary "- The jobs API listed no steps under the \`$REVIEW_JOB\` job of run $run_id after"\
+            summary "- The jobs API listed no steps, or not all of them, under the \`$REVIEW_JOB\` job of run $run_id after"\
               "$steps_tries tries (#5783). Decided from that job's conclusion (\`$review_job\`) and"\
               "$REVIEW_BOT's reviews on ${SHA:0:12}."
             if [ "$review_job" != "success" ]; then
@@ -494,7 +503,7 @@ jobs:
                     | select(.commit_id == env.SHA) | .id'
             if [ -z "$LOOKUP_OUT" ]; then
               echo "::error title=Review step not listed::The '$REVIEW_JOB' job of run $run_id"\
-                "succeeded, but after $steps_tries tries the jobs API still lists no steps under it,"\
+                "succeeded, but after $steps_tries tries the jobs API still has not listed all of its steps,"\
                 "and $REVIEW_BOT submitted no review on $SHA. Without the '$REVIEW_STEP' step this"\
                 "guard cannot tell a skipped review from one that ran and posted nothing, so the"\
                 "check fails (#5783). Re-run this guard later; the jobs API fills the steps in late."
