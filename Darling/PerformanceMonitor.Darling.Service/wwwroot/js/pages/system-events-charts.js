@@ -66,6 +66,17 @@ VIZ.healthSpinlocks = (data, desc) => {
   return VIZ.line({ spinlocks: points }, { ...desc, rowsKey: "spinlocks", series, format: "int" });
 };
 
+/** The sentence over the counter charts. It is shown only while a chart is drawn (#6439): on an Azure SQL Database, or a server
+    with no system_health row, every card says the data is absent and "charted below" would be false. */
+export const COUNTERS_INTRO =
+  "The corruption and contention counters are charted below (each point is the largest value in its time bucket); the raw parsed rows follow.";
+
+/** True when at least one counter chart or the sick spinlock chart of this chart read draws a line, the test for COUNTERS_INTRO. */
+export function counterChartsDrawn(data) {
+  const entries = (data && data.entries) || [];
+  return COUNTER_CHARTS.some((c) => counterHasData(entries, c.key)) || spinlockPoints(data).series.length > 0;
+}
+
 function getEntries(data, desc) {
   return (data && data[desc.rowsKey]) || [];
 }

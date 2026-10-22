@@ -1120,7 +1120,7 @@ public sealed class ServerPageTabsTests
 
         /* And fanout carries the same empty-state rule the two descriptor helpers do, so routing a panel through
            it is never the way to lose the sentence. */
-        Assert.Contains("function fanout(read, params, specs)", js, StringComparison.Ordinal);
+        Assert.Contains("function fanout(read, params, specs", js, StringComparison.Ordinal);
         Assert.Contains("a data panel must explain its own empty state.", js, StringComparison.Ordinal);
     }
 

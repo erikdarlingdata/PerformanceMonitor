@@ -12,7 +12,7 @@ Best for quick triage, Azure SQL Database, restricted environments, and consulta
 
 | Artifact | What you install first |
 |---|---|
-| `PerformanceMonitorLite-win-Setup.exe` (recommended) | **Nothing.** Self-contained; it also auto-updates |
+| `PerformanceMonitorLite-lite-Setup.exe` (recommended) | **Nothing.** Self-contained; it also auto-updates |
 | `PerformanceMonitorLite-<version>.zip` (portable) | **Nothing.** Self-contained; unzip and run |
 
 ### Windows must be up to date

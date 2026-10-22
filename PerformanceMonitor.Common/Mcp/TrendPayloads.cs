@@ -289,6 +289,42 @@ internal static class TrendPayloads
     }
 
     /// <summary>
+    /// <c>get_wait_trend</c>'s answer when the asked wait type has no rows in the window (#6446), both SKUs. The caller has
+    /// already ruled out an engine that does not collect wait stats, and passes what the window did collect. A wait type
+    /// the collector never stores (<paramref name="ignoredWaitTypes"/>, the benign list it skips; matched the way the
+    /// collector matches it, trailing space trimmed and case ignored) is <c>not_collected</c>: that gap is permanent. Any
+    /// other wait type is one the collector WOULD store, so no rows means we looked and nothing waited: <c>empty</c>
+    /// (a misspelled name reads the same, which is what the <c>collected_wait_types</c> hint is for). Nothing collected
+    /// at all stays <c>unavailable</c>.
+    /// </summary>
+    public static string WaitTrendMiss(
+        string waitType, int hoursBack, IReadOnlySet<string> ignoredWaitTypes, IReadOnlyList<string> collectedWaitTypes)
+    {
+        if (collectedWaitTypes.Count == 0)
+        {
+            return McpHelpers.Status(
+                "unavailable",
+                $"No trend data for wait type '{waitType}'. No wait stats have been collected for this server in the last {hoursBack}h yet " +
+                "(the collector may not have run, or delta wait stats need a second collection cycle).");
+        }
+
+        if (ignoredWaitTypes.Contains(waitType.Trim()))
+        {
+            return McpHelpers.Status(
+                "not_collected",
+                $"No trend data for wait type '{waitType}'. It is on the ignored (benign) wait list, so the collector never stores it. " +
+                $"See hints.collected_wait_types for the {collectedWaitTypes.Count} that have data.",
+                new { collected_wait_types = collectedWaitTypes });
+        }
+
+        return McpHelpers.Status(
+            "empty",
+            $"No trend data for wait type '{waitType}' in the last {hoursBack}h. The collector stores this wait type, so there was no waiting on it in this window " +
+            $"(or the name is misspelled: hints.collected_wait_types lists the {collectedWaitTypes.Count} that do have data).",
+            new { collected_wait_types = collectedWaitTypes });
+    }
+
+    /// <summary>
     /// <c>get_wait_trend</c>'s data envelope (#3960), both SKUs: one wait type's bucketed rate, its signal share, and
     /// the worst single collection as the peak. The keys the per-collection payload carried keep their names; a
     /// point is now a bucket, and the disclosure block says so.

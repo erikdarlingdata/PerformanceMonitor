@@ -351,6 +351,14 @@ public sealed class DarlingMcpServerTrendTools
             return gated;
         }
 
+        /* #6439: an Azure SQL Database never has tempdb file rows (file_io_stats runs there but sees only the user database's
+           files), so the tempdb file I/O read says the permanent engine gap instead of "check that collection is running". */
+        if (metric == "tempdb_file_io"
+            && await DarlingEngineCapability.TempDbFileIoNotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, cancellationToken) is { } azureGap)
+        {
+            return azureGap;
+        }
+
         /* #6177: the tempdb reads are fed by the tempdb DMVs, which a contained database user on Azure SQL Database is
            refused on every run. That is a setup step (a server login in ##MS_ServerStateReader##), so it answers
            precondition with the one message the Collection Health row and get_tempdb_trend carry, not "check that

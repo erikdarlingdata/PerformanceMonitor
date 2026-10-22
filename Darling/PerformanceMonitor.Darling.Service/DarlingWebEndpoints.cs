@@ -2558,18 +2558,38 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     internal sealed class SingleReleaseSlot
     {
         private readonly SemaphoreSlim gate;
-        private int held = 1;
+        private readonly object sync = new();
+        private readonly Action? beforeFree;
+        private bool released;
 
-        internal SingleReleaseSlot(SemaphoreSlim gate)
+        /// <param name="gate">The one-slot gate to free.</param>
+        /// <param name="beforeFree">A test seam only: runs inside the first release, after it claimed the slot and before
+        /// it frees the gate, so a test can stand a second caller in that window. Production passes nothing.</param>
+        internal SingleReleaseSlot(SemaphoreSlim gate, Action? beforeFree = null)
         {
             this.gate = gate;
+            this.beforeFree = beforeFree;
         }
 
-        /// <summary>Frees the slot on the first call; every later call does nothing.</summary>
+        /// <summary>
+        /// Frees the slot on the first call; every later call does nothing, but it does not RETURN until the first
+        /// call has really freed the gate (#6440). A flag flipped with Interlocked.Exchange before gate.Release() let a
+        /// second caller see "already released" and return while the first caller, preempted between the flag and
+        /// the Release, had not freed the gate yet: the handler then sent its answer, the client sent its next
+        /// edit, and that edit was refused with 429. The lock makes the second caller wait that moment out. Nothing
+        /// inside it blocks or awaits.
+        /// </summary>
         internal void Release()
         {
-            if (Interlocked.Exchange(ref held, 0) == 1)
+            lock (sync)
             {
+                if (released)
+                {
+                    return;
+                }
+
+                released = true;
+                beforeFree?.Invoke();
                 gate.Release();
             }
         }

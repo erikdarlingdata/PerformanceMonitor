@@ -19,7 +19,7 @@ namespace Lite.Tests;
 /// <summary>
 /// #2489/#2501: Lite ships TWO artifacts, and what a reader must install before either one starts is
 /// decided nowhere near the sentence that states it. #2489 was the docs having the two backwards —
-/// <c>PerformanceMonitorLite-win-Setup.exe</c> is packed from a <c>--self-contained</c> publish and
+/// <c>PerformanceMonitorLite-lite-Setup.exe</c> is packed from a <c>--self-contained</c> publish and
 /// needs no runtime at all, yet it was the one artifact carrying a runtime requirement in the README,
 /// while the portable ZIP was framework-dependent and had no prerequisites documented anywhere.
 /// #2501 then made the ZIP self-contained too, so the correct answer for BOTH artifacts is now
@@ -64,7 +64,7 @@ public sealed class LiteRuntimePrerequisiteDocsTests
     private const string NightlyWorkflowPath = ".github/workflows/nightly.yml";
 
     private const string PublishCommand = "dotnet publish Lite/PerformanceMonitorLite.csproj";
-    private const string SetupExeName = "PerformanceMonitorLite-win-Setup.exe";
+    private const string SetupExeName = "PerformanceMonitorLite-lite-Setup.exe";
     private const string PortableZipName = "PerformanceMonitorLite-<version>.zip";
 
     /// <summary>

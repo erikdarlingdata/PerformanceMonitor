@@ -72,6 +72,15 @@ public sealed class FileIoStatsCollector : CollectorDefinitionBase<FileIoStatsCo
        converted to nvarchar(64), the property's documented type, before the comparison. The size facts
        skip the NULL row (size_mb > 0), so no total includes it.
 
+       #6438: on a Hyperscale database sys.dm_io_virtual_file_stats(DB_ID(), NULL) also returns four rows with
+       database_id = 0 (measured on a Hyperscale database: one more per data file and per log file, plus two
+       whose file_id has no sys.database_files match). They are the engine's own storage-layer files, not files
+       of this database: their size reads 8 GB and their counters belong to no file the user can see. They share
+       the real files' (database_name, file_name) pair, which is the delta key, so each real file was differenced
+       against its phantom sibling and the collector stored I/O that never happened on every cycle. The database's
+       own files are exactly the rows whose database_id is DB_ID(), so the DMV rows are filtered to that.
+       A General Purpose database returns only those rows, so nothing changes there.
+
        The on-prem / Managed Instance query below is unchanged. */
     private const string AzureSqlDbQueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -101,6 +110,7 @@ SELECT /* PerformanceMonitorLite */
 FROM sys.dm_io_virtual_file_stats(DB_ID(), NULL) AS vfs
 LEFT JOIN sys.database_files AS df
   ON df.file_id = vfs.file_id
+WHERE vfs.database_id = DB_ID()
 OPTION(RECOMPILE);";
 
     private const string OnPremQueryText = @"
@@ -211,13 +221,60 @@ OPTION(RECOMPILE);";
                 reader.IsDBNull(14) ? 0 : Convert.ToInt32(reader.GetValue(14), CultureInfo.InvariantCulture)));
         }
 
-        return rows;
+        return KeepOneRowPerDeltaKey(rows, context.Target.IsAzureSqlDb);
     }
+
+    /// <summary>
+    /// #6438: the delta key is "{database}|{file}", so two rows of one pass that share it difference against
+    /// each other and store I/O that never happened. The Azure query already asks only for the connected
+    /// database's own files; this is the guard behind it. On Azure SQL Database a row whose database_id is 0 is
+    /// never one of the database's files (DB_ID() is never 0), so it is dropped, and of any rows that still
+    /// share a key the one with the highest database_id (then the lowest file_id) is kept, so the choice does
+    /// not change from one cycle to the next. A normal SQL Server never has two rows with one key (names are
+    /// unique within a database), so this changes nothing there.
+    /// </summary>
+    internal static List<Row> KeepOneRowPerDeltaKey(List<Row> rows, bool isAzureSqlDb)
+    {
+        var best = new Dictionary<string, Row>(StringComparer.Ordinal);
+        var order = new List<string>();
+        foreach (var row in rows)
+        {
+            if (isAzureSqlDb && row.DatabaseId == 0)
+            {
+                continue;
+            }
+
+            var key = DeltaKey(row);
+            if (!best.TryGetValue(key, out var kept))
+            {
+                best[key] = row;
+                order.Add(key);
+            }
+            else if (row.DatabaseId > kept.DatabaseId || (row.DatabaseId == kept.DatabaseId && row.FileId < kept.FileId))
+            {
+                best[key] = row;
+            }
+        }
+
+        var result = new List<Row>(order.Count);
+        foreach (var key in order)
+        {
+            result.Add(best[key]);
+        }
+
+        return result;
+    }
+
+    /* "{database}|{file}": the delta key, shared with the Darling seed (DarlingDeltaCalculator) so a
+       restarted service seeds the baselines this collector reads. */
+    internal static string DeltaKey(Row row) => DeltaKey(row.DatabaseName, row.FileName);
+
+    internal static string DeltaKey(string databaseName, string fileName) => $"{databaseName}|{fileName}";
 
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
     {
         /* "{database}|{file}" delta key and the eight group names are the parity contract. */
-        var deltaKey = $"{row.DatabaseName}|{row.FileName}";
+        var deltaKey = DeltaKey(row);
         var deltaReads = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "file_io_reads", deltaKey, row.NumOfReads, out var readsInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
         var deltaWrites = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "file_io_writes", deltaKey, row.NumOfWrites, out var writesInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
         var deltaReadBytes = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "file_io_read_bytes", deltaKey, row.ReadBytes, out var readBytesInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
