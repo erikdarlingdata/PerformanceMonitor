@@ -351,6 +351,7 @@ Full entries: [docs/changelog/3.11.md](docs/changelog/3.11.md)
 - **The web dashboard no longer tells managed-store users to use an option their store refuses** ([#6451])
 - **Known Patterns and Threshold Overrides server boxes show the server name, and the Metric box shows its value** ([#6452])
 - **Viewer Job History can pick an Azure SQL Database, says it has no SQL Agent, and lists only that server's categories** ([#6391])
+- **Collection health warns when an Extended Events ring buffer is too full to read** ([#6449])
 
 ## [3.10.0] - 2026-10-09
 
@@ -5845,3 +5846,4 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#6451]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/6451
 [#6452]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6452
 [#6391]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6391
+[#6449]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/6449
