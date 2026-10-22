@@ -337,6 +337,18 @@ internal static class DarlingWebhookSecrets
             Add(r.ScopeTagDepth.ToString(System.Globalization.CultureInfo.InvariantCulture));
             Add(r.ExpandedServerIds is null ? "-" : string.Join(",", r.ExpandedServerIds.OrderBy(id => id)));
             AddSigning(r.GenericSigning);
+
+            /* #6444: the rest of the row. The opened result carries the routes, so a route's agent settings and fallback are read
+               from it by investigation event delivery and by alert delivery; a reload that changed only one of these used to leave
+               the old row cached (a cleared fallback kept receiving the expired requests). A member added to NotificationRoute
+               must be added here: DarlingRouteCacheReloadTests fails on one that is not. */
+            Add(r.AgentLevel?.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            Add(r.AgentMaxPerHour.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            Add(r.AgentMaxPerDay.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            Add(r.AgentLeaseMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            Add(r.AgentExpiryMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            Add(r.FallbackRouteId?.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            Add(r.OffChannels is null ? "-" : string.Join(",", r.OffChannels.OrderBy(c => c, StringComparer.Ordinal)));
         }
 
         return text.ToString();
