@@ -23,7 +23,7 @@ The **Lite** app and the **Darling** viewer share the same tab layout (the viewe
 | **Job History** | SQL Agent job runs retained from `msdb` |
 | **Availability Groups** | Replica and per-database health from the Availability Group collectors |
 
-Both feature auto-refresh, chart drill-down to Active Queries, right-click CSV export, system tray integration, dark and light themes with user-adjustable palette colors (see [Themes and colors](../Lite/README.md#themes-and-colors)), and timezone display options (server time, local time, or UTC).
+Both feature auto-refresh, chart drill-down to Active Queries, right-click CSV export, system tray integration, Dark, Light and Cool Breeze themes with user-adjustable palette colors (see [Themes and colors](../Lite/README.md#themes-and-colors)), and timezone display options (server time, local time, or UTC).
 
 Both also share one time range picker with the web pages. It has presets, calendar periods, and typed ranges such as `last 3 days` or `since 9am`. A text column's filter lists its values to tick, like Excel, and stays set across refreshes and restarts.
 
