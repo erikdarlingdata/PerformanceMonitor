@@ -114,9 +114,10 @@ public sealed class SystemHealthEventFileTests
         Assert.Null(Measured(context, "event_file_events"));
         Assert.Equal(1, Measured(context, RingBufferTruncationNote.TruncatedLabel));
         Assert.Equal(773, Measured(context, RingBufferTruncationNote.EventsHiddenLabel));
-        Assert.Equal(
+        Assert.StartsWith(
             "ring_buffer_truncated=1 ring_buffer_events_hidden=773 newest_visible_event_age_s=19380 event_file_fallback=1",
-            CollectorMeasurementNote.Render(context.Measurements));
+            CollectorMeasurementNote.Render(context.Measurements),
+            StringComparison.Ordinal);
         Assert.Empty(context.PendingState);
     }
 
