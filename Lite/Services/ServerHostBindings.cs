@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Text.Json;
 using PerformanceMonitor.Common;
@@ -22,25 +23,41 @@ namespace PerformanceMonitorLite.Services;
 /// config folder. servers.json is one list for every user of the computer, while a saved password and the user's own sign-in
 /// belong to the user, so Lite connects to a server only when the settings servers.json names now are the ones this user saved
 /// or confirmed for that server. The settings kept are the ones that decide where the user's sign-in goes and where Lite runs
-/// code under it: the host, the Query Store replica, the authentication type, the credential profile, the database and the
-/// utility database (where Lite runs dbo.sp_IndexCleanup), and the encryption and certificate settings. Host names are compared
-/// as written (port and instance included), trimmed and case-insensitively.
+/// code under it: the host, the Query Store replica, the sign-in type and client IDs (a credential profile's own when the server
+/// uses one, since profiles.json is in the shared folder too), the credential profile, the database and the utility database
+/// (where Lite runs dbo.sp_IndexCleanup), and the encryption and certificate settings. Host names are compared as written (port
+/// and instance included), trimmed and case-insensitively.
 /// </summary>
 public sealed class ServerHostBindings
 {
     /// <summary>The file in the user's own config folder (never the shared one that holds servers.json).</summary>
     public const string FileName = "server-hosts.json";
 
+    /// <summary>
+    /// The file, in the user's own config folder beside <see cref="FileName"/>, that says a build keeping the record has started
+    /// with this data folder before (see <see cref="IsFirstStartInUsedFolder"/>).
+    /// </summary>
+    public const string StartedMarkerName = "server-hosts.started";
+
+    internal const string DatabaseSetting = "database";
+    internal const string UtilityDatabaseSetting = "utility database";
+    internal const string EncryptionSetting = "encryption";
+    internal const string CertificateSetting = "certificate check";
+
     private static readonly JsonSerializerOptions s_jsonOptions = new() { WriteIndented = true };
 
     private readonly string? _filePath;
+    private readonly Func<IProfileLookup?>? _profiles;
     private readonly object _lock = new();
     private readonly Dictionary<string, Binding> _bindings = new(StringComparer.OrdinalIgnoreCase);
     private bool _hasRecord;
     private bool _firstRunDone;
     private string? _saveProblem;
 
-    /// <summary>One server's confirmed settings. Replica, profile and database fields are empty when the server has none.</summary>
+    /// <summary>
+    /// One server's confirmed settings. Replica, profile and database fields are empty when the server has none. The sign-in
+    /// type and client IDs are the credential profile's when the server uses one; a null client ID was not recorded.
+    /// </summary>
     public sealed record Binding(
         string Host,
         string Replica,
@@ -49,16 +66,24 @@ public sealed class ServerHostBindings
         string DatabaseName,
         string UtilityDatabase,
         string EncryptMode,
-        bool TrustServerCertificate);
+        bool TrustServerCertificate,
+        string? AzureClientId,
+        string? ManagedIdentityClientId);
+
+    /// <summary>The sign-in settings a connection to a server uses.</summary>
+    private readonly record struct SignIn(string AuthenticationType, string AzureClientId, string ManagedIdentityClientId);
 
     /// <summary>Raised (outside the lock) with the sentence to show when the record could not be written.</summary>
     public event Action<string>? SaveFailed;
 
     /// <param name="filePath">The per-user file; null keeps the record in memory only (a <see cref="ServerManager"/> built
     /// without a per-user config folder, as tests do).</param>
-    public ServerHostBindings(string? filePath)
+    /// <param name="profiles">The credential profiles, read on every check (the app sets them after the server list loads).
+    /// Null, or a lookup that returns null, finds no profile: a server that uses one is then asked about.</param>
+    public ServerHostBindings(string? filePath, Func<IProfileLookup?>? profiles = null)
     {
         _filePath = filePath;
+        _profiles = profiles;
         if (filePath == null || !File.Exists(filePath))
             return;
 
@@ -83,7 +108,9 @@ public sealed class ServerHostBindings
                             entry.DatabaseName ?? "",
                             entry.UtilityDatabase ?? "",
                             entry.EncryptMode ?? "Strict",
-                            entry.TrustServerCertificate ?? false);
+                            entry.TrustServerCertificate ?? false,
+                            entry.AzureClientId,
+                            entry.ManagedIdentityClientId);
                 }
             }
         }
@@ -117,21 +144,22 @@ public sealed class ServerHostBindings
     {
         string? problem;
         int bound;
+        /* Built before the lock: a binding reads the credential profiles, which take a lock of their own. */
+        var chosen = new Dictionary<string, Binding>(StringComparer.OrdinalIgnoreCase);
+        if (hadLiteData)
+        {
+            foreach (var server in servers)
+            {
+                if (wasUsed(server))
+                    chosen[server.Id] = BindingFor(server);
+            }
+        }
+
         lock (_lock)
         {
             if (_hasRecord || _firstRunDone)
                 return 0;
             _firstRunDone = true;
-
-            var chosen = new Dictionary<string, Binding>(StringComparer.OrdinalIgnoreCase);
-            if (hadLiteData)
-            {
-                foreach (var server in servers)
-                {
-                    if (wasUsed(server))
-                        chosen[server.Id] = BindingFor(server);
-                }
-            }
 
             problem = TryWrite(chosen);
             if (problem == null)
@@ -159,6 +187,7 @@ public sealed class ServerHostBindings
     {
         string? problem = null;
         ServerHostChange? change;
+        var signIn = SignInFor(server);
         lock (_lock)
         {
             if (!_bindings.TryGetValue(server.Id, out var bound))
@@ -167,7 +196,7 @@ public sealed class ServerHostBindings
             var hostChanged = !SameHost(bound.Host, server.ServerName);
             /* A removed replica sends nothing anywhere, so only a replica that is set and differs needs confirming. */
             var replicaChanged = Normalize(server.QueryStoreReplica).Length > 0 && !SameHost(bound.Replica, server.QueryStoreReplica);
-            var settings = SettingChanges(bound, server);
+            var settings = SettingChanges(bound, server, signIn);
 
             if (!hostChanged && !replicaChanged && settings.Count == 0)
             {
@@ -201,9 +230,10 @@ public sealed class ServerHostBindings
     public void Confirm(ServerConnection server)
     {
         string? problem;
+        var binding = BindingFor(server);
         lock (_lock)
         {
-            _bindings[server.Id] = BindingFor(server);
+            _bindings[server.Id] = binding;
             problem = SaveLocked();
             if (problem == null)
                 _hasRecord = true;
@@ -243,23 +273,51 @@ public sealed class ServerHostBindings
         EncryptRank(server.EncryptMode) > EncryptRank(bound.EncryptMode) ||
         (bound.TrustServerCertificate && !server.TrustServerCertificate);
 
-    private static List<ServerSettingChange> SettingChanges(Binding bound, ServerConnection server)
+    /// <summary>
+    /// The sign-in settings a connection to the server uses: its credential profile's own when it names one (a connection
+    /// never reads the copy in servers.json then), else the server's. Null when the named profile is not found.
+    /// </summary>
+    private SignIn? SignInFor(ServerConnection server)
+    {
+        if (string.IsNullOrEmpty(server.CredentialProfileId))
+            return new SignIn(Normalize(server.AuthenticationType), Normalize(server.AzureClientId), Normalize(server.ManagedIdentityClientId));
+
+        var profile = _profiles?.Invoke()?.GetProfile(server.CredentialProfileId);
+        return profile == null
+            ? null
+            : new SignIn(Normalize(profile.AuthType), Normalize(profile.AzureClientId), Normalize(profile.ManagedIdentityClientId));
+    }
+
+    private static List<ServerSettingChange> SettingChanges(Binding bound, ServerConnection server, SignIn? signIn)
     {
         var changes = new List<ServerSettingChange>();
-        if (!string.Equals(bound.AuthenticationType, Normalize(server.AuthenticationType), StringComparison.Ordinal))
-            changes.Add(new ServerSettingChange("sign-in method", AuthName(bound.AuthenticationType), AuthName(server.AuthenticationType)));
         if (!SameHost(bound.CredentialProfileId, server.CredentialProfileId))
             changes.Add(new ServerSettingChange("credential profile", OrNone(bound.CredentialProfileId), OrNone(server.CredentialProfileId)));
+        else if (signIn == null)
+            changes.Add(new ServerSettingChange("credential profile", OrNone(bound.CredentialProfileId), "a profile Lite cannot find"));
+
+        if (signIn is { } now)
+        {
+            if (!string.Equals(bound.AuthenticationType, now.AuthenticationType, StringComparison.Ordinal))
+                changes.Add(new ServerSettingChange("sign-in method", AuthName(bound.AuthenticationType), AuthName(now.AuthenticationType)));
+            if (bound.AzureClientId == null || !SameHost(bound.AzureClientId, now.AzureClientId))
+                changes.Add(new ServerSettingChange("application (client) ID", Recorded(bound.AzureClientId), OrNone(now.AzureClientId)));
+            if (bound.ManagedIdentityClientId == null || !SameHost(bound.ManagedIdentityClientId, now.ManagedIdentityClientId))
+                changes.Add(new ServerSettingChange("managed identity client ID", Recorded(bound.ManagedIdentityClientId), OrNone(now.ManagedIdentityClientId)));
+        }
+
         if (!SameHost(bound.DatabaseName, server.DatabaseName))
-            changes.Add(new ServerSettingChange("database", OrNone(bound.DatabaseName), OrNone(server.DatabaseName)));
+            changes.Add(new ServerSettingChange(DatabaseSetting, OrNone(bound.DatabaseName), OrNone(server.DatabaseName)));
         if (!SameHost(bound.UtilityDatabase, server.UtilityDatabase))
-            changes.Add(new ServerSettingChange("utility database", OrNone(bound.UtilityDatabase), OrNone(server.UtilityDatabase)));
+            changes.Add(new ServerSettingChange(UtilityDatabaseSetting, OrNone(bound.UtilityDatabase), OrNone(server.UtilityDatabase)));
         if (EncryptRank(server.EncryptMode) < EncryptRank(bound.EncryptMode))
-            changes.Add(new ServerSettingChange("encryption", OrNone(bound.EncryptMode), OrNone(server.EncryptMode)));
+            changes.Add(new ServerSettingChange(EncryptionSetting, OrNone(bound.EncryptMode), OrNone(server.EncryptMode)));
         if (server.TrustServerCertificate && !bound.TrustServerCertificate)
-            changes.Add(new ServerSettingChange("certificate check", "checked", "trusted without a check"));
+            changes.Add(new ServerSettingChange(CertificateSetting, "checked", "trusted without a check"));
         return changes;
     }
+
+    private static string Recorded(string? value) => value == null ? "not recorded" : OrNone(value);
 
     private static string OrNone(string? value) => Normalize(value).Length == 0 ? "none" : Normalize(value);
 
@@ -276,16 +334,53 @@ public sealed class ServerHostBindings
         var other => other
     };
 
-    private static Binding BindingFor(ServerConnection server) =>
-        new(
+    /// <summary>The server's settings as a binding. A profile that is not found records no sign-in; it is asked about anyway.</summary>
+    private Binding BindingFor(ServerConnection server)
+    {
+        var signIn = SignInFor(server) ?? new SignIn("", "", "");
+        return new(
             Normalize(server.ServerName),
             Normalize(server.QueryStoreReplica),
-            Normalize(server.AuthenticationType),
+            signIn.AuthenticationType,
             Normalize(server.CredentialProfileId),
             Normalize(server.DatabaseName),
             Normalize(server.UtilityDatabase),
             Normalize(server.EncryptMode),
-            server.TrustServerCertificate);
+            server.TrustServerCertificate,
+            signIn.AzureClientId,
+            signIn.ManagedIdentityClientId);
+    }
+
+    /// <summary>
+    /// Whether this start is the first one, by a build that keeps the record, with a data folder an earlier Lite used
+    /// (<paramref name="databasePath"/> or settings.json exists): only that start binds the servers the user used. Writes
+    /// <see cref="StartedMarkerName"/> before Lite creates the database, so every later start reads false. A folder this
+    /// build created, or one whose first record write failed or whose first start stopped before the record was written, is
+    /// then never taken for an earlier Lite's, and Lite asks again about each server it has no record for.
+    /// </summary>
+    /// <param name="databasePath">monitor.duckdb.</param>
+    /// <param name="configDirectory">The user's own config folder (settings.json and the record).</param>
+    public static bool IsFirstStartInUsedFolder(string databasePath, string configDirectory)
+    {
+        var marker = Path.Combine(configDirectory, StartedMarkerName);
+        if (File.Exists(marker))
+            return false;
+
+        var usedBefore = File.Exists(databasePath) || File.Exists(Path.Combine(configDirectory, "settings.json"));
+        try
+        {
+            Directory.CreateDirectory(configDirectory);
+            File.WriteAllText(marker,
+                $"Lite first started with this data folder on {DateTime.UtcNow.ToString("u", CultureInfo.InvariantCulture)}. " +
+                $"While this file exists, a missing {FileName} means Lite asks again about each server before it connects.");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            AppLogger.Warn("ServerHostBindings", $"Could not write {marker}: {ex.Message}");
+        }
+
+        return usedBefore;
+    }
 
     private void Report(string? problem)
     {
@@ -315,7 +410,9 @@ public sealed class ServerHostBindings
                     DatabaseName = binding.DatabaseName,
                     UtilityDatabase = binding.UtilityDatabase,
                     EncryptMode = binding.EncryptMode,
-                    TrustServerCertificate = binding.TrustServerCertificate
+                    TrustServerCertificate = binding.TrustServerCertificate,
+                    AzureClientId = binding.AzureClientId,
+                    ManagedIdentityClientId = binding.ManagedIdentityClientId
                 };
             }
 
@@ -340,7 +437,7 @@ public sealed class ServerHostBindings
 
     private sealed class BindingsFile
     {
-        public int Version { get; set; } = 2;
+        public int Version { get; set; } = 3;
         public Dictionary<string, BindingEntry?> Servers { get; set; } = new();
     }
 
@@ -354,6 +451,8 @@ public sealed class ServerHostBindings
         public string? UtilityDatabase { get; set; }
         public string? EncryptMode { get; set; }
         public bool? TrustServerCertificate { get; set; }
+        public string? AzureClientId { get; set; }
+        public string? ManagedIdentityClientId { get; set; }
     }
 }
 
@@ -370,6 +469,8 @@ public sealed record ServerSettingChange(string Name, string From, string To);
 public sealed record ServerHostChange(string Host, string? ConfirmedHost, string Replica, bool ReplicaChanged)
 {
     private const int MaxShownLength = 80;
+    private const int ShownHead = 38;
+    private const int ShownTail = 39;
 
     /// <summary>The Query Store replica this user last confirmed (empty when none).</summary>
     public string ConfirmedReplica { get; init; } = "";
@@ -393,7 +494,8 @@ public sealed record ServerHostChange(string Host, string? ConfirmedHost, string
     /// <summary>
     /// A value from servers.json as it is shown: control characters, line and paragraph separators and bidi controls become
     /// '?' as in <see cref="ServerHostSetting"/>'s refusal text, every other character outside printable ASCII is written as
-    /// \uXXXX (so a look-alike letter cannot pass for the one it imitates), and the text is cut at 80 characters.
+    /// \uXXXX (so a look-alike letter cannot pass for the one it imitates), and text over 80 characters keeps its first 38 and
+    /// last 39 around "...", so both ends of a long host name show.
     /// </summary>
     public static string Shown(string? value)
     {
@@ -411,7 +513,7 @@ public sealed record ServerHostChange(string Host, string? ConfirmedHost, string
         }
 
         var cut = builder.ToString();
-        return cut.Length > MaxShownLength ? cut[..MaxShownLength] + "..." : cut;
+        return cut.Length > MaxShownLength ? cut[..ShownHead] + "..." + cut[^ShownTail..] : cut;
     }
 
     private static bool IsHidden(char c) =>
@@ -457,10 +559,20 @@ public sealed record ServerHostChange(string Host, string? ConfirmedHost, string
 /// </summary>
 public static class HostConfirmationGate
 {
+    /// <summary>The settings a password typed in the dialog does not confirm: typing it says nothing about where it is sent.</summary>
+    private static readonly HashSet<string> s_askedWithTypedSecret = new(StringComparer.Ordinal)
+    {
+        ServerHostBindings.DatabaseSetting,
+        ServerHostBindings.UtilityDatabaseSetting,
+        ServerHostBindings.EncryptionSetting,
+        ServerHostBindings.CertificateSetting
+    };
+
     /// <summary>
     /// The question to ask, or null when none is needed: the dialog adds a new server (the user typed every setting in it),
     /// the settings in the dialog are the confirmed ones, or the credential is a password or secret the user typed in the
-    /// dialog just now (typing it is the confirmation, as on Save).
+    /// dialog just now (typing it is the confirmation, as on Save). A typed password does not confirm a change to the
+    /// database, the utility database, the encryption or the certificate check: those are still asked about.
     /// </summary>
     /// <param name="change">The change between the dialog's settings and this user's record; null when they match.</param>
     /// <param name="isEdit">True for Edit Server, false for Add Server.</param>
@@ -491,8 +603,16 @@ public static class HostConfirmationGate
 
     private static string? QuestionCore(ServerHostChange? change, bool isEdit, string credential, bool secretTypedNow, bool replica)
     {
-        if (change == null || !isEdit || secretTypedNow)
+        if (change == null || !isEdit)
             return null;
+
+        /* The replica Test runs after the server's own Test, which already asked about these settings. */
+        if (secretTypedNow)
+        {
+            return !replica && change.Settings.Any(setting => s_askedWithTypedSecret.Contains(setting.Name))
+                ? $"Connect to {ServerHostChange.Shown(change.Host)} with these settings?\n\n" + change.DescribeChange()
+                : null;
+        }
 
         if (replica)
         {

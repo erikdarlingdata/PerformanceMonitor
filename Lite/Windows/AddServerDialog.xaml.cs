@@ -615,7 +615,14 @@ public partial class AddServerDialog : Window
             DatabaseName = string.IsNullOrWhiteSpace(DatabaseNameBox.Text) ? null : DatabaseNameBox.Text,
             UtilityDatabase = string.IsNullOrWhiteSpace(UtilityDatabaseBox.Text) ? null : UtilityDatabaseBox.Text,
             EncryptMode = GetSelectedEncryptMode(),
-            TrustServerCertificate = TrustCertCheckBox.IsChecked == true
+            TrustServerCertificate = TrustCertCheckBox.IsChecked == true,
+            /* As Save writes them: kept only for the mode that uses them, and never beside a profile (its own are checked). */
+            AzureClientId = !useProfile && authType == AuthenticationTypes.ServicePrincipal && !string.IsNullOrWhiteSpace(AzureClientIdBox.Text)
+                ? AzureClientIdBox.Text.Trim()
+                : null,
+            ManagedIdentityClientId = !useProfile && authType == AuthenticationTypes.ManagedIdentity && !string.IsNullOrWhiteSpace(ManagedIdentityClientIdBox.Text)
+                ? ManagedIdentityClientIdBox.Text.Trim()
+                : null
         };
 
         var typedSecret = !useProfile && authType switch

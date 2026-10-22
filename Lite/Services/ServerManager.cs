@@ -96,8 +96,10 @@ public class ServerManager
            shared by every user of the computer. Nothing is bound here: until BindHostsOnFirstRun runs (the main window, once
            the local store is open) a user with no record has every server unconfirmed, and a changed setting is confirmed
            before Lite connects to it. */
-        _hostBindings = new ServerHostBindings(hostBindingsPath
-            ?? (string.IsNullOrEmpty(App.ConfigDirectory) ? null : Path.Combine(App.ConfigDirectory, ServerHostBindings.FileName)));
+        _hostBindings = new ServerHostBindings(
+            hostBindingsPath
+                ?? (string.IsNullOrEmpty(App.ConfigDirectory) ? null : Path.Combine(App.ConfigDirectory, ServerHostBindings.FileName)),
+            () => ProfileLookup);
         _hostBindings.SaveFailed += message => HostRecordSaveFailed?.Invoke(message);
     }
 
@@ -109,13 +111,14 @@ public class ServerManager
 
     /// <summary>
     /// The first-run step for a user with no record of confirmed settings (see <see cref="ServerHostBindings.BindOnFirstRun"/>).
-    /// <paramref name="hadLiteData"/> is whether this user's monitor.duckdb or settings.json existed before this start; a user
-    /// without either is new and gets nothing bound. An upgrading user gets bound only the servers they used: one with a saved
-    /// password or secret (its own, or its credential profile's) in this user's credential store, or one with rows in this
-    /// user's local store (<paramref name="storedServerIds"/>, the hash ids collection writes under). Returns how many servers
-    /// were bound.
+    /// <paramref name="hadLiteData"/> is whether this is the first start of this build with a data folder an earlier Lite used
+    /// (<see cref="ServerHostBindings.IsFirstStartInUsedFolder"/>); otherwise nothing is bound. An upgrading user gets bound
+    /// only the servers they collected from: one whose storage name (host, database and read-only intent, as
+    /// <see cref="RemoteCollectorService.GetServerNameForStorage"/> writes it) is in <paramref name="storedServerNames"/>, the
+    /// server_name values in this user's collector tables, compared case-insensitively. A saved password alone does not
+    /// count: it is kept by server id and says nothing about the host. Returns how many servers were bound.
     /// </summary>
-    public int BindHostsOnFirstRun(bool hadLiteData, IReadOnlyCollection<int> storedServerIds)
+    public int BindHostsOnFirstRun(bool hadLiteData, IReadOnlyCollection<string> storedServerNames)
     {
         List<ServerConnection> servers;
         lock (_serversLock)
@@ -123,24 +126,9 @@ public class ServerManager
             servers = _servers.ToList();
         }
 
-        return _hostBindings.BindOnFirstRun(servers, hadLiteData, server =>
-            storedServerIds.Contains(RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server)))
-            || HasSavedSecret(server));
-    }
-
-    /// <summary>Whether this user's credential store holds a password or secret the server signs in with.</summary>
-    private bool HasSavedSecret(ServerConnection server)
-    {
-        if (!string.IsNullOrEmpty(server.CredentialProfileId))
-        {
-            var profile = ProfileLookup?.GetProfile(server.CredentialProfileId);
-            return profile != null
-                && profile.AuthType is AuthenticationTypes.SqlServer or AuthenticationTypes.ServicePrincipal
-                && _credentialService.GetCredential(ProfileManager.ProfileCredentialId(profile.Id)).HasValue;
-        }
-
-        return server.AuthenticationType is AuthenticationTypes.SqlServer or AuthenticationTypes.ServicePrincipal
-            && _credentialService.GetCredential(server.Id).HasValue;
+        var stored = new HashSet<string>(storedServerNames, StringComparer.OrdinalIgnoreCase);
+        return _hostBindings.BindOnFirstRun(servers, hadLiteData,
+            server => stored.Contains(RemoteCollectorService.GetServerNameForStorage(server)));
     }
 
     /// <summary>

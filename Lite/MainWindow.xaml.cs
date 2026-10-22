@@ -254,32 +254,41 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// The server hash ids with collection rows in this user's store, hot or archived: which servers this user used. A read
-    /// that fails counts as none, so the server waits for its settings to be confirmed instead of being bound.
+    /// The server_name values in this user's collector tables: the storage name (host, database and read-only intent) each
+    /// server's rows were collected under, so which hosts this user collected from. collection_log is not read: it keeps the
+    /// display name. A table that cannot be read counts as none, so its servers wait for their settings to be confirmed
+    /// instead of being bound.
     /// </summary>
-    private IReadOnlyCollection<int> ReadStoredServerIds()
+    private IReadOnlyCollection<string> ReadStoredServerNames()
     {
-        var ids = new HashSet<int>();
-        foreach (var source in new[] { "collection_log", "v_collection_log" })
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
         {
-            try
+            using var readLock = _databaseInitializer.AcquireReadLock();
+            using var connection = _databaseInitializer.CreateConnection();
+            connection.Open();
+            foreach (var table in DuckDbSchemaGenerator.CollectorTableNames())
             {
-                using var readLock = _databaseInitializer.AcquireReadLock();
-                using var connection = _databaseInitializer.CreateConnection();
-                connection.Open();
-                using var command = connection.CreateCommand();
-                command.CommandText = $"SELECT DISTINCT server_id FROM {source} WHERE server_id IS NOT NULL";
-                using var reader = command.ExecuteReader();
-                while (reader.Read())
-                    ids.Add(reader.GetInt32(0));
-            }
-            catch (Exception ex)
-            {
-                AppLogger.Debug("ServerHostBindings", $"Could not read the server ids in {source}: {ex.Message}");
+                try
+                {
+                    using var command = connection.CreateCommand();
+                    command.CommandText = $"SELECT DISTINCT server_name FROM {table} WHERE server_name IS NOT NULL";
+                    using var reader = command.ExecuteReader();
+                    while (reader.Read())
+                        names.Add(reader.GetString(0));
+                }
+                catch (Exception ex)
+                {
+                    AppLogger.Debug("ServerHostBindings", $"Could not read the server names in {table}: {ex.Message}");
+                }
             }
         }
+        catch (Exception ex)
+        {
+            AppLogger.Debug("ServerHostBindings", $"Could not open the local store to read the server names: {ex.Message}");
+        }
 
-        return ids;
+        return names;
     }
 
     private bool _hostRecordProblemShown;
@@ -305,11 +314,11 @@ public partial class MainWindow : Window
             await _databaseInitializer.InitializeAsync();
 
             /* The first run of the per-user record of confirmed server settings, before anything below connects: a user who
-               used Lite before gets the servers they used bound (rows in this store, or a saved password); a new user
-               confirms each server. A record that cannot be written is shown, not passed over. */
+               used an earlier Lite gets bound the servers whose current host has rows in this store; a new user, and a
+               server with only a saved password, confirms each one. A record that cannot be written is shown, not passed over. */
             _serverManager.HostRecordSaveFailed += message => Dispatcher.BeginInvoke(() => ShowHostRecordSaveProblem(message));
-            var storedServerIds = await Task.Run(ReadStoredServerIds);
-            _serverManager.BindHostsOnFirstRun(App.HadLiteDataAtStart, storedServerIds);
+            var storedServerNames = App.HadLiteDataAtStart ? await Task.Run(ReadStoredServerNames) : [];
+            _serverManager.BindHostsOnFirstRun(App.HadLiteDataAtStart, storedServerNames);
 
             /* #5775: remove route credentials no route points at (a crash between writing a new generation and the row, or a
                delete that failed). Off the UI thread and not awaited: the sweep takes the write lock briefly, logs only a count

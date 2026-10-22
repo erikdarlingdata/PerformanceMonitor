@@ -52,15 +52,178 @@ public sealed class ServerHostBindingTests : IDisposable
 
     private ServerManager NewManager() => new(_sharedDir, hostBindingsPath: _bindingsPath, credentialService: _credentials);
 
-    private static int StoredId(ServerConnection server) =>
-        RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
+    private static string StoredName(ServerConnection server) => RemoteCollectorService.GetServerNameForStorage(server);
 
     /// <summary>The first run for a user who had Lite data and collection rows for every server in the list.</summary>
     private ServerManager FirstRunAsAUserWhoUsedEveryServer()
     {
         var manager = NewManager();
-        manager.BindHostsOnFirstRun(hadLiteData: true, manager.GetAllServers().Select(StoredId).ToArray());
+        manager.BindHostsOnFirstRun(hadLiteData: true, manager.GetAllServers().Select(StoredName).ToArray());
         return manager;
+    }
+
+    /// <summary>A profile list the test changes as profiles.json would.</summary>
+    private sealed class Profiles : IProfileLookup
+    {
+        public System.Collections.Generic.Dictionary<string, CredentialProfile> ById { get; } = new();
+        public CredentialProfile? GetProfile(string id) => ById.TryGetValue(id, out var profile) ? profile : null;
+    }
+
+    [Fact]
+    public void ProfileServer_ProfileSignInTypeOrClientIdChange_IsRefused_ServersJsonCopyIsNotWhatIsChecked()
+    {
+        var profiles = new Profiles();
+        profiles.ById["p1"] = new CredentialProfile { Id = "p1", Name = "Ops", AuthType = AuthenticationTypes.ManagedIdentity, ManagedIdentityClientId = "mi-1" };
+        var bindings = new ServerHostBindings(_bindingsPath, () => profiles);
+        var resolver = new CredentialResolver(_credentials, profiles, bindings);
+        var server = new ServerConnection { Id = "a", ServerName = "sql01", AuthenticationType = AuthenticationTypes.ManagedIdentity, CredentialProfileId = "p1" };
+        bindings.Confirm(server);
+        Assert.Null(bindings.Check(server));
+
+        /* The copy in servers.json is not what a profile server connects with, so it is not what is checked. */
+        server.AuthenticationType = AuthenticationTypes.SqlServer;
+        Assert.Null(bindings.Check(server));
+
+        profiles.ById["p1"].AuthType = AuthenticationTypes.ServicePrincipal;
+        var change = bindings.Check(server);
+        Assert.NotNull(change);
+        Assert.Equal("sign-in method", Assert.Single(change.Settings).Name);
+        Assert.Throws<ServerHostNotConfirmedException>(() => resolver.GetConnectionString(server));
+
+        profiles.ById["p1"].AuthType = AuthenticationTypes.ManagedIdentity;
+        Assert.Null(bindings.Check(server));
+        profiles.ById["p1"].ManagedIdentityClientId = "mi-2";
+        Assert.Equal("The managed identity client ID for this server changed from mi-1 to mi-2.", bindings.Check(server)!.DescribeChange());
+
+        /* The next start, with the same profile list, refuses the same change. */
+        Assert.NotNull(new ServerHostBindings(_bindingsPath, () => profiles).Check(server));
+    }
+
+    [Fact]
+    public void ProfileServer_ProfileNotFound_IsRefused()
+    {
+        var profiles = new Profiles();
+        profiles.ById["p1"] = new CredentialProfile { Id = "p1", Name = "Ops", AuthType = AuthenticationTypes.SqlServer };
+        var bindings = new ServerHostBindings(_bindingsPath, () => profiles);
+        var server = new ServerConnection { Id = "a", ServerName = "sql01", AuthenticationType = AuthenticationTypes.SqlServer, CredentialProfileId = "p1" };
+        bindings.Confirm(server);
+        Assert.Null(bindings.Check(server));
+
+        profiles.ById.Clear();
+        var change = bindings.Check(server);
+        Assert.NotNull(change);
+        Assert.Equal("The credential profile for this server changed from p1 to a profile Lite cannot find.", change.DescribeChange());
+        Assert.Throws<ServerHostNotConfirmedException>(() => new CredentialResolver(_credentials, profiles, bindings).GetConnectionString(server));
+    }
+
+    [Fact]
+    public void ProfilesJson_ProfileWithASignInTypeAProfileCannotHave_IsNotLoaded()
+    {
+        WriteSharedServers();
+        File.WriteAllText(Path.Combine(_sharedDir, "profiles.json"), JsonSerializer.Serialize(new
+        {
+            Profiles = new[]
+            {
+                new CredentialProfile { Id = "sql", Name = "Sql", AuthType = AuthenticationTypes.SqlServer },
+                new CredentialProfile { Id = "sp", Name = "Sp", AuthType = AuthenticationTypes.ServicePrincipal },
+                new CredentialProfile { Id = "mi", Name = "Mi", AuthType = AuthenticationTypes.ManagedIdentity },
+                new CredentialProfile { Id = "win", Name = "Win", AuthType = AuthenticationTypes.Windows },
+                new CredentialProfile { Id = "mfa", Name = "Mfa", AuthType = AuthenticationTypes.EntraMFA },
+                new CredentialProfile { Id = "other", Name = "Other", AuthType = "Something" }
+            }
+        }));
+
+        var profiles = new ProfileManager(NewManager());
+
+        Assert.NotNull(profiles.GetProfile("sql"));
+        Assert.NotNull(profiles.GetProfile("sp"));
+        Assert.NotNull(profiles.GetProfile("mi"));
+        Assert.Null(profiles.GetProfile("win"));
+        Assert.Null(profiles.GetProfile("mfa"));
+        Assert.Null(profiles.GetProfile("other"));
+    }
+
+    [Fact]
+    public void FirstRun_MatchesStoredServerNames_NotTheirHashIds()
+    {
+        /* Two host names with the same 32-bit FNV-1a id: rows stored under one say nothing about the other. */
+        Assert.Equal(RemoteCollectorService.GetDeterministicHashCode("sql-1022789"), RemoteCollectorService.GetDeterministicHashCode("sql-1239192"));
+        WriteSharedServers(Server("a", "sql-1239192", AuthenticationTypes.Windows), Server("b", "sql02", AuthenticationTypes.Windows));
+        var manager = NewManager();
+
+        /* The stored name is matched case-insensitively. */
+        Assert.Equal(1, manager.BindHostsOnFirstRun(hadLiteData: true, ["sql-1022789", "SQL02"]));
+
+        Assert.Null(manager.HostChange(manager.GetServerById("a")!)!.ConfirmedHost);
+        Assert.Null(manager.HostChange(manager.GetServerById("b")!));
+    }
+
+    [Fact]
+    public void DataFolderThisBuildCreated_IsNotAnUpgradeOnTheNextStart_EvenWhenTheRecordWriteFailed()
+    {
+        var dataDir = Path.Combine(_root, "data");
+        var database = Path.Combine(dataDir, "monitor.duckdb");
+        var config = Path.Combine(dataDir, "config");
+
+        /* The first start: nothing there yet. The database is created next, and the record cannot be written. */
+        Assert.False(ServerHostBindings.IsFirstStartInUsedFolder(database, config));
+        File.WriteAllText(database, "");
+        WriteSharedServers(Server("a", "sql01", AuthenticationTypes.Windows));
+        Directory.CreateDirectory(_bindingsPath);
+        Assert.Equal(0, NewManager().BindHostsOnFirstRun(hadLiteData: false, []));
+        Directory.Delete(_bindingsPath);
+
+        /* The next start sees the database and no record, and still binds nothing. */
+        var hadLiteData = ServerHostBindings.IsFirstStartInUsedFolder(database, config);
+        Assert.False(hadLiteData);
+        var next = NewManager();
+        Assert.Equal(0, next.BindHostsOnFirstRun(hadLiteData, ["sql01"]));
+        Assert.NotNull(next.HostChange(next.GetServerById("a")!));
+
+        /* A folder an earlier Lite used is an upgrade on this build's first start only. */
+        var oldDir = Path.Combine(_root, "old");
+        Directory.CreateDirectory(oldDir);
+        File.WriteAllText(Path.Combine(oldDir, "monitor.duckdb"), "");
+        Assert.True(ServerHostBindings.IsFirstStartInUsedFolder(Path.Combine(oldDir, "monitor.duckdb"), Path.Combine(oldDir, "config")));
+        Assert.False(ServerHostBindings.IsFirstStartInUsedFolder(Path.Combine(oldDir, "monitor.duckdb"), Path.Combine(oldDir, "config")));
+    }
+
+    [Fact]
+    public void TypedPassword_WithWeakerEncryptionOrADatabaseChange_StillAsks()
+    {
+        var server = Server("a", "sql01", AuthenticationTypes.SqlServer);
+        var (bindings, _) = Confirmed(server);
+        var login = HostConfirmationGate.CredentialWords(AuthenticationTypes.SqlServer, null);
+
+        server.EncryptMode = "Optional";
+        Assert.Equal("Connect to sql01 with these settings?\n\nThe encryption for this server changed from Mandatory to Optional.",
+            HostConfirmationGate.Question(bindings.Check(server), isEdit: true, login, secretTypedNow: true));
+
+        server.EncryptMode = "Mandatory";
+        server.TrustServerCertificate = true;
+        Assert.NotNull(HostConfirmationGate.Question(bindings.Check(server), isEdit: true, login, secretTypedNow: true));
+
+        server.TrustServerCertificate = false;
+        server.UtilityDatabase = "Tools";
+        Assert.EndsWith("The utility database for this server changed from none to Tools.",
+            HostConfirmationGate.Question(bindings.Check(server), isEdit: true, login, secretTypedNow: true), StringComparison.Ordinal);
+
+        /* A host change alone is confirmed by typing the password. */
+        server.UtilityDatabase = null;
+        server.ServerName = "sql02";
+        Assert.Null(HostConfirmationGate.Question(bindings.Check(server), isEdit: true, login, secretTypedNow: true));
+    }
+
+    [Fact]
+    public void LongHostName_ShowsBothEnds()
+    {
+        var host = "prod-" + new string('x', 70) + ".corp.example.com";
+
+        var shown = ServerHostChange.Shown(host);
+
+        Assert.Equal(80, shown.Length);
+        Assert.Equal(host[..38] + "..." + host[^39..], shown);
+        Assert.EndsWith(".corp.example.com", shown, StringComparison.Ordinal);
     }
 
     /// <summary>A record with the one server confirmed as it is now, and the resolver that enforces it.</summary>
@@ -158,7 +321,7 @@ public sealed class ServerHostBindingTests : IDisposable
             Server("b", "sql02", AuthenticationTypes.Windows));
         var manager = NewManager();
 
-        Assert.Equal(0, manager.BindHostsOnFirstRun(hadLiteData: false, manager.GetAllServers().Select(StoredId).ToArray()));
+        Assert.Equal(0, manager.BindHostsOnFirstRun(hadLiteData: false, manager.GetAllServers().Select(StoredName).ToArray()));
 
         foreach (var id in new[] { "a", "b" })
         {
@@ -173,12 +336,12 @@ public sealed class ServerHostBindingTests : IDisposable
         /* The record is written, so the next start (now with Lite data) does not bind the list either. */
         Assert.True(File.Exists(_bindingsPath));
         var next = NewManager();
-        Assert.Equal(0, next.BindHostsOnFirstRun(hadLiteData: true, next.GetAllServers().Select(StoredId).ToArray()));
+        Assert.Equal(0, next.BindHostsOnFirstRun(hadLiteData: true, next.GetAllServers().Select(StoredName).ToArray()));
         Assert.NotNull(next.HostChange(next.GetServerById("a")!));
     }
 
     [Fact]
-    public void UpgradingUser_BindsOnlyTheServersTheyUsed()
+    public void UpgradingUser_BindsOnlyTheServersWithStoredRows_NotOnesWithOnlyASavedSecret()
     {
         var withRows = Server("rows", "sql01", AuthenticationTypes.Windows);
         var withPassword = Server(Guid.NewGuid().ToString(), "sql02", AuthenticationTypes.SqlServer);
@@ -195,11 +358,12 @@ public sealed class ServerHostBindingTests : IDisposable
             var manager = NewManager();
             manager.ProfileLookup = new OneProfile(new CredentialProfile { Id = profileId, Name = "Ops", AuthType = AuthenticationTypes.SqlServer });
 
-            Assert.Equal(3, manager.BindHostsOnFirstRun(hadLiteData: true, [StoredId(withRows)]));
+            /* A saved password or profile secret is kept by id and says nothing about the host: those servers are asked once. */
+            Assert.Equal(1, manager.BindHostsOnFirstRun(hadLiteData: true, [StoredName(withRows)]));
 
             Assert.Null(manager.HostChange(manager.GetServerById("rows")!));
-            Assert.Null(manager.HostChange(manager.GetServerById(withPassword.Id)!));
-            Assert.Null(manager.HostChange(manager.GetServerById("prof")!));
+            Assert.Null(manager.HostChange(manager.GetServerById(withPassword.Id)!)!.ConfirmedHost);
+            Assert.Null(manager.HostChange(manager.GetServerById("prof")!)!.ConfirmedHost);
             Assert.Null(manager.HostChange(manager.GetServerById("unused")!)!.ConfirmedHost);
             Assert.Null(manager.HostChange(manager.GetServerById("unused-login")!)!.ConfirmedHost);
         }
@@ -220,7 +384,7 @@ public sealed class ServerHostBindingTests : IDisposable
         var shown = new System.Collections.Generic.List<string>();
         manager.HostRecordSaveFailed += shown.Add;
 
-        Assert.Equal(0, manager.BindHostsOnFirstRun(hadLiteData: true, manager.GetAllServers().Select(StoredId).ToArray()));
+        Assert.Equal(0, manager.BindHostsOnFirstRun(hadLiteData: true, manager.GetAllServers().Select(StoredName).ToArray()));
 
         var message = Assert.Single(shown);
         Assert.StartsWith("Lite could not save the server settings you confirmed to ", message, StringComparison.Ordinal);
