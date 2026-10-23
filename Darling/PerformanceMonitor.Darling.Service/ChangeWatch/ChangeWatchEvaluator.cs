@@ -378,7 +378,7 @@ WHERE rn = 1";
                     if (DurationMoved(queryBeforeAvg, queryAfterAvg) && (queryWeekAvg is null || DurationMoved(queryWeekAvg.Value, queryAfterAvg)))
                     {
                         measures.Add(new ChangeWatchMeasure(measureName, "ms", queryBeforeAvg / 1000, queryAfterAvg / 1000,
-                            queryWeekAvg / 1000, true, $"Query Store query {queryId} in {database}; {queryBefore.Executions} -> {queryAfter.Executions} executions"));
+                            queryWeekAvg / 1000, true, $"read from Query Store: query_id {queryId} in database {database}; {queryBefore.Executions} -> {queryAfter.Executions} executions"));
                     }
                 }
             }
@@ -419,7 +419,7 @@ WHERE rn = 1";
                 if (DurationMoved(beforeAvg, afterAvg) && (weekAvg is null || DurationMoved(weekAvg.Value, afterAvg)))
                 {
                     measures.Add(new ChangeWatchMeasure("query_avg_duration_ms:" + hash, "ms", beforeAvg / 1000, afterAvg / 1000,
-                        weekAvg / 1000, true, $"database {after.Database}; {before.Executions} -> {after.Executions} executions"));
+                        weekAvg / 1000, true, $"read from the plan cache (query_stats), query_hash {hash} in database {after.Database ?? "(unknown)"}; {before.Executions} -> {after.Executions} executions"));
                 }
             }
 
@@ -484,10 +484,19 @@ WHERE rn = 1";
             text.Append('+').Append(watch.Changes.Count - 5).Append(" more; ");
         }
 
-        foreach (var m in measures.Where(m => m.Moved).Take(5))
+        var moved = measures.Where(m => m.Moved).Take(5).ToList();
+        foreach (var m in moved)
         {
             text.Append(m.Name).Append(" before ").Append(Num(m.Before)).Append(" after ").Append(Num(m.After))
                 .Append(" week earlier ").Append(Num(m.WeekEarlier)).Append(' ').Append(m.Unit).Append("; ");
+        }
+
+        /* #6551: a query measure's note names the database and the read (plan cache or Query Store) it came from, so an agent can call the
+           matching trend read for the right database without guessing it from another change line. The notes come after every measure line:
+           the cut below drops the end of the text, and a note must never push a moved measure out of it. */
+        foreach (var m in moved.Where(m => !string.IsNullOrEmpty(m.Note)))
+        {
+            text.Append(m.Name).Append(": ").Append(m.Note).Append("; ");
         }
 
         var result = text.ToString().TrimEnd(' ', ';');

@@ -40,14 +40,14 @@ public sealed class DarlingMcpChangeWatchTools
     {
         "open", "evaluating", "closed", "failed",
         ChangeWatchStore.ResultFlat, ChangeWatchStore.ResultRequestOpened, ChangeWatchStore.ResultMovedNoRequest,
-        ChangeWatchStore.ResultAgentChange, ChangeWatchStore.ResultNoData,
+        ChangeWatchStore.ResultAgentChange, ChangeWatchStore.ResultAutoPlanCorrection, ChangeWatchStore.ResultNoData,
     };
 
     [McpServerTool(Name = "get_change_watches"), Description(
         "Lists a server's change watches, open and closed, newest first: a recorded change (a configuration, trace flag, plan or " +
         "extension change) opens a 60 minute watch, and at its end Darling compares wait time per second, average CPU and query " +
         "duration with the hour before and the same hour a week earlier. Each watch carries its changes, its measures and its result " +
-        "(flat, request_opened, moved_no_request, moved_agent_change, no_data), or its failed state. Stored read. <<GUIDE>> " +
+        "(flat, request_opened, moved_no_request, moved_agent_change, moved_auto_plan_correction, no_data), or its failed state. Stored read. <<GUIDE>> " +
         "Reads the change watch windows (config.change_watches) for SQL Server and PostgreSQL targets. A SQL Server change is a server, database or " +
         "database-scoped setting, a trace flag, or a forced or unforced Query Store plan; a PostgreSQL change is a server setting, a per-database " +
         "or per-role setting, or an extension install, drop or version change. Every change Darling records opens a watch of 60 " +
@@ -61,7 +61,8 @@ public sealed class DarlingMcpChangeWatchTools
         "request_opened (something moved and ONE investigation request opened, request_id names it), moved_no_request (something moved and " +
         "no investigation could open: investigations are off or no agent route matched), moved_agent_change (something moved, but every " +
         "change in the watch was the investigation agent's own plan force or unforce made while it handled a change watch request, so it " +
-        "is recorded and measured and opens no further request), or no_data (the before or after hour had no " +
+        "is recorded and measured and opens no further request), moved_auto_plan_correction (something moved, but every change was a plan that SQL Server's own " +
+        "automatic plan correction forced or unforced, so it is recorded and measured and opens no request), or no_data (the before or after hour had no " +
         "collected rows, so nothing was compared). state says where a watch is: open (still collecting its window), evaluating (its " +
         "window ended and a Darling pass is reading its measures or opening its request; a watch stuck here is retried), closed (done, " +
         "with a result) or failed (its evaluation or request failed repeatedly and Darling gave up; result_detail holds the last error). " +
@@ -72,14 +73,14 @@ public sealed class DarlingMcpChangeWatchTools
         "collector where that is its source, CPU from Performance Insights samples and statements from pg_stat_statements; a measure it has no source for is listed in not_measured with the reason " +
         "(for example no CPU source), never as flat. An open watch has no measures yet: it is still collecting its window. Pass state " +
         "open, evaluating, closed or failed to see only watches in that state, or a result (flat, request_opened, moved_no_request, " +
-        "moved_agent_change, no_data) to see only watches that closed with it. A closed watch that measured many queries can run to about 20 KB, " +
+        "moved_agent_change, moved_auto_plan_correction, no_data) to see only watches that closed with it. A closed watch that measured many queries can run to about 20 KB, " +
         "so ask for a small limit (3 to 5), or pass watch_id to read one watch in any state. measures, not_measured and " +
         "changes are sent once, at the top of the watch; result_detail holds the rest of the stored result (had_data, notes, window). " +
         "A read over the monitoring store; no monitored server is touched.")]
     public static async Task<string> GetChangeWatches(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Only watches in this state (open, evaluating, closed, failed) or with this result (flat, request_opened, moved_no_request, moved_agent_change, no_data). Omit it, or pass all, for every state.")] string? state = null,
+        [Description("Only watches in this state (open, evaluating, closed, failed) or with this result (flat, request_opened, moved_no_request, moved_agent_change, moved_auto_plan_correction, no_data). Omit it, or pass all, for every state.")] string? state = null,
         [Description("Most watches to return, newest first. Default 20 (1-1000).")] int limit = 20,
         [Description("Read one watch by its watch_id, in any state; state still applies if you give it. A watch_id that is not on this server answers not_found.")] string? watch_id = null,
         CancellationToken cancellationToken = default)
@@ -159,6 +160,7 @@ public sealed class DarlingMcpChangeWatchTools
                             kind = c.Kind,
                             database = c.DatabaseName,
                             query_id = c.QueryId,
+                            plan_forcing_type = c.PlanForcingType,
                             what = c.Description,
                         }),
                         measures = detail?["measures"],

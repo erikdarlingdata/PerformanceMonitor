@@ -4,7 +4,7 @@ Part of the [Performance Monitor documentation](../README.md#documentation).
 
 Every edition includes an embedded [Model Context Protocol](https://modelcontextprotocol.io) server that exposes monitoring data to LLM clients like Claude Code and Cursor.
 
-The tools answer from the monitor's own collected store, and that is the boundary worth stating up front: **no MCP tool runs SQL an AI client wrote against your monitored servers.** The write-capable tools (Darling's view authoring, alert tuning, collector control and server onboarding) change the monitor's own configuration. Two reads touch a monitored server live: the analysis plan fetch and the onboarding connection probe. They run the product's own fixed, read-only queries under the same least-privilege monitoring login the collectors use.
+The tools answer from the monitor's own collected store, and that is the boundary worth stating up front: **no MCP tool runs SQL an AI client wrote against your monitored servers.** The write-capable tools (Darling's view authoring, alert tuning, collector control and server onboarding) change the monitor's own configuration. Five tools reach a monitored server live, each with the product's own fixed queries. They run under the same least-privilege monitoring login the collectors use: the analysis plan fetch, the onboarding connection probe (`add_servers`), the connection test `edit_server` runs before it saves a changed connection, `test_connection` and `run_collectors_now`, which runs that server's collectors once, now. All but the plan fetch are write tools, served only with `mcp.allowWrites` and a token (`add_servers` and `edit_server` also need `mcp.allowServerAdmin`).
 
 Only three Darling tools act on a monitored server: `force_query_store_plan` (with `unforce_query_store_plan`), `evict_cached_plan` and `kill_session`. They run fixed statements under a separate remediation login. Each runs only after a person turns on that server's switch for it. All switches start off, and [Agent dispatch](darling-agent-dispatch.md) explains them.
 
@@ -35,9 +35,9 @@ claude mcp add --transport http --scope user sql-monitor http://localhost:5151/ 
 
 ### Available Tools
 
-**Lite** exposes 113 tools (97 by default). **Darling** exposes 250 (181 by default). The deprecated **Dashboard** exposes 66 (see [deprecated/Dashboard/README.md](../deprecated/Dashboard/README.md)). 112 tool names are the same in Lite and Darling. Darling has 138 more. They are the PostgreSQL reads, Custom Views, custom alert rules, query tags, collector control, agent actions, investigation reads and fleet-wide reads.
+**Lite** exposes 113 tools (97 by default). **Darling** exposes 251 (182 by default). The deprecated **Dashboard** exposes 66 (see [deprecated/Dashboard/README.md](../deprecated/Dashboard/README.md)). 112 tool names are the same in Lite and Darling. Darling has 139 more. They are the PostgreSQL reads, Custom Views, custom alert rules, query tags, collector control, agent actions, investigation reads and fleet-wide reads.
 
-Of Darling's 250 tools, `mcp.allowWrites` with a token serves 63. `mcp.allowServerAdmin` adds 4 more. `mcp.allowInvestigations` with a token adds the last 2, and only while `mcp.allowWrites` is off. A service started before an upgrade reports the older, smaller count until you restart it.
+Of Darling's 251 tools, `mcp.allowWrites` with a token serves 63. `mcp.allowServerAdmin` adds 4 more. `mcp.allowInvestigations` with a token adds the last 2, and only while `mcp.allowWrites` is off. A service started before an upgrade reports the older, smaller count until you restart it.
 
 The table below names the main tools, not all of them. The `tools/list` call on a running server gives the full list.
 
@@ -94,7 +94,7 @@ The four investigation tools let your own agent pick up an alert, look into it w
 | Investigations (Darling) | `wait_for_investigation_requests` (waits up to 25 seconds for a request), `get_investigation_evidence` (the evidence frozen at the open), and the four tools Lite also has. Served with `mcp.allowInvestigations` and a token, while `mcp.allowWrites` is off |
 | Agent actions (Darling) | `force_query_store_plan`, `unforce_query_store_plan`, `evict_cached_plan`, `kill_session`, `merge_deadlock_signatures` (counts two deadlock signatures as one) and `undo_plan_change` (puts a plan forced or unforced by an agent back), and the reads `get_plan_force_precheck`, `get_compiles_after_evict`, `get_agent_changes` and `get_server_actions`. A person can undo a plan force or unforce. An eviction or a session kill cannot be undone. `set_server_action` (with `mcp.allowServerAdmin`) turns a server's switch on or off |
 | Collector control (Darling) | `get_collector_schedules`, `get_collector_cost`, `enable_collector`, `disable_collector`, `set_collector_frequency`, `set_collector_retention`, `set_collector_run_at`, `run_collectors_now` |
-| Collection state (Darling) | `get_collection_state`, `pause_collection`, `resume_collection`, `disable_server`, `enable_server`, `set_server_excluded_databases`, `test_connection`, `analyze_now`, and `purge_now` (needs `confirm`) |
+| Collection state (Darling) | `get_collection_state`, `get_server_settings`, `pause_collection`, `resume_collection`, `disable_server`, `enable_server`, `set_server_excluded_databases`, `test_connection`, `analyze_now`, and `purge_now` (needs `confirm`) |
 | Quiet windows (Darling) | `set_quiet_window` and `clear_quiet_window` set and end a time-boxed mute for one server or the whole fleet |
 | Database state expectations (Darling) | `get_database_state_expectations` lists each database with its current and expected state; `set_database_state_expected` sets, ignores or clears one (the Viewer's database state override editor) |
 | Mute rule purge (Darling) | `purge_expired_mute_rules` deletes every expired mute rule (the Viewer's Purge Expired) and returns each rule it deleted |

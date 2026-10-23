@@ -25,7 +25,70 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <param name="DatabaseName">The database a plan change belongs to, or null.</param>
 /// <param name="QueryId">The Query Store query a plan change belongs to, or null; a watch of plan changes alone measures these queries.</param>
 /// <param name="PlanId">The Query Store plan a plan change forced or unforced, or null: the agent-only test (#6239 round 3, M1) matches an agent's action to a change by server, database and this plan id.</param>
-public sealed record ChangeWatchChange(string Key, string Kind, DateTime ChangeTimeUtc, string Description, string? DatabaseName = null, long? QueryId = null, long? PlanId = null);
+public sealed record ChangeWatchChange(string Key, string Kind, DateTime ChangeTimeUtc, string Description, string? DatabaseName = null, long? QueryId = null, long? PlanId = null)
+{
+    /// <summary>
+    /// #6550: how a <c>plan_force</c> change's plan was forced: <c>MANUAL</c>, <c>AUTO</c> (automatic plan correction), <c>NONE</c> or <c>unknown</c> (before
+    /// SQL Server 2017 or not captured); null for any other kind. It rides in <see cref="Description"/> (see <see cref="ChangeWatchPlanForcing"/>), so a stored
+    /// change carries it with no column of its own, and a change recorded before this existed reads as <c>unknown</c>.
+    /// </summary>
+    public string? PlanForcingType => string.Equals(Kind, "plan_force", StringComparison.Ordinal) ? ChangeWatchPlanForcing.Parse(Description) : null;
+}
+
+/// <summary>#6550: writes and reads the forcing type a <c>plan_force</c> change's description carries, as a trailing <c>[forcing type X]</c>.</summary>
+public static class ChangeWatchPlanForcing
+{
+    /// <summary>A plan forced by automatic plan correction (<c>FORCE_LAST_GOOD_PLAN</c>).</summary>
+    public const string Auto = "AUTO";
+
+    /// <summary>A plan forced by a person or tool.</summary>
+    public const string Manual = "MANUAL";
+
+    /// <summary>The server did not say (an older SQL Server, or the capture holds no value).</summary>
+    public const string Unknown = "unknown";
+
+    /* The one spelling both Suffix (the writer) and Parse (the reader) use, so rewording it here keeps the two in step. Rows already stored carry the old
+       text, though, and read as unknown after a reword: keep the spelling, or read the old one too. */
+    private const string Prefix = " [forcing type ";
+
+    /// <summary>The collector's <c>plan_forcing_type</c> as one of <c>MANUAL</c>, <c>AUTO</c>, <c>NONE</c> or <c>unknown</c>.</summary>
+    public static string Normalize(string? raw)
+    {
+        var value = raw?.Trim().ToUpperInvariant();
+        return value is Auto or Manual or "NONE" ? value : Unknown;
+    }
+
+    /// <summary>The suffix a change description ends with.</summary>
+    public static string Suffix(string? raw)
+    {
+        var type = Normalize(raw);
+        return type == Auto ? $"{Prefix}{Auto}: automatic plan correction]" : $"{Prefix}{type}]";
+    }
+
+    /// <summary>The forcing type a description names; <c>unknown</c> when it names none.</summary>
+    public static string Parse(string? description)
+    {
+        if (description is null)
+        {
+            return Unknown;
+        }
+
+        var start = description.LastIndexOf(Prefix, StringComparison.Ordinal);
+        if (start < 0)
+        {
+            return Unknown;
+        }
+
+        start += Prefix.Length;
+        var end = start;
+        while (end < description.Length && char.IsLetter(description[end]))
+        {
+            end++;
+        }
+
+        return Normalize(description[start..end]);
+    }
+}
 
 /// <summary>A watch window and what it saw (#6234).</summary>
 public sealed record ChangeWatchRow(
@@ -56,6 +119,9 @@ public sealed class ChangeWatchStore
 
     /// <summary>The <c>result</c> of a watch that saw something move but whose every change was an agent's own plan change made while it handled a change-watch request: it is recorded and measured, and opens no further request (no loop, #6234).</summary>
     public const string ResultAgentChange = "moved_agent_change";
+
+    /// <summary>The <c>result</c> of a watch that saw something move but whose every change was a plan forced or unforced by automatic plan correction (#6550): SQL Server doing its job, so it is recorded and measured and opens no request.</summary>
+    public const string ResultAutoPlanCorrection = "moved_auto_plan_correction";
 
     /// <summary>The <c>state</c> and <c>result</c> of a watch whose evaluation, or whose request open, failed <see cref="MaxAttempts"/> times (#6239 round 3, M2): it is closed for good with the last error in its <c>result_json</c>, and pruned like a closed one.</summary>
     public const string StateFailed = "failed";
