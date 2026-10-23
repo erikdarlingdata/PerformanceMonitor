@@ -779,7 +779,7 @@ public sealed partial class DarlingMcpAlertTools
         try
         {
             var store = new PgNotificationRouteStore(postgres);
-            var existing = (await store.LoadSummariesAsync()).FirstOrDefault(r => r.RouteId == route_id);
+            var existing = (await store.LoadSummariesAsync(cancellationToken)).FirstOrDefault(r => r.RouteId == route_id);
             if (existing is null)
             {
                 return Outcome("not_found", $"No notification route with route_id {route_id}.");
@@ -814,7 +814,7 @@ public sealed partial class DarlingMcpAlertTools
                 }, McpHelpers.JsonOptions);
             }
 
-            if (await store.SetEnabledAsync(route_id, enabled) == 0)
+            if (await store.SetEnabledAsync(route_id, enabled, cancellationToken) == 0)
             {
                 /* The write holds back a route with an agent setting in its own statement (#6281): one a person gave a setting after the read
                    above is refused here, one removed in the meantime is not found. */
@@ -822,7 +822,7 @@ public sealed partial class DarlingMcpAlertTools
             }
 
             /* Re-read AFTER the write, so the reported row is the stored one (set_mute_rule_enabled's rule). */
-            var stored = (await store.LoadSummariesAsync()).FirstOrDefault(r => r.RouteId == route_id);
+            var stored = (await store.LoadSummariesAsync(cancellationToken)).FirstOrDefault(r => r.RouteId == route_id);
             return JsonSerializer.Serialize(new
             {
                 status = "updated",
@@ -858,7 +858,7 @@ public sealed partial class DarlingMcpAlertTools
         try
         {
             var store = new PgNotificationRouteStore(postgres);
-            var routes = await store.LoadSummariesAsync();
+            var routes = await store.LoadSummariesAsync(cancellationToken);
             var existing = routes.FirstOrDefault(r => r.RouteId == route_id);
             if (existing is null)
             {
@@ -894,8 +894,8 @@ public sealed partial class DarlingMcpAlertTools
                 }, McpHelpers.JsonOptions);
             }
 
-            await store.SetFallbackAsync(route_id, fallback_route_id);
-            var stored = (await store.LoadSummariesAsync()).FirstOrDefault(r => r.RouteId == route_id);
+            await store.SetFallbackAsync(route_id, fallback_route_id, cancellationToken);
+            var stored = (await store.LoadSummariesAsync(cancellationToken)).FirstOrDefault(r => r.RouteId == route_id);
             return JsonSerializer.Serialize(new
             {
                 status = "updated",
