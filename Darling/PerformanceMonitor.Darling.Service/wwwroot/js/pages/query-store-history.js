@@ -143,6 +143,12 @@ const whole = (v) => Number(v).toLocaleString("en-US", { maximumFractionDigits: 
 
 /* `scope` is the panel's own key. It keys each Plan button's panel, so a plan opened here is not also open in the grid's Plan
    column or in the History table under another row of the same query. */
+/* The Forced column follows is_forced_plan, so a plan whose force was removed and never sampled as forced says "No (removed)", not "Yes (removed)" (#6598). */
+function forcedLabel(p) {
+  const state = p.forced_state ? " (" + p.forced_state.toLowerCase().replace(/_/g, " ") + ")" : "";
+  return (p.is_forced_plan ? "Yes" : "No") + state;
+}
+
 function planTable(server, data, scope) {
   const head = ["Plan ID", "Execs", "Avg Duration", "Total Duration", "Avg CPU", "Total CPU", "First seen", "Last seen", "Forced", "Plan"];
   const rows = data.plans.map((p) =>
@@ -155,7 +161,7 @@ function planTable(server, data, scope) {
       cell(num(p.total_cpu_ms, fmtMs), "num"),
       cell(p.first_execution_time == null ? null : localTime(p.first_execution_time)),
       cell(p.last_execution_time == null ? null : localTime(p.last_execution_time)),
-      cell(p.forced_state ? "Yes (" + p.forced_state.toLowerCase().replace("_", " ") + ")" : p.is_forced_plan ? "Yes" : "No"),
+      cell(forcedLabel(p)),
       el("td", {}, [
         planSourceCell(
           server,

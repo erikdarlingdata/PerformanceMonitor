@@ -26,8 +26,8 @@ public sealed class DarlingMcpQueryStoreHistoryToolsTests
     private static MethodInfo Tool() =>
         typeof(DarlingMcpQueryStoreHistoryTools).GetMethod(nameof(DarlingMcpQueryStoreHistoryTools.GetQueryStoreQueryHistory))!;
 
-    private static ForcedPlanFact Fact(long plan, ForcedPlanState state, DateTime lastSeen, long query = 1) =>
-        new("Db", query, plan, state, lastSeen, lastSeen, null, lastSeen, null, 0, null, 0, null, Array.Empty<ForcedPlanOtherPlan>());
+    private static ForcedPlanFact Fact(long plan, ForcedPlanState state, DateTime lastSeen, long query = 1, string db = "Db") =>
+        new(db, query, plan, state, lastSeen, lastSeen, null, lastSeen, null, 0, null, 0, null, Array.Empty<ForcedPlanOtherPlan>());
 
     /// <summary>#6598: one plan with a REMOVED fact and a standing fact gives one fact, the standing one, even when the REMOVED one is newer.</summary>
     [Fact]
@@ -41,10 +41,21 @@ public sealed class DarlingMcpQueryStoreHistoryToolsTests
             Fact(8, ForcedPlanState.Removed, t),
             Fact(8, ForcedPlanState.Removed, t.AddHours(1)),
             Fact(9, ForcedPlanState.Working, t, query: 2),
-        }, 1);
+        }, "Db", 1);
         Assert.Equal(new long[] { 7, 8 }, picked.Select(f => f.PlanId).ToArray());
         Assert.Equal(ForcedPlanState.Working, picked[0].State);
         Assert.Equal(t.AddHours(1), picked[1].LastSeen);
+    }
+
+    /// <summary>#6598: facts of another database never merge into the named database's fact (a blank name reads every database).</summary>
+    [Fact]
+    public void PickForces_KeepsOnlyTheNamedDatabase()
+    {
+        var t = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var facts = new[] { Fact(7, ForcedPlanState.Working, t, db: "Other"), Fact(7, ForcedPlanState.Removed, t) };
+        var picked = DarlingMcpQueryStoreHistoryTools.PickForces(facts, "Db", 1);
+        Assert.Equal(ForcedPlanState.Removed, Assert.Single(picked).State);
+        Assert.Empty(DarlingMcpQueryStoreHistoryTools.PickForces(facts, "", 1));
     }
 
     /// <summary>#6598: a REMOVED force never pushes a standing force out of the cap.</summary>
@@ -53,7 +64,7 @@ public sealed class DarlingMcpQueryStoreHistoryToolsTests
     {
         var t = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
         var facts = Enumerable.Range(1, 30).Select(i => Fact(i, ForcedPlanState.Removed, t)).Append(Fact(99, ForcedPlanState.Failing, t)).ToList();
-        var picked = DarlingMcpQueryStoreHistoryTools.PickForces(facts, 1);
+        var picked = DarlingMcpQueryStoreHistoryTools.PickForces(facts, "Db", 1);
         Assert.Equal(99, picked[0].PlanId);
         Assert.Contains(picked, f => f.PlanId == 99);
     }

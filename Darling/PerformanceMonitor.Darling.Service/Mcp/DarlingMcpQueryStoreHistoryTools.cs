@@ -280,7 +280,7 @@ public sealed class DarlingMcpQueryStoreHistoryTools
         {
             var read = await DarlingForcedPlanStateReader.ReadAsync(
                 postgres, serverId, DatabaseFilter.One(databaseName), queryId, start, end, null, McpCommandDeadlines.ReadSeconds, cancellationToken: cancellationToken);
-            var facts = PickForces(read.Plans, queryId);
+            var facts = PickForces(read.Plans, databaseName, queryId);
             return (facts, read.Captures.Count == 0 ? "no_capture_in_window" : "ok");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -290,16 +290,20 @@ public sealed class DarlingMcpQueryStoreHistoryTools
         }
     }
 
-    /// <summary>
-    /// One fact per plan_id for the query (#6598): a standing force wins over a REMOVED one, else the newest (LastSeen) wins. Standing forces
-    /// come first, so a REMOVED force never pushes a standing one out of the <see cref="MaxPlans"/> cap.
-    /// </summary>
+    /// <summary>A force that still stands. REMOVED is a record that a force ended (#6598).</summary>
+    internal static bool IsStanding(ForcedPlanFact fact) => fact.State != ForcedPlanState.Removed;
+
     /// <summary>Forced when sampled, or standing now. A REMOVED fact alone does not make a plan forced (#6598).</summary>
     internal static bool IsForced(bool sampledForced, ForcedPlanFact? fact) =>
-        sampledForced || (fact is not null && fact.State != ForcedPlanState.Removed);
+        sampledForced || (fact is not null && IsStanding(fact));
 
-    internal static List<ForcedPlanFact> PickForces(IEnumerable<ForcedPlanFact> facts, long queryId) =>
-        facts.Where(f => f.QueryId == queryId)
+    /// <summary>
+    /// One fact per plan_id for the query in the named database (#6598): a standing force wins over a REMOVED one, else the newest (LastSeen)
+    /// wins. Standing forces come first, so a REMOVED force never pushes a standing one out of the <see cref="MaxPlans"/> cap. Facts of other
+    /// databases are dropped: a blank database_name widens the read to every database, and the history rows never match a blank name.
+    /// </summary>
+    internal static List<ForcedPlanFact> PickForces(IEnumerable<ForcedPlanFact> facts, string databaseName, long queryId) =>
+        facts.Where(f => f.QueryId == queryId && string.Equals(f.DatabaseName, databaseName, StringComparison.Ordinal))
             .GroupBy(f => f.PlanId)
             .Select(g => g.OrderBy(f => f.State == ForcedPlanState.Removed ? 1 : 0).ThenByDescending(f => f.LastSeen).First())
             .OrderBy(f => f.State == ForcedPlanState.Removed ? 1 : 0).ThenBy(f => f.PlanId)
@@ -396,7 +400,7 @@ public sealed class DarlingMcpQueryStoreHistoryTools
             plans = plans
                 .Concat(allPlans.Where(p => forcedById.ContainsKey(p.PlanId) && !plans.Any(k => k.PlanId == p.PlanId)))
                 .Concat(forced.Facts.Where(f => !allPlans.Any(p => p.PlanId == f.PlanId))
-                    .Select(f => new PlanTotals(f.PlanId, 0, null, 0, null, 0, null, null, f.State != ForcedPlanState.Removed)))
+                    .Select(f => new PlanTotals(f.PlanId, 0, null, 0, null, 0, null, null, IsStanding(f))))
                 .OrderBy(p => p.PlanId).ToList();
             var allPoints = BuildPoints(rows, plans.Select(p => p.PlanId));
             var points = NewestWithinBudget(allPoints, p => JsonSerializer.SerializeToUtf8Bytes(p, McpHelpers.JsonOptions).Length, MaxPoints, PointByteBudget);
