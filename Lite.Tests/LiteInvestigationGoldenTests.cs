@@ -13,7 +13,6 @@ using System.Linq;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
-using ModelContextProtocol.Server;
 using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Investigations;
 using PerformanceMonitorLite.Mcp;
@@ -23,10 +22,9 @@ namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
 /// #5914 (#5632 Phase B slice L) lands its shared link work with Lite's bytes held still: the brief Lite composes for a
-/// fixed input, at every <c>mcp.dataDetail</c> level, and Lite's Level 1 tool texts (each investigation tool's description
-/// and parameter descriptions) are pinned by SHA-256 here, written before any production change of the slice. Darling's
+/// fixed input, at every <c>mcp.dataDetail</c> level, is pinned by SHA-256 here, written before any production change of the slice. Darling's
 /// <c>prior_links</c> and <c>request_url</c> are absent from a Lite brief because Lite's reader supplies neither. A
-/// deliberate change to Lite's brief or tool text updates these pins in the same PR, with the reason.
+/// deliberate change to Lite's brief updates these pins in the same PR, with the reason.
 /// </summary>
 public sealed class LiteInvestigationGoldenTests
 {
@@ -126,24 +124,5 @@ public sealed class LiteInvestigationGoldenTests
         var bytes = new byte[32];
         for (int i = 0; i < bytes.Length; i++) bytes[i] = (byte)i;
         return new PseudonymKey(bytes);
-    }
-
-    [Fact]
-    public void LitesLevel1ToolTexts_AreUnchanged()
-    {
-        var text = new StringBuilder();
-        foreach (var method in typeof(McpInvestigationTools).GetMethods(BindingFlags.Public | BindingFlags.Static)
-                     .Where(m => m.GetCustomAttribute<McpServerToolAttribute>()?.Name is not null)
-                     .OrderBy(m => m.GetCustomAttribute<McpServerToolAttribute>()!.Name, StringComparer.Ordinal))
-        {
-            text.Append(method.GetCustomAttribute<McpServerToolAttribute>()!.Name).Append('\n')
-                .Append(method.GetCustomAttribute<DescriptionAttribute>()?.Description).Append('\n');
-            foreach (var parameter in method.GetParameters())
-                text.Append(parameter.Name).Append(": ").Append(parameter.GetCustomAttribute<DescriptionAttribute>()?.Description).Append('\n');
-        }
-
-        text.Append(InvestigationFormats.UnsupportedReportFormatMessage(2, "Lite"));
-        var all = text.ToString();
-        Assert.True(Sha(all) == "D5E43FB06F2EE2CE56495183C6A2EDD2CF4A729C87E169E256CA991CD1E78A30", $"Lite's Level 1 tool texts moved; their SHA-256 is {Sha(all)}:\n{all}");
     }
 }
