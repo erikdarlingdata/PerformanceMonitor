@@ -31,6 +31,13 @@ public sealed partial class DarlingMcpPlanForceTools
 {
     internal const string CreatePlanGuideToolName = "create_plan_guide";
 
+    /// <summary>The refusal reason for an Azure SQL target (#6569).</summary>
+    internal const string EngineNotSupported = "engine_not_supported";
+
+    /* SERVERPROPERTY('EngineEdition') as the registry stores it: 5 is an Azure SQL Database, 8 an Azure SQL Managed Instance. */
+    private const int AzureSqlDatabaseEdition = 5;
+    private const int AzureManagedInstanceEdition = 8;
+
     /// <summary>The create tool body (#6569), so a test drives it with its own data sources. <paramref name="owner"/> is the store owner's data source.</summary>
     internal static async Task<string> RunCreatePlanGuideAsync(NpgsqlDataSource postgres, NpgsqlDataSource? owner, ILogger? logger, string? server_name, string? database_name,
         string? name, string? statement, string? type, string? module_or_batch, string? parameters, string? hints, string? agent_action, bool dry_run, CancellationToken ct,
@@ -58,12 +65,19 @@ public sealed partial class DarlingMcpPlanForceTools
                     "database_name is the database the guide is created in, at most 128 characters. Nothing was run.", ct, agentTokenName);
             }
 
-            /* 2: SQL Server only (Azure SQL Database and Managed Instance have sp_create_plan_guide too). */
-            var (_, engineKind) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, ct);
+            /* 2: SQL Server only. Microsoft's sp_create_plan_guide page lists Azure SQL Database and Managed Instance, but the sp_control_plan_guide page, which the
+               drop of an invalid guide and the Undo need, lists SQL Server alone, so an Azure target is refused rather than half supported. */
+            var (engineEdition, engineKind) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, ct);
             if (engineKind is not null && engineKind.Contains("postgres", StringComparison.OrdinalIgnoreCase))
             {
                 return await RefuseBeforeGateAsync(store, agent_action, tool, PostgresTarget,
                     $"{resolved.DisplayName} is a PostgreSQL target. A plan guide is SQL Server only; there is no PostgreSQL equivalent.", ct, agentTokenName);
+            }
+
+            if (engineEdition is AzureSqlDatabaseEdition or AzureManagedInstanceEdition)
+            {
+                return await RefuseBeforeGateAsync(store, agent_action, tool, EngineNotSupported,
+                    $"{resolved.DisplayName} is an Azure SQL target. Darling creates plan guides on SQL Server only: Microsoft documents sp_control_plan_guide, which the drop of an invalid guide and the Undo use, for SQL Server alone. Nothing was run.", ct, agentTokenName);
             }
 
             if (owner is null)
@@ -233,11 +247,11 @@ public sealed partial class DarlingMcpPlanForceTools
     /* The tool method is the last member on purpose: the payload contract census reads a tool's span up to the next tool or the end of the file, and the
        body above has its own catch, which the census must not read as this one-line method's. */
     [McpServerTool(Name = "create_plan_guide"), Description(
-        "Agent arm, SQL Server only (Azure SQL Database and Managed Instance too): creates ONE plan guide with sys.sp_create_plan_guide, so a statement runs with the OPTION (...) hints you give it (OPTIMIZE FOR, RECOMPILE, MAXDOP, USE PLAN) without a change to the application. Dry run by default: returns the exact statement and what the guide matches, and writes nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's create_plan_guide switch and remediation login (with ALTER on the database, and on the module for an OBJECT guide); ships off. " +
+        "Agent arm, SQL Server only (an Azure SQL target is refused as engine_not_supported): creates ONE plan guide with sys.sp_create_plan_guide, so a statement runs with the OPTION (...) hints you give it (OPTIMIZE FOR, RECOMPILE, MAXDOP, USE PLAN) without a change to the application. Dry run by default: returns the exact statement and what the guide matches, and writes nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's create_plan_guide switch and remediation login (with ALTER on the module for an OBJECT guide, ALTER on the database for a SQL guide); ships off. " +
         "<<GUIDE>>" +
         "type is OBJECT (module_or_batch is the two-part schema.name of a procedure, function or trigger, and statement must appear exactly in its definition) or SQL (module_or_batch is the batch text, or empty when statement is the batch; params is the parameter list for a parameterized batch). TEMPLATE is refused. hints is required and is the OPTION (...) clause. Every value goes to the server as a parameter, never as batch text. " +
         "Before it creates, the guide is matched and reported: an OBJECT guide's module must resolve and hold the statement, a SQL guide reports how many cached batches equal its text (zero is allowed: the guide then matches nothing cached right now). A name already used in the database is refused. After it creates, the guide is validated with sys.fn_validate_plan_guide in the same batch: an invalid guide is dropped again and the call is journaled failed with the server's message. " +
-        "This tool blocks only a call that cannot do anything: bad_guide_name, bad_guide_type, bad_guide_argument, bad_module_name, bad_database, guide_exists, module_not_found, not_a_module, statement_not_in_module, guide_permission_denied, guide_invalid. " +
+        "This tool blocks only a call that cannot do anything: bad_guide_name, bad_guide_type, bad_guide_argument, bad_module_name, bad_database, engine_not_supported, guide_exists, module_not_found, not_a_module, statement_not_in_module, guide_permission_denied, guide_invalid. " +
         "mcp.allowWrites never bypasses the gate, and a dry run needs it too (it signs in with the remediation login). The change is journaled in Agent changes (kind plan_guide_create) with the whole definition, and a person can undo it there: the undo drops the guide by name. Answers status dry_run, done, refused (reason) or failed, with statement, before, matches and journal_id.")]
     public static Task<string> CreatePlanGuide(
         NpgsqlDataSource postgres,

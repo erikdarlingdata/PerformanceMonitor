@@ -91,7 +91,8 @@ public sealed partial class SqlServerRemediationExecutor
     /// The one batch of a plan guide create (#6569), run in the request's database. It reads what decides the create (whether the name is taken, whether an OBJECT guide's
     /// module resolves and holds the statement, the grants, how many cached batches equal a SQL guide's batch) and, only when <c>@run</c> is 1 and nothing refuses, runs
     /// <c>sys.sp_create_plan_guide</c>, then asks <c>sys.fn_validate_plan_guide</c> about the new guide and drops it in the same batch when that returns a row. Every value is a
-    /// typed parameter; none joins the batch text. The cached-plan count needs <c>VIEW SERVER STATE</c>, so it sits in a TRY block: a login without it gets null, not an error.
+    /// typed parameter; none joins the batch text. The grant that decides is the one Microsoft documents for <c>sp_create_plan_guide</c>: <c>ALTER</c> on the module for an
+    /// OBJECT guide, <c>ALTER</c> on the database for a SQL guide; the other is not required. The cached-plan count needs <c>VIEW SERVER STATE</c>, so it sits in a TRY block: a login without it gets null, not an error.
     /// </summary>
     internal static readonly string CreatePlanGuideBatchSql = @"
 DECLARE @exists bit = 0, @id integer = NULL, @otype varchar(2) = NULL, @module nvarchar(600) = NULL, @in_module bit = 0, @target nvarchar(max) = NULL,
@@ -124,7 +125,7 @@ BEGIN
         SET @cached = NULL;
     END CATCH;
 END;
-IF @run = 1 AND @exists = 0 AND @can_db = 1 AND @can_mod = 1
+IF @run = 1 AND @exists = 0 AND ((@type = N'SQL' AND @can_db = 1) OR (@type = N'OBJECT' AND @can_mod = 1))
    AND (@type = N'SQL' OR (@id IS NOT NULL AND @otype IN (" + string.Join(", ", Array.ConvertAll(PlanGuideModuleTypes, t => "N'" + t + "'")) + @") AND @in_module = 1))
 BEGIN
     EXEC sys.sp_create_plan_guide @name = @name, @stmt = @stmt, @type = @type, @module_or_batch = @target, @params = @params, @hints = @hints;
@@ -145,6 +146,8 @@ SELECT name_taken = CONVERT(bigint, @exists), module_found = CASE WHEN @id IS NU
     /// The one batch of a plan guide drop (#6569), run in the request's database: it reads the guide by name (its scope, its statement and hints), the grants, and, when the
     /// caller names the definition it expects, whether the guide still holds that statement and those hints, and, only when <c>@run</c> is 1 and nothing refuses, runs
     /// <c>sys.sp_control_plan_guide N'DROP'</c>. A guide somebody replaced under the same name does not match and is not dropped.
+    /// The grant that decides is the one Microsoft documents for <c>sp_control_plan_guide</c>: <c>ALTER</c> on the referenced object for an OBJECT guide, <c>ALTER</c> on the
+    /// database for every other; the grant that does not apply is reported as 1.
     /// </summary>
     internal static readonly string DropPlanGuideBatchSql = @"
 DECLARE @found bit = 0, @scope integer = NULL, @scope_obj integer = NULL, @stmt_db nvarchar(max) = NULL, @hints_db nvarchar(max) = NULL, @module nvarchar(600) = NULL,
@@ -159,6 +162,7 @@ BEGIN
     BEGIN
         SET @module = QUOTENAME(OBJECT_SCHEMA_NAME(@scope_obj)) + N'.' + QUOTENAME(OBJECT_NAME(@scope_obj));
         SET @can_mod = CONVERT(bigint, ISNULL(HAS_PERMS_BY_NAME(@module, N'OBJECT', N'ALTER'), 0));
+        SET @can_db = 1;
     END;
     IF @expect_stmt IS NOT NULL AND (@stmt_db COLLATE Latin1_General_BIN2 <> @expect_stmt COLLATE Latin1_General_BIN2 OR @hints_db COLLATE Latin1_General_BIN2 <> @expect_hints COLLATE Latin1_General_BIN2) SET @same = 0;
 END;
@@ -273,9 +277,11 @@ SELECT found = CONVERT(bigint, @found), same = CONVERT(bigint, @same), can_db = 
                     $"The statement does not appear exactly (character for character, case and spacing included) in the definition of {guide.ModuleOrBatch}. Copy it from OBJECT_DEFINITION. Nothing was run.") with { Statement = statement };
         }
 
-        if (!grantedDb || !grantedModule)
+        if (guide.Type == "OBJECT" ? !grantedModule : !grantedDb)
             return RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.GuidePermissionDenied,
-                $"The remediation login does not hold ALTER on {database}{(guide.Type == "OBJECT" ? $" and on {guide.ModuleOrBatch}" : "")}, which sp_create_plan_guide needs. Nothing was run.") with { Statement = statement };
+                (guide.Type == "OBJECT"
+                    ? $"The remediation login does not hold ALTER on {guide.ModuleOrBatch}, which sp_create_plan_guide needs for an OBJECT guide."
+                    : $"The remediation login does not hold ALTER on the database {database}, which sp_create_plan_guide needs for a SQL guide.") + " Nothing was run.") with { Statement = statement };
         return null;
     }
 
@@ -328,9 +334,12 @@ SELECT found = CONVERT(bigint, @found), same = CONVERT(bigint, @same), can_db = 
             if (!same)
                 return RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.GuideChanged,
                     $"Plan guide {guideName} in {database} no longer holds the statement and hints it was created with, so it was changed or replaced since. Nothing was changed.") with { Statement = statement };
-            if (!grantedDb || !grantedModule)
+            if (!grantedModule)
                 return RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.GuidePermissionDenied,
-                    $"The remediation login does not hold ALTER on {database} (and on the guide's module, for an OBJECT guide), which sp_control_plan_guide needs. Nothing was changed.") with { Statement = statement };
+                    $"The remediation login does not hold ALTER on the object plan guide {guideName} is on, which sp_control_plan_guide needs to drop an OBJECT guide. Nothing was changed.") with { Statement = statement };
+            if (!grantedDb)
+                return RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.GuidePermissionDenied,
+                    $"The remediation login does not hold ALTER on the database {database}, which sp_control_plan_guide needs to drop a SQL guide. Nothing was changed.") with { Statement = statement };
             if (dryRun)
                 return RemediationResult.Done(name, dryRun, wrote: false, $"Dry run: plan guide {guideName} would be dropped from {database}. Nothing was run.") with { Statement = statement };
             if (!ran)

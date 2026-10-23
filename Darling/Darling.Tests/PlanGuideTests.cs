@@ -103,13 +103,15 @@ public sealed class PlanGuideTests
         foreach (var other in new[] { "U", "V", "IF", "PC" })
             Assert.Equal(RemediationResult.Reasons.NotAModule, Reason(obj, false, true, other, true, true, true));
         Assert.Equal(RemediationResult.Reasons.StatementNotInModule, Reason(obj, false, true, "P", false, true, true));
-        Assert.Equal(RemediationResult.Reasons.GuidePermissionDenied, Reason(obj, false, true, "P", true, false, true));
+        /* Microsoft's grants: an OBJECT guide needs ALTER on the module alone; a SQL guide ALTER on the database alone. */
+        Assert.Null(Reason(obj, false, true, "P", true, false, true));
         Assert.Equal(RemediationResult.Reasons.GuidePermissionDenied, Reason(obj, false, true, "P", true, true, false));
         foreach (var module in SqlServerRemediationExecutor.PlanGuideModuleTypes)
             Assert.Null(Reason(obj, false, true, module, true, true, true));
         /* A SQL guide reads no module: the module facts are ignored. */
         Assert.Null(Reason(sql, false, false, null, false, true, true));
         Assert.Equal(RemediationResult.Reasons.GuidePermissionDenied, Reason(sql, false, false, null, false, false, true));
+        Assert.Null(Reason(sql, false, false, null, false, true, false));
     }
 
     [Fact]

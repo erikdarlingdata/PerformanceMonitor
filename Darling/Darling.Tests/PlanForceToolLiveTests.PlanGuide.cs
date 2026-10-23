@@ -163,7 +163,7 @@ public sealed partial class PlanForceToolLiveTests
             var json = Parse(await CreateGuideAsync(c, guide, dryRun: false, type: "SQL", statement: statement));
             Assert.Equal("done", (string?)json["status"]);
             Assert.Equal(0, (long)json["matches"]!);
-            Assert.Contains("matches nothing cached", (string?)json["message"] ?? "", StringComparison.Ordinal);
+            Assert.Contains("No cached batch matches this guide", (string?)json["message"] ?? "", StringComparison.Ordinal);
             Assert.Equal("SQL", await GuideColumnAsync(c, guide, "scope_type_desc"));
         });
     }
@@ -176,7 +176,8 @@ public sealed partial class PlanForceToolLiveTests
             var guide = "g_" + Guid.NewGuid().ToString("N")[..8];
             await TurnGuideOnAsync(c);
             var statement = "SELECT n = COUNT_BIG(*) FROM dbo.t WHERE a >= 2";
-            await AdminExecAsync(c, statement + ";");
+            /* The count is of cached batches whose text equals the statement byte for byte, so the batch is run with no trailing semicolon. */
+            await AdminExecAsync(c, statement);
 
             var json = Parse(await CreateGuideAsync(c, guide, dryRun: true, type: "SQL", statement: statement));
             Assert.True((long)json["matches"]! >= 1);
@@ -198,7 +199,8 @@ public sealed partial class PlanForceToolLiveTests
             Assert.Equal("3", Convert.ToString(await ScalarAsync(admin, "SELECT COUNT_BIG(*) FROM dbo.t;", c.Ct), CultureInfo.InvariantCulture));
             if ((string?)json["status"] == "done")
                 Assert.Equal(Statement, await GuideColumnAsync(c, guide, "query_text"));
-            Assert.Contains("it''s", (string?)json["statement"] ?? "", StringComparison.Ordinal);
+            /* The statement text holds two quotes in a row; the person-readable statement doubles each. */
+            Assert.Contains("it''''s", (string?)json["statement"] ?? "", StringComparison.Ordinal);
         });
     }
 
@@ -221,6 +223,10 @@ public sealed partial class PlanForceToolLiveTests
 
             var json = Parse(await CreateGuideAsync(c, guide, dryRun: false, moduleOrBatch: "dbo." + name, hints: "OPTION (USE PLAN N'" + plan.Replace("'", "''", StringComparison.Ordinal) + "')"));
             Assert.Equal("failed", (string?)json["status"]);
+            /* sp_create_plan_guide accepts a mismatched USE PLAN (measured on SQL Server 2019): the refusal comes from sys.fn_validate_plan_guide (message 8698), after the
+               create, and the batch drops the guide again. */
+            Assert.Equal("guide_invalid", (string?)json["reason"]);
+            Assert.Contains("could not be verified to be legal for query", (string?)json["message"] ?? "", StringComparison.Ordinal);
             Assert.Null(await GuideColumnAsync(c, guide, "name"));
             Assert.Single(await RowsAsync(c, "action_failed"));
             Assert.Empty(await RowsAsync(c, "action_done"));
@@ -295,6 +301,64 @@ public sealed partial class PlanForceToolLiveTests
             Assert.Equal("refused", (string?)json["status"]);
             Assert.Equal("postgres_target", (string?)json["reason"]);
             Assert.Equal(0, await JournalActionRowsAsync(c));
+        });
+    }
+
+    [Theory]
+    [InlineData(5)]
+    [InlineData(8)]
+    public async Task AGuideOnAnAzureSqlTarget_IsRefusedAsEngineNotSupported_ForADryRunAndAWrite(int engineEdition)
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var name = "p_" + Guid.NewGuid().ToString("N")[..8];
+            await MakeProcedureAsync(c, name);
+            await TurnGuideOnAsync(c);
+            await PgExecAsync(c.Connection, $"UPDATE collect.servers SET sql_engine_edition = {engineEdition.ToString(CultureInfo.InvariantCulture)} WHERE server_id = 7", c.Ct);
+
+            foreach (var dryRun in new[] { true, false })
+            {
+                var json = Parse(await CreateGuideAsync(c, "g_" + name, dryRun, moduleOrBatch: "dbo." + name));
+                Assert.Equal("refused", (string?)json["status"]);
+                Assert.Equal("engine_not_supported", (string?)json["reason"]);
+            }
+
+            Assert.Null(await GuideColumnAsync(c, "g_" + name, "name"));
+            Assert.Equal(0, await JournalActionRowsAsync(c));
+        });
+    }
+
+    [Fact]
+    public async Task ALoginWithAlterOnTheProcedureOnly_CreatesAnObjectGuide_AndIsRefusedASqlGuideWithThePermissionSentence()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var name = "p_" + Guid.NewGuid().ToString("N")[..8];
+            var guide = "g_" + name;
+            await MakeProcedureAsync(c, name);
+            await TurnGuideOnAsync(c);
+            /* The test login is db_owner; narrow it to what Microsoft documents for an OBJECT guide: ALTER on the referenced object. */
+            await AdminExecAsync(c, $"ALTER ROLE db_owner DROP MEMBER [{c.Sql.Login}]; GRANT ALTER ON OBJECT::dbo.[{name}] TO [{c.Sql.Login}];");
+
+            var sqlGuide = "s_" + name;
+            foreach (var dryRun in new[] { true, false })
+            {
+                var refused = Parse(await CreateGuideAsync(c, sqlGuide, dryRun, type: "SQL"));
+                Assert.Equal("refused", (string?)refused["status"]);
+                Assert.Equal("guide_permission_denied", (string?)refused["reason"]);
+                Assert.Contains("does not hold ALTER on the database", (string?)refused["message"] ?? "", StringComparison.Ordinal);
+            }
+
+            Assert.Null(await GuideColumnAsync(c, sqlGuide, "name"));
+
+            var created = Parse(await CreateGuideAsync(c, guide, dryRun: false, moduleOrBatch: "dbo." + name));
+            Assert.Equal("done", (string?)created["status"]);
+            Assert.Equal("OBJECT", await GuideColumnAsync(c, guide, "scope_type_desc"));
+
+            /* The undo follows the same split: ALTER on the object is enough to drop an OBJECT guide. */
+            var undone = await UndoAsync(c, (long)created["journal_id"]!, confirm: true);
+            Assert.Equal(PlanUndoAnswer.Undone, undone.Status);
+            Assert.Null(await GuideColumnAsync(c, guide, "name"));
         });
     }
 
