@@ -67,9 +67,9 @@ Open a new Claude Code session and ask questions like:
 
 ### Available Tools
 
-**Lite** exposes 113 tools (97 by default). **Darling** exposes 253 (182 by default). The deprecated **Dashboard** exposes 66 (see [deprecated/Dashboard/README.md](../deprecated/Dashboard/README.md)). 112 tool names are the same in Lite and Darling. Darling has 141 more. They are the PostgreSQL reads, Custom Views, custom alert rules, query tags, collector control, agent actions, investigation reads and fleet-wide reads.
+**Lite** exposes 113 tools (97 by default). **Darling** exposes 254 (183 by default). The deprecated **Dashboard** exposes 66 (see [deprecated/Dashboard/README.md](../deprecated/Dashboard/README.md)). 112 tool names are the same in Lite and Darling. Darling has 142 more. They are the PostgreSQL reads, Custom Views, custom alert rules, query tags, collector control, agent actions, investigation reads and fleet-wide reads.
 
-Of Darling's 253 tools, `mcp.allowWrites` with a token serves 65. `mcp.allowServerAdmin` adds 4 more. `mcp.allowInvestigations` with a token adds the last 2, and only while `mcp.allowWrites` is off. A service started before an upgrade reports the older, smaller count until you restart it.
+Of Darling's 254 tools, `mcp.allowWrites` with a token serves 65. `mcp.allowServerAdmin` adds 4 more. `mcp.allowInvestigations` with a token adds the last 2, and only while `mcp.allowWrites` is off. A service started before an upgrade reports the older, smaller count until you restart it.
 
 The table below names the main tools, not all of them. The `tools/list` call on a running server gives the full list.
 
@@ -106,7 +106,7 @@ The four investigation tools let your own agent pick up an alert, look into it w
 | Health | `get_server_summary`, `get_collection_health`, `get_daily_summary` |
 | Alerts | `get_alert_history`, `get_alert_settings`, `get_mute_rules`, and in Darling `get_known_patterns` (the entries you wrote about alerts that recur) |
 | Waits | `get_wait_stats`, `get_wait_types`, `get_wait_trend`, `get_waiting_tasks` |
-| Queries | `get_top_queries_by_cpu`, `get_top_procedures_by_cpu`, `get_cpu_by_database`, `get_load_by_caller`, `get_query_pileups`, `get_query_store_top`, `get_query_store_aborts`, `get_query_store_query_history`, `get_forced_plans`, `get_query_duration_trend`, `get_query_trend`, `get_resource_use_by_tag` |
+| Queries | `get_top_queries_by_cpu`, `get_top_procedures_by_cpu`, `get_cpu_by_database`, `get_load_by_caller`, `get_query_pileups`, `get_query_store_top`, `get_query_store_aborts`, `get_query_store_query_history`, `get_forced_plans`, `get_query_store_hints`, `get_query_duration_trend`, `get_query_trend`, `get_resource_use_by_tag` |
 | Active Queries | `get_active_queries` |
 | CPU | `get_cpu_utilization` |
 | Memory | `get_memory_stats`, `get_memory_trend`, `get_memory_clerks`, `get_memory_grants`, `get_resource_semaphore` |

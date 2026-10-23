@@ -25,7 +25,7 @@ export const FILTERED = new Set([
   "get_blocked_process_xml",
   // Duration trends, Query Store clutter, long queries and plan corrections (#5244 PR4).
   "get_query_duration_trend", "get_procedure_duration_trend", "get_query_store_duration_trend",
-  "get_query_store_clutter", "get_long_query_completions", "get_plan_corrections", "get_forced_plans",
+  "get_query_store_clutter", "get_long_query_completions", "get_plan_corrections", "get_forced_plans", "get_query_store_hints",
   // Configuration, Query Store health, configuration changes, severe errors and the default trace (#5244 PR6).
   "get_database_config", "get_database_scoped_config", "get_query_store_health", "get_database_config_changes",
   "get_health_parser_severe_errors", "get_default_trace_events",

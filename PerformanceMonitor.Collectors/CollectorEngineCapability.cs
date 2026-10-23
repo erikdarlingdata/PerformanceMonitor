@@ -142,6 +142,7 @@ public static class CollectorEngineCapability
             ["query_store"] = "the Query Store runtime statistics",
             ["query_store_health"] = "the per-database Query Store configuration and health",
             ["query_store_forced_plans"] = "the per-database list of Query Store forced plans",
+            ["query_store_hints"] = "the per-database list of Query Store hints",
             ["plan_cache_stats"] = "the plan-cache composition statistics",
             ["plan_correction"] = "the sys.dm_db_tuning_recommendations automatic plan corrections",
             ["pvs_stats"] = "the persistent version store statistics",

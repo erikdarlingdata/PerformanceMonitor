@@ -17442,6 +17442,7 @@ LIMIT 1";
         ["ag_database_replica_states"] = (r, s, ct) => r.RunAsync(AgDatabaseReplicaStatesCollector.Instance, s, ct),
         ["plan_correction"] = (r, s, ct) => r.RunAsync(PlanCorrectionCollector.Instance, s, ct),
         ["query_store_forced_plans"] = (r, s, ct) => r.RunAsync(QueryStoreForcedPlansCollector.Instance, s, ct),
+        ["query_store_hints"] = (r, s, ct) => r.RunAsync(QueryStoreHintsCollector.Instance, s, ct),
         ["pvs_stats"] = (r, s, ct) => r.RunAsync(PvsStatsCollector.Instance, s, ct),
         /* PostgreSQL. Dispatch is by name and engine-agnostic; the engine gate upstream in
            RunDueCollectorsAsync means this lambda is only ever reached for a Postgres target. */

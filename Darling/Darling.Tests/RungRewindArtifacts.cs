@@ -503,6 +503,11 @@ END IF; END $$;"),
         new(214, "hasKnownPatterns",
             @"
 DROP TABLE IF EXISTS config.config_known_patterns;"),
+
+        // V215 (#6581): the Query Store hints table. The table is the probe's newest sentinel. The rewind drops it (its indexes go with it), so a
+        // re-run of V215 does everything again. Safe on a store that never had it.
+        new(215, "hasQueryStoreHints",
+            "DROP TABLE IF EXISTS collect.query_store_hints;"),
     ];
 
     /// <summary>

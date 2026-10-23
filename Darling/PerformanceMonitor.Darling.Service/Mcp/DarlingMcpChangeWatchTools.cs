@@ -49,7 +49,7 @@ public sealed class DarlingMcpChangeWatchTools
         "duration with the hour before and the same hour a week earlier. Each watch carries its changes, its measures and its result " +
         "(flat, request_opened, moved_no_request, moved_agent_change, moved_auto_plan_correction, no_data), or its failed state. Stored read. <<GUIDE>> " +
         "Reads the change watch windows (config.change_watches) for SQL Server and PostgreSQL targets. A SQL Server change is a server, database or " +
-        "database-scoped setting, a trace flag, or a forced or unforced Query Store plan; a PostgreSQL change is a server setting, a per-database " +
+        "database-scoped setting, a trace flag, a forced or unforced Query Store plan, or a Query Store hint set, changed or cleared (kind query_store_hint, SQL Server 2022 and later); a PostgreSQL change is a server setting, a per-database " +
         "or per-role setting, or an extension install, drop or version change. Every change Darling records opens a watch of 60 " +
         "minutes for its server, or extends the open one; when the window ends, the watch is evaluated and closes. Darling looks for " +
         "changes once an hour per server, so a change may be recorded up to an hour after it happened. The window still runs from the " +
@@ -129,7 +129,7 @@ public sealed class DarlingMcpChangeWatchTools
                 var (_, engineKind) = await DarlingEngineCapability.PostgresTargetFactsAsync(postgres, resolved.ServerId, cancellationToken);
                 var kinds = MonitoredEngineKind.IsPostgres(engineKind)
                     ? "a server setting, a per-database or per-role setting, or an extension install, drop or version change"
-                    : "a server, database or database-scoped configuration change, a trace flag change or a Query Store plan force or unforce";
+                    : "a server, database or database-scoped configuration change, a trace flag change, a Query Store plan force or unforce or a Query Store hint change";
                 return McpHelpers.Status(
                     "empty",
                     $"No change watch{(state is null ? "" : $" matching {state}")} is recorded for {resolved.DisplayName}. A watch opens when {kinds} " +

@@ -76,7 +76,7 @@ That was not always true: through 3.5.0 the ZIP was a portable build with no run
 | database_scoped_config | On connect | Database-scoped configurations |
 | trace_flags | On connect | `DBCC TRACESTATUS` |
 
-Darling runs these same 43 collectors across a fleet of servers, plus a 44th, `query_store_forced_plans`, which reads each database's forced plans. Lite does not have it. Darling also runs 29 PostgreSQL collectors. See the [Darling collector reference](../Darling/README.md).
+Darling runs these same 43 collectors across a fleet of servers, plus a 44th, `query_store_forced_plans`, which reads each database's forced plans, and a 45th, `query_store_hints`, which reads each database's Query Store hints (SQL Server 2022 and later). Lite does not have it. Darling also runs 29 PostgreSQL collectors. See the [Darling collector reference](../Darling/README.md).
 
 ### The Extended Events Sessions Lite Creates
 
