@@ -721,6 +721,13 @@ candidates AS
     -- near-zero-cost queries whose ratios are all sampling jitter; magnitude ranking stays with
     -- regression_factor and the scorer.
     AND   latest_total_cpu_us >= 10000000
+    -- #6548: SQL Server own housekeeping statements (change tracking cleanup and the like) are not application code and
+    -- cannot be fixed by anyone monitoring. Left out BEFORE the LIMIT below, so they cannot use up its rows or lead the fact.
+    AND   NOT EXISTS (SELECT 1 FROM query_store_text AS x
+                      WHERE x.server_id = $1
+                        AND x.database_name = compared.database_name
+                        AND x.query_id = compared.query_id
+                        AND lower(x.query_sql_text) ~ '" + PerformanceMonitor.Common.InternalStatements.LowerTextPattern + @"')
     -- #5630: 100, not 20. The caller drops the queries whose two plans were compiled for different inputs
     -- (PlanInputComparison) and keeps the worst 20 of what is left, so the cut moved after that check.
     ORDER BY regression_factor DESC
