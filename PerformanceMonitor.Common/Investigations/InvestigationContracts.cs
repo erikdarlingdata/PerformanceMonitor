@@ -254,6 +254,10 @@ public sealed record InvestigationOpenedRow(
     /// <summary>#6003: the journal row's detail (for <c>evidence_ready</c>, the sections to re-read).</summary>
     public string? DetailJson { get; init; }
 
+    /// <summary>#6551: a change-watch request's alert detail (the changes, the database of each query measure and the read it
+    /// came from, and every measure that moved), so an agent can triage the wake-up before it claims; null for any other request.</summary>
+    public string? DetailText { get; init; }
+
     /// <summary>The cursor's key for this row: the event id, else the request id.</summary>
     public Guid CursorKey => EventId == Guid.Empty ? RequestId : EventId;
 
@@ -267,7 +271,8 @@ public sealed record InvestigationOpenedRow(
 /// rename shows on the next read (<see cref="ServerName"/> stays the name the request was opened with). Darling always fills
 /// <see cref="DisplayName"/> (it falls back to the opened name) and leaves <see cref="InstanceName"/> null once the server has left the
 /// registry; a store built with no server list to read leaves both null. Lite names them from its server list (ServerManager, #6011). A null is absent from the answer.
-/// The answer key is <c>instance_name</c>, not <c>host_name</c>, which the MCP data-detail filter numbers as a client host.</summary>
+/// The answer key is <c>instance_name</c>, not <c>host_name</c>, which the MCP data-detail filter numbers as a client host.
+/// <see cref="DetailText"/> (#6551) is a change-watch request's alert detail, read for the list; null for every other request, and then absent from the answer.</summary>
 public sealed record InvestigationRequestRow(
     Guid RequestId,
     int RouteId,
@@ -287,7 +292,8 @@ public sealed record InvestigationRequestRow(
     DateTime? ReportedAtUtc,
     Guid? PracticeOf = null,
     string? DisplayName = null,
-    string? InstanceName = null);
+    string? InstanceName = null,
+    string? DetailText = null);
 
 /// <summary>What one expiry sweep did.</summary>
 public sealed record InvestigationSweepResult(int LeasesLapsed, int Expired)
