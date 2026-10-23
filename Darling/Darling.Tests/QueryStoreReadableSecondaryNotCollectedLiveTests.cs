@@ -77,7 +77,7 @@ public sealed class QueryStoreReadableSecondaryNotCollectedLiveTests
         {
             await SeedRoleAsync(c, ct, "Secondary");
 
-            var forced = await DarlingMcpForcedPlanTools.GetForcedPlans(postgres, ServerName, 24, null, null, cancellationToken: ct);
+            var forced = await DarlingMcpForcedPlanTools.GetForcedPlans(postgres, ServerName, 24, null, DatabaseFilter.All, ct);
             Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(forced));
             Assert.Contains("readable secondary", Message(forced));
             Assert.Contains("query_store_replica", Message(forced));
@@ -128,7 +128,7 @@ public sealed class QueryStoreReadableSecondaryNotCollectedLiveTests
             await SeedRoleAsync(c, ct, "Secondary");
             await SeedReplicaSettingAsync(c, ct);
 
-            var forced = await DarlingMcpForcedPlanTools.GetForcedPlans(postgres, ServerName, 24, null, null, cancellationToken: ct);
+            var forced = await DarlingMcpForcedPlanTools.GetForcedPlans(postgres, ServerName, 24, null, DatabaseFilter.All, ct);
             Assert.Equal("empty", DarlingMcpTestData.StatusOf(forced));
             return 0;
         });
@@ -141,7 +141,7 @@ public sealed class QueryStoreReadableSecondaryNotCollectedLiveTests
         {
             await SeedRoleAsync(c, ct, "Primary");
 
-            var forced = await DarlingMcpForcedPlanTools.GetForcedPlans(postgres, ServerName, 24, null, null, cancellationToken: ct);
+            var forced = await DarlingMcpForcedPlanTools.GetForcedPlans(postgres, ServerName, 24, null, DatabaseFilter.All, ct);
             Assert.Equal("empty", DarlingMcpTestData.StatusOf(forced));
             return 0;
         });
