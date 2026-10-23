@@ -147,6 +147,19 @@ public sealed class DarlingMcpPlanForceTools
     }
 
     /// <summary>
+    /// The gate's refusal as an answer (#6455). A dry run asks the same gate a write does, so a call with no agent_action is refused
+    /// as <c>agent_action_required</c> before the per-server switch is read. The message now says why a dry run needs the claim, so
+    /// the refusal does not read as if the tool wrongly demanded one for a call that writes nothing.
+    /// </summary>
+    internal static string GateRefusalAnswer(AgentActionRefusal refusal, bool dryRun) =>
+        dryRun && refusal.Reason == AgentActionCodes.Required
+            ? DarlingAgentActionGate.RefusalAnswer(refusal with
+            {
+                Message = refusal.Message + " A dry run needs it too: it signs in to the monitored server with the remediation login and reads that server's action switch, so it is gated like a write, although it writes nothing.",
+            })
+            : DarlingAgentActionGate.RefusalAnswer(refusal);
+
+    /// <summary>
     /// Adds the <c>notice</c> a made change carries (not <c>warnings</c>: evict and kill already answer a list under that key) (#5632, step 13): the store recorded the change late, or could not record it,
     /// and what a later read could not show. A change the server accepted is never answered as an error.
     /// </summary>
@@ -213,7 +226,7 @@ public sealed class DarlingMcpPlanForceTools
             /* 2: the gate, for a dry run too. */
             var decision = await ServerActionGate.AuthorizeAsync(store, owner, logger, tool, ServerActionNames.ForcePlan, agent_action, target, ct);
             if (decision.Refusal is { } gateRefusal)
-                return DarlingAgentActionGate.RefusalAnswer(gateRefusal);
+                return GateRefusalAnswer(gateRefusal, dry_run);
             var permit = decision.Permit!;
             _ = InvestigationToolCore.ParseAgentAction(agent_action, out var action);
 
@@ -388,7 +401,7 @@ public sealed class DarlingMcpPlanForceTools
             var target = new AgentActionTarget(resolved.ServerId, resolved.ServerName, handle, null);
             var decision = await ServerActionGate.AuthorizeAsync(store, owner, logger, tool, ServerActionNames.EvictPlan, agent_action, target, ct);
             if (decision.Refusal is { } gateRefusal)
-                return DarlingAgentActionGate.RefusalAnswer(gateRefusal);
+                return GateRefusalAnswer(gateRefusal, dry_run);
             var permit = decision.Permit!;
             _ = InvestigationToolCore.ParseAgentAction(agent_action, out var action);
 
@@ -512,7 +525,7 @@ public sealed class DarlingMcpPlanForceTools
             var target = new AgentActionTarget(resolved.ServerId, resolved.ServerName, idText, targetDatabase);
             var decision = await ServerActionGate.AuthorizeAsync(store, owner, logger, tool, ServerActionNames.KillSession, agent_action, target, ct);
             if (decision.Refusal is { } gateRefusal)
-                return DarlingAgentActionGate.RefusalAnswer(gateRefusal);
+                return GateRefusalAnswer(gateRefusal, dry_run);
             var permit = decision.Permit!;
             _ = InvestigationToolCore.ParseAgentAction(agent_action, out var action);
 
@@ -668,7 +681,7 @@ public sealed class DarlingMcpPlanForceTools
         var target = new AgentActionTarget(resolved.ServerId, resolved.ServerName, idText, null);
         var decision = await ServerActionGate.AuthorizeAsync(store, owner, logger, tool, ServerActionNames.KillSession, agent_action, target, ct);
         if (decision.Refusal is { } gateRefusal)
-            return DarlingAgentActionGate.RefusalAnswer(gateRefusal);
+            return GateRefusalAnswer(gateRefusal, dry_run);
         var permit = decision.Permit!;
         _ = InvestigationToolCore.ParseAgentAction(agent_action, out var action);
 

@@ -2991,8 +2991,10 @@ public class WebhookAlertService
             : null;
         try
         {
+            /* #6456: an empty header set, not null. No configured headers are sent (they belong to the alert channel), but a non-null
+               set is what puts the default User-Agent on a generic post, so an event carries the same sender identity as an alert. */
             return await PostWebhookAsync(
-                url, payload, delivery.GenericWebhookProxyAddress, headers: null, WebhookPostTimeout, signed, cancellationToken, _logger);
+                url, payload, delivery.GenericWebhookProxyAddress, headers: new Dictionary<string, string>(), WebhookPostTimeout, signed, cancellationToken, _logger);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
