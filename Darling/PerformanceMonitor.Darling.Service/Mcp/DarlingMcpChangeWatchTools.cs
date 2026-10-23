@@ -32,6 +32,9 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpChangeWatchTools
 {
+    /// <summary>The <c>state</c> value that means no filter: what the answer echoes when none was given (#6561).</summary>
+    internal const string AllStates = "all";
+
     /// <summary>What <c>state</c> accepts: a watch's state, or the result it closed with (the store matches either).</summary>
     internal static readonly string[] StateFilters =
     {
@@ -74,16 +77,22 @@ public sealed class DarlingMcpChangeWatchTools
     public static async Task<string> GetChangeWatches(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Only watches in this state (open, evaluating, closed, failed) or with this result (flat, request_opened, moved_no_request, moved_agent_change, moved_auto_plan_correction, no_data). Omit for all.")] string? state = null,
+        [Description("Only watches in this state (open, evaluating, closed, failed) or with this result (flat, request_opened, moved_no_request, moved_agent_change, moved_auto_plan_correction, no_data). Omit it, or pass all, for every state.")] string? state = null,
         [Description("Most watches to return, newest first. Default 20 (1-1000).")] int limit = 20,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
+        /* #6561: the answer says "state": "all" when no filter was given, so a caller that copies that value back means no filter. */
+        if (string.Equals(state, AllStates, StringComparison.OrdinalIgnoreCase))
+        {
+            state = null;
+        }
+
         if (state is not null && Array.IndexOf(StateFilters, state) < 0)
         {
-            return McpHelpers.Refusal("state", $"Invalid state '{state}'. Use {string.Join(", ", StateFilters)}, or omit it for all.");
+            return McpHelpers.Refusal("state", $"Invalid state '{state}'. Use {string.Join(", ", StateFilters)}, {AllStates}, or omit it for all.");
         }
 
         var limitError = McpHelpers.ValidateTop(limit);

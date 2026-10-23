@@ -256,6 +256,7 @@ public sealed class CollectionCycleRowLiveTests
         {
             await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM collection_log WHERE server_id = $1", id);
             await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM servers WHERE server_id = $1", id);
+            await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM config.config_monitored_servers WHERE server_id = $1", id);
         }
     }
 
@@ -438,6 +439,9 @@ public sealed class CollectionCycleRowLiveTests
         foreach (var (id, name) in new[] { (ReaderServerOld, "cycle-reader-old"), (ReaderServerOnly, "cycle-reader-only") })
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, id, name, ct);
+            /* #6454: list_servers lists a registered server only while its definition exists. */
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO config.config_monitored_servers (server_id, name, host, is_enabled) VALUES ($1, $2, $2, TRUE) ON CONFLICT (server_id) DO NOTHING", id, name);
         }
 
         var oldRun = MinutesAgo(30);

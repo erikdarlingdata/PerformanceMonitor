@@ -61,6 +61,12 @@ public sealed class ListServersEmptyRegistryRouteLiveTests
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await FinOpsHighImpactReaderLiveTests.SeedAsync(cs!, ct);
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        /* #6454: list_servers lists a registered server only while its definition exists. */
+        await using (var define = postgres.CreateCommand(
+            "INSERT INTO config.config_monitored_servers (server_id, name, host, is_enabled) SELECT server_id, server_name, server_name, TRUE FROM servers WHERE is_enabled ON CONFLICT (server_id) DO NOTHING"))
+        {
+            await define.ExecuteNonQueryAsync(ct);
+        }
 
         var (status, body) = await FinOpsWebReadParityLiveTests.GetAsync(postgres, "/api/read/list_servers?", ct);
 

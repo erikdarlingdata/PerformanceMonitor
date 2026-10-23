@@ -47,6 +47,8 @@ public static class ChangeWatchPlanForcing
     /// <summary>The server did not say (an older SQL Server, or the capture holds no value).</summary>
     public const string Unknown = "unknown";
 
+    /* The one spelling both Suffix (the writer) and Parse (the reader) use, so rewording it here keeps the two in step. Rows already stored carry the old
+       text, though, and read as unknown after a reword: keep the spelling, or read the old one too. */
     private const string Prefix = " [forcing type ";
 
     /// <summary>The collector's <c>plan_forcing_type</c> as one of <c>MANUAL</c>, <c>AUTO</c>, <c>NONE</c> or <c>unknown</c>.</summary>
