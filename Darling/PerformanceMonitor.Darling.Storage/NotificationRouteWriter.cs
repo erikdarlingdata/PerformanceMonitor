@@ -323,8 +323,10 @@ WHERE route_id = $1";
     /// <paramref name="columns"/> names the ones to change. Returns, in the same order, whether a value was saved before for each column named (null for one not named; never a stored value, so a
     /// webhook value, sealed or not, never leaves the function). A database refusal propagates as a <see cref="PostgresException"/>.
     /// </summary>
+    /// <para>#6542 part 2: <paramref name="actor"/> is the operator-class MCP token's journal actor (<c>operator:</c> and its name), or null.
+    /// The function changes an agent route's destinations only for an operator actor.</para>
     public static async Task<bool?[]> SetRouteDestinationsAsync(
-        NpgsqlConnection connection, NpgsqlTransaction transaction, int routeId, IReadOnlyList<string> columns, IReadOnlyList<string> values,
+        NpgsqlConnection connection, NpgsqlTransaction transaction, int routeId, string? actor, IReadOnlyList<string> columns, IReadOnlyList<string> values,
         int timeoutSeconds, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(connection);
@@ -332,9 +334,12 @@ WHERE route_id = $1";
         ArgumentNullException.ThrowIfNull(columns);
         ArgumentNullException.ThrowIfNull(values);
         await using var command = new NpgsqlCommand(
-            "SELECT * FROM config.set_notification_route_destinations($1, $2, $3, $4, $5, $6, $7)", connection, transaction);
+            "SELECT * FROM config.set_notification_route_destinations($1, $2, $3, $4, $5, $6, $7, $8)", connection, transaction);
         command.CommandTimeout = timeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });
+        command.Parameters.Add(actor is null
+            ? new NpgsqlParameter { Value = DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text }
+            : new NpgsqlParameter<string> { TypedValue = actor });
         command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = columns.ToArray() });
         for (var i = 0; i < 5; i++)
         {

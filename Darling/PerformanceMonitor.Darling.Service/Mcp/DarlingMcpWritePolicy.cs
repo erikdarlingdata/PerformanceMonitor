@@ -244,6 +244,17 @@ internal static class DarlingMcpWritePolicy
         /// operator token has a name too, but it is not an agent, so no agent_id is held to it.</summary>
         internal string? AgentTokenName => Investigations ? TokenName : null;
 
+        /// <summary>True for an operator-class caller (#6542 part 2, agreed with the coordinator 10-23): a named operator token, or the legacy
+        /// single token served the writes. Under R2 of #5632 neither holds the investigation tools, so no investigation agent holds it.</summary>
+        internal bool IsOperator => Writes && !Investigations;
+
+        /// <summary>The journal actor of an operator-class caller's route agent change, else null: <c>operator:&lt;token name&gt;</c> for a named
+        /// operator token, and for the legacy token <c>operator:</c> with the token identity the route write log lines already carry
+        /// (<see cref="ReadCaller.AmbientMcpToken"/>, the fingerprint). Never a token value.</summary>
+        internal string? OperatorActor => !IsOperator ? null
+            : TokenName is { } name ? "operator:" + name
+            : "operator:" + (ReadCaller.AmbientMcpToken ?? "token unknown");
+
         /// <summary>True when a tool named <paramref name="toolName"/> is offered under this policy.</summary>
         internal bool Offers(string toolName) => Offers(toolName, AgentActionTools);
 

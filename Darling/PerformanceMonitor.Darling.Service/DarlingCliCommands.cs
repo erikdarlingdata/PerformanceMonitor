@@ -3564,10 +3564,7 @@ public static partial class DarlingCliCommands
             return "<a-LAN-IP-of-this-machine>";
         }
 
-        var text = listen.Trim();
-        return address.AddressFamily == AddressFamily.InterNetworkV6 && !text.StartsWith('[')
-            ? $"[{text}]"
-            : listen;
+        return DarlingListenUrl.FormatHost(listen);
     }
 
     /// <summary>
@@ -3797,21 +3794,88 @@ public static partial class DarlingCliCommands
 
     /// <summary>
     /// PURE: the line <c>--enable-mcp</c> / <c>--enable-web</c> prints when darling.json gives that endpoint no token and
-    /// its <c>allowTokenlessLoopback</c> is off, because the service then does not start it; null when a token is set or
-    /// the opt-out is on. Reads only whether a token value is present, never the token.
+    /// its <c>allowTokenlessLoopback</c> is off, because the service then does not start it; null when a token is set, the
+    /// opt-out is on, or (MCP only) <c>mcp.tokens</c> names tokens, which the host honors without a legacy token (#6542).
+    /// Reads only whether a token value is present, never the token.
     /// </summary>
     internal static string? EnableTokenNote(bool mcp, DarlingConfig config)
     {
         var section = mcp ? "mcp" : "web";
-        var hasToken = mcp
-            ? !string.IsNullOrWhiteSpace(config.Mcp.Network?.EncryptedToken) || !string.IsNullOrWhiteSpace(config.Mcp.Network?.Token)
-            : !string.IsNullOrWhiteSpace(config.Web.Network?.EncryptedToken) || !string.IsNullOrWhiteSpace(config.Web.Network?.Token);
         var optOut = mcp ? config.Mcp.AllowTokenlessLoopback : config.Web.AllowTokenlessLoopback;
-        return hasToken || optOut
+        return HasEndpointToken(mcp, config) || (mcp && config.Mcp.HasNamedTokens) || optOut
             ? null
             : $"NOTE: darling.json gives {section} no token, so the service will not start it. Set {section}.network.encryptedToken " +
               $"(from --encrypt-password) or {section}.network.token and restart the service, or set {section}.allowTokenlessLoopback " +
               (mcp ? "to true to serve loopback with no token (the write tools stay off)." : "to true to serve loopback with no token, for reads only.");
+    }
+
+    /// <summary>Whether darling.json gives the endpoint a token value (presence only; the value is never read here).</summary>
+    private static bool HasEndpointToken(bool mcp, DarlingConfig config) => mcp
+        ? !string.IsNullOrWhiteSpace(config.Mcp.Network?.EncryptedToken) || !string.IsNullOrWhiteSpace(config.Mcp.Network?.Token)
+        : !string.IsNullOrWhiteSpace(config.Web.Network?.EncryptedToken) || !string.IsNullOrWhiteSpace(config.Web.Network?.Token);
+
+    /// <summary>
+    /// The scheme a loopback client uses to reach the endpoint. Plain <c>http</c>, except when the network listener is
+    /// TLS and its listen is a wildcard or loopback address: then there is ONE listener, HTTPS for loopback too (#5288
+    /// review F11), so the loopback address must be opened over <c>https</c>. Mirrors the host's own decision
+    /// (<see cref="DarlingListenerTls.DescribeLoopbackListener"/>); a certificate that fails to load is not known here.
+    /// </summary>
+    private static string LoopbackScheme(bool mcp, DarlingConfig config)
+    {
+        var managed = config.Postgres.Managed;
+        var exposed = mcp
+            ? DarlingMcpHostService.ResolveMcpBind(config.Mcp, managed).Mode == DarlingMcpHostService.McpBindMode.NetworkAndLoopback
+            : DarlingWebHostService.ResolveWebBind(config.Web, managed).Mode == DarlingHostBinding.BindMode.NetworkAndLoopback;
+        var listen = mcp ? config.Mcp.Network?.Listen : config.Web.Network?.Listen;
+        var tls = mcp ? config.Mcp.Network?.Tls : config.Web.Network?.Tls;
+        return exposed && tls is not null
+            && IPAddress.TryParse(listen?.Trim(), out var listenIp)
+            && !DarlingHostBinding.ShouldAddLoopbackListeners(listenIp)
+            ? "https"
+            : "http";
+    }
+
+    /// <summary>
+    /// What <c>--enable-mcp</c> / <c>--enable-web</c> print after "now on" (#6474): the web address to open, or the
+    /// <c>claude mcp add</c> command the Viewer's Settings copies (built by the same <see cref="DarlingEndpointClientText"/>
+    /// call, so they match except when the scheme is <c>https</c> on loopback: the <c>tls</c> block lives only in darling.json
+    /// on the service host, which the Viewer cannot see, so its copy stays <c>http</c> and its status line says to change it), and, when darling.json sets a token, the verb that shows it. The token value is never
+    /// printed: the command carries the <c>&lt;token&gt;</c> placeholder. <paramref name="port"/> is the port the endpoint
+    /// binds, as the store row the verb just wrote reports it. Prints nothing when the service will not start the
+    /// endpoint (no token and no <c>allowTokenlessLoopback</c>): <see cref="EnableTokenNote"/> has said so, and an address
+    /// that refuses the connection is no next step.
+    /// </summary>
+    internal static void WriteEnableNextSteps(bool mcp, DarlingConfig config, int port, TextWriter output)
+    {
+        var optOut = mcp ? config.Mcp.AllowTokenlessLoopback : config.Web.AllowTokenlessLoopback;
+        var hasToken = HasEndpointToken(mcp, config);
+        var namedTokens = mcp && config.Mcp.HasNamedTokens;
+        if (!hasToken && !namedTokens && !optOut)
+        {
+            return;
+        }
+
+        var portText = port.ToString(CultureInfo.InvariantCulture);
+        var scheme = LoopbackScheme(mcp, config);
+        output.WriteLine();
+        if (mcp)
+        {
+            output.WriteLine("To connect Claude Code, run:");
+            output.WriteLine("    " + DarlingEndpointClientText.ClaudeMcpAddCommand(portText, scheme));
+            output.WriteLine(hasToken
+                ? $"Replace {DarlingEndpointClientText.TokenPlaceholder} with the MCP token. Show it with: PerformanceMonitor.Darling.Service.exe --print-mcp-token (run elevated)."
+                : namedTokens
+                    ? $"Replace {DarlingEndpointClientText.TokenPlaceholder} with the token of one of the mcp.tokens entries in darling.json."
+                    : "darling.json sets no MCP token and mcp.allowTokenlessLoopback is on, so leave the --header part off the command.");
+        }
+        else
+        {
+            output.WriteLine("Open the web dashboard at: " + DarlingEndpointClientText.WebDashboardAddress(portText, scheme));
+            if (hasToken)
+            {
+                output.WriteLine("It asks for the web token. Show it with: PerformanceMonitor.Darling.Service.exe --print-web-token (run elevated).");
+            }
+        }
     }
 
     /// <summary>PURE firewall-step decision for a toggle verb (unit-tested): a loopback-only endpoint needs no
@@ -4015,6 +4079,11 @@ public static partial class DarlingCliCommands
         if (enable && EnableTokenNote(endpoint == EndpointKind.Mcp, config) is { } tokenNote)
         {
             output.WriteLine(tokenNote);
+        }
+
+        if (enable)
+        {
+            WriteEnableNextSteps(endpoint == EndpointKind.Mcp, config, storePort, output);
         }
 
         /* #2414: the SAME resolver the two host supervisors bind on, fed the row this verb just wrote. It carries

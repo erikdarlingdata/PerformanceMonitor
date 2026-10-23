@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -251,6 +251,8 @@ public partial class ViewerServerTab
         if (PgCollectorIsGatedOff("pg_extension_availability"))
         {
             PgExtensionsGrid.ItemsSource = null;
+            PgExtensionCensusGrid.ItemsSource = null;
+            PgExtensionCensusNote.Text = string.Empty;
             PgExtensionsNote.Text = PanelNote("pg_extension_availability", 0, string.Empty);
             return;
         }
@@ -258,6 +260,7 @@ public partial class ViewerServerTab
         var rows = await _dataService.GetPgExtensionAvailabilityAsync(_server.ServerId, startUtc, endUtc);
 
         PgExtensionsGrid.ItemsSource = rows.Select(PgDisplay.Extension).ToList();
+        await LoadPgExtensionInstallCensusAsync(startUtc, endUtc);
 
         var actionable = rows.Count(r => r.IsMonitoringRelevant && string.Equals(r.State, "available", StringComparison.Ordinal));
         var outdated = rows.Count(r => r.IsMonitoringRelevant && string.Equals(r.State, "outdated", StringComparison.Ordinal));
@@ -275,6 +278,21 @@ public partial class ViewerServerTab
                       : string.Empty)
                   + "  \u201cInstalled\u201d is scoped to the database this server entry connects to — "
                   + "pg_extension is per-database while the server's offer is cluster-wide.");
+    }
+
+    /// <summary>Fills the Extension Install Census under the Extensions grid: one row per extension created anywhere on the server,
+    /// from the same shared read as the web's <c>install_census</c>. The scalars-only row a server with no stored rows produces
+    /// carries the denominators and is left out of the grid, as in the web.</summary>
+    private async Task LoadPgExtensionInstallCensusAsync(DateTime startUtc, DateTime endUtc)
+    {
+        var census = await _dataService.GetPgExtensionInstallCensusAsync(_server.ServerId, startUtc, endUtc);
+        var rows = census.Where(r => r.ExtensionName is not null).Select(PgExtensionCensusGridRow.From).ToList();
+        PgExtensionCensusGrid.ItemsSource = rows;
+        PgExtensionCensusNote.Text = rows.Count == 0
+            ? "Extension Install Census: nothing is created on this server beyond what PostgreSQL installs itself, or the inventory has not been collected yet. "
+              + "This census counts only extensions somebody created; the available-but-absent ones are the actionable rows in the grid above."
+            : $"Extension Install Census: {rows.Count} extension(s) created on this server, one row each, counted across all {census[0].DatabasesTotal:N0} database(s). "
+              + "No row limit touches it.";
     }
 
     /// <summary>
