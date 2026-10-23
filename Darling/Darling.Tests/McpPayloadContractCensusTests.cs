@@ -155,11 +155,19 @@ public sealed class McpPayloadContractCensusTests
     /// with a status word rather than an error (<c>precondition</c> when the store role lacks the table grant, and a refusal
     /// naming a server removed from the configuration), because a client that reads <c>status</c> must see "do this" and not
     /// a failed call. The same holds for <c>merge_deadlock_signatures</c> (#6006): <c>precondition</c> when the mcp role lacks the merge-table grant.
+    /// The four investigation admin tools (#6400) do likewise: <c>precondition</c> when a bring-your-own store's mcp role was never re-provisioned with their column grants.
     /// </summary>
     public static readonly (string File, string Tool)[] AdHocErrorReturns =
     [
         ("DarlingMcpThresholdOverrideTools.cs", "set_alert_threshold_override"),
         ("DarlingMcpSignatureMergeTools.cs", "merge_deadlock_signatures"),
+        ("DarlingMcpInvestigationAdminTools.cs", "write_investigation_note"),
+        ("DarlingMcpInvestigationAdminTools.cs", "approve_investigation_note"),
+        ("DarlingMcpInvestigationAdminTools.cs", "reject_investigation_note"),
+        ("DarlingMcpInvestigationAdminTools.cs", "close_investigation_request"),
+        ("DarlingMcpInvestigationFeedbackTools.cs", "start_practice_request"),
+        ("DarlingMcpInvestigationFeedbackTools.cs", "save_environment_profile"),
+        ("DarlingMcpInvestigationFeedbackTools.cs", "record_investigation_feedback"),
     ];
 
     /// <summary>
@@ -1417,6 +1425,8 @@ public sealed class McpPayloadContractCensusTests
     public static readonly string[] GeneralTimestampParsesWithUtcStyles =
     [
         "DarlingMcpAlertTools.cs BuildMuteRuleUpdate",
+        /* #6400: save_environment_profile's expected_modified_at, parsed under invariant UTC styles like the web profile route's. */
+        "DarlingMcpInvestigationFeedbackTools.cs SaveEnvironmentProfile",
         /* #4734: create_mute_rule's body moved into CreateMuteRuleOver (the tool hands it the Postgres-backed
            store), so the expires_at parse, unchanged, is found under the new method name. */
         "DarlingMcpAlertTools.cs CreateMuteRuleOver",

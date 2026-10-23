@@ -52,6 +52,19 @@ public sealed class ViewerInvestigationsValidationTests
         Assert.Null(ViewerDataService.ValidateInvestigationProfile(5, null, ""));
     }
 
+    /* #6400: the store matches a scope on coalesce(scope_tag_id, 0), so tag 0 would stand in the fleet's place. */
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void AProfile_ForATagThatIs0OrBelow_IsRefused_NamingTheId(int tagId)
+    {
+        var refusal = ViewerDataService.ValidateInvestigationProfile(null, tagId, "text");
+        Assert.NotNull(refusal);
+        Assert.Contains($"Tag id {tagId} ", refusal, StringComparison.Ordinal);
+        Assert.Equal(refusal, ViewerDataService.ValidateInvestigationProfile(null, tagId, ""));
+        Assert.Null(ViewerDataService.ValidateInvestigationProfile(null, 1, "text"));
+    }
+
     [Fact]
     public void EveryWrite_NamesThePerson_AsPersonLogin()
     {

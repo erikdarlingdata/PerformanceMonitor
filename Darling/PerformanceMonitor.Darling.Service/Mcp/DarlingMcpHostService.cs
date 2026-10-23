@@ -1761,6 +1761,12 @@ public sealed class DarlingMcpHostService : BackgroundService
             /* #6397: get_database_state_expectations (read) and set_database_state_expected (write): the Database State alert's per-database
                expected state, through the store code the Viewer's override editor runs. The mcp role holds INSERT/UPDATE/DELETE on only that table. */
             .WithGeminiCompatibleTools<DarlingMcpDatabaseStateTools>()
+            /* #6400: write_investigation_note, approve_investigation_note, reject_investigation_note and close_investigation_request, through the store
+               code the web routes and the Viewer run. The mcp role holds only the columns those statements set; an agent never gets them. */
+            .WithGeminiCompatibleTools<DarlingMcpInvestigationAdminTools>()
+            /* #6400 part 2: start_practice_request, save_environment_profile and record_investigation_feedback, through the practice, profile and
+               feedback store code the web routes and the Viewer run. The mcp role holds only the columns those statements set; an agent never gets them. */
+            .WithGeminiCompatibleTools<DarlingMcpInvestigationFeedbackTools>()
             /* #6230: pause / resume collection, disable / enable one server, set a server's excluded databases and reload the config,
                with get_collection_state to read the result. Each runs the command plane's own plan (or the Viewer's shared exclusions
                write) as the mcp role; the role holds UPDATE on only the paused column of config_service for it. */

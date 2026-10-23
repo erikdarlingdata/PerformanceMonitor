@@ -173,6 +173,16 @@ public static class DarlingWebEndpoints
         /* #6397: the Database State expectations are edited in the Viewer's override editor; the web has no route for them. */
         "get_database_state_expectations",
         "set_database_state_expected",
+        /* #6400: the web has its own routes for these seven (PUT /api/investigation-notes, .../approve, .../reject,
+           /api/investigation-requests/{id}/close, /api/investigation-practice-requests/{id}, /api/environment-profiles and
+           /api/investigation-feedback/{id}); the MCP tools are not dispatched through /api/read. */
+        "write_investigation_note",
+        "approve_investigation_note",
+        "reject_investigation_note",
+        "close_investigation_request",
+        "start_practice_request",
+        "save_environment_profile",
+        "record_investigation_feedback",
         /* #5632 Phase A: claim and submit write investigation state for an agent over MCP; the web serves the two
            investigation reads only (/api/read). */
         "claim_investigation_request",

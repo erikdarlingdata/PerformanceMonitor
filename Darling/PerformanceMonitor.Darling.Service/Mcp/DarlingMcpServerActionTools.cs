@@ -40,7 +40,7 @@ public sealed class DarlingMcpServerActionTools
     internal const string SetToolName = "set_server_action";
 
     /// <summary>The journal actor of an MCP switch change: <c>mcp:</c> plus the caller the request filter worked out. Never <c>agent:</c> and never <c>person:</c>.</summary>
-    internal static string ActorOf() => "mcp:" + ReadCaller.WriteIdentity();
+    internal static string ActorOf() => "mcp:" + ReadCaller.StoreIdentity();
 
     [McpServerTool(Name = "set_server_action"), Description(
         "Turns ONE server's switch for ONE agent server action on or off: force_plan and evict_plan (SQL Server only) and kill_session (SQL Server and PostgreSQL). All switches start off; an agent can act on a server only while its switch for that action is on (and the other conditions hold: Level 3, the service's agent actions on, a remediation login given as an env: or file: reference). Served only with mcp.allowServerAdmin, and never offered to an agent that investigates an alert. The change is journaled with who made it, from MCP, and the state before and after. Reversed by calling it again with the other value. The answer gives the state before and after and the call that puts it back.")]
