@@ -36,7 +36,7 @@ public sealed class DarlingMcpObjectStatsTools
 {
     /// <summary>Lite's default result caps (get_table_index_sizes takes no top parameter; get_index_usage and
     /// get_object_locking do, and these are the DEFAULT each falls back to, not a hard cap).</summary>
-    private const int TableSizesTop = 100;
+    private const int TableSizesTop = DarlingTableSizeGrowthReader.TopTables;
 
     /// <summary>
     /// #4198: <c>get_index_usage</c>'s caller-optional <c>limit</c> DEFAULT (#2636 made it optional; this lane
@@ -179,7 +179,7 @@ public sealed class DarlingMcpObjectStatsTools
     /// span at all. Null when every figure is defined, so the common row carries no note. Lite's twin words
     /// it identically.
     /// </summary>
-    internal static string? GrowthNote(DarlingObjectStatsReader.ObjectSizeGrowthRow r)
+    internal static string? GrowthNote(TableSizeGrowthRow r)
     {
         var notes = new List<string>();
         if (r.DaysOfData < 1)
@@ -394,7 +394,7 @@ public sealed class DarlingMcpObjectStatsTools
     }
 
     [ReadsLatestSnapshot(LatestSnapshotShape.Stamped)]
-    [McpServerTool(Name = "get_object_locking"), Description("Gets per-index locking and latch contention (row/page lock waits in ms, lock escalations, page-latch and page-IO-latch waits) from the latest daily snapshot, top contended objects first. Use to find tables/indexes driving blocking and contention. Counters are cumulative since the last instance restart. LATEST IS A TIME: this reads the newest index/object snapshot for the server, not a window, and captured_at is the instant it was collected - these are the databases and indexes that existed AT that stamp, and because object stats are collected DAILY the stamp can be most of a day old on a healthy server and older still on one whose collector has stalled.")]
+    [McpServerTool(Name = "get_object_locking"), Description("Gets per-index locking and latch contention (row/page lock waits in ms, lock escalations, page-latch and page-IO-latch waits) from the latest daily snapshot, top contended objects first. Use to find tables/indexes driving blocking and contention. Counters are cumulative since the last instance restart. LATEST IS A TIME: this reads the newest index/object snapshot for the server, not a window, and captured_at is the instant it was collected - these are the databases and indexes that existed AT that stamp, and because object stats are collected DAILY the stamp can be most of a day old on a healthy server and older still on one whose collector has stalled. It has no time window, so it cannot show locking during a past incident: use get_blocking_trend or get_blocking_stats for that.")]
     public static async Task<string> GetObjectLocking(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,

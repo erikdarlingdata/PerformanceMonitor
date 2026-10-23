@@ -229,6 +229,9 @@ public sealed class DarlingMcpCollectorScheduleBehaviourLiveTests
                 ("set_collector_frequency", l => DarlingMcpCollectorScheduleTools.SetCollectorFrequency(source, Delta, 10, false, "beh-alpha", l, ct)),
                 ("set_collector_retention", l => DarlingMcpCollectorScheduleTools.SetCollectorRetention(source, Delta, 45, false, "beh-alpha", l, ct)),
                 ("set_collector_run_at", l => DarlingMcpCollectorScheduleTools.SetCollectorRunAt(source, Daily, "03:30", "beh-alpha", l, ct)),
+                ("set_collector_databases", l => DarlingMcpCollectorScheduleTools.SetCollectorDatabases(source, Delta, "Sales", false, "beh-alpha", l, ct)),
+                /* Last: it removes the rows the calls above made, so it has something to remove. */
+                ("reset_collector_schedules", l => DarlingMcpCollectorScheduleTools.ResetCollectorSchedules(source, "beh-alpha", l, ct)),
             };
 
             foreach (var (tool, run) in calls)
@@ -240,7 +243,12 @@ public sealed class DarlingMcpCollectorScheduleBehaviourLiveTests
                 var line = Assert.Single(logger.Lines);
                 Assert.StartsWith("Information:", line, StringComparison.Ordinal);
                 Assert.Contains(tool, line, StringComparison.Ordinal);
-                Assert.Contains(tool == "set_collector_run_at" ? Daily : Delta, line, StringComparison.Ordinal);
+                if (tool != "reset_collector_schedules")
+                {
+                    /* The reset names a scope, not a collector. */
+                    Assert.Contains(tool == "set_collector_run_at" ? Daily : Delta, line, StringComparison.Ordinal);
+                }
+
                 Assert.Contains("beh-alpha", line, StringComparison.Ordinal);
                 Assert.Contains("client says: " + Caller, line, StringComparison.Ordinal);
             }
@@ -249,6 +257,14 @@ public sealed class DarlingMcpCollectorScheduleBehaviourLiveTests
             var refused = new CapturingTestLogger();
             Assert.NotEqual("changed", (string?)Parse(await DarlingMcpCollectorScheduleTools.DisableCollector(source, "no_such_collector", "beh-alpha", logger: refused, cancellationToken: ct))["status"]);
             Assert.Empty(refused.Lines);
+
+            var refusedDatabases = new CapturingTestLogger();
+            Assert.NotEqual("changed", (string?)Parse(await DarlingMcpCollectorScheduleTools.SetCollectorDatabases(source, "no_such_collector", "Sales", false, "beh-alpha", refusedDatabases, ct))["status"]);
+            Assert.Empty(refusedDatabases.Lines);
+
+            var refusedReset = new CapturingTestLogger();
+            Assert.NotEqual("changed", (string?)Parse(await DarlingMcpCollectorScheduleTools.ResetCollectorSchedules(source, "no_such_server", refusedReset, ct))["status"]);
+            Assert.Empty(refusedReset.Lines);
         });
     }
 

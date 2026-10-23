@@ -63,6 +63,17 @@ Two operational notes. The msdb grants live inside a system database that SQL Se
 
 **Availability Groups need a second grant.** The `ag_replica_states` / `ag_database_replica_states` collectors read the AG *catalog views* (`sys.availability_groups`, `sys.availability_replicas`) alongside the `sys.dm_hadr_*` DMVs. The DMVs are covered by `VIEW SERVER STATE`, but [the catalog views require `VIEW ANY DEFINITION`](https://learn.microsoft.com/en-us/sql/database-engine/availability-groups/windows/monitor-availability-groups-transact-sql) — and catalog views enforce that by *hiding rows*, not by raising an error. So on a real AG cluster a login with only `VIEW SERVER STATE` gets zero rows, which looks exactly like a server with no availability groups. If your AG dashboards are empty, this grant is why.
 
+Darling can print this script for you. `PerformanceMonitor.Darling.Service.exe --grant-script <server-name>` prints the login and the grants below for a server that Darling monitors. `--grant-script --host <host>` does the same for a host that you did not add yet. In the Viewer, the Add Server dialog has a **Copy grant script** button that copies the same text.
+
+The principal is the SQL login that the server entry uses. With Windows authentication, it is the account that the service runs as:
+
+- For a SQL Server on the same machine, it is `NT SERVICE\PerformanceMonitor Darling`.
+- For a remote SQL Server, it is the machine account (`DOMAIN\MACHINE$`).
+
+`--finops` adds the FinOps per-database grants. `--azure` prints the Azure SQL Database form, and a `name.database.windows.net` host does too. An Azure SQL Managed Instance host has a zone label before `database.windows.net`, so it gets the on-premises form. The script has no password, only a placeholder. You can run it a second time with no harm.
+
+The connection test also names each of the four required grants that the login does not have: `VIEW SERVER STATE`, `CONNECT ANY DATABASE`, `VIEW ANY DEFINITION` and `ALTER ANY EVENT SESSION`. Beside a successful test, it shows a warning with the statement that adds each missing grant. With Windows authentication, only the service's own test does this check: the Viewer, the MCP tools and `test_connect`. `--test-connection` runs as the console user, so it skips the check.
+
 Darling uses the same target-server grants. Its bundled PostgreSQL store and service account are covered in the [Darling operator guide](../Darling/README.md). Darling can also monitor PostgreSQL servers, which need different grants (see [PostgreSQL targets](#postgresql-targets-darling)), and it has two optional extra logins (see [Optional Darling logins](#optional-darling-logins)). The deprecated Full edition's install/least-privilege grants are in [deprecated/Dashboard/README.md](../deprecated/Dashboard/README.md).
 
 ### FinOps Index Analysis (per-database grants)
