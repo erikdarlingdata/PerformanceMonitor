@@ -46,7 +46,7 @@ internal static class DarlingMcpWritePolicy
     /// <summary>The darling.json key that offers the write tools.</summary>
     internal const string WritesSetting = "mcp.allowWrites";
 
-    /// <summary>The darling.json key that additionally offers <c>add_servers</c>, <c>edit_server</c> and <c>remove_server</c>.</summary>
+    /// <summary>The darling.json key that additionally offers <c>add_servers</c>, <c>edit_server</c>, <c>remove_server</c> and <c>set_server_action</c>.</summary>
     internal const string ServerAdminSetting = "mcp.allowServerAdmin";
 
     /// <summary>The tools that change which servers the service connects to, or where. They present the service's
