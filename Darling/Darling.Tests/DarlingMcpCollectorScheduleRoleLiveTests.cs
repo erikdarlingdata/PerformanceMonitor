@@ -38,7 +38,7 @@ public sealed class DarlingMcpCollectorScheduleRoleLiveTests
     private const string Delta = "wait_stats";
 
     /// <summary>The columns the tools set on an override row; every other column of the table stays out of the role's reach.</summary>
-    private static readonly string[] GrantedUpdateColumns = ["enabled", "frequency_minutes", "retention_days"];
+    private static readonly string[] GrantedUpdateColumns = ["enabled", "frequency_minutes", "retention_days", "databases"];
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -186,7 +186,7 @@ public sealed class DarlingMcpCollectorScheduleRoleLiveTests
     }
 
     [Fact]
-    public async Task TheProvisionedMcpLogin_CannotInsertTheDatabaseScope_AndCannotUpdateAnyColumnItWasNotGranted()
+    public async Task TheProvisionedMcpLogin_CanSetTheDatabaseScope_AndCannotUpdateTheKeyColumns()
     {
         await WithMcpStoreAsync(async (mcp, owner, ct) =>
         {
@@ -198,12 +198,10 @@ public sealed class DarlingMcpCollectorScheduleRoleLiveTests
                tool removes a row. */
             Assert.Equal(2L, Convert.ToInt64(await ScalarAsync(owner, "SELECT count(*) FROM config.config_collector_schedules", ct), CultureInfo.InvariantCulture));
 
-            /* The INSERT grant is the five columns the tools set (a new row is how a frequency or a retention starts): the database scope
-               is not among them, so an INSERT that names it is refused, whatever else it carries. */
-            var insert = await Assert.ThrowsAsync<PostgresException>(async () =>
-                await ExecAsync(login, "INSERT INTO config.config_collector_schedules (server_id, collector_name, enabled, databases) VALUES (NULL, 'cpu_utilization', TRUE, ARRAY['x'])", ct));
-            Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, insert.SqlState);
-            Assert.Equal(0L, Convert.ToInt64(await ScalarAsync(owner, "SELECT count(*) FROM config.config_collector_schedules WHERE collector_name = 'cpu_utilization'", ct), CultureInfo.InvariantCulture));
+            /* The INSERT grant is the six columns the tools set (#6396 added the database scope, which set_collector_databases starts a row with):
+               an INSERT that names it lands. */
+            await ExecAsync(login, "INSERT INTO config.config_collector_schedules (server_id, collector_name, enabled, databases) VALUES (NULL, 'cpu_utilization', NULL, ARRAY['x'])", ct);
+            Assert.Equal(1L, Convert.ToInt64(await ScalarAsync(owner, "SELECT count(*) FROM config.config_collector_schedules WHERE collector_name = 'cpu_utilization' AND databases = ARRAY['x']", ct), CultureInfo.InvariantCulture));
 
             /* An UPDATE of every column the grant does not name is refused: read from the catalog, so a column added later is held to it too. */
             var columns = new List<string>();
@@ -218,7 +216,7 @@ public sealed class DarlingMcpCollectorScheduleRoleLiveTests
             }
 
             var refused = columns.Except(GrantedUpdateColumns).ToList();
-            Assert.Contains("databases", refused);
+            Assert.DoesNotContain("databases", refused);
             Assert.Contains("server_id", refused);
             Assert.Contains("collector_name", refused);
             foreach (var column in refused)
@@ -228,14 +226,111 @@ public sealed class DarlingMcpCollectorScheduleRoleLiveTests
                 Assert.True(ex.SqlState == PostgresErrorCodes.InsufficientPrivilege, $"UPDATE of {column} gave {ex.SqlState}: {ex.MessageText}");
             }
 
-            /* The three granted columns still update. */
-            await ExecAsync(login, "UPDATE config.config_collector_schedules SET enabled = enabled, frequency_minutes = frequency_minutes, retention_days = retention_days", ct);
+            /* The four granted columns still update. */
+            await ExecAsync(login, "UPDATE config.config_collector_schedules SET enabled = enabled, frequency_minutes = frequency_minutes, retention_days = retention_days, databases = databases", ct);
 
             /* The run-time table: the role may not touch its key columns either, and a row of it cannot be written past the one value. */
             await DarlingMcpCollectorScheduleTools.SetCollectorRunAt(mcp, Daily, "03:30", "role-alpha", cancellationToken: ct);
             var runTimeKey = await Assert.ThrowsAsync<PostgresException>(async () =>
                 await ExecAsync(login, "UPDATE config.config_collector_run_times SET server_id = server_id", ct));
             Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, runTimeKey.SqlState);
+        });
+    }
+
+    private static async Task<string> DatabasesOfAsync(NpgsqlConnection owner, string collector, int? serverId, CancellationToken ct) =>
+        (string)(await ScalarAsync(owner,
+            "SELECT COALESCE((SELECT CASE WHEN databases IS NULL THEN 'NULL' ELSE '{' || array_to_string(databases, ',') || '}' END " +
+            $"FROM config.config_collector_schedules WHERE collector_name = '{collector}' AND server_id " + (serverId is null ? "IS NULL" : $"= {serverId}") + "), 'no row')", ct))!;
+
+    [Fact]
+    public async Task SetCollectorDatabases_AsTheMcpRole_WritesTheNormalizedScopeForTheNamedCollectorAndScopeOnly_AndRefusesWhatTheViewerRefuses()
+    {
+        await WithMcpStoreAsync(async (mcp, owner, ct) =>
+        {
+            /* The Viewer's parse: split on comma, trim, drop blanks. The fleet row is created with enabled inherited. */
+            var fleet = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorDatabases(mcp, Delta, " Sales ,, Orders ,", false, null, cancellationToken: ct));
+            Assert.Equal("changed", (string?)fleet["status"]);
+            Assert.Equal("{Sales,Orders}", await DatabasesOfAsync(owner, Delta, null, ct));
+            Assert.Equal(1L, Convert.ToInt64(await ScalarAsync(owner, "SELECT count(*) FROM config.config_collector_schedules WHERE enabled IS NULL AND collector_name = 'wait_stats'", ct), CultureInfo.InvariantCulture));
+            Assert.Equal(1L, Convert.ToInt64(await ScalarAsync(owner, "SELECT count(*) FROM config.config_collector_schedules", ct), CultureInfo.InvariantCulture));
+
+            /* One server: its own row only, the fleet row is not touched. An empty list on a server is the explicit no-scope array. */
+            await DarlingMcpCollectorScheduleTools.SetCollectorFrequency(mcp, Delta, 10, false, "role-alpha", cancellationToken: ct);
+            var server = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorDatabases(mcp, Delta, "", false, "role-alpha", cancellationToken: ct));
+            Assert.Equal("changed", (string?)server["status"]);
+            Assert.Equal("{}", await DatabasesOfAsync(owner, Delta, ServerA, ct));
+            Assert.Equal("{Sales,Orders}", await DatabasesOfAsync(owner, Delta, null, ct));
+            Assert.Equal("no row", await DatabasesOfAsync(owner, Delta, ServerB, ct));
+            Assert.Equal(10L, Convert.ToInt64(await ScalarAsync(owner, $"SELECT frequency_minutes FROM config.config_collector_schedules WHERE server_id = {ServerA}", ct), CultureInfo.InvariantCulture));
+
+            /* The answer's undo puts the previous scope back. */
+            var set = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorDatabases(mcp, Delta, "Only", false, "role-alpha", cancellationToken: ct));
+            Assert.Equal("{Only}", await DatabasesOfAsync(owner, Delta, ServerA, ct));
+            Assert.Equal("", (string?)set["undo"]!["arguments"]!["databases"]);
+            await DarlingMcpCollectorScheduleTools.SetCollectorDatabases(mcp, Delta, (string?)set["undo"]!["arguments"]!["databases"], false, "role-alpha", cancellationToken: ct);
+            Assert.Equal("{}", await DatabasesOfAsync(owner, Delta, ServerA, ct));
+
+            /* Clear: NULL at that level, the rest of the row stays. */
+            await DarlingMcpCollectorScheduleTools.SetCollectorDatabases(mcp, Delta, null, true, "role-alpha", cancellationToken: ct);
+            Assert.Equal("NULL", await DatabasesOfAsync(owner, Delta, ServerA, ct));
+            Assert.Equal(10L, Convert.ToInt64(await ScalarAsync(owner, $"SELECT frequency_minutes FROM config.config_collector_schedules WHERE server_id = {ServerA}", ct), CultureInfo.InvariantCulture));
+
+            /* At the fleet an empty list clears, as the Viewer's blank fleet box writes NULL. */
+            await DarlingMcpCollectorScheduleTools.SetCollectorDatabases(mcp, Delta, "", false, null, cancellationToken: ct);
+            Assert.Equal("NULL", await DatabasesOfAsync(owner, Delta, null, ct));
+
+            /* Refused, and nothing is written: an unknown collector, neither or both of databases and clear, an unknown server. */
+            var rowsBefore = await ScalarAsync(owner, "SELECT count(*) || '/' || COALESCE(sum(cardinality(databases)), 0) FROM config.config_collector_schedules", ct);
+            foreach (var answer in new[]
+            {
+                await DarlingMcpCollectorScheduleTools.SetCollectorDatabases(mcp, "not_a_collector", "x", false, null, cancellationToken: ct),
+                await DarlingMcpCollectorScheduleTools.SetCollectorDatabases(mcp, Delta, null, false, null, cancellationToken: ct),
+                await DarlingMcpCollectorScheduleTools.SetCollectorDatabases(mcp, Delta, "x", true, null, cancellationToken: ct),
+                await DarlingMcpCollectorScheduleTools.SetCollectorDatabases(mcp, Delta, "x", false, "no-such-server", cancellationToken: ct),
+            })
+            {
+                Assert.Equal("refused", (string?)Parse(answer)["status"]);
+            }
+
+            Assert.Equal(rowsBefore, await ScalarAsync(owner, "SELECT count(*) || '/' || COALESCE(sum(cardinality(databases)), 0) FROM config.config_collector_schedules", ct));
+        });
+    }
+
+    [Fact]
+    public async Task ResetCollectorSchedules_AsTheMcpRole_RemovesOneScopesRowsAndRunTimes_AndLeavesTheOtherScopesAlone()
+    {
+        await WithMcpStoreAsync(async (mcp, owner, ct) =>
+        {
+            foreach (var server in new string?[] { null, "role-alpha", "role-beta" })
+            {
+                await DarlingMcpCollectorScheduleTools.SetCollectorFrequency(mcp, Delta, 7, false, server, cancellationToken: ct);
+                await DarlingMcpCollectorScheduleTools.DisableCollector(mcp, Daily, server, cancellationToken: ct);
+                await DarlingMcpCollectorScheduleTools.SetCollectorDatabases(mcp, Daily, "Sales", false, server, cancellationToken: ct);
+                await DarlingMcpCollectorScheduleTools.SetCollectorRunAt(mcp, Daily, "03:30", server, cancellationToken: ct);
+            }
+
+            /* One server: that server's two rows and its run time, nothing else. */
+            var one = Parse(await DarlingMcpCollectorScheduleTools.ResetCollectorSchedules(mcp, "role-alpha", cancellationToken: ct));
+            Assert.Equal("changed", (string?)one["status"]);
+            Assert.Equal(2, (int?)one["removed"]!["schedule_rows"]);
+            Assert.Equal(1, (int?)one["removed"]!["run_times"]);
+            Assert.Equal(2, ((JsonArray)one["removed_overrides"]!).Count);
+            Assert.Equal(0L, Convert.ToInt64(await ScalarAsync(owner, $"SELECT count(*) FROM config.config_collector_schedules WHERE server_id = {ServerA}", ct), CultureInfo.InvariantCulture));
+            Assert.Equal(0L, Convert.ToInt64(await ScalarAsync(owner, $"SELECT count(*) FROM config.config_collector_run_times WHERE server_id = {ServerA}", ct), CultureInfo.InvariantCulture));
+            Assert.Equal(4L, Convert.ToInt64(await ScalarAsync(owner, "SELECT count(*) FROM config.config_collector_schedules", ct), CultureInfo.InvariantCulture));
+            Assert.Equal(2L, Convert.ToInt64(await ScalarAsync(owner, "SELECT count(*) FROM config.config_collector_run_times", ct), CultureInfo.InvariantCulture));
+
+            /* A second reset finds nothing and says so. */
+            Assert.Equal("unchanged", (string?)Parse(await DarlingMcpCollectorScheduleTools.ResetCollectorSchedules(mcp, "role-alpha", cancellationToken: ct))["status"]);
+
+            /* The fleet scope: the fleet rows and the fleet run time go, as the Viewer's Reset to Defaults deletes them; the servers' rows stay. */
+            var fleet = Parse(await DarlingMcpCollectorScheduleTools.ResetCollectorSchedules(mcp, null, cancellationToken: ct));
+            Assert.Equal(2, (int?)fleet["removed"]!["schedule_rows"]);
+            Assert.Equal(1, (int?)fleet["removed"]!["run_times"]);
+            Assert.Equal(0L, Convert.ToInt64(await ScalarAsync(owner, "SELECT count(*) FROM config.config_collector_schedules WHERE server_id IS NULL", ct), CultureInfo.InvariantCulture));
+            Assert.Equal(0L, Convert.ToInt64(await ScalarAsync(owner, "SELECT count(*) FROM config.config_collector_run_times WHERE server_id IS NULL", ct), CultureInfo.InvariantCulture));
+            Assert.Equal(2L, Convert.ToInt64(await ScalarAsync(owner, $"SELECT count(*) FROM config.config_collector_schedules WHERE server_id = {ServerB}", ct), CultureInfo.InvariantCulture));
+            Assert.Equal(1L, Convert.ToInt64(await ScalarAsync(owner, $"SELECT count(*) FROM config.config_collector_run_times WHERE server_id = {ServerB}", ct), CultureInfo.InvariantCulture));
         });
     }
 }

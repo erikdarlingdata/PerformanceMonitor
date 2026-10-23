@@ -867,8 +867,9 @@ DO $do$
 BEGIN
    IF pg_catalog.to_regclass('config.config_collector_schedules') IS NOT NULL THEN
       REVOKE INSERT, UPDATE, DELETE ON config.config_collector_schedules FROM mcp;
-      GRANT INSERT (server_id, collector_name, enabled, frequency_minutes, retention_days) ON config.config_collector_schedules TO mcp;
-      GRANT UPDATE (enabled, frequency_minutes, retention_days) ON config.config_collector_schedules TO mcp;
+      -- #6396: the database scope (V125) joins both lists, for set_collector_databases.
+      GRANT INSERT (server_id, collector_name, enabled, frequency_minutes, retention_days, databases) ON config.config_collector_schedules TO mcp;
+      GRANT UPDATE (enabled, frequency_minutes, retention_days, databases) ON config.config_collector_schedules TO mcp;
       -- #6454: remove_server clears a removed server's override rows, so mcp holds DELETE on this table (managed provisioning grants it too).
       GRANT DELETE ON config.config_collector_schedules TO mcp;
    ELSE

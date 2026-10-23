@@ -475,6 +475,9 @@ WHERE status = 'in_progress'
             case "set_collector_retention":
                 return ResolveCollectorColumn(command, CollectorScheduleColumn.RetentionDays);
 
+            case "set_collector_databases":
+                return ResolveCollectorDatabases(command);
+
             case "test_connect":
                 return string.IsNullOrWhiteSpace(command.ArgsJson)
                     ? Fail("test_connect requires args_json with the server definition")
@@ -805,6 +808,76 @@ WHERE status = 'in_progress'
         return serverId is int scopedId
             ? StoreWrite(CollectorScheduleSql.SetServerColumn(column), new object?[] { scopedId, collectorName, value }, what + " set")
             : StoreWrite(CollectorScheduleSql.SetFleetColumn(column), new object?[] { collectorName, value }, what + " set (fleet-wide)");
+    }
+
+    /// <summary>
+    /// set_collector_databases (#6396) -> set or clear the per-collector database scope (the V125 <c>databases</c> allow-list, the
+    /// schedule editor's Databases column) on ONE collector's row, scoped like <see cref="ResolveCollectorColumn"/>. args_json carries
+    /// <c>collector_name</c> and <c>databases</c>: a JSON array of names, or a comma-separated string, either read by
+    /// <see cref="CollectorDatabaseScope.Parse"/> (the Viewer's own parse), or the word <c>default</c> to clear the column to NULL. At the
+    /// fleet scope an empty list is NULL as well (the Viewer writes a blank fleet box as NULL: there is no lower level to opt out of);
+    /// on a server an empty list is the explicit "no scope" that stops the fall-through to the fleet row. Every other column of the row is kept.
+    /// </summary>
+    private static CommandPlan ResolveCollectorDatabases(ClaimedCommand command)
+    {
+        const string Verb = "set_collector_databases";
+        var collectorName = TryReadString(command.ArgsJson, "collector_name", "collectorName");
+        if (string.IsNullOrWhiteSpace(collectorName))
+        {
+            return Fail($"{Verb} requires args_json.collector_name");
+        }
+
+        if (DarlingCliCommands.CanonicalCollectorName(collectorName) is not string canonical)
+        {
+            return Fail($"{Verb}: unknown collector '{collectorName}'");
+        }
+
+        var raw = TryReadProperty(command.ArgsJson, new[] { "databases" });
+        List<string> names;
+        var clear = false;
+        switch (raw)
+        {
+            case { ValueKind: JsonValueKind.String } text when string.Equals(text.GetString()?.Trim(), "default", StringComparison.OrdinalIgnoreCase):
+                names = new List<string>();
+                clear = true;
+                break;
+            case { ValueKind: JsonValueKind.String } text:
+                names = CollectorDatabaseScope.Parse(text.GetString());
+                break;
+            case { ValueKind: JsonValueKind.Array } array:
+                names = new List<string>();
+                foreach (var item in array.EnumerateArray())
+                {
+                    if (item.ValueKind != JsonValueKind.String)
+                    {
+                        return Fail($"{Verb} requires args_json.databases as an array of names");
+                    }
+
+                    names.AddRange(CollectorDatabaseScope.Parse(item.GetString()));
+                }
+
+                break;
+            default:
+                return Fail($"{Verb} requires args_json.databases as an array of database names, a comma-separated string, or \"default\" to clear it");
+        }
+
+        var serverId = command.TargetServerId ?? TryReadInt(command.ArgsJson, "server_id", "serverId");
+        if (serverId is null && names.Count == 0)
+        {
+            clear = true;
+        }
+
+        if (clear)
+        {
+            return serverId is int clearedId
+                ? StoreWrite(CollectorScheduleSql.ClearServerDatabases, new object?[] { clearedId, canonical }, "collector database scope cleared")
+                : StoreWrite(CollectorScheduleSql.ClearFleetDatabases, new object?[] { canonical }, "collector database scope cleared (fleet-wide)");
+        }
+
+        var scope = names.ToArray();
+        return serverId is int scopedId
+            ? StoreWrite(CollectorScheduleSql.SetServerDatabases, new object?[] { scopedId, canonical, scope }, "collector database scope set")
+            : StoreWrite(CollectorScheduleSql.SetFleetDatabases, new object?[] { canonical, scope }, "collector database scope set (fleet-wide)");
     }
 
     /// <summary>test_connect result mapping (pure): success carries the probe facts, failure the error.</summary>

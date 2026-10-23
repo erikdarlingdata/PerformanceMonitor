@@ -1184,7 +1184,7 @@ The write needs the run-time table, which the service adds when it starts. If th
 
 ### Stop, start or reschedule a collector from MCP (#6227)
 
-With `mcp.allowWrites` on (and a token), five MCP tools change one collector's schedule, and one read shows the result. Each write takes a `collector_name` and an optional `server_name`. Without a server it changes the fleet-wide row, which every server inherits unless it has a row of its own.
+With `mcp.allowWrites` on (and a token), seven MCP tools change collector schedules, and one read shows the result. Each write takes a `collector_name` and an optional `server_name`. Without a server it changes the fleet-wide row, which every server inherits unless it has a row of its own.
 
 | Tool | What it does |
 |---|---|
@@ -1192,6 +1192,8 @@ With `mcp.allowWrites` on (and a token), five MCP tools change one collector's s
 | `set_collector_frequency` | Sets `frequency_minutes` (0 = once when the server loads), or `clear: true` to remove the override. |
 | `set_collector_run_at` | Sets the time of day a once-a-day collector starts (`HH:MM`, `none` or `default`), as `--set-collector-run-at` does. |
 | `set_collector_retention` | Sets `retention_days`, or `clear: true` to remove the override. |
+| `set_collector_databases` | Sets the collector's database scope (the editor's Databases column) from a comma-separated `databases` list, or `clear: true`. On a server, `databases: ""` is the explicit "no scope" that stops a fleet-wide scope reaching it. Only the collectors that fan out per database read it. |
+| `reset_collector_schedules` | The editor's Reset to Defaults: deletes every override row and run time of one scope (the fleet-wide rows with no `server_name`, else that server's), and lists what it removed. The other scope is left alone. |
 | `get_collector_schedules` | Lists the stored overrides (enabled, frequency, retention, run time, database scope), for one collector or all, fleet-wide and per server. A read: served without `mcp.allowWrites`. |
 
 The writes run the same plans as `--enable-collector`, `--disable-collector` and `--set-collector-run-at`, and refuse the same things: an unknown collector name, a frequency that is negative or past the cap for a collector that stores deltas, a retention under 1 day, a run time on a collector that runs more often than daily. A refusal changes nothing and says why. A write changes only its own column: the other columns on the row are kept, and a row the tool creates never switches a collector on or off. Each answer gives what changed, the previous value and the exact call that undoes it (`undo`). The service picks the change up on its next config poll; there is no restart.
