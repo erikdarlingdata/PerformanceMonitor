@@ -7588,7 +7588,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_server_config_changes"] = R(CatConfig, "Server-configuration changes over time.", PServer(), PHours(168), PAsOf()),
             ["get_trace_flag_changes"] = R(CatConfig, "Trace-flag changes over time.", PServer(), PHours(168), PAsOf()),
             ["get_known_patterns"] = R(CatConfig, "The operator-written known-pattern entries (a note on a recurring alert pattern); get_alert_history rows carry the matches.", PServer(), PText("metric_name")),
-            ["get_change_watches"] = R(CatConfig, "A server's change watches, open and closed: each recorded change opens a 60 minute watch, with its changes, measures and result.", PServer(), PText("state"), PLimit(20)),
+            ["get_change_watches"] = R(CatConfig, "A server's change watches, open and closed: each recorded change opens a 60 minute watch, with its changes, measures and result. watch_id reads one watch in any state.", PServer(), PText("state"), PLimit(20), PText("watch_id")),
 
             /* ── core data reads (DarlingMcpDataTools + long-query / fleet tools) ── */
             ["get_collection_health"] = R(CatData, "Per-collector collection health for a server. server=* with collector_name answers for that one collector on every enabled server (hours: default 24).", PServer(), PText("collector_name")),
