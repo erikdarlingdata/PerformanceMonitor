@@ -31,6 +31,9 @@
     <MajorUpgrade DowngradeErrorMessage="A newer PerformanceMonitor Darling is already installed. Uninstall it from Settings > Apps first if you mean to go back." />
     <MediaTemplate EmbedCab="yes" />
 
+    <!-- The setup wizard (Ui.wxs). A silent install (/qn) never shows it and takes the same public properties. -->
+    <UIRef Id="DarlingUI" />
+
     <!-- A script install (install-darling.ps1) is not taken over (#6480): it may have re-homed the service's logon
          account, which this package's ServiceInstall would reset. The service key existing with no marker and no
          upgrade in play is that case. Installed is true on repair and uninstall, which are this package's own. -->
@@ -93,6 +96,9 @@
                    trips ICE38, ICE43 and ICE57, which assume a per-user profile folder. -->
               <Shortcut Id="DarlingDesktopLnk" Directory="DesktopFolder" Name="Darling Viewer" Description="PerformanceMonitor Darling Viewer" WorkingDirectory="ViewerDir" />
               <Shortcut Id="DarlingStartMenuLnk" Directory="ProgramMenuFolder" Name="Darling Viewer" Description="PerformanceMonitor Darling Viewer" WorkingDirectory="ViewerDir" />
+              <!-- The finish page's launch box (Ui.wxs) opens this one: the shell-execute action takes a file, not a command line,
+                   and the viewer needs the add-server switch. It sits in the viewer folder, not on the Desktop or in the Start Menu. -->
+              <Shortcut Id="DarlingAddServerLnk" Directory="ViewerDir" Name="Darling Viewer (add server)" Description="PerformanceMonitor Darling Viewer, opening the add-server dialog" Arguments="--add-server" WorkingDirectory="ViewerDir" />
             </File>
           </Component>
         </Directory>
@@ -109,15 +115,17 @@
     <SetProperty Id="DARLING_ARG_UPGRADE" Value=" -MsiUpgrade" After="CostFinalize" Sequence="execute" Condition="WIX_UPGRADE_DETECTED" />
     <SetProperty Id="DARLING_ARG_WEB" Value=" -WebDashboard" After="CostFinalize" Sequence="execute" Condition="WEBDASHBOARD = &quot;1&quot;" />
     <SetProperty Id="DARLING_ARG_OPERATOR" Value=" -AddOperator &quot;[OPERATORACCOUNT]&quot;" After="CostFinalize" Sequence="execute" Condition="OPERATORACCOUNT" />
+    <!-- The wizard's "add me" box (Ui.wxs) put the person running setup in DARLING_UI_OPERATOR. An explicit OPERATORACCOUNT= wins. -->
+    <SetProperty Id="DARLING_ARG_OPERATOR_UI" Value=" -AddOperator &quot;[DARLING_UI_OPERATOR]&quot;" After="CostFinalize" Sequence="execute" Condition="ADDINSTALLER = &quot;1&quot; AND DARLING_UI_OPERATOR AND NOT OPERATORACCOUNT" />
     <SetProperty Id="DARLING_ARG_PURGE" Value=" -PurgeData -ConfirmPurge" After="CostFinalize" Sequence="execute" Condition="PURGEDATA = &quot;1&quot;" />
 
     <!-- A deferred WixQuietExec reads its command line from CustomActionData, which is the property of the same name
          as the action. The command must begin with the quoted program. Windows PowerShell 5.1, the engine the scripts
          are written for, from the 64-bit system folder. -->
     <SetProperty Id="DarlingPreStart" Sequence="execute" Before="DarlingPreStart" Condition="NOT (REMOVE~=&quot;ALL&quot;)"
-                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]install-darling.ps1&quot; -MsiPhase PreStart[DARLING_ARG_UPGRADE][DARLING_ARG_WEB][DARLING_ARG_OPERATOR]" />
+                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]install-darling.ps1&quot; -MsiPhase PreStart[DARLING_ARG_UPGRADE][DARLING_ARG_WEB][DARLING_ARG_OPERATOR][DARLING_ARG_OPERATOR_UI]" />
     <SetProperty Id="DarlingPostStart" Sequence="execute" Before="DarlingPostStart" Condition="NOT (REMOVE~=&quot;ALL&quot;)"
-                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]install-darling.ps1&quot; -MsiPhase PostStart[DARLING_ARG_UPGRADE][DARLING_ARG_WEB][DARLING_ARG_OPERATOR]" />
+                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]install-darling.ps1&quot; -MsiPhase PostStart[DARLING_ARG_UPGRADE][DARLING_ARG_WEB][DARLING_ARG_OPERATOR][DARLING_ARG_OPERATOR_UI]" />
     <SetProperty Id="DarlingUninstall" Sequence="execute" Before="DarlingUninstall" Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE"
                  Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]uninstall-darling.ps1&quot; -MsiUninstall[DARLING_ARG_PURGE]" />
 

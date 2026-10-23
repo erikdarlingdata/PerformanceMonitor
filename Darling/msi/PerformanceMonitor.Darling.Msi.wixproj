@@ -27,6 +27,7 @@
 
   <ItemGroup>
     <PackageReference Include="WixToolset.Util.wixext" />
+    <PackageReference Include="WixToolset.UI.wixext" />
   </ItemGroup>
 
   <Target Name="RequirePayload" BeforeTargets="BeforeBuild">
