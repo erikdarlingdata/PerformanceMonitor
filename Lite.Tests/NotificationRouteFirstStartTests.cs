@@ -27,6 +27,11 @@ namespace PerformanceMonitorLite.Tests;
 [Collection("app-alert-statics")]
 public sealed class NotificationRouteFirstStartTests : IDisposable
 {
+    /* Only an upper bound on one in-process read of a freshly built file; the store is initialized before the wait, so it ends in
+       milliseconds. Kept short because WriteLockBudgetTests sums the largest duration in every file that takes the write lock, and a
+       30 s bound here was counted as a 30 s hold of it (#6517). */
+    private static readonly TimeSpan FirstLoadWait = TimeSpan.FromSeconds(1);
+
     private readonly string _tempDir;
     private readonly DuckDbInitializer _initializer;
     private readonly DuckDbNotificationRouteStore _store;
@@ -63,7 +68,7 @@ public sealed class NotificationRouteFirstStartTests : IDisposable
         await cache.InitializeStoreThenConfigureAsync(
             _initializer.InitializeAsync,
             () => Task.Run(() => _store.ListAsync()).GetAwaiter().GetResult());
-        await cache.WaitForFirstLoadAsync(TimeSpan.FromSeconds(30));
+        await cache.WaitForFirstLoadAsync(FirstLoadWait);
 
         Assert.Empty(cache.Current);
         Assert.Empty(RouteTableLines());
@@ -76,7 +81,7 @@ public sealed class NotificationRouteFirstStartTests : IDisposable
         await cache.InitializeStoreThenConfigureAsync(
             _initializer.InitializeAsync,
             () => Task.Run(() => _store.ListAsync()).GetAwaiter().GetResult());
-        await cache.WaitForFirstLoadAsync(TimeSpan.FromSeconds(30));
+        await cache.WaitForFirstLoadAsync(FirstLoadWait);
         _ = AppLogger.DrainBufferedLines();
 
         using (_initializer.AcquireWriteLock())
@@ -109,7 +114,7 @@ public sealed class NotificationRouteFirstStartTests : IDisposable
         await cache.InitializeStoreThenConfigureAsync(
             async () => { await Task.Delay(300); initFinished = true; },
             () => { loaderRanBeforeInit |= !initFinished; return Array.Empty<NotificationRoute>(); });
-        await cache.WaitForFirstLoadAsync(TimeSpan.FromSeconds(30));
+        await cache.WaitForFirstLoadAsync(FirstLoadWait);
 
         Assert.True(initFinished);
         Assert.False(loaderRanBeforeInit);
@@ -124,7 +129,7 @@ public sealed class NotificationRouteFirstStartTests : IDisposable
         await Assert.ThrowsAsync<InvalidOperationException>(() => cache.InitializeStoreThenConfigureAsync(
             () => throw new InvalidOperationException("init failed"),
             () => { Interlocked.Increment(ref loaderCalls); return Array.Empty<NotificationRoute>(); }));
-        await cache.WaitForFirstLoadAsync(TimeSpan.FromSeconds(30));
+        await cache.WaitForFirstLoadAsync(FirstLoadWait);
 
         Assert.Equal(1, Volatile.Read(ref loaderCalls));
     }
