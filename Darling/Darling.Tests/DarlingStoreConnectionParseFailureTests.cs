@@ -392,6 +392,9 @@ public sealed class DarlingStoreConnectionParseFailureTests
             McpConnectionString = web ? null : configuredSurfaceString,
             WebConnectionString = web ? configuredSurfaceString : null,
         },
+        /* No token here: the opt-out lets the start reach the store string these tests are about. */
+        Web = new WebConfig { AllowTokenlessLoopback = true },
+        Mcp = new McpConfig { AllowTokenlessLoopback = true },
     };
 
     /// <summary>
