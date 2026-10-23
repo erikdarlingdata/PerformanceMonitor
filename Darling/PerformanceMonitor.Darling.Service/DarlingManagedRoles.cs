@@ -1737,14 +1737,17 @@ GRANT UPDATE ({McpMonitoredServerUpdateColumns})
 {BuildCustomAlertResolveFunctionSql(config)}
 GRANT EXECUTE ON FUNCTION {config}.record_custom_alert_resolution(integer, text, text, text) TO {viewer}, {mcp};
 -- #6334: the known-pattern entries' writes. The web editor (viewer) and the Viewer (admin) write config.config_known_patterns only
---     through these three functions; no role holds a direct INSERT/UPDATE/DELETE on the table, and mcp gets neither the functions nor a write
---     (no MCP tool writes an entry: they are operator-written context). Owned by the store owner, pinned search_path, no dynamic SQL; created and
+--     through these three functions, and the MCP create_known_pattern / update_known_pattern / delete_known_pattern tools (#6398) call the same
+--     functions as mcp; no role holds a direct INSERT/UPDATE/DELETE on the table. Owned by the store owner, pinned search_path, no dynamic SQL; created and
 --     REVOKEd from PUBLIC by the shared builder. The reads need no grant: the schema-wide SELECT covers the table. The beacon trigger runs as
 --     the function's owner, so no config_service grant is needed either. NOT a versioned migration, for the same reason as the edit function.
 {BuildKnownPatternFunctionsSql(config)}
 GRANT EXECUTE ON FUNCTION {config}.insert_known_pattern({InsertKnownPatternSignature}) TO {admin}, {viewer};
+GRANT EXECUTE ON FUNCTION {config}.insert_known_pattern({InsertKnownPatternSignature}) TO {mcp};
 GRANT EXECUTE ON FUNCTION {config}.update_known_pattern({UpdateKnownPatternSignature}) TO {admin}, {viewer};
+GRANT EXECUTE ON FUNCTION {config}.update_known_pattern({UpdateKnownPatternSignature}) TO {mcp};
 GRANT EXECUTE ON FUNCTION {config}.delete_known_pattern(bigint) TO {admin}, {viewer};
+GRANT EXECUTE ON FUNCTION {config}.delete_known_pattern(bigint) TO {mcp};
 -- #5240: the edit write. The web edit route (viewer) and the MCP edit_server tool (mcp) call
 --     {config}.edit_monitored_server for their one UPDATE of a config_monitored_servers row. It locks the row, checks
 --     the expected modified_at, and refuses a change of host or port that keeps the stored secret on a SQL or

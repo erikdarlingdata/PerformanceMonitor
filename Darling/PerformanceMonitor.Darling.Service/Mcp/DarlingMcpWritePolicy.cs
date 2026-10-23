@@ -132,6 +132,9 @@ internal static class DarlingMcpWritePolicy
         "set_collector_frequency",
         "set_collector_run_at",
         "set_collector_retention",
+        "create_known_pattern",
+        "update_known_pattern",
+        "delete_known_pattern",
     };
 
     /// <summary>The darling.json key that offers the investigation tools (#5632 Phase A, ruling R2).</summary>
@@ -211,6 +214,9 @@ internal static class DarlingMcpWritePolicy
         "set_collector_frequency",
         "set_collector_run_at",
         "set_collector_retention",
+        "create_known_pattern",
+        "update_known_pattern",
+        "delete_known_pattern",
         "add_servers",
         "remove_server",
         "edit_server",
