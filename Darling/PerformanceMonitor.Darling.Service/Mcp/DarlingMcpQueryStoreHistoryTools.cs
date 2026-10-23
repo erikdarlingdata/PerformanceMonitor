@@ -291,7 +291,7 @@ public sealed class DarlingMcpQueryStoreHistoryTools
     }
 
     [McpServerTool(Name = "get_query_store_query_history"), Description(
-        "One Query Store query's history, plan by plan: per-plan executions, duration and CPU, plus a per-interval series. Takes query_id (integer), not query_hash: get_query_store_top returns both. window_truncated marks a history floor. <<GUIDE>>" +
+        "One Query Store query's history, plan by plan: per-plan executions, duration and CPU, plus a per-interval series. window_truncated marks a history floor. <<GUIDE>>" +
         "Per-plan averages are execution-weighted (total over executions), so they can differ from get_query_store_top, which averages the interval averages. " +
         "Outcomes (Regular, Aborted, Exception) and replica roles are combined, execution-weighted, into one value per plan and collection time. " +
         "Reads the raw tier, or the per-interval table (kept 10 days) past raw retention, by get_query_store_top's own rule, so it covers what that grid does; effective_start is where complete history begins. " +
@@ -302,7 +302,7 @@ public sealed class DarlingMcpQueryStoreHistoryTools
     public static async Task<string> GetQueryStoreQueryHistory(
         NpgsqlDataSource postgres,
         [Description("The database_name from get_query_store_top.")] string database_name,
-        [Description("The query_id from get_query_store_top.")] long query_id,
+        [Description("The query_id (an integer) from get_query_store_top. Not query_hash: get_query_store_top returns both.")] long query_id,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history ending at as_of (default 24).")] int hours_back = 24,
         [Description("Window end, ISO 8601 UTC. Default: now.")] string? as_of = null,
