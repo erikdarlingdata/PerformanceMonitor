@@ -474,6 +474,9 @@ the verb refuses and tells you to start the service first — it will not fall b
 ```
 web dashboard endpoint ENABLED in the control-plane store (config.config_service.web_enabled = true).
 The running service applies this LIVE within one collection sweep (the write self-bumps the reload beacon) — no restart needed.
+
+Open the web dashboard at: http://localhost:5153/
+It asks for the web token. Show it with: PerformanceMonitor.Darling.Service.exe --print-web-token (run elevated).
 ```
 
 followed by, in the service log:

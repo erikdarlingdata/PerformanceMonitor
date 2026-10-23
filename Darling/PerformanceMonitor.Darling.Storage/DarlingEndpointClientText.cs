@@ -24,10 +24,10 @@ public static class DarlingEndpointClientText
     /// MCP token on loopback too unless <c>mcp.allowTokenlessLoopback</c> is on, so the command carries the header with
     /// <see cref="TokenPlaceholder"/> in place of the token.
     /// </summary>
-    public static string ClaudeMcpAddCommand(string port) =>
-        $"claude mcp add --transport http --scope user sql-monitor-darling http://localhost:{port}/ "
+    public static string ClaudeMcpAddCommand(string port, string scheme = "http") =>
+        $"claude mcp add --transport http --scope user sql-monitor-darling {scheme}://localhost:{port}/ "
         + $"--header \"Authorization: Bearer {TokenPlaceholder}\"";
 
-    /// <summary>The address to open for the web dashboard on loopback at <paramref name="port"/>, which the service always binds.</summary>
-    public static string WebDashboardAddress(string port) => $"http://localhost:{port}/";
+    /// <summary>The address to open for the web dashboard on loopback at <paramref name="port"/>, which the service always binds. <paramref name="scheme"/> is <c>https</c> only when the network listener is TLS on a wildcard or loopback listen (one listener, HTTPS for loopback too).</summary>
+    public static string WebDashboardAddress(string port, string scheme = "http") => $"{scheme}://localhost:{port}/";
 }
