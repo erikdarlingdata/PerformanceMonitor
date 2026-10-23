@@ -953,6 +953,25 @@ Do NOT try to repair this folder's permissions in place.
 "@
 }
 
+# The one-line PowerShell command that extracts the zip this folder came from straight into Program Files (#6469), for the
+# refusal of a folder the service cannot use. The zip is the one beside the extract folder with the folder's name, which is
+# how Explorer's "Extract All" names its folder; with none there, a placeholder says what to put.
+function Get-DarlingExtractCommand([string]$extractedFolder) {
+    $destination = Join-Path $env:ProgramFiles 'PerformanceMonitorDarling'
+    $zipPath = '<path to the Darling zip you downloaded>'
+    try {
+        $trimmed = $extractedFolder.TrimEnd('\')
+        $parent = Split-Path -Parent $trimmed
+        $leaf = Split-Path -Leaf $trimmed
+        if ($parent -and $leaf) {
+            $candidate = Join-Path $parent ($leaf + '.zip')
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) { $zipPath = $candidate }
+        }
+    }
+    catch { $null = $_ }
+    return "Expand-Archive -LiteralPath '" + $zipPath.Replace("'", "''") + "' -DestinationPath '" + $destination.Replace("'", "''") + "'"
+}
+
 # The refusal's advice when the service is NOT registered, or runs from some other folder, so this folder is not
 # an install to keep (#5627): a fresh folder. Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
 function Get-DarlingFreshFolderAdvice([string]$folder) {
@@ -1605,9 +1624,66 @@ function Invoke-InstallTreeLock([string]$account, [switch]$StopOnOpen) {
 }
 
 # -- 1. Environment checks ------------------------------------------------------------------------
+# Can this session answer a question? Not when PowerShell was started -NonInteractive (any abbreviation of it),
+# when its input is redirected, or when the process is not interactive: a Read-Host there throws or hangs, so
+# those runs keep the plain stop below (#6469). The three facts are parameters so a test can stand in for them.
+function Test-DarlingInteractiveSession(
+    [string[]]$commandLine = [Environment]::GetCommandLineArgs(),
+    [bool]$userInteractive = [Environment]::UserInteractive,
+    [bool]$inputRedirected = [Console]::IsInputRedirected) {
+    if (-not $userInteractive -or $inputRedirected) { return $false }
+    foreach ($argument in $commandLine) {
+        if ($argument -match '^[-/]non') { return $false }
+    }
+    return $true
+}
+
+# What to do about elevation: carry on, offer to restart elevated, or stop with the message (#6469).
+function Get-DarlingElevationAction([bool]$isAdministrator, [bool]$interactive) {
+    if ($isAdministrator) { return 'Continue' }
+    if ($interactive) { return 'Offer' }
+    return 'Stop'
+}
+
+# The arguments for the elevated restart: this script, with the execution policy bypassed for that one process
+# (never Set-ExecutionPolicy), and every switch and valued parameter the person passed. -NoExit keeps the new window open so its output
+# can be read once the script ends.
+function Get-DarlingElevatedArguments([string]$scriptPath, [hashtable]$boundParameters) {
+    $list = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-NoExit', '-File', ('"' + $scriptPath + '"'))
+    foreach ($name in @($boundParameters.Keys | Sort-Object)) {
+        $value = $boundParameters[$name]
+        if ($value -is [System.Management.Automation.SwitchParameter]) {
+            if ($value.IsPresent) { $list += "-$name" }
+        }
+        elseif ($null -ne $value) {
+            # A valued parameter (-AddOperator, #6478): without it the elevated run would never add that account.
+            $list += "-$name"
+            $list += ('"' + [string]$value + '"')
+        }
+    }
+    return $list
+}
+
 $identity = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
-if (-not $identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Fail 'Run this script from an ELEVATED PowerShell (service creation and Event Log registration require it).'
+$elevationAction = Get-DarlingElevationAction ($identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) (Test-DarlingInteractiveSession)
+if ($elevationAction -eq 'Stop') {
+    Fail 'Run this script from an ELEVATED PowerShell (service creation and Event Log registration require it). To skip that step, double-click Install-Darling.cmd beside this script instead: it asks Windows for administrator rights and runs this script for you.'
+}
+if ($elevationAction -eq 'Offer') {
+    Write-Host 'This installer needs administrator rights (service creation and Event Log registration), and this PowerShell is not elevated.' -ForegroundColor Yellow
+    $answer = Read-Host 'Restart it elevated now? Windows will ask you to approve. [Y/n]'
+    if ($answer -match '^[Nn]') {
+        Fail 'Not restarted. Run this script from an ELEVATED PowerShell, or double-click Install-Darling.cmd beside it.'
+    }
+    try {
+        $powerShellExe = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        Start-Process -FilePath $powerShellExe -Verb RunAs -ArgumentList (Get-DarlingElevatedArguments $PSCommandPath $PSBoundParameters)
+    }
+    catch {
+        Fail "Could not restart elevated: $($_.Exception.Message) Run this script from an ELEVATED PowerShell, or double-click Install-Darling.cmd beside it."
+    }
+    Write-Host 'The installer is running in the elevated window that just opened. Carry on there; this window has nothing more to do.' -ForegroundColor Green
+    exit 0
 }
 
 if (-not (Test-Path -LiteralPath $serviceExe)) {
@@ -1758,6 +1834,7 @@ at all. Either way the service installs cleanly and then cannot read its own pro
 "@
     }
 
+    $extractCommand = Get-DarlingExtractCommand $root
     $fix = @"
 Extract the zip again, from an elevated session, into a machine-scoped local folder that only
 administrators can write, and run this script from there:
@@ -1767,6 +1844,12 @@ administrators can write, and run this script from there:
 That is the documented location. A folder created there inherits read + execute for BUILTIN\Users,
 which the service's virtual account is a member of, and ordinary users can't write to it (#4043).
 Copy your darling.json across if you have one.
+
+To extract the zip straight into place, paste this into an ELEVATED PowerShell:
+
+  $extractCommand
+
+Then run install-darling.ps1 (or double-click Install-Darling.cmd) from that folder.
 "@
 
     if (-not $existing) {
@@ -2181,6 +2264,17 @@ if ($AddOperator) {
 # $existing was resolved back at 1b, which needs to know fresh-versus-upgrade before it decides whether a
 # bad install location is a refusal or a question. Nothing between there and here creates or removes the
 # service, so it is the same answer.
+# The registered path carries its quotes, as the MSI registers it (#6597). sc.exe strips a plain pair of quotes as it
+# parses its command line, which is why "`"$serviceExe`"" registered the path bare, so the value has to go in as
+# "\"path\"" (the outer pair is stripped, the \" pair is kept). How PowerShell turns a quoted native argument into a
+# command line differs between Windows PowerShell 5.1 and PowerShell 7.x (and by $PSNativeCommandArgumentPassing), so
+# the command line is handed over verbatim as ONE string through Start-Process, which behaves the same in all of them.
+function Invoke-ScWithQuotedBinPath([string]$verb, [string]$restOfLine) {
+    $argLine = "$verb `"$serviceName`" binPath= `"\`"$serviceExe\`"`" $restOfLine".TrimEnd()
+    $p = Start-Process -FilePath "$env:SystemRoot\System32\sc.exe" -ArgumentList $argLine -Wait -PassThru -NoNewWindow
+    return $p.ExitCode
+}
+
 if ($existing) {
     Write-Host "Service already exists - upgrading its binPath in place (config, store data, and credentials untouched)."
     if ($existing.Status -ne 'Stopped') {
@@ -2188,15 +2282,15 @@ if ($existing) {
         (Get-Service -Name $serviceName).WaitForStatus('Stopped', [TimeSpan]::FromSeconds(60))
     }
 
-    & sc.exe config $serviceName binPath= "`"$serviceExe`"" | Out-Null
-    if ($LASTEXITCODE -ne 0) { Fail "sc config failed ($LASTEXITCODE)." }
+    $scExit = Invoke-ScWithQuotedBinPath 'config' ''
+    if ($scExit -ne 0) { Fail "sc config failed ($scExit)." }
 }
 else {
     # The space after binPath=/start=/obj= is sc.exe syntax. The virtual service account is
     # password-less, per-service, unprivileged - and mandatory-in-practice for the bundled
     # PostgreSQL, which refuses to run with administrative privileges (LocalSystem bricks it).
-    & sc.exe create $serviceName binPath= "`"$serviceExe`"" start= auto obj= "NT SERVICE\$serviceName" | Out-Null
-    if ($LASTEXITCODE -ne 0) { Fail "sc create failed ($LASTEXITCODE)." }
+    $scExit = Invoke-ScWithQuotedBinPath 'create' "start= auto obj= `"NT SERVICE\$serviceName`""
+    if ($scExit -ne 0) { Fail "sc create failed ($scExit)." }
     Write-Host "Created service '$serviceName' (NT SERVICE virtual account, automatic start)."
 }
 
