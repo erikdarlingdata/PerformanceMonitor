@@ -7839,6 +7839,18 @@ LIMIT 1";
     }
 
     /// <summary>
+    /// The store data source the MCP and web hosts open (#6630): the operator's string (a configured
+    /// <c>postgres.mcpConnectionString</c>/<c>webConnectionString</c> or the owner fallback never runs through the managed
+    /// builder) with the collect/config search path set-if-absent, then the application name, then the UTC session pin,
+    /// in the order the worker builds its own. Without the path a login that does not own the database, on a database
+    /// with no default path, fails every unqualified read with 42P01.
+    /// </summary>
+    internal static NpgsqlDataSource CreateHostStoreDataSource(string storeConnectionString, string applicationName) =>
+        NpgsqlDataSource.Create(
+            DarlingStoreConnection.PinSessionTimeZoneUtc(
+                DarlingStoreConnection.WithApplicationName(EnsureStoreSearchPath(storeConnectionString), applicationName)));
+
+    /// <summary>
     /// Ensures the store connection string carries the collect/config search path (the V8 schema
     /// split) so every pooled physical connection resolves the shared SQL's bare table names to the
     /// <c>collect</c>/<c>config</c> schemas from its FIRST use. Managed mode already sets it

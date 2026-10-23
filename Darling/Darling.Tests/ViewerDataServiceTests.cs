@@ -994,6 +994,25 @@ public sealed class ViewerConnectionTimeoutTests
     }
 
     [Fact]
+    public void EnsureStoreSearchPath_ByoStringWithoutOne_GetsTheCollectConfigPath_AndKeepsTheRest()
+    {
+        /* #6630: the viewer's reads name store tables bare, so a bring-your-own string with no Search Path needs the path. */
+        var result = ViewerDataService.EnsureStoreSearchPath("Host=db.corp;Database=darling;Password=''");
+
+        var builder = new NpgsqlConnectionStringBuilder(result);
+        Assert.Equal("collect,config,public", builder.SearchPath);
+        Assert.StartsWith("Host=db.corp;Database=darling;Password=''", result, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EnsureStoreSearchPath_ByoStringWithItsOwnPath_IsLeftAlone()
+    {
+        const string theirs = "Host=db.corp;Database=darling;Search Path=public";
+
+        Assert.Equal(theirs, ViewerDataService.EnsureStoreSearchPath(theirs));
+    }
+
+    [Fact]
     public void ApplyConnectionTimeout_ByoStringWithExplicitTimeout_LeavesTheOperatorsValue()
     {
         /* The operator's explicit Timeout in a BYO connection string wins — the preference must not override it. */

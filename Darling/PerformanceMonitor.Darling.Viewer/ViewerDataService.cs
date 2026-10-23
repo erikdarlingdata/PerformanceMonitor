@@ -501,9 +501,9 @@ public sealed partial class ViewerDataService : IAsyncDisposable
     /// </param>
     public ViewerDataService(string connectionString, int? connectionTimeoutSeconds = null)
     {
-        var effectiveConnectionString = connectionTimeoutSeconds is int seconds
+        var effectiveConnectionString = EnsureStoreSearchPath(connectionTimeoutSeconds is int seconds
             ? ApplyConnectionTimeout(connectionString, seconds)
-            : connectionString;
+            : connectionString);
 
         /* #3016: the read-deadline family and the fan-out bound both need the pool size this seat really
            gets, and the managed constant is only one of the two strings the viewer can be handed. Published
@@ -626,6 +626,22 @@ public sealed partial class ViewerDataService : IAsyncDisposable
         return trimmed.Equals("127.0.0.1", StringComparison.Ordinal)
             || trimmed.Equals("::1", StringComparison.Ordinal)
             || trimmed.Equals("localhost", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// #6630: gives a bring-your-own connection string the store's collect/config search path when it names none
+    /// (set-if-absent, so an operator's own Search Path wins; a managed-derived string already carries it). The reads
+    /// here name store tables bare, and the database default the service sets is best effort: a login that does not
+    /// own the database never gets it set, and a connection opened before it keeps the old path, so without the path
+    /// on the string every read fails with 42P01. Appended, never rewritten through a builder, for the reason on
+    /// <see cref="ApplyConnectionTimeout"/>. The service applies the same rule to its own data sources.
+    /// </summary>
+    internal static string EnsureStoreSearchPath(string connectionString)
+    {
+        var builder = new NpgsqlConnectionStringBuilder(connectionString);
+        return string.IsNullOrWhiteSpace(builder.SearchPath)
+            ? connectionString + ";Search Path=" + ViewerSettings.ManagedSearchPath
+            : connectionString;
     }
 
     /// <summary>

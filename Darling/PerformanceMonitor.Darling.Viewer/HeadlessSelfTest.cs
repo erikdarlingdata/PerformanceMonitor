@@ -111,8 +111,8 @@ public static class HeadlessSelfTest
         try
         {
             var appSettings = new ViewerAppSettingsStore().Load();
-            effectiveConnectionString =
-                ViewerDataService.ApplyConnectionTimeout(settings.ConnectionString, appSettings.ConnectionTimeoutSeconds);
+            effectiveConnectionString = ViewerDataService.EnsureStoreSearchPath(
+                ViewerDataService.ApplyConnectionTimeout(settings.ConnectionString, appSettings.ConnectionTimeoutSeconds));
             if (!string.Equals(effectiveConnectionString, settings.ConnectionString, StringComparison.Ordinal))
             {
                 Print($"[note ] applied the Viewer's Connection timeout preference ({appSettings.ConnectionTimeoutSeconds}s) — "
