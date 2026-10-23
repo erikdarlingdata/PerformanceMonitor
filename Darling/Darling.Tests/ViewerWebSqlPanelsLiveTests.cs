@@ -192,5 +192,145 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM memory_grant_stats WHERE server_id = ANY($1)", ids);
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM plan_cache_stats WHERE server_id = ANY($1)", ids);
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM session_stats WHERE server_id = ANY($1)", ids);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM index_object_stats WHERE server_id = ANY($1)", ids);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM pg_extension_availability WHERE server_id = ANY($1)", ids);
+    }
+
+    /// <summary>
+    /// #6388 part B: the Viewer's Table &amp; Index Sizes and Extension Install Census return what <c>get_table_index_sizes</c> and
+    /// <c>get_pg_extensions</c> return for the same server. The store holds three index snapshots (30 days, 8 days, now), so a read
+    /// that took the wrong baseline, kept a temp table or ignored the database filter would differ from the tool.
+    /// </summary>
+    [Fact]
+    public async Task TheViewersTableSizesAndExtensionCensus_ReturnTheRowsTheWebToolsReturn_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live Viewer web-panel test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
+        using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            await DarlingMcpTestData.RegisterServerAsync(connection, EmptyServerId, EmptyServerName, ct);
+            var latest = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddHours(-1);
+            var past7 = latest.AddDays(-8);
+            var past30 = latest.AddDays(-31);
+
+            /* Big grows 50 -> 80 -> 100; Small exists only now (no baseline); #tmp is a temp table the read leaves out; Other is in a second database. */
+            foreach (var (at, db, table, reserved) in new[]
+            {
+                (past30, "salesdb", "Big", 50m), (past7, "salesdb", "Big", 80m), (latest, "salesdb", "Big", 100m),
+                (latest, "salesdb", "Small", 10m), (latest, "salesdb", "#tmp", 500m), (past30, "otherdb", "Other", 5m), (latest, "otherdb", "Other", 7m),
+            })
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    @"INSERT INTO index_object_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_id, table_name, index_id, index_name, index_type_desc, reserved_mb, used_mb, total_rows, row_lock_wait_count, row_lock_wait_in_ms, page_lock_wait_count, page_lock_wait_in_ms, index_lock_promotion_count, page_latch_wait_in_ms, page_io_latch_wait_in_ms)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)",
+                    CollectionIdGenerator.Next(), at, ServerId, ServerName, db, "dbo", 100, table, 1, "PK_" + table, "CLUSTERED", reserved, reserved - 1m, 1000L, 0L, 0L, 0L, 0L, 0L, 0L, 0L);
+            }
+
+            /* Extensions: pg_stat_statements is created in two databases (one behind), timescaledb is only available. */
+            foreach (var (db, extension, state) in new[]
+            {
+                ("db1", "pg_stat_statements", "installed"), ("db2", "pg_stat_statements", "outdated"), ("db1", "timescaledb", "available"), ("db2", "timescaledb", "available"),
+            })
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO pg_extension_availability
+    (collection_id, collection_time, server_id, server_name, database_name, extension_name,
+     state, installed_version, default_version, is_monitoring_relevant)
+VALUES ($1::bigint, $2::timestamp, $3::integer, $4::text, $5::text, $6::text,
+        $7::text, $8::text, $9::text, $10::boolean)",
+                    CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(latest), ServerId, ServerName,
+                    db, extension, state, state == "installed" ? "1.1" : state == "outdated" ? "1.0" : null, "1.1", true);
+            }
+
+            await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+            await using var viewer = new ViewerDataService(scratch.ConnectionString);
+
+            /* Table & Index Sizes vs get_table_index_sizes' tables, with and without a database filter. */
+            foreach (var filter in new string?[] { null, "otherdb" })
+            {
+                using var doc = JsonDocument.Parse(await DarlingMcpObjectStatsTools.GetTableIndexSizes(postgres, ServerName, filter, ct));
+                var web = doc.RootElement.GetProperty("tables").EnumerateArray().ToList();
+                var rows = await viewer.GetTableSizesAsync(ServerId, filter is null ? null : new[] { filter }, ct);
+                Assert.Equal(web.Count, rows.Count);
+                for (var i = 0; i < web.Count; i++)
+                {
+                    Assert.Equal(web[i].GetProperty("database_name").GetString(), rows[i].DatabaseName);
+                    Assert.Equal(web[i].GetProperty("table_name").GetString(), rows[i].TableName);
+                    Assert.Equal(web[i].GetProperty("reserved_mb").GetDouble(), rows[i].CurrentReservedMb);
+                    Assert.Equal(web[i].GetProperty("total_rows").GetInt64(), rows[i].TotalRows);
+                    Assert.Equal(web[i].GetProperty("index_count").GetInt32(), rows[i].IndexCount);
+                    AssertNullableEqual(web[i].GetProperty("growth_7d_mb"), rows[i].Growth7dMb);
+                    AssertNullableEqual(web[i].GetProperty("growth_30d_mb"), rows[i].Growth30dMb);
+                    AssertNullableEqual(web[i].GetProperty("growth_pct_30d"), rows[i].GrowthPct30d);
+                }
+
+                if (filter is null)
+                {
+                    /* The plant means what the comments say: largest first, the temp table left out, Small without baselines. */
+                    Assert.Equal(new[] { "Big", "Small", "Other" }, rows.Select(r => r.TableName));
+                    Assert.Equal(20d, rows[0].Growth7dMb);
+                    Assert.Equal(50d, rows[0].Growth30dMb);
+                    Assert.Null(rows[1].Growth7dMb);
+                }
+                else
+                {
+                    Assert.Equal(new[] { "Other" }, rows.Select(r => r.TableName));
+                }
+            }
+
+            /* Extension Install Census vs get_pg_extensions' install_census. */
+            using (var doc = JsonDocument.Parse(await DarlingMcpPgServerStateTools.GetPgExtensions(postgres, ServerName, 168, 50)))
+            {
+                var web = doc.RootElement.GetProperty("install_census").EnumerateArray().ToList();
+                var census = (await viewer.GetPgExtensionInstallCensusAsync(ServerId, latest.AddDays(-1), latest.AddDays(1), ct))
+                    .Where(r => r.ExtensionName is not null).ToList();
+                Assert.Equal(new[] { "pg_stat_statements" }, census.Select(r => r.ExtensionName));
+                Assert.Equal(web.Count, census.Count);
+                for (var i = 0; i < web.Count; i++)
+                {
+                    Assert.Equal(web[i].GetProperty("extension_name").GetString(), census[i].ExtensionName);
+                    Assert.Equal(web[i].GetProperty("databases_created").GetInt64(), census[i].DatabasesInstalled + census[i].DatabasesOutdated);
+                    Assert.Equal(web[i].GetProperty("databases_installed").GetInt64(), census[i].DatabasesInstalled);
+                    Assert.Equal(web[i].GetProperty("databases_outdated").GetInt64(), census[i].DatabasesOutdated);
+                    Assert.Equal(web[i].GetProperty("databases_reporting").GetInt64(), census[i].DatabasesReporting);
+                    Assert.Equal(web[i].GetProperty("databases_total").GetInt64(), census[i].DatabasesTotal);
+                }
+            }
+
+            /* A server that never collected either: empty reads, not an error. */
+            Assert.Empty(await viewer.GetTableSizesAsync(EmptyServerId, null, ct));
+            Assert.DoesNotContain(
+                await viewer.GetPgExtensionInstallCensusAsync(EmptyServerId, latest.AddDays(-1), latest.AddDays(1), ct),
+                r => r.ExtensionName is not null);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, DeleteRowsAsync);
+        }
+    }
+
+    private static void AssertNullableEqual(JsonElement web, double? viewer)
+    {
+        if (web.ValueKind == JsonValueKind.Null)
+        {
+            Assert.Null(viewer);
+        }
+        else
+        {
+            Assert.Equal(web.GetDouble(), viewer);
+        }
     }
 }

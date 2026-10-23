@@ -1,4 +1,4 @@
-﻿<UserControl x:Class="PerformanceMonitor.Darling.Viewer.ViewerServerTab"
+<UserControl x:Class="PerformanceMonitor.Darling.Viewer.ViewerServerTab"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:local="clr-namespace:PerformanceMonitor.Darling.Viewer"
@@ -4361,7 +4361,13 @@
                      step rather than a wall, and this is where the step is named. -->
                 <TextBlock Grid.Row="3" x:Name="PgExtensionsNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
-                <DataGrid Grid.Row="4" x:Name="PgExtensionsGrid" Style="{StaticResource DarkGrid}"
+                <Grid Grid.Row="4">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <DataGrid Grid.Row="0" x:Name="PgExtensionsGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
                         <!-- installed/outdated are per-database facts and available/absent are cluster-wide,
@@ -4382,6 +4388,22 @@
                         <DataGridTextColumn Header="Collected" Binding="{Binding CaptureTime}" Width="150" SortMemberPath="CaptureTimeUtc"/>
                     </DataGrid.Columns>
                 </DataGrid>
+                    <!-- #6388 the Extension Install Census (the web's install_census): one row per extension somebody created
+                         anywhere on this server, aggregated, so no row limit above touches it. -->
+                    <TextBlock Grid.Row="1" x:Name="PgExtensionCensusNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <DataGrid Grid.Row="2" x:Name="PgExtensionCensusGrid" Style="{StaticResource DarkGrid}" MaxHeight="180"
+                              HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Extension" Binding="{Binding ExtensionName}" Width="200"/>
+                            <DataGridTextColumn Header="Created In" Binding="{Binding DatabasesCreated}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                            <DataGridTextColumn Header="At Default" Binding="{Binding DatabasesInstalled}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                            <DataGridTextColumn Header="Outdated" Binding="{Binding DatabasesOutdated}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                            <DataGridTextColumn Header="Reported" Binding="{Binding DatabasesReporting}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                            <DataGridTextColumn Header="Databases" Binding="{Binding DatabasesTotal}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </Grid>
 
                 <!-- #2658 the server's own configuration, beneath the extension axis because it is the same
                      kind of fact one layer in: extensions say what this server CAN do, settings say what it

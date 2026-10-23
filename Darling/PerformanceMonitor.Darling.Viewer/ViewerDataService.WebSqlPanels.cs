@@ -49,4 +49,22 @@ public sealed partial class ViewerDataService
         int serverId, CancellationToken cancellationToken = default) =>
         DarlingSessionStatsReader.GetLatestAsync(
             _dataSource, serverId, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+
+    /// <summary>Table &amp; Index Sizes: the largest tables at the newest daily index snapshot with 7-day and 30-day growth -
+    /// <c>get_table_index_sizes</c>'s <c>tables</c>. A moment, not the window. Asks for one row past the page so the grid can say
+    /// the list was cut.</summary>
+    public Task<List<TableSizeGrowthRow>> GetTableSizesAsync(
+        int serverId, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
+    {
+        var now = DateTime.UtcNow;
+        return DarlingTableSizeGrowthReader.GetAsync(
+            _dataSource, serverId, now.AddDays(-7), now.AddDays(-30), DarlingTableSizeGrowthReader.TopTables + 1,
+            DatabaseFilter.Of(databaseNames), ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+    }
+
+    /// <summary>Extension Install Census (PostgreSQL targets): one row per extension somebody created, over the population
+    /// no row limit touches - <c>get_pg_extensions</c>'s <c>install_census</c>, server-wide.</summary>
+    public Task<List<DarlingPgExtensionAvailabilityReader.PgExtensionInstallCensusRow>> GetPgExtensionInstallCensusAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        DarlingPgExtensionAvailabilityReader.GetInstallCensusAsync(_dataSource, serverId, startUtc, endUtc, null, cancellationToken);
 }

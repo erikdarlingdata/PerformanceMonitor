@@ -35,6 +35,16 @@ public sealed record ResourceSemaphorePressureGridRow(
         row.LastSnapshotAt);
 }
 
+/// <summary>One Extension Install Census grid row (#6388): an extension somebody created on the server, with the databases it is
+/// created in (at the server's default version or older), how many databases reported, and the server's database count.</summary>
+public sealed record PgExtensionCensusGridRow(
+    string ExtensionName, long DatabasesCreated, long DatabasesInstalled, long DatabasesOutdated, long DatabasesReporting, long DatabasesTotal)
+{
+    public static PgExtensionCensusGridRow From(DarlingPgExtensionAvailabilityReader.PgExtensionInstallCensusRow row) => new(
+        row.ExtensionName ?? "", row.DatabasesInstalled + row.DatabasesOutdated, row.DatabasesInstalled, row.DatabasesOutdated,
+        row.DatabasesReporting, row.DatabasesTotal);
+}
+
 /// <summary>
 /// #6388: the panels the web had and the Viewer lacked. Resource Semaphore Pressure and Resource Semaphore sit on a new
 /// Memory &gt; Resource Semaphore sub-tab (the web puts them on its Memory Grants tab), Plan Cache by Type under the Plan Cache
@@ -77,5 +87,20 @@ public partial class ViewerServerTab
     {
         SessionsByApplicationGrid.ItemsSource = rows;
         await ShowEngineGapAsync(SessionsByApplicationNoDataMessage, "session_stats", rows.Count, keepsOwnEmptyText: true);
+    }
+
+    /// <summary>Fills the Extension Install Census under the Extensions grid: one row per extension created anywhere on the server,
+    /// from the same shared read as the web's <c>install_census</c>. The scalars-only row a server with no stored rows produces
+    /// carries the denominators and is left out of the grid, as in the web.</summary>
+    private async Task LoadPgExtensionInstallCensusAsync(DateTime startUtc, DateTime endUtc)
+    {
+        var census = await _dataService.GetPgExtensionInstallCensusAsync(_server.ServerId, startUtc, endUtc);
+        var rows = census.Where(r => r.ExtensionName is not null).Select(PgExtensionCensusGridRow.From).ToList();
+        PgExtensionCensusGrid.ItemsSource = rows;
+        PgExtensionCensusNote.Text = rows.Count == 0
+            ? "Extension Install Census: nothing is created on this server beyond what PostgreSQL installs itself, or the inventory has not been collected yet. "
+              + "This census counts only extensions somebody created; the available-but-absent ones are the actionable rows in the grid above."
+            : $"Extension Install Census: {rows.Count} extension(s) created on this server, one row each, counted across all {census[0].DatabasesTotal:N0} database(s). "
+              + "No row limit touches it.";
     }
 }

@@ -486,7 +486,7 @@ public sealed class McpZeroIsAMeasurementTests
         var latest = new DateTime(2026, 3, 4, 3, 0, 0);
 
         /* Three days of history: no 7-day or 30-day snapshot; the oldest holds the table at 100 MB. */
-        var threeDays = new DarlingObjectStatsReader.ObjectSizeGrowthRow(
+        var threeDays = new TableSizeGrowthRow(
             "db", "dbo", "Posts", CurrentReservedMb: 160, CurrentUsedMb: 150, TotalRows: 10, IndexCount: 2,
             ReservedMb7dAgo: null, ReservedMb30dAgo: null, ReservedMbOldest: 100,
             Snapshot7dTime: null, Snapshot30dTime: null, EarliestSnapshotTime: earliest, LatestSnapshotTime: latest, DaysOfData: 3);

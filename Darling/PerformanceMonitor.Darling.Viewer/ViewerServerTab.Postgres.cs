@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -251,6 +251,8 @@ public partial class ViewerServerTab
         if (PgCollectorIsGatedOff("pg_extension_availability"))
         {
             PgExtensionsGrid.ItemsSource = null;
+            PgExtensionCensusGrid.ItemsSource = null;
+            PgExtensionCensusNote.Text = string.Empty;
             PgExtensionsNote.Text = PanelNote("pg_extension_availability", 0, string.Empty);
             return;
         }
@@ -258,6 +260,7 @@ public partial class ViewerServerTab
         var rows = await _dataService.GetPgExtensionAvailabilityAsync(_server.ServerId, startUtc, endUtc);
 
         PgExtensionsGrid.ItemsSource = rows.Select(PgDisplay.Extension).ToList();
+        await LoadPgExtensionInstallCensusAsync(startUtc, endUtc);
 
         var actionable = rows.Count(r => r.IsMonitoringRelevant && string.Equals(r.State, "available", StringComparison.Ordinal));
         var outdated = rows.Count(r => r.IsMonitoringRelevant && string.Equals(r.State, "outdated", StringComparison.Ordinal));
