@@ -544,6 +544,7 @@ monitoring state. This page does not cover which seats can use each one.
 - **Alert History:** dismiss alerts.
 - **Servers:** add a server and edit a server's connection. The web host has no route that removes a server.
 - **Tags:** server tags, query tags and query tag rules (create, edit, delete and assign).
+- **Known Patterns:** add, edit and delete a known pattern.
 - **Run collectors now:** queue one run of a server's collectors, then read the result on the page.
 - **Investigations and agent actions:** approve or reject investigation notes, undo or switch agent changes,
   and turn a server's agent actions on or off.
