@@ -180,7 +180,7 @@ ORDER BY database_name";
         using var command = connection.CreateCommand();
         command.CommandText = @"
 SELECT
-    (SELECT sp.ag_replica_role FROM server_properties AS sp WHERE sp.server_id = $1 ORDER BY sp.collection_time DESC LIMIT 1),
+    (SELECT sp.ag_replica_role FROM v_server_properties AS sp WHERE sp.server_id = $1 ORDER BY sp.collection_time DESC LIMIT 1),
     (SELECT COUNT(*) FROM v_query_store_health AS h
       WHERE h.server_id = $1 AND h.capture_time = (SELECT MAX(h2.capture_time) FROM v_query_store_health AS h2 WHERE h2.server_id = $1)),
     (SELECT COUNT(*) FROM v_query_store_health AS h
