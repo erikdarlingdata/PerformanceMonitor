@@ -351,6 +351,13 @@ if (args.Length > 0 && DarlingCliCommands.IsListAlertSourcesVerb(args[0]))
     return await DarlingCliCommands.ListAlertSourcesAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);
 }
 
+/* CLI verb: --grant-script <server-name> | --host <host> [--finops] [--azure] (#6472) — print the T-SQL that creates the monitoring
+   login and grants what Darling needs. Connects to no SQL Server; prints no password. */
+if (args.Length > 0 && DarlingCliCommands.IsGrantScriptVerb(args[0]))
+{
+    return await DarlingCliCommands.GrantScriptAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);
+}
+
 if (args.Length > 0 && DarlingCliCommands.IsExportInvestigationsVerb(args[0]))
 {
     return await DarlingCliCommands.ExportInvestigationsAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);

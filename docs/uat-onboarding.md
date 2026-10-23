@@ -201,7 +201,11 @@ account's, and the per-server connect lines in step 1.7 are the real proof.
 
 ### 1.6 Install the service
 
-From an **elevated** PowerShell, in the install folder:
+The easy way: double-click **`Install-Darling.cmd`** in the install folder. It asks Windows for administrator rights
+and runs the script with the execution policy bypassed for that one run only; your machine's policy is not changed and
+there is nothing to unblock. Any arguments pass through (`Install-Darling.cmd -Network`).
+
+Or, from a PowerShell in the install folder (if it is not elevated, the script offers to restart itself elevated):
 
 ```powershell
 cd "C:\Program Files\PerformanceMonitorDarling"

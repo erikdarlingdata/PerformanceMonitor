@@ -1,6 +1,6 @@
 # Performance Monitor Darling — Headless Edition
 
-Darling is the headless, centralized edition of Performance Monitor: a 24/7 Windows service that collects from your SQL Servers into a central PostgreSQL (optionally TimescaleDB) store, plus a detached desktop viewer that reads that store. No desktop app has to stay open for collection to happen, and every viewer seat reads the same central data.
+Darling is the headless, centralized edition of Performance Monitor: a 24/7 service (a Windows service, or Linux with systemd or Docker Compose) that collects from your SQL Servers into a central PostgreSQL (optionally TimescaleDB) store, plus a detached desktop viewer that reads that store. No desktop app has to stay open for collection to happen, and every viewer seat reads the same central data.
 
 It runs the **same monitoring brain as the Lite edition** — one shared codebase, two storage engines:
 
@@ -16,13 +16,13 @@ A collector, alert, or analysis change lands once in the shared libraries and bo
 
 | | **Lite** | **Darling** |
 |---|---|---|
-| Collection runs | While the desktop app is open (or in the tray) | 24/7 as a Windows service |
+| Collection runs | While the desktop app is open (or in the tray) | 24/7 as a Windows service, or on Linux with systemd or Docker Compose |
 | Data lives | Locally per seat (DuckDB + Parquet) | Centrally (PostgreSQL / TimescaleDB) |
 | Execution plans | Not stored (fetched live when you view a query) | Captured and stored, TOAST-compressed (`capturePlans`, default on) |
 | Viewers | The app is the viewer | Any number of viewer seats read the central store |
-| Setup | Download and run | Provision PostgreSQL, edit `darling.json`, install the service |
+| Setup | Download and run | On Windows, extract the release zip and run `install-darling.ps1` (on Linux, see [Run on Linux](#run-on-linux-docker-compose-or-systemd)). The shipped default is the bundled store (managed mode), so you provision no database. To use your own PostgreSQL, provision it and set its connection string. |
 | Best for | Quick triage, consultants, a handful of servers | Always-on team monitoring, larger estates, one shared store |
-| Configuration | Settings UI | One JSON file (no UI) |
+| Configuration | Settings UI | `darling.json` seeds the first start. After that, the Viewer edits servers, alert settings and notification routes in the store. The web dashboard's Admin page edits a server in place and the agent channel of a notification route, for a sign-in that can make changes. Its Alert Settings tab is read-only. |
 
 Nothing is installed on the monitored SQL Servers by either edition beyond two lightweight Extended Events ring-buffer sessions and, when it is unset, a one-time `blocked process threshold` bootstrap (see [What the Service Does on Monitored Servers](#what-the-service-does-on-monitored-servers)).
 
@@ -35,43 +35,11 @@ Nothing is installed on the monitored SQL Servers by either edition beyond two l
 ### Prerequisites
 
 - **A store host sized for your estate.** The [store sizing guide](../docs/darling-store-sizing.md) gives the disk, RAM and vCPUs by server count, from the stores we measured.
-- **Windows** for the service host (Windows-service lifetime, DPAPI password protection) and for the viewer (WPF). Monitored servers can be SQL Server 2016 SP2–2025 (2017 needs CU3 or later), Azure SQL Managed Instance, AWS RDS for SQL Server, or Azure SQL Database.
+- **Windows** for the viewer (WPF) and for a Windows-service host (Windows-service lifetime, DPAPI password protection). A Linux host also runs the service: see [Run on Linux](#run-on-linux-docker-compose-or-systemd-1804). Monitored servers can be SQL Server 2016 SP2–2025 (2017 needs CU3 or later), Azure SQL Managed Instance, AWS RDS for SQL Server, or Azure SQL Database.
 - **A PostgreSQL store — bundled or your own.** In managed mode (the shipped default, see [Managed Bundled PostgreSQL](#managed-bundled-postgresql)) the service runs its own bundled PostgreSQL 18 + TimescaleDB and no database provisioning is needed. To bring your own instead, the minimum is PostgreSQL 16, and the service is developed and validated against PostgreSQL 18. The store needs a database and a login the service can create tables in. If that store has TimescaleDB, size its background workers before you rely on compression. The stock PostgreSQL defaults cannot run the policies (see [Background workers](#background-workers-sizing-an-unmanaged-store-and-what-happens-if-you-dont)). On SSD-backed storage, also set `random_page_cost = 1.1` (the managed store does): with the default of 4 the planner prices a BRIN index's heap reads as random I/O and can pick a sequential scan over the index for windows of 12 hours or more. The BRIN index on the per-interval Query Store table is skipped below PostgreSQL 16, because HOT updates past a BRIN index need PostgreSQL 16 or newer.
 - **TimescaleDB is optional and auto-adopted.** If the extension is installed (or pre-created by an administrator) in the store database, the service detects it at startup and automatically converts the collector tables to hypertables with compression; without it, the service runs in plain-PostgreSQL mode, which is fully supported. No configuration flag either way. The detection is also **re-run hourly for as long as it says no** (#3815), so a service that fell back because the store was restarting, failing over or momentarily unreachable at its own start returns to hypertable mode within the hour instead of at the next restart.
-- **A Windows that is current on its updates.** .NET 10 apps need them to start on a CPU with CET (a hardware protection). We saw this on Windows Server 2022 build 20348.1366. Without them the service and the viewer both stop at start. The exit code is `0x80131506` and stderr shows this message:
-
-  ```text
-  Fatal error. Your Windows doesn't fully support CET. Please install all available Windows updates.
-  ```
-
-  `install-darling.ps1` recognises that message in its pre-flight and stops with a plain message instead of asking whether to install anyway. The fix is to install all available Windows updates and restart. If you cannot do that yet, there is a short-term workaround. Run these from an elevated PowerShell before you install or start. Each turns off one protection (`UserShadowStack`, the hardware-enforced stack protection) for one Darling exe:
-
-  ```powershell
-  Set-ProcessMitigation -Name PerformanceMonitor.Darling.Service.exe -Disable UserShadowStack
-  Set-ProcessMitigation -Name PerformanceMonitor.Darling.Viewer.exe -Disable UserShadowStack
-  ```
-
-  This weakens that program's protection, so treat it as a stopgap. To undo it once Windows is patched, remove the values the first command wrote:
-
-  ```powershell
-  $ifeo = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options'
-  foreach ($exe in 'PerformanceMonitor.Darling.Service.exe', 'PerformanceMonitor.Darling.Viewer.exe') {
-      Remove-ItemProperty -Path "$ifeo\$exe" -Name MitigationOptions, MitigationAuditOptions, EAFModules -ErrorAction SilentlyContinue
-  }
-  ```
-
-  On Windows Server 2022 build 20348.5622, `Set-ProcessMitigation -Remove -Disable UserShadowStack` did not remove the setting (it returned `C000000D`). `Set-ProcessMitigation -Reset` failed too ("Invalid input parameters"). The registry way above worked. The `Set-ProcessMitigation -Disable` command writes three values (`MitigationOptions`, `MitigationAuditOptions`, `EAFModules`) under the exe's key in `Image File Execution Options`. The undo removes only those values and leaves any other value on that key alone. Restart the program afterwards. The first command is described in Microsoft's [Set-ProcessMitigation](https://learn.microsoft.com/en-us/powershell/module/processmitigations/set-processmitigation) reference.
+- **A Windows that is current on its updates.** .NET 10 apps need them to start on a CPU with CET (a hardware protection). Without them the service and the viewer both stop at start with exit code `0x80131506`. Install all available Windows updates and restart. If you cannot do that yet, [a short-term workaround](#windows-stops-at-start-the-cet-error) exists.
 - **No .NET runtime to install on Windows.** The service and the bundled `viewer\` folder in the zip carry their own .NET runtime. They are self-contained. A stock Windows Server needs nothing installed first. Runtime updates arrive with each Darling release. The Linux tarball is different: see [Run on Linux](#run-on-linux-docker-compose-or-systemd-1804). You need the .NET 10 SDK only to build from source.
-
-Build from the repository root:
-
-```
-dotnet build Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release
-```
-
-```
-dotnet build Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj -c Release
-```
 
 ### Configure darling.json
 
@@ -81,15 +49,13 @@ The service reads one JSON file. It resolves the path in this order:
 2. The `DARLING_CONFIG` environment variable
 3. `darling.json` next to the service binary
 
-The Windows installer writes a minimal `darling.json` for you, and the service starts with no monitored servers (it logs one line saying so); add the first one in the Viewer (Add Server) or with `--add-server`. To write the file yourself, copy the shipped `darling.sample.json` (it lands next to the built binary) to `darling.json` and edit; an empty `servers` list is valid. Comments and trailing commas are allowed; property names are case-insensitive.
+The Windows installer writes a minimal `darling.json` for you, and the service starts with no monitored servers (it logs one line saying so); add the first one in the Viewer (Add Server) or with `--add-server`. The server's login needs grants first: `--grant-script --host <host>` prints the T-SQL for them (the Add Server dialog has a Copy grant script button). To write the file yourself, copy the shipped `darling.sample.json` (it lands next to the built binary) to `darling.json` and edit; an empty `servers` list is valid. Comments and trailing commas are allowed; property names are case-insensitive.
 
-Minimal working example — one server, integrated auth, bring-your-own PostgreSQL. (With the bundled store instead, replace the `postgres` block with `"postgres": { "managed": true }` and skip provisioning entirely — see [Managed Bundled PostgreSQL](#managed-bundled-postgresql).)
+Minimal working example with the bundled store, which is the shipped default: one server, integrated auth. In managed mode the service runs its own bundled PostgreSQL, so you provision no database. See [Managed Bundled PostgreSQL](#managed-bundled-postgresql).
 
 ```json
 {
-  "postgres": {
-    "connectionString": "Host=localhost;Port=5432;Username=darling;Database=darling"
-  },
+  "postgres": { "managed": true },
   "servers": [
     {
       "name": "SQL2022",
@@ -98,6 +64,16 @@ Minimal working example — one server, integrated auth, bring-your-own PostgreS
       "excludedDatabases": []
     }
   ]
+}
+```
+
+To use a PostgreSQL that you already run, replace the `postgres` block with a connection string and leave `servers` as it is:
+
+```json
+{
+  "postgres": {
+    "connectionString": "Host=localhost;Port=5432;Username=darling;Database=darling"
+  }
 }
 ```
 
@@ -110,6 +86,28 @@ PerformanceMonitor.Darling.Service.exe --encrypt-password
 ```
 
 It prompts for the password on stdin (so the plaintext never lands in your shell history) and prints a base64 DPAPI blob. Paste that blob into the server's `"encryptedPassword"`. The blob is protected with **DPAPI LocalMachine scope**, so an administrator can encrypt it interactively and the service account can decrypt it later on the same machine — but it is machine-bound: run `--encrypt-password` **on the machine that will run the service**, and re-encrypt if you move `darling.json` to another machine. A plaintext `"password"` also works as a dev convenience, but the service logs a warning every time it is used. The same slot also takes an **`env:NAME` or `file:/path` reference** (#1804): the service reads the named environment variable or the file's (trimmed) contents at connect time, nothing secret lands in `darling.json`, and no warning is logged — the supported shape on non-Windows hosts, and compose-`secrets:`-friendly everywhere. A missing or empty reference target is a configuration error naming both the setting and the target, never a silent empty password.
+
+**Service principal.** Set `"auth": "serviceprincipal"`, the Entra application (client) id in `username`, and the client secret in `encryptedPassword`. `username` is required. Make the blob with the same `--encrypt-password` verb as for SQL auth.
+
+```json
+{
+  "name": "AZSQL1",
+  "host": "myserver.database.windows.net",
+  "auth": "serviceprincipal",
+  "username": "<application (client) id>",
+  "encryptedPassword": "<output of --encrypt-password>"
+}
+```
+
+**Managed identity.** Set `"auth": "managedidentity"`. There is no secret to store. A system-assigned identity needs no other field. A user-assigned identity puts its client id in `username`. The machine that runs the service must itself be an Azure resource with that identity. See [authentication](../docs/authentication.md).
+
+```json
+{
+  "name": "AZSQL2",
+  "host": "myserver.database.windows.net",
+  "auth": "managedidentity"
+}
+```
 
 **excludedDatabases** (per server) removes databases from collection: per-database collectors skip them and the exclusion is spliced into the collector queries — the same filter Lite applies. There is a second, separate `alerts.excludedDatabases` list that excludes databases from blocking/deadlock/long-running-query **alert evaluation** without affecting collection.
 
@@ -179,7 +177,7 @@ The same executable serves interactive debugging and service installation; the W
 Darling\PerformanceMonitor.Darling.Service\bin\Release\net10.0\PerformanceMonitor.Darling.Service.exe
 ```
 
-Watch the log output: you should see the config load (`Loaded configuration from ...`), the store migrate (`Postgres store ready (schema v44, ...)` — the number is whatever the current migration count is), the TimescaleDB detection result, and per-server connects. Per-collector run lines with row counts are at `Debug` and so are not in that output by default — add `--Logging:LogLevel:PerformanceMonitor.Darling.Service=Debug` to the command above to watch a first sweep collector by collector, or read the outcomes back from `collection_log` and the Viewer's Collection Health tab, which record every run at any level. See [Logs](#logs).
+From a release zip, run `PerformanceMonitor.Darling.Service.exe` from the extracted folder. After a [build from source](#build-from-source), run the path above. Watch the log output: you should see the config load (`Loaded configuration from ...`), the store migrate (`Postgres store ready (schema v<N>, <M> migration(s) applied)`, which gives the store's schema version and how many migrations this start applied), the TimescaleDB detection result, and per-server connects. Per-collector run lines with row counts are at `Debug` and so are not in that output by default — add `--Logging:LogLevel:PerformanceMonitor.Darling.Service=Debug` to the command above to watch a first sweep collector by collector, or read the outcomes back from `collection_log` and the Viewer's Collection Health tab, which record every run at any level. See [Logs](#logs).
 
 <a id="run-on-linux-docker-compose-or-systemd-1804"></a>
 ### Run on Linux (Docker Compose or systemd)
@@ -244,7 +242,7 @@ Use the same `env:`/`file:` secret references (systemd `LoadCredential=` pairs n
 
 ### Install as a Windows Service
 
-**Scripted (recommended):** the packaged zips ship `install-darling.ps1` beside the service exe. Extract the zip to its final location (e.g. `C:\Program Files\PerformanceMonitorDarling` — see [below](#the-install-location-has-to-be-machine-scoped) for why that is preferred over a folder made directly under `C:\`), then from an elevated PowerShell in that folder run `.\install-darling.ps1`. It refuses a folder ordinary local users can already write to before anything else runs ([#4043](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4043)), checks the install location and refuses anywhere the service could not read itself (see [below](#the-install-location-has-to-be-machine-scoped)), checks for `darling.json` (on a first install it writes a minimal one, the bundled store and no servers, and carries on: the service starts with no monitored servers and you add the first one afterwards in the Viewer's Add Server, so nothing needs editing first; `darling.sample.json` stays beside it as the full reference; a first install is refused if `darling.json` is an unedited copy of that sample, because the copy still names its example servers), runs the `--test-connection` pre-flight, registers the Event Log source, creates the service under the virtual account (or upgrades an existing install's binPath in place, preserving config/store/credentials), locks the install folder so only SYSTEM, Administrators and the service account can change what runs from it ([#4034](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4034): a folder made directly under `C:\` otherwise lets any local user replace the service's binaries; the lock goes on before anything runs from the folder, and `upgrade-darling.ps1` applies it before laying a new build down, so an older install is closed at its next upgrade. No lock can undo a file swapped before it, which is what the #4043 check above catches instead — extract into a fresh folder and run the script straight away, and re-extract fresh if the folder has sat open on a box with other local users), starts it, and creates **Darling Viewer** shortcuts on the public Desktop and in the all-users Start Menu, so they show for every user and not only for the account that ran the installer (pin to taskbar from the Start Menu entry — Windows does not allow programmatic pinning). `uninstall-darling.ps1` reverses it, deliberately leaving the store/config in place unless you pass `-PurgeData`.
+**Scripted (recommended):** the packaged zips ship `install-darling.ps1` beside the service exe. Extract the zip to its final location (e.g. `C:\Program Files\PerformanceMonitorDarling` — see [below](#the-install-location-has-to-be-machine-scoped) for why that is preferred over a folder made directly under `C:\`), then double-click `Install-Darling.cmd` in that folder (it asks for administrator rights and runs the script with the execution policy bypassed for that one run only, leaving the machine's policy alone), or run `.\install-darling.ps1` from a PowerShell there (if it is not elevated, the script offers to restart itself elevated). It refuses a folder ordinary local users can already write to before anything else runs ([#4043](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4043)), checks the install location and refuses anywhere the service could not read itself (see [below](#the-install-location-has-to-be-machine-scoped)), checks for `darling.json` (on a first install it writes a minimal one, the bundled store and no servers, and carries on: the service starts with no monitored servers and you add the first one afterwards in the Viewer's Add Server, so nothing needs editing first; `darling.sample.json` stays beside it as the full reference; a first install is refused if `darling.json` is an unedited copy of that sample, because the copy still names its example servers), runs the `--test-connection` pre-flight, registers the Event Log source, creates the service under the virtual account (or upgrades an existing install's binPath in place, preserving config/store/credentials), locks the install folder so only SYSTEM, Administrators and the service account can change what runs from it ([#4034](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4034): a folder made directly under `C:\` otherwise lets any local user replace the service's binaries; the lock goes on before anything runs from the folder, and `upgrade-darling.ps1` applies it before laying a new build down, so an older install is closed at its next upgrade. No lock can undo a file swapped before it, which is what the #4043 check above catches instead — extract into a fresh folder and run the script straight away, and re-extract fresh if the folder has sat open on a box with other local users), starts it, and creates **Darling Viewer** shortcuts on the public Desktop and in the all-users Start Menu, so they show for every user and not only for the account that ran the installer (pin to taskbar from the Start Menu entry — Windows does not allow programmatic pinning). `uninstall-darling.ps1` reverses it, deliberately leaving the store/config in place unless you pass `-PurgeData`.
 
 **Add the people who run the Viewer or the CLI to the operator group.** The installer creates the local group `PerformanceMonitor Darling Operators`, empty, and restricts `darling.json` to SYSTEM, Administrators, the service account and that group. `upgrade-darling.ps1` creates the group too when an older install does not have it yet. The service applies the same restriction at its next start. At the end, `install-darling.ps1` asks whether to add the account you are signed in to (default No). `upgrade-darling.ps1` adds no one. Until a person is added, they cannot run the Viewer or the CLI without elevation. See [Security & Least-Privilege Roles](#security--least-privilege-roles) for who to add, why, and the scripted options.
 
@@ -252,19 +250,19 @@ Use the same `env:`/`file:` secret references (systemd `LoadCredential=` pairs n
 
 `install-darling.ps1` registers a service; it does not lay a new build over an old one. That step — stop, back up, copy, start, verify — is `upgrade-darling.ps1`, shipped in the same zip.
 
-> **`upgrade-darling.ps1` does not exist in 3.5.0 or earlier.** It was added after 3.5.0 was tagged, so a build up to and including 3.5.0 does not contain it and neither does its zip. If you are upgrading FROM one of those, see [upgrading from a build that predates the script](#upgrading-from-a-build-that-predates-the-script) below and use the manual procedure — the steps in this section describe a script you will not have.
+> **`upgrade-darling.ps1` does not exist in 3.5.0 or earlier.** It was added after 3.5.0 was tagged, so a build up to and including 3.5.0 does not contain it and neither does its zip. If you upgrade from one of those, use the short manual procedure in [upgrading from a build that predates the script](#upgrading-from-a-build-that-predates-the-script) once. The steps in this section describe a script that those builds do not have.
 
-Extract the new zip to a **staging** folder only an administrator can write to, from an **elevated** PowerShell, and run *its* copy (#4043): the folder you run the script from is the trust root, and anyone who can write to it can replace the script itself, so a folder under `C:\Program Files\` is required, not a folder made directly under `C:\`. (Windows UAC's split token is not a security boundary here: trusting the installing admin's account also trusts that same admin's non-elevated session, since both are the same account.)
+In the examples below, replace `<version>` with the release number you downloaded. Extract the new zip to a **staging** folder only an administrator can write to, from an **elevated** PowerShell, and run *its* copy (#4043): the folder you run the script from is the trust root, and anyone who can write to it can replace the script itself, so a folder under `C:\Program Files\` is required, not a folder made directly under `C:\`. (Windows UAC's split token is not a security boundary here: trusting the installing admin's account also trusts that same admin's non-elevated session, since both are the same account.)
 
 ```powershell
-Expand-Archive PerformanceMonitorDarling-3.5.1.zip -DestinationPath "C:\Program Files\PerformanceMonitorDarling-staging\3.5.1"
-& "C:\Program Files\PerformanceMonitorDarling-staging\3.5.1\upgrade-darling.ps1" -Source "C:\Program Files\PerformanceMonitorDarling-staging\3.5.1"
+Expand-Archive PerformanceMonitorDarling-<version>.zip -DestinationPath "C:\Program Files\PerformanceMonitorDarling-staging\<version>"
+& "C:\Program Files\PerformanceMonitorDarling-staging\<version>\upgrade-darling.ps1" -Source "C:\Program Files\PerformanceMonitorDarling-staging\<version>"
 ```
 
 To verify the zip's SHA256 as part of the same run, point `-Source` at the downloaded zip itself instead of the extracted folder, with the hash from the release page — the script copies that zip into its own protected staging folder, hashes the copy, and extracts from it:
 
 ```powershell
-& "C:\Program Files\PerformanceMonitorDarling-staging\3.5.1\upgrade-darling.ps1" -Source C:\Users\you\Downloads\PerformanceMonitorDarling-3.5.1.zip -Sha256 <hash-from-the-release-page>
+& "C:\Program Files\PerformanceMonitorDarling-staging\<version>\upgrade-darling.ps1" -Source C:\Users\you\Downloads\PerformanceMonitorDarling-<version>.zip -Sha256 <hash-from-the-release-page>
 ```
 
 It resolves the install directory from the registered service, verifies the zip's SHA256 when you point it at one (checked against `-Sha256` or a `SHA256SUMS.txt` beside it, itself only trusted from a folder that passes the same writability check), backs the install root's files up to `_rollback_manual_<stamp>`, prunes the backups past the newest `-KeepRollbacks` (3), lays the new build down, confirms `darling.json` is byte-identical, and starts the service. Re-running after a failure is safe and is the intended recovery: a backup taken in the last `-BackupWindowMinutes` (60) is reused rather than replaced, so a re-run cannot overwrite the good pre-upgrade copy with a copy of a half-upgraded tree.
@@ -311,35 +309,17 @@ An older build ignores what those migrations added, so it can read some newer da
 
 #### Upgrading from a build that predates the script
 
-`upgrade-darling.ps1` was added after 3.5.0, so upgrading **from 3.5.0 or earlier** is a manual
-procedure. It is the same sequence the script automates ([#2593](https://github.com/erikdarlingdata/PerformanceMonitor/issues/2593)).
+This is a note for very old builds. `upgrade-darling.ps1` was added after 3.5.0, so a build from 3.5.0 or earlier needs this manual procedure once ([#2593](https://github.com/erikdarlingdata/PerformanceMonitor/issues/2593)). It is the same sequence the script automates.
 
-**Nothing you need to preserve lives in the install directory.** The managed store, the DPAPI
-credential blobs and the logs are all under `C:\ProgramData\PerformanceMonitorDarling`, and anything
-encrypted with `--encrypt-password` survives because those blobs are DPAPI **machine** scope rather than
-account scope. The only file that has to travel is `darling.json`. That also means renaming the install
-folder does **not** back up your data — if you want a data rollback point, snapshot the volume or stop
-the service and copy that ProgramData folder.
+Nothing that you must keep lives in the install directory. The managed store, the DPAPI credential blobs and the logs are under `C:\ProgramData\PerformanceMonitorDarling`. The only file that has to travel is `darling.json`. Renaming the install folder does not back up your data. For a data rollback point, snapshot the volume, or stop the service and copy the ProgramData folder.
 
-1. **Verify the download first.** `Get-FileHash <zip> -Algorithm SHA256` against `SHA256SUMS.txt` from the
-   same release page. This is the one step with no recovery if it is skipped.
-2. `Stop-Service 'PerformanceMonitor Darling' -Force`, then **poll until `Status` is actually `Stopped`**.
-   Requesting a stop is not the same as it having stopped, and laying a build over a live tree is where
-   this goes wrong.
-3. Rename the current install folder aside (e.g. `...\PerformanceMonitorDarling_3.3`). This is your
-   rollback.
-4. Extract the new zip to the **original** folder name.
-5. Copy `darling.json` from the renamed folder into the new one, then **hash it on both sides and confirm
-   they match**. A config silently altered mid-upgrade is very hard to notice afterwards.
-6. Run `.\install-darling.ps1` from the new folder. For an existing install it re-points the service's
-   binPath in place and preserves config, store and credentials.
-7. Start the service, then **verify** — see the post-start checklist below. Reaching `Running` means the
-   process started, not that it collects, and an upgrade that crosses several schema migrations has more
-   than usual to get wrong on first start.
-
-A clean extract like this has one advantage over the scripted overlay: files a newer build stopped
-shipping cannot accumulate, which is the problem `-RemoveStaleFiles` exists to clean up on an
-overlay-upgraded tree.
+1. Verify the download. Run `Get-FileHash <zip> -Algorithm SHA256` and compare it with `SHA256SUMS.txt` from the same release page. If you skip this step, you cannot recover from it.
+2. Run `Stop-Service 'PerformanceMonitor Darling' -Force`. Poll until `Status` is `Stopped`. A stop request is not a stopped service.
+3. Rename the current install folder (for example, add `_old`). This is your rollback.
+4. Extract the new zip to the original folder name.
+5. Copy `darling.json` from the renamed folder into the new one. Hash it on both sides and confirm the hashes match.
+6. Run `.\install-darling.ps1` from the new folder. For an existing install, it re-points the service's binPath and keeps the config, the store and the credentials.
+7. Start the service, then verify with the post-start checklist. Reaching `Running` means the process started, not that it collects.
 
 #### The install location has to be machine-scoped
 
@@ -421,6 +401,46 @@ With `"auth": "integrated"`, the monitoring identity **is** the service's Log On
 4. **Start the service and verify from its log** (`%ProgramData%\PerformanceMonitorDarling\logs`): the per-server connect lines are the proof that the *service account's* grants work. `--test-connection` from your console runs as you, not the service account — see the [pre-flight note above](#validate-the-config-pre-flight).
 
 Nothing else moves: anything encrypted with `--encrypt-password` (SQL-auth server passwords, SMTP) survives the account change, because those blobs are DPAPI **machine**-scope, not account-scope — and collected data is untouched. Later `install-darling.ps1` upgrades preserve a custom Log On account and harden `darling.json` for the account the service actually runs as.
+
+### Build from source
+
+You need the .NET 10 SDK to build from source. A release zip needs no SDK.
+
+Build from the repository root:
+
+```
+dotnet build Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release
+```
+
+```
+dotnet build Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj -c Release
+```
+
+### Windows stops at start: the CET error
+
+.NET 10 apps need a Windows that is current on its updates to start on a CPU with CET (a hardware protection). We saw this on Windows Server 2022 build 20348.1366. Without the updates the service and the viewer both stop at start. The exit code is `0x80131506` and stderr shows this message:
+
+```text
+Fatal error. Your Windows doesn't fully support CET. Please install all available Windows updates.
+```
+
+`install-darling.ps1` recognises that message in its pre-flight and stops with a plain message instead of asking whether to install anyway. The fix is to install all available Windows updates and restart. If you cannot do that yet, there is a short-term workaround. Run these from an elevated PowerShell before you install or start. Each turns off one protection (`UserShadowStack`, the hardware-enforced stack protection) for one Darling exe:
+
+```powershell
+Set-ProcessMitigation -Name PerformanceMonitor.Darling.Service.exe -Disable UserShadowStack
+Set-ProcessMitigation -Name PerformanceMonitor.Darling.Viewer.exe -Disable UserShadowStack
+```
+
+This weakens that program's protection, so treat it as a stopgap. To undo it once Windows is patched, remove the values the first command wrote:
+
+```powershell
+$ifeo = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options'
+foreach ($exe in 'PerformanceMonitor.Darling.Service.exe', 'PerformanceMonitor.Darling.Viewer.exe') {
+    Remove-ItemProperty -Path "$ifeo\$exe" -Name MitigationOptions, MitigationAuditOptions, EAFModules -ErrorAction SilentlyContinue
+}
+```
+
+On Windows Server 2022 build 20348.5622, `Set-ProcessMitigation -Remove -Disable UserShadowStack` did not remove the setting (it returned `C000000D`). `Set-ProcessMitigation -Reset` failed too ("Invalid input parameters"). The registry way above worked. The `Set-ProcessMitigation -Disable` command writes three values (`MitigationOptions`, `MitigationAuditOptions`, `EAFModules`) under the exe's key in `Image File Execution Options`. The undo removes only those values and leaves any other value on that key alone. Restart the program afterwards. The first command is described in Microsoft's [Set-ProcessMitigation](https://learn.microsoft.com/en-us/powershell/module/processmitigations/set-processmitigation) reference.
 
 ### What the Service Does on Monitored Servers
 
@@ -572,9 +592,9 @@ Two mutually exclusive modes — setting `managed: true` together with `connecti
 | `engine` | `"sqlserver"` | `"sqlserver"` or `"postgres"` (`postgresql` / `pg` / `aurora-postgresql` also accepted). Configuration rather than something probed, because it decides which driver builds the connection string before there is a connection to ask. An omitted or unrecognized value means SQL Server, so every existing `darling.json` keeps its exact present behaviour — see [PostgreSQL targets](#postgresql-targets) |
 | `port` | *(driver default)* | PostgreSQL targets on a non-default port. SQL Server carries its port in the host as `host,1433` instead, and that convention is left alone |
 | `database` | *(none)* | Azure SQL Database only: the one database this entry monitors (also part of the server's storage identity). PostgreSQL targets connect to the maintenance database and read cluster-wide catalogs |
-| `auth` | `"integrated"` | `"integrated"` or `"sql"` |
-| `username` | *(none)* | Required for `"sql"` |
-| `encryptedPassword` | *(none)* | DPAPI blob from `--encrypt-password` (preferred) |
+| `auth` | `"integrated"` | `"integrated"`, `"sql"`, `"serviceprincipal"` or `"managedidentity"` |
+| `username` | *(none)* | Required for `"sql"` (the login) and `"serviceprincipal"` (the application or client id). For `"managedidentity"`, only a user-assigned identity sets it (its client id) |
+| `encryptedPassword` | *(none)* | DPAPI blob from `--encrypt-password` (preferred). For `"serviceprincipal"` it holds the client secret |
 | `password` | *(none)* | A literal (dev only, warned on every use) or an `env:NAME` / `file:/path` reference (#1804) — references are the supported non-Windows shape and are not warned |
 | `readOnlyIntent` | `false` | Route to a readable AG secondary (`ApplicationIntent=ReadOnly`) |
 | `queryStoreReplica` | *(none)* | SQL Server only: a readable AG secondary (`host` or `host,port`) or a listener name that Darling reads Query Store from, instead of the server itself, so the primary carries none of that read. Empty (the default) reads the primary and changes nothing. Azure SQL Database never reads a replica. The replica host gets the same login and password as the server, so the replica must accept them. Changing it counts as a change of how the server is reached, so the web dashboard, the MCP `edit_server` tool and the desktop viewer ask for the password again. Collection health shows the newest Query Store run's `read_source` (for example `replica 12, primary 2`) beside the collector, only when a run has one |
@@ -930,7 +950,7 @@ The embedded MCP server, over Streamable HTTP bound to `localhost` by default (s
   - *Blocking / deadlocks* — `get_blocking` (blocked/blocking pairs from the blocked-process-report XE + the always-on DMV fallback), `get_deadlocks`, `get_deadlock_detail` (raw graph XML), `get_blocked_process_xml` (raw report XML), and the per-minute count series `get_blocking_trend` / `get_deadlock_trend`.
   - *Sessions* — `get_session_stats` (latest per-application connection counts), `get_active_queries` (captured running-query snapshots), `get_waiting_tasks`.
   - *Config* — the change history `get_server_config_changes`, `get_database_config_changes`, `get_trace_flag_changes`, plus the latest-snapshot pair `get_database_scoped_config` / `get_query_store_health` (per-database Query Store health: actual vs desired state, readonly_reason decoded, storage vs cap) and the current-config snapshots `get_server_config` / `get_database_config` / `get_trace_flags` (what sp_configure / sys.databases / the active trace flags are set to **right now** — the companion to the `*_changes` diffs, which are empty on a stable server).
-  - *Change watches (Darling-only)* — `get_change_watches` lists a server's change watches, open and closed, newest first (#6234). A recorded change (SQL Server: server, database or database-scoped configuration, a trace flag, a forced or unforced Query Store plan; PostgreSQL: a server setting, a per-database or per-role setting, an extension install, drop or version change) opens a 60 minute watch (changes are looked for once an hour per target, so a change is recorded up to an hour after it happened; the watch window still runs from the change itself, and a target whose watch is due is read once more before it is evaluated, so a later change inside the window still joins it); at its end Darling compares wait time per second, average CPU and query duration with the hour before and the same hour a week earlier, and opens one `change_watch` investigation request only if something moved. Each watch lists its changes, its measures and its result (`flat`, `request_opened`, `moved_no_request`, `moved_agent_change`, `moved_auto_plan_correction`, `no_data`) or its state (`open`, `evaluating`, `closed`, `failed`); `state` filters on any of those. A PostgreSQL target with no source for a measure (no CPU samples, no wait collection, no statement statistics) lists it under `not_measured` with the reason, never as flat. A read of the monitoring store; the investigation agent may call it.
+  - *Change watches (Darling-only)* — `get_change_watches` lists a server's change watches, open and closed, newest first (#6234). A recorded change (SQL Server: server, database or database-scoped configuration, a trace flag, a forced or unforced Query Store plan; PostgreSQL: a server setting, a per-database or per-role setting, an extension install, drop or version change) opens a 60 minute watch (changes are looked for once an hour per target, so a change is recorded up to an hour after it happened; the watch window still runs from the change itself, and a target whose watch is due is read once more before it is evaluated, so a later change inside the window still joins it); at its end Darling compares wait time per second, average CPU and query duration with the hour before and the same hour a week earlier, and opens one `change_watch` investigation request only if something moved. Each watch lists its changes, its measures and its result (`flat`, `request_opened`, `moved_no_request`, `moved_agent_change`, `moved_auto_plan_correction`, `no_data`) or its state (`open`, `evaluating`, `closed`, `failed`); `state` filters on any of those. A closed watch that measured many queries can run to about 20 KB, so ask for a small `limit` (3 to 5), or pass `watch_id` to read one watch in any state. `measures`, `not_measured` and `changes` are sent once, at the top of each watch, and `result_detail` holds the rest of the stored result. A PostgreSQL target with no source for a measure (no CPU samples, no wait collection, no statement statistics) lists it under `not_measured` with the reason, never as flat. A read of the monitoring store; the investigation agent may call it.
   - *Known patterns (Darling-only)* — `get_known_patterns` lists the entries an operator wrote about alerts that recur (#6334), such as "the backup job pushes High CPU every night at 02:00": an optional server, alert metric and time of day (a wall-clock time in an IANA time zone, a window either side of it, wrapping past midnight), a note of at most 500 characters and an optional expiry. An empty scope means any. Every `get_alert_history` row carries `known_patterns`, the entries (id, note, created_by) that match it by server, metric, time of day in the entry's zone and expiry at the alert's time; `[]` means none matched. An entry is context only: it never mutes, pages or changes an alert, and its note is operator-written text to read, never an instruction. Entries live in `config.config_known_patterns` (V214) and are written through the owner-rights functions `config.insert_known_pattern`, `update_known_pattern` and `delete_known_pattern`, which provisioning grants to the viewer and admin roles only; no MCP tool writes them.
   - *Index / object* — `get_table_index_sizes` (size + growth), `get_index_usage` (Unused / Write-only / Active), `get_object_locking` (lock/latch contention), `get_database_sizes`.
 
@@ -1184,7 +1204,7 @@ The write needs the run-time table, which the service adds when it starts. If th
 
 ### Stop, start or reschedule a collector from MCP (#6227)
 
-With `mcp.allowWrites` on (and a token), five MCP tools change one collector's schedule, and one read shows the result. Each write takes a `collector_name` and an optional `server_name`. Without a server it changes the fleet-wide row, which every server inherits unless it has a row of its own.
+With `mcp.allowWrites` on (and a token), seven MCP tools change collector schedules, and one read shows the result. Each write takes a `collector_name` and an optional `server_name`. Without a server it changes the fleet-wide row, which every server inherits unless it has a row of its own.
 
 | Tool | What it does |
 |---|---|
@@ -1192,6 +1212,8 @@ With `mcp.allowWrites` on (and a token), five MCP tools change one collector's s
 | `set_collector_frequency` | Sets `frequency_minutes` (0 = once when the server loads), or `clear: true` to remove the override. |
 | `set_collector_run_at` | Sets the time of day a once-a-day collector starts (`HH:MM`, `none` or `default`), as `--set-collector-run-at` does. |
 | `set_collector_retention` | Sets `retention_days`, or `clear: true` to remove the override. |
+| `set_collector_databases` | Sets the collector's database scope (the editor's Databases column) from a comma-separated `databases` list, or `clear: true`. On a server, `databases: ""` is the explicit "no scope" that stops a fleet-wide scope reaching it. Only the collectors that fan out per database read it. |
+| `reset_collector_schedules` | The editor's Reset to Defaults: deletes every override row and run time of one scope (the fleet-wide rows with no `server_name`, else that server's), and lists what it removed. The other scope is left alone. |
 | `get_collector_schedules` | Lists the stored overrides (enabled, frequency, retention, run time, database scope), for one collector or all, fleet-wide and per server. A read: served without `mcp.allowWrites`. |
 
 The writes run the same plans as `--enable-collector`, `--disable-collector` and `--set-collector-run-at`, and refuse the same things: an unknown collector name, a frequency that is negative or past the cap for a collector that stores deltas, a retention under 1 day, a run time on a collector that runs more often than daily. A refusal changes nothing and says why. A write changes only its own column: the other columns on the row are kept, and a row the tool creates never switches a collector on or off. Each answer gives what changed, the previous value and the exact call that undoes it (`undo`). The service picks the change up on its next config poll; there is no restart.
@@ -1248,7 +1270,7 @@ Every source login is a member of `darling_alert_sources`, a NOLOGIN group role 
 
 For a managed store:
 
-1. Make the store reachable from the network (`postgres.network.listen` and `allowFrom`, see [Remote viewer](#remote-viewer)).
+1. Make the store reachable from the network (`postgres.network.listen` and `allowFrom`, see [Remote viewer](#connect-a-remote-viewer)).
 2. Add `sources` to `postgres.network.role`, keeping the roles it already lists, for example `"role": "viewer,sources"`.
 3. Restart the service. The managed pg_hba block gains `hostssl darling +darling_alert_sources <allowFrom> scram-sha-256`, which admits, from that range over TLS, each role that is a member of `darling_alert_sources` directly or through another role. The service keeps those members to the registered source logins, and writes the line only while they are exactly that: if a member remains that it could not revoke, it leaves the line out (the block's other lines stay) and logs a warning naming the role.
 4. `--add-alert-source` and `--rotate-alert-source` print two connection strings: one for a source on this machine, and one for a source on another machine, built the way the remote viewer's is: the store's network address, `SSL Mode=VerifyFull` and `Root Certificate` naming the store's `server.crt`. Copy that file to the source machine and point `Root Certificate` at the copy. Both strings are shown once. When `sources` is not listed yet, the second string is still printed, with a line saying it works once `sources` is listed.
@@ -1391,7 +1413,7 @@ The per-database fan-out itself is done — `pg_autovacuum_stats` is the collect
 
 ### The Store
 
-The service migrates the store itself at startup — plain versioned SQL scripts, each applied once inside its own transaction, tracked in `darling_schema_version`, safe under concurrent starters (advisory-locked). Current schema is **v139** — `StorageVersion.SchemaVersion` is the source of truth and a test pins it to the highest rung in the ladder.
+The service migrates the store itself at startup — plain versioned SQL scripts, each applied once inside its own transaction, tracked in `darling_schema_version`, safe under concurrent starters (advisory-locked). `StorageVersion.SchemaVersion` is the source of truth for the schema version, and a test pins it to the highest rung in the ladder. The service logs the version it found at each start (`Postgres store ready (schema v<N>, ...)`).
 
 The notable rungs are below. For the **complete** current schema, read `Darling/Darling.Tests/Fixtures/migration-ladder-*.sql` — the whole ladder as resolved SQL, regenerated per release; it is generated, so don't hand-edit it.
 
