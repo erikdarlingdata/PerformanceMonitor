@@ -152,7 +152,7 @@ public sealed class McpRouteAgentFieldsLiveTests
             /* The two single-field tools take the same path for an operator token. */
             Assert.Equal("updated", Status(await DarlingMcpAlertTools.SetNotificationRouteEnabled(
                 asMcp, routeId, true, served: OperatorPolicy(), cancellationToken: ct)));
-            Assert.Equal("true", await ScalarAsync(owner, $"SELECT enabled FROM config.config_notification_routes WHERE route_id = {routeId}", ct));
+            Assert.Equal("true", await ScalarAsync(owner, $"SELECT enabled::text FROM config.config_notification_routes WHERE route_id = {routeId}", ct));
 
             /* Any other actor: NULL (a caller that is not operator-class) and an agent: label are refused in the store, and nothing changes. */
             foreach (var actor in new[] { "NULL", "'agent:triage-bot'" })
@@ -166,7 +166,7 @@ public sealed class McpRouteAgentFieldsLiveTests
                 Assert.Equal("DL403", refused.SqlState);
             }
 
-            Assert.Equal("true", await ScalarAsync(owner, $"SELECT send_resolutions FROM config.config_notification_routes WHERE route_id = {routeId}", ct));
+            Assert.Equal("true", await ScalarAsync(owner, $"SELECT send_resolutions::text FROM config.config_notification_routes WHERE route_id = {routeId}", ct));
 
             /* A caller that is not operator-class still gets refused by the tool, before the store. */
             var investigations = new DarlingMcpServedPolicy(new DarlingMcpWritePolicy.Effective(false, false, Investigations: true));
