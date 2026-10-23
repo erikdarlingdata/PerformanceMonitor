@@ -37,11 +37,6 @@ internal static class DarlingSessionReader
 {
     /* ─────────────────────────── result rows ─────────────────────────── */
 
-    /// <summary>One (program_name) group at the latest session_stats snapshot.</summary>
-    public sealed record SessionStatRow(
-        DateTime CollectionTime, string ProgramName, long ConnectionCount, int RunningCount, int SleepingCount,
-        int DormantCount, long? TotalCpuTimeMs, long? TotalReads, long? TotalWrites, long? TotalLogicalReads);
-
     /// <summary>One captured query snapshot — the columns Lite's get_active_queries surfaces.</summary>
     public sealed record ActiveQueryRow(
         DateTime CollectionTime, int SessionId, string? DatabaseName, string? Status, long CpuTimeMs,
@@ -91,54 +86,16 @@ internal static class DarlingSessionReader
 
     /* ─────────────────────────── session stats (latest snapshot, per application) ─────────────────────────── */
 
-    /// <summary>
-    /// The latest per-application session_stats snapshot — Lite's <c>GetLatestSessionStatsAsync</c>: every
-    /// program_name at the newest collection, most connections first. connection_count is bigint; the
-    /// running/sleeping/dormant counts are integer; the cumulative totals are nullable bigint. $1 server_id.
-    /// </summary>
-    public const string LatestSessionStatsSql = """
-        SELECT
-            collection_time,
-            program_name,
-            connection_count,
-            running_count,
-            sleeping_count,
-            dormant_count,
-            total_cpu_time_ms,
-            total_reads,
-            total_writes,
-            total_logical_reads
-        FROM v_session_stats
-        WHERE server_id = $1
-        AND   collection_time = (SELECT MAX(collection_time) FROM v_session_stats WHERE server_id = $1)
-        ORDER BY connection_count DESC
-        """;
+    /* ─────────────────────────── session stats: moved to Storage (#6388) ─────────────────────────── */
 
-    public static async Task<List<SessionStatRow>> GetLatestSessionStatsAsync(
-        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
-    {
-        var rows = new List<SessionStatRow>();
-        await using var command = postgres.CreateCommand(LatestSessionStatsSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        DarlingMcpReadParameters.AddInt(command, serverId);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            rows.Add(new SessionStatRow(
-                reader.GetDateTime(0),
-                reader.IsDBNull(1) ? "" : reader.GetString(1),
-                reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
-                reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
-                reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
-                reader.IsDBNull(5) ? 0 : reader.GetInt32(5),
-                reader.IsDBNull(6) ? null : reader.GetInt64(6),
-                reader.IsDBNull(7) ? null : reader.GetInt64(7),
-                reader.IsDBNull(8) ? null : reader.GetInt64(8),
-                reader.IsDBNull(9) ? null : reader.GetInt64(9)));
-        }
+    /// <summary>The latest-snapshot read, now <see cref="DarlingSessionStatsReader.LatestSql"/> in Storage so the Viewer reads
+    /// the same text (#6388).</summary>
+    public const string LatestSessionStatsSql = DarlingSessionStatsReader.LatestSql;
 
-        return rows;
-    }
+    public static Task<List<SessionStatRow>> GetLatestSessionStatsAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default) =>
+        DarlingSessionStatsReader.GetLatestAsync(postgres, serverId, McpCommandDeadlines.ReadSeconds, cancellationToken);
+
 
     /* ─────────────────────────── active queries (query snapshots over the window) ─────────────────────────── */
 
