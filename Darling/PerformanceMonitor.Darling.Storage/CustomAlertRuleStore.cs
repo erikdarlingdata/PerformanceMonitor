@@ -42,7 +42,7 @@ public sealed class CustomAlertRuleStore
 
     /// <summary>
     /// <paramref name="commandTimeoutSeconds"/> is the deadline of every statement this store runs. The service passes its own MCP/web read
-    /// deadline; a caller that passes nothing gets <see cref="StorageCommandDeadlines.McpReadSeconds"/>.
+    /// deadline; there is no default, so every caller names one.
     /// </summary>
     public CustomAlertRuleStore(NpgsqlDataSource dataSource, int commandTimeoutSeconds)
     {
