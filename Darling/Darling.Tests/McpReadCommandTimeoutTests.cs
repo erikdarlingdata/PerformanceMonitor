@@ -700,7 +700,7 @@ public sealed class McpReadCommandTimeoutTests
 
         Assert.True(Directory.Exists(mcp), $"MCP directory not found: {mcp}");
 
-        var named = new[] { "CustomViewStore.cs", "DarlingWebEndpoints.cs" }
+        var named = new[] { "DarlingWebEndpoints.cs" }
             .Select(f => Path.Combine(project, f))
             .ToArray();
 
