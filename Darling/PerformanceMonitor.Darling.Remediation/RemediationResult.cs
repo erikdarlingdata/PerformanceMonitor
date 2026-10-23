@@ -48,6 +48,12 @@ public sealed record RemediationResult(
     /// <summary>A plan guide create's count of cached batches whose text equals a SQL guide's batch (#6569). Null for every other action, for an OBJECT guide, and when the login cannot read the plan cache.</summary>
     public long? CachedMatches { get; init; }
 
+    /// <summary>A plan guide drop's read of the guide it named (#6569, slice 2b): the whole definition as <c>sys.plan_guides</c> holds it, which the journal keeps so an Undo can re-create the guide. Null for every other result, and when the guide was not found.</summary>
+    public PlanGuideDefinition? Guide { get; init; }
+
+    /// <summary>Whether the guide a drop read was disabled (<c>sys.plan_guides.is_disabled</c>); the Undo disables the re-created guide again. Null when <see cref="Guide"/> is null.</summary>
+    public bool? GuideDisabled { get; init; }
+
     /// <summary>The message <c>sys.fn_validate_plan_guide</c> returned for a plan guide the create dropped again (#6569). Null for every other result.</summary>
     public string? Validation { get; init; }
 
@@ -84,6 +90,7 @@ public sealed record RemediationResult(
         public const string StatementNotInModule = "statement_not_in_module";
         public const string GuideExists = "guide_exists";
         public const string GuideNotFound = "guide_not_found";
+        public const string GuideTemplate = "guide_template";
         public const string GuideChanged = "guide_changed";
         public const string GuideInvalid = "guide_invalid";
         public const string GuidePermissionDenied = "guide_permission_denied";

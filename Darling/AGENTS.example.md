@@ -92,6 +92,8 @@ Everything above stays true until a person turns it on, server by server: Darlin
 
 `create_plan_guide` attaches an `OPTION (...)` clause to one statement with `sys.sp_create_plan_guide`. Pass `database_name`, `name`, `statement` (exactly as written in the module or batch), `type` (`OBJECT` or `SQL`), `module_or_batch` and `hints`. The dry run reports what the guide matches. A person can undo the create from Agent changes (the undo drops the guide), so say in `reason` why the hint is the fix.
 
+`drop_plan_guide` drops one plan guide by name. Pass `database_name` and `name`; the dry run reads the guide and shows the whole definition that would be journaled. A person can undo the drop from Agent changes (the undo re-creates the guide from that definition), so say in `reason` why the guide should go. A `TEMPLATE` guide is refused.
+
 `kill_session` kills one session on a SQL Server, an Azure SQL Database or a PostgreSQL server, behind its own per-server switch. A kill has no undo, so this tool is different from the plan tools: a person decides each kill. Darling never kills its own sessions or a session of the remediation login.
 
 On SQL Server, take `session_id` and `login_time` from `get_blocking` (`blocking_session_id` and `blocking_login_time`, passed back as read). In the same batch as the kill, Darling checks that the session is still the one you named. It compares the session id and the login time, because SQL Server reuses a session id after a disconnect. The check is not atomic, so a session can still end and its id be reused between the check and the kill.

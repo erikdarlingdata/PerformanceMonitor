@@ -39,7 +39,10 @@ public sealed record PlanChangeFacts(
     public bool IsForce => Kind == AgentChangeKinds.PlanForce;
 
     /// <summary>True for <c>plan_guide_create</c> (#6569): the undo drops the guide <see cref="GuideName"/>. <see cref="QueryId"/> and <see cref="PlanId"/> are 0 and mean nothing.</summary>
-    public bool IsGuide => Kind == AgentChangeKinds.PlanGuideCreate;
+    public bool IsGuide => Kind is AgentChangeKinds.PlanGuideCreate or AgentChangeKinds.PlanGuideDrop;
+
+    /// <summary>True for <c>plan_guide_drop</c> (#6569, slice 2b): the undo re-creates the guide from the definition the drop journaled (<see cref="Guide"/>).</summary>
+    public bool IsGuideDrop => Kind == AgentChangeKinds.PlanGuideDrop;
 
     /// <summary>The guide a create made: its name, from the journaled target's id.</summary>
     public string? GuideName => Guide is JsonObject g && g["name"] is JsonValue v && v.TryGetValue(out string? s) ? s : null;
@@ -201,8 +204,8 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
         if (JsonNode.Parse(calledDetail ?? "{}") is not JsonObject called)
             return (null, AgentUndoResult.Refused("not_undoable", "This change has no recorded before image."));
         var kind = called["kind"] is JsonValue kv && kv.TryGetValue(out string? k) ? k : null;
-        if (kind is not (AgentChangeKinds.PlanForce or AgentChangeKinds.PlanUnforce or AgentChangeKinds.PlanGuideCreate))
-            return (null, AgentUndoResult.Refused("not_undoable", "This kind of change is not a plan force, an unforce or a plan guide create."));
+        if (kind is not (AgentChangeKinds.PlanForce or AgentChangeKinds.PlanUnforce or AgentChangeKinds.PlanGuideCreate or AgentChangeKinds.PlanGuideDrop))
+            return (null, AgentUndoResult.Refused("not_undoable", "This kind of change is not a plan force, an unforce or a plan guide create or drop."));
         if (await FirstDetailAsync(connection, transaction, "action_undone", calledId, requestId, cancellationToken) is not null)
             return (null, AgentUndoResult.Refused("already_undone", "This change was already undone."));
 
@@ -215,9 +218,9 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
         string? Text(JsonNode? node) => node is JsonValue v && v.TryGetValue(out string? s) ? s : node?.ToString();
         long? Number(JsonNode? node) => node is JsonValue v && v.TryGetValue(out long n) ? n : (long.TryParse(Text(node), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) ? parsed : null);
         var database = Text(target?["database"]) ?? Text(before?["database"]);
-        if (kind == AgentChangeKinds.PlanGuideCreate)
+        if (kind is AgentChangeKinds.PlanGuideCreate or AgentChangeKinds.PlanGuideDrop)
         {
-            /* #6569: a plan guide create is undone by dropping the guide by name, so the facts are the target's id and the definition the call journaled. */
+            /* #6569: a plan guide create is undone by dropping the guide by name, a drop by re-creating it from the journaled definition, so the facts are the target's id and the definition the call journaled. */
             var guide = before?["guide"] as JsonObject;
             var guideName = Text(target?["id"]);
             if (requestId is not Guid guideRequest || serverId is not int guideServer || string.IsNullOrWhiteSpace(database) || string.IsNullOrWhiteSpace(guideName) || guide is null)
@@ -271,11 +274,11 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
         public Task<ServerActionDecision> AuthorizeAsync(long planId, NpgsqlDataSource ownerSource, CancellationToken cancellationToken = default) =>
             AuthorizeAsync(planId.ToString(CultureInfo.InvariantCulture), ownerSource, cancellationToken);
 
-        /// <summary>The same two server-side conditions for the object the permit is for: a plan id (as text) for a force or unforce, the guide's name for a plan guide create's undo, which that server's <c>create_plan_guide</c> switch gates (#6569).</summary>
+        /// <summary>The same two server-side conditions for the object the permit is for: a plan id (as text) for a force or unforce, the guide's name for a plan guide create's or drop's undo, which that server's <c>create_plan_guide</c> or <c>drop_plan_guide</c> switch gates (#6569).</summary>
         public async Task<ServerActionDecision> AuthorizeAsync(string permitId, NpgsqlDataSource ownerSource, CancellationToken cancellationToken = default)
         {
             ArgumentNullException.ThrowIfNull(ownerSource);
-            var serverAction = Facts.IsGuide ? ServerActionNames.CreatePlanGuide : ServerActionNames.ForcePlan;
+            var serverAction = Facts.IsGuideDrop ? ServerActionNames.DropPlanGuide : Facts.IsGuide ? ServerActionNames.CreatePlanGuide : ServerActionNames.ForcePlan;
             var store = new InvestigationRequestStore(_owner._dataSource, _owner._commandTimeoutSeconds);
             /* The shared form of the server's switch lock, in the session's transaction and before the switch is read, as an agent's write takes it:
                a switch writer that takes the exclusive form then waits for this undo, and an undo that starts after it reads the committed switch. */

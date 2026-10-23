@@ -23,9 +23,9 @@ using PerformanceMonitor.Darling.Storage;
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
 /// <summary>
-/// <c>create_plan_guide</c> (#6569, slice 2a): the fifth Level 3 server action tool, in the shape of <c>recompile_module</c> (the gate for a dry run too, the executor's
-/// own checks, the journal) with an undo. Its definition is journaled whole, so a person's undo drops the guide by name (<see cref="UndoPlanChangeAsync"/>) and a re-create
-/// can read the definition back (slice 2b). Every value reaches the server as a parameter of <c>sys.sp_create_plan_guide</c>; none is spliced into batch text.
+/// <c>create_plan_guide</c> (#6569, slice 2a) and <c>drop_plan_guide</c> (slice 2b): the fifth and sixth Level 3 server action tools, in the shape of <c>recompile_module</c> (the gate for a dry run too, the executor's
+/// own checks, the journal) with an undo. Its definition is journaled whole, so a person's undo drops the guide by name (<see cref="UndoPlanChangeAsync"/>) and the drop
+/// journals the definition it read, so a person's undo re-creates the guide from it (slice 2b). Every value reaches the server as a parameter of <c>sys.sp_create_plan_guide</c>; none is spliced into batch text.
 /// </summary>
 public sealed partial class DarlingMcpPlanForceTools
 {
@@ -244,7 +244,221 @@ public sealed partial class DarlingMcpPlanForceTools
         return new PlanUndoAnswer(PlanUndoAnswer.Undone, null, $"Plan guide {guideName} was dropped from {facts.Database}.", statement, stateNode, null, null, facts.CalledId, session.Actor);
     }
 
-    /* The tool method is the last member on purpose: the payload contract census reads a tool's span up to the next tool or the end of the file, and the
+    internal const string DropPlanGuideToolName = "drop_plan_guide";
+
+    /// <summary>The definition a drop reads, in the shape the journal keeps and the Undo re-creates from (#6569, slice 2b): the create's own definition fields plus <c>is_disabled</c>.</summary>
+    private static object GuideImage(PlanGuideDefinition guide, bool disabled) =>
+        new { name = guide.Name, type = guide.Type, statement = guide.Statement, module_or_batch = guide.ModuleOrBatch, @params = guide.Params, hints = guide.Hints, is_disabled = disabled };
+
+    /// <summary>The drop tool body (#6569, slice 2b), so a test drives it with its own data sources. <paramref name="owner"/> is the store owner's data source.</summary>
+    internal static async Task<string> RunDropPlanGuideAsync(NpgsqlDataSource postgres, NpgsqlDataSource? owner, ILogger? logger, string? server_name, string? database_name,
+        string? name, string? agent_action, bool dry_run, CancellationToken ct, string? agentTokenName = null)
+    {
+        const string tool = DropPlanGuideToolName;
+        logger ??= NullLogger.Instance;
+        try
+        {
+            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, ct, NameClash.Refuse);
+            if (error is not null)
+                return error;
+
+            var store = new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds);
+
+            /* 1: arguments that cannot name a guide are refused before the gate, and journaled as a block is. */
+            var guideName = PlanGuideDefinition.TryName(name);
+            if (guideName is null)
+                return await RefuseBeforeGateAsync(store, agent_action, tool, RemediationResult.Reasons.BadGuideName, PlanGuideDefinition.BadNameMessage, ct, agentTokenName);
+
+            var database = database_name?.Trim();
+            if (string.IsNullOrEmpty(database) || database.Length > 128 || ContainsControlCharacter(database))
+            {
+                return await RefuseBeforeGateAsync(store, agent_action, tool, RemediationResult.Reasons.BadDatabase,
+                    "database_name is the database the guide is dropped from, at most 128 characters. Nothing was run.", ct, agentTokenName);
+            }
+
+            /* 2: SQL Server only, as the create is: sp_control_plan_guide is documented for SQL Server alone. */
+            var (engineEdition, engineKind) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, ct);
+            if (engineKind is not null && engineKind.Contains("postgres", StringComparison.OrdinalIgnoreCase))
+            {
+                return await RefuseBeforeGateAsync(store, agent_action, tool, PostgresTarget,
+                    $"{resolved.DisplayName} is a PostgreSQL target. A plan guide is SQL Server only; there is no PostgreSQL equivalent.", ct, agentTokenName);
+            }
+
+            if (engineEdition is AzureSqlDatabaseEdition or AzureManagedInstanceEdition)
+            {
+                return await RefuseBeforeGateAsync(store, agent_action, tool, EngineNotSupported,
+                    $"{resolved.DisplayName} is an Azure SQL target. Darling drops plan guides on SQL Server only: Microsoft documents sp_control_plan_guide for SQL Server alone. Nothing was run.", ct, agentTokenName);
+            }
+
+            if (owner is null)
+            {
+                return DarlingAgentActionGate.RefusalAnswer(new AgentActionRefusal(NoOwnerSource,
+                    "The service has not published its store owner connection yet, so this server's remediation login cannot be read. Try again shortly."));
+            }
+
+            /* 3: the gate, for a dry run too. The permit's Id is the guide's name and its Database is the database. */
+            var target = new AgentActionTarget(resolved.ServerId, resolved.ServerName, guideName, database);
+            var decision = await ServerActionGate.AuthorizeAsync(store, owner, logger, tool, ServerActionNames.DropPlanGuide, agent_action, target, ct, agentTokenName);
+            if (decision.Refusal is { } gateRefusal)
+                return GateRefusalAnswer(gateRefusal, dry_run);
+            var permit = decision.Permit!;
+            _ = InvestigationToolCore.ParseAgentAction(agent_action, out var action);
+
+            var row = await ReadServerRowAsync(owner, resolved.ServerId, ct);
+            if (row is null)
+                return Answer("failed", "server_row_missing", $"{resolved.DisplayName} has no row in the monitored-server settings.");
+
+            /* 3b: a database the server's entry excludes is one Darling does not act in. */
+            if (IsExcludedDatabase(row.ExcludedDatabases, database))
+            {
+                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, AzureDatabaseExcluded, ct);
+                return DarlingAgentActionGate.RefusalAnswer(ExcludedDatabaseRefusal(database));
+            }
+
+            var executor = new SqlServerRemediationExecutor(resolved.ServerId, row.Server, row.UserName, row.SecretSlot, logger);
+            var statementText = PlanGuideStatement.Drop(database, guideName);
+
+            /* 4: one batch in the request's database reads the guide, and the executor refuses a missing or TEMPLATE guide and a missing grant before anything is dropped. */
+            var dry = await executor.DropPlanGuideAsync(permit, guideName, expected: null, dryRun: true, ct);
+            if (dry.Outcome != RemediationOutcome.Done || dry.Guide is null)
+            {
+                if (dry.Outcome == RemediationOutcome.Refused && dry.Reason is not null)
+                    await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, dry.Reason, ct);
+                return Answer(dry.Outcome == RemediationOutcome.Refused ? "refused" : "failed", dry.Reason, dry.Message,
+                    new { dry_run, statement = dry.Statement ?? statementText, before = new { database } });
+            }
+
+            var disabled = dry.GuideDisabled == true;
+            var read = dry.Guide;
+            var before = new { database, guide = GuideImage(read, disabled) };
+            if (dry_run)
+                return Answer("dry_run", null, dry.Message + " A person can undo the drop from Agent changes: the undo re-creates the guide from the definition journaled with the drop.",
+                    new { dry_run = true, statement = dry.Statement ?? statementText, before });
+
+            /* 5: the write, journaled. action_called holds the definition; the drop runs only while the guide still holds the statement and hints read above (guide_changed otherwise). */
+            RemediationResult? unknown = null;
+            RemediationResult? done = null;
+            var changed = new ServerChangeSignal();
+            try
+            {
+                var hooks = new AgentActionHooks
+                {
+                    ServerChange = changed,
+                    LoadLevels = (connection, _, token) => DarlingAgentActionGate.LoadLevelsAsync(connection, logger, token),
+                    ReadBefore = (_, _, _) => Task.FromResult<string?>(JsonSerializer.Serialize(before, McpHelpers.JsonOptions)),
+                    Write = async (_, _, token) =>
+                    {
+                        var written = await executor.DropPlanGuideAsync(permit, guideName, read, dryRun: false, token);
+                        if (written.Wrote)
+                            changed.MarkServerChanged();
+                        if (written.Outcome == RemediationOutcome.Unknown)
+                        {
+                            /* The write was sent and its reply was lost, or the call was cancelled while it ran: neither done nor failed (#5632). */
+                            changed.MarkOutcomeUnknown();
+                            unknown = written;
+                            return null;
+                        }
+
+                        if (written.Outcome != RemediationOutcome.Done || !written.Wrote)
+                            throw new PlanForceWriteException(written.Message, Answer(written.Outcome == RemediationOutcome.Refused ? "refused" : "failed",
+                                written.Reason, written.Message, new { dry_run = false, statement = statementText, before }));
+                        done = written;
+                        return JsonSerializer.Serialize(new { statement = written.Statement ?? statementText, message = written.Message }, McpHelpers.JsonOptions);
+                    },
+                };
+                var result = await store.RunAgentActionAsync(new AgentActionCall(tool, AgentChangeKinds.PlanGuideDrop, action!, target), hooks, ct);
+                if (result.Refusal is { } refused)
+                    return DarlingAgentActionGate.RefusalAnswer(refused);
+                if (result.OutcomeUnknown && unknown is not null)
+                    return Answer("outcome_unknown", null, unknown.Message, new { dry_run = false, statement = statementText, before, journal_id = result.CalledId });
+
+                return WithWarnings(Answer("done", null,
+                    (done?.Message ?? $"Plan guide {guideName} was dropped from {database}.") + " A person can undo it from Agent changes: the undo re-creates the guide from the journaled definition.",
+                    new { dry_run = false, statement = statementText, before, undo = (AgentPlanUndo?)null, journal_id = result.CalledId }), result);
+            }
+            catch (PlanForceWriteException ex)
+            {
+                return ex.Answer;
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return McpHelpers.FormatError(tool, ex);
+        }
+    }
+
+    /// <summary>
+    /// A person's undo of a plan guide drop (#6569, slice 2b), run by <see cref="UndoPlanChangeAsync"/> in the same show-then-confirm shape as a plan undo. It re-creates the guide
+    /// from the definition the drop journaled, through the create path (the name must be free, an OBJECT guide's module must still hold the statement, the new guide is validated and
+    /// dropped again when it is invalid), and disables it when it was disabled. A name that exists now is <c>guide_exists</c>: the answer says so and nothing changes. The gate is that
+    /// server's <c>drop_plan_guide</c> switch and remediation login, the switch of the action being undone.
+    /// </summary>
+    private static async Task<PlanUndoAnswer> DecideAndRunGuideRecreateUndoAsync(AgentChangeUndo.PlanUndoSession session, NpgsqlDataSource owner, ILogger logger,
+        bool confirm, string? shownStatement, CancellationToken ct)
+    {
+        var facts = session.Facts;
+        var guideName = facts.GuideName!;
+        string? Text(string key) => facts.Guide is System.Text.Json.Nodes.JsonObject g && g[key] is System.Text.Json.Nodes.JsonValue v && v.TryGetValue(out string? s) ? s : null;
+        var disabled = facts.Guide is System.Text.Json.Nodes.JsonObject d && d["is_disabled"] is System.Text.Json.Nodes.JsonValue dv && dv.TryGetValue(out bool b) && b;
+        var type = Text("type");
+        var statementText = Text("statement");
+        var hints = Text("hints");
+        var stateNode = facts.Guide?.DeepClone();
+        if (type is not ("OBJECT" or "SQL") || string.IsNullOrWhiteSpace(statementText) || string.IsNullOrWhiteSpace(hints))
+            return PlanUndoAnswer.Refused("not_undoable", "The definition journaled with this drop is incomplete, so the guide cannot be re-created from it.");
+        var definition = new PlanGuideDefinition(guideName, type, statementText, Text("module_or_batch"), Text("params"), hints);
+
+        var decision = await session.AuthorizeAsync(guideName, owner, ct);
+        if (decision.Refusal is { } gateRefusal)
+            return PlanUndoAnswer.Refused(gateRefusal.Reason, gateRefusal.Message);
+        var permit = decision.Permit!;
+
+        var row = await ReadServerRowAsync(owner, facts.ServerId, ct);
+        if (row is null)
+            return PlanUndoAnswer.Refused("server_row_missing", $"{facts.ServerName} has no row in the monitored-server settings.");
+        var executor = new SqlServerRemediationExecutor(facts.ServerId, row.Server, row.UserName, row.SecretSlot, logger);
+
+        var statement = PlanGuideStatement.Create(facts.Database, definition, disabled);
+        var dry = await executor.CreatePlanGuideAsync(permit, definition, dryRun: true, ct, disableAfter: disabled);
+        if (dry.Outcome != RemediationOutcome.Done)
+        {
+            if (dry.Outcome == RemediationOutcome.Refused && dry.Reason is not null)
+                await session.RecordRefusalAsync(dry.Reason, ct);
+            return new PlanUndoAnswer(dry.Outcome == RemediationOutcome.Refused ? PlanUndoAnswer.RefusedStatus : PlanUndoAnswer.Failed, dry.Reason, dry.Message, dry.Statement ?? statement, stateNode);
+        }
+
+        statement = dry.Statement ?? statement;
+        var words = $"Re-creating plan guide {guideName} in {facts.Database} undoes its drop: the statement runs with the guide's hints again" + (disabled ? ", and the guide is disabled as it was." : ".");
+        if (!confirm || shownStatement is null || !string.Equals(shownStatement, statement, StringComparison.Ordinal))
+        {
+            var lead = !confirm ? ""
+                : shownStatement is null ? "A confirm must carry the statement that was shown, so nothing was written. Review this statement and confirm it. "
+                : "The server's state changed since the statement was shown, so nothing was written. Review the new statement and confirm again. ";
+            return new PlanUndoAnswer(PlanUndoAnswer.Confirm, null, lead + words, statement, stateNode);
+        }
+
+        var written = await executor.CreatePlanGuideAsync(permit, definition, dryRun: false, ct, disableAfter: disabled);
+        if (written.Outcome == RemediationOutcome.Unknown)
+        {
+            logger.LogWarning("The undo of plan guide drop {CalledId} was sent, but its outcome is unknown: {Message}", facts.CalledId, written.Message);
+            await session.RecordOutcomeUnknownAsync(statement);
+            return new PlanUndoAnswer(PlanUndoAnswer.OutcomeUnknown, RemediationResult.Reasons.OutcomeUnknown,
+                "The undo was sent to the server, but its reply was lost, so the plan guide may or may not exist again. Nothing was recorded as undone. Read sys.plan_guides before you try again; the change stays on the list, and a second try reads the server first.",
+                statement, stateNode);
+        }
+
+        if (written.Outcome != RemediationOutcome.Done || !written.Wrote)
+        {
+            await session.RecordRefusalAsync(written.Reason ?? "write_failed", ct);
+            return new PlanUndoAnswer(written.Outcome == RemediationOutcome.Refused ? PlanUndoAnswer.RefusedStatus : PlanUndoAnswer.Failed, written.Reason, written.Message, statement, stateNode);
+        }
+
+        await session.MarkServerChangedAsync(statement, stateNode, null);
+        await session.JournalUndoneAsync(statement, stateNode, null, null, ct);
+        return new PlanUndoAnswer(PlanUndoAnswer.Undone, null, $"Plan guide {guideName} was re-created in {facts.Database}" + (disabled ? " and disabled, as it was." : "."), statement, stateNode, null, null, facts.CalledId, session.Actor);
+    }
+
+    /* The tool methods are the last members on purpose: the payload contract census reads a tool's span up to the next tool or the end of the file, and the
        body above has its own catch, which the census must not read as this one-line method's. */
     [McpServerTool(Name = "create_plan_guide"), Description(
         "Agent arm, SQL Server only (an Azure SQL target is refused as engine_not_supported): creates ONE plan guide with sys.sp_create_plan_guide, so a statement runs with the OPTION (...) hints you give it (OPTIMIZE FOR, RECOMPILE, MAXDOP, USE PLAN) without a change to the application. Dry run by default: returns the exact statement and what the guide matches, and writes nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's create_plan_guide switch and remediation login (with ALTER on the module for an OBJECT guide, ALTER on the database for a SQL guide); ships off. " +
@@ -271,4 +485,23 @@ public sealed partial class DarlingMcpPlanForceTools
         CancellationToken cancellationToken = default) =>
         RunCreatePlanGuideAsync(postgres, ownerSource?.Read(), logger, server_name, database_name, name, statement, type, module_or_batch, @params, hints, agent_action, dry_run, cancellationToken,
             served?.Policy.AgentTokenName);
+
+    [McpServerTool(Name = "drop_plan_guide"), Description(
+        "Agent arm, SQL Server only (an Azure SQL target is refused as engine_not_supported): drops ONE plan guide by name with sys.sp_control_plan_guide N'DROP', so the statement it applied to runs without the guide's hints again. Dry run by default: reads the guide and returns the exact statement and the whole definition that would be journaled, and writes nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's drop_plan_guide switch and remediation login (with ALTER on the module for an OBJECT guide, ALTER on the database for a SQL guide); ships off. " +
+        "<<GUIDE>>" +
+        "The guide is read from sys.plan_guides in the database_name you give, in the same batch that drops it. A name that is not there is refused as guide_not_found. A TEMPLATE guide is refused as guide_template, because the Undo could not re-create one. " +
+        "This tool blocks only a call that cannot do anything: bad_guide_name, bad_database, engine_not_supported, guide_not_found, guide_template, guide_changed (the guide was replaced between the read and the drop), guide_permission_denied. " +
+        "mcp.allowWrites never bypasses the gate, and a dry run needs it too (it signs in with the remediation login). The change is journaled in Agent changes (kind plan_guide_drop) with the whole definition (name, type, statement, module_or_batch, params, hints, is_disabled), and a person can undo it there: the undo re-creates the guide from that definition (validated, and disabled again if it was disabled), and is refused as guide_exists if a guide with that name exists by then. Answers status dry_run, done, refused (reason) or failed, with statement, before and journal_id.")]
+    public static Task<string> DropPlanGuide(
+        NpgsqlDataSource postgres,
+        [Description("The database the guide is dropped from.")] string database_name,
+        [Description("The plan guide's name, as sys.plan_guides shows it.")] string name,
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Required: the agent_action object (request_id, claim_id, agent_id, reason, evidence); see the tool guide. The reason is recorded with the change.")] string? agent_action = null,
+        [Description("Default true: return the exact statement and the definition that would be journaled, write nothing. Pass false to write.")] bool dry_run = true,
+        StoreOwnerSource? ownerSource = null,
+        ILogger? logger = null,
+        DarlingMcpServedPolicy? served = null,
+        CancellationToken cancellationToken = default) =>
+        RunDropPlanGuideAsync(postgres, ownerSource?.Read(), logger, server_name, database_name, name, agent_action, dry_run, cancellationToken, served?.Policy.AgentTokenName);
 }

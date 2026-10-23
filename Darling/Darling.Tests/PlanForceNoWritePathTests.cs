@@ -176,6 +176,7 @@ public sealed class PlanForceNoWritePathTests
         Assert.Equal(new[]
         {
             nameof(DarlingMcpPlanForceTools) + "." + nameof(DarlingMcpPlanForceTools.CreatePlanGuide),
+            nameof(DarlingMcpPlanForceTools) + "." + nameof(DarlingMcpPlanForceTools.DropPlanGuide),
             nameof(DarlingMcpPlanForceTools) + "." + nameof(DarlingMcpPlanForceTools.EvictCachedPlan),
             nameof(DarlingMcpPlanForceTools) + "." + nameof(DarlingMcpPlanForceTools.ForceQueryStorePlan),
             nameof(DarlingMcpPlanForceTools) + "." + nameof(DarlingMcpPlanForceTools.KillSession),

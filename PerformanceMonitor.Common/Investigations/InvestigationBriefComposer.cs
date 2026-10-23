@@ -237,7 +237,7 @@ public sealed class InvestigationBriefComposer
                 level2
                     ? "You may change alert settings on this request's server only, and only before you report. Change first, report last: writes refuse after submit. " +
                       "Every change needs agent_action (request_id, claim_id, agent_id, reason, evidence) and is journaled. Nothing you can call changes the monitored server itself." +
-                      (level3 ? " This is a Level 3 request: force_query_store_plan, unforce_query_store_plan, evict_cached_plan, recompile_module and kill_session can change the monitored server, and each also needs that server's own switch and remediation credential. Dry run first." : string.Empty)
+                      (level3 ? " This is a Level 3 request: force_query_store_plan, unforce_query_store_plan, evict_cached_plan, recompile_module, create_plan_guide, drop_plan_guide and kill_session can change the monitored server, and each also needs that server's own switch and remediation credential. Dry run first." : string.Empty)
                     : "You only read and report. Nothing you can call changes a monitored server.",
                 "Earlier reports are labeled unreviewed and self_attributed: an agent wrote them and no person has checked them.",
                 "Remediation here is a verdict and its blockers, never a script to run.",

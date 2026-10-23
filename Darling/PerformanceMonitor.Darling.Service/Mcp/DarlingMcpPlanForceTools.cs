@@ -961,6 +961,8 @@ public sealed partial class DarlingMcpPlanForceTools
         if (owner is null)
             return PlanUndoAnswer.Refused(NoOwnerSource, "The service has not published its store owner connection yet, so this server's remediation login cannot be read. Try again shortly.");
 
+        if (facts.IsGuideDrop)
+            return await DecideAndRunGuideRecreateUndoAsync(session, owner, logger, confirm, shownStatement, ct);
         if (facts.IsGuide)
             return await DecideAndRunGuideUndoAsync(session, owner, logger, confirm, shownStatement, ct);
 
@@ -1147,7 +1149,7 @@ SELECT EXISTS (SELECT 1 FROM v_dmv_blocking_snapshots WHERE server_id = $1 AND d
                 $"Database {database} is not this server's registered database, and Darling has collected no blocking row from it in the last day, so the kill does not connect to it. Pass the database_name of the get_blocking row you read. Nothing was run.");
     }
 
-    /// <summary>The refusal for a database the server's entry excludes, shared by the Azure kill and <c>recompile_module</c>.</summary>
+    /// <summary>The refusal for a database the server's entry excludes, shared by the Azure kill, <c>recompile_module</c> and the plan guide tools.</summary>
     internal static AgentActionRefusal ExcludedDatabaseRefusal(string database) =>
         new(AzureDatabaseExcluded, $"Database {database} is excluded in this server's entry, so Darling does not act in it. Nothing was run.");
 

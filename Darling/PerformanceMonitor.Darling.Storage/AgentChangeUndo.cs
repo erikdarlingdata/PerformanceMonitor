@@ -50,8 +50,8 @@ public sealed record AgentChangeRow(
     private string? ReadString(string key) =>
         JsonNode.Parse(DetailJson) is JsonObject o && o[key] is JsonValue v && v.TryGetValue(out string? s) ? s : null;
 
-    /// <summary>True for a plan force or unforce (#5632, step 9) or a plan guide create (#6569): the server's state decides its undo, not the journal's result.</summary>
-    public bool IsPlanChange => Kind is AgentChangeKinds.PlanForce or AgentChangeKinds.PlanUnforce or AgentChangeKinds.PlanGuideCreate;
+    /// <summary>True for a plan force or unforce (#5632, step 9) or a plan guide create or drop (#6569): the server's state decides its undo, not the journal's result.</summary>
+    public bool IsPlanChange => Kind is AgentChangeKinds.PlanForce or AgentChangeKinds.PlanUnforce or AgentChangeKinds.PlanGuideCreate or AgentChangeKinds.PlanGuideDrop;
 
     /// <summary>True when an undo can be tried: nobody undid it, it is inside the window, and the kind has an undo. A store kind needs a done
     /// change. A plan force or unforce may be done, failed or unknown, because the undo reads the server first and decides from what it finds.</summary>

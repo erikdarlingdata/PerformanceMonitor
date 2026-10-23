@@ -79,6 +79,27 @@ public sealed class PlanGuideTests
     }
 
     [Fact]
+    public void AReCreateOfADisabledGuide_ShowsTheDisableStatementAfterTheCreate_AndAnEnabledOneShowsNone()
+    {
+        var guide = new PlanGuideDefinition("g1", "SQL", "SELECT 1", null, null, "OPTION (RECOMPILE)");
+        var enabled = PlanGuideStatement.Create("d", guide);
+        var disabled = PlanGuideStatement.Create("d", guide, disabled: true);
+        Assert.DoesNotContain("DISABLE", enabled, StringComparison.Ordinal);
+        Assert.Equal(enabled + " EXEC sys.sp_control_plan_guide N'DISABLE', N'g1';", disabled);
+    }
+
+    [Fact]
+    public void TheGuideNameCheck_IsTheSameForADropAsForACreate()
+    {
+        Assert.Equal("g1", PlanGuideDefinition.TryName("  g1 "));
+        Assert.Null(PlanGuideDefinition.TryName(""));
+        Assert.Null(PlanGuideDefinition.TryName("#temp"));
+        Assert.Null(PlanGuideDefinition.TryName("a\nb"));
+        Assert.Null(PlanGuideDefinition.TryName(new string('g', 129)));
+        Assert.Equal(new string('g', 128), PlanGuideDefinition.TryName(new string('g', 128)));
+    }
+
+    [Fact]
     public void TheStatements_NameTheDatabase_DoubleAQuote_AndTheBatchTextHoldsNoValue()
     {
         var guide = new PlanGuideDefinition("g'1", "SQL", "SELECT 'x'; DROP TABLE t; --", null, "@p int", "OPTION (RECOMPILE)");
@@ -166,6 +187,11 @@ public sealed class PlanGuideTests
         Assert.Contains("create_plan_guide", DarlingMcpWritePolicy.AgentActionTools);
         Assert.True(DarlingMcpWritePolicy.IsWrite("create_plan_guide"));
         Assert.Equal(ServerActionNames.CreatePlanGuide, InvestigationRequestStore.ServerActionForKind(AgentChangeKinds.PlanGuideCreate));
+        /* Slice 2b: the drop tool is read by the same lists, and its journal kind keys the drop switch. */
+        Assert.Contains("drop_plan_guide", InvestigationRules.AgentActionToolNames);
+        Assert.Contains("drop_plan_guide", DarlingMcpWritePolicy.AgentActionTools);
+        Assert.True(DarlingMcpWritePolicy.IsWrite("drop_plan_guide"));
+        Assert.Equal(ServerActionNames.DropPlanGuide, InvestigationRequestStore.ServerActionForKind(AgentChangeKinds.PlanGuideDrop));
     }
 
     [Fact]

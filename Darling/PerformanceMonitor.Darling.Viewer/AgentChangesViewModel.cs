@@ -130,6 +130,7 @@ public sealed class AgentChangeViewRow
         AgentChangeKinds.SessionKill => "kill session",
         AgentChangeKinds.ModuleRecompile => "recompile module",
         AgentChangeKinds.PlanGuideCreate => "create plan guide",
+        AgentChangeKinds.PlanGuideDrop => "drop plan guide",
         var other => other ?? "",
     };
 

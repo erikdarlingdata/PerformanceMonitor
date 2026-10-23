@@ -163,6 +163,7 @@ public sealed partial class InvestigationRequestStore
         AgentChangeKinds.SessionKill => ServerActionNames.KillSession,
         AgentChangeKinds.ModuleRecompile => ServerActionNames.RecompileModule,
         AgentChangeKinds.PlanGuideCreate => ServerActionNames.CreatePlanGuide,
+        AgentChangeKinds.PlanGuideDrop => ServerActionNames.DropPlanGuide,
         _ => null,
     };
 
