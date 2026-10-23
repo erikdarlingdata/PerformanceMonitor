@@ -26,8 +26,8 @@ public sealed class McpHostService : BackgroundService
     private readonly DuckDbInitializer _duckDb;
     private readonly ScheduleManager? _scheduleManager;
     private readonly int _port;
-    private readonly bool _allowWrites;
-    private readonly bool _allowInvestigations;
+    private readonly McpServing _serving;
+    private string? _currentToken;
     private readonly McpDataDetail _dataDetail;
     private readonly IPseudonymKeySource? _pseudonymKeys;
     private readonly IInvestigationRequestStore _investigationStore;
@@ -44,13 +44,21 @@ public sealed class McpHostService : BackgroundService
     /// configuration and takes it as a service parameter, so a host without it would advertise it as a tool argument nobody can fill.</param>
     /// <param name="scheduleManager">#3896: the collector schedules, so the analysis tools bound each
     /// latest-value read by the cadence its collector runs at. Null bounds by the shipped defaults.</param>
-    /// <param name="allowWrites">Whether the write tools are served (<see cref="McpSettings.AllowWrites"/>, the
+    /// <param name="bearerToken">The MCP token every request must carry. Required: null or empty is refused (an
+    /// <see cref="ArgumentException"/>) unless <paramref name="allowTokenlessLoopback"/> is on, so no caller can start the host with
+    /// no gate by leaving it out.</param>
+    /// <param name="allowTokenlessLoopback">The explicit opt-out (<see cref="McpSettings.AllowTokenlessLoopback"/>): no gate is
+    /// installed, only the read tools are served, and <paramref name="bearerToken"/> is ignored. See <see cref="DecideServing"/>.</param>
+    /// <param name="allowWrites">Whether the write tools are asked for (<see cref="McpSettings.AllowWrites"/>, the
     /// <c>mcp_allow_writes</c> setting). Default off: a write tool is then absent from the served set and a call
-    /// to it fails as an unknown tool. See <see cref="McpWritePolicy"/>.</param>
-    public McpHostService(LocalDataService dataService, ServerManager serverManager, MuteRuleService muteRuleService, DuckDbInitializer duckDb, int port, IInvestigationRequestStore investigationStore, ScheduleManager? scheduleManager = null, bool allowWrites = false,
+    /// to it fails as an unknown tool. They are served only with a usable token too. See <see cref="McpWritePolicy"/>.</param>
+    public McpHostService(LocalDataService dataService, ServerManager serverManager, MuteRuleService muteRuleService, DuckDbInitializer duckDb, int port, IInvestigationRequestStore investigationStore,
+        string? bearerToken, bool allowTokenlessLoopback, ScheduleManager? scheduleManager = null, bool allowWrites = false,
         bool allowInvestigations = false, McpDataDetail dataDetail = McpDataDetail.Full,
         IPseudonymKeySource? pseudonymKeys = null)
     {
+        _serving = DecideServing(bearerToken, allowTokenlessLoopback, allowWrites, allowInvestigations);
+        _currentToken = _serving.Token;
         _pseudonymKeys = pseudonymKeys;
         _dataService = dataService;
         _serverManager = serverManager;
@@ -58,8 +66,6 @@ public sealed class McpHostService : BackgroundService
         _duckDb = duckDb;
         _port = port;
         _scheduleManager = scheduleManager;
-        _allowWrites = allowWrites;
-        _allowInvestigations = allowInvestigations;
         _dataDetail = dataDetail;
         _investigationStore = investigationStore ?? throw new ArgumentNullException(nameof(investigationStore));
 
@@ -108,6 +114,83 @@ public sealed class McpHostService : BackgroundService
     internal static void RegisterCollectorRunTimes(IServiceCollection services, ScheduleManager? schedules, ServerManager serverManager)
     {
         services.AddSingleton(new McpCollectorRunTimes(schedules, serverManager));
+    }
+
+    /// <summary>What a start serves, decided once from the token and the settings by <see cref="DecideServing"/>.</summary>
+    /// <param name="Token">The token every request must carry, or null with the opt-out on (no gate).</param>
+    /// <param name="Writes">The write tools are served.</param>
+    /// <param name="Investigations">The investigation tools are served.</param>
+    /// <param name="AskedWrites">The settings asked for the write tools.</param>
+    /// <param name="AskedInvestigations">The settings asked for the investigation tools.</param>
+    internal readonly record struct McpServing(string? Token, bool Writes, bool Investigations, bool AskedWrites, bool AskedInvestigations)
+    {
+        /// <summary>The compiler-made <c>ToString</c> would print the token, so it shows only whether there is one.</summary>
+        private bool PrintMembers(System.Text.StringBuilder builder)
+        {
+            builder.Append("Token = ").Append(Token is null ? "<none>" : "<set>")
+                .Append(", Writes = ").Append(Writes)
+                .Append(", Investigations = ").Append(Investigations)
+                .Append(", AskedWrites = ").Append(AskedWrites)
+                .Append(", AskedInvestigations = ").Append(AskedInvestigations);
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// The one decision of what a start serves, the same rule as Darling's (<c>DarlingMcpWritePolicy.ResolveForStart</c>). With
+    /// <paramref name="allowTokenlessLoopback"/> on there is no token and only the read tools are served. Otherwise the token is
+    /// required (empty throws). The write tools need <paramref name="allowWrites"/> and a usable token (<see cref="McpTokenStore.IsUsableToken"/>:
+    /// at least <see cref="McpTokenStore.MinimumTokenLength"/> characters and at least <see cref="McpTokenStore.MinimumDistinctTokenCharacters"/>
+    /// different ones). The investigation tools need their setting, a usable token and
+    /// <paramref name="allowWrites"/> off (the writes SETTING, not whether they are served). It lives here, in the host's own
+    /// constructor path, so no caller can skip it.
+    /// </summary>
+    internal static McpServing DecideServing(string? bearerToken, bool allowTokenlessLoopback, bool allowWrites, bool allowInvestigations)
+    {
+        if (!allowTokenlessLoopback && string.IsNullOrEmpty(bearerToken))
+        {
+            throw new ArgumentException(
+                $"The MCP server needs a token; pass one, or turn on {McpSettings.AllowTokenlessLoopbackSetting} to serve the read tools without one.",
+                nameof(bearerToken));
+        }
+
+        var token = allowTokenlessLoopback ? null : bearerToken;
+        var usable = McpTokenStore.IsUsableToken(token);
+        return new McpServing(
+            token,
+            Writes: allowWrites && usable,
+            Investigations: allowInvestigations && usable && !allowWrites,
+            AskedWrites: allowWrites,
+            AskedInvestigations: allowInvestigations);
+    }
+
+    /// <summary>
+    /// The token gate: every request must carry <c>Authorization: Bearer &lt;token&gt;</c> with the right token, or it is
+    /// answered 401 with <c>WWW-Authenticate: Bearer</c> before <c>MapMcp</c>. The compare is constant-time
+    /// (<see cref="McpTokenStore.IsAuthorized"/>). This is Darling's gate for its loopback listener. <paramref name="currentToken"/>,
+    /// when given, is read on every request, so a replaced token takes effect at once. A null or empty
+    /// <paramref name="token"/> installs nothing (<c>mcp_allow_tokenless_loopback</c> is on, and only the read tools are served).
+    /// </summary>
+    internal static void UseBearerTokenGate(IApplicationBuilder app, string? token, Func<string?>? currentToken = null)
+    {
+        if (string.IsNullOrEmpty(token))
+        {
+            return;
+        }
+
+        app.Use(async (context, next) =>
+        {
+            /* currentToken: the host's live token, which New token replaces while the server runs. Empty never authorizes. */
+            var expected = currentToken?.Invoke() ?? token;
+            if (!McpTokenStore.IsAuthorized(context.Request.Headers.Authorization.ToString(), expected))
+            {
+                context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                context.Response.Headers.WWWAuthenticate = "Bearer";
+                return;
+            }
+
+            await next(context);
+        });
     }
 
     /// <summary>
@@ -238,6 +321,94 @@ public sealed class McpHostService : BackgroundService
             .WithRequestFilters(AddCallToolFilters);
     }
 
+    /// <summary>Makes <paramref name="newToken"/> the token every request must carry, from the next request on; the old one is refused
+    /// at once. False (nothing changes) when this host serves without a token or the new token is empty.</summary>
+    internal bool ReplaceToken(string newToken)
+    {
+        if (_serving.Token is null || string.IsNullOrEmpty(newToken))
+        {
+            return false;
+        }
+
+        Volatile.Write(ref _currentToken, newToken);
+        return true;
+    }
+
+    /// <summary>
+    /// The request pipeline, in order: the Host guard (#1648), the token gate, the JSON POST guard, then <c>MapMcp</c>. Extracted from
+    /// <c>ExecuteAsync</c> so a test drives the SAME pipeline production runs, not a hand-built copy.
+    ///
+    /// <para>The Host guard runs the SAME shared decision Darling's web dashboard and MCP host install (<see cref="HostHeaderGuard"/>;
+    /// never a second copy of the rule). This host listens on loopback only, so a browser on this machine that loads hostile
+    /// content could be rebound to 127.0.0.1:{port} and reach every tool same-origin; application/json does not force a CORS
+    /// preflight under a rebind, because the browser considers the request same-origin. Loopback-only means no configured listen
+    /// IP, so ONLY loopback Hosts (localhost / 127.0.0.1 / ::1) and an absent Host pass; a rebound foreign hostname is rejected 400
+    /// before the token gate, <c>MapMcp</c> or any tool handler.</para>
+    ///
+    /// <para>After the Host guard and before the JSON guard and <c>MapMcp</c>, a request with no token or a wrong one is refused 401
+    /// before anything else looks at it.</para>
+    /// </summary>
+    internal static void ConfigurePipeline(WebApplication app, McpServing serving, Func<string?>? currentToken = null)
+    {
+        app.Use(async (context, next) =>
+        {
+            if (!HostHeaderGuard.IsAllowedHost(context.Request.Host.Host, networkListenIp: null))
+            {
+                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                return;
+            }
+
+            await next(context);
+        });
+
+        UseBearerTokenGate(app, serving.Token, currentToken);
+
+        UseJsonPostGuard(app);
+
+        app.MapMcp();
+    }
+
+    /// <summary>
+    /// The lines a start logs about what it serves: one Warning when there is no token, one line for the write tools (a Warning when
+    /// served, one Critical when they were asked for and stay off, an Information when not asked for), and the investigation gate's
+    /// line (<see cref="McpInvestigationPolicy.StartupLine"/>). Every tool group that was asked for and stays off gets one Critical line.
+    /// </summary>
+    internal static List<(LogLevel Level, string Message)> StartupLines(McpServing serving)
+    {
+        var lines = new List<(LogLevel, string)>();
+        var writeTools = $"{McpWritePolicy.WriteTools.Count} write tools";
+        if (serving.Token is null)
+        {
+            lines.Add((LogLevel.Warning,
+                $"{McpSettings.AllowTokenlessLoopbackSetting} is on: the MCP server serves http://localhost with no token, and only the read tools. Turn it off to require a token."));
+        }
+
+        var usable = McpTokenStore.IsUsableToken(serving.Token);
+        if (serving.Writes)
+        {
+            lines.Add((LogLevel.Warning,
+                $"MCP write tools are ON ({McpWritePolicy.WritesSetting}): the {writeTools} are served to any client that has the MCP token."));
+        }
+        else if (serving.AskedWrites)
+        {
+            lines.Add((LogLevel.Critical,
+                $"{McpWritePolicy.WritesSetting} is on but the MCP write tools stay OFF: they need {McpTokenStore.TokenRequirement}, "
+                + $"and {McpSettings.AllowTokenlessLoopbackSetting} must be off. The {writeTools} are not served."));
+        }
+        else
+        {
+            lines.Add((LogLevel.Information,
+                $"MCP write tools are off (the default): the {writeTools} are not served. To serve them set {McpWritePolicy.WritesSetting} to true in settings.json (a token is needed too)."));
+        }
+
+        if (McpInvestigationPolicy.StartupLine(serving.AskedInvestigations, serving.AskedWrites, usable) is { } line)
+        {
+            lines.Add(line);
+        }
+
+        return lines;
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         try
@@ -271,59 +442,26 @@ public sealed class McpHostService : BackgroundService
 
             /* The write switch and the SDK's tool registration live in RegisterMcpServer, the method the tests that
                drive tools/call also use (see there). */
-            RegisterMcpServer(builder.Services, _allowWrites, _allowInvestigations, _dataDetail, _pseudonymKeys);
+            RegisterMcpServer(builder.Services, _serving.Writes, _serving.Investigations, _dataDetail, _pseudonymKeys);
 
             _app = builder.Build();
 
-            /* DNS-rebinding guard (#1648) — the FIRST middleware, running the SAME shared decision Darling's
-               web dashboard and MCP host install (HostHeaderGuard; never a second copy of the rule). This host
-               is loopback-only and tokenless, so a browser on this machine that loads attacker content could be
-               rebound to 127.0.0.1:{port} and reach every tool same-origin; application/json does not force a
-               CORS preflight under a rebind, because the browser considers the request same-origin. Loopback-
-               only means no configured listen IP, so ONLY loopback Hosts (localhost / 127.0.0.1 / ::1) and an
-               absent Host pass — a rebound foreign hostname is rejected 400 before MapMcp or any tool handler.
-               Severity here is informational (single-user desktop app, no service-account privilege), but the
-               guard is shared code and covers both apps rather than only the one that was exploitable. */
-            _app.Use(async (context, next) =>
-            {
-                if (!HostHeaderGuard.IsAllowedHost(context.Request.Host.Host, networkListenIp: null))
-                {
-                    context.Response.StatusCode = StatusCodes.Status400BadRequest;
-                    return;
-                }
-
-                await next(context);
-            });
-
-            UseJsonPostGuard(_app);
-
-            _app.MapMcp();
+            ConfigurePipeline(_app, _serving, () => Volatile.Read(ref _currentToken));
 
             AppLogger.Info("MCP", $"Starting MCP server on http://localhost:{_port}");
-
-            /* One line at every start, because an install that used the mute tool before the switch existed loses
-               it on upgrade until the operator turns the setting on. */
-            if (_allowWrites)
+            foreach (var (level, message) in StartupLines(_serving))
             {
-                AppLogger.Warn("MCP",
-                    $"MCP write tools are ON ({McpWritePolicy.WritesSetting}): the write tools (mute_analysis_finding, unmute_analysis_finding, set_notification_route_enabled, delete_notification_route) are served to any client that reaches this port.");
-            }
-            else
-            {
-                AppLogger.Info("MCP",
-                    $"MCP write tools are off (the default): the write tools (mute_analysis_finding, unmute_analysis_finding, set_notification_route_enabled, delete_notification_route) are not served. To serve them set {McpWritePolicy.WritesSetting} to true in settings.json and restart.");
-            }
-
-            var gateLine = McpInvestigationPolicy.StartupLine(_allowInvestigations, _allowWrites);
-            if (gateLine is { } line)
-            {
-                if (line.Level == LogLevel.Critical)
+                if (level == LogLevel.Critical)
                 {
-                    AppLogger.Error(LogLevel.Critical, "MCP", line.Message, null);
+                    AppLogger.Error(LogLevel.Critical, "MCP", message, null);
+                }
+                else if (level == LogLevel.Warning)
+                {
+                    AppLogger.Warn("MCP", message);
                 }
                 else
                 {
-                    AppLogger.Info("MCP", line.Message);
+                    AppLogger.Info("MCP", message);
                 }
             }
 
