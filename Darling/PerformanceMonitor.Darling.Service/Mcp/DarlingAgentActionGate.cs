@@ -71,6 +71,15 @@ internal static class DarlingAgentActionGate
             return AgentActionGateOutcome.Refused(problem);
         }
 
+        /* #6542: a named agent token is the agent's identity, so its agent_action acts only as that name. */
+        if (policy.AgentTokenName is { } tokenName && !string.Equals(action!.AgentId, tokenName, StringComparison.Ordinal))
+        {
+            await store.RecordAgentActionRefusalAsync(action.RequestId, tokenName, tool, DarlingMcpInvestigationTools.AgentIdNotToken,
+                cancellationToken);
+            return AgentActionGateOutcome.Refused(new AgentActionRefusal(DarlingMcpInvestigationTools.AgentIdNotToken,
+                DarlingMcpInvestigationTools.AgentIdNotTokenMessage(tokenName)));
+        }
+
         var hooks = new AgentActionHooks
         {
             LoadLevels = (connection, _, ct) => LoadLevelsAsync(connection, logger, ct),

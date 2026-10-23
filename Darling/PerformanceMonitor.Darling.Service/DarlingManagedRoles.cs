@@ -1557,12 +1557,15 @@ GRANT DELETE ON {config}.query_tag_map TO {mcp};
 --    mcp.allowWrites and a token, and are never offered to an investigation agent. Provisioning re-runs every start, so no migration
 --    rung carries this.
 --    The grants are by column, the narrowest the tools' statements need: the override rows take an INSERT of the five columns the tools
---    set and an UPDATE of the three values they change (never the database scope, never a DELETE: no tool removes a row, and the
+--    set and an UPDATE of the three values they change (never the database scope; the DELETE is #6454's, below, and the
 --    Viewer's delete-and-reinsert Save runs as the owner). The run times take their one value column and a DELETE (set_collector_run_at
 --    deletes the row for default). The table-level grants an earlier provisioning gave are revoked first, so a re-run narrows them.
 REVOKE INSERT, UPDATE, DELETE ON {config}.config_collector_schedules FROM {mcp};
 GRANT INSERT (server_id, collector_name, enabled, frequency_minutes, retention_days) ON {config}.config_collector_schedules TO {mcp};
 GRANT UPDATE (enabled, frequency_minutes, retention_days) ON {config}.config_collector_schedules TO {mcp};
+-- #6454: remove_server clears a removed server's override rows (a set-and-cleared row stayed behind all-null, and a set one would come
+--    back when the server is re-added), so mcp holds DELETE on the override table. Only remove_server runs it, by server_id.
+GRANT DELETE ON {config}.config_collector_schedules TO {mcp};
 REVOKE INSERT, UPDATE, DELETE ON {config}.config_collector_run_times FROM {mcp};
 GRANT INSERT (server_id, collector_name, run_at_minute) ON {config}.config_collector_run_times TO {mcp};
 GRANT UPDATE (run_at_minute) ON {config}.config_collector_run_times TO {mcp};
@@ -3545,7 +3548,7 @@ BEGIN
    IF v_moved
       AND COALESCE(OLD.encrypted_password, '') <> ''
       AND NEW.encrypted_password IS NOT DISTINCT FROM OLD.encrypted_password THEN
-      RAISE EXCEPTION '%', 'Changing how this server is reached needs its password again: it is stored encrypted and this surface cannot read it back.' USING ERRCODE = 'PW002';
+      RAISE EXCEPTION '%', 'Changing the host, port or any other connection setting of this server needs its password sent with the change, because a saved password is only ever sent to the server it was saved for. Send the password together with the new settings.' USING ERRCODE = 'PW002';
    END IF;
 
    -- A new AWS role (#5452) never inherits an external ID stored for the old one, unseen: the update names the ID

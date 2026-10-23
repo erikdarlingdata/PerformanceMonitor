@@ -500,6 +500,53 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>
+    /// #6384: the Sweep Pressure and Heaviest Collectors panels' data, the same trailing 7 days <c>get_collection_health</c> reads on the web.
+    /// It runs the web's own statement (<see cref="CollectionHealthStatements.ComposedSql"/>, which the service's reader points at too) and
+    /// feeds the average, p95 and max duration it returns (null when the window holds no collection log row), with each collector's cadence on this server (the schedule override, else the
+    /// shipped default, as <see cref="ApplyScheduledFrequencies"/> resolves it), to <see cref="SweepPressureReport"/>, the arithmetic the web's
+    /// tool uses. A failure to read the schedule overrides costs the panels nothing but the overrides (the shipped cadences are used).
+    /// </summary>
+    public async Task<SweepPressureReport?> GetSweepPressureAsync(int serverId, CancellationToken cancellationToken = default)
+    {
+        var scheduleOverrides = await ReadScheduleOverridesForHealthAsync(cancellationToken);
+        var costs = new List<(CollectorHealthRow Row, double Avg, double P95, double Max)>();
+        await using (var command = _dataSource.CreateCommand(CollectionHealthStatements.ComposedSql))
+        {
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            command.Parameters.Add(new NpgsqlParameter<DateTime>
+            {
+                TypedValue = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-7), DateTimeKind.Unspecified),
+            });
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                /* Ordinals 0, 4, 5 and 6 of the statement: collector_name, avg_duration_ms, max_duration_ms, p95_duration_ms. */
+                costs.Add((
+                    new CollectorHealthRow { CollectorName = reader.GetString(0) },
+                    reader.IsDBNull(4) ? 0 : Convert.ToDouble(reader.GetValue(4), System.Globalization.CultureInfo.InvariantCulture),
+                    reader.IsDBNull(6) ? 0 : Convert.ToDouble(reader.GetValue(6), System.Globalization.CultureInfo.InvariantCulture),
+                    reader.IsDBNull(5) ? 0 : Convert.ToDouble(reader.GetValue(5), System.Globalization.CultureInfo.InvariantCulture)));
+            }
+        }
+
+        /* No collection log rows in the window: no report, as the web's get_collection_health answers "unavailable" for the same server. */
+        if (costs.Count == 0)
+        {
+            return null;
+        }
+
+        /* A name the catalog does not know is left unstamped (frequency 0), which the ranking and the roll-up both skip: the service's rule. */
+        ApplyScheduledFrequencies(
+            costs.Select(c => c.Row).Where(r => CollectorScheduleDefaults.All.ContainsKey(r.CollectorName)), serverId, scheduleOverrides);
+
+        /* The statement's p95 is always the upper bound of a duration bucket (P95Bucketed), as the service's reader marks it. */
+        return SweepPressureReport.Build(costs.Select(c =>
+            new SweepCollectorCost(c.Row.CollectorName, c.Avg, c.P95, P95Bucketed: true, c.Max, c.Row.FrequencyMinutes)));
+    }
+
+    /// <summary>
     /// #6254: the newest Query Store run's <c>read_source</c> on this server in the trailing 7 days. The newest run, not the newest run
     /// that had one, so a server whose Query Store replica setting was turned off stops showing a source as soon as its runs stop writing
     /// one. One keyed index walk that stops at the first row.
@@ -1284,7 +1331,7 @@ public class CollectorHealthRow
     /// rule the service's own schedule resolution is built on, so this band, the fleet roll-up's and
     /// get_collection_health's judge a collector against the same interval. A row nothing stamped keeps the
     /// shipped default.</para></summary>
-    private int FrequencyMinutes =>
+    internal int FrequencyMinutes =>
         EffectiveFrequencyMinutes
         ?? (CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule)
             ? CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(schedule.FrequencyMinutes)
