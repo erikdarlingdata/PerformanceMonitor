@@ -297,7 +297,7 @@ public sealed class DarlingMcpQueryStoreHistoryTools
         "Reads the raw tier, or the per-interval table (kept 10 days) past raw retention, by get_query_store_top's own rule, so it covers what that grid does; effective_start is where complete history begins. " +
         "points keeps the newest 150 of the listed plans (points_truncated) and plans the 20 longest by total duration (plans_truncated). " +
         "Every plan of the query forced in its database's newest forced-plan capture is listed (forced_state: WORKING, NOT_EXERCISED, IGNORED, FAILING or UNKNOWN_PLAN_NOT_COLLECTED; get_forced_plans explains the states), even with no executions in the window. " +
-        "is_forced_plan true with forced_state null means the plan was forced when sampled but is absent from the newest forced-plan capture (usually the force has since been removed). " +
+        "is_forced_plan true with forced_state null: when forced_plans_status is ok, the force no longer stands (a REMOVED force is left out, get_forced_plans shows it); when it is no_capture_in_window or unavailable, the force state is unknown. " +
         "Each forced_plans entry also lists variant_plans (plans SQL Server compiled to run the force, which count as the forced plan running) and plan_guide (a plan guide that covers the query), as get_forced_plans does.")]
     public static async Task<string> GetQueryStoreQueryHistory(
         NpgsqlDataSource postgres,
