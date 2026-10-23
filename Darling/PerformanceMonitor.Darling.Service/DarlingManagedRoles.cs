@@ -1858,8 +1858,8 @@ REVOKE EXECUTE ON FUNCTION {config}.config_bump_version(), {config}.config_servi
 --     service opens, joins, sweeps and journals as the owner. mcp (the claim and submit tools) updates only the
 --     claim and report columns of a request, inserts a report and a journal row, and proposes a note. The agent
 --     tools (claim, submit) leave the note's state column to its default, pending, but the database does not hold mcp to
---     that: since #6400 mcp also holds INSERT on state, so the keeping of a note pending rests on those tools' code, and
---     the investigation admin tools run as mcp to write a note approved and to decide one. admin (the WPF viewer) closes a
+--     that: since #6400 mcp also holds INSERT on state, because the person-only investigation tools (write, approve and reject a
+--     note, close a request, save a profile) run as mcp. What keeps an agent from them is the tool policy (NeverAgentTools), not this role. admin (the WPF viewer) closes a
 --     request, writes the environment profiles, writes, decides or deletes a note, and journals what it did.
 --     Nothing but the owner writes the alert links (but for the Viewer's practice copy, section 10e). An identity column needs no sequence grant. One table per write
 --     grant, so provision-roles.sql's mirror (its step 3i) is compared grant for grant. It runs after every blanket
