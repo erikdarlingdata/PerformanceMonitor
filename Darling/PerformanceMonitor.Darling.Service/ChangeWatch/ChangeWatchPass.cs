@@ -19,6 +19,7 @@ using NpgsqlTypes;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitor.Darling.Storage;
@@ -125,7 +126,7 @@ WITH fresh AS (
                           AND q.collection_time < m.t AND q.collection_time >= m.t - interval '1 day') AS p
     WHERE p.prev_t IS NOT NULL AND m.t - p.prev_t <= $4 * interval '1 minute'
 )
-SELECT 'forced' AS change_kind, n.t, n.database_name, f.query_id, f.plan_id
+SELECT 'forced' AS change_kind, n.t, n.database_name, f.query_id, f.plan_id, f.plan_forcing_type
 FROM fresh AS n
 JOIN collect.query_store_forced_plans AS f
   ON f.server_id = $1 AND f.collection_time = n.t AND f.database_name = n.database_name AND f.plan_id IS NOT NULL AND f.query_id IS NOT NULL
@@ -137,7 +138,7 @@ WHERE before.hit IS NULL
                   WHERE a.server_id = $1 AND a.database_name = f.database_name AND a.query_id = f.query_id AND a.plan_id = f.plan_id
                     AND a.outcome = 'succeeded' AND a.action_time > n.prev_t AND a.action_time <= n.t)
 UNION ALL
-SELECT 'unforced', n.t, n.database_name, p.query_id, p.plan_id
+SELECT 'unforced', n.t, n.database_name, p.query_id, p.plan_id, p.plan_forcing_type
 FROM fresh AS n
 JOIN collect.query_store_forced_plans AS p
   ON p.server_id = $1 AND p.collection_time = n.prev_t AND p.database_name = n.database_name AND p.plan_id IS NOT NULL AND p.query_id IS NOT NULL
@@ -148,6 +149,14 @@ WHERE after.hit IS NULL
   AND NOT EXISTS (SELECT 1 FROM collect.plan_force_actions AS a
                   WHERE a.server_id = $1 AND a.database_name = p.database_name AND a.query_id = p.query_id AND a.plan_id = p.plan_id
                     AND a.outcome = 'succeeded' AND a.action_time > n.prev_t AND a.action_time <= n.t)";
+
+    /// <summary>#6551: the databases of <paramref name="serverId"/> that are readable-secondary copies, whose plan-snapshot changes are the primary's.
+    /// The rule is the shared one every other read of the store uses (<see cref="PgSecondaryReplicaScope"/>): the newest availability-group snapshots at or
+    /// before <paramref name="end"/>, both within <see cref="AgReplicaScope.SnapshotFreshness"/>, and nothing is left out when they are stale or unreadable.
+    /// A snapshot older than that is not trusted to say this node is still a secondary: when the collectors stopped at or before a failover, a day-old
+    /// SECONDARY row would drop this node's real plan changes.</summary>
+    internal async Task<IReadOnlySet<string>> ReadReplicaDatabasesAsync(int serverId, DateTime end, CancellationToken cancellationToken)
+        => await PgSecondaryReplicaScope.ReadAsync(_readSource, serverId, end, _logger, cancellationToken);
 
     private readonly NpgsqlDataSource _readSource;
     private readonly ChangeWatchStore _store;
@@ -448,10 +457,13 @@ WHERE after.hit IS NULL
             {
                 var database = reader.GetString(2);
                 changes.Add(new ChangeWatchChange($"plan_force:action:{reader.GetInt64(0)}", "plan_force", Utc(reader.GetDateTime(1)),
-                    $"plan {reader.GetInt64(4)} of query {reader.GetInt64(3)} in {database}: {reader.GetString(5)} by the plan-force ledger", database, reader.GetInt64(3), reader.GetInt64(4)));
+                    $"plan {reader.GetInt64(4)} of query {reader.GetInt64(3)} in {database}: {reader.GetString(5)} by the plan-force ledger{ChangeWatchPlanForcing.Suffix(ChangeWatchPlanForcing.Manual)}", database, reader.GetInt64(3), reader.GetInt64(4)));
             }
         }
 
+        /* #6551: a plan change in a database this server holds as a readable secondary was made on the primary, and the primary's watch records it once.
+           The plan-force ledger (above) is this server's own action and is kept. */
+        var replicaDatabases = await ReadReplicaDatabasesAsync(serverId, end, cancellationToken);
         var gapLimit = CaptureGapLimit(await ForcedPlansFrequencyMinutesAsync(serverId, cancellationToken));
         await using (var command = WithGapLimit(Bind(_readSource.CreateCommand(PlanSnapshotChangesSql), serverId, Mark("plan_snapshots"), naiveEnd), gapLimit))
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
@@ -460,12 +472,19 @@ WHERE after.hit IS NULL
             {
                 var forced = string.Equals(reader.GetString(0), "forced", StringComparison.Ordinal);
                 var database = reader.GetString(2);
+                if (replicaDatabases.Contains(database))
+                {
+                    continue;
+                }
+
                 var time = reader.GetDateTime(1);
                 var queryId = reader.GetInt64(3);
                 var planId = reader.GetInt64(4);
+                /* #6550: the forcing type of the capture the plan was seen in (the previous one for an unforce), so the change says whether the server forced it itself. */
+                var forcingType = ChangeWatchPlanForcing.Suffix(reader.IsDBNull(5) ? null : reader.GetString(5));
                 changes.Add(new ChangeWatchChange(
                     $"plan_force:{(forced ? "snapshot" : "unforced")}:{database}:{queryId}:{planId}:{Stamp(time)}", "plan_force", Utc(time),
-                    $"plan {planId} of query {queryId} in {database}: {(forced ? "forced" : "unforced (in the database's previous forced-plan capture, not in this one)")}",
+                    $"plan {planId} of query {queryId} in {database}: {(forced ? "forced" : "unforced (in the database's previous forced-plan capture, not in this one)")}{forcingType}",
                     database, queryId, planId));
             }
         }
@@ -539,6 +558,14 @@ WHERE after.hit IS NULL
                 {
                     /* #6239 round 3, L9: an agent's own plan change under a change-watch request is recorded and measured, and opens no further request. */
                     await _store.CloseAsync(watch.WatchId, ChangeWatchStore.ResultAgentChange, null, evaluation.ResultJson, cancellationToken);
+                    continue;
+                }
+
+                if (watch.Changes.Count > 0 && watch.Changes.All(c => string.Equals(c.PlanForcingType, ChangeWatchPlanForcing.Auto, StringComparison.Ordinal)))
+                {
+                    /* #6550: automatic plan correction forcing and reverting plans is SQL Server doing its job, and the regression that set it off has its own
+                       alerts. The watch is recorded and measured, and opens no request; a watch that mixes AUTO with any other change still does. */
+                    await _store.CloseAsync(watch.WatchId, ChangeWatchStore.ResultAutoPlanCorrection, null, evaluation.ResultJson, cancellationToken);
                     continue;
                 }
 

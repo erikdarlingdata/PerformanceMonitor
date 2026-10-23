@@ -270,7 +270,7 @@ FROM d";
                     if (DurationMoved(beforeAvg, afterAvg) && (weekAvg is null || DurationMoved(weekAvg.Value, afterAvg)))
                     {
                         measures.Add(new ChangeWatchMeasure($"query_avg_duration_ms:{key.DatabaseId}:{key.QueryId}", "ms", beforeAvg, afterAvg, weekAvg, true,
-                            $"query id {key.QueryId} in database id {key.DatabaseId}; {before.Calls} -> {after.Calls} calls"));
+                            $"read from pg_stat_statements: query id {key.QueryId} in database id {key.DatabaseId}; {before.Calls} -> {after.Calls} calls"));
                     }
                 }
 
