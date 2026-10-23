@@ -94,6 +94,13 @@ public sealed class DarlingMcpNamedTokenTests
         catalog.Where(n => Regex.IsMatch(text, @"(?<![A-Za-z0-9_])" + Regex.Escape(n) + @"(?![A-Za-z0-9_])", RegexOptions.CultureInvariant))
             .OrderBy(n => n, StringComparer.Ordinal).ToList();
 
+    /// <summary>The tools the text points a client at: backticked names, the convention #5789's
+    /// <c>RenderedInstructions_NameOnlyServedTools</c> checks. The legacy settings paragraph
+    /// (<c>DarlingMcpWritePolicy.InstructionsLine</c>) names the claim and submit tools bare, to say which switch serves
+    /// them, and that is not pointing at them.</summary>
+    private static List<string> ToolsPointedAtIn(string text, IEnumerable<string> catalog) =>
+        catalog.Where(n => text.Contains("`" + n + "`", StringComparison.Ordinal)).OrderBy(n => n, StringComparer.Ordinal).ToList();
+
     private static readonly string[] ServerAdminToolNames = { "add_servers", "edit_server", "remove_server", "set_server_action" };
 
     [Fact]
@@ -186,7 +193,7 @@ public sealed class DarlingMcpNamedTokenTests
 
         Assert.Equal(expected, actual);
         var served = await ToolNamesAsync(server, legacy);
-        Assert.Empty(ToolsNamedIn(actual, catalog).Where(n => !served.Contains(n)));
+        Assert.Empty(ToolsPointedAtIn(actual, catalog).Where(n => !served.Contains(n)));
     }
 
     [Fact]
