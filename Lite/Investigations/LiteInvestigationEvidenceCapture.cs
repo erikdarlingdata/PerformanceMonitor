@@ -288,6 +288,14 @@ WHERE b.newest = 1
   AND g.plan_id <> b.plan_id
   AND g.cpu_per_exec_us > 0
   AND b.cpu_per_exec_us >= $5 * g.cpu_per_exec_us
+  -- #6548: SQL Server own housekeeping statements (change tracking cleanup and the like) are not application code. Left
+  -- out BEFORE the row cap, so they cannot use up its rows. Any row of the query carrying the text is enough.
+  AND NOT EXISTS (SELECT 1 FROM v_query_store_stats AS x
+                  WHERE x.server_id = $1
+                    AND x.database_name = b.database_name
+                    AND x.query_id = b.query_id
+                    AND x.last_execution_time >= $2
+                    AND regexp_matches(lower(x.query_text), '" + PerformanceMonitor.Common.InternalStatements.LowerTextPattern + @"'))
 ORDER BY b.cpu_per_exec_us / g.cpu_per_exec_us DESC, b.database_name, b.query_id
 LIMIT $6";
 
