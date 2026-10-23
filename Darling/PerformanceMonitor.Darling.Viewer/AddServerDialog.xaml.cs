@@ -1167,16 +1167,10 @@ public partial class AddServerDialog : Window
             auth, username, host, ServiceAccount: null, Environment.MachineName, Environment.UserDomainName));
         var script = MonitoringGrantScript.Build(
             principal, GrantScriptFinOpsCheck.IsChecked == true, MonitoringGrantScript.IsAzureSqlDatabaseHost(host), host);
-        try
-        {
-            Clipboard.SetText(script);
-            StatusText.Text = $"Copied the grant script for {principal.Name}. Review it, then run it on {host} as a sysadmin.";
-        }
-        catch (System.Runtime.InteropServices.ExternalException ex)
-        {
-            /* The clipboard is held by another process; the operator can click again. */
-            StatusText.Text = $"Could not reach the clipboard ({ex.Message}). Try again.";
-        }
+        /* The shared guard: another process can hold the clipboard, and the operator can click again. */
+        StatusText.Text = PerformanceMonitor.Ui.ClipboardText.TrySetText(script)
+            ? $"Copied the grant script for {principal.Name}. Review it, then run it on {host} as a sysadmin."
+            : "Could not reach the clipboard. Try again.";
     }
 
     private void CancelButton_Click(object sender, RoutedEventArgs e)

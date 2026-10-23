@@ -174,7 +174,7 @@ public static partial class DarlingCliCommands
             DarlingConfig config;
             try
             {
-                config = DarlingConfig.Load(args.ConfigPath);
+                config = LoadConfigForGrantScript(args.ConfigPath);
             }
             catch (Exception ex)
             {

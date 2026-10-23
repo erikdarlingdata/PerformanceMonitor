@@ -1261,6 +1261,10 @@ public static partial class DarlingCliCommands
             : CheckSettingsExitCode.Ok;
     }
 
+    /// <summary>#6472: <c>--grant-script</c>'s configuration load. It sits here with the other verbs' loads: this is a CLI process, so the
+    /// owned set <see cref="DarlingConfig.Load"/> publishes is that of the file the verb was pointed at.</summary>
+    internal static DarlingConfig LoadConfigForGrantScript(string? configPath) => DarlingConfig.Load(configPath);
+
     /// <summary>Formats one server's probe outcome as a PASS/FAIL line (pure — unit-testable).</summary>
     public static string FormatProbeLine(string serverName, ConnectionProbeResult probe)
     {
