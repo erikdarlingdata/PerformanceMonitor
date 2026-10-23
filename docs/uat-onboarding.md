@@ -223,12 +223,12 @@ guided wizard at the end. Parts 3 and 4 cover doing it later.
 ### 1.7 Wait about two minutes
 
 **The first start does real work: it unpacks `pg-runtime.zip`, runs `initdb`, migrates the store, provisions
-the least-privilege roles, and completes a first collection cycle.** The installer says so on its last line:
+the least-privilege roles, and completes a first collection cycle.** The installer now waits for it, up to 7 minutes, showing each step as the service logs it, and ends with
+`Service is ready` and the next steps for this install (open the Viewer, add the first server, the web address if
+the dashboard is on). If the service logs a startup failure, stops, or is not ready in time, the installer prints
+the log lines that explain it and exits with an error.
 
-> `Service is Running. First start does real work (unpack pg-runtime, initdb, store migration, first
-> collection cycle) - give it ~2 minutes.`
-
-**It has not hung. Do not kill it.** The internal `initdb` timeout alone is 180 seconds. Watch the log:
+**It has not hung. Do not kill it.** The internal `initdb` timeout alone is 180 seconds. To watch the log yourself:
 
 ```powershell
 Get-Content "$env:ProgramData\PerformanceMonitorDarling\logs\darling-service_$(Get-Date -Format yyyyMMdd).log" -Wait -Tail 40
@@ -478,6 +478,9 @@ the verb refuses and tells you to start the service first — it will not fall b
 ```
 web dashboard endpoint ENABLED in the control-plane store (config.config_service.web_enabled = true).
 The running service applies this LIVE within one collection sweep (the write self-bumps the reload beacon) — no restart needed.
+
+Open the web dashboard at: http://localhost:5153/
+It asks for the web token. Show it with: PerformanceMonitor.Darling.Service.exe --print-web-token (run elevated).
 ```
 
 followed by, in the service log:

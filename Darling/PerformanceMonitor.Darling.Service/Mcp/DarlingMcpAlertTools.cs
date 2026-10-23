@@ -766,13 +766,15 @@ public sealed partial class DarlingMcpAlertTools
         "the next level (a family route, then the parent channels) on the next firing — the reversible form of " +
         "'send this family to the parent channels for now'. Returns {status:\"updated\", route:{...}} with the route AS " +
         "STORED, {status:\"unchanged\", route:{...}} when it already holds that value (a retry is safe and costs no " +
-        "write); both carry previous {enabled} and undo (the call that sets the previous value back), {status:\"refused\"} for an agent route, or for turning off a route with an Off agent setting (that is done in the Viewer or on the web dashboard; turning it on is allowed), or {status:\"not_found\"}. The running service picks the change up on its next collection sweep, " +
+        "write); both carry previous {enabled} and undo (the call that sets the previous value back), {status:\"refused\"} for an agent route, or for turning off a route with an Off agent setting (that is done in the Viewer or on the web dashboard; turning it on is allowed), or {status:\"not_found\"}. An operator token is not refused: its change to a route with an agent setting goes through update_notification_route and is journaled as route_agent_changed, and it answers as update_notification_route does. The running service picks the change up on its next collection sweep, " +
         "when the write's config_version bump makes it reload its channel configuration. This tool cannot author or " +
         "re-point a route: destinations are bearer secrets, set with create_notification_route / update_notification_route or in the Viewer's Settings window.")]
     public static async Task<string> SetNotificationRouteEnabled(
         NpgsqlDataSource postgres,
         [Description("The route_id to enable or disable (from get_notification_routes).")] int route_id,
-        [Description("true to put the route back in force, false to skip it at resolution while keeping it.")] bool enabled)
+        [Description("true to put the route back in force, false to skip it at resolution while keeping it.")] bool enabled,
+        DarlingMcpServedPolicy? served = null,
+        CancellationToken cancellationToken = default)
     {
         try
         {
@@ -781,6 +783,14 @@ public sealed partial class DarlingMcpAlertTools
             if (existing is null)
             {
                 return Outcome("not_found", $"No notification route with route_id {route_id}.");
+            }
+
+            /* #6542 part 2 (MCP is full admin): an operator-class token changes a route with an agent setting through update_notification_route's
+               store function, which journals it as route_agent_changed, as the Viewer's toggle does. */
+            if (existing.AgentLevel is not null && served?.Policy.OperatorActor is { } operatorActor)
+            {
+                return await UpdateNotificationRouteAsync(postgres, route_id, null, enabled, null, null, null, null, null, null,
+                    RouteDestinationRequest.None, DarlingPasswordKey.Current, null, cancellationToken, null, operatorActor);
             }
 
             if (AgentRouteRefusal(existing, "set_notification_route_enabled") is { } agentRefusal)
@@ -837,11 +847,13 @@ public sealed partial class DarlingMcpAlertTools
         "A route cannot be its own fallback and the fallback must be an existing route: either is refused with " +
         "{status:\"invalid\"}. Returns {status:\"updated\", route:{...}} with the route AS STORED, {status:\"unchanged\", route:{...}} " +
         "when it already holds that value (both carry previous {fallback_route_id} and undo, the call that sets the previous fallback back), or {status:\"not_found\"}. An agent route (agent_level 1 or more) is " +
-        "{status:\"refused\"}: it is changed in the Viewer. Deleting the fallback route clears the reference.")]
+        "{status:\"refused\"}: it is changed in the Viewer, or by an operator token, whose call goes through update_notification_route. Deleting the fallback route clears the reference.")]
     public static async Task<string> SetNotificationRouteFallback(
         NpgsqlDataSource postgres,
         [Description("The route to set the fallback on (from get_notification_routes).")] int route_id,
-        [Description("The route_id of the fallback route, from get_notification_routes. Omit to clear the fallback.")] int? fallback_route_id = null)
+        [Description("The route_id of the fallback route, from get_notification_routes. Omit to clear the fallback.")] int? fallback_route_id = null,
+        DarlingMcpServedPolicy? served = null,
+        CancellationToken cancellationToken = default)
     {
         try
         {
@@ -851,6 +863,14 @@ public sealed partial class DarlingMcpAlertTools
             if (existing is null)
             {
                 return Outcome("not_found", $"No notification route with route_id {route_id}.");
+            }
+
+            /* #6542 part 2: an operator-class token sets an agent route's fallback through update_notification_route's store function. */
+            if (existing.AgentLevel is >= 1 && served?.Policy.OperatorActor is { } operatorActor)
+            {
+                return await UpdateNotificationRouteAsync(postgres, route_id, null, null, null, null, null, null,
+                    fallback_route_id, fallback_route_id is null ? true : (bool?)null, RouteDestinationRequest.None, DarlingPasswordKey.Current, null,
+                    cancellationToken, null, operatorActor);
             }
 
             if (AgentRouteRefusal(existing, "set_notification_route_fallback") is { } agentRefusal)
@@ -1036,9 +1056,14 @@ public sealed partial class DarlingMcpAlertTools
     /// Viewer's Settings window or the web dashboard's admin notification routes page. Null for any other route,
     /// including agent_level 0: that is the route's explicit Off (null inherits, 0 is off, 1 investigates), so it opens
     /// no investigation. It can be turned on over MCP; turning it off or deleting it is <see cref="OffRouteRefusal"/>'s (#6281).
+    /// <para>#6542 part 2 (MCP is full admin): an operator-class caller (<paramref name="operatorActor"/>: a named operator token, or the legacy token
+    /// with writes) passes, so update_notification_route changes every field of an agent route: match, scope, enabled flag, send_resolutions,
+    /// fallback, destinations and agent fields. The store functions take the same actor and refuse any other. set_notification_route_enabled and
+    /// set_notification_route_fallback hand an operator's change to an agent route to update_notification_route. delete_notification_route
+    /// still refuses an agent route for every caller.</para>
     /// </summary>
-    internal static string? AgentRouteRefusal(PgNotificationRouteStore.RouteSummary route, string tool) =>
-        route.AgentLevel is null or < 1
+    internal static string? AgentRouteRefusal(PgNotificationRouteStore.RouteSummary route, string tool, string? operatorActor = null) =>
+        route.AgentLevel is null or < 1 || operatorActor is not null
             ? null
             : Outcome("refused",
                 $"Route {route.RouteId} is an agent route (agent_level {route.AgentLevel}): {tool} does not change it over MCP. " +

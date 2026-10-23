@@ -184,12 +184,7 @@ public static class CollectorScheduleOverlay
     /// <summary>Parses the grid's comma-separated scope exactly the way the Settings window parses
     /// excluded databases (split on comma, trim, drop blanks) — one entry discipline for the two
     /// instruments that must agree on what a name is.</summary>
-    public static List<string> ParseDatabases(string? text) =>
-        (text ?? "")
-            .Split(',')
-            .Select(s => s.Trim())
-            .Where(s => s.Length > 0)
-            .ToList();
+    public static List<string> ParseDatabases(string? text) => CollectorDatabaseScope.Parse(text);
 
     /// <summary>
     /// Enforces what the store and the collection pipeline can honor before the write, so a bad value
