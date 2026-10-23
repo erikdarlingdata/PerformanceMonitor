@@ -503,6 +503,15 @@ END IF; END $$;"),
         new(214, "hasKnownPatterns",
             @"
 DROP TABLE IF EXISTS config.config_known_patterns;"),
+        // V215 (#6569): the module recompile switch. The stored CHECK naming it is the probe's newest sentinel. The rewind puts V196's three-word CHECK
+        // back (it deletes any recompile_module row first, which the old CHECK could not hold), so a re-run of V215 widens it again. Safe on a store that never had it.
+        new(215, "hasServerActionRecompile",
+            @"
+DO $$ BEGIN IF to_regclass('config.config_server_actions') IS NOT NULL THEN
+  DELETE FROM config.config_server_actions WHERE action = 'recompile_module';
+  ALTER TABLE config.config_server_actions DROP CONSTRAINT IF EXISTS ck_config_server_actions_action;
+  ALTER TABLE config.config_server_actions ADD CONSTRAINT ck_config_server_actions_action CHECK (action IN ('force_plan', 'evict_plan', 'kill_session'));
+END IF; END $$;"),
     ];
 
     /// <summary>

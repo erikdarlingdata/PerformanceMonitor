@@ -36,6 +36,9 @@ public sealed record RemediationResult(
     /// <summary>The exact statement a force, unforce or eviction runs (or would run, on a dry run). A force names the database quoted the way <c>QUOTENAME</c> quotes it; an eviction names the handle in its normal form. Null when the result is not about one.</summary>
     public string? Statement { get; init; }
 
+    /// <summary>A module recompile's read of the object it named (#6569): its <c>sys.objects.type_desc</c> (for example <c>SQL_STORED_PROCEDURE</c>). Null for every other action, and when the object was not found.</summary>
+    public string? ObjectType { get; init; }
+
     /// <summary>A kill's facts about the session it named, read in the batch that decided (#5632, step 12). Null for every other action, and when no such session was found.</summary>
     public KillSessionFacts? Session { get; init; }
 
@@ -59,6 +62,10 @@ public sealed record RemediationResult(
         public const string AlreadyForced = "plan_already_forced";
         public const string NotForced = "plan_not_forced";
         public const string NotCached = "plan_not_cached";
+        public const string BadModuleName = "bad_module_name";
+        public const string ModuleNotFound = "module_not_found";
+        public const string NotAModule = "not_a_module";
+        public const string RecompilePermissionDenied = "recompile_permission_denied";
         public const string SessionGone = "session_gone";
         public const string SessionReused = "session_reused";
         public const string OwnSession = "own_session";

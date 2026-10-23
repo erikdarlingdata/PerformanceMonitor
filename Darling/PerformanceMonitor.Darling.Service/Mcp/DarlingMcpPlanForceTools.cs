@@ -41,7 +41,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// needs no write (the plan is not the query's, or is already in the asked state) is journaled once per request, tool, code and hour.</para>
 /// </summary>
 [McpServerToolType]
-public sealed class DarlingMcpPlanForceTools
+public sealed partial class DarlingMcpPlanForceTools
 {
     internal const string ForceToolName = "force_query_store_plan";
     internal const string UnforceToolName = "unforce_query_store_plan";

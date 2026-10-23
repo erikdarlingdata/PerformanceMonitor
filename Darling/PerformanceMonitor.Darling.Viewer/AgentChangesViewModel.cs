@@ -128,6 +128,7 @@ public sealed class AgentChangeViewRow
         AgentChangeKinds.PlanUnforce => "unforce plan",
         AgentChangeKinds.PlanEvict => "evict plan",
         AgentChangeKinds.SessionKill => "kill session",
+        AgentChangeKinds.ModuleRecompile => "recompile module",
         var other => other ?? "",
     };
 

@@ -152,6 +152,8 @@ public static class DarlingWebEndpoints
         "evict_cached_plan",
         /* #5632 step 12: a kill ends a session on a monitored SQL Server through the server action gate; the web has no route for it. */
         "kill_session",
+        /* #6569: a module recompile runs sp_recompile on a monitored SQL Server through the server action gate; the web has no route for it. */
+        "recompile_module",
         /* #5632 step 10: an agent's read of what compiled after its eviction, served over MCP by journal id; no page read mirrors it. */
         "get_compiles_after_evict",
         /* #6230 part B: the incident actions queue a command to the service over MCP; the web has its own routes for them, none a generic read.

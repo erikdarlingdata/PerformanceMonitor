@@ -42,6 +42,7 @@ export function agentKindText(kind) {
   if (kind === "plan_unforce") return "unforce plan";
   if (kind === "plan_evict") return "evict plan";
   if (kind === "session_kill") return "kill session"; // #6310: the Darling Viewer's word for it
+  if (kind === "module_recompile") return "recompile module"; // #6569
   return kind || null;
 }
 

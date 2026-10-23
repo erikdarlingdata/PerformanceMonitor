@@ -151,6 +151,7 @@ public sealed class ServerActionViewRow
         ServerActionNames.ForcePlan => "force or unforce a Query Store plan",
         ServerActionNames.EvictPlan => "evict a plan from the plan cache",
         ServerActionNames.KillSession => "kill a session",
+        ServerActionNames.RecompileModule => "recompile a procedure, function or trigger",
         var other => other,
     };
 

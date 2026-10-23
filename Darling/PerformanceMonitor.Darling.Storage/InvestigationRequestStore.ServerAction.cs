@@ -108,7 +108,7 @@ public sealed partial class InvestigationRequestStore
     {
         if (!System.Linq.Enumerable.Contains(ServerActionNames.All, call.ServerAction, StringComparer.Ordinal))
             return new AgentActionRefusal(AgentActionCodes.UnknownServerAction,
-                "That is not a server action. The actions are force_plan, evict_plan and kill_session.");
+                "That is not a server action. The actions are force_plan, evict_plan, kill_session and recompile_module.");
 
         /* 1: the service-wide switch, the one read the write-time re-check uses (without the lock, here). */
         if (await ActionsOffRefusalAsync(connection, transaction, lockRow: false, cancellationToken) is { } off)
@@ -161,6 +161,7 @@ public sealed partial class InvestigationRequestStore
         AgentChangeKinds.PlanForce or AgentChangeKinds.PlanUnforce => ServerActionNames.ForcePlan,
         AgentChangeKinds.PlanEvict => ServerActionNames.EvictPlan,
         AgentChangeKinds.SessionKill => ServerActionNames.KillSession,
+        AgentChangeKinds.ModuleRecompile => ServerActionNames.RecompileModule,
         _ => null,
     };
 

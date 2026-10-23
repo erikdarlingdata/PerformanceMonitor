@@ -201,6 +201,7 @@ At Level 3, an agent can also change the monitored server. These tools exist:
 - `force_query_store_plan` and `unforce_query_store_plan` (SQL Server).
 - `evict_cached_plan` (SQL Server, not Azure SQL Database).
 - `kill_session` (SQL Server, Azure SQL Database and PostgreSQL).
+- `recompile_module` (SQL Server and Azure SQL Database): runs `sys.sp_recompile` on one procedure, function or trigger, so its next run compiles a new plan. The agent names the database and the two-part `schema.name`; Darling resolves the name in that database first and refuses a name that does not resolve or that is a table, a view or another kind of object. The name goes to the server as a parameter. There is no undo.
 
 Each tool runs as a dry run unless the agent passes `dry_run` as `false`. A dry run returns the exact statement and writes nothing. A dry run still signs in with the remediation login.
 
@@ -252,6 +253,7 @@ Grants for the remediation login:
 |---|---|
 | Force or unforce a plan (SQL Server) | `ALTER` on each database where it forces a plan. |
 | Evict a plan (SQL Server) | `ALTER SERVER STATE`. Without it, an eviction is refused as `evict_permission_denied`. |
+| Recompile a module (SQL Server, Azure SQL Database) | `ALTER` on the procedure, function or trigger. Without it, a recompile is refused as `recompile_permission_denied`. |
 | Kill a session (SQL Server) | `ALTER ANY CONNECTION`. This grant lets the login kill any session on that server. Grant it only where you want an agent to kill. |
 | Kill a session (Azure SQL Database) | A user in each database, with `VIEW DATABASE STATE` and `KILL DATABASE CONNECTION`. |
 | Kill a session (PostgreSQL) | `pg_signal_backend` and `pg_read_all_stats`. |
@@ -272,7 +274,7 @@ A switch cannot be turned on for an action the server's engine cannot run, but i
 
 As a fallback, the store owner can write the table directly.
 
-The actions are `force_plan` (it covers force and unforce), `evict_plan` and `kill_session`. To write the table directly, connect as the store owner and run this statement for each action and server:
+The actions are `force_plan` (it covers force and unforce), `evict_plan`, `kill_session` and `recompile_module`. To write the table directly, connect as the store owner and run this statement for each action and server:
 
 ```sql
 INSERT INTO config.config_server_actions (server_id, action, enabled, set_by)

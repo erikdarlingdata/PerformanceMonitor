@@ -49,6 +49,7 @@ export function serverActionLabel(action) {
   if (action === "force_plan") return "Force or unforce plans";
   if (action === "evict_plan") return "Evict plans from the plan cache";
   if (action === "kill_session") return "Kill sessions";
+  if (action === "recompile_module") return "Recompile procedures, functions and triggers";
   return action;
 }
 
@@ -56,6 +57,7 @@ function serverActionLets(action) {
   if (action === "force_plan") return "force or unforce a Query Store plan";
   if (action === "evict_plan") return "evict a plan from the plan cache";
   if (action === "kill_session") return "kill a session";
+  if (action === "recompile_module") return "recompile a procedure, function or trigger";
   return action;
 }
 

@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -178,6 +178,7 @@ public sealed class PlanForceNoWritePathTests
             nameof(DarlingMcpPlanForceTools) + "." + nameof(DarlingMcpPlanForceTools.EvictCachedPlan),
             nameof(DarlingMcpPlanForceTools) + "." + nameof(DarlingMcpPlanForceTools.ForceQueryStorePlan),
             nameof(DarlingMcpPlanForceTools) + "." + nameof(DarlingMcpPlanForceTools.KillSession),
+            nameof(DarlingMcpPlanForceTools) + "." + nameof(DarlingMcpPlanForceTools.RecompileModule),
             nameof(DarlingMcpPlanForceTools) + "." + nameof(DarlingMcpPlanForceTools.UnforceQueryStorePlan),
             /* #6230: the undo is the way back from a force, run by the same code the web route runs; its gate is the force tools (that server force_plan switch and remediation login). */
             nameof(DarlingMcpPlanUndoTools) + "." + nameof(DarlingMcpPlanUndoTools.UndoPlanChange),
@@ -260,7 +261,7 @@ public sealed class PlanForceNoWritePathTests
             })
             .Select(Path.GetFileName)
             .ToArray();
-        Assert.Equal(new[] { "DarlingMcpPlanForceTools.cs" }, naming);
+        Assert.Equal(new[] { "DarlingMcpPlanForceTools.cs", "DarlingMcpPlanForceTools.RecompileModule.cs" }, naming);
         Assert.DoesNotContain("PlanForceBot.cs", naming);
     }
 
