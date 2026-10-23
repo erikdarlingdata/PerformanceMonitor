@@ -166,7 +166,7 @@ public sealed partial class DarlingMcpServerAdminTools
         "stored, and is never returned. password is the password itself: a value that starts with env: or file: is " +
         "rejected as \"invalid\", because references are set in the configuration file. " +
         "Returns {requested:N, added:N, skipped:N, collided:N, failed:N, results:[{server, " +
-        "status:\"added\"|\"duplicate\"|\"collides\"|\"connection_failed\"|\"not_saved\"|\"invalid\", detail}]}. requested is " +
+        "status:\"added\"|\"duplicate\"|\"collides\"|\"connection_failed\"|\"not_saved\"|\"invalid\", detail, undo}]}. An added entry's undo is the remove_server call for it; every other entry has undo null. requested is " +
         "the number of entries you sent and the four counters SUM to it — every entry lands in exactly one: " +
         "\"added\" → added, \"duplicate\" → skipped, \"collides\" → collided, \"connection_failed\", " +
         "\"not_saved\" and \"invalid\" → failed. Only added servers are monitored; read the other three counters before treating " +
@@ -357,7 +357,7 @@ public sealed partial class DarlingMcpServerAdminTools
                     {
                         results.Add(new ServerResult(entry.Order, entry.DisplayName, AddStatus.Added,
                             DescribeProbe(probeResult, QueryStoreReplicaReply(entry.ProbeConfig, probeResult, logger, revealConnectError,
-                                entry.PlaintextPassword, entry.ProbeConfig.AwsExternalId))));
+                                entry.PlaintextPassword, entry.ProbeConfig.AwsExternalId)), entry.StorageKey));
                     }
                     else if (rowsWritten == InsertKeyClaimed)
                     {
@@ -424,7 +424,7 @@ public sealed partial class DarlingMcpServerAdminTools
         "definition from the central monitoring store; the running service drops it from its collection set within " +
         "one sweep and drops this install's own Extended Events sessions on the server, leaving the shared ones and " +
         "any session another registration of this install keeps. Already-collected historical data is NOT deleted. Returns {status:\"removed\", server, " +
-        "display_name, matched_by:\"exact\"|\"partial\", matched_in:\"config_monitored_servers\", ever_connected} on " +
+        "display_name, matched_by:\"exact\"|\"partial\", matched_in:\"config_monitored_servers\", ever_connected, previous (the removed definition, no password, no AWS external ID), undo (the add_servers call that re-adds it, with a password placeholder), undo_note (what a re-add does not bring back)} on " +
         "success — ever_connected says whether the connected-servers registry (populated on a server's first " +
         "successful connection) also had a row for it, i.e. whether any history exists under its id; " +
         "{status:\"ambiguous\", ...} as above; or {status:\"not_found\", ...} when no definition matches the name. A " +
@@ -521,6 +521,9 @@ public sealed partial class DarlingMcpServerAdminTools
             var resolved = target.Candidates[0];
             var resolvedDefinition = definitions.First(d => d.Server.ServerId == resolved.ServerId);
 
+            /* #6403: the definition as it stood, read before the delete, for the answer's previous and undo. */
+            var removedRow = await new PostgresServerEditStore(postgres).ReadRowAsync(resolved.ServerId, CancellationToken.None);
+
             /* The server's tag assignments go in the same transaction as its definition: server_id is a fixed hash
                of the connection, so a re-added server would otherwise get its old tags back and rejoin
                tag-scoped alert rules. */
@@ -594,7 +597,7 @@ public sealed partial class DarlingMcpServerAdminTools
             }
 
             return affected > 0
-                ? RemovedAnswer(resolvedDefinition, target.MatchedBy)
+                ? RemovedAnswer(resolvedDefinition, target.MatchedBy, removedRow)
                 : Outcome("not_found",
                     $"'{resolved.DisplayName}' was defined when this call resolved it but its definition was gone by the time the delete ran (a concurrent remove); nothing was changed.");
         }
@@ -617,7 +620,7 @@ public sealed partial class DarlingMcpServerAdminTools
 
     /// <summary>One per-server outcome (a <see cref="AddStatus"/> value) with a human-readable <see cref="Detail"/>;
     /// <see cref="Order"/> restores input order in the aggregate.</summary>
-    internal sealed record ServerResult(int Order, string Server, string Status, string Detail);
+    internal sealed record ServerResult(int Order, string Server, string Status, string Detail, string? UndoServer = null);
 
     /// <summary>
     /// The per-row <c>status</c> vocabulary of <c>add_servers</c> — the five outcomes an entry can have, as
@@ -711,7 +714,7 @@ public sealed partial class DarlingMcpServerAdminTools
     /// storage name and <c>kind</c> says which of a machine's registrations it was (plain, read-only, per-database), so
     /// a wrong pick shows at once (#4734). Pure, so the shape unit-tests without a store.
     /// </summary>
-    internal static string RemovedAnswer(ServerDefinition resolved, string matchedBy) =>
+    internal static string RemovedAnswer(ServerDefinition resolved, string matchedBy, ServerEditRow? row = null) =>
         JsonSerializer.Serialize(new
         {
             status = "removed",
@@ -728,7 +731,69 @@ public sealed partial class DarlingMcpServerAdminTools
                     + "For a server nothing else monitors, an operator runs PerformanceMonitor.Darling.Service.exe --drop-xe-sessions --print-sql, which prints the DROP statements, and runs them on that server. "
                     + "The named form (--drop-xe-sessions <server>) works only for a server this service still monitors, so it had to run before this removal."
                 : "The definition is deleted. This server had never connected (no connected-servers registry row), so no history exists under its id and nothing else references it.",
+            previous = row is null ? null : RemovedPreviousOf(row),
+            undo = row is null ? null : DarlingMcpUndoShape.Call("add_servers", new JsonObject
+            {
+                ["servers_json"] = new JsonArray(RemovedPreviousOf(row)).ToJsonString(),
+            }),
+            undo_note = row is null ? null : RemoveUndoNote,
         }, McpHelpers.JsonOptions);
+
+    /// <summary>The password placeholder the undo's add_servers entry carries: the stored password cannot be read back.</summary>
+    internal const string PasswordPlaceholder = "<password>";
+
+    internal const string RemoveUndoNote =
+        "The undo re-adds the definition, but its password is a placeholder (the stored one cannot be read back) and the add probes the connection first, so replace the placeholder before running it. " +
+        "A re-add does not bring back this server's tag assignments, query-tag assignments and rules, collector schedule overrides and run times, " +
+        "monthly cost, excluded databases, plan-capture and alert-delivery settings, or an AWS external ID; the server comes back enabled. " +
+        "Collected history and the connected-servers registry row were never deleted and reattach by the server id.";
+
+    /// <summary>The removed definition without its password and AWS external ID, in the keys add_servers takes, so it is also the undo's one entry.</summary>
+    private static JsonObject RemovedPreviousOf(ServerEditRow row)
+    {
+        var entry = new JsonObject
+        {
+            ["host"] = row.Host,
+            ["display_name"] = row.Name,
+            ["engine"] = row.Engine,
+            ["auth"] = AuthWord(row.Auth),
+        };
+        if (row.Database is not null)
+        {
+            entry["database"] = row.Database;
+        }
+
+        if (row.Username is not null)
+        {
+            entry["username"] = row.Username;
+        }
+
+        if (IsSecretAuth(row.Auth))
+        {
+            entry["password"] = PasswordPlaceholder;
+        }
+
+        if (PerformanceMonitor.Collectors.MonitoredEngineKind.ParseConfiguredEngine(row.Engine) == PerformanceMonitor.Collectors.CollectorTargetEngine.PostgreSql)
+        {
+            entry["port"] = row.Port;
+        }
+
+        entry["encrypt_mode"] = row.EncryptMode;
+        entry["trust_server_certificate"] = row.TrustServerCertificate;
+        entry["read_only_intent"] = row.ReadOnlyIntent;
+        entry["multi_subnet_failover"] = row.MultiSubnetFailover;
+        if (!string.IsNullOrEmpty(row.QueryStoreReplica))
+        {
+            entry["query_store_replica"] = row.QueryStoreReplica;
+        }
+
+        if (row.AwsRoleArn is not null)
+        {
+            entry["aws_role_arn"] = row.AwsRoleArn;
+        }
+
+        return entry;
+    }
 
     /// <summary>
     /// The definitions read behind <c>remove_server</c>: every row of the table the DELETE targets, with its
@@ -1750,7 +1815,14 @@ ON CONFLICT (server_id) DO NOTHING";
             skipped = counters["skipped"],
             collided = counters["collided"],
             failed = counters["failed"],
-            results = ordered.Select(r => new { server = r.Server, status = r.Status, detail = r.Detail }),
+            /* #6403: an added server's undo is the remove_server call for its storage name; a skipped, refused or failed entry changed nothing and has none. */
+            results = ordered.Select(r => new
+            {
+                server = r.Server,
+                status = r.Status,
+                detail = r.Detail,
+                undo = r.UndoServer is null ? null : DarlingMcpUndoShape.Call("remove_server", new JsonObject { ["server_name"] = r.UndoServer }),
+            }),
         }, McpHelpers.JsonOptions);
     }
 
