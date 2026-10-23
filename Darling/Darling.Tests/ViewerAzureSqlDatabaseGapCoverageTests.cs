@@ -203,6 +203,13 @@ public sealed class ViewerAzureSqlDatabaseGapCoverageTests
         Assert.Contains("Azure SQL Database", note, StringComparison.Ordinal);
         Assert.Contains("running_jobs", note, StringComparison.Ordinal);
 
+        /* #6457: the sentence leads with what the engine lacks, the way the web says "no SQL Agent", and the
+           collector comes after it, not first. */
+        Assert.StartsWith(ServerName + " runs on Azure SQL Database (EngineEdition 5), which does not have the SQL Agent running-job snapshot", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("AppliesTo", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("collector does not run", note, StringComparison.Ordinal);
+        Assert.Contains("and never will.", note, StringComparison.Ordinal);
+
         Assert.Null(ViewerServerTab.EngineGapNote(ServerName, OnPremEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs"));
         Assert.Null(ViewerServerTab.EngineGapNote(
             ServerName, CollectorEngineCapability.AzureManagedInstanceEngineEdition, MonitoredEngineKind.SqlServer, "running_jobs"));

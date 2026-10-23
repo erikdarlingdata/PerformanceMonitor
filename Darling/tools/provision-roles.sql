@@ -1843,7 +1843,7 @@ BEGIN
    IF v_moved
       AND COALESCE(OLD.encrypted_password, '') <> ''
       AND NEW.encrypted_password IS NOT DISTINCT FROM OLD.encrypted_password THEN
-      RAISE EXCEPTION '%', 'Changing how this server is reached needs its password again: it is stored encrypted and this surface cannot read it back.' USING ERRCODE = 'PW002';
+      RAISE EXCEPTION '%', 'Changing the host, port or any other connection setting of this server needs its password sent with the change, because a saved password is only ever sent to the server it was saved for. Send the password together with the new settings.' USING ERRCODE = 'PW002';
    END IF;
 
    -- A new AWS role (#5452) never inherits an external ID stored for the old one, unseen: the update names the ID

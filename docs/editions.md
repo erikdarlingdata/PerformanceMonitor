@@ -18,7 +18,7 @@ Pick by how you want collection to run — the monitoring brain (collectors, ale
 
 **👉 Not sure? [Start with Lite.](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest)** One download, nothing installed on your server, data flowing in under 5 minutes.
 
-All editions include real-time alerts (email + webhooks), charts and graphs, dark and light themes, CSV export, and a built-in MCP server for AI-powered analysis with tools like Claude. Lite and Dashboard also show alerts in the system tray. All release binaries are digitally signed via [SignPath](https://signpath.io) — no more Windows SmartScreen warnings.
+All editions include real-time alerts (email + webhooks), charts and graphs, Dark, Light and Cool Breeze themes, CSV export, and a built-in MCP server for AI-powered analysis with tools like Claude. Lite and Dashboard also show alerts in the system tray. All release binaries are digitally signed via [SignPath](https://signpath.io) — no more Windows SmartScreen warnings.
 
 ## Edition Comparison
 
@@ -34,7 +34,7 @@ All editions include real-time alerts (email + webhooks), charts and graphs, dar
 | Graphical plan viewer | Built-in, 37-rule PlanAnalyzer | Built-in, 37-rule PlanAnalyzer | Built-in, 37-rule PlanAnalyzer |
 | Standalone plan viewer | Open/paste/drag `.sqlplan` | Open/paste/drag `.sqlplan` | Open/paste/drag `.sqlplan` |
 | Alerts (tray + email + webhooks) | Yes | Email + webhooks (headless) | Yes |
-| Themes | Dark and light | Dark and light | Dark and light |
+| Themes | Dark, Light and Cool Breeze, with per-color overrides | Dark, Light and Cool Breeze, with per-color overrides (viewer) | Dark, Light and Cool Breeze |
 | Web dashboard | Not available | Optional, off by default (port 5153) | Not available |
 | Portability | Single executable | Portable service + viewer zip (Windows), service tarball (Linux) | Server-bound |
 | SQL Server collectors | 43 (the long-running-query trace is opt-in) | 44 (adds a forced-plan collector) | Its own set, installed on the target |
@@ -43,4 +43,4 @@ All editions include real-time alerts (email + webhooks), charts and graphs, dar
 | Agent changes on a monitored server (force or unforce a Query Store plan, evict a cached plan, kill a session) | Not available | Yes, one switch per server and action, all off until you turn them on | Not available |
 | Query tags (name a group of queries and see its resource use) | Yes | Yes | Not available |
 | Notification routes limited to a server or a tag | Yes | Yes | Not available |
-| MCP server (LLM integration) | Built-in (113 tools, 97 served by default) | On request (247 tools, 180 served by default) | Built into Dashboard (66 tools) |
+| MCP server (LLM integration) | Built-in (113 tools, 97 served by default) | On request (248 tools, 180 served by default) | Built into Dashboard (66 tools) |
