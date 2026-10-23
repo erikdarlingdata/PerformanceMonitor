@@ -14,8 +14,8 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #6609: a listener URL the service logs puts an IPv6 host in brackets, so a browser (and the installer, which
-/// reads the web dashboard address from that log line) can open it.
+/// #6609: a listener URL the service logs puts an IPv6 host in brackets, so a browser (and anything that
+/// reads the address back from the log line) can open it.
 /// </summary>
 public sealed class DarlingListenUrlTests
 {
@@ -38,6 +38,15 @@ public sealed class DarlingListenUrlTests
     public void FormatHost_BoundAddress_MatchesTheStringForm(string listen, string expected)
     {
         Assert.Equal(expected, DarlingListenUrl.FormatHost(IPAddress.Parse(listen)));
+    }
+
+    [Theory]
+    [InlineData("fd00::5", "[fd00::5] or localhost")]
+    [InlineData("192.168.1.205", "192.168.1.205 or localhost")]
+    [InlineData("myhost", "myhost or localhost")]
+    public void OidcRedirectHosts_BracketAnIPv6Listen(string listen, string expected)
+    {
+        Assert.Equal(expected, DarlingWebHostService.DescribeOidcRedirectHosts(listen));
     }
 
     [Fact]

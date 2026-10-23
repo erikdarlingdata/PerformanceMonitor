@@ -466,6 +466,11 @@ public sealed class DarlingWebHostService : BackgroundService
         + DarlingHostBinding.MinimumTokenLength + " characters and " + DarlingHostBinding.MinimumDistinctTokenCharacters
         + " different ones before it can make changes. Set a longer token in darling.json and restart the service.";
 
+    /// <summary>The host slot of the OIDC redirect-URI line a start logs (#6609): the URI the operator registers at the IdP,
+    /// so an IPv6 listen is bracketed the way the redirect_uri the service sends (built from the request's Host header) is.</summary>
+    internal static string DescribeOidcRedirectHosts(string? listen) =>
+        $"{DarlingListenUrl.FormatHost(listen)} or localhost";
+
     /// <summary>The line a start logs when its token is under the length floor: <paramref name="problem"/> is
     /// <see cref="DarlingHostBinding.DescribeTokenProblem"/>'s text, which never holds the token.</summary>
     internal static string ShortTokenReadsOnlyLine(string problem) =>
@@ -712,7 +717,7 @@ public sealed class DarlingWebHostService : BackgroundService
                             ? "none (every signed-in user gets the edit seat, the shared token's reach)"
                             : $"claim '{oidcClient.Options.RoleClaim}' -> {oidcClient.Options.AdminRoles.Count} admin / {oidcClient.Options.ViewerRoles.Count} viewer value(s), unmatched users refused",
                         effectivePort,
-                        $"{network.Listen} or localhost");
+                        DescribeOidcRedirectHosts(network.Listen));
                 }
             }
 
