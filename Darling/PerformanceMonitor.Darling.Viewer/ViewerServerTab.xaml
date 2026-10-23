@@ -1217,6 +1217,12 @@
                                            Padding="8,4" FontWeight="Bold"
                                            Foreground="{DynamicResource ForegroundBrush}"
                                            Background="#22FFAA00"/>
+                                <!-- #6651: the databases the ranking left out (dropped since an earlier snapshot), and the empty-page
+                                     sentence when that left nothing. -->
+                                <TextBlock x:Name="ProcStatsLeftOutBanner" Visibility="Collapsed" TextWrapping="Wrap"
+                                           Padding="8,4" FontWeight="Bold"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Background="#22FFAA00"/>
                                 <TextBlock x:Name="ProcStatsComparisonBanner" Visibility="Collapsed"
                                            Padding="8,4" FontWeight="Bold"
                                            Foreground="{DynamicResource ForegroundBrush}"
