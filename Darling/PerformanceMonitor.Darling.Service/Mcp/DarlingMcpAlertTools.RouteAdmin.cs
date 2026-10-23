@@ -141,11 +141,6 @@ public sealed partial class DarlingMcpAlertTools
                     change = await ApplyRouteDestinationsAsync(connection, transaction, routeId, destinations, proxies, ring, cancellationToken, operatorActor);
                 }
 
-                if (agent.Any)
-                {
-                    await SetRouteAgentAsync(connection, transaction, routeId, operatorActor!, agent, null, created: true, cancellationToken);
-                }
-
                 await transaction.CommitAsync(cancellationToken);
             }
             catch (PostgresException ex) when (RouteFunctionOutcome(ex) is { } refusal)
@@ -404,7 +399,7 @@ public sealed partial class DarlingMcpAlertTools
                    "changed metric_match, agent_level", as the Viewer's save does. */
                 if (agent.Any || journalsMatchOrFlag)
                 {
-                    await SetRouteAgentAsync(connection, transaction, route_id, operatorActor!, agent, fallback, created: false, cancellationToken, before);
+                    await SetRouteAgentAsync(connection, transaction, route_id, operatorActor!, agent, fallback, created: false, cancellationToken);
                 }
 
                 await transaction.CommitAsync(cancellationToken);
@@ -489,6 +484,11 @@ public sealed partial class DarlingMcpAlertTools
         if (operatorActor is null)
         {
             return AgentFieldsNeedOperator(tool);
+        }
+
+        if (agent.Level == 3)
+        {
+            return Outcome("refused", "Level 3 is not set over MCP.");
         }
 
         draft.AgentLevel = agent.Level ?? draft.AgentLevel;

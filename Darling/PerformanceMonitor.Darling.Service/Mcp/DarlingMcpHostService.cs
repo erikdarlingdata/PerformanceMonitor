@@ -668,7 +668,6 @@ public sealed class DarlingMcpHostService : BackgroundService
             {
                 _logger.LogCritical("MCP named tokens (mcp.tokens) are set but none can be served, and no legacy token is set; MCP server not started.");
                 await DisposeFailedStartAsync();
-                return false;
             }
 
             if (tokenSet.HasNamed)

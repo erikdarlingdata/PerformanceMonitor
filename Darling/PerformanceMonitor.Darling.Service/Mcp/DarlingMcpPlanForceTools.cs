@@ -498,14 +498,14 @@ public sealed class DarlingMcpPlanForceTools
             if (session_id is not > 0)
             {
                 return await RefuseBeforeGateAsync(store, agent_action, tool, RemediationResult.Reasons.BadSession,
-                    "session_id is a positive whole number, the blocking_session_id get_blocking returns. Nothing was run.", ct, agentTokenName);
+                    "session_id is a positive whole number, the blocking_session_id get_blocking returns. Nothing was run.", ct);
             }
 
             var sessionId = session_id.Value;
             if (!TryReadLoginTime(login_time, out var loginUtc))
             {
                 return await RefuseBeforeGateAsync(store, agent_action, tool, BadLoginTime,
-                    "login_time is the blocking_login_time get_blocking returns (ISO 8601, UTC), passed back unchanged. Nothing was run.", ct, agentTokenName);
+                    "login_time is the blocking_login_time get_blocking returns (ISO 8601, UTC), passed back unchanged. Nothing was run.", ct);
             }
 
             if (owner is null)
@@ -523,7 +523,7 @@ public sealed class DarlingMcpPlanForceTools
                    another. Its shape is checked before the gate; the registry and the collected data are checked after it (#5632). */
                 targetDatabase = AzureDatabaseShape(database_name);
                 if (targetDatabase is null)
-                    return await RefuseBeforeGateAsync(store, agent_action, tool, AzureDatabaseRequired, AzureDatabaseRequiredMessage, ct, agentTokenName);
+                    return await RefuseBeforeGateAsync(store, agent_action, tool, AzureDatabaseRequired, AzureDatabaseRequiredMessage, ct);
             }
 
             var target = new AgentActionTarget(resolved.ServerId, resolved.ServerName, idText, targetDatabase);
@@ -665,13 +665,13 @@ public sealed class DarlingMcpPlanForceTools
         if (!PostgresBackendId.TryUnpack(backend_id, out var pid, out var startEpoch))
         {
             return await RefuseBeforeGateAsync(store, agent_action, tool, BadBackendId,
-                "backend_id is the value get_pg_blocking (root_backend_id) or get_pg_session_states (backend_id) returns for the session, a string of digits, passed back unchanged. Nothing was run.", ct, agentTokenName);
+                "backend_id is the value get_pg_blocking (root_backend_id) or get_pg_session_states (backend_id) returns for the session, a string of digits, passed back unchanged. Nothing was run.", ct);
         }
 
         if (session_id is not { } given || given != pid)
         {
             return await RefuseBeforeGateAsync(store, agent_action, tool, BadBackendId,
-                "session_id must be the session's pid (root_pid from get_pg_blocking, pid from get_pg_session_states), and it must agree with the pid inside backend_id. Pass both exactly as the read returned them. Nothing was run.", ct, agentTokenName);
+                "session_id must be the session's pid (root_pid from get_pg_blocking, pid from get_pg_session_states), and it must agree with the pid inside backend_id. Pass both exactly as the read returned them. Nothing was run.", ct);
         }
 
         if (owner is null)
@@ -888,7 +888,7 @@ public sealed class DarlingMcpPlanForceTools
 
         var refusal = new AgentActionRefusal(code, message);
         /* #6542: a named agent token journals under its own name, never the agent_id it passed. */
-        await store.RecordAgentActionRefusalAsync(parsed!.RequestId, agentTokenName ?? parsed.AgentId, tool, refusal.Reason, ct);
+        await store.RecordAgentActionRefusalAsync(parsed!.RequestId, parsed.AgentId, tool, refusal.Reason, ct);
         return DarlingAgentActionGate.RefusalAnswer(refusal);
     }
 
