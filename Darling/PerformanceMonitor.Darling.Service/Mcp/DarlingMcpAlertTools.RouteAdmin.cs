@@ -188,12 +188,14 @@ public sealed partial class DarlingMcpAlertTools
         "A route's own destinations do not stop a change to what it matches. " +
         "Fields: metric_match (" + MatchHelp + "), enabled, scope (scope_server_id or scope_tag_id, the other is cleared; fleet_wide true clears both), " +
         "send_resolutions (inherit, always or never) and fallback_route_id (an existing route; clear_fallback true removes it), plus the destination fields. A field left out keeps its stored value. " +
+        "An operator token sets agent_level 0 to 3, or clear_agent_level true to put the level back to Inherit (null: the next level decides), not both. Clearing the level keeps the four limits, as the Viewer's Inherit does. " +
         "The same rules the Viewer's route window applies hold: * needs a scope, a route is scoped to one server or one tag, a route is not its own fallback, a webhook is an absolute http or https URL, recipients are plain addresses. " +
         "A route whose generic webhook has a signing key keeps its generic URL until the key is removed in the Viewer. " +
         "The database role this tool runs as can neither read nor write a destination column; the row is changed by the store's own config.update_notification_route and config.set_notification_route_destinations functions in one transaction, " +
         "which re-read the row under its lock and refuse a change to an agent route from any caller that is not an operator token. " +
         "Use set_notification_route_enabled to turn a route off and on without the rest. " +
         "The answer's previous is the route before the change and undo is the update_notification_route call that puts the match, scope, enabled flag, resolution override and fallback back. " +
+        "For an operator token undo puts the agent fields back too: agent_level and the four limits, or clear_agent_level true when the level was Inherit. " +
         "A webhook URL or key is never shown, so to put one back pass its earlier value again in its field; destinations.previous says whether one was saved (the host for Teams and Slack). The earlier recipient list is shown, and undo.arguments carries it as email_recipients. " +
         "Returns {status:\"updated\", route, previous, destinations:{changed, now, previous}, undo}, or {status:\"unchanged\", route, previous, undo} when nothing differs.")]
     public static Task<string> UpdateNotificationRoute(
@@ -217,6 +219,7 @@ public sealed partial class DarlingMcpAlertTools
         [Description("Operator token only: requests per day, 1 to 500. Omit to keep.")] int? agent_max_per_day = null,
         [Description("Operator token only: lease minutes, 5 to 120. Omit to keep.")] int? agent_lease_minutes = null,
         [Description("Operator token only: expiry minutes, 15 to 1440. Omit to keep.")] int? agent_expiry_minutes = null,
+        [Description("Operator token only: true puts agent_level back to Inherit (null), so the next level decides. The limits are kept. Not with agent_level.")] bool? clear_agent_level = null,
         DarlingMcpServedPolicy? served = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
@@ -224,7 +227,7 @@ public sealed partial class DarlingMcpAlertTools
             postgres, route_id, metric_match, enabled, scope_server_id, scope_tag_id, fleet_wide, send_resolutions, fallback_route_id, clear_fallback,
             new RouteDestinationRequest(teams_webhook_url, slack_webhook_url, generic_webhook_url, pagerduty_routing_key, email_recipients),
             DarlingPasswordKey.Current, logger, cancellationToken,
-            new RouteAgentRequest(agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes),
+            new RouteAgentRequest(agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes, clear_agent_level == true),
             served?.Policy.OperatorActor);
 
     /// <summary>The edit: the match, scope and flag columns and the destinations in one transaction.</summary>
@@ -252,6 +255,15 @@ public sealed partial class DarlingMcpAlertTools
             {
                 return AgentFieldsNeedOperator("update_notification_route");
             }
+
+            if (agent.ClearLevel && agent.Level.HasValue)
+            {
+                return Outcome("invalid", "Pass agent_level to set a level, or clear_agent_level true to put it back to Inherit, not both.");
+            }
+
+            /* Only the agent fields that differ from the stored row are written, so an undo that carries all five (L5 of the #6593 review)
+               changes nothing it does not have to, and a call that changes nothing still answers unchanged. */
+            agent = agent.Narrowed(existing);
 
             if (scope_server_id.HasValue && scope_tag_id.HasValue)
             {
@@ -363,7 +375,7 @@ public sealed partial class DarlingMcpAlertTools
                     status = "unchanged",
                     route = RouteWritePayload(existing),
                     previous = RouteWritePayload(existing),
-                    undo = UndoCall("update_notification_route", UndoArguments(existing, null)),
+                    undo = UndoCall("update_notification_route", UndoArguments(existing, null, operatorActor is not null)),
                 }, McpHelpers.JsonOptions);
             }
 
@@ -431,7 +443,7 @@ public sealed partial class DarlingMcpAlertTools
                 undo = new
                 {
                     tool = "update_notification_route",
-                    arguments = UndoArguments(existing, change),
+                    arguments = UndoArguments(existing, change, operatorActor is not null),
                     destinations = change is { Fields.Count: > 0 }
                         ? "A webhook URL or key is never shown. To put one back, pass its earlier value again in the same field (destinations.previous says whether one was saved). The earlier recipient list is in the arguments as email_recipients."
                         : null,
@@ -445,12 +457,22 @@ public sealed partial class DarlingMcpAlertTools
     }
 
     /// <summary>The agent fields a route write carries (#6542 part 2): each null keeps the stored value. The fallback goes through
-    /// config.update_notification_route with the match, scope and flags.</summary>
-    internal sealed record RouteAgentRequest(int? Level, int? PerHour, int? PerDay, int? LeaseMinutes, int? ExpiryMinutes)
+    /// config.update_notification_route with the match, scope and flags. <paramref name="ClearLevel"/> (L5 of the #6593 review) puts the
+    /// level back to Inherit (NULL) and keeps the limits, as the Viewer's route window saves an Inherit.</summary>
+    internal sealed record RouteAgentRequest(int? Level, int? PerHour, int? PerDay, int? LeaseMinutes, int? ExpiryMinutes, bool ClearLevel = false)
     {
         internal static readonly RouteAgentRequest None = new(null, null, null, null, null);
 
-        internal bool HasAgentField => Level.HasValue || PerHour.HasValue || PerDay.HasValue || LeaseMinutes.HasValue || ExpiryMinutes.HasValue;
+        internal bool HasAgentField => Level.HasValue || ClearLevel || PerHour.HasValue || PerDay.HasValue || LeaseMinutes.HasValue || ExpiryMinutes.HasValue;
+
+        /// <summary>This request without the fields that already hold the stored value.</summary>
+        internal RouteAgentRequest Narrowed(PgNotificationRouteStore.RouteSummary stored) => new(
+            Level == stored.AgentLevel ? null : Level,
+            PerHour == stored.AgentMaxPerHour ? null : PerHour,
+            PerDay == stored.AgentMaxPerDay ? null : PerDay,
+            LeaseMinutes == stored.AgentLeaseMinutes ? null : LeaseMinutes,
+            ExpiryMinutes == stored.AgentExpiryMinutes ? null : ExpiryMinutes,
+            ClearLevel && stored.AgentLevel is not null);
 
         internal bool Any => HasAgentField;
 
@@ -460,7 +482,7 @@ public sealed partial class DarlingMcpAlertTools
             get
             {
                 var names = new List<string>();
-                if (Level.HasValue) names.Add("agent_level");
+                if (Level.HasValue || ClearLevel) names.Add("agent_level");
                 if (PerHour.HasValue) names.Add("agent_max_per_hour");
                 if (PerDay.HasValue) names.Add("agent_max_per_day");
                 if (LeaseMinutes.HasValue) names.Add("agent_lease_minutes");
@@ -491,7 +513,7 @@ public sealed partial class DarlingMcpAlertTools
             return AgentFieldsNeedOperator(tool);
         }
 
-        draft.AgentLevel = agent.Level ?? draft.AgentLevel;
+        draft.AgentLevel = agent.ClearLevel ? null : agent.Level ?? draft.AgentLevel;
         draft.AgentMaxPerHour = agent.PerHour ?? draft.AgentMaxPerHour;
         draft.AgentMaxPerDay = agent.PerDay ?? draft.AgentMaxPerDay;
         draft.AgentLeaseMinutes = agent.LeaseMinutes ?? draft.AgentLeaseMinutes;
@@ -558,8 +580,10 @@ public sealed partial class DarlingMcpAlertTools
     internal static void LogRouteWrite(ILogger? logger, string tool, string caller, int routeId, string fields) =>
         logger?.LogInformation("MCP route write {Tool} by {Identity}: route {RouteId}, fields changed: {Fields}", tool, caller, routeId, fields);
 
-    /// <summary>The update call that puts a route's fields back to <paramref name="existing"/>'s values, and the recipient list back when the call changed it (<c>-</c> removes a list that was empty).</summary>
-    private static Dictionary<string, object?> UndoArguments(PgNotificationRouteStore.RouteSummary existing, RouteDestinationChange? change)
+    /// <summary>The update call that puts a route's fields back to <paramref name="existing"/>'s values, and the recipient list back when the call changed it (<c>-</c> removes a list that was empty).
+    /// With <paramref name="agentFields"/> (an operator token, the only caller that may set them) it puts the agent level and the four limits back too,
+    /// with clear_agent_level true when the level was Inherit (L5 of the #6593 review). Any other caller cannot change them, so its undo leaves them out.</summary>
+    private static Dictionary<string, object?> UndoArguments(PgNotificationRouteStore.RouteSummary existing, RouteDestinationChange? change, bool agentFields)
     {
         var args = new Dictionary<string, object?>
         {
@@ -588,6 +612,23 @@ public sealed partial class DarlingMcpAlertTools
         else
         {
             args["clear_fallback"] = true;
+        }
+
+        if (agentFields)
+        {
+            if (existing.AgentLevel is { } level)
+            {
+                args["agent_level"] = level;
+            }
+            else
+            {
+                args["clear_agent_level"] = true;
+            }
+
+            args["agent_max_per_hour"] = existing.AgentMaxPerHour;
+            args["agent_max_per_day"] = existing.AgentMaxPerDay;
+            args["agent_lease_minutes"] = existing.AgentLeaseMinutes;
+            args["agent_expiry_minutes"] = existing.AgentExpiryMinutes;
         }
 
         if (change?.PreviousRecipients is { } previousRecipients)
