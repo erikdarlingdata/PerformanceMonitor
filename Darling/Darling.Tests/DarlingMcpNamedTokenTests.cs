@@ -153,8 +153,8 @@ public sealed class DarlingMcpNamedTokenTests
         var operatorText = await InstructionsAsync(server, OperatorToken);
         var agentText = await InstructionsAsync(server, AgentToken);
 
-        Assert.Empty(ToolsNamedIn(operatorText, catalog).Where(n => !operatorTools.Contains(n)));
-        Assert.Empty(ToolsNamedIn(agentText, catalog).Where(n => !agentTools.Contains(n)));
+        Assert.DoesNotContain(ToolsNamedIn(operatorText, catalog), n => !operatorTools.Contains(n));
+        Assert.DoesNotContain(ToolsNamedIn(agentText, catalog), n => !agentTools.Contains(n));
 
         /* The case the review found: the mute step is in NeverAgentTools, so the agent's Workflow line must not name it. */
         Assert.DoesNotContain("mute_analysis_finding", agentTools);
@@ -193,7 +193,7 @@ public sealed class DarlingMcpNamedTokenTests
 
         Assert.Equal(expected, actual);
         var served = await ToolNamesAsync(server, legacy);
-        Assert.Empty(ToolsPointedAtIn(actual, catalog).Where(n => !served.Contains(n)));
+        Assert.DoesNotContain(ToolsPointedAtIn(actual, catalog), n => !served.Contains(n));
     }
 
     [Fact]
@@ -352,7 +352,7 @@ public sealed class DarlingMcpNamedTokenTests
         {
             Compare = (presented, expected) =>
             {
-                comparisons.Add(expected![..expected.IndexOf('-', StringComparison.Ordinal)]);
+                comparisons.Add(expected is null ? string.Empty : expected[..expected.IndexOf('-', StringComparison.Ordinal)]);
                 return DarlingHostBinding.FixedTimeTokenEquals(presented, expected);
             },
         };
@@ -397,6 +397,21 @@ public sealed class DarlingMcpNamedTokenTests
             Assert.Contains(name, problem, StringComparison.Ordinal);
         if (!string.IsNullOrEmpty(token))
             Assert.DoesNotContain(token, problem, StringComparison.Ordinal);
+    }
+
+    /// <summary>#6542 part 2 (item 10 of #6556's security review): a named token whose reference cannot be read says which entry it is,
+    /// <c>mcp.tokens[name].token</c>, and never names the legacy setting <c>mcp.network.token</c>.</summary>
+    [Fact]
+    public void AnUnreadableNamedToken_NamesItsOwnSetting_NotTheLegacyOne()
+    {
+        var entry = Entry("ops-lead", "env:DARLING_TEST_6542_TOKEN_THAT_IS_NOT_SET", "operator");
+
+        var (token, unreadable) = DarlingMcpTokenSet.ResolveEntry(entry);
+
+        Assert.Equal("", token);
+        Assert.NotNull(unreadable);
+        Assert.Contains("mcp.tokens[ops-lead].token", unreadable, StringComparison.Ordinal);
+        Assert.DoesNotContain("mcp.network", unreadable, StringComparison.Ordinal);
     }
 
     [Fact]
