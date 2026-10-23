@@ -315,6 +315,36 @@ public sealed class ChangeWatchDetectionLiveTests
         });
     }
 
+    /* #6551 review: the secondary rule is the shared one (an availability-group snapshot older than an hour is not trusted). The collectors can stop at or
+       before a failover, and a day-old SECONDARY row would then drop this node's own plan changes for a day. */
+    [Fact]
+    public async Task AStaleSecondarySnapshot_IsNotTrusted_AndDropsNoPlanChange()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            var first = h.Now.AddMinutes(-50);
+            var second = h.Now.AddMinutes(-40);
+            await ForcedPlanCaptureAsync(h.Connection, first, "Replicated", ct);
+            await ForcedPlanCaptureAsync(h.Connection, second, "Replicated", ct, (1, 10));
+
+            static bool Snapshot(ChangeWatchChange c) => c.Key.StartsWith("plan_force:snapshot:", StringComparison.Ordinal);
+
+            /* The newest snapshots say SECONDARY, but they are three hours old: the collectors stopped. */
+            await SeedAsync(h.Connection, "ag_replica_states", new Dictionary<string, object>
+            {
+                ["server_id"] = ServerId, ["server_name"] = ServerName, ["collection_time"] = Naive(h.Now.AddHours(-3)), ["ag_name"] = "AG1",
+                ["replica_server_name"] = ServerName, ["role_desc"] = "SECONDARY", ["is_local"] = true,
+            }, ct);
+            await SeedAsync(h.Connection, "ag_database_replica_states", new Dictionary<string, object>
+            {
+                ["server_id"] = ServerId, ["server_name"] = ServerName, ["collection_time"] = Naive(h.Now.AddHours(-3)), ["ag_name"] = "AG1",
+                ["database_name"] = "Replicated", ["replica_server_name"] = ServerName, ["is_local"] = true,
+            }, ct);
+
+            Assert.Single((await h.NewPass().ReadChangesAsync(ServerId, first.AddMinutes(-1), h.Now, ct)).Where(Snapshot));
+        });
+    }
+
     [Fact]
     public async Task MarkerRows_DoNotFailDetection_AndALaterCapturedDatabaseIsABaseline_NotAForce()
     {

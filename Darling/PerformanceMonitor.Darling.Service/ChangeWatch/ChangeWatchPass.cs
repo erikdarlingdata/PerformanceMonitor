@@ -19,6 +19,7 @@ using NpgsqlTypes;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitor.Darling.Storage;
@@ -149,36 +150,13 @@ WHERE after.hit IS NULL
                   WHERE a.server_id = $1 AND a.database_name = p.database_name AND a.query_id = p.query_id AND a.plan_id = p.plan_id
                     AND a.outcome = 'succeeded' AND a.action_time > n.prev_t AND a.action_time <= n.t)";
 
-    /* #6551: the databases this server holds as a SECONDARY replica of an availability group, from the newest snapshot of the two availability-group
-       collectors in the last day ($2). A readable secondary's Query Store holds the primary's forced plans, replicated, so a plan change it shows is
-       the primary's, which the primary's own watch reports. Both snapshots must agree: the database row is the local copy (is_local) and the replica
-       row of the same group is the local replica (is_local) with role SECONDARY. After a failover the newest snapshot says PRIMARY and nothing is
-       left out. A server with no availability-group rows returns nothing. */
-    internal const string ReplicaDatabasesSql = @"
-SELECT DISTINCT d.database_name
-FROM collect.ag_database_replica_states AS d
-JOIN collect.ag_replica_states AS r
-  ON r.server_id = d.server_id AND r.ag_name = d.ag_name AND r.is_local AND r.role_desc = 'SECONDARY'
- AND r.collection_time = (SELECT max(x.collection_time) FROM collect.ag_replica_states AS x WHERE x.server_id = $1 AND x.collection_time > $2)
-WHERE d.server_id = $1 AND d.is_local AND d.database_name IS NOT NULL
-  AND d.collection_time = (SELECT max(y.collection_time) FROM collect.ag_database_replica_states AS y WHERE y.server_id = $1 AND y.collection_time > $2)";
-
-    /// <summary>#6551: the databases of <paramref name="serverId"/> that are readable-secondary copies, whose plan-snapshot changes are the primary's.</summary>
-    internal async Task<HashSet<string>> ReadReplicaDatabasesAsync(int serverId, DateTime end, CancellationToken cancellationToken)
-    {
-        var databases = new HashSet<string>(StringComparer.Ordinal);
-        await using var command = _readSource.CreateCommand(ReplicaDatabasesSql);
-        command.CommandTimeout = _commandTimeoutSeconds;
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Naive(end.AddDays(-1)) });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            databases.Add(reader.GetString(0));
-        }
-
-        return databases;
-    }
+    /// <summary>#6551: the databases of <paramref name="serverId"/> that are readable-secondary copies, whose plan-snapshot changes are the primary's.
+    /// The rule is the shared one every other read of the store uses (<see cref="PgSecondaryReplicaScope"/>): the newest availability-group snapshots at or
+    /// before <paramref name="end"/>, both within <see cref="AgReplicaScope.SnapshotFreshness"/>, and nothing is left out when they are stale or unreadable.
+    /// A snapshot older than that is not trusted to say this node is still a secondary: when the collectors stopped at or before a failover, a day-old
+    /// SECONDARY row would drop this node's real plan changes.</summary>
+    internal async Task<IReadOnlySet<string>> ReadReplicaDatabasesAsync(int serverId, DateTime end, CancellationToken cancellationToken)
+        => await PgSecondaryReplicaScope.ReadAsync(_readSource, serverId, end, _logger, cancellationToken);
 
     private readonly NpgsqlDataSource _readSource;
     private readonly ChangeWatchStore _store;
