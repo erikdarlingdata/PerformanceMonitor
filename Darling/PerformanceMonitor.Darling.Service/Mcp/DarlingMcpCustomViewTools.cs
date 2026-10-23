@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -60,7 +61,7 @@ public sealed class DarlingMcpCustomViewTools
     {
         try
         {
-            var store = new CustomViewStore(postgres);
+            var store = new CustomViewStore(postgres, McpCommandDeadlines.ReadSeconds);
             var views = await store.ListAsync(allPersonal: true, folder: folder?.Trim());
             return DarlingWebEndpoints.BuildSummariesNode(views).ToJsonString(McpHelpers.JsonOptions);
         }
@@ -80,7 +81,7 @@ public sealed class DarlingMcpCustomViewTools
     {
         try
         {
-            var store = new CustomViewStore(postgres);
+            var store = new CustomViewStore(postgres, McpCommandDeadlines.ReadSeconds);
             var result = await store.GetAsync(view_id);
             return result is CustomViewResult.Ok ok
                 ? DarlingWebEndpoints.BuildFullViewNode(ok.View!).ToJsonString(McpHelpers.JsonOptions)
@@ -152,7 +153,7 @@ public sealed class DarlingMcpCustomViewTools
                 return Outcome("invalid", validation.Error!);
             }
 
-            var store = new CustomViewStore(postgres);
+            var store = new CustomViewStore(postgres, McpCommandDeadlines.ReadSeconds);
             var result = await store.CreateAsync(
                 name, description, definition, updatedBy: DarlingWebEndpoints.McpEditorPrincipal, folder: folder, personal: false);
             return result switch
@@ -199,7 +200,7 @@ public sealed class DarlingMcpCustomViewTools
                 return Outcome("invalid", validation.Error!);
             }
 
-            var store = new CustomViewStore(postgres);
+            var store = new CustomViewStore(postgres, McpCommandDeadlines.ReadSeconds);
 
             /* #3541 A14: read the row first so an OMITTED description is carried forward rather than written as
                NULL. The store's UpdateAsync is a full replacement (right for the web editor, which always sends
@@ -251,7 +252,7 @@ public sealed class DarlingMcpCustomViewTools
     {
         try
         {
-            var store = new CustomViewStore(postgres);
+            var store = new CustomViewStore(postgres, McpCommandDeadlines.ReadSeconds);
             var before = await store.GetAsync(view_id);
             if (before is not CustomViewResult.Ok beforeOk || beforeOk.View is null)
             {

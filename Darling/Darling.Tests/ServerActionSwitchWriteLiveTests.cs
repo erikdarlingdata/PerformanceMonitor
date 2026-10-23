@@ -277,6 +277,57 @@ public sealed class ServerActionSwitchWriteLiveTests
         });
     }
 
+    /* #6600: the managed store's shape. The web reads as the viewer role; a signed-in admin's access check goes through the arm, so the page can
+       decide, and the switch change is journaled by the person. */
+    [Fact]
+    public async Task OnTheManagedStore_ASignedInAdminSeat_ChangesASwitchThroughTheArm_AndCanDecideIsTrue()
+    {
+        await WithWebAsync("viewer", async (owner, _, Send, ct) =>
+        {
+            var list = await Send("GET", "/api/server-actions", null);
+            Assert.Equal(200, list.Status);
+            Assert.True((bool)list.Body!["can_decide"]!);
+            Assert.True((bool)list.Body["signed_in_admin"]!);
+
+            Assert.Equal(200, (await Send("PUT", "/api/servers/1/actions/force_plan", "application/json", "{\"enabled\":true}")).Status);
+            Assert.Equal("True", await ScalarAsync(owner, "SELECT enabled FROM config.config_server_actions WHERE server_id = 1 AND action = 'force_plan'", ct));
+            Assert.Equal("person:alice", await ScalarAsync(owner, "SELECT actor FROM config.investigation_journal WHERE event = 'server_action_switched'", ct));
+        }, seat: new DarlingWebSeat("alice", true), arm: AdminArmShape.Admin, managedStore: true);
+    }
+
+    /* #6600: an OIDC viewer seat never opens the arm (its login is refused here, so opening it would fail): it lists, cannot decide, and a
+       change answers with the sign-in sentence, as today. */
+    [Fact]
+    public async Task OnTheManagedStore_AViewerSeat_NeverOpensTheArm_AndAnswersAsToday()
+    {
+        await WithWebAsync("viewer", async (owner, _, Send, ct) =>
+        {
+            var list = await Send("GET", "/api/server-actions", null);
+            Assert.Equal(200, list.Status);
+            Assert.False((bool)list.Body!["can_decide"]!);
+            Assert.False((bool)list.Body["signed_in_admin"]!);
+
+            var refused = await Send("PUT", "/api/servers/1/actions/force_plan", "application/json", "{\"enabled\":true}");
+            Assert.Equal(403, refused.Status);
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.config_server_actions", ct));
+        }, seat: new DarlingWebSeat("viewer-person", false), arm: AdminArmShape.Refused, managedStore: true);
+    }
+
+    /* #6600: with the switch off (no arm on a managed store) the signed-in admin lists only, and the 403 names the switch. */
+    [Fact]
+    public async Task OnTheManagedStore_WithTheSwitchOff_TheSignedInAdminStillListsOnly_NamingTheSwitch()
+    {
+        await WithWebAsync("viewer", async (owner, _, Send, ct) =>
+        {
+            Assert.False((bool)(await Send("GET", "/api/server-actions", null)).Body!["can_decide"]!);
+            var refused = await Send("PUT", "/api/servers/1/actions/force_plan", "application/json", "{\"enabled\":true}");
+            Assert.Equal(403, refused.Status);
+            Assert.Equal(DarlingWebEndpoints.ServerActionRefusedMessage(true, adminWritesOff: true), (string)refused.Body!["error"]!);
+            Assert.Contains("web.allowAdminWrites", (string)refused.Body["error"]!, StringComparison.Ordinal);
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.config_server_actions", ct));
+        }, seat: new DarlingWebSeat("alice", true), managedStore: true);
+    }
+
     [Fact]
     public async Task TheWebRoutes_AsViewer_ListButRefuseEveryChangeWith403_ChangingNothing()
     {
@@ -620,7 +671,8 @@ public sealed class ServerActionSwitchWriteLiveTests
         }
     }
 
-    private static async Task WithWebAsync(string managedRole, Func<NpgsqlDataSource, NpgsqlDataSource, Sender, CancellationToken, Task> body, bool signedIn = true, DarlingWebSeat? seat = null)
+    private static async Task WithWebAsync(string managedRole, Func<NpgsqlDataSource, NpgsqlDataSource, Sender, CancellationToken, Task> body, bool signedIn = true, DarlingWebSeat? seat = null,
+        AdminArmShape arm = AdminArmShape.None, bool managedStore = false)
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the server action switch live tests.");
@@ -654,6 +706,7 @@ public sealed class ServerActionSwitchWriteLiveTests
                 Pooling = false,
             }.ConnectionString;
             await using var webLogin = NpgsqlDataSource.Create(asSeat);
+            using var adminArm = await AdminArmLive.BuildAsync(owner, scratch, roleName, arm, ct);
 
             var builder = WebApplication.CreateBuilder(new WebApplicationOptions
             {
@@ -676,7 +729,8 @@ public sealed class ServerActionSwitchWriteLiveTests
 
             var ownerSeam = new StoreOwnerSource();
             ownerSeam.Publish(owner);
-            DarlingWebEndpoints.MapAll(app, webLogin, new CollectorRuntimeState(), new CapturingTestLogger(), ownerSource: ownerSeam);
+            DarlingWebEndpoints.MapAll(app, webLogin, new CollectorRuntimeState(), new CapturingTestLogger(), ownerSource: ownerSeam,
+                postgresConfig: managedStore ? new PostgresConfig { Managed = true } : null, adminArm: adminArm);
             await app.StartAsync(ct);
             using var server = app.GetTestServer();
 
@@ -707,7 +761,7 @@ public sealed class ServerActionSwitchWriteLiveTests
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (connection, token) =>
             {
                 NpgsqlConnection.ClearAllPools();
-                await using var drop = new NpgsqlCommand($"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName}", connection);
+                await using var drop = new NpgsqlCommand(AdminArmLive.DropRolesSql(roleName), connection);
                 await drop.ExecuteNonQueryAsync(token);
             });
         }

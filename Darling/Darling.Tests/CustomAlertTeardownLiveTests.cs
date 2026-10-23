@@ -107,8 +107,8 @@ public sealed class CustomAlertTeardownLiveTests
         var ct = TestContext.Current.CancellationToken;
         await using var dataSource = await MigrateAndOpenAsync(connectionString, ct);
 
-        var rules = new CustomAlertRuleStore(dataSource);
-        var state = new CustomAlertStateStore(dataSource);
+        var rules = new CustomAlertRuleStore(dataSource, StorageCommandDeadlines.McpReadSeconds);
+        var state = new CustomAlertStateStore(dataSource, StorageCommandDeadlines.McpReadSeconds);
 
         var ruleName = "car_del_" + Guid.NewGuid().ToString("N");
         const int serverId = 990101;
@@ -148,8 +148,8 @@ public sealed class CustomAlertTeardownLiveTests
         var ct = TestContext.Current.CancellationToken;
         await using var dataSource = await MigrateAndOpenAsync(connectionString, ct);
 
-        var rules = new CustomAlertRuleStore(dataSource);
-        var state = new CustomAlertStateStore(dataSource);
+        var rules = new CustomAlertRuleStore(dataSource, StorageCommandDeadlines.McpReadSeconds);
+        var state = new CustomAlertStateStore(dataSource, StorageCommandDeadlines.McpReadSeconds);
 
         var ruleName = "car_dis_" + Guid.NewGuid().ToString("N");
         const int serverId = 990202;
