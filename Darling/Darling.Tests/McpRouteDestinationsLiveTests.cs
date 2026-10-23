@@ -220,7 +220,7 @@ public sealed class McpRouteDestinationsLiveTests
             }
 
             await using (var plain = mcp.CreateCommand(
-                $"SELECT * FROM config.set_notification_route_destinations({routeId}, ARRAY['slack_url'], '', 'https://hooks.example.test/plain', '', '', '')"))
+                $"SELECT * FROM config.set_notification_route_destinations({routeId}, NULL, ARRAY['slack_url'], '', 'https://hooks.example.test/plain', '', '', '')"))
             {
                 var refusedPlain = await Assert.ThrowsAsync<PostgresException>(() => plain.ExecuteNonQueryAsync(ct));
                 Assert.Equal("DL400", refusedPlain.SqlState);
