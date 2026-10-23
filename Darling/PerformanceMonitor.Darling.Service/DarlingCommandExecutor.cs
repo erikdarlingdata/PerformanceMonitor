@@ -832,6 +832,8 @@ WHERE status = 'in_progress'
             return Fail($"{Verb}: unknown collector '{collectorName}'");
         }
 
+        /* Only "default" clears, where the frequency and retention verbs also take "none": a database can be named none, and a string
+           here is a database list. */
         var raw = TryReadProperty(command.ArgsJson, new[] { "databases" });
         List<string> names;
         var clear = false;

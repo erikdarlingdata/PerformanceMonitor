@@ -215,8 +215,19 @@ public sealed class DarlingMcpCollectorScheduleRoleLiveTests
                 }
             }
 
-            var refused = columns.Except(GrantedUpdateColumns).ToList();
-            Assert.DoesNotContain("databases", refused);
+            /* What the store grants, asked of the catalog for the mcp login (not the test's own roster): exactly the four value columns. */
+            var granted = new List<string>();
+            foreach (var column in columns)
+            {
+                if ((bool)(await ScalarAsync(owner,
+                    $"SELECT has_column_privilege('mcp', 'config.config_collector_schedules', '{column}', 'UPDATE')", ct))!)
+                {
+                    granted.Add(column);
+                }
+            }
+
+            Assert.Equal(GrantedUpdateColumns.OrderBy(c => c, StringComparer.Ordinal), granted.OrderBy(c => c, StringComparer.Ordinal));
+            var refused = columns.Except(granted).ToList();
             Assert.Contains("server_id", refused);
             Assert.Contains("collector_name", refused);
             foreach (var column in refused)
@@ -234,6 +245,47 @@ public sealed class DarlingMcpCollectorScheduleRoleLiveTests
             var runTimeKey = await Assert.ThrowsAsync<PostgresException>(async () =>
                 await ExecAsync(login, "UPDATE config.config_collector_run_times SET server_id = server_id", ct));
             Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, runTimeKey.SqlState);
+        });
+    }
+
+    /// <summary>#6396: <c>reset_collector_schedules</c> runs its two deletes on the MCP host's own data source, which is not given the
+    /// <c>config</c> search_path the role tests above pin. The database default is taken off and the login's string carries none, so the
+    /// statements must name their schema themselves: unqualified they fail with 42P01.</summary>
+    [Fact]
+    public async Task ResetCollectorSchedules_OnADataSourceWithNoConfigSearchPath_StillResetsTheScope()
+    {
+        await WithMcpStoreAsync(async (mcp, owner, ct) =>
+        {
+            await DarlingMcpCollectorScheduleTools.DisableCollector(mcp, Delta, null, cancellationToken: ct);
+            await DarlingMcpCollectorScheduleTools.SetCollectorFrequency(mcp, Delta, 10, false, "role-alpha", cancellationToken: ct);
+
+            /* The migration set a database-level search_path; the host's source cannot count on it (ALTER DATABASE needs the owner). */
+            await ExecAsync(owner, $"ALTER DATABASE \"{owner.Database}\" RESET search_path", ct);
+            var bare = new NpgsqlConnectionStringBuilder(owner.ConnectionString)
+            {
+                Username = "mcp",
+                Password = ProvisioningTestSecrets.McpPassword,
+                Pooling = false,
+            };
+            await using var noPath = NpgsqlDataSource.Create(bare.ConnectionString);
+
+            await using (var probe = await noPath.OpenConnectionAsync(ct))
+            {
+                var unqualified = await Assert.ThrowsAsync<PostgresException>(async () =>
+                    await ExecAsync(probe, "SELECT 1 FROM config_collector_schedules", ct));
+                Assert.Equal(PostgresErrorCodes.UndefinedTable, unqualified.SqlState);
+            }
+
+            var fleet = Parse(await DarlingMcpCollectorScheduleTools.ResetCollectorSchedules(noPath, null, cancellationToken: ct));
+            Assert.Null(fleet["error"]);
+            Assert.Equal("changed", (string?)fleet["status"]);
+            Assert.Null(await RowAsync(owner, null, Delta, ct));
+            Assert.NotNull(await RowAsync(owner, ServerA, Delta, ct));
+
+            /* The server scope goes through the store call: naming a server resolves it against the unqualified registry read, which this source cannot do either. */
+            var (scheduleRows, _) = await CollectorScheduleSql.ResetScopeAsync(noPath, ServerA, 30, ct);
+            Assert.Equal(1, scheduleRows);
+            Assert.Null(await RowAsync(owner, ServerA, Delta, ct));
         });
     }
 

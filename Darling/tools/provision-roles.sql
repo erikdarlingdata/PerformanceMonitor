@@ -860,7 +860,7 @@ REVOKE UPDATE (paused) ON config.config_service FROM mcp;
 GRANT INSERT, UPDATE, DELETE ON config.server_tags TO mcp;
 GRANT INSERT, UPDATE, DELETE ON config.server_tag_map TO mcp;
 -- #6227: the collector schedule tools (disable_collector, enable_collector, set_collector_frequency, set_collector_run_at,
---     set_collector_retention) run as mcp and write the two non-secret schedule tables. Both carry a statement-level
+--     set_collector_retention, and #6396's set_collector_databases and reset_collector_schedules) run as mcp and write the two non-secret schedule tables. Both carry a statement-level
 --     reload-beacon trigger that UPDATEs config_service.config_version as the caller; the column grant above covers it.
 --     The run-time table (V160) is skipped, with a warning, on a store the service has not upgraded that far.
 DO $do$
@@ -871,6 +871,7 @@ BEGIN
       GRANT INSERT (server_id, collector_name, enabled, frequency_minutes, retention_days, databases) ON config.config_collector_schedules TO mcp;
       GRANT UPDATE (enabled, frequency_minutes, retention_days, databases) ON config.config_collector_schedules TO mcp;
       -- #6454: remove_server clears a removed server's override rows, so mcp holds DELETE on this table (managed provisioning grants it too).
+      --    reset_collector_schedules (#6396) runs the same DELETE, by server_id or, at the fleet scope, with server_id IS NULL.
       GRANT DELETE ON config.config_collector_schedules TO mcp;
    ELSE
       RAISE WARNING 'config.config_collector_schedules was not found, so its mcp grant was skipped. Run this script again after the service has upgraded the store.';

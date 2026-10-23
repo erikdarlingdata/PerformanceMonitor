@@ -1553,7 +1553,7 @@ GRANT INSERT, UPDATE, DELETE ON {config}.query_tag_assignments TO {mcp};
 GRANT INSERT, UPDATE, DELETE ON {config}.query_tag_rules TO {mcp};
 GRANT DELETE ON {config}.query_tag_map TO {mcp};
 -- #6227: the collector schedule tools (disable_collector, enable_collector, set_collector_frequency, set_collector_run_at,
---    set_collector_retention) run as mcp. They write the two non-secret schedule tables the Viewer and the --enable-collector /
+--    set_collector_retention, and #6396's set_collector_databases and reset_collector_schedules) run as mcp. They write the two non-secret schedule tables the Viewer and the --enable-collector /
 --    --set-collector-run-at verbs write: the sparse override rows (enabled, frequency, retention, databases) and the run times (V160).
 --    Both carry a statement-level reload-beacon trigger (INVOKER) that UPDATEs config_service.config_version as the writer, which the
 --    two-column config_service grant above covers; the tables are SELECT-able by mcp already. The tools are served only with
@@ -1567,7 +1567,8 @@ REVOKE INSERT, UPDATE, DELETE ON {config}.config_collector_schedules FROM {mcp};
 GRANT INSERT (server_id, collector_name, enabled, frequency_minutes, retention_days, databases) ON {config}.config_collector_schedules TO {mcp};
 GRANT UPDATE (enabled, frequency_minutes, retention_days, databases) ON {config}.config_collector_schedules TO {mcp};
 -- #6454: remove_server clears a removed server's override rows (a set-and-cleared row stayed behind all-null, and a set one would come
---    back when the server is re-added), so mcp holds DELETE on the override table. Only remove_server runs it, by server_id.
+--    back when the server is re-added), so mcp holds DELETE on the override table. remove_server runs it by server_id, and
+--    reset_collector_schedules (#6396) by server_id, or at the fleet scope with server_id IS NULL.
 GRANT DELETE ON {config}.config_collector_schedules TO {mcp};
 REVOKE INSERT, UPDATE, DELETE ON {config}.config_collector_run_times FROM {mcp};
 GRANT INSERT (server_id, collector_name, run_at_minute) ON {config}.config_collector_run_times TO {mcp};

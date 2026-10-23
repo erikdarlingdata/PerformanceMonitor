@@ -36,11 +36,14 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// (<see cref="CollectorScheduleSql.ResetScopeAsync"/>: the scope's schedule rows and run times, in one transaction). The writes are served under <c>mcp.allowWrites</c> and are never offered
 /// to an investigation agent (<see cref="DarlingMcpWritePolicy.NeverAgentTools"/>).
 ///
-/// <para><b>One write path.</b> Each tool builds the <see cref="ClaimedCommand"/> a queued command row would carry and asks
+/// <para><b>One write path.</b> Every tool but <c>reset_collector_schedules</c> builds the <see cref="ClaimedCommand"/> a queued command
+/// row would carry and asks
 /// <see cref="DarlingCommandExecutor.ResolvePlan"/> for the plan, which is where the collector-name check, the bounds
 /// (<c>CollectorScheduleBounds</c>) and the SQL live, and runs it through
 /// <see cref="DarlingCommandExecutor.ExecuteStoreWriteAsync(NpgsqlDataSource, CommandPlan, CancellationToken)"/>: the same plan the
-/// <c>--enable-collector</c> / <c>--set-collector-run-at</c> verbs execute. The server is resolved by the write rule the verbs use
+/// <c>--enable-collector</c> / <c>--set-collector-run-at</c> verbs execute. The reset has no command-plane plan: it calls
+/// <see cref="CollectorScheduleSql.ResetScopeAsync"/> itself, the same call the Viewer's Reset to Defaults makes, so it is not
+/// reachable from a queued command row. The server is resolved by the write rule the verbs use
 /// (<see cref="DarlingCliCommands.ResolveCollectorScopeAsync"/>), and a run time is judged against the collector's interval by
 /// <see cref="DarlingCliCommands.RunAtIntervalRefusal"/>. This class owns no SQL and no validation of its own.</para>
 ///

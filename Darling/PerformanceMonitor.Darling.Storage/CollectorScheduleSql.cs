@@ -145,11 +145,12 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
     public const string ClearServerDatabases =
         "UPDATE config.config_collector_schedules SET databases = NULL WHERE server_id = $1 AND lower(collector_name) = lower($2)";
 
-    /// <summary>Deletes every fleet-wide override row (revert the fleet scope to code defaults).</summary>
-    public const string DeleteFleetScope = "DELETE FROM config_collector_schedules WHERE server_id IS NULL";
+    /// <summary>Deletes every fleet-wide override row (revert the fleet scope to code defaults). Schema-qualified: the MCP host's data
+    /// source (#6396) is not guaranteed a <c>config</c> search_path, as the Viewer's connection is.</summary>
+    public const string DeleteFleetScope = "DELETE FROM config.config_collector_schedules WHERE server_id IS NULL";
 
     /// <summary>Deletes every override row for one server (the "use default schedule" revert). $1 server_id.</summary>
-    public const string DeleteServerScope = "DELETE FROM config_collector_schedules WHERE server_id = $1";
+    public const string DeleteServerScope = "DELETE FROM config.config_collector_schedules WHERE server_id = $1";
 
     /// <summary>Deletes EVERY fleet-wide run time, whatever the collector: the run-time half of a fleet-scope schedule Reset.</summary>
     public const string RunTimeDeleteFleetScope = "DELETE FROM config.config_collector_run_times WHERE server_id IS NULL";
