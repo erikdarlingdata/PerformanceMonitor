@@ -1557,21 +1557,22 @@ GRANT INSERT, UPDATE, DELETE ON {config}.query_tag_assignments TO {mcp};
 GRANT INSERT, UPDATE, DELETE ON {config}.query_tag_rules TO {mcp};
 GRANT DELETE ON {config}.query_tag_map TO {mcp};
 -- #6227: the collector schedule tools (disable_collector, enable_collector, set_collector_frequency, set_collector_run_at,
---    set_collector_retention) run as mcp. They write the two non-secret schedule tables the Viewer and the --enable-collector /
+--    set_collector_retention, and #6396's set_collector_databases and reset_collector_schedules) run as mcp. They write the two non-secret schedule tables the Viewer and the --enable-collector /
 --    --set-collector-run-at verbs write: the sparse override rows (enabled, frequency, retention, databases) and the run times (V160).
 --    Both carry a statement-level reload-beacon trigger (INVOKER) that UPDATEs config_service.config_version as the writer, which the
 --    two-column config_service grant above covers; the tables are SELECT-able by mcp already. The tools are served only with
 --    mcp.allowWrites and a token, and are never offered to an investigation agent. Provisioning re-runs every start, so no migration
 --    rung carries this.
---    The grants are by column, the narrowest the tools' statements need: the override rows take an INSERT of the five columns the tools
---    set and an UPDATE of the three values they change (never the database scope; the DELETE is #6454's, below, and the
---    Viewer's delete-and-reinsert Save runs as the owner). The run times take their one value column and a DELETE (set_collector_run_at
+--    The grants are by column, the narrowest the tools' statements need: the override rows take an INSERT of the six columns the tools
+--    set and an UPDATE of the four values they change (#6396 added the database scope, for set_collector_databases; the DELETE is #6454's,
+--    below, and also serves reset_collector_schedules, as the run-time DELETE does). The run times take their one value column and a DELETE (set_collector_run_at
 --    deletes the row for default). The table-level grants an earlier provisioning gave are revoked first, so a re-run narrows them.
 REVOKE INSERT, UPDATE, DELETE ON {config}.config_collector_schedules FROM {mcp};
-GRANT INSERT (server_id, collector_name, enabled, frequency_minutes, retention_days) ON {config}.config_collector_schedules TO {mcp};
-GRANT UPDATE (enabled, frequency_minutes, retention_days) ON {config}.config_collector_schedules TO {mcp};
+GRANT INSERT (server_id, collector_name, enabled, frequency_minutes, retention_days, databases) ON {config}.config_collector_schedules TO {mcp};
+GRANT UPDATE (enabled, frequency_minutes, retention_days, databases) ON {config}.config_collector_schedules TO {mcp};
 -- #6454: remove_server clears a removed server's override rows (a set-and-cleared row stayed behind all-null, and a set one would come
---    back when the server is re-added), so mcp holds DELETE on the override table. Only remove_server runs it, by server_id.
+--    back when the server is re-added), so mcp holds DELETE on the override table. remove_server runs it by server_id, and
+--    reset_collector_schedules (#6396) by server_id, or at the fleet scope with server_id IS NULL.
 GRANT DELETE ON {config}.config_collector_schedules TO {mcp};
 REVOKE INSERT, UPDATE, DELETE ON {config}.config_collector_run_times FROM {mcp};
 GRANT INSERT (server_id, collector_name, run_at_minute) ON {config}.config_collector_run_times TO {mcp};
@@ -1777,6 +1778,13 @@ GRANT EXECUTE ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerLeg
 --     NOT a versioned migration, for the same reason as the edit function above.
 {BuildRequestSnapshotNowFunctionSql(config)}
 GRANT EXECUTE ON FUNCTION {config}.request_snapshot_now(integer, text, text) TO {viewer}, {mcp};
+-- #6386: the web's Run live now button on the Active Queries panel. The web route (viewer) queues a fetch_active_queries command
+--     through {config}.request_active_queries_live, the only way viewer writes that command row. The command type is fixed in
+--     the body and the caller supplies a server id and nothing else, so it cannot reach the service-credential pivot that
+--     test_connect's args_json is. Owned by the store owner, pinned search_path, no dynamic SQL; created and REVOKEd from
+--     PUBLIC by the builder. NOT a versioned migration, for the same reason as request_snapshot_now above.
+{BuildRequestActiveQueriesLiveFunctionSql(config)}
+GRANT EXECUTE ON FUNCTION {config}.request_active_queries_live(integer, text) TO {viewer};
 -- #6231: the MCP route tools. mcp holds no INSERT on {config}.config_notification_routes and no SELECT or UPDATE on its
 --     destination columns, and gets none here: create_notification_route and update_notification_route reach the table only
 --     through these functions. create leaves every channel empty and update writes the match, scope, enabled flag, resolution
@@ -2578,6 +2586,11 @@ DECLARE
    v_last_status text;
    v_last_at timestamp;
 BEGIN
+   -- The one-request-at-a-time rule below reads the newest row of its kind with a fresh snapshot per statement. A transaction that
+   -- keeps one snapshot (REPEATABLE READ and up) could miss a row another session just queued, so it is refused.
+   IF current_setting('transaction_isolation') <> 'read committed' THEN
+      RAISE EXCEPTION 'This request must run at the READ COMMITTED isolation level.' USING ERRCODE = 'DL400';
+   END IF;
    IF p_server_id IS NULL OR NOT EXISTS (SELECT 1 FROM {config}.config_monitored_servers WHERE server_id = p_server_id) THEN
       RAISE EXCEPTION 'No monitored server with that id.' USING ERRCODE = 'DL404';
    END IF;
@@ -2620,6 +2633,68 @@ BEGIN
 END
 $fn$;
 REVOKE ALL ON FUNCTION {config}.request_snapshot_now(integer, text, text) FROM PUBLIC;";
+
+    /// <summary>
+    /// The SECURITY DEFINER function (#6386) the web route queues a <c>fetch_active_queries</c> command through: a fixed command type
+    /// and a server id, nothing else (the command takes no arguments). One request per server at a time and not within 10 seconds of
+    /// the last, so a holder of the viewer login cannot fill the queue. Created and REVOKEd from PUBLIC here; the caller adds the
+    /// narrow GRANT EXECUTE.
+    /// </summary>
+    internal static string BuildRequestActiveQueriesLiveFunctionSql(string config) => $@"
+CREATE OR REPLACE FUNCTION {config}.request_active_queries_live(
+   p_server_id integer,
+   p_requested_by text)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+   v_id bigint;
+   v_last_status text;
+   v_last_at timestamp;
+BEGIN
+   -- The one-request-at-a-time rule below reads the newest row of its kind with a fresh snapshot per statement. A transaction that
+   -- keeps one snapshot (REPEATABLE READ and up) could miss a row another session just queued, so it is refused.
+   IF current_setting('transaction_isolation') <> 'read committed' THEN
+      RAISE EXCEPTION 'This request must run at the READ COMMITTED isolation level.' USING ERRCODE = 'DL400';
+   END IF;
+   IF p_server_id IS NULL OR NOT EXISTS (SELECT 1 FROM {config}.config_monitored_servers WHERE server_id = p_server_id) THEN
+      RAISE EXCEPTION 'No monitored server with that id.' USING ERRCODE = 'DL404';
+   END IF;
+   -- Never blocks (provisioning rule): a request that holds the lock for this server is a concurrent request, which is the same
+   -- conflict as a pending row, so this refuses with DL409 instead of waiting.
+   IF NOT pg_try_advisory_xact_lock(6386, p_server_id) THEN
+      RAISE EXCEPTION 'A live active-queries read for this server is already queued or running.' USING ERRCODE = 'DL409';
+   END IF;
+   SELECT c.status, c.created_at INTO v_last_status, v_last_at
+   FROM {config}.config_command AS c
+   WHERE c.command_type = 'fetch_active_queries' AND c.target_server_id = p_server_id
+   ORDER BY c.command_id DESC
+   LIMIT 1;
+   IF v_last_status IN ('pending', 'in_progress') THEN
+      RAISE EXCEPTION 'A live active-queries read for this server is already queued or running.' USING ERRCODE = 'DL409';
+   END IF;
+   IF v_last_at IS NOT NULL AND v_last_at > (now() AT TIME ZONE 'UTC') - interval '10 seconds' THEN
+      RAISE EXCEPTION 'A live active-queries read was requested for this server less than 10 seconds ago.'
+         USING ERRCODE = 'DL429',
+               HINT = to_char(v_last_at + interval '10 seconds', 'YYYY-MM-DD') || 'T' || to_char(v_last_at + interval '10 seconds', 'HH24:MI:SS') || 'Z';
+   END IF;
+   -- Finished results do not pile up: a result carries the plan XML with no size cap and the web never deletes the row it reads, so each
+   -- request first removes this server's finished live reads that finished more than an hour ago. Only terminal rows
+   -- (succeeded or failed) with a completed_at are touched, so a pending or running row and every other command type stay. The Viewer
+   -- reads and deletes its own row within seconds, far inside the hour.
+   DELETE FROM {config}.config_command
+   WHERE command_type = 'fetch_active_queries' AND target_server_id = p_server_id
+     AND status IN ('succeeded', 'failed')
+     AND completed_at < (now() AT TIME ZONE 'UTC') - interval '1 hour';
+   INSERT INTO {config}.config_command (requested_by, command_type, target_server_id, args_json, status, created_at)
+   VALUES (left(COALESCE(p_requested_by, 'web'), 200), 'fetch_active_queries', p_server_id, NULL, 'pending', (now() AT TIME ZONE 'UTC'))
+   RETURNING command_id INTO v_id;
+   RETURN v_id;
+END
+$fn$;
+REVOKE ALL ON FUNCTION {config}.request_active_queries_live(integer, text) FROM PUBLIC;";
 
     /// <summary>
     /// The SECURITY DEFINER functions (#6231) the MCP <c>create_notification_route</c> and <c>update_notification_route</c>
