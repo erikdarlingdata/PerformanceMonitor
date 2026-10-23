@@ -41,7 +41,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// needs no write (the plan is not the query's, or is already in the asked state) is journaled once per request, tool, code and hour.</para>
 /// </summary>
 [McpServerToolType]
-public sealed class DarlingMcpPlanForceTools
+public sealed partial class DarlingMcpPlanForceTools
 {
     internal const string ForceToolName = "force_query_store_plan";
     internal const string UnforceToolName = "unforce_query_store_plan";
@@ -201,7 +201,7 @@ public sealed class DarlingMcpPlanForceTools
             if (query_id <= 0 || plan_id <= 0)
                 return McpHelpers.Refusal("plan_id", "query_id and plan_id are positive numbers from get_query_store_top.");
 
-            var store = new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds);
+            var store = new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds, agentActionSource: owner);
             var target = new AgentActionTarget(resolved.ServerId, resolved.ServerName, plan_id.ToString(CultureInfo.InvariantCulture), database_name.Trim());
 
             /* 1: SQL Server only. A PostgreSQL target is refused with its own reason, before the gate is asked, and the refusal is journaled. */
@@ -378,7 +378,7 @@ public sealed class DarlingMcpPlanForceTools
             if (error is not null)
                 return error;
 
-            var store = new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds);
+            var store = new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds, agentActionSource: owner);
 
             /* 1: a handle that does not parse can do nothing. Refused before the gate, and journaled as a block is. */
             if (!PlanEvictStatement.TryNormalize(plan_handle, out var handle))
@@ -483,7 +483,7 @@ public sealed class DarlingMcpPlanForceTools
             if (error is not null)
                 return error;
 
-            var store = new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds);
+            var store = new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds, agentActionSource: owner);
 
             /* 1: the engine decides how the session is named. A PostgreSQL target has its own arm (pid plus start second from backend_id). */
             var (engineEdition, engineKind) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, ct);
@@ -961,6 +961,11 @@ public sealed class DarlingMcpPlanForceTools
         if (owner is null)
             return PlanUndoAnswer.Refused(NoOwnerSource, "The service has not published its store owner connection yet, so this server's remediation login cannot be read. Try again shortly.");
 
+        if (facts.IsGuideDrop)
+            return await DecideAndRunGuideRecreateUndoAsync(session, owner, logger, confirm, shownStatement, ct);
+        if (facts.IsGuide)
+            return await DecideAndRunGuideUndoAsync(session, owner, logger, confirm, shownStatement, ct);
+
         /* The permit for the plan the change named: it reads the state, and it is the plan an unforce or a no-prior-force undo writes on. */
         var decision = await session.AuthorizeAsync(facts.PlanId, owner, ct);
         if (decision.Refusal is { } gateRefusal)
@@ -1128,7 +1133,7 @@ SELECT EXISTS (SELECT 1 FROM v_dmv_blocking_snapshots WHERE server_id = $1 AND d
         string database, CancellationToken ct)
     {
         if (IsExcludedDatabase(row.ExcludedDatabases, database))
-            return new AgentActionRefusal(AzureDatabaseExcluded, $"Database {database} is excluded in this server's entry, so Darling does not act in it. Nothing was run.");
+            return ExcludedDatabaseRefusal(database);
 
         if (string.Equals(row.Server.Database, database, StringComparison.OrdinalIgnoreCase))
             return null;
@@ -1143,6 +1148,10 @@ SELECT EXISTS (SELECT 1 FROM v_dmv_blocking_snapshots WHERE server_id = $1 AND d
             : new AgentActionRefusal(AzureDatabaseUnknown,
                 $"Database {database} is not this server's registered database, and Darling has collected no blocking row from it in the last day, so the kill does not connect to it. Pass the database_name of the get_blocking row you read. Nothing was run.");
     }
+
+    /// <summary>The refusal for a database the server's entry excludes, shared by the Azure kill, <c>recompile_module</c> and the plan guide tools.</summary>
+    internal static AgentActionRefusal ExcludedDatabaseRefusal(string database) =>
+        new(AzureDatabaseExcluded, $"Database {database} is excluded in this server's entry, so Darling does not act in it. Nothing was run.");
 
     /// <summary>Whether the server entry's excluded list names <paramref name="database"/>: entries are compared trimmed, and without regard to case (#5632).</summary>
     internal static bool IsExcludedDatabase(string[]? excluded, string database) =>

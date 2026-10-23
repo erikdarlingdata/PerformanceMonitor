@@ -587,17 +587,27 @@ FROM expired AS e
 ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
 
     private readonly NpgsqlDataSource _dataSource;
+    private readonly NpgsqlDataSource? _agentActionSource;
     private readonly int _commandTimeoutSeconds;
     private readonly Func<DateTime> _utcNow;
+
+    /// <summary>The data source <see cref="RunAgentActionAsync"/> runs on: the store owner's, when the caller gave one. The journal rows an agent
+    /// action writes (<see cref="AgentActionEvents"/>) are the owner's alone, so the whole change, its checks and its rows, runs on that login.</summary>
+    private NpgsqlDataSource AgentActionSource => _agentActionSource ?? _dataSource;
 
     /// <summary>
     /// <paramref name="dataSource"/> must connect as a role that may write the investigation tables: the store owner for
     /// open, join and the sweep; the owner or the <c>mcp</c> role for claim and submit. <paramref name="commandTimeoutSeconds"/>
     /// is applied to every command. <paramref name="utcNow"/> is the clock (tests move it); it defaults to the wall clock.
+    /// <paramref name="agentActionSource"/> is the store owner's data source for <see cref="RunAgentActionAsync"/>: the service's MCP tools
+    /// pass it, because their own <paramref name="dataSource"/> is the <c>mcp</c> login, which the journal's trigger keeps from writing the
+    /// agent action rows (#6569). Null runs the change on <paramref name="dataSource"/>.
     /// </summary>
-    public InvestigationRequestStore(NpgsqlDataSource dataSource, int commandTimeoutSeconds, Func<DateTime>? utcNow = null)
+    public InvestigationRequestStore(NpgsqlDataSource dataSource, int commandTimeoutSeconds, Func<DateTime>? utcNow = null,
+        NpgsqlDataSource? agentActionSource = null)
     {
         _dataSource = dataSource ?? throw new ArgumentNullException(nameof(dataSource));
+        _agentActionSource = agentActionSource;
         _commandTimeoutSeconds = commandTimeoutSeconds;
         _utcNow = utcNow ?? (() => DateTime.UtcNow);
     }

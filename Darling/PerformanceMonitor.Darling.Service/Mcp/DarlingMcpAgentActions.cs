@@ -30,9 +30,17 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// </summary>
 public sealed class DarlingAgentActionSeat
 {
-    internal DarlingAgentActionSeat(DarlingMcpWritePolicy.Effective policy) => Policy = policy;
+    internal DarlingAgentActionSeat(DarlingMcpWritePolicy.Effective policy, StoreOwnerSource? owner = null)
+    {
+        Policy = policy;
+        Owner = owner;
+    }
 
     internal DarlingMcpWritePolicy.Effective Policy { get; }
+
+    /// <summary>The service's own (store owner) data source, which the gate runs a change on (#6569): the journal keeps the agent action rows to the owner,
+    /// and the tools' own data source is the <c>mcp</c> login. Null (a test host) runs the change on the tool's data source.</summary>
+    internal StoreOwnerSource? Owner { get; }
 
     /// <summary>True when a call must go through the gate: the investigations arm, and not the writes arm.</summary>
     internal static bool IsGated(DarlingAgentActionSeat? seat) => seat is not null && !seat.Policy.Writes;
@@ -137,7 +145,7 @@ internal static class DarlingMcpAgentActions
         Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<string?>> readBefore,
         Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<string?>> write, CancellationToken ct)
     {
-        var store = new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds);
+        var store = new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds, agentActionSource: seat.Owner?.Read());
         try
         {
             var outcome = await DarlingAgentActionGate.RunAsync(seat.Policy, postgres, store,

@@ -329,6 +329,9 @@ public static class ServerActionNames
     public const string ForcePlan = "force_plan";
     public const string EvictPlan = "evict_plan";
     public const string KillSession = "kill_session";
+    public const string RecompileModule = "recompile_module";
+    public const string CreatePlanGuide = "create_plan_guide";
+    public const string DropPlanGuide = "drop_plan_guide";
 
     /// <summary>An action in plain words, the label both switch screens show in their tables and the answers to a change use (#6269).</summary>
     public static string Label(string action) => action switch
@@ -336,11 +339,14 @@ public static class ServerActionNames
         ForcePlan => "Force or unforce plans",
         EvictPlan => "Evict plans from the plan cache",
         KillSession => "Kill sessions",
+        RecompileModule => "Recompile procedures, functions and triggers",
+        CreatePlanGuide => "Create plan guides",
+        DropPlanGuide => "Drop plan guides",
         _ => action,
     };
 
     /// <summary>Every server action, the table's CHECK list.</summary>
-    public static readonly IReadOnlyList<string> All = new[] { ForcePlan, EvictPlan, KillSession };
+    public static readonly IReadOnlyList<string> All = new[] { ForcePlan, EvictPlan, KillSession, RecompileModule, CreatePlanGuide, DropPlanGuide };
 
     /// <summary>
     /// Whether <paramref name="action"/> can ever run on a server of that engine (#6269): a Query Store plan force and a plan-cache
@@ -349,7 +355,7 @@ public static class ServerActionNames
     /// </summary>
     public static bool IsValidForEngine(string? action, bool postgres) =>
         string.Equals(action, KillSession, StringComparison.Ordinal)
-        || (!postgres && (string.Equals(action, ForcePlan, StringComparison.Ordinal) || string.Equals(action, EvictPlan, StringComparison.Ordinal)));
+        || (!postgres && (string.Equals(action, ForcePlan, StringComparison.Ordinal) || string.Equals(action, EvictPlan, StringComparison.Ordinal) || string.Equals(action, RecompileModule, StringComparison.Ordinal) || string.Equals(action, CreatePlanGuide, StringComparison.Ordinal) || string.Equals(action, DropPlanGuide, StringComparison.Ordinal)));
 }
 
 /// <summary>What a server's remediation slots hold, as the server-action gate classifies them (#5632, step 5). The gate never

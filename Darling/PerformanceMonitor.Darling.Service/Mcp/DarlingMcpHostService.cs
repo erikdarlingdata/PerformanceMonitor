@@ -1278,9 +1278,9 @@ public sealed class DarlingMcpHostService : BackgroundService
            arm they go through the agent_action gate and under the writes arm they write as before. A service parameter, so a
            client cannot supply it. */
         if (perRequest)
-            services.AddTransient<DarlingAgentActionSeat>(sp => new DarlingAgentActionSeat(PolicyOf(sp)));
+            services.AddTransient<DarlingAgentActionSeat>(sp => new DarlingAgentActionSeat(PolicyOf(sp), sp.GetService<StoreOwnerSource>()));
         else
-            services.AddSingleton<DarlingAgentActionSeat>(new DarlingAgentActionSeat(writes));
+            services.AddSingleton<DarlingAgentActionSeat>(sp => new DarlingAgentActionSeat(writes, sp.GetService<StoreOwnerSource>()));
 
         /* #4442 scope 2: the per-tool latency filter needs the SAME accumulator singleton the web host and
            worker flush use (Program.cs registers ONE ReadLatencyAccumulator for the whole process) -- an

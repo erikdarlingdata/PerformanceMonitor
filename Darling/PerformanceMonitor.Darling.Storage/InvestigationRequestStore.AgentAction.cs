@@ -23,6 +23,20 @@ namespace PerformanceMonitor.Darling.Storage;
 /// e.g. <c>mute</c>), the validated <c>agent_action</c> and the target.</summary>
 public sealed record AgentActionCall(string Tool, string Kind, AgentAction Action, AgentActionTarget Target);
 
+/// <summary>The journal events one agent action writes (#6569): the call, then its result. Only the store owner journals them, as
+/// <c>server_action_switched</c> is (#6269): <see cref="InvestigationRequestStore.RunAgentActionAsync"/>, a person's undo through the
+/// owner, and nothing else. The journal's trigger refuses them from the <c>mcp</c> and <c>admin</c> logins (<c>refused</c> and
+/// <c>journal_capped</c> stay writable by both, because the claim and submit tools journal them too).</summary>
+public static class AgentActionEvents
+{
+    public const string Called = "action_called";
+    public const string Done = "action_done";
+    public const string Failed = "action_failed";
+
+    /// <summary>The events above, for the journal trigger's owner-only list.</summary>
+    public static IReadOnlyList<string> OwnerOnly { get; } = [Called, Done, Failed];
+}
+
 /// <summary>What the gate knows about the request when it asks a tool's kind rule (#5912).</summary>
 public sealed record AgentActionContext(AgentActionCall Call, int RequestServerId, string RequestServerName, int ClaimNo);
 
@@ -181,7 +195,10 @@ RETURNING journal_id";
     /// before image and commits <c>action_called</c> first, which drops the lock; the change then runs in its own
     /// transaction, which takes the row <c>FOR SHARE</c> again and re-checks 3, 5 and 6 before it writes, and journals
     /// <c>action_done</c> with it, or <c>action_failed</c>. No row holds the claim id: the journal names the claim by its
-    /// number (<c>claim_no</c>).
+    /// number (<c>claim_no</c>). Every transaction here, and the late <c>action_done</c>, runs on the store owner's data source
+    /// when the store was given one (#6569): the journal keeps <see cref="AgentActionEvents"/> to the owner, so the checks, the
+    /// store change a tool's write hook makes and the rows stay in one transaction on the login that may write them. The agent's
+    /// own identity checks (token, claim, request) are the same; only the login that writes changed.
     /// </summary>
     public async Task<AgentActionResult> RunAgentActionAsync(AgentActionCall call, AgentActionHooks hooks,
         CancellationToken cancellationToken = default)
@@ -193,7 +210,7 @@ RETURNING journal_id";
         var now = Now();
 
         long calledId;
-        await using (var connection = await _dataSource.OpenConnectionAsync(cancellationToken))
+        await using (var connection = await AgentActionSource.OpenConnectionAsync(cancellationToken))
         await using (var transaction = await connection.BeginTransactionAsync(cancellationToken))
         {
             var request = await ReadAgentActionRequestAsync(connection, transaction, action.RequestId, cancellationToken);
@@ -263,7 +280,7 @@ RETURNING journal_id";
         var requestServerId = call.Target.ServerId;
         try
         {
-            await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+            await using var connection = await AgentActionSource.OpenConnectionAsync(cancellationToken);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
             var request = await ReadAgentActionRequestAsync(connection, transaction, action.RequestId, cancellationToken);
             /* Everything the gate checked is checked again here (#5632): a person can turn agent changes off, turn this server's switch off or
@@ -342,7 +359,7 @@ RETURNING journal_id";
                does: its called row stays with no result, which reads as "result unknown"): the change rolled back with
                its transaction (a store change) or never happened (a refused write), so journal the failure on its own. A
                failure to write this row leaves the called row with neither result, which reads as "result unknown". */
-            await using var connection = await _dataSource.OpenConnectionAsync(CancellationToken.None);
+            await using var connection = await AgentActionSource.OpenConnectionAsync(CancellationToken.None);
             await using var transaction = await connection.BeginTransactionAsync(CancellationToken.None);
             await JournalReturningAsync(connection, transaction, Now(), action.RequestId, call.Target.ServerId, "action_failed",
                 actor, "error", new JsonObject { ["called_id"] = calledId, ["error"] = ex.Message }.ToJsonString(),
@@ -371,7 +388,7 @@ RETURNING journal_id";
         {
             try
             {
-                await using var connection = await _dataSource.OpenConnectionAsync(CancellationToken.None);
+                await using var connection = await AgentActionSource.OpenConnectionAsync(CancellationToken.None);
                 await using var command = Command(connection, null, AgentActionLateDoneSql,
                     P(at), P(requestId), new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlDbType.Integer },
                     P(actor), P(detail), P(calledId.ToString(CultureInfo.InvariantCulture)));

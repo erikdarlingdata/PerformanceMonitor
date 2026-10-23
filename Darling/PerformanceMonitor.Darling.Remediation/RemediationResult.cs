@@ -36,6 +36,27 @@ public sealed record RemediationResult(
     /// <summary>The exact statement a force, unforce or eviction runs (or would run, on a dry run). A force names the database quoted the way <c>QUOTENAME</c> quotes it; an eviction names the handle in its normal form. Null when the result is not about one.</summary>
     public string? Statement { get; init; }
 
+    /// <summary>A module recompile's read of the object it named (#6569): its <c>sys.objects.type_desc</c> (for example <c>SQL_STORED_PROCEDURE</c>). Null for every other action, and when the object was not found.</summary>
+    public string? ObjectType { get; init; }
+
+    /// <summary>A module recompile's resolved object (#6569): the schema the server resolved the input to (<c>OBJECT_SCHEMA_NAME</c> of the resolved id), not the input text. Null for every other action, and when the name did not resolve.</summary>
+    public string? ObjectSchema { get; init; }
+
+    /// <summary>A module recompile's resolved object name (<c>OBJECT_NAME</c> of the resolved id), not the input text. Null for every other action, and when the name did not resolve.</summary>
+    public string? ObjectName { get; init; }
+
+    /// <summary>A plan guide create's count of cached batches, compiled in the guide's own database, whose text equals a SQL guide's batch (#6569). Null for every other action, for an OBJECT guide, and when the login cannot read the plan cache.</summary>
+    public long? CachedMatches { get; init; }
+
+    /// <summary>A plan guide drop's read of the guide it named (#6569, slice 2b): the whole definition as <c>sys.plan_guides</c> holds it, which the journal keeps so an Undo can re-create the guide. Null for every other result, and when the guide was not found.</summary>
+    public PlanGuideDefinition? Guide { get; init; }
+
+    /// <summary>Whether the guide a drop read was disabled (<c>sys.plan_guides.is_disabled</c>); the Undo disables the re-created guide again. Null when <see cref="Guide"/> is null.</summary>
+    public bool? GuideDisabled { get; init; }
+
+    /// <summary>The message <c>sys.fn_validate_plan_guide</c> returned for a plan guide the create dropped again (#6569). Null for every other result.</summary>
+    public string? Validation { get; init; }
+
     /// <summary>A kill's facts about the session it named, read in the batch that decided (#5632, step 12). Null for every other action, and when no such session was found.</summary>
     public KillSessionFacts? Session { get; init; }
 
@@ -59,6 +80,19 @@ public sealed record RemediationResult(
         public const string AlreadyForced = "plan_already_forced";
         public const string NotForced = "plan_not_forced";
         public const string NotCached = "plan_not_cached";
+        public const string BadModuleName = "bad_module_name";
+        public const string ModuleNotFound = "module_not_found";
+        public const string NotAModule = "not_a_module";
+        public const string RecompilePermissionDenied = "recompile_permission_denied";
+        public const string BadGuideName = "bad_guide_name";
+        public const string BadGuideType = "bad_guide_type";
+        public const string BadGuideArgument = "bad_guide_argument";
+        public const string StatementNotInModule = "statement_not_in_module";
+        public const string GuideExists = "guide_exists";
+        public const string GuideNotFound = "guide_not_found";
+        public const string GuideChanged = "guide_changed";
+        public const string GuideInvalid = "guide_invalid";
+        public const string GuidePermissionDenied = "guide_permission_denied";
         public const string SessionGone = "session_gone";
         public const string SessionReused = "session_reused";
         public const string OwnSession = "own_session";
