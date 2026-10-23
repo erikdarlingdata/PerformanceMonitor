@@ -664,15 +664,16 @@ LIMIT $6";
                 {
                     ["statement_fingerprint"] = s.Fingerprint,
                     ["sampled_events"] = s.Events,
-                    ["sample_statement"] = Cut(s.Text, ClientTimeoutStatementMaxChars),
+                    ["sql_text"] = Cut(s.Text, ClientTimeoutStatementMaxChars),
                 }).ToArray()),
                 ["note"] = "count is exact (the session's event_counter). The lists come from sampled ring-buffer events, a subset: they show who and what was timing out, never how many.",
             },
         };
     }
 
+    /* #6579: cut at a text-element boundary, like ClientTimeoutsRead, so a surrogate pair or combining sequence is never split. */
     private static string? Cut(string? text, int max) =>
-        string.IsNullOrEmpty(text) ? null : text.Length <= max ? text : text[..max];
+        string.IsNullOrEmpty(text) ? null : text.Length <= max ? text : text[..McpHelpers.TextElementCutLength(text, max)];
 
     /// <summary>Parses collected XML with DTDs refused; null for none or XML that does not parse.</summary>
     private static XElement? ParseXml(string? xml)

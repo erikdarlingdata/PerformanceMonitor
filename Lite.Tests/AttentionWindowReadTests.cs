@@ -54,9 +54,9 @@ public sealed class AttentionWindowReadTests : IClassFixture<SharedDuckDbFixture
 
         await RowAsync(id++, ServerId, now.AddSeconds(-28), "count", 7, null, null, null, null);
         await RowAsync(id++, ServerId, now.AddMinutes(-2).AddSeconds(-28), "count", 5, null, null, null, null);
-        await RowAsync(id++, ServerId, now.AddSeconds(-28), "sample", 0, "db1", "etl", "fp-a", "SELECT 1");
-        await RowAsync(id++, ServerId, now.AddSeconds(-28), "sample", 0, "db1", "etl", "fp-a", "SELECT 1");
-        await RowAsync(id++, ServerId, now.AddMinutes(-1).AddSeconds(-28), "sample", 0, "db2", "web", "fp-b", "SELECT 2");
+        await RowAsync(id++, ServerId, now.AddSeconds(-28), "sample", 0, "db1", "etl", "fp-a", "SELECT 1", "ws-1");
+        await RowAsync(id++, ServerId, now.AddSeconds(-28), "sample", 0, "db1", "etl", "fp-a", "SELECT 1", "ws-1");
+        await RowAsync(id++, ServerId, now.AddMinutes(-1).AddSeconds(-28), "sample", 0, "db2", "web", "fp-b", "SELECT 2", "app-1");
         await RowAsync(id++, ServerId, now.AddMinutes(-Lookback - 2), "count", 999, null, null, null, null);
         await RowAsync(id++, OtherServerId, now.AddSeconds(-28), "count", 888, null, null, null, null);
 
@@ -73,6 +73,8 @@ public sealed class AttentionWindowReadTests : IClassFixture<SharedDuckDbFixture
         Assert.Equal(new[] { "db1", "db2" }, window.TopDatabases.Select(t => t.Name).ToArray());
         Assert.Equal(new[] { "etl", "web" }, window.TopApplications.Select(t => t.Name).ToArray());
         Assert.Equal(2, window.TopApplications[0].Samples);
+        Assert.Equal(new[] { "ws-1", "app-1" }, window.Hosts.Select(t => t.Name).ToArray());
+        Assert.Equal(2, window.Hosts[0].Samples);
     }
 
     [Fact]
@@ -205,15 +207,15 @@ VALUES ($1, $2, 'test-server', $3, $4, 5, $5)";
     }
 
     private async Task RowAsync(
-        long id, int serverId, DateTime time, string kind, long count, string? db, string? app, string? fingerprint, string? text)
+        long id, int serverId, DateTime time, string kind, long count, string? db, string? app, string? fingerprint, string? text, string? host = null)
     {
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         using var command = connection.CreateCommand();
         command.CommandText = @"
 INSERT INTO attention_events
-    (attention_event_id, collection_time, server_id, server_name, event_kind, attention_count, database_name, client_app_name, statement_fingerprint, statement_text)
-VALUES ($1, $2, $3, 'test-server', $4, $5, $6, $7, $8, $9)";
+    (attention_event_id, collection_time, server_id, server_name, event_kind, attention_count, database_name, client_app_name, statement_fingerprint, statement_text, client_hostname)
+VALUES ($1, $2, $3, 'test-server', $4, $5, $6, $7, $8, $9, $10)";
         command.Parameters.Add(new DuckDBParameter { Value = id });
         command.Parameters.Add(new DuckDBParameter { Value = time });
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -223,6 +225,7 @@ VALUES ($1, $2, $3, 'test-server', $4, $5, $6, $7, $8, $9)";
         command.Parameters.Add(new DuckDBParameter { Value = (object?)app ?? DBNull.Value });
         command.Parameters.Add(new DuckDBParameter { Value = (object?)fingerprint ?? DBNull.Value });
         command.Parameters.Add(new DuckDBParameter { Value = (object?)text ?? DBNull.Value });
+        command.Parameters.Add(new DuckDBParameter { Value = (object?)host ?? DBNull.Value });
         await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 }
