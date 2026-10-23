@@ -509,7 +509,7 @@ public sealed class ViewerSettings
         {
             ViewerServiceRunState.NotInstalled =>
                 $"{subject} does not exist: the PerformanceMonitor Darling service is not installed on this machine, so it has " +
-                "never run here and there is no store yet. Install it with install-darling.ps1 (or Install-Darling.cmd) from the " +
+                "never run here and there is no store yet. Install it with install-darling.ps1 from the " +
                 "folder you extracted the Darling zip into; the installer starts it and waits for its first start to finish.",
             ViewerServiceRunState.NotRunning =>
                 $"{subject} does not exist: the PerformanceMonitor Darling service is installed but is not running, and it has " +

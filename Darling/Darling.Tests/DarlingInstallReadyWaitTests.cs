@@ -31,7 +31,7 @@ public sealed class DarlingInstallReadyWaitTests
             new[]
             {
                 "Get-DarlingServiceLogEntries", "Get-DarlingStartupVerdict", "Get-DarlingStartupProblemLines",
-                "Wait-DarlingServiceReady", "Get-DarlingWebAddress", "Get-DarlingConfiguredServerCount",
+                "Wait-DarlingServiceReady", "Get-DarlingWebAddress", "Get-DarlingConfiguredServerCount", "Get-DarlingStartupRemedy",
             }.Select(name => DarlingInstallerConfigStepTests.ExtractFunction(Script, name)));
 
     private const string Prelude = """
@@ -72,7 +72,7 @@ public sealed class DarlingInstallReadyWaitTests
                     'level=' + $entries[1].Level
                     'joined=' + ($entries[1].Text -replace "`n", '|')
                     'servers=' + (Get-DarlingConfiguredServerCount $entries)
-                    'web=' + (Get-DarlingWebAddress $entries)
+                    'web=' + (Get-DarlingWebAddress $entries 'HOST1')
                 } finally { $stream.Dispose() }
                 """);
 
@@ -84,7 +84,7 @@ public sealed class DarlingInstallReadyWaitTests
                     "level=CRIT",
                     "joined=Cannot reach or migrate the Postgres store: boom|    at Npgsql.Thing()",
                     "servers=3",
-                    "web=https://0.0.0.0:5153",
+                    "web=https://HOST1:5153",
                 },
                 lines);
         }
@@ -158,6 +158,15 @@ public sealed class DarlingInstallReadyWaitTests
             'stopped=' + $r3.State
             $r4 = Wait-DarlingServiceReady 'svc' 'C:\none' ([datetime]::Now) 420 3 { param($d, $f) @($loaded, $fail, $loop) } $running $noSleep
             'recovered=' + $r4.State
+            # The sustained-retry criticals (#4508) are logged at ~120 s while the service keeps retrying; the loop line comes minutes later.
+            $sustained = @(
+                (E 'CRIT' 'Cannot reach or migrate the Postgres store within the 120s retry budget (57P03); this is still a recoverable failure, so it keeps retrying every 60s instead of standing down.'),
+                (E 'CRIT' 'Managed Postgres bootstrap has not succeeded within the 120s retry budget (boom); this is still a recoverable failure, so it keeps retrying every 60s instead of standing down.'),
+                (E 'CRIT' 'Cannot load configuration within the 120s retry budget (locked); this is still a recoverable failure, so it keeps retrying every 60s instead of standing down.'))
+            $script:polls = 0
+            $sequential = { param($d, $f) $script:polls++; if ($script:polls -le 40) { @($loaded) + $sustained } else { @($loaded) + $sustained + @($loop) } }
+            $r5 = Wait-DarlingServiceReady 'svc' 'C:\none' ([datetime]::Now) 420 3 $sequential $running $noSleep
+            'sustained=' + $r5.State + '@' + $r5.Seconds
             (Get-DarlingStartupProblemLines @($loaded, $acl, $fail)) -join ' || '
             """);
 
@@ -165,8 +174,57 @@ public sealed class DarlingInstallReadyWaitTests
         Assert.Contains("acl=TimedOut", lines);
         Assert.Contains("stopped=Stopped", lines);
         Assert.Contains("recovered=Ready", lines);
+        Assert.Contains("sustained=Ready@120", lines);
         Assert.Contains(
             "10:00:00 [CRIT] C:\\x\\darling.json is READABLE by Users/Authenticated Users/Everyone/INTERACTIVE. || 10:00:00 [CRIT] Cannot reach or migrate the Postgres store: no pg_hba entry",
+            lines);
+    }
+
+    /// <summary>The closing remedy is true for the state the wait ended in: a logged failure and a stopped service are
+    /// not "retrying a store", and a quiet timeout does not claim a failure.</summary>
+    [Fact]
+    public void TheRemedy_SaysWhatIsTrueForEachEndState()
+    {
+        var lines = Run(Functions() + """
+
+            'failed=' + (Get-DarlingStartupRemedy 'Failed' 1 'svc')
+            'stopped=' + (Get-DarlingStartupRemedy 'Stopped' 0 'svc')
+            'retrying=' + (Get-DarlingStartupRemedy 'TimedOut' 2 'svc')
+            'quiet=' + (Get-DarlingStartupRemedy 'TimedOut' 0 'svc')
+            """);
+
+        Assert.Equal(4, lines.Count);
+        Assert.StartsWith("failed=The service logged a startup failure it will not get past without help.", lines[0], StringComparison.Ordinal);
+        Assert.Contains("Restart-Service -Name \"svc\"", lines[0], StringComparison.Ordinal);
+        Assert.StartsWith("stopped=The service is not running.", lines[1], StringComparison.Ordinal);
+        Assert.Contains("Start-Service -Name \"svc\"", lines[1], StringComparison.Ordinal);
+        Assert.DoesNotContain("retrying", lines[1] + lines[0], StringComparison.Ordinal);
+        Assert.StartsWith("retrying=The service may still be retrying a store it cannot reach.", lines[2], StringComparison.Ordinal);
+        Assert.StartsWith("quiet=The service may only be slow.", lines[3], StringComparison.Ordinal);
+        Assert.DoesNotContain("cannot reach", lines[3], StringComparison.Ordinal);
+    }
+
+    /// <summary>A dashboard listening on a wildcard address is printed under the machine's name, since 0.0.0.0 and :: are
+    /// not addresses a browser can open; a loopback or specific address is printed as the service logged it.</summary>
+    [Fact]
+    public void TheWebAddress_ReplacesAWildcardListenWithTheMachineName()
+    {
+        var lines = Run(Functions() + "\n" + Prelude + """
+
+            function W([string]$text) { Get-DarlingWebAddress @((E 'INFO' $text)) 'HOST1' }
+            'v4=' + (W 'Starting web dashboard on https://0.0.0.0:5153 (LAN-exposed to 10.0.0.0/8)')
+            'v6=' + (W 'Starting web dashboard on https://[::]:5153 (LAN-exposed to 10.0.0.0/8)')
+            'v6bare=' + (W 'Starting web dashboard on https://:::5153 (LAN-exposed to 10.0.0.0/8)')
+            'specific=' + (W 'Starting web dashboard on https://10.1.2.3:5153 (LAN-exposed to 10.0.0.0/8)')
+            'loopback=' + (W 'Starting web dashboard on http://localhost:5153 (loopback only)')
+            """);
+
+        Assert.Equal(
+            new[]
+            {
+                "v4=https://HOST1:5153", "v6=https://HOST1:5153", "v6bare=https://HOST1:5153",
+                "specific=https://10.1.2.3:5153", "loopback=http://localhost:5153",
+            },
             lines);
     }
 

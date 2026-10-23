@@ -3006,13 +3006,15 @@ function Get-DarlingServiceLogEntries([string]$logDirectory, [datetime]$since) {
 # What the entries say about the start: 'Ready' once the collection loop has started (whatever failed and retried before it),
 # 'Failed' when the service logged a startup failure it will not get past without help, otherwise 'Waiting'. The failure lines
 # are the service's CRITICAL startup lines only: a CRITICAL line about a file's permissions is a warning to read, not a start
-# that failed, so it does not stop the wait.
+# that failed, so it does not stop the wait. The sustained-retry criticals (#4508: "...within the Ns retry budget ...; this is
+# still a recoverable failure, so it keeps retrying") are logged at ~120 seconds while the service keeps trying every minute, so
+# they are not terminal either: a store that comes up at 180 seconds still reaches the collection loop inside the wait.
 function Get-DarlingStartupVerdict($entries) {
     $failurePattern = '^(Cannot load configuration|Configuration problem|Managed Postgres bootstrap|Cannot reach or migrate the Postgres store|postgres\.managed = true requires)'
     foreach ($entry in $entries) {
         if ($entry.Text -match '^PerformanceMonitor Darling collection loop started') { return [pscustomobject]@{ State = 'Ready'; Lines = @() } }
     }
-    $failures = @($entries | Where-Object { $_.Level -eq 'CRIT' -and $_.Text -match $failurePattern })
+    $failures = @($entries | Where-Object { $_.Level -eq 'CRIT' -and $_.Text -match $failurePattern -and $_.Text -notmatch 'still a recoverable failure' })
     if ($failures.Count -gt 0) { return [pscustomobject]@{ State = 'Failed'; Lines = $failures } }
     return [pscustomobject]@{ State = 'Waiting'; Lines = @() }
 }
@@ -3026,6 +3028,18 @@ function Get-DarlingStartupProblemLines($entries, [int]$last = 12) {
         if ($first.Length -gt 400) { $first = $first.Substring(0, 400) + '...' }
         '{0} [{1}] {2}' -f $_.Time.ToString('HH:mm:ss'), $_.Level, $first
     })
+}
+
+# The one sentence that says what to do about a start that did not finish, true for the state it ended in: a logged failure and a
+# stopped service are not retrying anything, and a wait that merely ran out of time may be a store that is still being tried.
+function Get-DarlingStartupRemedy([string]$state, [int]$problemLineCount, [string]$serviceName) {
+    $restart = "'Restart-Service -Name `"$serviceName`"'"
+    switch ($state) {
+        'Failed' { return "The service logged a startup failure it will not get past without help. Fix what the lines above say, then restart it ($restart), or re-run this script." }
+        'Stopped' { return "The service is not running. Read the log lines above if there are any, fix what they say, then start it ('Start-Service -Name `"$serviceName`"'), or re-run this script." }
+    }
+    if ($problemLineCount -gt 0) { return "The service may still be retrying a store it cannot reach. Fix what the lines above say, then restart it ($restart), or re-run this script." }
+    return "The service may only be slow. Check the log again in a minute; if it stays quiet, restart it ($restart) or re-run this script."
 }
 
 # Waits until the service is ready, has logged a startup failure, has stopped, or $timeoutSeconds have passed, and says which:
@@ -3073,10 +3087,15 @@ function Wait-DarlingServiceReady([string]$serviceName, [string]$logDirectory, [
 }
 
 # The web dashboard address the service logged for this start ("Starting web dashboard on http://localhost:5153 ..."), or $null.
-function Get-DarlingWebAddress($entries) {
+# A LAN-exposed dashboard logs the address it LISTENS on, and a wildcard listen (0.0.0.0 or ::) is not an address a browser can
+# open, so the machine's name stands in for it.
+function Get-DarlingWebAddress($entries, [string]$machineName = $env:COMPUTERNAME) {
     $address = $null
     foreach ($entry in $entries) {
         if ($entry.Text -match '^Starting web dashboard on (https?://\S+)') { $address = $Matches[1] }
+    }
+    if ($address -and $machineName) {
+        $address = $address -replace '^(https?://)(0\.0\.0\.0|\[::\]|::)(?=:\d+)', ('${1}' + $machineName)
     }
     return $address
 }
@@ -3116,6 +3135,7 @@ else {
     else {
         Write-Host 'The service has logged no warning or error since it started, so it may only be slow. Check again in a minute.' -ForegroundColor Yellow
     }
+    $startupRemedy = Get-DarlingStartupRemedy $ready.State $problemLines.Count $serviceName
     Write-Host ''
 }
 Write-Host "Primary log: $serviceLogDirectory\darling-service_yyyyMMdd.log"
@@ -3228,7 +3248,7 @@ $serverCount = Get-DarlingConfiguredServerCount $entriesNow
 Write-Host ''
 if ($startupProblem) {
     Write-Host "Installed, but not ready: $startupProblem" -ForegroundColor Red
-    Write-Host "The service keeps retrying a store it cannot reach. Fix what the lines above say, then restart it ('Restart-Service -Name `"$serviceName`"'), or re-run this script." -ForegroundColor Yellow
+    Write-Host $startupRemedy -ForegroundColor Yellow
     exit 1
 }
 Write-Host 'Done. Next steps:' -ForegroundColor Green
