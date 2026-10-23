@@ -582,7 +582,11 @@ public sealed class DarlingManagedRolesTests
            and viewer writes nothing here. */
         Assert.Contains("GRANT INSERT ON config.investigation_request_alerts TO admin;", flat, StringComparison.Ordinal);
         Assert.Contains("ON config.investigation_requests TO admin;", flat, StringComparison.Ordinal);
-        Assert.DoesNotMatch(@"GRANT [A-Z ,()a-z_]*(INSERT|UPDATE|DELETE)[^;]* ON config\.investigation_request_alerts TO (?!admin;)", flat);
+        Assert.DoesNotMatch(@"GRANT [A-Z ,()a-z_]*(INSERT|UPDATE|DELETE)[^;]* ON config\.investigation_request_alerts TO (?!admin;|mcp;)", flat);
+
+        /* #6400: mcp (start_practice_request) copies a case's alert rows too, by the ten columns the copy sets, and never updates or deletes a link. */
+        Assert.Contains("GRANT INSERT (request_id, alert_time, server_id, metric_name, dedup_key, current_value, threshold_value, muted, detail_text, context_json) ON config.investigation_request_alerts TO mcp;", flat, StringComparison.Ordinal);
+        Assert.DoesNotMatch(@"GRANT [A-Z ,()a-z_]*(UPDATE|DELETE)[^;]* ON config\.investigation_request_alerts TO mcp;", flat);
         Assert.DoesNotMatch(@"GRANT (INSERT|UPDATE|DELETE)[^;]* ON config\.(investigation|agent_environment)[a-z_]* TO [a-z_, ]*viewer", flat);
     }
 

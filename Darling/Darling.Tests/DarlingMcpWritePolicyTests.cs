@@ -152,6 +152,9 @@ public sealed class DarlingMcpWritePolicyTests
     [InlineData("approve_investigation_note")]
     [InlineData("reject_investigation_note")]
     [InlineData("close_investigation_request")]
+    [InlineData("start_practice_request")]
+    [InlineData("save_environment_profile")]
+    [InlineData("record_investigation_feedback")]
     public void InvestigationAdminWrites_AreServedOnlyUnderWrites_AndNeverOfferedToAgents(string tool)
     {
         var off = Names(DarlingMcpWritePolicy.FilterToolCollection(ServedTools(), DarlingMcpWritePolicy.Effective.Off));

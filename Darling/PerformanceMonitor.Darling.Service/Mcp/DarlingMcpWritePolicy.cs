@@ -136,6 +136,9 @@ internal static class DarlingMcpWritePolicy
         "approve_investigation_note",
         "reject_investigation_note",
         "close_investigation_request",
+        "start_practice_request",
+        "save_environment_profile",
+        "record_investigation_feedback",
         "set_collector_databases",
         "reset_collector_schedules",
     };
@@ -228,6 +231,9 @@ internal static class DarlingMcpWritePolicy
         "approve_investigation_note",
         "reject_investigation_note",
         "close_investigation_request",
+        "start_practice_request",
+        "save_environment_profile",
+        "record_investigation_feedback",
     };
 
     internal static bool IsWrite(string toolName) => WriteTools.Contains(toolName);

@@ -211,7 +211,7 @@ public sealed class InvestigationAdminMcpLiveTests
                 /* No mcp code path changes a note's expiry by UPDATE (the decision sets state, decided_by and decided_at; the expiry is set at INSERT). */
                 "UPDATE config.investigation_notes SET expires_at = now() + interval '10 years'",
                 "UPDATE config.investigation_requests SET server_name = 'x'",
-                "DELETE FROM config.agent_environment_profiles",
+                "UPDATE config.agent_environment_profiles SET scope_server_id = 1",
             })
             {
                 var refused = await Assert.ThrowsAsync<PostgresException>(async () =>

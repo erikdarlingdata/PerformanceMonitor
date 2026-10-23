@@ -1917,6 +1917,13 @@ GRANT UPDATE (closed_at, closed_by, closed_reason) ON {config}.investigation_req
 GRANT INSERT (state, created_at, expires_at, decided_at, decided_by) ON {config}.investigation_notes TO {mcp};
 GRANT UPDATE (state, decided_at, decided_by) ON {config}.investigation_notes TO {mcp};
 GRANT INSERT, UPDATE, DELETE ON {config}.agent_environment_profiles TO {admin};
+-- #6400: save_environment_profile (the web's PUT /api/environment-profiles) runs InvestigationRequestStore.SaveProfileAsync as mcp. The
+--     statements set the five profile columns on an insert (the profile_id identity takes its default), update three of them on a
+--     conflict and a blank save deletes the scope's profile; the scope lock (SELECT ... FOR UPDATE) rides on the UPDATE grant. The
+--     journal INSERT is mcp's already. Provisioning re-runs every start, so no migration rung carries this.
+GRANT INSERT (scope_server_id, scope_tag_id, profile_text, modified_at, modified_by) ON {config}.agent_environment_profiles TO {mcp};
+GRANT UPDATE (profile_text, modified_at, modified_by) ON {config}.agent_environment_profiles TO {mcp};
+GRANT DELETE ON {config}.agent_environment_profiles TO {mcp};
 -- #6003 review: the journal is the event log the service signs and delivers, and mcp and admin hold INSERT on it, so a
 --     trigger keeps the event rows, their delivery and fallback marks and the time order to the owner (see
 --     BuildJournalEventRulesSql). Created here, not in a migration, as the password rules are; a self-managed store gets
@@ -1951,6 +1958,18 @@ GRANT INSERT, UPDATE, DELETE ON {config}.config_threshold_overrides TO {mcp};
 GRANT INSERT (request_id, route_id, server_id, server_name, family, first_metric, story_path_hash, first_alert_at, last_alert_at,
    window_until, opened_at, expires_at, lease_minutes, autonomy_level, alert_count, practice_of) ON {config}.investigation_requests TO {admin};
 GRANT INSERT ON {config}.investigation_request_alerts TO {admin};
+-- #6400: start_practice_request and record_investigation_feedback run InvestigationPracticeStore.OpenAsync and
+--     InvestigationFeedbackStore.RecordAsync as mcp, so mcp holds what those two statements set and nothing more: the practice's request row
+--     and its copied alert rows (the journal INSERT is mcp's already, and trg_investigation_request_alerts_owner_rows still refuses a
+--     link to any request but a practice one), and a feedback row (the insert's six columns, and on a conflict the author's earlier
+--     row is replaced: the five text columns and created_at). No DELETE on feedback, no UPDATE of a request. Provisioning re-runs
+--     every start, so no migration rung carries this.
+GRANT INSERT (request_id, route_id, server_id, server_name, family, first_metric, story_path_hash, first_alert_at, last_alert_at,
+   window_until, opened_at, expires_at, lease_minutes, autonomy_level, alert_count, practice_of) ON {config}.investigation_requests TO {mcp};
+GRANT INSERT (request_id, alert_time, server_id, metric_name, dedup_key, current_value, threshold_value, muted, detail_text, context_json)
+   ON {config}.investigation_request_alerts TO {mcp};
+GRANT INSERT (request_id, verdict, corrected_verdict, missed_step, comment, author) ON {config}.investigation_feedback TO {mcp};
+GRANT UPDATE (verdict, corrected_verdict, missed_step, comment, author, created_at) ON {config}.investigation_feedback TO {mcp};
 
 -- 10e2. The per-server action switches (V196, #5632 step 5). Every role reads them and NO role but the store owner (the service)
 --     writes them: the default privileges would give admin INSERT/UPDATE/DELETE on a table made after them, so REVOKE ALL ... CASCADE

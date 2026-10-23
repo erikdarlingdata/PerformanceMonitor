@@ -2682,6 +2682,11 @@ $v193c$;
    GRANT INSERT (state, created_at, expires_at, decided_at, decided_by) ON config.investigation_notes TO mcp;
    GRANT UPDATE (state, decided_at, decided_by) ON config.investigation_notes TO mcp;
    GRANT INSERT, UPDATE, DELETE ON config.agent_environment_profiles TO admin;
+   -- #6400: save_environment_profile runs InvestigationRequestStore.SaveProfileAsync as mcp: the columns the statements set, and
+   --     the delete a blank save does. BRING-YOUR-OWN STORES: re-run this script to add them.
+   GRANT INSERT (scope_server_id, scope_tag_id, profile_text, modified_at, modified_by) ON config.agent_environment_profiles TO mcp;
+   GRANT UPDATE (profile_text, modified_at, modified_by) ON config.agent_environment_profiles TO mcp;
+   GRANT DELETE ON config.agent_environment_profiles TO mcp;
 END $do$;
 
 -- 3i (continued). #6003 review: the journal is the request event log the service signs and delivers, and mcp and admin
@@ -2806,6 +2811,14 @@ BEGIN
    GRANT INSERT (request_id, route_id, server_id, server_name, family, first_metric, story_path_hash, first_alert_at, last_alert_at,
       window_until, opened_at, expires_at, lease_minutes, autonomy_level, alert_count, practice_of) ON config.investigation_requests TO admin;
    GRANT INSERT ON config.investigation_request_alerts TO admin;
+   -- #6400: start_practice_request and record_investigation_feedback run the practice and feedback stores as mcp: the columns their
+   --     statements set and nothing more. BRING-YOUR-OWN STORES: re-run this script to add them.
+   GRANT INSERT (request_id, route_id, server_id, server_name, family, first_metric, story_path_hash, first_alert_at, last_alert_at,
+      window_until, opened_at, expires_at, lease_minutes, autonomy_level, alert_count, practice_of) ON config.investigation_requests TO mcp;
+   GRANT INSERT (request_id, alert_time, server_id, metric_name, dedup_key, current_value, threshold_value, muted, detail_text, context_json)
+      ON config.investigation_request_alerts TO mcp;
+   GRANT INSERT (request_id, verdict, corrected_verdict, missed_step, comment, author) ON config.investigation_feedback TO mcp;
+   GRANT UPDATE (verdict, corrected_verdict, missed_step, comment, author, created_at) ON config.investigation_feedback TO mcp;
 END $do$;
 
 -- 3j2. The per-server action switches (V196, #5632 step 5), mirroring managed provisioning's section 10e2. Every role reads them and

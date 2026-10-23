@@ -165,6 +165,9 @@ public sealed class McpPayloadContractCensusTests
         ("DarlingMcpInvestigationAdminTools.cs", "approve_investigation_note"),
         ("DarlingMcpInvestigationAdminTools.cs", "reject_investigation_note"),
         ("DarlingMcpInvestigationAdminTools.cs", "close_investigation_request"),
+        ("DarlingMcpInvestigationFeedbackTools.cs", "start_practice_request"),
+        ("DarlingMcpInvestigationFeedbackTools.cs", "save_environment_profile"),
+        ("DarlingMcpInvestigationFeedbackTools.cs", "record_investigation_feedback"),
     ];
 
     /// <summary>
@@ -1422,6 +1425,8 @@ public sealed class McpPayloadContractCensusTests
     public static readonly string[] GeneralTimestampParsesWithUtcStyles =
     [
         "DarlingMcpAlertTools.cs BuildMuteRuleUpdate",
+        /* #6400: save_environment_profile's expected_modified_at, parsed under invariant UTC styles like the web profile route's. */
+        "DarlingMcpInvestigationFeedbackTools.cs SaveEnvironmentProfile",
         /* #4734: create_mute_rule's body moved into CreateMuteRuleOver (the tool hands it the Postgres-backed
            store), so the expires_at parse, unchanged, is found under the new method name. */
         "DarlingMcpAlertTools.cs CreateMuteRuleOver",

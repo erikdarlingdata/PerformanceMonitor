@@ -67,9 +67,9 @@ Open a new Claude Code session and ask questions like:
 
 ### Available Tools
 
-**Lite** exposes 113 tools (97 by default). **Darling** exposes 257 (182 by default). The deprecated **Dashboard** exposes 66 (see [deprecated/Dashboard/README.md](../deprecated/Dashboard/README.md)). 112 tool names are the same in Lite and Darling. Darling has 145 more. They are the PostgreSQL reads, Custom Views, custom alert rules, query tags, collector control, agent actions, investigation reads and fleet-wide reads.
+**Lite** exposes 113 tools (97 by default). **Darling** exposes 260 (182 by default). The deprecated **Dashboard** exposes 66 (see [deprecated/Dashboard/README.md](../deprecated/Dashboard/README.md)). 112 tool names are the same in Lite and Darling. Darling has 148 more. They are the PostgreSQL reads, Custom Views, custom alert rules, query tags, collector control, agent actions, investigation reads and fleet-wide reads.
 
-Of Darling's 257 tools, `mcp.allowWrites` with a token serves 69. `mcp.allowServerAdmin` adds 4 more. `mcp.allowInvestigations` with a token adds the last 2, and only while `mcp.allowWrites` is off. A service started before an upgrade reports the older, smaller count until you restart it.
+Of Darling's 260 tools, `mcp.allowWrites` with a token serves 72. `mcp.allowServerAdmin` adds 4 more. `mcp.allowInvestigations` with a token adds the last 2, and only while `mcp.allowWrites` is off. A service started before an upgrade reports the older, smaller count until you restart it.
 
 The table below names the main tools, not all of them. The `tools/list` call on a running server gives the full list.
 
@@ -138,7 +138,7 @@ The four investigation tools let your own agent pick up an alert, look into it w
 | Collection state (Darling) | `get_collection_state`, `get_server_settings`, `pause_collection`, `resume_collection`, `disable_server`, `enable_server`, `set_server_excluded_databases`, `test_connection`, `analyze_now`, and `purge_now` (needs `confirm`) |
 | Quiet windows (Darling) | `set_quiet_window` and `clear_quiet_window` set and end a time-boxed mute for one server or the whole fleet |
 | Database state expectations (Darling) | `get_database_state_expectations` lists each database with its current and expected state; `set_database_state_expected` sets, ignores or clears one (the Viewer's database state override editor) |
-| Investigation admin (Darling) | `write_investigation_note` (a note a person stands behind, approved as written), `approve_investigation_note` and `reject_investigation_note` (decide a pending agent note), `close_investigation_request` (close an open, claimed or reported request with a reason). Served only with `mcp.allowWrites` and a token, never to an investigation agent, and none has an undo, as the web has none |
+| Investigation admin (Darling) | `write_investigation_note` (a note a person stands behind, approved as written), `approve_investigation_note` and `reject_investigation_note` (decide a pending agent note), `close_investigation_request` (close an open, claimed or reported request with a reason), `start_practice_request` (replay a judged case), `save_environment_profile` (the profile text of the fleet, one server or one tag; a blank text removes it) and `record_investigation_feedback` (right, partly or wrong on a report). Served only with `mcp.allowWrites` and a token, never to an investigation agent. The answer shows the row before and after. A profile edit is undone by saving the answer's 'before' again; the other six have no undo, as the web has none |
 | Mute rule purge (Darling) | `purge_expired_mute_rules` deletes every expired mute rule (the Viewer's Purge Expired) and returns each rule it deleted |
 | Alert tuning (Darling) | `backtest_custom_alert_rule` (where a rule fired over stored history), `set_alert_threshold_override`, `dismiss_alert_history` and `restore_alert_history`, and route tools such as `create_notification_route`, `update_notification_route` and `set_notification_route_fallback` |
 
