@@ -2181,6 +2181,15 @@ if ($AddOperator) {
 # $existing was resolved back at 1b, which needs to know fresh-versus-upgrade before it decides whether a
 # bad install location is a refusal or a question. Nothing between there and here creates or removes the
 # service, so it is the same answer.
+# The registered path carries its quotes, as the MSI registers it (#6597). Windows PowerShell 5.1 (and PowerShell
+# 7.0-7.2, or 7.3+ with $PSNativeCommandArgumentPassing = 'Legacy') wraps an argument that holds a space in quotes
+# but does not escape quotes inside it, so a bare " in the value is eaten and sc.exe registers the path with none:
+# the quotes have to go in as \". PowerShell 7.3+ in its Windows/Standard mode escapes inner quotes itself, and a
+# \" there would arrive as a literal backslash, so it takes the bare ".
+$nativeArgMode = Get-Variable -Name PSNativeCommandArgumentPassing -ValueOnly -ErrorAction SilentlyContinue
+$binPathQuote = if ($nativeArgMode -and $nativeArgMode -ne 'Legacy') { '"' } else { '\"' }
+$quotedServiceExe = "$binPathQuote$serviceExe$binPathQuote"
+
 if ($existing) {
     Write-Host "Service already exists - upgrading its binPath in place (config, store data, and credentials untouched)."
     if ($existing.Status -ne 'Stopped') {
@@ -2188,14 +2197,14 @@ if ($existing) {
         (Get-Service -Name $serviceName).WaitForStatus('Stopped', [TimeSpan]::FromSeconds(60))
     }
 
-    & sc.exe config $serviceName binPath= "`"$serviceExe`"" | Out-Null
+    & sc.exe config $serviceName binPath= $quotedServiceExe | Out-Null
     if ($LASTEXITCODE -ne 0) { Fail "sc config failed ($LASTEXITCODE)." }
 }
 else {
     # The space after binPath=/start=/obj= is sc.exe syntax. The virtual service account is
     # password-less, per-service, unprivileged - and mandatory-in-practice for the bundled
     # PostgreSQL, which refuses to run with administrative privileges (LocalSystem bricks it).
-    & sc.exe create $serviceName binPath= "`"$serviceExe`"" start= auto obj= "NT SERVICE\$serviceName" | Out-Null
+    & sc.exe create $serviceName binPath= $quotedServiceExe start= auto obj= "NT SERVICE\$serviceName" | Out-Null
     if ($LASTEXITCODE -ne 0) { Fail "sc create failed ($LASTEXITCODE)." }
     Write-Host "Created service '$serviceName' (NT SERVICE virtual account, automatic start)."
 }
