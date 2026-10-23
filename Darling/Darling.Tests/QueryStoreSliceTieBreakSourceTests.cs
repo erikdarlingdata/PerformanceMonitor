@@ -12,6 +12,7 @@ using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
 using Xunit;
+using PerformanceMonitor.Darling.Storage;
 
 namespace Darling.Tests;
 
@@ -141,13 +142,13 @@ public sealed class QueryStoreSliceTieBreakSourceTests
     public void ComposeCompiler_DedupePartitionByLiteral_EqualsTheRestrictionKey()
     {
         /* The dedupe spells its PARTITION BY list as a literal (this guard's regex has to see it); the
-           restriction joins on PerformanceMonitor.Darling.Service.ComposeCompiler.s_queryStorePartitionKey.
+           restriction joins on PerformanceMonitor.Darling.Storage.ComposeCompiler.s_queryStorePartitionKey.
            A drift between the two would make the restriction keep the wrong partitions. */
         var source = File.ReadAllText(SourcePath(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "Compose", "ComposeCompiler.cs")));
         var m = Regex.Match(source, @"ROW_NUMBER\(\) OVER \(PARTITION BY ""\s*\+\s*\$""(?<cols>[^""]+?)\s*""\s*\+\s*\$""ORDER BY");
         Assert.True(m.Success, "the Query Store dedupe's literal PARTITION BY list was not found in ComposeCompiler.cs");
         Assert.Equal(
-            string.Join(", ", PerformanceMonitor.Darling.Service.ComposeCompiler.s_queryStorePartitionKey),
+            string.Join(", ", PerformanceMonitor.Darling.Storage.ComposeCompiler.s_queryStorePartitionKey),
             m.Groups["cols"].Value);
     }
 
