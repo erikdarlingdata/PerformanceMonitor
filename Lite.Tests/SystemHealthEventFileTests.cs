@@ -57,11 +57,11 @@ public sealed class SystemHealthEventFileTests
 
     private static object[] Trailer(
         bool truncated, long hidden, object age, bool fileRead, object? error = null, bool bookmarkRefused = false,
-        string? scanFile = null, long? scanOffset = null, bool bufferCut = false) =>
+        string? scanFile = null, long? scanOffset = null, bool bufferCut = false, bool wildcard = false) =>
         new object[]
         {
             truncated, hidden, age, fileRead, error ?? DBNull.Value, bookmarkRefused,
-            (object?)scanFile ?? DBNull.Value, (object?)scanOffset ?? DBNull.Value, bufferCut,
+            (object?)scanFile ?? DBNull.Value, (object?)scanOffset ?? DBNull.Value, bufferCut, wildcard,
         };
 
     [Fact]
@@ -421,5 +421,20 @@ public sealed class SystemHealthEventFileTests
         Assert.Equal(
             SystemHealthEventsCollector.FormatBookmark(newest, 4_096, FileA),
             context.PendingState[SystemHealthEventsCollector.BookmarkStateKey]);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AWildcardRead_IsRecorded_AndAnExactPathReadWritesNothing(bool wildcard)
+    {
+        var context = MakeContext(watermark: s_watermark);
+        using var reader = FakeCollectorDataReader.WithResultSets(
+            new[] { FileRow(s_watermark.AddMinutes(2), "wait_info", FileA, 4_096) },
+            new[] { Trailer(false, 0, DBNull.Value, true, wildcard: wildcard) });
+
+        await SystemHealthEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Equal(wildcard ? 1 : null, Measured(context, "event_file_wildcard"));
     }
 }

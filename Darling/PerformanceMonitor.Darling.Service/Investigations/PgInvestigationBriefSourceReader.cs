@@ -509,8 +509,17 @@ ORDER BY m.metric_name, f.day DESC";
         return new InvestigationBriefSources(request, alerts, findings, earlier, changes, notes, profiles,
             priorLinks.Count > 0 ? priorLinks : null, requestUrl, practiceOf is not null,
             recurrence.Count > 0 ? recurrence : null, evidence.Count > 0 ? evidence : null,
-            knownPatterns.Count > 0 ? knownPatterns : null);
+            knownPatterns.Count > 0 ? knownPatterns : null,
+            await QueryStoreNotCollectedAsync(request, cancellationToken).ConfigureAwait(false));
     }
+
+    /// <summary>#6554: the reason a Change Watch request's Query Store reads will be empty, or null (every other request, and a server whose
+    /// Query Store is collected). The wording is <see cref="DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync"/>'s, the same
+    /// text the Query Store reads answer with.</summary>
+    private Task<string?> QueryStoreNotCollectedAsync(InvestigationBriefRequest request, CancellationToken cancellationToken) =>
+        string.Equals(request.FirstMetric, InvestigationTriggerKinds.ChangeWatchMetric, StringComparison.Ordinal)
+            ? DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(_postgres, request.ServerId, request.ServerName, cancellationToken)
+            : Task.FromResult<string?>(null);
 
     /// <summary>The latest findings for the server over 24 hours, collapsed per chain, the request's own story first, each
     /// remediation reduced to its verdict and blockers (the store's forcing state read as <c>get_analysis_findings</c> does).</summary>
