@@ -23,7 +23,7 @@ namespace Darling.Tests;
 /// <summary>
 /// #6560: <c>get_forced_plans</c> listed at most 200 forces with no way to reach the rest or to ask for one plan. Over a server
 /// with 250 forces, the list pages (<c>limit</c>, <c>offset</c>, <c>has_more</c>, <c>next_offset</c>) and <c>query_id</c> /
-/// <c>plan_id</c> name the forces wanted, while <c>total_forces</c> and <c>state_counts</c> keep describing the whole server.
+/// <c>plan_id</c> name the forces wanted, and narrow the read itself, before the reader's cap of 2000 forces, so a force past the cap is still found.
 /// </summary>
 [Collection("live-postgres")]
 public sealed class ForcedPlanPagingLiveTests
@@ -35,7 +35,7 @@ public sealed class ForcedPlanPagingLiveTests
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
-    private static async Task<T> WithStoreAsync<T>(Func<NpgsqlDataSource, CancellationToken, Task<T>> body)
+    private static async Task<T> WithStoreAsync<T>(Func<NpgsqlDataSource, CancellationToken, Task<T>> body, int forces = Forces)
     {
         var cs = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live forced-plan paging tests.");
@@ -55,7 +55,7 @@ VALUES ($1,$2,$3,$4,$5,NULL,NULL,NULL,NULL,NULL,NULL)", CollectionIdGenerator.Ne
         await DarlingMcpTestData.ExecAsync(connection, ct, @"INSERT INTO collect.query_store_forced_plans
 (collection_id, collection_time, server_id, server_name, database_name, plan_id, query_id, query_plan_hash, plan_forcing_type, force_failure_count, last_force_failure_reason)
 SELECT $1 + g, $2, $3, $4, $5, g, g + 1000, '0x' || g::text, 'MANUAL', 0, NULL FROM generate_series(1, $6::int) AS g",
-            CollectionIdGenerator.Next() + 1_000_000, at, ServerId, ServerName, Db, Forces);
+            CollectionIdGenerator.Next() + 1_000_000, at, ServerId, ServerName, Db, forces);
 
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
         return await body(postgres, ct);
@@ -77,7 +77,7 @@ SELECT $1 + g, $2, $3, $4, $5, g, g + 1000, '0x' || g::text, 'MANUAL', 0, NULL F
             Assert.Equal(250, plan.GetProperty("plan_id").GetInt64());
             Assert.Equal(1250, plan.GetProperty("query_id").GetInt64());
             Assert.Equal(1, root.GetProperty("matched_forces").GetInt32());
-            Assert.Equal(Forces, root.GetProperty("total_forces").GetInt32());
+            Assert.Equal(1, root.GetProperty("total_forces").GetInt32());
             Assert.False(root.GetProperty("has_more").GetBoolean());
             return 0;
         });
@@ -117,6 +117,49 @@ SELECT $1 + g, $2, $3, $4, $5, g, g + 1000, '0x' || g::text, 'MANUAL', 0, NULL F
                 .Select(p => p.GetProperty("plan_id").GetInt64()).ToList();
             Assert.Equal(Forces, ids.Distinct().Count());
             Assert.Equal(Forces, first.GetProperty("total_forces").GetInt32());
+            return 0;
+        });
+    }
+
+    /// <summary>Plans sort by database then plan_id and the reader keeps the first <see cref="DarlingForcedPlanStateReader.MaxForces"/>; plan 2100 is past it.</summary>
+    private const int PastTheCap = DarlingForcedPlanStateReader.MaxForces + 100;
+
+    [Fact]
+    public async Task TheQueryFilter_FindsAForcePastTheReadCap()
+    {
+        await WithStoreAsync(async (postgres, ct) =>
+        {
+            var root = Parse(await Call(postgres, PastTheCap + 1000, null, 200, 0, ct));
+
+            var plan = Assert.Single(root.GetProperty("forced_plans").EnumerateArray());
+            Assert.Equal(PastTheCap, plan.GetProperty("plan_id").GetInt64());
+            Assert.Equal(1, root.GetProperty("matched_forces").GetInt32());
+            return 0;
+        }, PastTheCap);
+    }
+
+    [Fact]
+    public async Task ThePlanFilter_FindsAForcePastTheReadCap()
+    {
+        await WithStoreAsync(async (postgres, ct) =>
+        {
+            var root = Parse(await Call(postgres, null, PastTheCap, 200, 0, ct));
+
+            var plan = Assert.Single(root.GetProperty("forced_plans").EnumerateArray());
+            Assert.Equal(PastTheCap + 1000, plan.GetProperty("query_id").GetInt64());
+            return 0;
+        }, PastTheCap);
+    }
+
+    [Fact]
+    public async Task AFilterThatMatchesNothing_SaysSo()
+    {
+        await WithStoreAsync(async (postgres, ct) =>
+        {
+            var root = Parse(await Call(postgres, 999_999, null, 200, 0, ct));
+
+            Assert.Equal("empty", root.GetProperty("status").GetString());
+            Assert.Contains("matches query_id/plan_id", root.GetProperty("message").GetString(), StringComparison.Ordinal);
             return 0;
         });
     }

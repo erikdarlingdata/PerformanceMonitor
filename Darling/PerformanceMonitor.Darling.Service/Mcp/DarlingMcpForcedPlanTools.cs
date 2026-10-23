@@ -79,7 +79,8 @@ public sealed class DarlingMcpForcedPlanTools
         "it sits beside the state and never changes it: a FAILING force with a guide may still be running fine. " +
         "An empty answer says why: no capture in the window (the collector has not run, or Query Store is off for every database), or no forced plans in the newest captures. " +
         "forced_plans lists the worst states first, at most limit (default and most 200) per call: when has_more is true, call again with offset = next_offset. " +
-        "query_id and plan_id narrow the list to the forces you name (matched_forces counts them; total_forces and state_counts stay the whole scope).")]
+        "query_id and plan_id narrow the read itself, so a force is found even on a server with more forces than one read holds (2000); with either, matched_forces, total_forces and state_counts count only the forces that match. Without them total_forces is capped at 2000. " +
+        "plan_forcing_type AUTO means SQL Server forced the plan itself (automatic plan correction), so force and unforce churn on it is normal; MANUAL is a person or a tool.")]
     public static async Task<string> GetForcedPlans(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -99,9 +100,9 @@ public sealed class DarlingMcpForcedPlanTools
         GetForcedPlans(postgres, server_name, hours_back, as_of, databases, null, null, MaxListed, 0, cancellationToken);
 
     /// <summary>
-    /// #6560: the same read with a page and a plan filter. <paramref name="queryId"/> and <paramref name="planId"/> narrow the LIST only:
-    /// <c>total_forces</c> and <c>state_counts</c> keep describing the whole scope, so a filtered answer still says how big the server's
-    /// force population is. <paramref name="limit"/> (1 to <see cref="MaxListed"/>) and <paramref name="offset"/> page the ordered list.
+    /// #6560: the same read with a page and a plan filter. <paramref name="queryId"/> and <paramref name="planId"/> narrow the READ (before the reader's
+    /// <see cref="DarlingForcedPlanStateReader.MaxForces"/> cap, so a force past it is still found), so with either set <c>total_forces</c> and
+    /// <c>state_counts</c> describe the matching forces; without them <c>total_forces</c> is the count under that cap. <paramref name="limit"/> (1 to <see cref="MaxListed"/>) and <paramref name="offset"/> page the ordered list.
     /// </summary>
     internal static async Task<string> GetForcedPlans(
         NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, DatabaseFilter databases,
@@ -122,7 +123,7 @@ public sealed class DarlingMcpForcedPlanTools
         try
         {
             var read = await DarlingForcedPlanStateReader.ReadAsync(
-                postgres, resolved.ServerId, databases, null, start, windowEnd, null, McpCommandDeadlines.ReadSeconds, cancellationToken);
+                postgres, resolved.ServerId, databases, queryId, start, windowEnd, null, McpCommandDeadlines.ReadSeconds, cancellationToken, planId);
             ReadScope.NoteSource(ReadScope.SourceRaw);
 
             var scope = databases.Describe();
@@ -141,7 +142,9 @@ public sealed class DarlingMcpForcedPlanTools
                 {
                     ["server"] = resolved.DisplayName,
                     ["status"] = "empty",
-                    ["message"] = $"No plan is forced{where} in the newest capture of each database in the window. Captured databases are listed.",
+                    ["message"] = queryId is not null || planId is not null
+                        ? $"No force{where} in the newest captures matches query_id/plan_id. Captured databases are listed."
+                        : $"No plan is forced{where} in the newest capture of each database in the window. Captured databases are listed.",
                     ["as_of"] = Format(windowEnd),
                     ["hours_back"] = hours_back,
                     ["captures"] = read.Captures.Select(CaptureNode),
@@ -152,9 +155,8 @@ public sealed class DarlingMcpForcedPlanTools
                 .OrderBy(p => StateRank(p.State)).ThenBy(p => p.DatabaseName, StringComparer.Ordinal).ThenBy(p => p.PlanId).ThenBy(p => p.QueryId)
                 .ToList();
             var narrowed = queryId is not null || planId is not null;
-            var matched = narrowed
-                ? ordered.Where(p => (queryId is null || p.QueryId == queryId) && (planId is null || p.PlanId == planId)).ToList()
-                : ordered;
+            /* The reader applied query_id and plan_id before its cap, so the list is already the matching forces. */
+            var matched = ordered;
             var listed = matched.Skip(offset).Take(limit).ToList();
             var hasMore = offset + listed.Count < matched.Count;
             string? pageNote = null;
