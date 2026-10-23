@@ -10,7 +10,9 @@ changed file list. Outputs, as `key=value` lines (stdout, and $GITHUB_OUTPUT whe
   areas            docs-only | darling | lite | all | none
   darling_scope    full | reads-lite | none   (reads-lite: the Stage=Guard classes plus the classes that read a Lite file)
   lite_scope       full | reads | none        (reads: the Lite classes that read a Darling file)
-  build            true when the shared test build is needed (any run that is not docs-only)
+  build            true when a test build is needed (any run that is not docs-only)
+  build_darling    true when the Darling.Tests build job runs (same as build: every area runs Darling.Tests classes)
+  build_lite       true when the Lite.Tests build job runs (build, except areas darling: no Lite class runs then)
   test_minutes     estimated test time of the selected classes, in minutes
   legs             a pull request: N = ceil(test_minutes / MINUTES_PER_LEG), at most MAX_LEGS; a dev push: DEV_PUSH_LEGS;
                    0 when nothing runs
@@ -220,7 +222,7 @@ def plan(event: str, base: str, head_ref: str, draft: bool, labels: "list[str]",
          rules, catalog: "dict | None" = None) -> "dict[str, str]":
     outcome, why = gate(event, head_ref, draft, labels)
     out = {"run": "true" if outcome == "run" else "false", "outcome": outcome, "why": why,
-           "areas": "none", "darling_scope": "none", "lite_scope": "none", "build": "false",
+           "areas": "none", "darling_scope": "none", "lite_scope": "none", "build": "false", "build_darling": "false", "build_lite": "false",
            "test_minutes": "0", "legs": "0", "legs_json": "[]",
            "actionlint": "false", "check_web_js": "false", "deprecated_tests": "false"}
     if outcome != "run":
@@ -230,6 +232,9 @@ def plan(event: str, base: str, head_ref: str, draft: bool, labels: "list[str]",
     out.update(areas=c["areas"], darling_scope=c["darling_scope"], lite_scope=c["lite_scope"])
     out["why"] = f"{why} {c['reason']}"
     out["build"] = "false" if c["areas"] == "docs-only" else "true"
+    # Two build jobs (#6656): every area runs Darling.Tests classes, but -Areas darling runs no Lite.Tests class.
+    out["build_darling"] = out["build"]
+    out["build_lite"] = "true" if out["build"] == "true" and c["areas"] != "darling" else "false"
     out["actionlint"] = _bool(any(f.startswith(".github/workflows/") for f in files))
     out["check_web_js"] = _bool(any(WEB_JS_MARKER in "/" + f for f in files))
     out["deprecated_tests"] = _bool(any(f.startswith("deprecated/") for f in files))

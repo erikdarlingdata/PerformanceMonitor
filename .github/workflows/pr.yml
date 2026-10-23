@@ -1,7 +1,7 @@
 name: PR CI
 
-# #6656: the pull request and dev-push CI. One plan job decides the work from the changed files, one build job builds
-# both test projects once, N test legs run weighted slices of the classes from that build, and one verdict job turns the
+# #6656: the pull request and dev-push CI. One plan job decides the work from the changed files, two build jobs build
+# the two test projects in parallel, N test legs run weighted slices of the classes from that build, and one verdict job turns the
 # result into the commit status `CI result`. `CI result` is a commit status and not a job: a skipped required job counts
 # as passing, so a draft's skipped run could leave a green on a SHA nobody tested. The status stays pending until the
 # verdict sets it, so a run that is cancelled or dies early never passes.
@@ -43,6 +43,8 @@ jobs:
       areas: ${{ steps.plan.outputs.areas }}
       darling_scope: ${{ steps.plan.outputs.darling_scope }}
       build: ${{ steps.plan.outputs.build }}
+      build_darling: ${{ steps.plan.outputs.build_darling }}
+      build_lite: ${{ steps.plan.outputs.build_lite }}
       legs: ${{ steps.plan.outputs.legs }}
       legs_json: ${{ steps.plan.outputs.legs_json }}
     steps:
@@ -115,10 +117,10 @@ jobs:
         shell: bash
         run: bash .github/scripts/check-web-js.sh
 
-  build:
-    name: Build the test projects
+  build-darling:
+    name: Build Darling.Tests
     needs: plan
-    if: ${{ needs.plan.outputs.run == 'true' && needs.plan.outputs.build == 'true' }}
+    if: ${{ needs.plan.outputs.run == 'true' && needs.plan.outputs.build_darling == 'true' }}
     runs-on: windows-latest
     timeout-minutes: 25
     steps:
@@ -132,30 +134,23 @@ jobs:
           cache-dependency-path: '**/packages.lock.json'
 
       # Locked mode and `set -euo pipefail`: a multi-line run block under the default shell reports only its last
-      # command's exit code, so the first restore could fail unseen (LockedModeRestoreCoverageTests enforces both).
-      - name: Restore the test projects
+      # command's exit code, so a failed restore could go unseen (LockedModeRestoreCoverageTests enforces both).
+      - name: Restore Darling.Tests
         shell: bash
         run: |
           set -euo pipefail
 
           dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode
-          dotnet restore Lite.Tests/Lite.Tests.csproj --locked-mode
 
-      - name: Build the Darling test project
+      - name: Build Darling.Tests
         shell: bash
         run: |
           set -euo pipefail
 
           dotnet build Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-restore
 
-      - name: Build the Lite test project
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          dotnet build Lite.Tests/Lite.Tests.csproj -c Release --no-restore
-
       # Where this build was made and from what, for the legs' check. No dot-prefix (upload-artifact skips hidden files).
+      # One file a build job, so a leg that fetches both artifacts keeps both.
       - name: Record where this build was made
         shell: pwsh
         env:
@@ -163,15 +158,38 @@ jobs:
           PRODUCER_SHA: ${{ github.sha }}
         run: |
           $ErrorActionPreference = 'Stop'
-          Set-Content -Path guard-build-origin.txt -Value @("workspace=$env:PRODUCER_WORKSPACE", "sha=$env:PRODUCER_SHA") -Encoding utf8NoBOM
+          Set-Content -Path guard-build-origin-darling.txt -Value @("workspace=$env:PRODUCER_WORKSPACE", "sha=$env:PRODUCER_SHA") -Encoding utf8NoBOM
 
-      # The same file lists the Guard build uploaded for the two projects. One day of retention: only this run's legs read it.
-      - name: Upload the built test projects
+      # The legs run on windows-latest (win-x64), which loads only runtimes/win, runtimes/unix and runtimes/win-x64. The
+      # other platforms' native libraries (osx, linux, arm, x86: DuckDB, Skia, MSAL, HarfBuzz) were 822 of the 1,054 MB
+      # of the first artifact and what 16 legs spent minutes downloading at once (#6656). Nothing reads them: the tests
+      # that name runtimes/ plant their own tree. PDBs stay, for stack traces with line numbers.
+      - name: Leave other platforms' native libraries out of the artifact
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $keep = @('win', 'win-x64', 'unix')
+          $roots = @('Darling/Darling.Tests/bin/Release', 'Darling/PerformanceMonitor.Darling.Service/bin/Release')
+          $removed = 0
+          foreach ($root in $roots) {
+            foreach ($runtimes in @(Get-ChildItem -Path $root -Directory -Recurse -Filter runtimes)) {
+              foreach ($rid in @(Get-ChildItem -Path $runtimes.FullName -Directory)) {
+                if ($keep -notcontains $rid.Name) {
+                  Remove-Item -Recurse -Force $rid.FullName
+                  $removed++
+                }
+              }
+            }
+          }
+          Write-Host "Removed $removed runtime folder(s) for other platforms."
+
+      # One day of retention: only this run's legs read it.
+      - name: Upload the built Darling.Tests
         uses: actions/upload-artifact@v6
         with:
-          name: ci-test-build
+          name: ci-test-build-darling
           path: |
-            guard-build-origin.txt
+            guard-build-origin-darling.txt
             Darling/Darling.Tests/bin/Release
             Darling/PerformanceMonitor.Darling.Service/bin/Release
             Darling/Darling.Tests/obj/project.assets.json
@@ -179,6 +197,84 @@ jobs:
             Darling/Darling.Tests/obj/*.nuget.g.props
             Darling/Darling.Tests/obj/*.nuget.g.targets
             Darling/Darling.Tests/obj/*.nuget.dgspec.json
+          retention-days: 1
+          compression-level: 1
+          overwrite: true
+          if-no-files-found: error
+
+  build-lite:
+    name: Build Lite.Tests
+    needs: plan
+    if: ${{ needs.plan.outputs.run == 'true' && needs.plan.outputs.build_lite == 'true' }}
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup .NET 10.0
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+
+      # Locked mode and `set -euo pipefail`: a multi-line run block under the default shell reports only its last
+      # command's exit code, so a failed restore could go unseen (LockedModeRestoreCoverageTests enforces both).
+      - name: Restore Lite.Tests
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dotnet restore Lite.Tests/Lite.Tests.csproj --locked-mode
+
+      - name: Build Lite.Tests
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dotnet build Lite.Tests/Lite.Tests.csproj -c Release --no-restore
+
+      # Where this build was made and from what, for the legs' check. No dot-prefix (upload-artifact skips hidden files).
+      # One file a build job, so a leg that fetches both artifacts keeps both.
+      - name: Record where this build was made
+        shell: pwsh
+        env:
+          PRODUCER_WORKSPACE: ${{ github.workspace }}
+          PRODUCER_SHA: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Content -Path guard-build-origin-lite.txt -Value @("workspace=$env:PRODUCER_WORKSPACE", "sha=$env:PRODUCER_SHA") -Encoding utf8NoBOM
+
+      # The legs run on windows-latest (win-x64), which loads only runtimes/win, runtimes/unix and runtimes/win-x64. The
+      # other platforms' native libraries (osx, linux, arm, x86: DuckDB, Skia, MSAL, HarfBuzz) were 822 of the 1,054 MB
+      # of the first artifact and what 16 legs spent minutes downloading at once (#6656). Nothing reads them: the tests
+      # that name runtimes/ plant their own tree. PDBs stay, for stack traces with line numbers.
+      - name: Leave other platforms' native libraries out of the artifact
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $keep = @('win', 'win-x64', 'unix')
+          $roots = @('Lite.Tests/bin/Release')
+          $removed = 0
+          foreach ($root in $roots) {
+            foreach ($runtimes in @(Get-ChildItem -Path $root -Directory -Recurse -Filter runtimes)) {
+              foreach ($rid in @(Get-ChildItem -Path $runtimes.FullName -Directory)) {
+                if ($keep -notcontains $rid.Name) {
+                  Remove-Item -Recurse -Force $rid.FullName
+                  $removed++
+                }
+              }
+            }
+          }
+          Write-Host "Removed $removed runtime folder(s) for other platforms."
+
+      # One day of retention: only this run's legs read it.
+      - name: Upload the built Lite.Tests
+        uses: actions/upload-artifact@v6
+        with:
+          name: ci-test-build-lite
+          path: |
+            guard-build-origin-lite.txt
             Lite.Tests/bin/Release
             Lite/bin/**/PerformanceMonitorLite.runtimeconfig.json
             Lite.Tests/obj/project.assets.json
@@ -193,8 +289,10 @@ jobs:
 
   test:
     name: Test leg ${{ matrix.leg }}/${{ needs.plan.outputs.legs }}
-    needs: [plan, build]
-    if: ${{ needs.plan.outputs.run == 'true' && needs.plan.outputs.legs != '0' }}
+    needs: [plan, build-darling, build-lite]
+    # A skipped build-lite is fine when the plan asked for no Lite build (areas darling); a build that failed is not.
+    # !cancelled() because a job that needs a skipped job is skipped otherwise.
+    if: ${{ !cancelled() && needs.plan.outputs.run == 'true' && needs.plan.outputs.legs != '0' && needs.build-darling.result == 'success' && (needs.build-lite.result == 'success' || (needs.plan.outputs.build_lite != 'true' && needs.build-lite.result == 'skipped')) }}
     runs-on: windows-latest
     # The test step has 25 minutes; the rest is setup, the artifact fetch and the uploads.
     timeout-minutes: 40
@@ -205,10 +303,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Fetch the build
+      - name: Fetch the Darling.Tests build
         uses: actions/download-artifact@v6
         with:
-          name: ci-test-build
+          name: ci-test-build-darling
+          path: .
+
+      # Only a leg that runs Lite.Tests classes (areas all or lite) needs the Lite build.
+      - name: Fetch the Lite.Tests build
+        if: needs.plan.outputs.build_lite == 'true'
+        uses: actions/download-artifact@v6
+        with:
+          name: ci-test-build-lite
           path: .
 
       # A fetched build that is not for THIS workspace and commit is an error: the tests find the repo root through
@@ -218,21 +324,30 @@ jobs:
         env:
           THIS_WORKSPACE: ${{ github.workspace }}
           THIS_SHA: ${{ github.sha }}
-          REQUIRED_FILES: Darling/Darling.Tests/bin/Release/net10.0-windows/Darling.Tests.dll;Darling/Darling.Tests/obj/project.assets.json;Lite.Tests/bin/Release/net10.0-windows/Lite.Tests.dll;Lite.Tests/obj/project.assets.json
+          WITH_LITE: ${{ needs.plan.outputs.build_lite }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $origin = @{}
-          if (Test-Path guard-build-origin.txt) {
-            foreach ($line in Get-Content guard-build-origin.txt) { if ($line -match '^(\w+)=(.*)$') { $origin[$Matches[1]] = $Matches[2] } }
+          # One origin file and one file list for each build this leg fetched.
+          $builds = @(
+            @{ Name = 'Darling.Tests'; Origin = 'guard-build-origin-darling.txt'; Files = @('Darling/Darling.Tests/bin/Release/net10.0-windows/Darling.Tests.dll', 'Darling/Darling.Tests/obj/project.assets.json') }
+          )
+          if ($env:WITH_LITE -eq 'true') {
+            $builds += @{ Name = 'Lite.Tests'; Origin = 'guard-build-origin-lite.txt'; Files = @('Lite.Tests/bin/Release/net10.0-windows/Lite.Tests.dll', 'Lite.Tests/obj/project.assets.json') }
           }
-          if ($origin['workspace'] -ne $env:THIS_WORKSPACE -or $origin['sha'] -ne $env:THIS_SHA) {
-            Write-Host "::error title=Build is for another workspace or commit::The fetched build says workspace '$($origin['workspace'])' at '$($origin['sha'])'; this leg is at '$env:THIS_WORKSPACE' at '$env:THIS_SHA'."
-            exit 1
-          }
-          foreach ($file in ($env:REQUIRED_FILES -split ';')) {
-            if (-not (Test-Path $file)) {
-              Write-Host "::error title=Build is incomplete::The fetched build has no $file."
+          foreach ($build in $builds) {
+            $origin = @{}
+            if (Test-Path $build.Origin) {
+              foreach ($line in Get-Content $build.Origin) { if ($line -match '^(\w+)=(.*)$') { $origin[$Matches[1]] = $Matches[2] } }
+            }
+            if ($origin['workspace'] -ne $env:THIS_WORKSPACE -or $origin['sha'] -ne $env:THIS_SHA) {
+              Write-Host "::error title=Build is for another workspace or commit::The fetched $($build.Name) build says workspace '$($origin['workspace'])' at '$($origin['sha'])'; this leg is at '$env:THIS_WORKSPACE' at '$env:THIS_SHA'."
               exit 1
+            }
+            foreach ($file in $build.Files) {
+              if (-not (Test-Path $file)) {
+                Write-Host "::error title=Build is incomplete::The fetched $($build.Name) build has no $file."
+                exit 1
+              }
             }
           }
 
@@ -307,7 +422,7 @@ jobs:
   # Named "CI verdict", never "CI result": `CI result` is the commit status this job sets.
   verdict:
     name: CI verdict
-    needs: [plan, build, test]
+    needs: [plan, build-darling, build-lite, test]
     # Nothing to say for a draft, which sets no status: skip the runner too.
     if: ${{ always() && (needs.plan.result != 'success' || needs.plan.outputs.run == 'true' || needs.plan.outputs.outcome == 'train-blocked') }}
     runs-on: ubuntu-latest
@@ -322,9 +437,11 @@ jobs:
           IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
           PLAN_RESULT: ${{ needs.plan.result }}
           PLAN_OUTCOME: ${{ needs.plan.outputs.outcome }}
-          PLAN_BUILD: ${{ needs.plan.outputs.build }}
+          PLAN_BUILD_DARLING: ${{ needs.plan.outputs.build_darling }}
+          PLAN_BUILD_LITE: ${{ needs.plan.outputs.build_lite }}
           PLAN_LEGS: ${{ needs.plan.outputs.legs }}
-          BUILD_RESULT: ${{ needs.build.result }}
+          BUILD_DARLING_RESULT: ${{ needs.build-darling.result }}
+          BUILD_LITE_RESULT: ${{ needs.build-lite.result }}
           TEST_RESULT: ${{ needs.test.result }}
           TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -341,9 +458,11 @@ jobs:
             desc="This pull request carries the merge-train label; only an admin override merges it."
             echo "::error title=CI result failed::This pull request carries the merge-train label, so its train run covers it. It can be merged only by an admin override after a merge train covered it."
           else
-            want_build=skipped; [ "${PLAN_BUILD}" = "true" ] && want_build=success
+            want_darling=skipped; [ "${PLAN_BUILD_DARLING}" = "true" ] && want_darling=success
+            want_lite=skipped;    [ "${PLAN_BUILD_LITE}" = "true" ] && want_lite=success
             want_test=skipped;  [ "${PLAN_LEGS}" != "0" ] && want_test=success
-            [ "${BUILD_RESULT}" = "${want_build}" ] || { state=failure; failed="${failed} build (${BUILD_RESULT})"; }
+            [ "${BUILD_DARLING_RESULT}" = "${want_darling}" ] || { state=failure; failed="${failed} build-darling (${BUILD_DARLING_RESULT})"; }
+            [ "${BUILD_LITE_RESULT}" = "${want_lite}" ]       || { state=failure; failed="${failed} build-lite (${BUILD_LITE_RESULT})"; }
             [ "${TEST_RESULT}" = "${want_test}" ]   || { state=failure; failed="${failed} test (${TEST_RESULT})"; }
           fi
           if [ "${state}" = "failure" ] && [ "${PLAN_OUTCOME}" != "train-blocked" ]; then
