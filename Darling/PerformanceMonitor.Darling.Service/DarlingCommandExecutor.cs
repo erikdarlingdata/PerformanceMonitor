@@ -839,6 +839,8 @@ WHERE status = 'in_progress'
                 queryStoreReplica = probe.QueryStoreReplica,
                 queryStoreReplicaError = probe.QueryStoreReplicaError,
                 queryStoreReplicaNote = DarlingServerConnector.DescribeQueryStoreReplica(probe),
+                /* #6472: the base grants the connecting login lacks, with the statement for each; null when none is missing. */
+                missingGrantsNote = probe.MissingGrantsNote,
             });
             return ("connected", json);
         }
