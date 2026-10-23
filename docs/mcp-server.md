@@ -34,7 +34,7 @@ claude mcp add --transport http --scope user sql-monitor http://localhost:5151/ 
 
 1. Turn MCP on. It is off by default, and its port is `5152`. Use one of these:
    - In the Viewer, open Settings and turn on MCP.
-   - Run `PerformanceMonitor.Darling.Service.exe --enable-mcp`. The running service applies it within one collection sweep, with no restart.
+   - On Windows with the bundled (managed) store, run `PerformanceMonitor.Darling.Service.exe --enable-mcp`. The running service applies it within one collection sweep, with no restart. With your own PostgreSQL, or on Linux and in the compose container, run `UPDATE config.config_service SET mcp_enabled = true;` against the store's PostgreSQL instead. The service picks it up within one sweep.
    - Set `mcp.enabled` to `true` in `darling.json`. The service reads this value only to seed the store at its first start. After that, the Viewer or `--enable-mcp` and `--disable-mcp` decide.
 2. Set a token. A Darling MCP server that is on but has no token does not start. The service log names the settings to add. Make a token of at least 16 characters with at least 6 different ones. A shorter or more repetitive token still gates every request, but the write and investigation tools stay off. Put the token in `darling.json` and restart the service:
 
@@ -77,7 +77,7 @@ By default Lite serves 97 tools, all of them reads. Its twelve write tools are s
 
 Two more file settings, both off or at `full` by default and read at start (restart Lite after a change). `mcp_allow_investigations` serves the four investigation tools (`list_investigation_requests`, `claim_investigation_request`, `submit_investigation_report` and `get_investigation_reports`) only when it is `true` AND `mcp_allow_writes` is `false`; with both on, the investigation tools stay off and Lite logs one Critical line. They also need the MCP token, so with `mcp_allow_tokenless_loopback` on they stay off, and Lite logs one Critical line. `mcp_data_detail` sets how much collected data the tool answers hand out: `full` (the default), `maskLiterals` (statement text keeps its shape with every literal replaced) or `metadataOnly` (statement text, error text, plans and input buffers are withheld, and logins and host names are masked, each as `login#` or `host#` plus 8 hex characters of a keyed hash that is the same in every answer from one store; Lite keeps its key in Windows Credential Manager). Any other word keeps the MCP endpoint off and the log names the accepted words.
 
-Darling has its own switches, under `mcp` in `darling.json`. All of them default to off, and a change needs a restart of the service:
+Darling has its own switches, under `mcp` in `darling.json`. All of them default to off, except `mcp.dataDetail`, which defaults to `full`. A change needs a restart of the service:
 
 - `mcp.allowWrites` serves the tools that change the monitoring store's configuration, such as alert settings and notification routes, mute rules, custom alert rules and Custom Views.
 - `mcp.allowServerAdmin` also serves `add_servers`, `edit_server`, `remove_server` and `set_server_action`. It has no effect while `mcp.allowWrites` is off.
