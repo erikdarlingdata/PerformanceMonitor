@@ -62,6 +62,8 @@ public partial class ViewerServerTab
         var dataTask = _dataService.GetSessionStatsAsync(_server.ServerId, startUtc, endUtc);
         var applicationsTask = _dataService.GetSessionsByApplicationAsync(_server.ServerId);
         await Task.WhenAll(dataTask, applicationsTask);
+        /* Both reads are done; the engine-gap probe below is a store read, so release or it is priced at this width. */
+        readFanOut.Release();
         RenderSessionStatsChart(dataTask.Result);
         await RenderSessionsByApplicationAsync(applicationsTask.Result);
     }

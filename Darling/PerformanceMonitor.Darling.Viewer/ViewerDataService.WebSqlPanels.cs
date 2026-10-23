@@ -17,8 +17,9 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <summary>
 /// #6388: the SQL Server panels the web had and the Viewer lacked, each fed by the SAME store read the web endpoint's
 /// MCP tool calls (the read moved to <c>PerformanceMonitor.Darling.Storage</c> so both hosts run one text). The Viewer
-/// passes its own interactive command deadline; the rows come back as the shared read's own records, which the grids bind
-/// to directly.
+/// passes its own interactive command deadline, except for the Extension Install Census, whose reader pins the MCP read
+/// deadline itself; the rows come back as the shared read's own records, which the grids bind to directly or wrap for display
+/// (the Resource Semaphore grids null what the web nulls).
 /// </summary>
 public sealed partial class ViewerDataService
 {

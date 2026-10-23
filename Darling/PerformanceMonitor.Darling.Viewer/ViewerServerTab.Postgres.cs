@@ -280,6 +280,21 @@ public partial class ViewerServerTab
                   + "pg_extension is per-database while the server's offer is cluster-wide.");
     }
 
+    /// <summary>Fills the Extension Install Census under the Extensions grid: one row per extension created anywhere on the server,
+    /// from the same shared read as the web's <c>install_census</c>. The scalars-only row a server with no stored rows produces
+    /// carries the denominators and is left out of the grid, as in the web.</summary>
+    private async Task LoadPgExtensionInstallCensusAsync(DateTime startUtc, DateTime endUtc)
+    {
+        var census = await _dataService.GetPgExtensionInstallCensusAsync(_server.ServerId, startUtc, endUtc);
+        var rows = census.Where(r => r.ExtensionName is not null).Select(PgExtensionCensusGridRow.From).ToList();
+        PgExtensionCensusGrid.ItemsSource = rows;
+        PgExtensionCensusNote.Text = rows.Count == 0
+            ? "Extension Install Census: nothing is created on this server beyond what PostgreSQL installs itself, or the inventory has not been collected yet. "
+              + "This census counts only extensions somebody created; the available-but-absent ones are the actionable rows in the grid above."
+            : $"Extension Install Census: {rows.Count} extension(s) created on this server, one row each, counted across all {census[0].DatabasesTotal:N0} database(s). "
+              + "No row limit touches it.";
+    }
+
     /// <summary>
     /// The server's own configuration (#2658), under the extension axis because it is the same kind of fact
     /// one layer in: extensions say what this server CAN do, settings say what it was told to do.

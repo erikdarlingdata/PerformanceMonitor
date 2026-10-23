@@ -58,6 +58,9 @@ public partial class ViewerServerTab
         var summaryTask = _dataService.GetPlanCacheSummaryAsync(_server.ServerId, startUtc, endUtc);
         await Task.WhenAll(trendTask, summaryTask, byTypeTask);
 
+        /* The three reads are done; the by-type engine-gap probe below is a store read, so release or it is priced at this width. */
+        readFanOut.Release();
+
         RenderPlanCacheChart(trendTask.Result);
         RenderPlanCacheSummary(summaryTask.Result);
         await RenderPlanCacheByTypeAsync(byTypeTask.Result);
