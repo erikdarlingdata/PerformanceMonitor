@@ -375,7 +375,7 @@ public sealed partial class DarlingMcpAlertTools
                     await using var command = new NpgsqlCommand(updateSql, connection) { Transaction = transaction };
                     command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
                     command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = route_id });
-                    command.Parameters.Add(ActorParameter(operatorActor));
+                    command.Parameters.Add(ActorParameter(null));
                     command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = columns.ToArray() });
                     command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = match });
                     command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = enabledNow });

@@ -136,7 +136,7 @@ public sealed class DarlingMcpPlanForceTools
         ILogger? logger = null,
         DarlingMcpServedPolicy? served = null,
         CancellationToken cancellationToken = default) =>
-        RunKillAsync(postgres, ownerSource?.Read(), logger, server_name, session_id, login_time, backend_id, agent_action, dry_run, cancellationToken, database_name, served?.Policy.AgentTokenName);
+        RunKillAsync(postgres, ownerSource?.Read(), logger, server_name, session_id, login_time, backend_id, agent_action, dry_run, cancellationToken, database_name, null);
 
     private static string Answer(string status, string? reason, string message, object? extra = null)
     {
@@ -488,7 +488,7 @@ public sealed class DarlingMcpPlanForceTools
             /* 1: the engine decides how the session is named. A PostgreSQL target has its own arm (pid plus start second from backend_id). */
             var (engineEdition, engineKind) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, ct);
             if (engineKind is not null && engineKind.Contains("postgres", StringComparison.OrdinalIgnoreCase))
-                return await RunKillPostgresAsync(owner, logger, store, resolved, session_id, backend_id, agent_action, dry_run, ct, agentTokenName);
+                return await RunKillPostgresAsync(owner, logger, store, resolved, session_id, backend_id, agent_action, dry_run, ct);
 
             /* An Azure SQL Database scopes KILL and the session views to the connected database (#5632): the kill connects to the session's
                own database, which the agent names. The batch checks the engine again, so a registry that has not recorded it yet is refused there. */
