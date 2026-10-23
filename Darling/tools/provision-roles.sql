@@ -22,7 +22,9 @@
 --              dismissed column of config.config_alert_log (the web Alert History dismiss, #4843), and INSERT
 --              on config.config_monitored_servers and no UPDATE on it: the web add-server route (#4843) inserts, and
 --              the web edit-server route (#5240) edits through config.edit_monitored_server, a function it may
---              execute (its credential column stays SELECT-carved). Every table is non-secret-keyed; over the web every write is gated server-side by the host's auth + seat model -- these
+--              execute (its credential column stays SELECT-carved), and the web Run collectors now (#5941) and Run live now
+--              (#6386) buttons queue their command rows through config.request_snapshot_now and
+--              config.request_active_queries_live, functions it may execute (mcp may execute request_snapshot_now too). Every table is non-secret-keyed; over the web every write is gated server-side by the host's auth + seat model -- these
 --              grants are only the floor beneath that gate. All other write actions degrade gracefully. The
 --              web dashboard's identity, and a locked-down Viewer's (postgres.connectAs = "viewer").
 --   mcp     -- the MCP server's identity: viewer's reads (the same secret-column carve), plus the MCP tools'
@@ -860,16 +862,18 @@ REVOKE UPDATE (paused) ON config.config_service FROM mcp;
 GRANT INSERT, UPDATE, DELETE ON config.server_tags TO mcp;
 GRANT INSERT, UPDATE, DELETE ON config.server_tag_map TO mcp;
 -- #6227: the collector schedule tools (disable_collector, enable_collector, set_collector_frequency, set_collector_run_at,
---     set_collector_retention) run as mcp and write the two non-secret schedule tables. Both carry a statement-level
+--     set_collector_retention, and #6396's set_collector_databases and reset_collector_schedules) run as mcp and write the two non-secret schedule tables. Both carry a statement-level
 --     reload-beacon trigger that UPDATEs config_service.config_version as the caller; the column grant above covers it.
 --     The run-time table (V160) is skipped, with a warning, on a store the service has not upgraded that far.
 DO $do$
 BEGIN
    IF pg_catalog.to_regclass('config.config_collector_schedules') IS NOT NULL THEN
       REVOKE INSERT, UPDATE, DELETE ON config.config_collector_schedules FROM mcp;
-      GRANT INSERT (server_id, collector_name, enabled, frequency_minutes, retention_days) ON config.config_collector_schedules TO mcp;
-      GRANT UPDATE (enabled, frequency_minutes, retention_days) ON config.config_collector_schedules TO mcp;
+      -- #6396: the database scope (V125) joins both lists, for set_collector_databases.
+      GRANT INSERT (server_id, collector_name, enabled, frequency_minutes, retention_days, databases) ON config.config_collector_schedules TO mcp;
+      GRANT UPDATE (enabled, frequency_minutes, retention_days, databases) ON config.config_collector_schedules TO mcp;
       -- #6454: remove_server clears a removed server's override rows, so mcp holds DELETE on this table (managed provisioning grants it too).
+      --    reset_collector_schedules (#6396) runs the same DELETE, by server_id or, at the fleet scope, with server_id IS NULL.
       GRANT DELETE ON config.config_collector_schedules TO mcp;
    ELSE
       RAISE WARNING 'config.config_collector_schedules was not found, so its mcp grant was skipped. Run this script again after the service has upgraded the store.';
@@ -913,7 +917,7 @@ GRANT INSERT ON config.config_monitored_servers TO viewer;
 --     function checks the optimistic token, works out for itself whether host or port moves, and refuses a move that
 --     keeps the stored secret on a SQL or service-principal row. RE-RUN THIS SCRIPT AFTER UPGRADING to the release that
 --     adds the edit route (the precedent is the V117 note above): a store whose roles predate the function answers
---     every web edit with an error that says to re-run it. The function is owned by whoever runs the script, so run it
+--     every web edit with an error that says to re-run it. The functions end up owned by the owner of config.config_command (step 8 at the end), but the REVOKEs below only undo grants made by the role that runs them, so run it
 --     as the store owner, the role that owns config.config_monitored_servers.
 --     REVOKE first, like the SELECT carve above: it takes away any UPDATE an earlier release granted viewer here, and
 --     revoking the table privilege also revokes every column privilege on it. A plain REVOKE removes only the privileges
@@ -1338,6 +1342,11 @@ DECLARE
    v_last_status text;
    v_last_at timestamp;
 BEGIN
+   -- The one-request-at-a-time rule below reads the newest row of its kind with a fresh snapshot per statement. A transaction that
+   -- keeps one snapshot (REPEATABLE READ and up) could miss a row another session just queued, so it is refused.
+   IF current_setting('transaction_isolation') <> 'read committed' THEN
+      RAISE EXCEPTION 'This request must run at the READ COMMITTED isolation level.' USING ERRCODE = 'DL400';
+   END IF;
    IF p_server_id IS NULL OR NOT EXISTS (SELECT 1 FROM config.config_monitored_servers WHERE server_id = p_server_id) THEN
       RAISE EXCEPTION 'No monitored server with that id.' USING ERRCODE = 'DL404';
    END IF;
@@ -1381,6 +1390,65 @@ END
 $fn$;
 REVOKE ALL ON FUNCTION config.request_snapshot_now(integer, text, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION config.request_snapshot_now(integer, text, text) TO viewer, mcp;
+
+-- #6386: the web Run live now button on the Active Queries panel. The web route (viewer) queues a fetch_active_queries command
+--     through config.request_active_queries_live, the only way viewer writes that command row. The command type is fixed in the
+--     body and the caller supplies a server id and nothing else. Same function, same text, as managed provisioning rebuilds on every start.
+CREATE OR REPLACE FUNCTION config.request_active_queries_live(
+   p_server_id integer,
+   p_requested_by text)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+   v_id bigint;
+   v_last_status text;
+   v_last_at timestamp;
+BEGIN
+   -- The one-request-at-a-time rule below reads the newest row of its kind with a fresh snapshot per statement. A transaction that
+   -- keeps one snapshot (REPEATABLE READ and up) could miss a row another session just queued, so it is refused.
+   IF current_setting('transaction_isolation') <> 'read committed' THEN
+      RAISE EXCEPTION 'This request must run at the READ COMMITTED isolation level.' USING ERRCODE = 'DL400';
+   END IF;
+   IF p_server_id IS NULL OR NOT EXISTS (SELECT 1 FROM config.config_monitored_servers WHERE server_id = p_server_id) THEN
+      RAISE EXCEPTION 'No monitored server with that id.' USING ERRCODE = 'DL404';
+   END IF;
+   -- Never blocks (provisioning rule): a request that holds the lock for this server is a concurrent request, which is the same
+   -- conflict as a pending row, so this refuses with DL409 instead of waiting.
+   IF NOT pg_try_advisory_xact_lock(6386, p_server_id) THEN
+      RAISE EXCEPTION 'A live active-queries read for this server is already queued or running.' USING ERRCODE = 'DL409';
+   END IF;
+   SELECT c.status, c.created_at INTO v_last_status, v_last_at
+   FROM config.config_command AS c
+   WHERE c.command_type = 'fetch_active_queries' AND c.target_server_id = p_server_id
+   ORDER BY c.command_id DESC
+   LIMIT 1;
+   IF v_last_status IN ('pending', 'in_progress') THEN
+      RAISE EXCEPTION 'A live active-queries read for this server is already queued or running.' USING ERRCODE = 'DL409';
+   END IF;
+   IF v_last_at IS NOT NULL AND v_last_at > (now() AT TIME ZONE 'UTC') - interval '10 seconds' THEN
+      RAISE EXCEPTION 'A live active-queries read was requested for this server less than 10 seconds ago.'
+         USING ERRCODE = 'DL429',
+               HINT = to_char(v_last_at + interval '10 seconds', 'YYYY-MM-DD') || 'T' || to_char(v_last_at + interval '10 seconds', 'HH24:MI:SS') || 'Z';
+   END IF;
+   -- Finished results do not pile up: a result carries the plan XML with no size cap and the web never deletes the row it reads, so each
+   -- request first removes this server's finished live reads that finished more than an hour ago. Only terminal rows
+   -- (succeeded or failed) with a completed_at are touched, so a pending or running row and every other command type stay. The Viewer
+   -- reads and deletes its own row within seconds, far inside the hour.
+   DELETE FROM config.config_command
+   WHERE command_type = 'fetch_active_queries' AND target_server_id = p_server_id
+     AND status IN ('succeeded', 'failed')
+     AND completed_at < (now() AT TIME ZONE 'UTC') - interval '1 hour';
+   INSERT INTO config.config_command (requested_by, command_type, target_server_id, args_json, status, created_at)
+   VALUES (left(COALESCE(p_requested_by, 'web'), 200), 'fetch_active_queries', p_server_id, NULL, 'pending', (now() AT TIME ZONE 'UTC'))
+   RETURNING command_id INTO v_id;
+   RETURN v_id;
+END
+$fn$;
+REVOKE ALL ON FUNCTION config.request_active_queries_live(integer, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION config.request_active_queries_live(integer, text) TO viewer;
 -- #6231: the MCP route tools. mcp holds no INSERT on config.config_notification_routes and no SELECT or UPDATE on its
 --     destination columns, and gets none here: create_notification_route and update_notification_route reach the table only
 --     through these functions. create leaves every channel empty and update writes the match, scope, enabled flag, resolution
@@ -2786,3 +2854,42 @@ GRANT CONNECT ON DATABASE darling TO mcp;
 --    (#3334) the managed batch creates for viewer and mcp. It exists for the custom-alert evaluator, which
 --    runs on a managed store only; with no evaluator there is never a firing rule for a rule delete to
 --    resolve.
+
+-- 8. Function owner. The queue functions run as the owner of config.config_command, whoever runs this script: each definer-rights
+--    function this script creates in schema config is created by the role running the script, which is a superuser on some
+--    stores, so the last step hands each one to the table owner. A function already owned by that role is left alone.
+DO $do$
+DECLARE
+   v_owner text;
+   v_sig text;
+BEGIN
+   SELECT pg_catalog.pg_get_userbyid(c.relowner) INTO v_owner
+   FROM pg_catalog.pg_class AS c
+   WHERE c.oid = pg_catalog.to_regclass('config.config_command');
+   IF v_owner IS NULL THEN
+      RAISE WARNING 'The function owners were not changed: config.config_command does not exist yet.';
+      RETURN;
+   END IF;
+   FOREACH v_sig IN ARRAY ARRAY[
+   'config.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric, text, text, text)',
+   'config.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric, text, text)',
+   'config.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric)',
+   'config.insert_known_pattern(integer, text, time, text, integer, text, text, timestamp)',
+   'config.update_known_pattern(bigint, integer, text, time, text, integer, text, timestamp, text)',
+   'config.delete_known_pattern(bigint)',
+   'config.request_snapshot_now(integer, text, text)',
+   'config.request_active_queries_live(integer, text)',
+   'config.create_notification_route(text, boolean, integer, integer, boolean, integer)',
+   'config.update_notification_route(integer, text[], text, boolean, integer, integer, boolean, integer)',
+   'config.set_notification_route_destinations(integer, text[], text, text, text, text, text)',
+   'config.request_mcp_command(text, integer, integer, text)',
+   'config.read_mcp_command_result(bigint)',
+   'config.submit_external_alert(text, text, text, text, text, text, double precision)'
+   ] LOOP
+      IF (SELECT p.proowner FROM pg_catalog.pg_proc AS p WHERE p.oid = pg_catalog.to_regprocedure(v_sig))
+         IS DISTINCT FROM (SELECT c.relowner FROM pg_catalog.pg_class AS c WHERE c.oid = pg_catalog.to_regclass('config.config_command')) THEN
+         EXECUTE pg_catalog.format('ALTER FUNCTION %s OWNER TO %I', v_sig, v_owner);
+      END IF;
+   END LOOP;
+END
+$do$;

@@ -153,8 +153,8 @@ public sealed class DarlingMcpNamedTokenTests
         var operatorText = await InstructionsAsync(server, OperatorToken);
         var agentText = await InstructionsAsync(server, AgentToken);
 
-        Assert.Empty(ToolsNamedIn(operatorText, catalog).Where(n => !operatorTools.Contains(n)));
-        Assert.Empty(ToolsNamedIn(agentText, catalog).Where(n => !agentTools.Contains(n)));
+        Assert.DoesNotContain(ToolsNamedIn(operatorText, catalog), n => !operatorTools.Contains(n));
+        Assert.DoesNotContain(ToolsNamedIn(agentText, catalog), n => !agentTools.Contains(n));
 
         /* The case the review found: the mute step is in NeverAgentTools, so the agent's Workflow line must not name it. */
         Assert.DoesNotContain("mute_analysis_finding", agentTools);
@@ -193,7 +193,7 @@ public sealed class DarlingMcpNamedTokenTests
 
         Assert.Equal(expected, actual);
         var served = await ToolNamesAsync(server, legacy);
-        Assert.Empty(ToolsPointedAtIn(actual, catalog).Where(n => !served.Contains(n)));
+        Assert.DoesNotContain(ToolsPointedAtIn(actual, catalog), n => !served.Contains(n));
     }
 
     [Fact]
@@ -352,7 +352,7 @@ public sealed class DarlingMcpNamedTokenTests
         {
             Compare = (presented, expected) =>
             {
-                comparisons.Add(expected![..expected.IndexOf('-', StringComparison.Ordinal)]);
+                comparisons.Add(expected is null ? string.Empty : expected[..expected.IndexOf('-', StringComparison.Ordinal)]);
                 return DarlingHostBinding.FixedTimeTokenEquals(presented, expected);
             },
         };

@@ -1150,7 +1150,7 @@ public sealed class DarlingMcpHostService : BackgroundService
         var loopback = DarlingListenerTls.DescribeLoopbackListener(
             tlsServed ? "loopback also bound over plain HTTP" : "loopback also bound", tlsServed, primaryBind);
 
-        return $"Starting MCP server on {scheme}://{primaryBind}:{port} "
+        return $"Starting MCP server on {scheme}://{DarlingListenUrl.FormatHost(primaryBind)}:{port} "
             + $"(LAN-exposed to {allowedCidr.ToString()} behind a bearer token + in-app CIDR; {loopback}) — "
             + $"enabled/port from {origin}; {fileFields} from darling.json mcp.network (file-only, restart-only)";
     }

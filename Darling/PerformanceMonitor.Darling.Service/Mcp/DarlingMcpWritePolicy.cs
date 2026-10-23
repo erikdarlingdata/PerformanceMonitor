@@ -136,6 +136,8 @@ internal static class DarlingMcpWritePolicy
         "approve_investigation_note",
         "reject_investigation_note",
         "close_investigation_request",
+        "set_collector_databases",
+        "reset_collector_schedules",
     };
 
     /// <summary>The darling.json key that offers the investigation tools (#5632 Phase A, ruling R2).</summary>
@@ -215,6 +217,8 @@ internal static class DarlingMcpWritePolicy
         "set_collector_frequency",
         "set_collector_run_at",
         "set_collector_retention",
+        "set_collector_databases",
+        "reset_collector_schedules",
         "add_servers",
         "remove_server",
         "edit_server",

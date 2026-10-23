@@ -281,7 +281,7 @@ RETURNING route_id, server_id, server_name";
     {
         var read = await DarlingForcedPlanStateReader.ReadAsync(_dataSource, force.ServerId, DatabaseFilter.One(force.Database), force.QueryId,
             force.ForcedAt.AddMinutes(-ForceCheckCaptureLeadMinutes), now, new Dictionary<(string Database, long PlanId), DateTime> { [(force.Database, force.PlanId)] = force.ForcedAt },
-            _commandTimeoutSeconds, cancellationToken);
+            _commandTimeoutSeconds, cancellationToken: cancellationToken);
         var fact = read.Plans.FirstOrDefault(p => p.PlanId == force.PlanId && string.Equals(p.DatabaseName, force.Database, StringComparison.Ordinal));
         var before = await DarlingForcedPlanStateReader.ReadWindowAsync(_dataSource, force.ServerId, force.Database, force.QueryId,
             force.ForcedAt.AddHours(-ForceCheckBeforeHours), force.ForcedAt, _commandTimeoutSeconds, cancellationToken);
