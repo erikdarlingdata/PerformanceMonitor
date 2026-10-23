@@ -200,7 +200,7 @@ function Expect-Success($r, [string]$what) {
     if ($r.Text -match 'Ordinary users can already write|already writable by ordinary users') { Fail-Leg "$what reported an ordinary-user write grant on a folder only administrators can write" }
 }
 
-# #6597: install-darling.ps1 registers the service path in quotes, as the MSI does. This reads the real service back
+# #6597: both scripts register the service path in quotes, as the MSI does. This reads the real service back
 # with sc qc, so it is a check of what Windows holds, not of the script's text.
 function Expect-QuotedServicePath([string]$what) {
     $qc = (sc.exe qc $svc | Out-String)
@@ -271,7 +271,8 @@ else {
 switch ($Leg) {
     { $_ -in 'U1-install', 'U1-upgrade', 'U2-install', 'U2-upgrade' } {
         Expect-Success $r "$which-darling.ps1"
-        if ($which -eq 'install') { Expect-QuotedServicePath 'install-darling.ps1' }
+        # The upgrade legs start from a service a released install script registered bare, so this also proves the upgrade fixes it.
+        Expect-QuotedServicePath "$which-darling.ps1"
         if ($shape -eq 'U1') {
             # #5649: the service-owned hand-named backup does not refuse the run (Expect-Success above) and stays where it was.
             if (-not (Test-Path -LiteralPath (Join-Path $root $HandNamedBackupName))) { Fail-Leg "$which-darling.ps1 removed the hand-named backup $HandNamedBackupName" }
