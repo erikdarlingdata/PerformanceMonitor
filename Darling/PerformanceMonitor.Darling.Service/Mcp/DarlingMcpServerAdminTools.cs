@@ -101,7 +101,9 @@ public sealed partial class DarlingMcpServerAdminTools
     internal static string ConnectFailureReply(
         MonitoredServer server, ConnectionProbeResult probe, ILogger? logger, bool revealConnectError, params string?[] secrets)
     {
-        var target = server.Port > 0 ? $"{server.Host},{server.Port}" : server.Host;
+        /* #6583: the target that was tried. A SQL Server connection uses the host alone (its port rides in the host as host,port), so a
+           stored SQL Server port was never dialled and is not named; only a PostgreSQL target connects on its port. */
+        var target = server.IsPostgres && server.Port > 0 ? $"{server.Host},{server.Port}" : server.Host;
         var driverText = string.IsNullOrWhiteSpace(probe.Error) ? "(no driver text)" : RedactEditSecret(probe.Error, secrets);
         /* The logged copy is one line of bounded length: the driver text and the target both come from the server the
            caller named, so each goes through the refusal log's sanitizer. The --add-server reply below keeps the
@@ -571,6 +573,17 @@ public sealed partial class DarlingMcpServerAdminTools
                         queryTagClear.CommandTimeout = McpCommandDeadlines.ReadSeconds;
                         queryTagClear.Parameters.Add(new NpgsqlParameter<int> { TypedValue = resolved.ServerId });
                         await queryTagClear.ExecuteNonQueryAsync();
+                    }
+
+                    /* #6454: the server's collector overrides and run times go too, same transaction and same reason: set-and-clear
+                       left an all-null override row behind, and a set one would come back when the server is re-added. Only this
+                       server's rows; the fleet-wide rows (server_id NULL) stay. */
+                    foreach (var scheduleSql in CollectorScheduleSql.ClearForServerSqls)
+                    {
+                        await using var scheduleClear = new NpgsqlCommand(scheduleSql, connection) { Transaction = transaction };
+                        scheduleClear.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                        scheduleClear.Parameters.Add(new NpgsqlParameter<int> { TypedValue = resolved.ServerId });
+                        await scheduleClear.ExecuteNonQueryAsync();
                     }
 
                     await transaction.CommitAsync();
@@ -1060,6 +1073,13 @@ ORDER BY d.host, d.database";
         if (portError != null)
         {
             return (null, Invalid(portError));
+        }
+
+        /* #6583: a SQL Server connection never uses the port (it rides in the host as host,port), so a non-zero one is refused
+           rather than stored and silently ignored. Zero is the omitted value and stays accepted. */
+        if (engine == EngineSqlServer && port != 0)
+        {
+            return (null, Invalid(SqlServerPortAdvice.Refusal));
         }
 
         /* #5452: the AWS role for an RDS or Aurora target, and its external ID. Blank is "not set"; the formats and the
@@ -1807,7 +1827,7 @@ ON CONFLICT (server_id) DO NOTHING";
 
     /// <summary>
     /// Validates the optional <c>port</c>; absent or 0 → the driver's default. Consumed only by the PostgreSQL
-    /// connection builder (a SQL Server target carries its port in the host string), and range-checked here to
+    /// connection builder (a SQL Server target carries its port in the host string, and a non-zero one is refused, #6583), and range-checked here to
     /// match <c>DarlingConfig.Validate</c> rather than failing later inside Npgsql.
     /// </summary>
     internal static (int Port, string? Error) ResolvePort(JsonObject obj)

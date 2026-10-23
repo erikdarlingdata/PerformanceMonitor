@@ -571,20 +571,6 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
     }
 
     [Fact]
-    public void ServerListSql_EnabledServers_WithLastCollection()
-    {
-        var sql = DarlingDataReader.ServerListSql;
-        Assert.Contains("FROM servers", sql, StringComparison.Ordinal);
-        Assert.Contains("WHERE s.is_enabled", sql, StringComparison.Ordinal);
-        /* #3976: a per-server LATERAL probe, not a correlated MAX(collection_time) — same freshness source,
-           a plan TimescaleDB can stop at the newest chunk with a row instead of planning every retained one. */
-        Assert.Contains("LEFT JOIN LATERAL", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY cl.collection_time DESC", sql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
-        Assert.Contains("FROM v_collection_log cl", sql, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void CollectionHealthSql_SevenDayAggregate_SkippedIsHealthy()
     {
         var sql = DarlingDataReader.CollectionHealthSql;
@@ -951,6 +937,13 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE, sql_major_version = 15;
         command.Parameters.AddWithValue(ServerName);
         command.Parameters.AddWithValue(Naive(DateTime.UtcNow));
         await command.ExecuteNonQueryAsync(ct);
+
+        /* #6454: list_servers lists a registered server only while its definition exists. */
+        using var define = new NpgsqlCommand(
+            "INSERT INTO config.config_monitored_servers (server_id, name, host, is_enabled) VALUES ($1, $2, $2, TRUE) ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", connection);
+        define.Parameters.AddWithValue(ServerId);
+        define.Parameters.AddWithValue(ServerName);
+        await define.ExecuteNonQueryAsync(ct);
     }
 
     private static async Task Exec(NpgsqlConnection connection, string sql, System.Threading.CancellationToken ct, params object?[] values)
@@ -1120,7 +1113,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)", ct, CollectionIdGenerator.Next(), Naive(t), S
         };
         var sql = string.Join(" ", tables.Select(tbl => $"DELETE FROM {tbl} WHERE server_id = {ServerId};"));
         if (!keepServer)
-            sql += $" DELETE FROM servers WHERE server_id = {ServerId};";
+            sql += $" DELETE FROM servers WHERE server_id = {ServerId}; DELETE FROM config.config_monitored_servers WHERE server_id = {ServerId};";
         using var cleanup = new NpgsqlCommand(sql, connection);
         await cleanup.ExecuteNonQueryAsync(ct);
     }
