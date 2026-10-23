@@ -12,9 +12,10 @@ using System.Collections.Generic;
 namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>
-/// #6583: a SQL Server entry's <c>port</c> is never used. The connection builders read the host alone, and server identity, the
-/// host rules and instance matching all key on <c>host</c>, so a non-default SQL Server port goes in the host as
-/// <c>host,port</c>. A new entry that carries one is refused, and an entry that already holds one (a darling.json file or a registry
+/// #6583: a SQL Server entry's <c>port</c> is never used to connect. The connection builders read the host alone, so a non-default
+/// SQL Server port goes in the host as <c>host,port</c>. (A stored port is not inert: <c>MonitoredServer.StorageName</c> passes it to
+/// <c>ServerIdHelper.BuildStorageName</c>, which appends it as <c>host:port</c>, so moving a stored port into the host changes the
+/// server's storage name. That is correct, because the old row never connected on that port.) A new entry that carries one is refused, and an entry that already holds one (a darling.json file or a registry
 /// row saved before the refusal) is named in a warning, so the port is never silently dropped.
 /// </summary>
 internal static class SqlServerPortAdvice
