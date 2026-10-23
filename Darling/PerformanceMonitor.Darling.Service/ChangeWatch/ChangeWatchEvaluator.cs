@@ -168,7 +168,7 @@ WITH len AS (
     WHERE server_id = $1 AND database_name = $2 AND interval_length_minutes > 0
       AND capture_time >= $4 - interval '2 days' AND capture_time <= $5 + interval '1 day'
 )
-SELECT plan_id::text, sum(execution_count)::bigint, sum(execution_count::double precision * avg_duration_us::double precision)::double precision
+SELECT coalesce(plan_id::text, ''), sum(execution_count)::bigint, coalesce(sum(execution_count::double precision * avg_duration_us::double precision), 0)::double precision
 FROM (
     SELECT plan_id, execution_count, avg_duration_us,
            ROW_NUMBER() OVER (PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
@@ -179,7 +179,7 @@ FROM (
       AND collection_time >= $4 - interval '1 day' AND collection_time <= $5 + interval '1 day'
 ) AS x
 WHERE rn = 1
-GROUP BY plan_id
+GROUP BY coalesce(plan_id::text, '')
 HAVING sum(execution_count) > 0";
 
     private static readonly string QueryStorePlansByStartSql =
@@ -188,11 +188,13 @@ HAVING sum(execution_count) > 0";
     private static readonly string QueryStorePlansByEndSql =
         QueryStorePlansSqlTemplate.Replace("{placement}", IntervalEndSql + " > $4 AND " + IntervalEndSql + " <= $5", StringComparison.Ordinal);
 
-    /* #6555: one query hash's plans in a window (the plan cache's query_plan_hash), the per-plan counterpart of QuerySql. */
+    /* #6555: one query hash's plans in a window (the plan cache's query_plan_hash), the per-plan counterpart of QuerySql. $5 is the same database
+       list QuerySql takes (NULL for none), so the plans describe the population the measured averages do. */
     private const string QueryPlansSql = @"
-SELECT coalesce(query_plan_hash, ''), sum(delta_execution_count)::bigint, sum(delta_elapsed_time)::double precision
+SELECT coalesce(query_plan_hash, ''), sum(delta_execution_count)::bigint, coalesce(sum(delta_elapsed_time), 0)::double precision
 FROM v_query_stats
 WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3 AND query_hash::text = $4
+  AND ($5::text[] IS NULL OR database_name = ANY($5))
 GROUP BY coalesce(query_plan_hash, '')
 HAVING sum(delta_execution_count) > 0";
 
@@ -286,9 +288,46 @@ HAVING sum(delta_execution_count) > 0";
     }
 
     /// <summary>
+    /// #6555: whether any plan the query ran in both windows got slower on its own: it ran at least <see cref="MinExecutions"/> times in each window and its
+    /// own average passes <see cref="DurationMoved"/>. The mix adjustment answers "did the average move once the mix is held", which a plan that was a minority
+    /// before and now carries most of the executions can slip under (its slowdown is weighted by the share it used to have), so this is the second question.
+    /// </summary>
+    internal static bool AnySharedPlanMoved(IReadOnlyDictionary<string, PlanRuntime> reference, IReadOnlyDictionary<string, PlanRuntime> after)
+    {
+        foreach (var (plan, runtime) in after)
+        {
+            if (reference.TryGetValue(plan, out var before) && before.Executions >= MinExecutions && runtime.Executions >= MinExecutions
+                && DurationMoved(before.ElapsedUs / before.Executions, runtime.ElapsedUs / runtime.Executions))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>The busiest plans of the after-window with their share of the executions and their average, before then after, so a note says which plan moved.</summary>
+    internal static string PlanBreakdown(IReadOnlyDictionary<string, PlanRuntime> before, IReadOnlyDictionary<string, PlanRuntime> after)
+    {
+        double beforeTotal = before.Values.Sum(p => p.Executions), afterTotal = after.Values.Sum(p => p.Executions);
+        var parts = new List<string>();
+        foreach (var (plan, runtime) in after.OrderByDescending(p => p.Value.Executions).ThenBy(p => p.Key, StringComparer.Ordinal).Take(3))
+        {
+            var afterText = string.Create(CultureInfo.InvariantCulture, $"{runtime.Executions * 100 / afterTotal:0}% at {runtime.ElapsedUs / runtime.Executions / 1000:0.##} ms");
+            var beforeText = before.TryGetValue(plan, out var was) && was.Executions > 0 && beforeTotal > 0
+                ? string.Create(CultureInfo.InvariantCulture, $"{was.Executions * 100 / beforeTotal:0}% at {was.ElapsedUs / was.Executions / 1000:0.##} ms")
+                : "not run";
+            parts.Add($"plan {plan}: {beforeText} before, {afterText} after");
+        }
+
+        return string.Join("; ", parts);
+    }
+
+    /// <summary>
     /// #6555: decides one query's duration measure, given the plan-level reads of the three windows. The whole-query averages are the first test; for a
-    /// query that ran more than one plan the after average is then compared again at the before-window's plan mix (and at the week-earlier window's), so a
-    /// shift in the mix alone is not a regression. <paramref name="note"/> says what the plans were; it is set whenever more than one plan ran in a window.
+    /// query that ran more than one plan the after average is then compared again at the before-window's plan mix (and at the week-earlier window's), and a
+    /// plan that got slower on its own keeps the measure moved whatever the mix did (<see cref="AnySharedPlanMoved"/>), so a shift in the mix alone is not a
+    /// regression. <paramref name="note"/> says what the plans were; it is set whenever more than one plan ran in a window.
     /// </summary>
     internal static bool QueryDurationMoved(
         double beforeAvgUs, double afterAvgUs, double? weekAvgUs,
@@ -298,14 +337,15 @@ HAVING sum(delta_execution_count) > 0";
         note = null;
         var adjusted = AdjustAfterToMix(beforePlans, afterPlans);
         var adjustedWeek = weekAvgUs is null ? (double?)null : AdjustAfterToMix(weekPlans, afterPlans);
-        var moved = DurationMoved(beforeAvgUs, adjusted) && (weekAvgUs is null || DurationMoved(weekAvgUs.Value, adjustedWeek!.Value));
+        var movedBefore = DurationMoved(beforeAvgUs, adjusted) || AnySharedPlanMoved(beforePlans, afterPlans);
+        var movedWeek = weekAvgUs is null || DurationMoved(weekAvgUs.Value, adjustedWeek!.Value) || AnySharedPlanMoved(weekPlans, afterPlans);
         if (Math.Max(beforePlans.Count, afterPlans.Count) > 1)
         {
             note = string.Create(CultureInfo.InvariantCulture,
-                $"{beforePlans.Count} plan(s) before, {afterPlans.Count} after; the average moves with the plan mix, so it is compared at the before-window's mix: {adjusted / 1000:0.##} ms there against {afterAvgUs / 1000:0.##} ms as measured");
+                $"{beforePlans.Count} plan(s) before, {afterPlans.Count} after; the average moves with the plan mix, so it is compared at the before-window's mix: {adjusted / 1000:0.##} ms there against {afterAvgUs / 1000:0.##} ms as measured; {PlanBreakdown(beforePlans, afterPlans)}");
         }
 
-        return moved;
+        return movedBefore && movedWeek;
     }
 
     /// <summary>One window's rate from a statement that returns (rate, seconds covered, rows read).</summary>
@@ -512,7 +552,7 @@ HAVING sum(delta_execution_count) > 0";
                         }
                         else
                         {
-                            notes.Add($"{measureName}: the average duration moved from {Num(queryBeforeAvg / 1000)} ms to {Num(queryAfterAvg / 1000)} ms, but only with the plan mix, so it is not a regression ({where}; {mixNote})");
+                            notes.Add($"{measureName}: the average duration moved from {Num(queryBeforeAvg / 1000)} ms to {Num(queryAfterAvg / 1000)} ms, but only with the plan mix, so it is not a regression ({where}{(mixNote is null ? "" : "; " + mixNote)})");
                         }
                     }
                 }
@@ -529,8 +569,8 @@ HAVING sum(delta_execution_count) > 0";
         else if (afterQueries.Count > 0)
         {
             var hashes = afterQueries.Keys.ToArray();
-            var beforeQueries = await ReadQueriesAsync(connection, watch.ServerId, beforeStart, afterStart, hashes, null, hashes.Length, cancellationToken);
-            var weekQueries = await ReadQueriesAsync(connection, watch.ServerId, weekStart, weekEnd, hashes, null, hashes.Length, cancellationToken);
+            var beforeQueries = await ReadQueriesAsync(connection, watch.ServerId, beforeStart, afterStart, hashes, scope, hashes.Length, cancellationToken);
+            var weekQueries = await ReadQueriesAsync(connection, watch.ServerId, weekStart, weekEnd, hashes, scope, hashes.Length, cancellationToken);
             var missingBefore = 0;
             var belowFloor = 0;
             foreach (var (hash, after) in afterQueries)
@@ -554,11 +594,11 @@ HAVING sum(delta_execution_count) > 0";
                 if (DurationMoved(beforeAvg, afterAvg) && (weekAvg is null || DurationMoved(weekAvg.Value, afterAvg)))
                 {
                     /* #6555: a query hash that ran several plans is compared per plan (at the before-window's mix), not by the average over all of them. */
-                    var beforePlans = await ReadQueryPlansAsync(connection, watch.ServerId, hash, beforeStart, afterStart, cancellationToken);
-                    var afterPlans = await ReadQueryPlansAsync(connection, watch.ServerId, hash, afterStart, afterEnd, cancellationToken);
+                    var beforePlans = await ReadQueryPlansAsync(connection, watch.ServerId, hash, beforeStart, afterStart, scope, cancellationToken);
+                    var afterPlans = await ReadQueryPlansAsync(connection, watch.ServerId, hash, afterStart, afterEnd, scope, cancellationToken);
                     var weekPlans = weekAvg is null
                         ? new Dictionary<string, PlanRuntime>(StringComparer.Ordinal)
-                        : await ReadQueryPlansAsync(connection, watch.ServerId, hash, weekStart, weekEnd, cancellationToken);
+                        : await ReadQueryPlansAsync(connection, watch.ServerId, hash, weekStart, weekEnd, scope, cancellationToken);
                     var moved = QueryDurationMoved(beforeAvg, afterAvg, weekAvg, beforePlans, afterPlans, weekPlans, out var mixNote);
                     var where = $"read from the plan cache (query_stats), query_hash {hash} in database {after.Database ?? "(unknown)"}; {before.Executions} -> {after.Executions} executions";
                     if (moved)
@@ -568,7 +608,7 @@ HAVING sum(delta_execution_count) > 0";
                     }
                     else
                     {
-                        notes.Add($"query_avg_duration_ms:{hash}: the average duration moved from {Num(beforeAvg / 1000)} ms to {Num(afterAvg / 1000)} ms, but only with the plan mix, so it is not a regression ({where}; {mixNote})");
+                        notes.Add($"query_avg_duration_ms:{hash}: the average duration moved from {Num(beforeAvg / 1000)} ms to {Num(afterAvg / 1000)} ms, but only with the plan mix, so it is not a regression ({where}{(mixNote is null ? "" : "; " + mixNote)})");
                     }
                 }
             }
@@ -631,10 +671,11 @@ HAVING sum(delta_execution_count) > 0";
 
     /// <summary>#6555: the plans (query_plan_hash) one query hash ran in the window, from the plan cache's statistics.</summary>
     private async Task<Dictionary<string, PlanRuntime>> ReadQueryPlansAsync(
-        NpgsqlConnection connection, int serverId, string queryHash, DateTime start, DateTime end, CancellationToken cancellationToken)
+        NpgsqlConnection connection, int serverId, string queryHash, DateTime start, DateTime end, string[]? databases, CancellationToken cancellationToken)
     {
         await using var command = Command(connection, QueryPlansSql, serverId, start, end);
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = queryHash });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = (object?)databases ?? DBNull.Value });
         return await ReadPlansAsync(command, cancellationToken);
     }
 

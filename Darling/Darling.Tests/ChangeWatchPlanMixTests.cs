@@ -82,6 +82,29 @@ public sealed class ChangeWatchPlanMixTests
         Assert.True(ChangeWatchEvaluator.QueryDurationMoved(Avg(before), Avg(after), null, before, after, Plans(), out _));
     }
 
+    /* The reviewer's case (#6580 round 1): plan A was 10% of the executions before and 1 ms; after, it is 90% and ten times slower. Weighted by its OLD share
+       the whole query reads 1.9 ms against 1.0 ms, under the factor, so the mix adjustment alone called it flat. */
+    [Fact]
+    public void AMinorityPlan_ThatGotSlower_AndTookOverTheWorkload_IsStillARegression()
+    {
+        var before = Plans(("a", 10, 1_000), ("b", 90, 1_000));
+        var after = Plans(("a", 90, 10_000), ("b", 10, 1_000));
+
+        Assert.True(ChangeWatchEvaluator.DurationMoved(Avg(before), Avg(after)));
+        Assert.False(ChangeWatchEvaluator.DurationMoved(Avg(before), ChangeWatchEvaluator.AdjustAfterToMix(before, after)));
+        Assert.True(ChangeWatchEvaluator.QueryDurationMoved(Avg(before), Avg(after), null, before, after, Plans(), out var note));
+        Assert.Contains("plan a: 10% at 1 ms before, 90% at 10 ms after", note, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ASlowerPlan_CountsOnlyWhenItRanEnoughInBothWindows()
+    {
+        var before = Plans(("a", 5, 1_000), ("b", 95, 1_000));      /* plan a ran 5 times: its average is not evidence */
+        var after = Plans(("a", 90, 10_000), ("b", 10, 1_000));
+        Assert.False(ChangeWatchEvaluator.AnySharedPlanMoved(before, after));
+        Assert.True(ChangeWatchEvaluator.AnySharedPlanMoved(Plans(("a", 10, 1_000), ("b", 90, 1_000)), after));
+    }
+
     private static async Task SeedPlanAsync(NpgsqlConnection c, DateTime windowStart, long planId, long executionsPerInterval, long avgUs, CancellationToken ct)
     {
         for (var interval = 0; interval < 6; interval++)
@@ -156,10 +179,10 @@ public sealed class ChangeWatchPlanMixTests
         Assert.Equal("request_opened", result);
     }
 
-    private static Task SeedStatsAsync(NpgsqlConnection c, DateTime at, string planHash, long executions, long avgUs, CancellationToken ct) =>
+    private static Task SeedStatsAsync(NpgsqlConnection c, DateTime at, string planHash, long executions, long avgUs, CancellationToken ct, string database = "Sales") =>
         SeedAsync(c, "query_stats", new Dictionary<string, object>
         {
-            ["server_id"] = ServerId, ["server_name"] = ServerName, ["collection_time"] = ChangeWatchDetectionLiveTests.Naive(at), ["database_name"] = "Sales",
+            ["server_id"] = ServerId, ["server_name"] = ServerName, ["collection_time"] = ChangeWatchDetectionLiveTests.Naive(at), ["database_name"] = database,
             ["query_hash"] = "0xABC", ["query_plan_hash"] = planHash, ["delta_execution_count"] = executions, ["delta_elapsed_time"] = executions * avgUs,
         }, ct);
 
@@ -189,6 +212,33 @@ public sealed class ChangeWatchPlanMixTests
                 Assert.Equal(mixOnly, json.Contains("only with the plan mix", StringComparison.Ordinal));
             });
         Assert.Equal(expected, result);
+    }
+
+    /* A plan_force watch whose Query Store holds nothing falls back to the top queries of the CHANGED databases. The same query hash also runs in another
+       database (a procedure deployed per tenant) fast and in volume; every read of the hash, the plan reads included, is limited to Sales, so that other
+       database cannot pull Sales' 1 ms -> 5 ms back under the factor. */
+    [Fact]
+    public async Task AFallbackQuery_IsMeasuredInTheChangedDatabaseOnly_NotInAnotherThatRunsTheSameHash()
+    {
+        var result = await RunWatchAsync(
+            async (c, change, ct) =>
+            {
+                for (var i = 0; i < 6; i++)
+                {
+                    var before = change.AddMinutes(-55 + (i * 8));
+                    var after = change.AddMinutes(5 + (i * 8));
+                    await SeedStatsAsync(c, before, "0xP1", 20, 1_000, ct);
+                    await SeedStatsAsync(c, after, "0xP1", 20, 5_000, ct);
+                    await SeedStatsAsync(c, before, "0xP1", 5_000, 1_000, ct, "Tenant2");
+                    await SeedStatsAsync(c, after, "0xP1", 5_000, 1_000, ct, "Tenant2");
+                }
+            },
+            (h, json, ct) =>
+            {
+                Assert.Contains("\"moved\":true", json, StringComparison.Ordinal);
+                return Task.CompletedTask;
+            });
+        Assert.Equal("request_opened", result);
     }
 
     private static async Task<string?> RunWatchWithConfigChangeAsync(Func<NpgsqlConnection, DateTime, CancellationToken, Task> seed, Action<string?> check)
