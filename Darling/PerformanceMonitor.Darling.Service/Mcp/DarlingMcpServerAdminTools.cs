@@ -426,7 +426,7 @@ public sealed partial class DarlingMcpServerAdminTools
         "definition from the central monitoring store; the running service drops it from its collection set within " +
         "one sweep and drops this install's own Extended Events sessions on the server, leaving the shared ones and " +
         "any session another registration of this install keeps. Already-collected historical data is NOT deleted. Returns {status:\"removed\", server, " +
-        "display_name, matched_by:\"exact\"|\"partial\", matched_in:\"config_monitored_servers\", ever_connected, previous (the removed definition, no password, no AWS external ID), undo (the add_servers call that re-adds it, with a password placeholder), undo_note (what a re-add does not bring back)} on " +
+        "display_name, matched_by:\"exact\"|\"partial\", matched_in:\"config_monitored_servers\", ever_connected, previous (the removed definition in the keys add_servers takes; the stored password cannot be read back, so a SQL or service-principal row carries the placeholder <password> in its place, and the AWS external ID is left out), undo (the add_servers call that re-adds it, with that same password placeholder), undo_note (what a re-add does not bring back)} on " +
         "success — ever_connected says whether the connected-servers registry (populated on a server's first " +
         "successful connection) also had a row for it, i.e. whether any history exists under its id; " +
         "{status:\"ambiguous\", ...} as above; or {status:\"not_found\", ...} when no definition matches the name. A " +

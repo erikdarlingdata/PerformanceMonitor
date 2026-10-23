@@ -988,7 +988,14 @@ public sealed class DarlingMcpCustomAlertTools
 
         if (expiresAtUtc is not null)
         {
-            arguments["expires_at_utc"] = CustomAlertExpiry.Format(before.ExpiresAtUtc) ?? string.Empty;
+            // A past expiry cannot be sent back (the tool refuses one that is not the rule's current value, and the refusal would
+            // drop every other restored field with it), so an already-passed expiry is restored as "no expiry" and the note says so.
+            var passed = before.ExpiresAtUtc is { } was && was <= DateTime.UtcNow;
+            arguments["expires_at_utc"] = passed ? string.Empty : CustomAlertExpiry.Format(before.ExpiresAtUtc) ?? string.Empty;
+            if (passed)
+            {
+                node["undo_note"] = "The rule's expiry had already passed, so the undo leaves the rule with no expiry rather than the passed one.";
+            }
         }
 
         node["undo"] = DarlingMcpUndoShape.Call("update_custom_alert_rule", arguments);

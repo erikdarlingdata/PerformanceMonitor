@@ -604,6 +604,28 @@ LIMIT 1";
                        : ".");
         }
 
+        /* A row saved before #6583 (a non-zero port on SQL Server) or #6352 (a named-pipe or admin-style host) holds a value the edit
+           rules now refuse. Putting it back is refused the same way, with nothing written, so the note says so instead of leaving
+           the undo to read as a call that works. */
+        var sqlServerRow = PerformanceMonitor.Collectors.MonitoredEngineKind.ParseConfiguredEngine(row.Engine) != PerformanceMonitor.Collectors.CollectorTargetEngine.PostgreSql;
+        var refusedValues = new List<string>();
+        if (sqlServerRow && plan.ChangedFields.Contains("port") && row.Port > 0)
+        {
+            refusedValues.Add("port " + row.Port.ToString(System.Globalization.CultureInfo.InvariantCulture) + " (a SQL Server port is no longer accepted)");
+        }
+
+        if (sqlServerRow && plan.ChangedFields.Contains("host") && ServerHostSetting.Refusal(row.Host) is not null)
+        {
+            refusedValues.Add("host " + row.Host + " (no longer an accepted host)");
+        }
+
+        if (refusedValues.Count > 0)
+        {
+            note = (note is null ? string.Empty : note + " ")
+                + "The undo will be refused with nothing written, because the previous " + string.Join(" and ", refusedValues)
+                + " would no longer pass the add rules; edit the other fields by hand.";
+        }
+
         if (previous.Count == 0)
         {
             return (previous, null, note);

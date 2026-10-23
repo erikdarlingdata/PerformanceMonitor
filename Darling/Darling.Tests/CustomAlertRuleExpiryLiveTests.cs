@@ -255,6 +255,16 @@ VALUES ($1, (now() AT TIME ZONE 'UTC'), $2, $3, (now() AT TIME ZONE 'UTC'), $4, 
             Assert.NotNull((string?)revived["previous_expires_at_utc"]);
             Assert.Equal("update_custom_alert_rule", (string?)revived["undo"]!["tool"]);
 
+            // The undo must be a call the tool accepts: the expiry it undoes had already passed, which the tool refuses to set, so the
+            // undo restores "no expiry" and the answer says so (replaying a past instant answers "invalid" and writes nothing).
+            Assert.Contains("already passed", (string?)revived["undo_note"]);
+            var undoArguments = revived["undo"]!["arguments"]!;
+            Assert.Equal(string.Empty, (string?)undoArguments["expires_at_utc"]);
+            var replayed = JsonNode.Parse(await DarlingMcpCustomAlertTools.UpdateCustomAlertRule(
+                dataSource, (long)undoArguments["rule_id"]!, (int)undoArguments["version"]!, expires_at_utc: (string?)undoArguments["expires_at_utc"]))!;
+            Assert.NotEqual("invalid", (string?)replayed["status"]);
+            Assert.False((bool)replayed["expired"]!);
+
             bodySucceeded = true;
         }
         finally

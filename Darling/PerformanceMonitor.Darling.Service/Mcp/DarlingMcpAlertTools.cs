@@ -931,10 +931,6 @@ public sealed partial class DarlingMcpAlertTools
         }
     }
 
-    /// <summary>The ONE Darling route projection (#5750): <c>get_notification_routes</c> lists it and
-    /// <c>set_notification_route_enabled</c> returns it, so the two cannot drift apart again. Field names mirror Lite's
-    /// payload (<c>McpAlertTools.RoutePayload</c>); <see cref="NotificationRouteKinds"/> spells <c>match_kind</c> and
-    /// <c>family</c> for both products, so a <c>*</c> route reads as <c>wildcard</c> with no family.</summary>
     /// <summary>
     /// The undo of delete_notification_route (#6403): the create_notification_route call carrying the deleted route's match, scope,
     /// enabled flag, resolution override, fallback and recipients. A webhook URL or key is sealed and was never readable, so it is not
@@ -975,6 +971,10 @@ public sealed partial class DarlingMcpAlertTools
         };
     }
 
+    /// <summary>The ONE Darling route projection (#5750): <c>get_notification_routes</c> lists it and
+    /// <c>set_notification_route_enabled</c> returns it, so the two cannot drift apart again. Field names mirror Lite's
+    /// payload (<c>McpAlertTools.RoutePayload</c>); <see cref="NotificationRouteKinds"/> spells <c>match_kind</c> and
+    /// <c>family</c> for both products, so a <c>*</c> route reads as <c>wildcard</c> with no family.</summary>
     internal static object RoutePayload(PgNotificationRouteStore.RouteSummary r) => RoutePayload(r, null);
 
     /// <summary>The route projection with its agent use (#5632): the requests the route opened in the last hour and the last

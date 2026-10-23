@@ -115,6 +115,35 @@ public sealed partial class ServerEditLiveTests
     }
 
     [Fact]
+    public async Task EditServer_ClearingAPortSavedBeforeTheRule_SaysItsUndoWillBeRefused_AndTheReplayWritesNothing()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        var ok = false;
+        try
+        {
+            await SeedServerAsync(rig.Owner, 5305, "undo-05", "undo-05.example.test", "integrated", null, null, ct);
+            await ExecAsync(rig.Owner, "UPDATE config_monitored_servers SET port = 1444 WHERE server_id = 5305", ct);
+
+            var cleared = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "undo-05.example.test", "{\"port\":0}", Reachable, TestKeyRings.Healthy, null, ct));
+            Assert.Equal("updated", (string)cleared["status"]!);
+            Assert.Equal(1444, (int)cleared["previous"]!["port"]!);
+            Assert.Contains("refused", (string)cleared["undo_note"]!, StringComparison.Ordinal);
+            Assert.Contains("1444", (string)cleared["undo_note"]!, StringComparison.Ordinal);
+
+            var signature = await ScalarAsync<string>(rig.Owner, DefinitionSignatureSql + 5305, ct);
+            var replay = Parse(await ReplayEditAsync(rig.Mcp, cleared["undo"], ct));
+            Assert.Equal("invalid", (string)replay["status"]!);
+            Assert.Equal(signature, await ScalarAsync<string>(rig.Owner, DefinitionSignatureSql + 5305, ct));
+            ok = true;
+        }
+        finally
+        {
+            await DropRoleAsync(rig, ok);
+        }
+    }
+
+    [Fact]
     public async Task AddServers_EachAddedEntryCarriesTheRemoveUndo_AndASkippedEntryCarriesNone()
     {
         var ct = TestContext.Current.CancellationToken;
