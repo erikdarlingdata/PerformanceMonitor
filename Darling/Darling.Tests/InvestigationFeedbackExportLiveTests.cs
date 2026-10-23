@@ -578,6 +578,48 @@ public sealed class InvestigationFeedbackExportLiveTests
         });
     }
 
+    /* #6600: the managed store's shape. The web reads as the viewer role and the cases are read on it; the access probe (can this login record
+       feedback) runs on the arm for a signed-in admin, so the download is served. */
+    [Fact]
+    public async Task OnTheManagedStore_ASignedInAdminSeat_IsServedTheDownload_BecauseTheProbeRunsOnTheArm()
+    {
+        await InvestigationFeedbackLiveTests.WithRawWebRoutesAsync("viewer", AdminSeat, McpDataDetail.Full, null, async (owner, request, Send, ct) =>
+        {
+            await new InvestigationFeedbackStore(owner, 30).RecordAsync(new InvestigationFeedbackSubmission(request, "wrong", null, null, "owner note", "dana"), ct);
+            var served = Decode(await Send("GET", "/api/investigation-export", null, null));
+            Assert.Equal(200, served.Status);
+            Assert.Equal(request.ToString(), (string)JsonNode.Parse(served.Text.TrimEnd('\n'))!["request_id"]!);
+        }, arm: AdminArmShape.Admin, managedStore: true);
+    }
+
+    /* #6600: an OIDC viewer seat never opens the arm (its login is refused here, so opening it would fail): the download is refused as today. */
+    [Fact]
+    public async Task OnTheManagedStore_AViewerSeat_NeverOpensTheArm_AndIsRefusedAsToday()
+    {
+        await InvestigationFeedbackLiveTests.WithRawWebRoutesAsync("viewer", ViewerSeat, McpDataDetail.Full, null, async (owner, request, Send, ct) =>
+        {
+            await new InvestigationFeedbackStore(owner, 30).RecordAsync(new InvestigationFeedbackSubmission(request, "wrong", null, null, "owner note", "dana"), ct);
+            var refused = Decode(await Send("GET", "/api/investigation-export", null, null));
+            Assert.Equal(403, refused.Status);
+            Assert.Equal(DarlingWebEndpoints.InvestigationExportSeatMessage, (string)JsonNode.Parse(refused.Text)!["error"]!);
+            Assert.DoesNotContain(request.ToString(), refused.Text, StringComparison.Ordinal);
+        }, arm: AdminArmShape.Refused, managedStore: true);
+    }
+
+    /* #6600: with the switch off (no arm on a managed store) a signed-in admin is refused as today, and the 403 names the switch. */
+    [Fact]
+    public async Task OnTheManagedStore_WithTheSwitchOff_TheSignedInAdminGets403_NamingTheSwitch()
+    {
+        await InvestigationFeedbackLiveTests.WithRawWebRoutesAsync("viewer", AdminSeat, McpDataDetail.Full, null, async (owner, request, Send, ct) =>
+        {
+            await new InvestigationFeedbackStore(owner, 30).RecordAsync(new InvestigationFeedbackSubmission(request, "wrong", null, null, "owner note", "dana"), ct);
+            var refused = Decode(await Send("GET", "/api/investigation-export", null, null));
+            Assert.Equal(403, refused.Status);
+            Assert.Equal(DarlingWebEndpoints.InvestigationExportRefusedMessage(true, adminWritesOff: true), (string)JsonNode.Parse(refused.Text)!["error"]!);
+            Assert.DoesNotContain(request.ToString(), refused.Text, StringComparison.Ordinal);
+        }, managedStore: true);
+    }
+
     [Theory]
     [InlineData("full")]
     [InlineData("metadataOnly")]
