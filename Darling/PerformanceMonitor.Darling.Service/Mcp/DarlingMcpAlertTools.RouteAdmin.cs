@@ -190,7 +190,7 @@ public sealed partial class DarlingMcpAlertTools
         "send_resolutions (inherit, always or never) and fallback_route_id (an existing route; clear_fallback true removes it), plus the destination fields. A field left out keeps its stored value. " +
         "An operator token sets agent_level 0 to 3, or clear_agent_level true to put the level back to Inherit (null: the next level decides), not both. Clearing the level keeps the four limits, as the Viewer's Inherit does. " +
         "The same rules the Viewer's route window applies hold: * needs a scope, a route is scoped to one server or one tag, a route is not its own fallback, a webhook is an absolute http or https URL, recipients are plain addresses. " +
-        "A route whose generic webhook has a signing key keeps its generic URL until the key is removed in the Viewer. " +
+        "A route whose generic webhook has a signing key keeps its generic URL until the key is removed (remove_webhook_signing_key, or the Viewer). " +
         "The database role this tool runs as can neither read nor write a destination column; the row is changed by the store's own config.update_notification_route and config.set_notification_route_destinations functions in one transaction, " +
         "which re-read the row under its lock and refuse a change to an agent route from any caller that is not an operator token. " +
         "Use set_notification_route_enabled to turn a route off and on without the rest. " +

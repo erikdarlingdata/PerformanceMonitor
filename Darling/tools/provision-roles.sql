@@ -1825,6 +1825,105 @@ GRANT EXECUTE ON FUNCTION config.create_notification_route(text, boolean, intege
 GRANT EXECUTE ON FUNCTION config.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer) TO mcp;
 GRANT EXECUTE ON FUNCTION config.set_notification_route_destinations(integer, text, text[], text, text, text, text, text) TO mcp;
 GRANT EXECUTE ON FUNCTION config.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean, jsonb) TO mcp;
+-- #6394: the MCP generate_webhook_signing_key and remove_webhook_signing_key tools. mcp holds no UPDATE on a signing key column of config.config_notification
+--     or config.config_notification_routes (they are secret columns) and no SELECT on them, and gets none here. The service reads the saved (sealed) URL
+--     and proxy a new key is sealed for through its own store connection, so there is no function that returns them to mcp (an earlier build of this
+--     change made read_webhook_signing_target; it is dropped here). set_webhook_signing_key stores a key the service sealed (only the shape of one:
+--     sealed:v1:, the 16 character key id, base64) and moves the current key to the previous slot with the 7 day window the Viewer uses, and
+--     clear_webhook_signing_key clears the key, the previous key and the window. Neither returns a key. Granted to mcp only.
+DROP FUNCTION IF EXISTS config.read_webhook_signing_target(integer);
+CREATE OR REPLACE FUNCTION config.set_webhook_signing_key(p_route_id integer, p_sealed_key text, p_stored_url text, p_proxy text)
+RETURNS timestamptz
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+   v_url text;
+   v_until timestamptz;
+BEGIN
+   IF p_sealed_key IS NULL OR length(p_sealed_key) > 16384
+      OR p_sealed_key !~ '^sealed:v1:[0-9a-f]+:[A-Za-z0-9+/]+=?=?$'
+      OR length(split_part(p_sealed_key, ':', 3)) <> 16 THEN
+      RAISE EXCEPTION 'A signing key is stored sealed by the Darling service, never as text.' USING ERRCODE = 'DL400';
+   END IF;
+   IF p_route_id IS NULL THEN
+      SELECT n.generic_url INTO v_url FROM config.config_notification AS n WHERE n.id = 1;
+      IF NOT FOUND THEN
+         RAISE EXCEPTION 'The notification settings row does not exist yet.' USING ERRCODE = 'DL404';
+      END IF;
+   ELSE
+      SELECT r.generic_url INTO v_url FROM config.config_notification_routes AS r WHERE r.route_id = p_route_id;
+      IF NOT FOUND THEN
+         RAISE EXCEPTION 'No notification route with route_id %.', p_route_id USING ERRCODE = 'DL404';
+      END IF;
+   END IF;
+   IF v_url !~ '^sealed:' THEN
+      RAISE EXCEPTION 'There is no saved generic webhook URL to tie a key to. Save the generic webhook URL first, then generate the key.' USING ERRCODE = 'DL400';
+   END IF;
+   -- The Viewer's own writes (ViewerDataService.SigningKeys): the current key moves to the previous slot with a window of 7 days when there
+   -- was one, and the write is guarded on the URL and proxy the key was sealed for still being what is stored. The route form reads the settings
+   -- row's proxy FOR SHARE, so it waits for a Settings save that holds that row.
+   IF p_route_id IS NULL THEN
+      UPDATE config.config_notification
+         SET previous_signing_key = signing_key,
+             previous_signing_key_until = CASE WHEN signing_key <> '' THEN now() + make_interval(days => 7) END,
+             signing_key = p_sealed_key
+       WHERE id = 1 AND generic_url = p_stored_url AND generic_proxy = p_proxy
+      RETURNING previous_signing_key_until INTO v_until;
+   ELSE
+      UPDATE config.config_notification_routes
+         SET previous_signing_key = signing_key,
+             previous_signing_key_until = CASE WHEN signing_key <> '' THEN now() + make_interval(days => 7) END,
+             signing_key = p_sealed_key
+       WHERE route_id = p_route_id AND generic_url = p_stored_url
+         AND COALESCE((SELECT n.generic_proxy FROM config.config_notification AS n WHERE n.id = 1 FOR SHARE), '') = p_proxy
+      RETURNING previous_signing_key_until INTO v_until;
+   END IF;
+   IF NOT FOUND THEN
+      RAISE EXCEPTION 'The generic webhook URL or proxy changed while the key was made. Nothing was written; try again.' USING ERRCODE = 'DL403';
+   END IF;
+   RETURN v_until;
+END
+$fn$;
+REVOKE ALL ON FUNCTION config.set_webhook_signing_key(integer, text, text, text) FROM PUBLIC;
+CREATE OR REPLACE FUNCTION config.clear_webhook_signing_key(p_route_id integer)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+   v_url text;
+   v_had boolean;
+BEGIN
+   IF p_route_id IS NULL THEN
+      SELECT n.generic_url, n.signing_key <> '' INTO v_url, v_had FROM config.config_notification AS n WHERE n.id = 1 FOR UPDATE;
+      IF NOT FOUND THEN
+         RAISE EXCEPTION 'The notification settings row does not exist yet.' USING ERRCODE = 'DL404';
+      END IF;
+   ELSE
+      SELECT r.generic_url, r.signing_key <> '' INTO v_url, v_had FROM config.config_notification_routes AS r WHERE r.route_id = p_route_id FOR UPDATE;
+      IF NOT FOUND THEN
+         RAISE EXCEPTION 'No notification route with route_id %.', p_route_id USING ERRCODE = 'DL404';
+      END IF;
+   END IF;
+   -- A destination with no generic webhook has no key to remove (a key that is somehow still stored is cleared all the same).
+   IF v_url = '' AND NOT v_had THEN
+      RAISE EXCEPTION 'There is no generic webhook on this destination, so there is no signing key to remove.' USING ERRCODE = 'DL400';
+   END IF;
+   -- The Viewer's own clear: the key, the previous key and the window.
+   IF p_route_id IS NULL THEN
+      UPDATE config.config_notification SET signing_key = '', previous_signing_key = '', previous_signing_key_until = NULL WHERE id = 1;
+   ELSE
+      UPDATE config.config_notification_routes SET signing_key = '', previous_signing_key = '', previous_signing_key_until = NULL WHERE route_id = p_route_id;
+   END IF;
+   RETURN v_had;
+END
+$fn$;
+REVOKE ALL ON FUNCTION config.clear_webhook_signing_key(integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION config.set_webhook_signing_key(integer, text, text, text) TO mcp;
+GRANT EXECUTE ON FUNCTION config.clear_webhook_signing_key(integer) TO mcp;
 COMMIT;
 
 -- #6230: the MCP incident tools queue analyze_now, purge_now, test_connect, pause and resume through this function, the only way the
