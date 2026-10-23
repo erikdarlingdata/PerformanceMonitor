@@ -68,6 +68,11 @@ C:\Program Files\PerformanceMonitorDarling). What it does, in order:
 
 Uninstall with uninstall-darling.ps1 (same folder).
 
+The MSI package (#6480) runs this same script in two phases through -MsiPhase, around the service the package creates and
+starts itself: PreStart does steps 1-3 and 4b-4c, PostStart does 5a (an upgrade only) and step 7. The package owns steps 4, 5
+and 6, so neither phase runs them, and neither phase asks a question. A machine the MSI installed is refused here without
+-MsiPhase: update it with a newer MSI.
+
 .PARAMETER SkipPreflight
 Skip the --test-connection probe (2). The service and the viewer\ folder are self-contained, so there is no
 .NET runtime check to skip (#6471).
@@ -100,6 +105,23 @@ which has no local groups. Cannot be combined with -NoOperatorPrompt.
 Never ask whether to add the signed-in account to the operator group (#6478). The install prints who to add, and that the
 person signs out and back in, as it did before the question existed. A host that cannot take an answer (input redirected, or
 started with -NonInteractive) is treated the same way without this switch.
+
+.PARAMETER MsiPhase
+PreStart or PostStart. For the MSI package's custom actions only (#6480); a person running this by hand does not pass it.
+PreStart runs after the package has installed the files and created the service, before it starts it: steps 1 to 3 and 4b to 4c
+(locks and permissions, the operator group, the store folder, the firewall rules). PostStart runs after the package has started
+the service: 5a (the firewall re-reconcile) on an upgrade only, then step 7. Neither phase creates, stops or starts the service,
+creates shortcuts, or asks a question: a question becomes "continue" (the CET refusal at step 2 still stops the install, exit 5).
+Under -MsiPhase the script does not treat an existing service as an upgrade, because the package creates the service first;
+-MsiUpgrade says which it is. Cannot be combined with -Network.
+
+.PARAMETER MsiUpgrade
+With -MsiPhase: the package is replacing an installed Darling (a major upgrade), so the store already exists. PostStart then
+re-applies the firewall rules at 5a. Without it a -MsiPhase run is a fresh install, even though the service record exists by then.
+
+.PARAMETER WebDashboard
+When this script writes the minimal darling.json (none existed), set web.enabled to true in it, so the web dashboard starts on its
+loopback address. Does nothing when darling.json already exists: that file is the operator's.
 #>
 [CmdletBinding()]
 param(
@@ -108,7 +130,11 @@ param(
     [switch]$Network,
     [switch]$AcceptWritableExtraction,
     [string]$AddOperator,
-    [switch]$NoOperatorPrompt
+    [switch]$NoOperatorPrompt,
+    [ValidateSet('PreStart', 'PostStart')]
+    [string]$MsiPhase,
+    [switch]$MsiUpgrade,
+    [switch]$WebDashboard
 )
 
 $ErrorActionPreference = 'Stop'
@@ -1610,6 +1636,60 @@ if (-not $identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrat
     Fail 'Run this script from an ELEVATED PowerShell (service creation and Event Log registration require it).'
 }
 
+# The MSI package (#6480) writes HKLM\SOFTWARE\PerformanceMonitor Darling, value InstalledBy = msi, and removes it at uninstall. A
+# machine that holds it belongs to Windows Installer: a script install over it would leave two owners for one service. Returns the
+# refusal text, or $null when the marker is absent. The registry read is a parameter so a test can stand in for the machine; the
+# default reads the 64-bit view, so a 32-bit PowerShell is not sent to WOW6432Node and does not miss the marker. Kept byte-identical
+# in install-darling.ps1 and upgrade-darling.ps1.
+function Get-DarlingMsiInstallRefusal([string]$ScriptName, [scriptblock]$ReadMarker = $null) {
+    if (-not $ReadMarker) {
+        $ReadMarker = {
+            $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+            try {
+                $key = $base.OpenSubKey('SOFTWARE\PerformanceMonitor Darling')
+                if ($key) { try { $key.GetValue('InstalledBy') } finally { $key.Dispose() } }
+            }
+            finally { $base.Dispose() }
+        }
+    }
+    if ("$(& $ReadMarker)" -ne 'msi') { return $null }
+    return @"
+PerformanceMonitor Darling on this machine was installed by the MSI package, so $ScriptName will not change it: two installers
+would then own one service.
+  To update it: run the newer MSI. Windows Installer replaces the files in place and keeps darling.json and the store.
+  To remove it: Settings > Apps > Installed apps > PerformanceMonitor Darling > Uninstall. That keeps the store unless you tick
+  the box to remove it.
+  To go back to script installs: uninstall the MSI as above, extract the zip into a fresh folder, and run install-darling.ps1 there.
+Nothing was installed or changed.
+"@
+}
+
+# Fresh install or upgrade. By hand it is whether the service exists. Under -MsiPhase the package created the service before this
+# script ran, so $Existing is set on a fresh MSI install too and would read as an upgrade: the package says which it is with
+# -MsiUpgrade (#6480). Takes the facts as arguments so a test can stand in for the machine.
+function Test-DarlingIsUpgrade([string]$MsiPhase, [bool]$MsiUpgrade, $Existing) {
+    if ($MsiPhase) { return $MsiUpgrade }
+    return ($null -ne $Existing)
+}
+
+# The one place a question is asked of a person at steps 1b and 2. Under -MsiPhase nobody can answer (a custom action has no console), so
+# the answer is "continue" and nothing is read (#6480). The reader is a parameter so a test can see that it is not called.
+function Read-DarlingAnswer([string]$MsiPhase, [string]$Prompt, [scriptblock]$Ask = $null) {
+    if ($MsiPhase) {
+        Write-Host "Continuing: a -MsiPhase run asks no questions ($Prompt)" -ForegroundColor Yellow
+        return 'y'
+    }
+    if (-not $Ask) { $Ask = { param($text) Read-Host $text } }
+    return (& $Ask $Prompt)
+}
+
+if ($MsiUpgrade -and -not $MsiPhase) { Fail '-MsiUpgrade is only for the MSI package: it goes with -MsiPhase.' }
+if ($MsiPhase -and $Network) { Fail '-Network opens an interactive wizard, which -MsiPhase never does. Run install-darling.ps1 -Network by hand afterwards, or edit darling.json.' }
+if (-not $MsiPhase) {
+    $msiRefusal = Get-DarlingMsiInstallRefusal 'install-darling.ps1'
+    if ($msiRefusal) { Fail $msiRefusal }
+}
+
 if (-not (Test-Path -LiteralPath $serviceExe)) {
     Fail "PerformanceMonitor.Darling.Service.exe not found beside this script. Extract the full Darling zip and run install-darling.ps1 from the extracted folder."
 }
@@ -1618,6 +1698,13 @@ if (-not (Test-Path -LiteralPath $serviceExe)) {
 # needed it: 1a's pre-lock check (below) must also know fresh-versus-upgrade, so a re-run over a tree #4038
 # already locked does not read that lock's own grant back as a stranger's (round-1 review, #4043).
 $existing = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+
+# Fresh install or upgrade, for 1b, 1c2 and 5a (see Test-DarlingIsUpgrade for why $existing alone is not enough under -MsiPhase).
+$isUpgrade = Test-DarlingIsUpgrade $MsiPhase ([bool]$MsiUpgrade) $existing
+
+# PostStart has nothing to check or lock: PreStart did all of it before the service started. The body below is not re-indented,
+# to keep the diff of this long block readable.
+if ($MsiPhase -ne 'PostStart') {
 
 # -- 1a. Refuse an install tree an ordinary user can ALREADY write to (#4043) -----------------------
 # #4038's lock at 1b2 closes the tree against writes from here on. It cannot undo one made before it ran:
@@ -1706,12 +1793,10 @@ else {
 # This runs BEFORE the pre-flight, the Event Log source, and service creation, so a doomed location costs
 # nothing and leaves nothing behind.
 
-# The same fact as a boolean, for the post-start firewall reconcile at 5a (#2436). $existing itself was
-# already resolved at 1a, before this point and before sc.exe create ever runs, because the pre-lock check
-# there needs fresh-versus-upgrade too. Named rather than reusing $existing at the far end of the script
-# because what 5a actually depends on is not "a service object was found" but "a STORE already exists to be
-# asked" - which is what an existing service implies.
-$isUpgrade = $null -ne $existing
+# $isUpgrade (set right after $existing, above) is the same fact as a boolean, for the post-start firewall reconcile at 5a
+# (#2436). Named rather than reusing $existing at the far end of the script because what 5a actually depends on is not "a
+# service object was found" but "a STORE already exists to be asked" - which is what an existing service implies by hand, and
+# what -MsiUpgrade says under -MsiPhase.
 # Classify the NORMALIZED spelling, but keep installing to $root exactly as given (#2348). The \\?\ prefix
 # instructs the path parser and is not part of where the install lives, so stripping it for the decision
 # changes which rules see the path and nothing about where files land.
@@ -1769,7 +1854,7 @@ which the service's virtual account is a member of, and ordinary users can't wri
 Copy your darling.json across if you have one.
 "@
 
-    if (-not $existing) {
+    if (-not $isUpgrade) {
         Fail @"
 $why
 
@@ -1794,7 +1879,7 @@ Nothing was installed or changed.
     Write-Host "Service '$serviceName' already exists, so this is an upgrade, and this folder may have been made" -ForegroundColor Yellow
     Write-Host 'to work by hand (granting the service account read + execute on the tree). That is the only reason' -ForegroundColor Yellow
     Write-Host 'this is a question. If it has NOT been, the service will stop working the moment it restarts.' -ForegroundColor Yellow
-    $answer = Read-Host 'Point the service at this folder anyway? [y/N]'
+    $answer = Read-DarlingAnswer $MsiPhase 'Point the service at this folder anyway? [y/N]'
     if ($answer -notmatch '^[Yy]') { exit 4 }
 }
 
@@ -1815,7 +1900,7 @@ function Test-DarlingConfigIsUnchangedSample([string]$configPath, [string]$sampl
     return ($config -ceq $sample)
 }
 
-if (-not $existing -and (Test-DarlingConfigIsUnchangedSample $configPath $samplePath)) {
+if (-not $isUpgrade -and (Test-DarlingConfigIsUnchangedSample $configPath $samplePath)) {
     Fail @"
 darling.json is an unedited copy of darling.sample.json, so it still names the sample's example servers, which do not exist.
 The service would register them on its first start.
@@ -1850,8 +1935,8 @@ Invoke-InstallTreeLock $lockAccount -StopOnOpen
 # A first install needs no hand-edited darling.json (#6468). The service starts with no monitored servers, so a
 # missing darling.json is answered with a minimal one (the bundled store only) and the install carries on. The
 # first server is added afterwards in the Viewer. The full sample is left beside it as the reference.
-function New-DarlingMinimalConfigText {
-    return @'
+function New-DarlingMinimalConfigText([bool]$EnableWebDashboard = $false) {
+    $text = @'
 {
   // Written by install-darling.ps1. The service keeps everything else in its own PostgreSQL store.
   // darling.sample.json beside this file is the full, commented reference for every setting.
@@ -1866,16 +1951,21 @@ function New-DarlingMinimalConfigText {
   "servers": []
 }
 '@
+    # -WebDashboard (the MSI's WEBDASHBOARD=1, #6480): the dashboard starts on its loopback address. The block goes ahead of "servers".
+    if ($EnableWebDashboard) {
+        $text = $text -replace '(?m)^  "servers": \[\]', ('  "web": {' + "`r`n" + '    "enabled": true' + "`r`n" + '  },' + "`r`n" + '  "servers": []')
+    }
+    return $text
 }
 
 # Writes the minimal file as UTF-8 without a byte-order mark, so every reader (the service's, this script's
 # regexes, Windows PowerShell 5.1) sees the same bytes.
-function Write-DarlingMinimalConfig([string]$path) {
-    [System.IO.File]::WriteAllText($path, (New-DarlingMinimalConfigText), (New-Object System.Text.UTF8Encoding($false)))
+function Write-DarlingMinimalConfig([string]$path, [bool]$EnableWebDashboard = $false) {
+    [System.IO.File]::WriteAllText($path, (New-DarlingMinimalConfigText $EnableWebDashboard), (New-Object System.Text.UTF8Encoding($false)))
 }
 
 if (-not (Test-Path -LiteralPath $configPath)) {
-    Write-DarlingMinimalConfig $configPath
+    Write-DarlingMinimalConfig $configPath ([bool]$WebDashboard)
     Write-Host ''
     Write-Host 'darling.json did not exist, so a minimal one was written: the bundled PostgreSQL store and no servers.' -ForegroundColor Yellow
     Write-Host 'Nothing needs editing before the install. Add your first server afterwards, in the Viewer (Add Server).' -ForegroundColor Yellow
@@ -1919,7 +2009,7 @@ if (-not $SkipPreflight) {
     if ($preflightExit -ne 0) {
         Write-Host ''
         Write-Host "Pre-flight FAILED (exit $preflightExit) - the config is invalid or a server is unreachable." -ForegroundColor Yellow
-        $answer = Read-Host 'Install anyway? A monitoring service may legitimately be installed while a target is down. [y/N]'
+        $answer = Read-DarlingAnswer $MsiPhase 'Install anyway? A monitoring service may legitimately be installed while a target is down. [y/N]'
         if ($answer -notmatch '^[Yy]') { exit 3 }
     }
     else {
@@ -1935,6 +2025,8 @@ try {
 catch [System.InvalidOperationException] {
     Write-Host "Event Log source '$serviceName' already registered."
 }
+
+}  # end of the PreStart-and-by-hand block that starts at 1a
 
 # The Windows product type: 1 workstation, 2 domain controller, 3 server (Win32_OperatingSystem.ProductType), or 0 when it
 # cannot be read. Its own function so a test can stand in for the machine. Kept byte-identical in install-darling.ps1 and
@@ -2181,7 +2273,11 @@ if ($AddOperator) {
 # $existing was resolved back at 1b, which needs to know fresh-versus-upgrade before it decides whether a
 # bad install location is a refusal or a question. Nothing between there and here creates or removes the
 # service, so it is the same answer.
-if ($existing) {
+if ($MsiPhase) {
+    # The package created the service (its ServiceInstall row) and starts and stops it; this script never touches the service itself (#6480).
+    Write-Host "Service '$serviceName' is managed by the MSI package - not created, stopped or started here."
+}
+elseif ($existing) {
     Write-Host "Service already exists - upgrading its binPath in place (config, store data, and credentials untouched)."
     if ($existing.Status -ne 'Stopped') {
         Stop-Service -Name $serviceName -Force
@@ -2317,6 +2413,9 @@ if (-not $onDomainController) {
     try { $operatorSid = Initialize-DarlingOperatorGroup $operatorGroupName }
     catch { $operatorGroupProblem = $_.Exception.Message }
 }
+
+# 4b to 4b2 and the TLS key verb ran in PreStart. The body is not re-indented, for the reason given at the start of the block at 1a.
+if ($MsiPhase -ne 'PostStart') {
 
 # Every path here is named with -LiteralPath (#4745). PowerShell reads [ and ] in a -Path value as wildcard
 # characters, so under an install folder named with either, -Path finds no .bak files at all, and Get-Acl or
@@ -2464,6 +2563,8 @@ the service starts. Create the group from an elevated prompt, then re-run this s
 # that could not run is a warning with the command to run by hand, and the install carries on.
 $tlsKeyWarning = Invoke-DarlingTlsKeyFileHardening $serviceExe $configPath
 if ($tlsKeyWarning) { Write-Host "WARNING: $tlsKeyWarning" -ForegroundColor Yellow }
+
+}  # end of the PreStart-and-by-hand block that starts at 4b
 
 # -- 4b3. Create the store folder before the service does -------------------------------------------------
 # The store folder is the parent of postgres.dataDirectory: %ProgramData%\PerformanceMonitorDarling unless
@@ -2912,7 +3013,10 @@ function Initialize-DarlingStoreFolder([string]$folder, [string]$serviceAccount,
 }
 
 $storeFolder = Get-DarlingStoreFolder $configPath
-if ($storeFolder) {
+if ($MsiPhase -eq 'PostStart') {
+    # PreStart secured it before the service started; step 7 only needs to know where it is.
+}
+elseif ($storeFolder) {
     try { Initialize-DarlingStoreFolder $storeFolder $serviceAccount $operatorSid (Get-DarlingDataDirectory $configPath) $serviceName }
     catch {
         Fail @"
@@ -2958,13 +3062,21 @@ function Invoke-FirewallReconcile {
     }
 }
 
-Invoke-FirewallReconcile
+if ($MsiPhase -ne 'PostStart') { Invoke-FirewallReconcile }
+
+# PreStart ends here: the package starts the service next, and PostStart is the run after that (#6480).
+if ($MsiPhase -eq 'PreStart') {
+    Write-Host 'PreStart done: permissions, operator group, store folder and firewall rules are in place. The package starts the service next.' -ForegroundColor Green
+    exit 0
+}
 
 # -- 5. Start + confirm ---------------------------------------------------------------------------
-Start-Service -Name $serviceName
-(Get-Service -Name $serviceName).WaitForStatus('Running', [TimeSpan]::FromSeconds(60))
-Write-Host "Service is Running. First start does real work (unpack pg-runtime, initdb, store migration, first collection cycle) - give it ~2 minutes." -ForegroundColor Green
-Write-Host "Primary log: %ProgramData%\PerformanceMonitorDarling\logs\darling-service_yyyyMMdd.log"
+if (-not $MsiPhase) {
+    Start-Service -Name $serviceName
+    (Get-Service -Name $serviceName).WaitForStatus('Running', [TimeSpan]::FromSeconds(60))
+    Write-Host "Service is Running. First start does real work (unpack pg-runtime, initdb, store migration, first collection cycle) - give it ~2 minutes." -ForegroundColor Green
+    Write-Host "Primary log: %ProgramData%\PerformanceMonitorDarling\logs\darling-service_yyyyMMdd.log"
+}
 
 # -- 5a. Re-reconcile the firewall on an UPGRADE (#2436) -------------------------------------------
 # The 4c call ran with the service stopped, which on a managed install means the store was down too - it is
@@ -3019,7 +3131,7 @@ function Get-DarlingShortcutPaths([string[]]$Folders, [scriptblock]$GetFolder = 
 }
 
 # -- 6. Viewer shortcuts --------------------------------------------------------------------------
-if (-not $NoShortcuts) {
+if (-not $NoShortcuts -and -not $MsiPhase) {
     if (Test-Path -LiteralPath $viewerExe) {
         # GetFolderPath returns '' for Desktop/StartMenu whenever there is no loaded user profile - a
         # Windows service, a scheduled task, a CI runner, a remote/SSM session - and Join-Path then
@@ -3052,7 +3164,9 @@ if (-not $NoShortcuts) {
 # No group on a domain controller, so no question there. The group exists by now on any other machine: a group that could not
 # be made stopped the install at 4b2.
 if ($operatorSid) {
-    $null = Invoke-DarlingOperatorStep $operatorGroupName $AddOperator ([bool]$NoOperatorPrompt) $configPath $storeFolder
+    # Under -MsiPhase nobody can answer (a custom action has no console), so the question is never asked: the MSI's OPERATORACCOUNT
+    # arrives as -AddOperator, and without it the closing guidance says who to add (#6480).
+    $null = Invoke-DarlingOperatorStep $operatorGroupName $AddOperator ([bool]($NoOperatorPrompt -or $MsiPhase)) $configPath $storeFolder
 }
 
 Write-Host ''

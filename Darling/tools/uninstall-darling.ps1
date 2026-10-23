@@ -15,10 +15,25 @@ is reversible by simply re-running install-darling.ps1. To destroy the collected
 .PARAMETER PurgeData
 ALSO delete %ProgramData%\PerformanceMonitorDarling - the entire PostgreSQL store (all collected
 history), the generated store credentials, and the service logs. Irreversible; prompts.
+
+.PARAMETER MsiUninstall
+For the MSI package's uninstall custom action only (#6480), which runs this before Windows Installer stops and removes the service.
+Stops the service (waiting up to 90 seconds for a clean stop), removes the scoped firewall rules and any account's direct grant on
+darling.json and the store, and leaves the rest to Windows Installer: the service is not deleted (the package's ServiceInstall row
+does that) and the Darling Viewer shortcuts are not touched (the package owns them). Never asks a question: without -PurgeData
+-ConfirmPurge the store is kept, as is darling.json. The package's folder and everything else this script leaves in place stay as
+they are.
+
+.PARAMETER ConfirmPurge
+With -PurgeData: delete the store without the typed DELETE confirmation. For a caller that cannot answer (the MSI's PURGEDATA=1
+passes -MsiUninstall -PurgeData -ConfirmPurge). Without it, -PurgeData asks as before, and under -MsiUninstall it keeps the store.
+Does nothing without -PurgeData.
 #>
 [CmdletBinding()]
 param(
-    [switch]$PurgeData
+    [switch]$PurgeData,
+    [switch]$MsiUninstall,
+    [switch]$ConfirmPurge
 )
 
 $ErrorActionPreference = 'Stop'
@@ -38,9 +53,15 @@ if ($existing) {
         (Get-Service -Name $serviceName).WaitForStatus('Stopped', [TimeSpan]::FromSeconds(90))
     }
 
-    & sc.exe delete $serviceName | Out-Null
-    if ($LASTEXITCODE -ne 0) { Write-Host "sc delete failed ($LASTEXITCODE)." -ForegroundColor Red; exit 1 }
-    Write-Host "Service '$serviceName' removed."
+    if ($MsiUninstall) {
+        # Windows Installer deletes the service itself (its ServiceInstall row), after this script has stopped it (#6480).
+        Write-Host "Service '$serviceName' is stopped; Windows Installer removes it."
+    }
+    else {
+        & sc.exe delete $serviceName | Out-Null
+        if ($LASTEXITCODE -ne 0) { Write-Host "sc delete failed ($LASTEXITCODE)." -ForegroundColor Red; exit 1 }
+        Write-Host "Service '$serviceName' removed."
+    }
 }
 else {
     Write-Host "Service '$serviceName' is not installed - nothing to remove."
@@ -86,7 +107,8 @@ function Get-DarlingShortcutPaths([string[]]$Folders, [scriptblock]$GetFolder = 
 
 # The all-users shortcuts the installer makes now (#6475), and the running account's own Desktop and Start Menu, where an
 # older install put them.
-foreach ($lnkPath in (Get-DarlingShortcutPaths @('CommonDesktopDirectory', 'CommonPrograms', 'Desktop', 'Programs'))) {
+# Under -MsiUninstall the package made the all-users shortcuts and removes them itself, so none is touched here (#6480).
+foreach ($lnkPath in $(if ($MsiUninstall) { @() } else { Get-DarlingShortcutPaths @('CommonDesktopDirectory', 'CommonPrograms', 'Desktop', 'Programs') })) {
     if (Test-Path $lnkPath) {
         Remove-Item $lnkPath -Force
         Write-Host "Removed shortcut $lnkPath"
@@ -155,13 +177,21 @@ if (Test-Path -LiteralPath $operatorConfigPath -PathType Leaf) {
 try { Remove-DarlingDirectOperatorGrants $operatorConfigPath $operatorStoreFolder 'PerformanceMonitor Darling Operators' }
 catch { Write-Host "Could not check for direct operator grants ($($_.Exception.Message))." -ForegroundColor Yellow }
 
+# Whether the store may be deleted. -ConfirmPurge is the answer already given; a caller that cannot be asked (-MsiUninstall) and gave
+# none keeps the store; otherwise the person types DELETE, as before. The question is a parameter so a test can answer it.
+function Test-DarlingPurgeConfirmed([bool]$ConfirmPurge, [bool]$CannotAsk, [scriptblock]$ReadAnswer = $null) {
+    if ($ConfirmPurge) { return $true }
+    if ($CannotAsk) { return $false }
+    if (-not $ReadAnswer) { $ReadAnswer = { Read-Host "Type the word DELETE to confirm" } }
+    return ((& $ReadAnswer) -ceq 'DELETE')
+}
+
 if ($PurgeData) {
     if (Test-Path $dataRoot) {
         Write-Host ''
         Write-Host "-PurgeData will DELETE $dataRoot - the ENTIRE PostgreSQL store (all collected history)," -ForegroundColor Yellow
         Write-Host 'the generated store credentials, and the service logs. This cannot be undone.' -ForegroundColor Yellow
-        $answer = Read-Host "Type the word DELETE to confirm"
-        if ($answer -ceq 'DELETE') {
+        if (Test-DarlingPurgeConfirmed ([bool]$ConfirmPurge) ([bool]$MsiUninstall)) {
             Remove-Item $dataRoot -Recurse -Force
             Write-Host 'Store, credentials, and logs deleted.'
         }
@@ -169,6 +199,12 @@ if ($PurgeData) {
             Write-Host 'Purge NOT confirmed - data left in place.'
         }
     }
+}
+elseif ($MsiUninstall) {
+    Write-Host ''
+    Write-Host "Left in place (installing the MSI again restores the install):"
+    Write-Host "  - darling.json beside the program files"
+    Write-Host "  - $dataRoot (the store with all collected history, credentials, logs)"
 }
 else {
     Write-Host ''

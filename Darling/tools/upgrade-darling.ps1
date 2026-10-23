@@ -2974,6 +2974,37 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     Fail "Run this from an ELEVATED PowerShell. Stopping the service, writing to the install directory, and starting it again all need it."
 }
 
+# The MSI package (#6480) writes HKLM\SOFTWARE\PerformanceMonitor Darling, value InstalledBy = msi, and removes it at uninstall. A
+# machine that holds it belongs to Windows Installer: a script install over it would leave two owners for one service. Returns the
+# refusal text, or $null when the marker is absent. The registry read is a parameter so a test can stand in for the machine; the
+# default reads the 64-bit view, so a 32-bit PowerShell is not sent to WOW6432Node and does not miss the marker. Kept byte-identical
+# in install-darling.ps1 and upgrade-darling.ps1.
+function Get-DarlingMsiInstallRefusal([string]$ScriptName, [scriptblock]$ReadMarker = $null) {
+    if (-not $ReadMarker) {
+        $ReadMarker = {
+            $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+            try {
+                $key = $base.OpenSubKey('SOFTWARE\PerformanceMonitor Darling')
+                if ($key) { try { $key.GetValue('InstalledBy') } finally { $key.Dispose() } }
+            }
+            finally { $base.Dispose() }
+        }
+    }
+    if ("$(& $ReadMarker)" -ne 'msi') { return $null }
+    return @"
+PerformanceMonitor Darling on this machine was installed by the MSI package, so $ScriptName will not change it: two installers
+would then own one service.
+  To update it: run the newer MSI. Windows Installer replaces the files in place and keeps darling.json and the store.
+  To remove it: Settings > Apps > Installed apps > PerformanceMonitor Darling > Uninstall. That keeps the store unless you tick
+  the box to remove it.
+  To go back to script installs: uninstall the MSI as above, extract the zip into a fresh folder, and run install-darling.ps1 there.
+Nothing was installed or changed.
+"@
+}
+
+$msiRefusal = Get-DarlingMsiInstallRefusal 'upgrade-darling.ps1'
+if ($msiRefusal) { Fail $msiRefusal }
+
 if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
     $InstallRoot = Get-DarlingInstallRootFromService $serviceName
     if ([string]::IsNullOrWhiteSpace($InstallRoot)) {

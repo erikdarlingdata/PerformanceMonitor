@@ -864,7 +864,7 @@ public class DarlingFirewallCheckTests
            sees them - otherwise a fresh networked install spends its first start reporting a missing rule. */
         var script = ReadRepoFile(Path.Combine("Darling", "tools", "install-darling.ps1"));
 
-        var call = script.IndexOf("\nInvoke-FirewallReconcile", StringComparison.Ordinal);
+        var call = script.IndexOf("\nif ($MsiPhase -ne 'PostStart') { Invoke-FirewallReconcile }", StringComparison.Ordinal);
         var start = script.IndexOf("Start-Service -Name $serviceName", StringComparison.Ordinal);
 
         Assert.True(call >= 0, "install-darling.ps1 never calls Invoke-FirewallReconcile at top level");

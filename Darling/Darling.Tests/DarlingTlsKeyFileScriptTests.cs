@@ -78,7 +78,7 @@ public sealed class DarlingTlsKeyFileScriptTests
 
         var installLock = install.LastIndexOf("\nInvoke-InstallTreeLock $serviceAccount\n", StringComparison.Ordinal);
         var installCall = install.IndexOf("\n$tlsKeyWarning = Invoke-DarlingTlsKeyFileHardening $serviceExe $configPath\n", StringComparison.Ordinal);
-        var installStart = install.IndexOf("\nStart-Service -Name $serviceName\n", StringComparison.Ordinal);
+        var installStart = install.IndexOf("\n    Start-Service -Name $serviceName\n", StringComparison.Ordinal);
         Assert.True(installLock > 0 && installCall > installLock && installCall < installStart, $"install order: lock {installLock}, call {installCall}, start {installStart}");
         Assert.Matches(@"\$tlsKeyWarning = Invoke-DarlingTlsKeyFileHardening \$serviceExe \$configPath\nif \(\$tlsKeyWarning\) \{ Write-Host ""WARNING: \$tlsKeyWarning"" -ForegroundColor Yellow \}\n", install);
 

@@ -93,16 +93,16 @@ public class DarlingInstallLocationTests
         var script = InstallScript;
         var guard = ExtractBracedBlock(script, "if ($underProfile -or $networkKind) {");
 
-        var refusal = guard.IndexOf("if (-not $existing) {", StringComparison.Ordinal);
+        var refusal = guard.IndexOf("if (-not $isUpgrade) {", StringComparison.Ordinal);
         Assert.True(refusal >= 0, "the guard no longer distinguishes a fresh install from an upgrade (#2187)");
 
-        var fresh = ExtractBracedBlock(guard, "if (-not $existing) {");
+        var fresh = ExtractBracedBlock(guard, "if (-not $isUpgrade) {");
         Assert.Contains("Fail", fresh, StringComparison.Ordinal);
-        Assert.DoesNotContain("Read-Host", fresh, StringComparison.Ordinal);
+        Assert.DoesNotContain("Read-DarlingAnswer", fresh, StringComparison.Ordinal);
 
         /* The upgrade branch asks — and defaults to NO, so an operator who hits Enter through an unattended
            run does not silently re-point a service at a folder it cannot read. */
-        Assert.Contains("Read-Host 'Point the service at this folder anyway? [y/N]'", guard, StringComparison.Ordinal);
+        Assert.Contains("Read-DarlingAnswer $MsiPhase 'Point the service at this folder anyway? [y/N]'", guard, StringComparison.Ordinal);
         Assert.Contains("if ($answer -notmatch '^[Yy]') { exit 4 }", guard, StringComparison.Ordinal);
 
         /* $existing has to be resolved before the guard consults it, or the fresh/upgrade split silently
