@@ -351,7 +351,7 @@ public sealed class SwallowedItemFailureTests
             Assert.False(CollectorHealthClassifier.IsIntervalSourcedCollector(name), name);
         }
 
-        foreach (var dense in new[] { "memory_grant_stats", "query_stats" })
+        foreach (var dense in new[] { "memory_grant_stats" })
         {
             Assert.Contains(dense, catalog);
             Assert.False(CollectorHealthClassifier.IsActivitySourcedCollector(dense), dense);

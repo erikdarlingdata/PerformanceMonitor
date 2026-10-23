@@ -104,6 +104,41 @@ public sealed class SystemHealthEventFileTests
         Assert.DoesNotContain(SystemHealthEventsCollector.BookmarkStateKey, context.PendingState.Keys);
     }
 
+    /// <summary>
+    /// #6453: the health-parser reads answer <c>empty</c> for a server with no stored events only when the newest run
+    /// read the live session through its event_file target. This holds the reader's rule to the note the collector really
+    /// renders: a file read (quiet pass included) is accepted; a ring buffer fallback, with or without an error number, a
+    /// truncated ring buffer and a pass that recorded nothing are not.
+    /// </summary>
+    [Fact]
+    public async Task TheNoteTheCollectorRenders_TellsAFileReadFromAFallback_ToTheHealthParserReads()
+    {
+        async Task<string> NoteOf(object[][] events, object[] trailer)
+        {
+            var context = MakeContext();
+            using var reader = FakeCollectorDataReader.WithResultSets(events, new[] { trailer });
+            await SystemHealthEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+            return CollectorMeasurementNote.Render(context.Measurements) ?? "";
+        }
+
+        var quietFile = await NoteOf(Array.Empty<object[]>(), Trailer(false, 0, DBNull.Value, true));
+        Assert.Contains("event_file_events=0", quietFile, StringComparison.Ordinal);
+        Assert.True(SystemHealthSourceNote.ReadThroughEventFile(quietFile), quietFile);
+
+        var fallback = await NoteOf(new[] { RingRow(s_watermark.AddMinutes(1), "error_reported") }, Trailer(false, 0, DBNull.Value, false));
+        Assert.False(SystemHealthSourceNote.ReadThroughEventFile(fallback), fallback);
+
+        var fallbackWithError = await NoteOf(Array.Empty<object[]>(), Trailer(false, 0, DBNull.Value, false, error: 297));
+        Assert.False(SystemHealthSourceNote.ReadThroughEventFile(fallbackWithError), fallbackWithError);
+
+        var truncated = await NoteOf(Array.Empty<object[]>(), Trailer(true, 773, 19380L, false));
+        Assert.False(SystemHealthSourceNote.ReadThroughEventFile(truncated), truncated);
+
+        Assert.False(SystemHealthSourceNote.ReadThroughEventFile(null));
+        Assert.False(SystemHealthSourceNote.ReadThroughEventFile(""));
+        Assert.False(SystemHealthSourceNote.ReadThroughEventFile("some host note"));
+    }
+
     [Fact]
     public async Task TheRingBufferFallback_RecordsTheFallback_KeepsTheTruncationCounts_AndLeavesNoBookmark()
     {

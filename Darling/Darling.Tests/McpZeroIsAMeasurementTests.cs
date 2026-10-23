@@ -104,9 +104,11 @@ public sealed class McpZeroIsAMeasurementTests
     }
 
     /// <summary>
-    /// The ladder itself: five rungs, three of them <c>empty</c> and two <c>unavailable</c> (#6441). One is the
+    /// The ladder itself: five rungs, four exits that say <c>empty</c> and two that say <c>unavailable</c> (#6441, #6453). One is the
     /// nothing-of-any-type-ever rung, with <c>source_observed: false</c> and the sentence the
-    /// EngineCapabilityMissTests pin (<c>system_health session is started</c>). The other is the truncated-capture
+    /// EngineCapabilityMissTests pin (<c>system_health session is started</c>); since #6453 it answers <c>empty</c>
+    /// instead when the collector's newest run was SUCCESS and read the live session through its event_file target
+    /// (behaviour: <c>NothingEverStored_IsEmptyOnlyAfterAnEventFileRead</c> in both stores). The other is the truncated-capture
     /// rung, which comes first: when the newest collection run found the ring buffer truncated, an empty window is
     /// not a true negative, so it is <c>unavailable</c>, not <c>empty</c>. It reads the collection log's note,
     /// which is why it is a probe of its own and the witness stays the events view. Rung 3 — this type never, the
@@ -123,7 +125,7 @@ public sealed class McpZeroIsAMeasurementTests
         var end = source.IndexOf("private static string WitnessStatus", start, StringComparison.Ordinal);
         var ladder = Strip(source[start..end]);
 
-        Assert.Equal(3, Regex.Matches(ladder, "WitnessStatus\\(\\s*\"empty\"").Count);
+        Assert.Equal(4, Regex.Matches(ladder, "WitnessStatus\\(\\s*\"empty\"").Count);
         Assert.Equal(2, Regex.Matches(ladder, "WitnessStatus\\(\\s*\"unavailable\"").Count);
         Assert.Contains("RingBufferTruncationNote.Describe", ladder, StringComparison.Ordinal);
         Assert.Single(Regex.Matches(ladder, "sourceObserved: false"));
