@@ -1150,7 +1150,7 @@ public sealed partial class DarlingMcpAlertTools
         "the whole mount point, any case, a trailing \\ or / on either side ignored, never a prefix match. Excluded volumes are dropped before " +
         "the breach test, so the worst volume, the severity and the card come from the volumes that remain, and a server whose only low volumes " +
         "are excluded resolves. Pass the FULL list each time; an EMPTY array clears it. " +
-        "Returns {status:\"updated\", updated_fields:[...], warnings:[...], settings:{...}} with the full new settings (warnings is " +
+        "Returns {status:\"updated\", updated_fields:[...] (the delivery cooldown is named delivery.cooldown_minutes, as in the call and get_alert_settings), warnings:[...], settings:{...}} with the full new settings (warnings is " +
         "empty unless a stored-but-unconsulted field was sent, or a round-trip moved the route knob's source from the file to the store), or " +
         "{status:\"unavailable\"} when the settings row has not been seeded yet.")]
     public static async Task<string> UpdateAlertSettings(
@@ -1297,8 +1297,11 @@ public sealed partial class DarlingMcpAlertTools
                 /* Bare column names, unqualified, even though two tables are now in play: this array is a
                    consumer API and qualifying the existing entries would redefine every one of them. No
                    writable column name appears on both tables, so a bare name is still unambiguous --
-                   asserted, not assumed, by WritableColumnNames_DoNotCollideAcrossTheTwoTables. */
-                updated_fields = updates.Select(u => u.Column).ToArray(),
+                   asserted, not assumed, by WritableColumnNames_DoNotCollideAcrossTheTwoTables. The one
+                   exception is the cooldown, reported as delivery.cooldown_minutes (#6455): that is the name
+                   DeliveryCooldownColumn's doc and Darling/README.md already gave it, so the code was the part
+                   that was wrong. */
+                updated_fields = updates.Select(u => UpdatedFieldName(u.Column)).ToArray(),
                 /* #3653: always present, usually empty — a caller branching on it should not have to probe
                    for the key. Non-empty only when a field was written that nothing consults (today:
                    poison_wait.threshold_ms); the field IS in updated_fields, because it was updated. */
@@ -2330,6 +2333,14 @@ public sealed partial class DarlingMcpAlertTools
     /// the whole point of keeping it: <c>delivery.cooldown_minutes</c> is what the tool reports, and this is
     /// what every existing config file, Settings window and hand-written UPDATE already calls it.</summary>
     internal const string DeliveryCooldownColumn = "email_cooldown_minutes";
+
+    /// <summary>
+    /// The name update_alert_settings reports a written column under (#6455). The delivery cooldown is stored as
+    /// <c>email_cooldown_minutes</c> but called and read as <c>delivery.cooldown_minutes</c>, so the answer uses that name, whichever
+    /// of the two the caller sent. Every other column keeps its bare name.
+    /// </summary>
+    internal static string UpdatedFieldName(string column) =>
+        column == DeliveryCooldownColumn ? "delivery.cooldown_minutes" : column;
 
     private static string? Trimmed(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 

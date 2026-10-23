@@ -300,7 +300,7 @@ public sealed class McpQueryTagTools
         string? databaseName, string? schemaName, string? objectName, int? serverId, long? queryId) =>
         GuardAsync("assign_query_tag", async () =>
         {
-            var key = BuildKey(kind, queryHash, databaseName, schemaName, objectName, serverId, out var keyRefusal);
+            var key = BuildKey(kind, queryHash, databaseName, schemaName, objectName, serverId, out var keyRefusal, requireHashShape: true);
             if (keyRefusal is not null)
             {
                 return keyRefusal;
@@ -747,7 +747,8 @@ public sealed class McpQueryTagTools
             key.Hash, new PerformanceMonitor.Common.QueryTags.QueryTagObject(key.Database, key.Schema, key.Name));
 
     private static QueryTagKey? BuildKey(
-        string? kind, string? queryHash, string? databaseName, string? schemaName, string? objectName, int? serverId, out string? refusal)
+        string? kind, string? queryHash, string? databaseName, string? schemaName, string? objectName, int? serverId, out string? refusal,
+        bool requireHashShape = false)
     {
         refusal = null;
         var cleanKind = kind?.Trim().ToLowerInvariant();
@@ -785,8 +786,16 @@ public sealed class McpQueryTagTools
                 return null;
             }
 
-            /* The resolver matches a hash ignoring case, so the key stores one spelling of it. A value that is not a hash
-               at all is kept as typed. */
+            /* #6455: a NEW assignment must name something a query hash can be, the same refusal the Darling twin gives; unassign
+               skips this so a key stored before the check can still be removed. */
+            if (requireHashShape && !QueryHashIdentity.IsAssignableHash(hash))
+            {
+                refusal = Refusal("invalid", "bad_key", "query_hash must be hexadecimal: 0x followed by 1 to 16 hex digits (for example 0x1A2B3C4D5E6F7081), or the decimal number the long-query trace stores.");
+                return null;
+            }
+
+            /* The resolver matches a hash ignoring case, so the key stores one spelling of it. Unassign skips the shape check
+               above, so a key stored before it is kept as typed and can be removed. */
             return new QueryTagKey(KindHash, serverId, QueryHashIdentity.CanonicalKey(hash) ?? hash, null, null, null);
         }
 
