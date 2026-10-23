@@ -22,8 +22,9 @@ namespace PerformanceMonitorLite.Mcp;
 /// by themselves, which is why they come with the setting and not instead of it.</para>
 ///
 /// <para>Lite's endpoint is loopback-only behind the shared Host-header guard and, like Darling's, needs the MCP token
-/// unless mcp_allow_tokenless_loopback is on. The write tools need <see cref="WritesSetting"/> AND a token of at least
-/// <see cref="McpTokenStore.MinimumTokenLength"/> characters: with mcp_allow_tokenless_loopback on, only the read tools are served
+/// unless mcp_allow_tokenless_loopback is on. The write tools need <see cref="WritesSetting"/> AND a usable token
+/// (<see cref="McpTokenStore.IsUsableToken"/>: <see cref="McpTokenStore.MinimumTokenLength"/> characters or more, with
+/// <see cref="McpTokenStore.MinimumDistinctTokenCharacters"/> or more different ones): with mcp_allow_tokenless_loopback on, only the read tools are served
 /// and the writes stay off (<see cref="McpHostService.DecideServing"/>, which Darling's <c>DarlingMcpWritePolicy.ResolveForStart</c>
 /// mirrors). The sample settings (<c>settings.sample.json</c>) and the README's MCP section say so. The setting has no UI
 /// control, so it has no tooltip.</para>

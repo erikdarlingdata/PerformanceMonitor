@@ -24,7 +24,7 @@ claude mcp add --transport http --scope user sql-monitor http://localhost:5151/ 
 
    If MCP was already on when you updated, Lite makes the token at its first start and logs a line saying so. Copy the new config then, because the old registration has no token.
 
-   To serve local clients with no token, as earlier builds did, set `mcp_allow_tokenless_loopback` to `true` in `settings.json` and restart Lite. Lite then serves the read tools only: the write tools and the investigation tools need a token (at least 16 characters), so they stay off, and Lite logs one Critical line for each one you asked for. Import Settings never brings `mcp_allow_tokenless_loopback`, `mcp_allow_writes` or `mcp_allow_investigations` in from another folder.
+   To serve local clients with no token, as earlier builds did, set `mcp_allow_tokenless_loopback` to `true` in `settings.json` and restart Lite. Lite then serves the read tools only: the write tools and the investigation tools need a token (at least 16 characters, with at least 6 different ones), so they stay off, and Lite logs one Critical line for each one you asked for. Import Settings never brings `mcp_allow_tokenless_loopback`, `mcp_allow_writes` or `mcp_allow_investigations` in from another folder.
 
 3. Open a new Claude Code session and ask questions like:
    - "What servers are being monitored?"

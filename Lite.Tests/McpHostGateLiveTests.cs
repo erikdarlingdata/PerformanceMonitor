@@ -40,9 +40,13 @@ public sealed class McpHostGateLiveTests : IDisposable
     private const string Token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     private const string FifteenCharToken = "abcdefghijklmno";
     private const string SixteenCharToken = "abcdefghijklmnop";
+    private const string SixteenCopiesOfOneCharacter = "aaaaaaaaaaaaaaaa";
+    private const string FiveDistinctCharacters = "abcdeabcdeabcdea";
+    private const string SixDistinctCharacters = "abcdefabcdefabcd";
 
     private readonly string _folder = Path.Combine(Path.GetTempPath(), "lite-mcp-host-" + Guid.NewGuid().ToString("N"));
     private readonly List<RunningHost> _hosts = [];
+    private readonly List<DuckDbInitializer> _ducks = [];
 
     public McpHostGateLiveTests() => Directory.CreateDirectory(_folder);
 
@@ -52,6 +56,11 @@ public sealed class McpHostGateLiveTests : IDisposable
         {
             try { host.Service.StopAsync(CancellationToken.None).GetAwaiter().GetResult(); } catch { /* best effort */ }
             host.Client.Dispose();
+        }
+
+        foreach (var duck in _ducks)
+        {
+            duck.Dispose();
         }
 
         try { Directory.Delete(_folder, recursive: true); } catch { /* best effort */ }
@@ -77,6 +86,7 @@ public sealed class McpHostGateLiveTests : IDisposable
     {
         var port = FreePort();
         var duck = new DuckDbInitializer(Path.Combine(_folder, $"m{port}.duckdb"));
+        _ducks.Add(duck);
         var service = new McpHostService(
             new LocalDataService(duck),
             new ServerManager(_folder),
@@ -204,6 +214,98 @@ public sealed class McpHostGateLiveTests : IDisposable
         Assert.Contains("mute_analysis_finding", tools);
         Assert.Equal(McpWritePolicy.WriteTools.Order(), tools.Where(McpWritePolicy.IsWrite).Order());
         Assert.DoesNotContain(tools, McpInvestigationPolicy.IsInvestigationTool);
+    }
+
+    [Theory]
+    [InlineData(SixteenCopiesOfOneCharacter)]
+    [InlineData(FiveDistinctCharacters)]
+    public async Task ASixteenCharacterTokenWithFewerThanSixDistinctCharacters_StillGatesRequests_ButServesNoWriteOrInvestigationTool(string token)
+    {
+        var host = await StartAsync(token, allowTokenless: false, allowWrites: true);
+        var hostInvestigations = await StartAsync(token, allowTokenless: false, allowInvestigations: true);
+
+        var (noToken, _) = await ToolsListAsync(host, authorization: null);
+        var writes = await ListedAsync(host, token);
+        var investigations = await ListedAsync(hostInvestigations, token);
+
+        Assert.Equal(401, noToken);
+        Assert.DoesNotContain(writes, McpWritePolicy.IsWrite);
+        Assert.DoesNotContain(investigations, McpInvestigationPolicy.IsInvestigationTool);
+    }
+
+    [Fact]
+    public async Task ASixteenCharacterTokenWithSixDistinctCharacters_ServesTheWriteAndInvestigationTools_WhenAsked()
+    {
+        var host = await StartAsync(SixDistinctCharacters, allowTokenless: false, allowWrites: true);
+        var hostInvestigations = await StartAsync(SixDistinctCharacters, allowTokenless: false, allowInvestigations: true);
+
+        var writes = await ListedAsync(host, SixDistinctCharacters);
+        var investigations = await ListedAsync(hostInvestigations, SixDistinctCharacters);
+
+        Assert.Equal(McpWritePolicy.WriteTools.Order(), writes.Where(McpWritePolicy.IsWrite).Order());
+        Assert.Equal(McpInvestigationPolicy.InvestigationTools.Order(), investigations.Where(McpInvestigationPolicy.IsInvestigationTool).Order());
+    }
+
+    [Fact]
+    public void ARepetitiveToken_GetsTheCriticalLine_ThatNamesTheDistinctCharacterRequirement()
+    {
+        var lines = McpHostService.StartupLines(McpHostService.DecideServing(SixteenCopiesOfOneCharacter, false, allowWrites: true, allowInvestigations: false));
+
+        Assert.Single(lines, l => l.Level == LogLevel.Critical && l.Message.Contains("6 different characters", StringComparison.Ordinal));
+    }
+
+    /// <summary>The pipeline's order, by outcome: a request whose Host is not loopback is refused 400 even with no token and even
+    /// with the right one, so the Host check runs before the token gate and before MapMcp.</summary>
+    [Fact]
+    public async Task ARequestWithAForeignHost_IsRefused400_BeforeTheTokenGateLooksAtIt()
+    {
+        var host = await StartAsync(Token, allowTokenless: false);
+
+        var (noToken, _) = await PostAsync(host, authorization: null, hostHeader: "evil.example", contentType: "application/json");
+        var (rightToken, _) = await PostAsync(host, "Bearer " + Token, hostHeader: "evil.example", contentType: "application/json");
+        var (loopbackNoToken, _) = await PostAsync(host, authorization: null, hostHeader: null, contentType: "application/json");
+
+        Assert.Equal(400, noToken);
+        Assert.Equal(400, rightToken);
+        Assert.Equal(401, loopbackNoToken);
+    }
+
+    /// <summary>A POST that is not JSON is refused 415 by the JSON guard when the token is right, and 401 by the token gate when it
+    /// is not, so the token gate runs first and the JSON guard runs before MapMcp.</summary>
+    [Fact]
+    public async Task ANonJsonPost_WithTheRightToken_IsRefused415_AndWithoutOneIsRefused401()
+    {
+        var host = await StartAsync(Token, allowTokenless: false);
+
+        var (withToken, _) = await PostAsync(host, "Bearer " + Token, hostHeader: null, contentType: "text/plain");
+        var (withoutToken, _) = await PostAsync(host, authorization: null, hostHeader: null, contentType: "text/plain");
+        var (json, _) = await PostAsync(host, "Bearer " + Token, hostHeader: null, contentType: "application/json");
+
+        Assert.Equal(415, withToken);
+        Assert.Equal(401, withoutToken);
+        Assert.Equal(200, json);
+    }
+
+    private static async Task<(int Status, string Body)> PostAsync(RunningHost host, string? authorization, string? hostHeader, string contentType)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/")
+        {
+            Content = new StringContent("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}", Encoding.UTF8),
+        };
+        request.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(contentType);
+        request.Headers.TryAddWithoutValidation("Accept", "application/json, text/event-stream");
+        if (hostHeader is not null)
+        {
+            request.Headers.Host = hostHeader;
+        }
+
+        if (authorization is not null)
+        {
+            request.Headers.TryAddWithoutValidation("Authorization", authorization);
+        }
+
+        using var response = await host.Client.SendAsync(request);
+        return ((int)response.StatusCode, await response.Content.ReadAsStringAsync());
     }
 
     [Fact]

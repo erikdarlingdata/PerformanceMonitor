@@ -63,6 +63,26 @@ internal sealed class McpTokenStore
     /// the write and investigation tools stay off (<see cref="McpHostService.DecideServing"/>).</summary>
     internal const int MinimumTokenLength = 16;
 
+    /// <summary>The fewest different characters a usable token has (Darling's <c>DarlingHostBinding.MinimumDistinctTokenCharacters</c>).
+    /// Sixteen copies of one letter meet the length alone, so a token with fewer than this many different characters is not used
+    /// for the write or investigation tools.</summary>
+    internal const int MinimumDistinctTokenCharacters = 6;
+
+    /// <summary>
+    /// True when <paramref name="token"/> is usable for the write and investigation tools: at least <see cref="MinimumTokenLength"/>
+    /// characters and at least <see cref="MinimumDistinctTokenCharacters"/> different characters. The same two conditions as Darling's
+    /// <c>DarlingHostBinding.DescribeTokenProblem(token) is null</c>, which <c>DarlingMcpWritePolicy.ResolveForStart</c> applies
+    /// (Lite does not reference the Darling service project, so the rule is mirrored here).
+    /// </summary>
+    internal static bool IsUsableToken(string? token) =>
+        !string.IsNullOrWhiteSpace(token)
+        && token.Length >= MinimumTokenLength
+        && token.Distinct().Count() >= MinimumDistinctTokenCharacters;
+
+    /// <summary>The requirement in words, for the startup lines.</summary>
+    internal static readonly string TokenRequirement =
+        $"a token of at least {MinimumTokenLength} characters with at least {MinimumDistinctTokenCharacters} different characters";
+
     private readonly IMcpTokenVault _vault;
 
     internal McpTokenStore(IMcpTokenVault vault) => _vault = vault ?? throw new ArgumentNullException(nameof(vault));
@@ -115,7 +135,7 @@ internal sealed class McpTokenStore
             case CredentialReadOutcome.NotFound:
                 return null;
             default:
-                failure = "the entry could not be read: " + (readFailure ?? "unknown");
+                failure = "the entry could not be read: " + (readFailure ?? "no reason was given");
                 return null;
         }
     }

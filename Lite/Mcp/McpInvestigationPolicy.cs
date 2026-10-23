@@ -68,7 +68,7 @@ internal static class McpInvestigationPolicy
         if (!tokenUsable)
         {
             return (Microsoft.Extensions.Logging.LogLevel.Critical,
-                $"The MCP investigation tools are OFF: {InvestigationsSetting} needs a token of at least {McpTokenStore.MinimumTokenLength} characters, "
+                $"The MCP investigation tools are OFF: {InvestigationsSetting} needs {McpTokenStore.TokenRequirement}, "
                 + $"and {McpSettings.AllowTokenlessLoopbackSetting} must be off. Not served: {string.Join(", ", InvestigationTools)}.");
         }
 

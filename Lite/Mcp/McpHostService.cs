@@ -139,8 +139,9 @@ public sealed class McpHostService : BackgroundService
     /// <summary>
     /// The one decision of what a start serves, the same rule as Darling's (<c>DarlingMcpWritePolicy.ResolveForStart</c>). With
     /// <paramref name="allowTokenlessLoopback"/> on there is no token and only the read tools are served. Otherwise the token is
-    /// required (empty throws). The write tools need <paramref name="allowWrites"/> and a usable token, one of at least
-    /// <see cref="McpTokenStore.MinimumTokenLength"/> characters. The investigation tools need their setting, a usable token and
+    /// required (empty throws). The write tools need <paramref name="allowWrites"/> and a usable token (<see cref="McpTokenStore.IsUsableToken"/>:
+    /// at least <see cref="McpTokenStore.MinimumTokenLength"/> characters and at least <see cref="McpTokenStore.MinimumDistinctTokenCharacters"/>
+    /// different ones). The investigation tools need their setting, a usable token and
     /// <paramref name="allowWrites"/> off (the writes SETTING, not whether they are served). It lives here, in the host's own
     /// constructor path, so no caller can skip it.
     /// </summary>
@@ -154,7 +155,7 @@ public sealed class McpHostService : BackgroundService
         }
 
         var token = allowTokenlessLoopback ? null : bearerToken;
-        var usable = token is { Length: >= McpTokenStore.MinimumTokenLength };
+        var usable = McpTokenStore.IsUsableToken(token);
         return new McpServing(
             token,
             Writes: allowWrites && usable,
@@ -382,7 +383,7 @@ public sealed class McpHostService : BackgroundService
                 $"{McpSettings.AllowTokenlessLoopbackSetting} is on: the MCP server serves http://localhost with no token, and only the read tools. Turn it off to require a token."));
         }
 
-        var usable = serving.Token is { Length: >= McpTokenStore.MinimumTokenLength };
+        var usable = McpTokenStore.IsUsableToken(serving.Token);
         if (serving.Writes)
         {
             lines.Add((LogLevel.Warning,
@@ -391,7 +392,7 @@ public sealed class McpHostService : BackgroundService
         else if (serving.AskedWrites)
         {
             lines.Add((LogLevel.Critical,
-                $"{McpWritePolicy.WritesSetting} is on but the MCP write tools stay OFF: they need a token of at least {McpTokenStore.MinimumTokenLength} characters, "
+                $"{McpWritePolicy.WritesSetting} is on but the MCP write tools stay OFF: they need {McpTokenStore.TokenRequirement}, "
                 + $"and {McpSettings.AllowTokenlessLoopbackSetting} must be off. The {writeTools} are not served."));
         }
         else
