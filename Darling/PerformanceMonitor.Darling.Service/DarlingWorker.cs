@@ -2083,6 +2083,7 @@ LIMIT 1";
                 var next = StartupFailureTriage.NextAction(attempt, configRetryBudget.Elapsed, ex);
                 if (!configSustainedRetryCriticalLogged)
                 {
+                    // install-darling.ps1 waits for this text (#6470): reword both together.
                     _logger.LogCritical(
                         ex,
                         "Cannot load configuration within the {Budget}s retry budget ({Message}); this is " +
@@ -2108,6 +2109,7 @@ LIMIT 1";
             }
             catch (Exception ex)
             {
+                // install-darling.ps1 waits for this text (#6470): reword both together.
                 _logger.LogCritical(ex, "Cannot load configuration: {Message}", ex.Message);
                 _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.Configuration);
                 return;
@@ -2125,6 +2127,7 @@ LIMIT 1";
         {
             foreach (var problem in problems)
             {
+                // install-darling.ps1 waits for this text (#6470): reword both together.
                 _logger.LogCritical("Configuration problem: {Problem}", problem);
             }
 
@@ -2207,6 +2210,7 @@ LIMIT 1";
         {
             if (!OperatingSystem.IsWindows())
             {
+                // install-darling.ps1 waits for this text (#6470): reword both together.
                 _logger.LogCritical(
                     "postgres.managed = true requires Windows (the bundled runtime and the DPAPI-protected credential); " +
                     "set postgres.managed = false and point postgres.connectionString at your own PostgreSQL instead.");
@@ -2280,6 +2284,7 @@ LIMIT 1";
                     var next = StartupFailureTriage.NextAction(attempt, bootstrapRetryBudget.Elapsed, ex);
                     if (!bootstrapSustainedRetryCriticalLogged)
                     {
+                        // install-darling.ps1 waits for this text (#6470): reword both together.
                         _logger.LogCritical(
                             ex,
                             "Managed Postgres bootstrap has not succeeded within the {Budget}s retry budget " +
@@ -2305,6 +2310,7 @@ LIMIT 1";
                 }
                 catch (Exception ex)
                 {
+                    // install-darling.ps1 waits for this text (#6470): reword both together.
                     _logger.LogCritical(ex, "Managed Postgres bootstrap failed: {Message}", ex.Message);
                     _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.ManagedStore);
                     return;
@@ -2897,6 +2903,7 @@ LIMIT 1";
                 var next = StartupFailureTriage.NextAction(attempt, storeRetryBudget.Elapsed, ex);
                 if (!storeSustainedRetryCriticalLogged)
                 {
+                    // install-darling.ps1 waits for this text (#6470): reword both together.
                     _logger.LogCritical(
                         ex,
                         "Cannot reach or migrate the Postgres store within the {Budget}s retry budget " +
@@ -2921,6 +2928,7 @@ LIMIT 1";
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
+                // install-darling.ps1 waits for this text (#6470): reword both together.
                 _logger.LogCritical(ex, "Cannot reach or migrate the Postgres store: {Message}", ex.Message);
                 /* #2953: AFTER the critical line, deliberately. The log line is the diagnosis of record and
                    predates this seam; publishing first would put a new call between the failure and the one
@@ -3797,6 +3805,7 @@ LIMIT 1";
            once, here. No daily run can be going yet, so nothing has to give a permit back. */
         ApplyDailyRunCap(StorePoolMaxSize(postgres), initialSweepWidth);
 
+        // install-darling.ps1 waits for this text (#6470): reword both together.
         _logger.LogInformation("PerformanceMonitor Darling collection loop started");
         /* #2953: the one publish that clears the failure phases. Set HERE — the last statement before the
            sweep loop's first iteration — and not re-published per cycle: this seam answers "did collection

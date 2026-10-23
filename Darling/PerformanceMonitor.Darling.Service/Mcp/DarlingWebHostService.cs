@@ -919,6 +919,7 @@ public sealed class DarlingWebHostService : BackgroundService
                    listen there is ONE listener, HTTPS for loopback too, and saying otherwise sends a local
                    client to the wrong scheme. With no TLS the text is unchanged. Text only: no listener
                    decision moves. */
+                // install-darling.ps1 waits for this text (#6470): reword both together.
                 _logger.LogInformation(
                     "Starting web dashboard on {Scheme}://{Listen}:{Port} (LAN-exposed to {Cidr} behind a token->cookie gate + in-app CIDR; "
                     + "{Loopback}, and since #1649 it authenticates too) — "
@@ -930,6 +931,7 @@ public sealed class DarlingWebHostService : BackgroundService
             }
             else
             {
+                // install-darling.ps1 waits for this text (#6470): reword both together.
                 _logger.LogInformation(
                     "Starting web dashboard on http://localhost:{Port} (loopback only){TokenNote} — enabled/port from {Origin}",
                     effectivePort, requireTokenWhenLoopbackOnly ? ", token required" : "", origin);
