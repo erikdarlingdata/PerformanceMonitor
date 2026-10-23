@@ -68,7 +68,7 @@ namespace PerformanceMonitor.Collectors;
 /// that stops the file read (no event_file target, a permission refusal, Managed Instance or RDS, an error) drops back to
 /// the ring buffer exactly as before, truncation measurement included. The run records <c>event_file_events</c> for a
 /// file read, <c>event_file_fallback</c> for the fallback, <c>event_file_error</c> (the SQL Server error number) next to
-/// it when an error caused it, and <c>event_file_buffer_cut</c> when one buffer held more than ten times the cap.</para>
+/// it when an error caused it, and <c>event_file_buffer_cut</c> when one buffer held more than <see cref="BufferReReadFactor"/> times the cap, and <c>event_file_wildcard</c> when the bookmark's file had rolled over and the read opened every rollover file (#6544).</para>
 /// </summary>
 public sealed class SystemHealthEventsCollector : CollectorDefinitionBase<SystemHealthEventsCollector.Row>
 {
@@ -106,8 +106,20 @@ public sealed class SystemHealthEventsCollector : CollectorDefinitionBase<System
     /// <summary>The error number (<c>ERROR_NUMBER()</c>) that stopped the file read, recorded next to <see cref="EventFileFallbackMeasurement"/>. Written only when an error caused the fallback.</summary>
     internal const string EventFileErrorMeasurement = "event_file_error";
 
-    /// <summary>1 on a pass where one buffer held more events than ten times the cap: the pass kept the events it read and the bookmark skips the rest of that buffer. Written only then.</summary>
+    /// <summary>1 on a pass where one buffer held more events than <see cref="BufferReReadFactor"/> times the cap: the pass kept the events it read and the bookmark skips the rest of that buffer. Written only then.</summary>
     internal const string EventFileBufferCutMeasurement = "event_file_buffer_cut";
+
+    /// <summary>1 on a pass that read every <c>&lt;stem&gt;_0_*.xel</c> file because the bookmark's file is no longer the one the target is writing (#6544). A pass whose bookmark is in the current file, or that has no bookmark, reads that one file and writes nothing. Written only then.</summary>
+    internal const string EventFileWildcardMeasurement = "event_file_wildcard";
+
+    /// <summary>
+    /// The multiple of the cap the single-buffer re-read reads (#6564): <c>TOP (cap x this)</c> raw events, then the cast of
+    /// the kept buffer's events. Sized so the worst pass stays under half of Lite's 30 second command timeout (see
+    /// <see cref="MaxEventsPerPass"/>): measured on the sql2019 test server, a first read at the cap costs about 3.3 s
+    /// when it has to open every file and the re-read adds about 2.4 s to open them again, 0.055 ms a raw row and
+    /// 0.3 ms an event cast, so 3.3 + 2.4 + (0.165 + 0.9) x factor seconds: 12.1 s at 6, 16.4 s at the old 10.
+    /// </summary>
+    internal const int BufferReReadFactor = 6;
 
     public override IReadOnlyList<string> StateKeys { get; } = new[] { BookmarkStateKey };
 
@@ -238,8 +250,10 @@ public sealed class SystemHealthEventsCollector : CollectorDefinitionBase<System
        server-scoped reaches here.
 
        The file path: the target's current file name gives the directory and the session's file-name stem
-       (<stem>_0_<FILETIME>.xel). Attempt 1 reads from the bookmark (@bookmark_file, @bookmark_offset) across every
-       <stem>_0_*.xel file after it, which skips every buffer up to and including the one the last pass ended in. SQL
+       (<stem>_0_<FILETIME>.xel). Attempt 1 reads from the bookmark (@bookmark_file, @bookmark_offset), which skips every
+       buffer up to and including the one the last pass ended in. When the bookmark is in the file the target is writing
+       it reads that file by its exact path; otherwise (the file rolled over) it reads every <stem>_0_*.xel file after
+       the bookmark (#6544, measured: the wildcard costs about 2 s a pass, the exact path about 0.1 s). SQL
        Server refuses a bookmark whose file is gone (error 25717, the operating system's file-not-found) or whose offset is
        not a buffer start (error 25722); SystemHealthEventFileLiveSqlTests proves both live. A refusal moves to
        attempt 2: the current file alone (never every file: a read of every file is what outran the command timeout). A
@@ -250,7 +264,7 @@ public sealed class SystemHealthEventsCollector : CollectorDefinitionBase<System
        seconds whatever the TOP). That holds on every version and both attempts. When the cap is hit the last buffer read
        is dropped (the bookmark skips a whole buffer, so a buffer cut in the middle would lose its remaining events), the
        pass keeps what it has, and the next pass continues from the new bookmark. When every capped event is in one
-       buffer there is no earlier buffer to keep, so that buffer is read again with ten times the cap and only its own
+       buffer there is no earlier buffer to keep, so that buffer is read again with BufferReReadFactor (6) times the cap and only its own
        events kept (the stream is in file order, so they come first); a buffer that fills even that is kept as far as it
        was read and recorded as event_file_buffer_cut. A capped read also returns its scan position, the last buffer it
        kept: when every event there is older than the cutoff no row carries it, and the host still moves the bookmark to
@@ -309,6 +323,7 @@ DECLARE
     @scan_file nvarchar(260),
     @scan_offset bigint,
     @buffer_cut bit = 0,
+    @read_wildcard bit = 0,
     @attempt integer;
 
 {RingBufferXml.DeclareSql}
@@ -365,8 +380,19 @@ WHILE  @event_file_path IS NOT NULL
 AND    @event_file_ok = 0
 AND    @attempt <= 2
 BEGIN
+    /* #6544: the wildcard makes the function open every rollover file (about 2 s for 8 files, 330 MB, on sql2019, whatever
+       the number of events returned), and it is only needed when the bookmark's file is not the one being written, so the
+       read has to cross into a later file. A bookmark in the current file reads that file by its exact path (about 0.1 s). */
+    SET @read_wildcard =
+        CASE
+            WHEN @attempt = 1
+            AND  @bookmark_file COLLATE Latin1_General_100_CI_AS <> @event_file_name COLLATE Latin1_General_100_CI_AS
+            THEN 1
+            ELSE 0
+        END;
+
     SELECT
-        @read_path = CASE WHEN @attempt = 1 THEN @event_file_path ELSE @event_file_name END,
+        @read_path = CASE WHEN @read_wildcard = 1 THEN @event_file_path ELSE @event_file_name END,
         @read_file = CASE WHEN @attempt = 1 THEN @bookmark_file END,
         @read_offset = CASE WHEN @attempt = 1 THEN @bookmark_offset END,
         @read_cutoff =
@@ -419,12 +445,12 @@ BEGIN
             ELSE
             BEGIN
                 /* Every capped event is in one buffer, and the bookmark would skip the rest of it. Read it again with
-                   ten times the cap, keeping only its events; a buffer that fills even that is kept as far as it was
+                   {BufferReReadFactor} times the cap, keeping only its events; a buffer that fills even that is kept as far as it was
                    read and recorded. */
                 SELECT
                     @keep_file = @last_file,
                     @keep_offset = @last_offset,
-                    @read_top = @read_cap * 10;
+                    @read_top = @read_cap * {BufferReReadFactor};
 
                 DELETE @raw_events;
 
@@ -583,7 +609,8 @@ SELECT
     bookmark_refused = @bookmark_refused,
     scan_file = CASE WHEN @event_file_ok = 1 THEN @scan_file END,
     scan_offset = CASE WHEN @event_file_ok = 1 THEN @scan_offset END,
-    event_file_buffer_cut = CASE WHEN @event_file_ok = 1 THEN @buffer_cut END;";
+    event_file_buffer_cut = CASE WHEN @event_file_ok = 1 THEN @buffer_cut END,
+    event_file_wildcard = CASE WHEN @event_file_ok = 1 THEN @read_wildcard END;";
 
     private static readonly string s_queryTextXmlTime = BuildQueryText(hasTimestampUtc: false);
 
@@ -745,6 +772,11 @@ SELECT
             if (reader.FieldCount > 8 && !reader.IsDBNull(8) && reader.GetBoolean(8))
             {
                 context.Measure(EventFileBufferCutMeasurement, 1);
+            }
+
+            if (reader.FieldCount > 9 && !reader.IsDBNull(9) && reader.GetBoolean(9))
+            {
+                context.Measure(EventFileWildcardMeasurement, 1);
             }
         }
 
