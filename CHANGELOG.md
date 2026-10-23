@@ -21,6 +21,10 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A SQL Server entry with a `port` is no longer ignored without a word** ([#6584]) - the port was stored and never used, so a failed connect named a port that was never tried. `add_servers` now refuses a non-zero port on a SQL Server target and says to put it in `host` as `host,port`, `--validate-config` and the service log warn about entries that already hold one, and a failed connect names the host that was actually tried.
+
 ## [3.11.0] - 2026-10-22
 
 Full entries: [docs/changelog/3.11.md](docs/changelog/3.11.md)
@@ -5847,3 +5851,4 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#6452]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6452
 [#6391]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6391
 [#6449]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/6449
+[#6584]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/6584
