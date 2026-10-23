@@ -90,4 +90,21 @@ public sealed class McpWriteToolWordingTests
         Assert.Equal("agent_action is required.", write.GetProperty("message").GetString());
         Assert.Equal("off.", other.GetProperty("message").GetString());
     }
+
+    [Fact]
+    public void ADryRunRefusedForWantOfTheClaim_AddsTheSwitchState_AndAWriteOrAnotherReasonDoesNot()
+    {
+        var refusal = new AgentActionRefusal(AgentActionCodes.Required, "agent_action is required.");
+        const string note = "For reference, Force plan on srv is currently off, so the real call would be refused as actions_off until it is turned on.";
+
+        var dry = JsonDocument.Parse(DarlingMcpPlanForceTools.GateRefusalAnswer(refusal, dryRun: true, note)).RootElement;
+        var write = JsonDocument.Parse(DarlingMcpPlanForceTools.GateRefusalAnswer(refusal, dryRun: false, note)).RootElement;
+        var other = JsonDocument.Parse(DarlingMcpPlanForceTools.GateRefusalAnswer(
+            new AgentActionRefusal(AgentActionCodes.ActionsOff, "off."), dryRun: true, note)).RootElement;
+
+        Assert.Equal("agent_action_required", dry.GetProperty("reason").GetString());
+        Assert.EndsWith(note, dry.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.Equal("agent_action is required.", write.GetProperty("message").GetString());
+        Assert.Equal("off.", other.GetProperty("message").GetString());
+    }
 }

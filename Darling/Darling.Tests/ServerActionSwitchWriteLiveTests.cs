@@ -84,6 +84,25 @@ public sealed class ServerActionSwitchWriteLiveTests
     }
 
     [Fact]
+    public async Task ADryRunRefusedForWantOfTheClaim_ReadsTheSwitchWithoutOne_AndSaysOnOrOff()
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            /* #6455: no claim, no agent_action. The plan tools read the switch for a refused dry run through ServerActionSwitches.ListAsync. */
+            var off = await DarlingMcpPlanForceTools.ReadSwitchStateAsync(owner, null, SqlServerId, "srv-1", "force_plan", ct);
+            Assert.Contains("is currently off", off, StringComparison.Ordinal);
+            Assert.Contains("actions_off", off, StringComparison.Ordinal);
+
+            await ServerActionSwitches.SetAsync(owner, SqlServerId, "force_plan", true, "person:alice", ServerActionSurfaces.Viewer, ct);
+            var on = await DarlingMcpPlanForceTools.ReadSwitchStateAsync(owner, null, SqlServerId, "srv-1", "force_plan", ct);
+            Assert.Contains("is currently on.", on, StringComparison.Ordinal);
+
+            /* An unknown server has no switch to describe, so the refusal goes out without the note. */
+            Assert.Null(await DarlingMcpPlanForceTools.ReadSwitchStateAsync(owner, null, 9999, "nowhere", "force_plan", ct));
+        });
+    }
+
+    [Fact]
     public async Task TheService_RefusesAnUnknownAction_AnActionTheEngineCannotRun_AndAnUnknownServer_WritingAndJournalingNothing()
     {
         await WithStoreAsync(async (owner, ct) =>

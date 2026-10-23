@@ -230,7 +230,10 @@ public sealed class DarlingMcpCustomAlertTools
         "change it), an empty string \"\" clears it so the rule never expires, and omitting it keeps the current one. A rule past " +
         "its expiry is EXPIRED: it is not evaluated and does not fire, and enabled:true on its own does not revive it. Turn it " +
         "back on by sending a later expires_at_utc, or \"\", with the rule's current version; the answer to any update of an " +
-        "expired rule says this and repeats the call.")]
+        "expired rule says this and repeats the call. " +
+        "Server scope is part of the definition, not a separate argument (#6455): a rule with no 'scope' applies to EVERY monitored server, " +
+        "and a new definition replaces the old one whole, so to keep or set a limit include {\"scope\":{\"mode\":\"servers\",\"servers\":[\"<server name>\"]}} " +
+        "(or mode 'tag' with a fleet-tag 'tagId') in it.")]
     public static async Task<string> UpdateCustomAlertRule(
         NpgsqlDataSource postgres,
         [Description("The id of the rule to update (from list_custom_alert_rules).")] long rule_id,
