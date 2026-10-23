@@ -231,6 +231,9 @@ public static class DarlingWebEndpoints
         "set_collector_frequency",
         "set_collector_run_at",
         "set_collector_retention",
+        /* #6396: the database scope and the reset to defaults are MCP-only too, for the same reason. */
+        "set_collector_databases",
+        "reset_collector_schedules",
         "get_collector_schedules",
         /* #6269: the server action switches have their own web routes (GET /api/server-actions and PUT /api/servers/{id}/actions/{action}, admin role); the MCP write is under mcp.allowServerAdmin. */
         "set_server_action",
