@@ -3828,7 +3828,8 @@ public static partial class DarlingCliCommands
     /// <summary>
     /// What <c>--enable-mcp</c> / <c>--enable-web</c> print after "now on" (#6474): the web address to open, or the
     /// <c>claude mcp add</c> command the Viewer's Settings copies (built by the same <see cref="DarlingEndpointClientText"/>
-    /// call, so they cannot differ), and, when darling.json sets a token, the verb that shows it. The token value is never
+    /// call, so they match except when the scheme is <c>https</c> on loopback: the <c>tls</c> block lives only in darling.json
+    /// on the service host, which the Viewer cannot see, so its copy stays <c>http</c> and its status line says to change it), and, when darling.json sets a token, the verb that shows it. The token value is never
     /// printed: the command carries the <c>&lt;token&gt;</c> placeholder. <paramref name="port"/> is the port the endpoint
     /// binds, as the store row the verb just wrote reports it. Prints nothing when the service will not start the
     /// endpoint (no token and no <c>allowTokenlessLoopback</c>): <see cref="EnableTokenNote"/> has said so, and an address

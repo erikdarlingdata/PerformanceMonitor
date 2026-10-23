@@ -613,7 +613,7 @@ public partial class SettingsWindow : Window
         var command = DarlingEndpointClientText.ClaudeMcpAddCommand(port);
         /* SetDataObject with copy=false avoids WPF's problematic Clipboard.Flush(). */
         McpStatusText.Text = ClipboardText.TrySetDataObject(command)
-            ? "Copied to clipboard! Replace <token> with the MCP token: --print-mcp-token on the service host prints it."
+            ? "Copied to clipboard! Replace <token> with the MCP token: --print-mcp-token on the service host prints it. If the service's MCP network listener has a tls block, change http to https in the copied command."
             : "Couldn't copy: the clipboard is in use.";
     }
 
