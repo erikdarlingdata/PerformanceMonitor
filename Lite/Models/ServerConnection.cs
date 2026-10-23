@@ -375,7 +375,8 @@ public class ServerConnection : INotifyPropertyChanged
             if (AuthenticationType == AuthenticationTypes.SqlServer ||
                 AuthenticationType == AuthenticationTypes.ServicePrincipal)
             {
-                var cred = credentialService.GetCredential(Id);
+                /* A saved password is read only for a server whose Id is a GUID (ServerCredentialIds). */
+                var cred = ServerCredentialIds.Allows(Id, DisplayName) ? credentialService.GetCredential(Id) : null;
                 if (cred.HasValue)
                 {
                     username = cred.Value.Username;
@@ -727,6 +728,6 @@ public class ServerConnection : INotifyPropertyChanged
         }
 
         // SqlServer (password) and ServicePrincipal (client secret) require a stored credential.
-        return credentialService.CredentialExists(server.Id);
+        return ServerCredentialIds.Allows(server.Id, server.DisplayName) && credentialService.CredentialExists(server.Id);
     }
 }
