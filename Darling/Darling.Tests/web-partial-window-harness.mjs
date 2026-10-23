@@ -113,6 +113,10 @@ const alertBody = [
   "",
   "Newest blocked process sample: 23:12:45 UTC, 5m 20s old",
 ].join("\n");
+const auditBody = [
+  "Retained history for 2026-10-20 (UTC) fell below half of the usual pace for that hour in 1 source(s), where usual is the median of the 7 days before.",
+  "  Blocked Query: SELECT 1 WHERE note = '3 file(s)'",
+].join("\n");
 const sample = { source: "blocked process", instant_utc: "2026-10-12T23:12:45.0000000Z", age_seconds: 320 };
 out.h2 = {
   spaceZ: localizeIsoText("until 2026-10-11 12:48:52Z"),
@@ -130,6 +134,7 @@ out.h2 = {
   stripUtc: noticeStrip("until 2026-10-11 12:48:52Z").textContent,
   here: { inc: here("2026-10-12T23:13:00Z"), fail: here("2026-10-12T07:00:00Z"), end: here("2026-10-12T08:00:00Z"), samp: here("2026-10-12T23:12:45Z") },
   bodyRaw: alertBody,
+  auditBody: localizeAlertDetail(auditBody, null),
 };
 
 console.log(JSON.stringify(out));

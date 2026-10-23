@@ -27,7 +27,7 @@ public sealed class WebPlainTextTests
 {
     private static string[] Run(string[] inputs, out string notCollectedLine) => RunDoc(inputs, out notCollectedLine).Out;
 
-    private static (string[] Out, string[] Named, string[] Tools, string[] Labels, string[] Actions) RunDoc(string[] inputs, out string notCollectedLine)
+    private static (string[] Out, string[] Named, string[] Tools, string[] Labels, string[] Actions, string[] Counts) RunDoc(string[] inputs, out string notCollectedLine)
     {
         var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
         psi.ArgumentList.Add(PathTo("Darling", "Darling.Tests", "web-plain-text-harness.mjs"));
@@ -43,7 +43,7 @@ public sealed class WebPlainTextTests
         {
             Assert.Skip("Node is not installed, so the shipped page script cannot be run.");
             notCollectedLine = "";
-            return ([], [], [], [], []);
+            return ([], [], [], [], [], []);
         }
 
         using (proc)
@@ -60,7 +60,7 @@ public sealed class WebPlainTextTests
             using var doc = JsonDocument.Parse(output.Split('\n').First(l => l.StartsWith('{')));
             notCollectedLine = doc.RootElement.GetProperty("line").GetString()!;
             string[] Strs(string name) => doc.RootElement.GetProperty(name).EnumerateArray().Select(e => e.GetString()!).ToArray();
-            return (Strs("out"), Strs("named"), Strs("tools"), Strs("labels"), Strs("actions"));
+            return (Strs("out"), Strs("named"), Strs("tools"), Strs("labels"), Strs("actions"), Strs("counts"));
         }
     }
 
@@ -96,6 +96,61 @@ public sealed class WebPlainTextTests
     {
         var o = Run(["latest run: shred_gated=1 events_read=0 report_xml_empty=0"], out _);
         Assert.Equal("latest run: shred gated: 1, events read: 0, report xml empty: 0", o[0]);
+    }
+
+    /* #6649: the left-out databases pointer, the baseline window sentence and the memory clerk column name reached the page
+       with the MCP answer's field names in them. */
+    [Fact]
+    public void FieldNamesInTheServicesOwnSentences_ReadAsThePagesWords()
+    {
+        var o = Run(
+        [
+            "No Query Store rows in the 24-hour window for a database this server still has. 29 database(s) the server no longer lists were left out of this read (see databases_left_out).",
+            "Here the window starts at baseline_start, so the baseline holds only the part from effective_start to baseline_end.",
+            "The clerk is in the newest capture's top 25; latest_memory_mb is its current footprint.",
+            "The clerk appeared earlier in the window and has since dropped out of the collector's top 25; latest_memory_mb is its last observed footprint, not its current one.",
+        ], out _);
+        Assert.Equal("No Query Store rows in the 24-hour window for a database this server still has. 29 databases the server no longer lists were left out of this read.", o[0]);
+        Assert.Equal("Here the window starts before the baseline period, so the baseline holds only the part the store has.", o[1]);
+        Assert.Equal("The clerk is in the newest capture's top 25; Latest MB is its current footprint.", o[2]);
+        Assert.Contains("Latest MB is its last observed footprint", o[3]);
+        foreach (var line in o)
+        {
+            Assert.DoesNotContain("_left_out", line);
+            Assert.DoesNotContain("baseline_start", line);
+            Assert.DoesNotContain("effective_start", line);
+            Assert.DoesNotContain("_mb is", line);
+            Assert.DoesNotContain("(s)", line);
+        }
+    }
+
+    /* #6649: a count can be negative or have a fraction, and either ended the run of pairs, so the whole note stayed raw. */
+    [Fact]
+    public void ACountRunWithANegativeOrFractionalValue_StillReadsAsWords()
+    {
+        var o = Run(
+        [
+            "latest run: plans_rendered=0 plans_rendered_bytes=-12 plan_fetch_ms=0.5 deferred_hit=0",
+            "latest run: ring_buffer_truncated=1 ring_buffer_events_hidden=167 newest_visible_event_age_s=4300 statement_scrub_named=0",
+        ], out _);
+        Assert.Equal("latest run: plans rendered: 0, plans rendered bytes: -12, plan fetch ms: 0.5, deferred hit: 0", o[0]);
+        Assert.DoesNotContain("=", o[0]);
+        Assert.DoesNotContain("=0 ", o[1] + " ");
+        Assert.DoesNotContain("=", o[1]);
+    }
+
+    /* #6649: the collection log's Error cell holds a failed run's error and a successful run's note. The note's counts are said in
+       words; a real error message keeps everything else, a lone key=value pair and any tool-looking word included. */
+    [Fact]
+    public void TheCollectionLogMessage_SaysItsCountsInWords_AndLeavesAnErrorAlone()
+    {
+        var (_, _, _, _, _, counts) = RunDoc(
+        [
+            "ring_buffer_truncated=1 ring_buffer_events_hidden=167 newest_visible_event_age_s=4300",
+            "Connection failed (timeout=30): relation \"get_orders\" is not available; widen hours_back",
+        ], out _);
+        Assert.Equal("ring buffer truncated: 1, ring buffer events hidden: 167, newest visible event age s: 4300", counts[0]);
+        Assert.Equal("Connection failed (timeout=30): relation \"get_orders\" is not available; widen the time range", counts[1]);
     }
 
     /* #5644 W8 (live check): the CPU and Memory pages have no bucket control, the Waits and Activity notes print raw field names, and a
@@ -224,7 +279,7 @@ public sealed class WebPlainTextTests
             "column \"last_error\" of relation \"x\" does not exist",
             "denied_since_last_success is true; move as_of or widen days_back",
         ];
-        var (_, named, _, _, _) = RunDoc(inputs, out _);
+        var (_, named, _, _, _, _) = RunDoc(inputs, out _);
         Assert.Equal("Could not find 'dbo.get_orders' (timeout=30); widen the time range or use get_collection_health", named[0]);
         /* Round-2 L1: a Last Error can quote a real relation or column, so field and table names are not rewritten here. */
         Assert.Equal("latest run: events_read=4 shred_gated=1 and last_error shows it", named[1]);
@@ -293,7 +348,7 @@ public sealed class WebPlainTextTests
     [Fact]
     public void ThePlainNamedPath_NeverLowerCasesOrDropsAnything()
     {
-        var (_, named, _, _, _) = RunDoc(["Last error: DID NOT connect; try analyze_server"], out _);
+        var (_, named, _, _, _, _) = RunDoc(["Last error: DID NOT connect; try analyze_server"], out _);
         Assert.Equal("Last error: DID NOT connect; try analyze_server", named[0]);
     }
 
@@ -301,7 +356,7 @@ public sealed class WebPlainTextTests
     public void TheToolNameList_IsExactlyTheRegisteredGetTools()
     {
         /* The get_ rule rewrites only these names, so the list must be the MCP tool registry's get_ tools, both ways. */
-        var (_, _, tools, _, actions) = RunDoc([], out _);
+        var (_, _, tools, _, actions, _) = RunDoc([], out _);
         if (tools.Length == 0)
         {
             return;
@@ -330,7 +385,7 @@ public sealed class WebPlainTextTests
     [Fact]
     public void TheMeasurementLabelList_CoversEveryLabelTheCollectorsWrite()
     {
-        var (_, _, tools, labels, _) = RunDoc([], out _);
+        var (_, _, tools, labels, _, _) = RunDoc([], out _);
         if (tools.Length == 0)
         {
             return;

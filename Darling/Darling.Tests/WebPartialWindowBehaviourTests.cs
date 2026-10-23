@@ -166,6 +166,16 @@ public sealed class WebPartialWindowBehaviourTests
     }
 
     [Fact]
+    public void TheCollectionHistoryAuditAlert_AgreesItsSourceCount_AndLeavesAStatementLineAlone()
+    {
+        // #6649: Alert History printed "in 1 source(s)"; the statement line under it is data and prints as stored.
+        var body = Run().GetProperty("h2").GetProperty("auditBody").GetString()!;
+        Assert.Contains("in 1 source, where usual", body);
+        Assert.DoesNotContain("source(s)", body);
+        Assert.Contains("note = '3 file(s)'", body);
+    }
+
+    [Fact]
     public void ACappedPanelsHeading_DropsItsWindowLabel_AndAnyOtherKeepsIt()
     {
         var r = Run();

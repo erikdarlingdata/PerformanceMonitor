@@ -282,7 +282,10 @@ export function localizeIsoText(text) {
  */
 export function localizeAlertDetail(text, sample) {
   if (typeof text !== "string") return text;
-  let out = text.replace(/^(\s*(?:Incident Since|Started|Failed At|Snapshot|From|To|Window): )(.*)$/gm,
+  /* #6649: the collection-history audit's sentence says "N source(s)"; the count is known, so the word agrees with it. Only that
+     sentence: the rest of a body carries SQL and query text that must print as written. */
+  let out = text.replace(/Retained history for .*$/gm, (line) => plainText(line));
+  out = out.replace(/^(\s*(?:Incident Since|Started|Failed At|Snapshot|From|To|Window): )(.*)$/gm,
     (m, lead, value) => lead + localizeIsoText(value));
   const at = sample && typeof sample.instant_utc === "string" ? parseUtc(sample.instant_utc) : null;
   if (at) {

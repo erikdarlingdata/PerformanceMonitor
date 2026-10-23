@@ -52,7 +52,7 @@ import {
   localizeAlertDetail,
 } from "./util.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "./charts.js";
-import { plainText, plainTextNamed } from "./plain-text.js";
+import { plainText, plainTextNamed, plainTextCounts } from "./plain-text.js";
 import { toTsv, toCsv, isListValue, csvFileName, copyText, downloadCsv } from "./grid-tools.js";
 import {
   VALUE_LIST_MAX_LEN,
@@ -1317,6 +1317,8 @@ function cell(row, c) {
           ? "—"
           : c.plain === "named"
             ? plainTextNamed(String(raw))
+            : c.plain === "counts"
+            ? plainTextCounts(String(raw))
             : c.plain
               ? plainText(String(raw))
               : String(raw);
