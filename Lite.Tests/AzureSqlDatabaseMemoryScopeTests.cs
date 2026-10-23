@@ -141,8 +141,8 @@ public sealed class AzureSqlDatabaseMemoryScopeTests : IClassFixture<SharedDuckD
     [Fact]
     public void RightSizedSentence_OnAzureSqlDatabase_CitesTheBufferPoolShare_OfTheDatabasesMemoryLimit()
     {
-        var onAzure = ServerHardwareScope.RightSizedExplanation(40m, 62m, 71.0, azureSqlDatabase: true);
-        var onBox = ServerHardwareScope.RightSizedExplanation(40m, 62m, 71.0, azureSqlDatabase: false);
+        var onAzure = ServerHardwareScope.RightSizedExplanation(40m, 62m, 62m, 71.0, azureSqlDatabase: true);
+        var onBox = ServerHardwareScope.RightSizedExplanation(40m, 62m, 62m, 71.0, azureSqlDatabase: false);
 
         Assert.Equal(
             "CPU is moderately loaded (avg 40.0%, p95 62.0%) and memory is well-utilized (buffer pool uses 71% of the database's memory limit). No action needed.",
@@ -151,6 +151,24 @@ public sealed class AzureSqlDatabaseMemoryScopeTests : IClassFixture<SharedDuckD
         Assert.Equal(
             "CPU is moderately loaded (avg 40.0%, p95 62.0%) and memory is well-utilized (buffer pool uses 71% of physical RAM). No action needed.",
             onBox);
+    }
+
+    /// <summary>#6646: RIGHT_SIZED is also the verdict for an idle average with one sample at 40% or more. The sentence names the test that
+    /// decided, and says "well-utilized" only for a buffer pool holding at least half of its basis.</summary>
+    [Fact]
+    public void RightSizedSentence_ForAnIdleAverageWithOneBusySample_NamesThePeak_NotAModerateLoadOrWellUtilizedMemory()
+    {
+        var peak = ServerHardwareScope.RightSizedExplanation(0.1m, 0m, 40m, 8.0, azureSqlDatabase: false);
+        Assert.DoesNotContain("moderately loaded", peak, StringComparison.Ordinal);
+        Assert.DoesNotContain("well-utilized", peak, StringComparison.Ordinal);
+        Assert.Equal(
+            "CPU averaged 0.1% (p95 0.0%), but one sample reached 40%, so this server is not rated over-provisioned and buffer pool uses 8% of physical RAM. No action needed.",
+            peak);
+
+        var grants = ServerHardwareScope.RightSizedExplanation(5m, 8m, 12m, 60.0, azureSqlDatabase: true);
+        Assert.DoesNotContain("moderately loaded", grants, StringComparison.Ordinal);
+        Assert.Contains("memory grants use 50% or more of their target", grants, StringComparison.Ordinal);
+        Assert.Contains("memory is well-utilized (buffer pool uses 60% of the database's memory limit)", grants, StringComparison.Ordinal);
     }
 
     [Fact]

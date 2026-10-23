@@ -229,11 +229,28 @@ public static class ServerHardwareScope
 
     /// <summary>
     /// The FinOps utilization verdict sentence for a server whose provisioning is RIGHT_SIZED. Off an Azure SQL Database it is
-    /// the long-standing sentence, byte for byte. On one it says the same, with the share named against the database's memory
-    /// limit instead of physical RAM.
+    /// the long-standing sentence, byte for byte, when the average CPU is at or above <see cref="ProvisioningVerdict.IdleAvgCpuPercent"/>.
+    /// On one it says the same, with the share named against the database's memory limit instead of physical RAM.
+    /// <para>#6646: RIGHT_SIZED is also the answer for a server whose average is below that bar, so the CPU clause names the test
+    /// that decided: one sample at or above <see cref="ProvisioningVerdict.IdleMaxCpuPercent"/> is real peak demand, so the server is
+    /// not rated over-provisioned; otherwise grant or memory pressure held it back. "Well-utilized" is said only when the buffer
+    /// pool holds at least half of the basis.</para>
     /// </summary>
-    public static string RightSizedExplanation(decimal avgCpuPct, decimal p95CpuPct, double bufferPoolPct, bool azureSqlDatabase) =>
-        string.Create(CultureInfo.CurrentCulture, $"CPU is moderately loaded (avg {avgCpuPct:N1}%, p95 {p95CpuPct:N1}%) and memory is well-utilized (buffer pool uses {bufferPoolPct:N0}% of {MemoryBasis(azureSqlDatabase)}). No action needed.");
+    public static string RightSizedExplanation(decimal avgCpuPct, decimal p95CpuPct, decimal maxCpuPct, double bufferPoolPct, bool azureSqlDatabase)
+    {
+        var cpu = avgCpuPct >= ProvisioningVerdict.IdleAvgCpuPercent
+            ? string.Create(CultureInfo.CurrentCulture, $"CPU is moderately loaded (avg {avgCpuPct:N1}%, p95 {p95CpuPct:N1}%)")
+            : maxCpuPct >= ProvisioningVerdict.IdleMaxCpuPercent
+                ? string.Create(CultureInfo.CurrentCulture, $"CPU averaged {avgCpuPct:N1}% (p95 {p95CpuPct:N1}%), but one sample reached {maxCpuPct:N0}%, so this server is not rated over-provisioned")
+                : string.Create(CultureInfo.CurrentCulture, $"CPU is lightly loaded (avg {avgCpuPct:N1}%, p95 {p95CpuPct:N1}%), but its memory grants use {ProvisioningVerdict.IdleGrantUtilizationPercent:N0}% or more of their target, so this server is not rated over-provisioned");
+        var memory = bufferPoolPct >= RightSizedWellUtilizedBufferPoolPercent
+            ? string.Create(CultureInfo.CurrentCulture, $"memory is well-utilized (buffer pool uses {bufferPoolPct:N0}% of {MemoryBasis(azureSqlDatabase)})")
+            : string.Create(CultureInfo.CurrentCulture, $"buffer pool uses {bufferPoolPct:N0}% of {MemoryBasis(azureSqlDatabase)}");
+        return cpu + " and " + memory + ". No action needed.";
+    }
+
+    /// <summary>The share of the memory basis the buffer pool must hold for a RIGHT_SIZED sentence to call memory well-utilized (#6646).</summary>
+    private const double RightSizedWellUtilizedBufferPoolPercent = 50.0;
 
     /// <summary>
     /// The FinOps utilization verdict sentence for a server whose provisioning is OVER_PROVISIONED. Same rule as

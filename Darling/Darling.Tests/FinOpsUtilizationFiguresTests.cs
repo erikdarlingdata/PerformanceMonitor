@@ -135,7 +135,7 @@ public sealed class FinOpsUtilizationFiguresTests
         var azure = ServerHardwareScope.HardwareIsTheHosts(dto.EngineEdition);
         var old = dto.ProvisioningStatus switch
         {
-            "RIGHT_SIZED" => ServerHardwareScope.RightSizedExplanation(dto.AvgCpuPct, dto.P95CpuPct, bpPct, azure),
+            "RIGHT_SIZED" => ServerHardwareScope.RightSizedExplanation(dto.AvgCpuPct, dto.P95CpuPct, dto.MaxCpuPct, bpPct, azure),
             "OVER_PROVISIONED" => ServerHardwareScope.OverProvisionedExplanation(dto.AvgCpuPct, dto.MaxCpuPct, bpPct, azure),
             "UNDER_PROVISIONED" => ProvisioningVerdict.UnderProvisionedReason(
                 dto.P95CpuPct, dto.MaxGrantWaiters, dto.GrantTimeouts, dto.ForcedGrants, dto.MaxWorkersCount, dto.CurrentWorkersCount),
