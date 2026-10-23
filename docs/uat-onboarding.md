@@ -239,7 +239,7 @@ Initializing managed Postgres cluster in C:\ProgramData\PerformanceMonitorDarlin
 Managed Postgres cluster initialized (scram-sha-256, data checksums, UTF8/C locale)
 Managed Postgres started
 Creating the 'darling' database
-Postgres store ready (schema v79, 79 migration(s) applied)
+Postgres store ready (schema v<version>, <count> migration(s) applied)
 Least-privilege roles ready (admin: ...; viewer: ...; mcp: ...)
 TimescaleDB detected — hypertables, chunk-based retention, and compression enabled
 TimescaleDB: 50/50 collector table(s) are hypertables
@@ -293,7 +293,7 @@ password. The same lines are in `%APPDATA%\PerformanceMonitorDarling\logs\darlin
 
 Two specific failures worth naming:
 
-- `The Darling store is at schema v78, but this viewer needs v79. Update or restart the Darling service so it
+- `The Darling store is at schema v<store version>, but this viewer needs v<viewer version>. Update or restart the Darling service so it
   migrates the store, then reopen the viewer.` — the viewer is newer than the service. Upgrade or restart the
   service; it migrates on start. (The gate is `<`, not `≠`: a store *newer* than the viewer is not blocked.)
 - `pg-admin-credential.dpapi ... does not exist yet.` — the service's first run never got far enough to
@@ -345,7 +345,7 @@ trust.
 | | Where the viewer lives | Where to put the three exported files |
 |---|---|---|
 | Copy `viewer\` out of `PerformanceMonitorDarling-<ver>.zip` | wherever you unpacked it | next to `PerformanceMonitor.Darling.Viewer.exe` — works unedited |
-| Run the standalone `PerformanceMonitorDarlingViewer-<ver>-Setup.exe` (Velopack; auto-updating) | a versioned folder the installer manages | **anywhere**, then point `%DARLING_CONFIG%` at the exported `darling.json` |
+| Run the standalone `PerformanceMonitorDarlingViewer-darlingviewer-Setup.exe` (Velopack; auto-updating) | a versioned folder the installer manages | **anywhere**, then point `%DARLING_CONFIG%` at the exported `darling.json` |
 
 Prefer `DARLING_CONFIG` with the Setup.exe: its install directory changes on every update, so files dropped
 beside the exe do not survive. Either way keep the three files **together** — a bare `Root Certificate=server.crt`
@@ -489,9 +489,16 @@ On the service host, open `http://localhost:5153/`. The dashboard shows its sign
 with `web.allowTokenlessLoopback` on does a loopback-only dashboard skip the sign-in. It then serves reads only:
 a change gets 403 and a message that names the token setting.
 
-**Proof:** a sidebar titled **Darling Web** with **Fleet Overview**, **Alert History** and **Custom Views**, a
-list of your servers under them, and fleet cards in the main pane. (**Availability Groups** appears only once
-the store holds AG data; the `#/ag` route works regardless.) Or, scriptably:
+**Proof:** a sidebar titled **Darling Web**, a list of your servers under its links, and fleet cards in the main
+pane. The links are:
+
+- **Fleet Overview**, **Availability Groups**, **FinOps**, **Fleet Sweeps**
+- **Alert History**, **Investigations**, **Alert Rules**, **Admin**
+- **Custom Views**, **Mute Rules**, **Known Patterns**
+- **Manage Tags**, **Query Tags**, **Query Tag Usage**, **Job History**
+
+**Availability Groups** stays hidden until the store holds AG data. The `#/ag` route works regardless. Or,
+scriptably:
 
 ```powershell
 Invoke-RestMethod http://localhost:5153/api/ping
@@ -514,7 +521,7 @@ service is up, the dashboard still answers, the Windows service still reports **
 being collected. Note that `Invoke-RestMethod` THROWS on a 503, which is the behaviour you want from a
 scripted check — catch it and read `$_.ErrorDetails.Message` for the body.
 
-### 3.4 What it will not do
+### 3.4 What it does and does not do
 
 Be clear about this before you file it as a bug. The web dashboard reads the store as the least-privilege
 `viewer` role. Its `/api/read/*` surface is machine-derived from the MCP tool catalog minus an explicit
@@ -524,18 +531,30 @@ exclusion list, and these are the exclusions that matter to you:
   `analyze_plan_xml` family is excluded. **Use the WPF viewer for plans** — it has the graphical plan viewer,
   the block-chain reconstruction and the deadlock-graph renderer.
 - **No `analyze_server`.** That makes a live outbound connection to a monitored server; the web host does not.
-- **No live "Current Active Queries" fetch, no actual-plan capture, no purge** — all of those are the
-  `config_command` enqueue from 2.3, and the web host has no write path to it.
-- **No alert tuning, no mute-rule writes, no adding or removing servers.**
+- **No live "Current Active Queries" fetch, no actual-plan capture, no purge.** All of those are the
+  `config_command` enqueue from 2.3. The web host has no route that queues them.
 
-The pages are Fleet Overview, per-server, Alert History, Availability Groups and Custom Views. The per-server
-page carries one of **two** tab sets, chosen from the engine the store recorded for that server
+The web host also writes to the monitoring store. Everything below changes monitoring configuration or
+monitoring state. This page does not cover which seats can use each one.
+
+- **Custom Views:** create, edit and delete, and preview one with `POST /api/compose/run`.
+- **Mute rules:** add, edit, enable or disable, and delete.
+- **Alert rules:** custom alert rules (add, edit, delete, validate and test), threshold overrides, environment
+  profiles, and notification routes (add, edit and delete).
+- **Alert History:** dismiss alerts.
+- **Servers:** add a server and edit a server's connection. The web host has no route that removes a server.
+- **Tags:** server tags, query tags and query tag rules (create, edit, delete and assign).
+- **Run collectors now:** queue one run of a server's collectors, then read the result on the page.
+- **Investigations and agent actions:** approve or reject investigation notes, undo or switch agent changes,
+  and turn a server's agent actions on or off.
+
+The sidebar links are listed in 3.3. The per-server page carries one of **two** tab sets, chosen from the engine the store recorded for that server
 ([#2530](https://github.com/erikdarlingdata/PerformanceMonitor/issues/2530)):
 
-- **SQL Server — twelve sub-tabs.** Overview, Wait Stats, CPU, Memory, Blocking, File I/O, Queries,
-  Configuration, Config Changes, Activity, System Events, Collection Health.
-- **PostgreSQL — seven.** Overview, Activity, Vacuum, Waits, I/O, Replication, Storage. Seven is the design
-  and not a shortfall: it is where every `get_pg_*` read lives, and the SQL Server tabs it does not have
+- **SQL Server, thirteen sub-tabs:** Overview, Wait Stats, CPU, Memory, Blocking, File I/O, I/O Trends,
+  Queries, Configuration, Config Changes, Activity, System Events, Collection Health.
+- **PostgreSQL, eight:** Overview, Activity, Vacuum, Waits, I/O, Replication, Storage, Configuration. The
+  smaller set is the design and not a shortfall. It is where every `get_pg_*` read lives, and the SQL Server tabs it does not have
   (tempdb, Query Store, trace flags, plan cache, the `system_health` ring buffer) have no PostgreSQL analogue
   to fill them. Vacuum is deliberately one tab rather than three — an old xmin horizon starves vacuum, starved
   vacuum falls behind on freezing, and freezing falling behind is what ends in wraparound; read separately each
@@ -550,9 +569,7 @@ page carries one of **two** tab sets, chosen from the engine the store recorded 
   positive PostgreSQL claim moves a server off the default. A server that has never connected will therefore
   show SQL Server tabs until it does.
 
-Between them the two sets reach **81 of the 93** read endpoints, 82 across all five pages, against the viewer's
-nineteen top-level per-server tabs (65 counting their inner tabs). So most of what the viewer shows is now
-here, and what is not divides into three groups.
+Most of what the viewer shows is also here. What is not divides into three groups.
 
 **Reads that exist but no web page shows.** `get_database_scoped_config`, whose `databases[].settings[]` shape
 the table renderer cannot draw, and `get_store_metrics`, which is store-wide and has no per-server home.
@@ -567,9 +584,8 @@ than reading a second, wider list that could offer a query the table does not.
 
 **Every PostgreSQL capture path is now on BOTH surfaces.**
 [#2530](https://github.com/erikdarlingdata/PerformanceMonitor/issues/2530) landed the web tabs first and the
-WPF viewer second, and the desktop set is deliberately the same seven with the same names and the same
-grouping — Overview, Activity, Vacuum, Waits, I/O, Replication, Storage — so the two front ends do not teach
-one engine two shapes. The desktop panels are grids rather than charts, and the desktop Overview is the
+WPF viewer second, and the desktop set has the same names and the same grouping as the web set, so the two
+front ends do not teach one engine two shapes. The one difference is Configuration, which only the web set has. The desktop panels are grids rather than charts, and the desktop Overview is the
 per-collector collection report (which of them ran, when, with what result, and for one that cannot run here,
 why), which is the answer a PostgreSQL operator wants first and the one the web splits across tiles.
 
@@ -662,10 +678,8 @@ no stored-plan download or cached-plan fetch from it, and none of the desktop gr
 per-column filter popups, CSV export, Copy Repro Script, and right-click drill-down into a ±30-minute
 window.
 
-What it *can* write is one thing: **Custom Views** — the saved dashboards and notebooks in
-`config.custom_views`, created and edited through the built-in composer, plus `POST /api/compose/run` to
-preview one. That is the only write the web host exposes at all, and it is available to **any authenticated
-seat**, not only a local one. It is also the reason the loopback token exemption went away (see 3.5).
+**Custom Views** are the saved dashboards and notebooks in `config.custom_views`, created and edited through
+the built-in composer. The write routes listed above are the reason the loopback token exemption went away (see 3.5).
 
 (The `viewer` role itself carries one more narrow grant — `config.database_state_expected`, behind the WPF
 viewer's per-database state-override editor — but no web route reaches it, and the WPF editor gates itself on
@@ -811,6 +825,8 @@ port you configured; replace `<token>` with the output of `--print-mcp-token`.)
 
 **Proof:** `claude mcp list` shows `sql-monitor-darling` as connected, and `/mcp` in a new Claude Code session
 lists the Darling tools — `list_servers`, `get_fleet_overview`, `get_wait_stats`, `analyze_server` and the rest.
+The server reports its own tool count in its instructions and in `tools/list`. The write tools add more tools
+when you turn them on.
 Ask it *"what servers are being monitored?"* and it should answer from your store.
 
 Two details that save a round of guessing: the endpoint is the **root path** (`http://localhost:5152/`, not
