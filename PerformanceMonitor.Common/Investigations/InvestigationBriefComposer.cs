@@ -302,20 +302,34 @@ public sealed class InvestigationBriefComposer
                 used += length;
             }
 
+            /* #6547: the first alert is the one that opened the request. When it alone is longer than the section's budget, keeping
+               whole items from the head kept none, and the agent got no alert text and no metric. Keep it instead, with its long
+               strings cut further (detail text first); its metric, times, value and threshold stay whole. */
+            var shortened = false;
+            if (kept == 0 && list.Count > 0 && section == "alerts" && ShrinkAlertToBudget(list[0], budget, cut))
+            {
+                shortened = true;
+                kept = 1;
+                used = list[0].ToJsonString().Length + 1;
+            }
+
             for (var i = 0; i < kept; i++)
                 array.Add(list[i]);
             remaining -= used;
 
-            if (kept < list.Count)
+            if (kept < list.Count || shortened)
             {
                 droppedChars += list.Skip(kept).Sum(n => n.ToJsonString().Length + 1);
-                cuts.Add(new JsonObject
+                var entry = new JsonObject
                 {
                     ["section"] = section,
                     ["kept"] = kept,
                     ["dropped"] = list.Count - kept,
                     ["fetch"] = fetch,
-                });
+                };
+                if (shortened)
+                    entry["shortened"] = true;
+                cuts.Add(entry);
             }
         }
 
@@ -735,6 +749,44 @@ public sealed class InvestigationBriefComposer
         };
     }
 
+    /// <summary>
+    /// Cuts the long strings of one alert node until it fits <paramref name="budget"/> (#6547): the detail text first, then the
+    /// send error and the context strings, then context items from the tail, and last the detail text itself. The metric, times,
+    /// value, threshold and muted flag are never touched. Counts each cut in <paramref name="cut"/>. False when even the bare
+    /// alert does not fit.
+    /// </summary>
+    private static bool ShrinkAlertToBudget(JsonObject node, int budget, CutCounter cut)
+    {
+        bool Fits() => node.ToJsonString().Length + 1 <= budget;
+
+        foreach (var cap in new[] { 400, 200, 100 })
+        {
+            if (Fits()) return true;
+            if (node["detail_text"] is JsonValue detail && detail.TryGetValue<string>(out var text))
+                node["detail_text"] = cut.CutTo(text, cap);
+            if (Fits()) return true;
+            if (node["send_error"] is JsonValue error && error.TryGetValue<string>(out var errorText))
+                node["send_error"] = cut.CutTo(errorText, cap);
+            if (node["context"] is JsonArray context)
+                cut.CutAllTo(context, cap);
+        }
+
+        if (node["context"] is JsonArray items)
+        {
+            while (!Fits() && items.Count > 0)
+            {
+                cut.AddOmitted(items[items.Count - 1]!.ToJsonString().Length);
+                items.RemoveAt(items.Count - 1);
+            }
+        }
+
+        if (!Fits() && node["detail_text"] is JsonValue last && last.TryGetValue<string>(out var lastText))
+            node["detail_text"] = cut.CutTo(lastText, 0);
+        if (!Fits() && node["send_error"] is JsonValue lastError && lastError.TryGetValue<string>(out var lastErrorText))
+            node["send_error"] = cut.CutTo(lastErrorText, 0);
+        return Fits();
+    }
+
     private static JsonObject FindingNode(InvestigationBriefFinding finding, McpDataDetailMasker masker, CutCounter cut)
     {
         JsonObject? remediation = null;
@@ -909,6 +961,51 @@ public sealed class InvestigationBriefComposer
             Chars += value.Length - keep;
             return string.Concat(value.AsSpan(0, keep), CutMarker);
         }
+
+        /// <summary>Cuts <paramref name="value"/> to <paramref name="cap"/> characters, marker included (#6547). A string already
+        /// within the cap, or one the cut would not shorten, comes back unchanged.</summary>
+        public string? CutTo(string? value, int cap)
+        {
+            if (value is null || value.Length <= cap) return value;
+            var keep = cap <= CutMarker.Length ? 0 : McpHelpers.TextElementCutLength(value, cap - CutMarker.Length);
+            var result = string.Concat(value.AsSpan(0, keep), CutMarker);
+            if (result.Length >= value.Length) return value;
+            // A string the field cap already cut counted once as a cut field; only the further omission is new.
+            if (!value.EndsWith(CutMarker, StringComparison.Ordinal)) Fields++;
+            Chars += value.Length - keep;
+            return result;
+        }
+
+        /// <summary>Cuts every string under <paramref name="node"/> to <paramref name="cap"/> characters (#6547).</summary>
+        public void CutAllTo(JsonNode? node, int cap)
+        {
+            switch (node)
+            {
+                case JsonObject obj:
+                    foreach (var key in obj.Select(p => p.Key).ToList())
+                    {
+                        if (obj[key] is JsonValue value && value.TryGetValue<string>(out var text))
+                            obj[key] = CutTo(text, cap);
+                        else
+                            CutAllTo(obj[key], cap);
+                    }
+
+                    break;
+                case JsonArray array:
+                    for (var i = 0; i < array.Count; i++)
+                    {
+                        if (array[i] is JsonValue value && value.TryGetValue<string>(out var text))
+                            array[i] = CutTo(text, cap);
+                        else
+                            CutAllTo(array[i], cap);
+                    }
+
+                    break;
+            }
+        }
+
+        /// <summary>Counts characters omitted by dropping a whole piece of a kept item (#6547).</summary>
+        public void AddOmitted(int chars) => Chars += chars;
 
         public void CapAll(JsonNode? node)
         {
