@@ -329,6 +329,16 @@ public sealed class MigrationDataMovingRungCensusPins
             + "weeks) and is milliseconds. The rung also builds one partial index on collect.query_store_forced_plans, WHERE plan_id IS NULL "
             + "(the marker rows, one per captured database per pass): a read of that plain table once, a few seconds on a store that keeps "
             + "30 days of captures. It does not move the lock-wait floor."),
+        new(
+            215,
+            SetsTheFloor: false,
+            "six CREATE INDEX IF NOT EXISTS over config.investigation_requests and config.investigation_reports (both created V184), "
+            + "five of them partial. Real index builds over rows an earlier rung created, so the scan counts it, but both tables are "
+            + "narrow control-plane tables: a request is one row per incident (about a hundred a day at the route limits), kept "
+            + "InvestigationRetentionDays (a year), and a report is at most one row per request. The rung's own measurement loaded a year "
+            + "of requests at a production store's rate (73,000 rows) and a production store holds hundreds today, so each build "
+            + "reads the table once and takes milliseconds. A different class from V104's collected hypertable. It does not move the "
+            + "lock-wait floor, so the multiple stays 5."),
     ];
 
     /// <summary>
