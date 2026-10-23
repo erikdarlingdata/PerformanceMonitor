@@ -2801,20 +2801,19 @@ BEGIN
    IF NOT FOUND THEN
       RAISE EXCEPTION 'No notification route has that route_id.' USING ERRCODE = 'DL404';
    END IF;
-   IF v_row.agent_level = 3 THEN
-      RAISE EXCEPTION 'That route is at agent level 3 (Act on servers): it is changed by a person in the Viewer, not over MCP, lowering included.' USING ERRCODE = 'DL403';
-   END IF;
    v_level := CASE WHEN 'agent_level' = ANY (p_columns) THEN p_agent_level ELSE v_row.agent_level END;
    v_hour := CASE WHEN 'agent_max_per_hour' = ANY (p_columns) THEN p_agent_max_per_hour ELSE v_row.agent_max_per_hour END;
    v_day := CASE WHEN 'agent_max_per_day' = ANY (p_columns) THEN p_agent_max_per_day ELSE v_row.agent_max_per_day END;
    v_lease := CASE WHEN 'agent_lease_minutes' = ANY (p_columns) THEN p_agent_lease_minutes ELSE v_row.agent_lease_minutes END;
    v_expiry := CASE WHEN 'agent_expiry_minutes' = ANY (p_columns) THEN p_agent_expiry_minutes ELSE v_row.agent_expiry_minutes END;
    v_fallback := CASE WHEN 'fallback_route_id' = ANY (p_columns) THEN p_fallback_route_id ELSE v_row.fallback_route_id END;
-   IF v_level = 3 THEN
-      RAISE EXCEPTION 'Agent level 3 (Act on servers) is set by a person in the Viewer, not over MCP. Over MCP a route takes Off (0), Investigate (1) or Act (2).' USING ERRCODE = 'DL403';
+   -- The MCP ceiling (#6542 part 2, pending a decision): the one line that holds levels above 2 person-only, both ways. It mirrors
+   -- DarlingMcpAlertTools.MaxMcpAgentLevel.
+   IF v_row.agent_level > 2 OR v_level > 2 THEN
+      RAISE EXCEPTION 'Agent levels above 2 are set and changed by a person in the Viewer, not over MCP, lowering included.' USING ERRCODE = 'DL403';
    END IF;
-   IF v_level IS NOT NULL AND v_level NOT IN (0, 1, 2) THEN
-      RAISE EXCEPTION 'The agent level is Off (0), Investigate (1) or Act (2).' USING ERRCODE = 'DL400';
+   IF v_level IS NOT NULL AND v_level NOT IN (0, 1, 2, 3) THEN
+      RAISE EXCEPTION 'The agent level is Off (0), Investigate (1), Act (2) or Act on servers (3).' USING ERRCODE = 'DL400';
    END IF;
    IF v_hour IS NULL OR v_hour NOT BETWEEN 1 AND 60 THEN
       RAISE EXCEPTION 'Requests per hour must be between 1 and 60.' USING ERRCODE = 'DL400';

@@ -41,6 +41,9 @@ public sealed class McpRouteAgentFieldsLiveTests
     /// <summary>The legacy single token with writes on: no token name.</summary>
     private static DarlingMcpServedPolicy LegacyPolicy() => new(new DarlingMcpWritePolicy.Effective(true, false));
 
+    /// <summary>The level 3 answers follow the one ceiling constant, so moving the ceiling flips them with no other test edit.</summary>
+    private static readonly bool Level3OverMcp = DarlingMcpAlertTools.MaxMcpAgentLevel >= 3;
+
     private static string Status(string answer) => JsonDocument.Parse(answer).RootElement.GetProperty("status").GetString()!;
 
     private static int RouteIdOf(string answer) =>
@@ -95,15 +98,15 @@ public sealed class McpRouteAgentFieldsLiveTests
             /* Level 3 asked for on a create: refused, and no route is left behind. */
             var create = await DarlingMcpAlertTools.CreateNotificationRoute(
                 asMcp, "Deadlocks", agent_level: 3, served: OperatorPolicy(), cancellationToken: ct);
-            Assert.Equal("refused", Status(create));
-            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.config_notification_routes WHERE metric_match = 'Deadlocks'", ct));
+            Assert.Equal(Level3OverMcp ? "created" : "refused", Status(create));
+            Assert.Equal(Level3OverMcp ? "1" : "0", await ScalarAsync(owner, "SELECT count(*) FROM config.config_notification_routes WHERE metric_match = 'Deadlocks'", ct));
 
             var routeId = RouteIdOf(await DarlingMcpAlertTools.CreateNotificationRoute(
                 asMcp, "Blocking", agent_level: 2, served: OperatorPolicy(), cancellationToken: ct));
             var raise = await DarlingMcpAlertTools.UpdateNotificationRoute(
                 asMcp, routeId, agent_level: 3, served: OperatorPolicy(), cancellationToken: ct);
-            Assert.Equal("refused", Status(raise));
-            Assert.Equal("2", await ScalarAsync(owner, $"SELECT agent_level FROM config.config_notification_routes WHERE route_id = {routeId}", ct));
+            Assert.Equal(Level3OverMcp ? "updated" : "refused", Status(raise));
+            Assert.Equal(Level3OverMcp ? "3" : "2", await ScalarAsync(owner, $"SELECT agent_level FROM config.config_notification_routes WHERE route_id = {routeId}", ct));
 
             /* A person set level 3 in the Viewer: MCP cannot lower it, change a limit or move its fallback. */
             await using (var person = owner.CreateCommand($"UPDATE config.config_notification_routes SET agent_level = 3 WHERE route_id = {routeId}"))
@@ -111,12 +114,17 @@ public sealed class McpRouteAgentFieldsLiveTests
                 await person.ExecuteNonQueryAsync(ct);
             }
 
-            Assert.Equal("refused", Status(await DarlingMcpAlertTools.UpdateNotificationRoute(
-                asMcp, routeId, agent_level: 1, served: OperatorPolicy(), cancellationToken: ct)));
-            Assert.Equal("refused", Status(await DarlingMcpAlertTools.UpdateNotificationRoute(
+            Assert.Equal(Level3OverMcp ? "updated" : "refused", Status(await DarlingMcpAlertTools.UpdateNotificationRoute(
                 asMcp, routeId, agent_max_per_day: 50, served: OperatorPolicy(), cancellationToken: ct)));
-            Assert.Equal("3|100", await ScalarAsync(owner,
+            Assert.Equal(Level3OverMcp ? "3|50" : "3|100", await ScalarAsync(owner,
                 $"SELECT agent_level::text || '|' || agent_max_per_day::text FROM config.config_notification_routes WHERE route_id = {routeId}", ct));
+
+            Assert.Equal(Level3OverMcp ? "updated" : "refused", Status(await DarlingMcpAlertTools.UpdateNotificationRoute(
+                asMcp, routeId, agent_level: 1, served: OperatorPolicy(), cancellationToken: ct)));
+            if (Level3OverMcp)
+            {
+                return;
+            }
 
             /* The store function refuses it too, so a caller that skips the tool's own check is held as well. */
             var direct = await Assert.ThrowsAsync<PostgresException>(async () =>

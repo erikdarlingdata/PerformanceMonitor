@@ -474,11 +474,21 @@ public sealed partial class DarlingMcpAlertTools
     internal static string AgentFieldsNeedOperator(string tool) =>
         Outcome("refused", $"{tool} sets a route's agent fields only for a named operator token (mcp.tokens, role operator). Set them in the Viewer's Settings window or on the web dashboard.");
 
-    /// <summary>The refusal for agent level 3, set or changed over MCP (#6542 part 2): it includes a session kill, which has no undo, so a person
-    /// sets it and a person changes it, in the Viewer.</summary>
-    internal static string LevelThreeRefusal(string tool, int routeId, bool current) => Outcome("refused", current
-        ? $"Route {routeId} is at agent level 3 (Act on servers): {tool} does not change its agent fields over MCP, lowering included. A person changes it in the Viewer."
-        : $"{tool} does not set agent level 3 (Act on servers) over MCP: it includes a session kill, which has no undo, so a person sets it in the Viewer. Over MCP a route takes 0 (Off), 1 (Investigate) or 2 (Act).");
+    /// <summary>
+    /// The highest agent level an operator token sets over MCP, and the highest level a route may be at for MCP to change its agent fields
+    /// (#6542 part 2). PENDING A DECISION: 2 keeps level 3 (Act on servers, which includes a session kill with no undo) person-only in both
+    /// directions. Allowing level 3 is this one line, plus the matching line in config.set_notification_route_agent
+    /// (DarlingManagedRoles.BuildNotificationRouteFunctionsSql and tools/provision-roles.sql). A level 3 server action still needs the
+    /// person-only per-server switch (config.config_server_actions, ServerActionGate) whatever the route says.
+    /// </summary>
+    internal const int MaxMcpAgentLevel = NotificationRoute.AgentLevelAct;
+
+    /// <summary>The one ceiling check: a requested level, or the route's current level, above <see cref="MaxMcpAgentLevel"/>.</summary>
+    internal static bool AboveMcpCeiling(int? level) => level > MaxMcpAgentLevel;
+
+    /// <summary>The one ceiling refusal sentence.</summary>
+    internal static string CeilingRefusal(string tool) => Outcome("refused",
+        $"{tool} sets and changes agent levels up to {MaxMcpAgentLevel} over MCP. A higher level is set and changed by a person in the Viewer, and a route at a higher level keeps its agent fields there, lowering included.");
 
     /// <summary>
     /// The check an operator token's agent fields get before anything is written (#6542 part 2): a named operator token only, never level 3
@@ -492,14 +502,9 @@ public sealed partial class DarlingMcpAlertTools
             return AgentFieldsNeedOperator(tool);
         }
 
-        if (currentLevel == NotificationRoute.AgentLevelServerAct)
+        if (AboveMcpCeiling(currentLevel) || AboveMcpCeiling(agent.Level))
         {
-            return LevelThreeRefusal(tool, draft.RouteId, current: true);
-        }
-
-        if (agent.Level == NotificationRoute.AgentLevelServerAct)
-        {
-            return LevelThreeRefusal(tool, draft.RouteId, current: false);
+            return CeilingRefusal(tool);
         }
 
         draft.AgentLevel = agent.Level ?? draft.AgentLevel;
