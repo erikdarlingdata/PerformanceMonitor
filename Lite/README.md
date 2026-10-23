@@ -56,6 +56,19 @@ Pinning the publish to `win-x64` and bundling the runtime removed that failure e
 
 Monitored SQL Servers need nothing installed on them either way.
 
+## Upgrading an install older than 3.4.0
+
+Do not run `Setup.exe` over a Lite version older than 3.4.0. Before 3.4.0, Lite kept its DuckDB store, Parquet archive, logs, and `settings.json` inside `%LOCALAPPDATA%\PerformanceMonitorLite`. That folder is also the install folder, and `Setup.exe` deletes it before the new build starts. The history is then lost. Lite 3.4.0 and later keep that data in `%LOCALAPPDATA%\PerformanceMonitorLite-Data`, so `Setup.exe` does not touch it.
+
+To find your version, click **About** in the left sidebar.
+
+If your version is older than 3.4.0, use one of these two ways:
+
+1. Click **About**, then install the update from there. This upgrades in place and keeps your data.
+2. Close Lite and copy `%LOCALAPPDATA%\PerformanceMonitorLite` to a safe place. Then run `Setup.exe`. `Setup.exe` deletes the original folder, so nothing is restored on its own. After Lite starts, click **Import Settings** and then **Import Data** in the sidebar, and point both at your copy.
+
+After option 1, the first start of 3.4.0 or later moves the old data to the new folder. Your server list and your saved passwords are not in the install folder, so a `Setup.exe` upgrade does not delete them.
+
 ## Themes and colors
 
 Lite ships three themes — **Dark** (the default), **Light** and **Cool Breeze** — picked from **Settings → Color theme**, applied live. Every surface in the app is painted from one palette of eighteen named colors per theme, and you can adjust twelve of them yourself (#3577), per theme, with a reset to the shipped values.
