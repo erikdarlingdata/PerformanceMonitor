@@ -334,7 +334,7 @@ export function serverRows(data) {
    network, so the form built on top of them can be tested rule by rule.
    They mirror the service's edit (PlanEdit and ParseEditChanges in Mcp/DarlingMcpServerAdminTools.Edit.cs):
      - only the fields the form changed are sent, plus the read's opaque modified_at text as expected_modified_at;
-     - a SQL Server edit never sends port (the service refuses it, even 0) and a PostgreSQL edit never sends auth;
+     - a SQL Server edit never sends port (the service refuses a non-zero one; the page has no way to clear a stored one) and a PostgreSQL edit never sends auth;
      - a password is required when the connection of a SQL or ServicePrincipal server changes, because the stored one
        cannot be read back; and the service probes the new connection on ANY connection change (Windows and managed
        identity included) or whenever a password is sent.

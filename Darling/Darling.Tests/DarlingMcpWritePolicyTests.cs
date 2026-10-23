@@ -133,6 +133,21 @@ public sealed class DarlingMcpWritePolicyTests
     }
 
     [Fact]
+    public void DatabaseStateExpectations_WritesOff_ServeTheReadOnly_WritesOn_ServeBoth_AndTheWriteIsNeverOfferedToAgents()
+    {
+        var off = Names(DarlingMcpWritePolicy.FilterToolCollection(ServedTools(), DarlingMcpWritePolicy.Effective.Off));
+        var on = Names(DarlingMcpWritePolicy.FilterToolCollection(ServedTools(), WritesOnly));
+
+        Assert.Contains("get_database_state_expectations", off);
+        Assert.DoesNotContain("set_database_state_expected", off);
+        Assert.Contains("get_database_state_expectations", on);
+        Assert.Contains("set_database_state_expected", on);
+        Assert.True(DarlingMcpWritePolicy.IsWrite("set_database_state_expected"));
+        Assert.False(DarlingMcpWritePolicy.IsWrite("get_database_state_expectations"));
+        Assert.Contains("set_database_state_expected", DarlingMcpWritePolicy.NeverAgentTools);
+    }
+
+    [Fact]
     public void QueryTagWrites_AreNeverOfferedToAgents_AndTheListIsAnOrdinaryRead()
     {
         string[] writes = ["create_query_tag", "update_query_tag", "delete_query_tag", "assign_query_tag", "unassign_query_tag"];
@@ -395,6 +410,7 @@ public sealed class DarlingMcpWritePolicyTests
     [InlineData("/", "edit_server", "{\"server_name\":\"alpha\",\"changes_json\":\"{}\"}")]
     [InlineData("/", "add_servers", "{\"servers_json\":\"[]\"}")]
     [InlineData("/", "unmute_analysis_finding", "{\"story_path_hash\":\"abc\"}")]
+    [InlineData("/", "set_database_state_expected", "{\"server_name\":\"alpha\",\"database_name\":\"d\",\"expected_state\":\"ONLINE\"}")]
     [InlineData("/core", "create_mute_rule", "{}")]
     [InlineData("/core", "edit_server", "{\"server_name\":\"alpha\",\"changes_json\":\"{}\"}")]
     [InlineData("/", "create_query_tag", "{\"name\":\"Reports\"}")]
