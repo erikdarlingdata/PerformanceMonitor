@@ -84,7 +84,7 @@ public sealed class AgentSetupWebLiveTests
 
     private static async Task WithWebRoutesAsync(
         string managedRole, Func<NpgsqlDataSource, NpgsqlDataSource, Sender, CancellationToken, Task> body, IPasswordKeyRing? ring = null,
-        DarlingWebSeat? seat = null, bool signedIn = true, bool managedStore = false)
+        DarlingWebSeat? seat = null, bool signedIn = true, bool managedStore = false, ArmShape arm = ArmShape.None)
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the agent setup web live tests.");
@@ -111,6 +111,10 @@ public sealed class AgentSetupWebLiveTests
                 Pooling = false,
             }.ConnectionString;
             await using var webLogin = NpgsqlDataSource.Create(asSeat);
+
+            /* #6600: the managed-shaped store. The web logs in as the read-only role above; the arm signs in as a second role that holds the admin
+               role's grants (the managed `admin` login), or, for Refused, as a login the store rejects, so a request that opens it fails. */
+            using var adminArm = arm == ArmShape.None ? null : await BuildArmAsync(owner, scratch, roleName, arm, ct);
 
             var builder = WebApplication.CreateBuilder(new WebApplicationOptions
             {
@@ -144,7 +148,7 @@ public sealed class AgentSetupWebLiveTests
                 await next(context);
             });
             DarlingWebEndpoints.MapAll(app, webLogin, new CollectorRuntimeState(), new CapturingTestLogger(), passwordKeys: ring,
-                postgresConfig: managedStore ? new PostgresConfig { Managed = true } : null);
+                postgresConfig: managedStore ? new PostgresConfig { Managed = true } : null, adminArm: adminArm);
             await app.StartAsync(ct);
             using var server = app.GetTestServer();
 
@@ -204,13 +208,36 @@ public sealed class AgentSetupWebLiveTests
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (connection, token) =>
             {
                 NpgsqlConnection.ClearAllPools();
-                await using var drop = new NpgsqlCommand($"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName}", connection);
+                await using var drop = new NpgsqlCommand(
+                    $"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName}; " +
+                    $"DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{roleName}_arm') THEN DROP OWNED BY {roleName}_arm; DROP ROLE {roleName}_arm; END IF; END $$", connection);
                 await drop.ExecuteNonQueryAsync(token);
             });
         }
     }
 
     private const string Json = "application/json";
+
+    private enum ArmShape { None, Admin, Refused }
+
+    private static async Task<WebAdminArm> BuildArmAsync(NpgsqlDataSource owner, ScratchPostgres scratch, string webRole, ArmShape shape, CancellationToken ct)
+    {
+        var armRole = webRole + "_arm";
+        await ExecAsync(owner, $"CREATE ROLE {armRole} LOGIN NOSUPERUSER PASSWORD '{RolePassword}'", ct);
+        foreach (var statement in ViewerGrantReplay.StatementsFor(armRole, scratch.DatabaseName, "admin"))
+        {
+            await ExecAsync(owner, statement, ct);
+        }
+
+        var armConnection = new NpgsqlConnectionStringBuilder(scratch.ConnectionString)
+        {
+            Username = armRole,
+            Password = shape == ArmShape.Refused ? "not-the-password" : RolePassword,
+            SearchPath = "config,public",
+            Pooling = false,
+        }.ConnectionString;
+        return new WebAdminArm(() => armConnection);
+    }
 
     [Fact]
     public async Task AgentRoutes_CreateEditDelete_RoundTrip_KeepTheRoutesDestinations_AndDeleteClearsFallbacks()
@@ -467,10 +494,11 @@ public sealed class AgentSetupWebLiveTests
                 var answer = await Send(method, path, method == "DELETE" ? null : Json, json);
                 Assert.Equal(403, answer.Status);
                 var said = (string)answer.Body!["error"]!;
-                Assert.Equal(DarlingWebAgentSetup.RefusedMessage(managedStore), said);
+                Assert.Equal(DarlingWebAgentSetup.RefusedMessage(managedStore, adminWritesOff: managedStore), said);
+                Assert.Equal(managedStore, said.Contains("web.allowAdminWrites", StringComparison.Ordinal));
                 Assert.Contains("Viewer app", said, StringComparison.Ordinal);
                 Assert.Equal(!managedStore, said.Contains("webConnectionString", StringComparison.Ordinal));
-                Assert.Equal(!managedStore, said.Contains("admin", StringComparison.OrdinalIgnoreCase));
+                Assert.Equal(!managedStore, said.Contains("admin store login", StringComparison.OrdinalIgnoreCase));
             }
 
             Assert.Equal(managedStore, (bool)(await Send("GET", "/api/session", null)).Body!["managed_store"]!);
@@ -524,6 +552,67 @@ public sealed class AgentSetupWebLiveTests
             Assert.Equal(415, (await Send("PUT", "/api/environment-profiles", null, "{}")).Status);
             Assert.Equal("2", await ScalarAsync(owner, "SELECT count(*) FROM config.agent_environment_profiles", ct));
         });
+    }
+
+    /* #6600: the managed store's shape: the web reads as the viewer role and a signed-in admin's writes use the arm, a second small pool on the
+       admin login. The write succeeds, the journal names the person, and the access flags are true. */
+    [Fact]
+    public async Task OnTheManagedStore_ASignedInAdminSeat_WritesThroughTheArm_AndTheAccessFlagsAreTrue()
+    {
+        await WithWebRoutesAsync("viewer", async (owner, _, Send, ct) =>
+        {
+            var seeded = await SeedRouteAsync(owner, "performance", ct);
+
+            var access = await Send("GET", "/api/agent-setup/access", null);
+            Assert.True((bool)access.Body!["can_edit_routes"]!);
+            Assert.True((bool)access.Body["can_edit_profiles"]!);
+            Assert.True((bool)(await Send("GET", "/api/environment-profiles", null)).Body!["can_edit"]!);
+
+            Assert.Equal(200, (await Send("PUT", "/api/environment-profiles", Json, "{\"profile_text\":\"fleet: OLTP\"}")).Status);
+            Assert.Equal(200, (await Send("PUT", $"/api/notification-routes/{seeded}", Json, "{\"agent_level\":3}")).Status);
+            var created = await Send("POST", "/api/notification-routes", Json, "{\"metric_match\":\"blocking\",\"agent_level\":1}");
+            Assert.Equal(200, created.Status);
+            Assert.Equal(200, (await Send("DELETE", $"/api/notification-routes/{(int)created.Body!["route_id"]!}", null)).Status);
+
+            Assert.Equal("person:alice", await ScalarAsync(owner, "SELECT modified_by FROM config.agent_environment_profiles", ct));
+            Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'route_agent_changed' AND actor = 'person:alice' AND route_id = " + seeded, ct));
+        }, DarlingPasswordKey.FromPrivateKey(PasswordPrivateKey.Generate()), seat: new DarlingWebSeat("alice", true), managedStore: true, arm: ArmShape.Admin);
+    }
+
+    /* #6600: a seat that is not a signed-in admin never opens the arm. Its login here is refused by the store, so a request that opened it would
+       fail; instead the reads answer as they do today (the viewer role: list only) and the host's write gate answers the write. */
+    [Fact]
+    public async Task OnTheManagedStore_AReadOnlySeat_NeverOpensTheArm_AndAnswersAsToday()
+    {
+        await WithWebRoutesAsync("viewer", async (owner, _, Send, ct) =>
+        {
+            var seeded = await SeedRouteAsync(owner, "performance", ct);
+
+            var access = await Send("GET", "/api/agent-setup/access", null);
+            Assert.Equal(200, access.Status);
+            Assert.False((bool)access.Body!["can_edit_routes"]!);
+            Assert.False((bool)access.Body["can_edit_profiles"]!);
+
+            Assert.Equal(403, (await Send("PUT", $"/api/notification-routes/{seeded}", Json, "{\"agent_level\":3}")).Status);
+            Assert.Equal("", await ScalarAsync(owner, $"SELECT agent_level FROM config_notification_routes WHERE route_id = {seeded}", ct));
+        }, DarlingPasswordKey.FromPrivateKey(PasswordPrivateKey.Generate()), seat: new DarlingWebSeat("viewer-person", false), managedStore: true, arm: ArmShape.Refused);
+    }
+
+    /* #6600: with the switch off (no arm on a managed store) the answers are today's: list-only flags, a 403 on every write that now names the
+       switch, and nothing written. */
+    [Fact]
+    public async Task OnTheManagedStore_WithTheSwitchOff_TheSignedInAdminStillListsOnly()
+    {
+        await WithWebRoutesAsync("viewer", async (owner, _, Send, ct) =>
+        {
+            var access = await Send("GET", "/api/agent-setup/access", null);
+            Assert.False((bool)access.Body!["can_edit_routes"]!);
+
+            var refused = await Send("POST", "/api/notification-routes", Json, "{\"metric_match\":\"blocking\",\"agent_level\":1}");
+            Assert.Equal(403, refused.Status);
+            Assert.Contains("web.allowAdminWrites", (string)refused.Body!["error"]!, StringComparison.Ordinal);
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config_notification_routes", ct));
+        }, DarlingPasswordKey.FromPrivateKey(PasswordPrivateKey.Generate()), seat: new DarlingWebSeat("alice", true), managedStore: true);
     }
 
     /* The one person-name rule (#6265) reaches the web's profile and route writes: a signed-in name with a space and an apostrophe is a real
