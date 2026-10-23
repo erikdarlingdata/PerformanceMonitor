@@ -477,6 +477,10 @@ public partial class MainWindow : Window
         JobHistoryContent.Initialize(_dataService);
         JobHistoryContent.StatusChanged += OnServerTabStatusChanged;
 
+        /* Fleet Sweeps (#6390): a self-loading read-only control over the fleet sweep engine's record. */
+        FleetSweepsContent.Initialize(_dataService);
+        FleetSweepsContent.StatusChanged += OnServerTabStatusChanged;
+
         /* Availability Groups (#991): a self-loading fleet-wide control. Its TabItem ships Collapsed and is
            revealed only once a load finds AG rows, so an Always-On-less fleet never carries a dead tab. */
         AvailabilityGroupsContent.Initialize(_dataService);
@@ -1278,6 +1282,10 @@ public partial class MainWindow : Window
                 case TabItem tab when ReferenceEquals(tab, JobHistoryTabItem):
                     await JobHistoryContent.RefreshJobsAsync();
                     StampRefreshed("job history");
+                    break;
+                case TabItem tab when ReferenceEquals(tab, FleetSweepsTabItem):
+                    await FleetSweepsContent.RefreshAsync();
+                    StampRefreshed("fleet sweeps");
                     break;
                 case TabItem tab when ReferenceEquals(tab, AvailabilityGroupsTabItem):
                     await RefreshAvailabilityGroupsAsync();
