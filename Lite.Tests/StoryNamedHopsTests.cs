@@ -33,7 +33,7 @@ public class StoryNamedHopsTests
     {
         /* A key joins by a one-row edit in FactIdentity that says what it names; this pin is the reviewer's
            prompt to read that row. Exact set, exact prefix. */
-        Assert.Equal(["BLOCKING_CHAIN", "RUNNING_JOBS", "ANOMALY_OBJECT_GROWTH", "ANOMALY_OBJECT_CONTENTION"], FactIdentity.SqlServerKeys);
+        Assert.Equal(["BLOCKING_CHAIN", "RUNNING_JOBS", "ANOMALY_OBJECT_GROWTH", "ANOMALY_OBJECT_CONTENTION", "QUERY_SPILLS", "PARAMETER_SENSITIVITY"], FactIdentity.SqlServerKeys);
         Assert.Equal("BAD_ACTOR_", FactIdentity.SqlServerBadActorPrefix);
         Assert.All(FactIdentity.SqlServerKeys, k => Assert.True(FactIdentity.IsIdentityBearingKey(k)));
         Assert.True(FactIdentity.IsIdentityBearingKey("BAD_ACTOR_0x1234"));
@@ -56,6 +56,12 @@ public class StoryNamedHopsTests
             FactIdentity.Describe(new Fact { Key = "ANOMALY_OBJECT_GROWTH", ObjectName = "dbo.Orders", DatabaseName = "Sales" }));
         Assert.Equal("table `dbo.Orders`",
             FactIdentity.Describe(new Fact { Key = "ANOMALY_OBJECT_CONTENTION", ObjectName = "dbo.Orders" }));
+        /* #6640: the two query facts name the query they rank first, so a hop that consumes them still says which. */
+        Assert.Equal("most spilled query `Sales/0xAB`",
+            FactIdentity.Describe(new Fact { Key = "QUERY_SPILLS", ObjectName = "Sales/0xAB" }));
+        Assert.Equal("most sensitive plan `Sales/0xAB/0xCD`",
+            FactIdentity.Describe(new Fact { Key = "PARAMETER_SENSITIVITY", ObjectName = "Sales/0xAB/0xCD" }));
+        Assert.Null(FactIdentity.Describe(new Fact { Key = "QUERY_SPILLS" }));
         Assert.Equal("query hash `0xABCD` in `Sales`",
             FactIdentity.Describe(new Fact { Key = "BAD_ACTOR_0xABCD", DatabaseName = "Sales" }));
     }

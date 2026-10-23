@@ -7,6 +7,7 @@
  */
 
 using System.Collections.Generic;
+using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using PerformanceMonitor.Analysis;
@@ -48,6 +49,18 @@ public sealed class FactsNameQueriesAdviceTests
         };
         var advice = FactAdvice.Compose("PARAMETER_SENSITIVITY", new Dictionary<string, Fact> { ["PARAMETER_SENSITIVITY"] = fact })!;
         Assert.Contains("Db/0xQB/0xPB (200×), Db/0xQA/0xPA (50×).", advice.Investigation);
+    }
+
+    [Fact]
+    public void FactPayload_AttachSubjectThenAttach_KeepsRankedLast_AndTheSubjectOnTheWire()
+    {
+        /* The tools' wiring: Attach(AttachSubject(card, f), f.Ranked). A swapped nesting would drop one block. */
+        var fact = Spills();
+        var wired = FactRanked.Attach(FactRanked.AttachSubject(new { key = "QUERY_SPILLS", value = 1100 }, fact, McpHelpers.JsonOptions), fact.Ranked, McpHelpers.JsonOptions);
+        var json = (JsonObject)wired;
+        Assert.Equal("Db/0xSB", (string?)json["object_name"]);
+        Assert.Equal(2, json["ranked"]!.AsArray().Count);
+        Assert.Equal("ranked", json.Last().Key);
     }
 
     [Fact]

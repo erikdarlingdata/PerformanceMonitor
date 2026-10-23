@@ -13,10 +13,6 @@ namespace PerformanceMonitorLite.Analysis;
 
 public partial class DuckDbFactCollector
 {
-    /// <summary>
-    /// Collects query-level aggregate facts from query_stats.
-    /// Focuses on spills (memory grant misestimates) and high-parallelism queries.
-    /// </summary>
     /// <summary>#6640: the queries behind QUERY_SPILLS, most spilled pages first. Same window, filter and (database, query_hash)
     /// identity as the aggregate, so the names are the queries its spilling_query_count counts. Run only when spills exist.</summary>
     private static readonly string QuerySpillsRankedSql = @"
@@ -34,6 +30,10 @@ GROUP BY v.database_name, v.query_hash
 ORDER BY spills DESC, v.database_name, v.query_hash
 LIMIT " + FactRanked.MaxObjects + ";";
 
+    /// <summary>
+    /// Collects query-level aggregate facts from query_stats.
+    /// Focuses on spills (memory grant misestimates) and high-parallelism queries.
+    /// </summary>
     private async Task CollectQueryStatsFactsAsync(AnalysisContext context, List<Fact> facts)
     {
         try
@@ -267,7 +267,7 @@ AND   max_worker_time >= 250000
 AND   execution_count >= 20
 AND   creation_time_utc <= $4
 AND   max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) >= 10
-ORDER BY worker_ratio DESC";
+ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });

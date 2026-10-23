@@ -65,7 +65,7 @@ AND   v.delta_execution_count > 0";
     /// <summary>#6640: the queries behind QUERY_SPILLS, most spilled pages first. Same window, same filter and same
     /// (database, query_hash) identity as the aggregate above, so the names are exactly the queries its spilling_query_count counts.
     /// Run only when the aggregate found spills, and capped at the ranked-list cap.</summary>
-    public static readonly string QuerySpillsRankedSql = @"
+    private static readonly string QuerySpillsRankedSql = @"
 SELECT
     v.database_name,
     v.query_hash,
@@ -250,7 +250,7 @@ AND   max_worker_time >= 250000
 AND   execution_count >= 20
 AND   creation_time - make_interval(mins => svr.offset_minutes) <= $2 + interval '1 hour'
 AND   max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) >= 10
-ORDER BY worker_ratio DESC";
+ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
 
     /// <summary>
     /// Detects parameter-sensitive cached plans: a single query_plan_hash whose

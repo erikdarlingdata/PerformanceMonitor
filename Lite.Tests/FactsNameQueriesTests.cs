@@ -85,6 +85,26 @@ public sealed class FactsNameQueriesTests : IClassFixture<SharedDuckDbFixture>, 
             new[] { $"{Db}/0xSB", $"{Db}/0xSA", $"{Db}/0xSC" },
             fact.Ranked.Select(o => o.ObjectName).ToArray());
         Assert.Equal(new[] { 500.0, 300.0, 200.0 }, fact.Ranked.Select(o => o.Value).ToArray());
+        /* #6640: the one stated exception to the Ranked invariant. Fact.Value is the window total, entry [0] is the worst query's own pages. */
+        Assert.Equal(fact.Metadata["total_spills"], fact.Value);
+        Assert.True(fact.Ranked[0].Value < fact.Value);
+    }
+
+    [Fact]
+    public async Task ParameterSensitivity_TiedRatios_AreNamedInKeyOrder()
+    {
+        /* Four plans at the same ratio, seeded out of key order: the cap keeps three, and which three (and which is first) must not depend on row order. */
+        await SeedPlanAsync("0xQD", "0xPD", 40, 0);
+        await SeedPlanAsync("0xQB", "0xPB", 40, 0);
+        await SeedPlanAsync("0xQC", "0xPC", 40, 0);
+        await SeedPlanAsync("0xQA", "0xPA", 40, 0);
+
+        var fact = Assert.Single(await CollectAsync(), f => f.Key == "PARAMETER_SENSITIVITY");
+
+        Assert.Equal(
+            new[] { $"{Db}/0xQA/0xPA", $"{Db}/0xQB/0xPB", $"{Db}/0xQC/0xPC" },
+            fact.Ranked.Select(o => o.ObjectName).ToArray());
+        Assert.Equal($"{Db}/0xQA/0xPA", fact.ObjectName);
     }
 
     private Task<System.Collections.Generic.List<Fact>> CollectAsync() =>
