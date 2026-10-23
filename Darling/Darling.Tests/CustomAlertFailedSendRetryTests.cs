@@ -92,7 +92,7 @@ public sealed class CustomAlertFailedSendRetryTests
 
             Evaluator = new CustomAlertEvaluator(
                 new CustomAlertRuleStore(_dataSource, StorageCommandDeadlines.McpReadSeconds), new CustomAlertStateStore(_dataSource, StorageCommandDeadlines.McpReadSeconds), _dataSource, Deliverer,
-                isAlertMuted: _ => Muted, alertsEnabled: static () => true, new PgAlertHistoryStore(_dataSource),
+                isAlertMuted: _ => Muted, alertsEnabled: static () => true, new PgAlertHistoryStore(_dataSource, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds),
                 defaultIntervalSeconds: 0, cacheTtl: TimeSpan.Zero, Log);
         }
 

@@ -31,6 +31,8 @@
             <Button Content="Refresh" Click="RefreshButton_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
             <TextBlock x:Name="LastRefreshedIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center"
                        FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}"/>
+            <TextBlock x:Name="CadenceIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center"
+                       FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}"/>
         </WrapPanel>
 
         <!-- Timeline: one row per sweep. Selecting a row loads that sweep below. -->

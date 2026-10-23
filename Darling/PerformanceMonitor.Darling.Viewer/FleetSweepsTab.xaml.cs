@@ -71,6 +71,18 @@ public partial class FleetSweepsTab : UserControl
             var node = await _dataService.GetFleetSweepTimelineAsync(startUtc, endUtc);
             if (_loads.Superseded(nameof(LoadTimelineAsync), gen)) return;
 
+            /* The cadence line is display only, from the same alert settings the web page reads; a failed read leaves it blank and never costs the timeline. */
+            try
+            {
+                CadenceIndicator.Text = FleetSweepsRows.CadenceText(await _dataService.GetAlertSettingsAsync());
+            }
+            catch (Exception)
+            {
+                CadenceIndicator.Text = "";
+            }
+
+            if (_loads.Superseded(nameof(LoadTimelineAsync), gen)) return;
+
             var rows = FleetSweepsRows.Runs(node);
             _binding = true;
             try
