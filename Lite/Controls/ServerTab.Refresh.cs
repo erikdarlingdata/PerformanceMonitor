@@ -1110,7 +1110,9 @@ public partial class ServerTab : UserControl
             _blockingSlicerData = data;
             _blockingSlicerMetric = "Events";
             var (slicerStart, slicerEnd) = PerformanceMonitor.Ui.TimeWindows.ChartAxis(hoursBack, fromDate, toDate, DateTime.UtcNow);
-            if (data.Count > 0)
+            if (data.Count == 0)
+                BlockingSlicer.ShowEmpty("No blocked process reports in the selected time window.");
+            else
                 BlockingSlicer.LoadData(data, "Blocking Events", slicerStart, slicerEnd);
         }
         catch (Exception ex)
@@ -1132,7 +1134,9 @@ public partial class ServerTab : UserControl
             var data = await Task.Run(() => _dataService.GetDeadlockSlicerDataAsync(_serverId, hoursBack, fromDate, toDate));
             _deadlockSlicerData = data;
             var (slicerStart, slicerEnd) = PerformanceMonitor.Ui.TimeWindows.ChartAxis(hoursBack, fromDate, toDate, DateTime.UtcNow);
-            if (data.Count > 0)
+            if (data.Count == 0)
+                DeadlockSlicer.ShowEmpty("No deadlocks in the selected time window.");
+            else
                 DeadlockSlicer.LoadData(data, "Deadlocks", slicerStart, slicerEnd);
         }
         catch (Exception ex)

@@ -1429,6 +1429,18 @@ public sealed class McpHealthTools
                 }
 
                 var everCollected = await dataService.HasAnyWaitingTaskSampleAsync(resolved.ServerId);
+
+                /* #6453: no row EVER stored is not "unavailable" when the collector's own newest run completed clean: the
+                   server was sampled and had nothing waiting, which collection health calls HEALTHY. Darling's twin. */
+                var healthyEmpty = everCollected
+                    ? null
+                    : await McpRuntimePrecondition.HealthyEmptyMessageAsync(
+                        dataService, resolved.ServerId, resolved.DisplayName, "waiting_tasks", "waiting-task samples");
+                if (healthyEmpty != null)
+                {
+                    return McpHelpers.Status("empty", healthyEmpty);
+                }
+
                 return everCollected
                     ? McpHelpers.Status(
                         "empty",

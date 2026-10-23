@@ -58,6 +58,97 @@ public class DarlingInstallerConfigStepTests
         }
     }
 
+    /// <summary>
+    /// #6475: a first install on a darling.json that is an unedited copy of the shipped sample is detected, whatever the copy's line
+    /// endings or trailing blanks; any real edit, the installer's own minimal file, a missing file and a missing sample are not.
+    /// Run against the real shipped sample.
+    /// </summary>
+    [Fact]
+    public void TestDarlingConfigIsUnchangedSample_CatchesACopy_AndNothingElse()
+    {
+        var sample = PathTo("Darling", "PerformanceMonitor.Darling.Service", "darling.sample.json");
+        var sampleText = File.ReadAllText(sample);
+        var folder = Directory.CreateTempSubdirectory("darling-installer-sample-").FullName;
+        try
+        {
+            string Write(string name, string text)
+            {
+                var path = Path.Combine(folder, name);
+                File.WriteAllText(path, text);
+                return path;
+            }
+
+            var lf = sampleText.ReplaceLineEndings("\n");
+            var cases = new (string Config, bool Expected)[]
+            {
+                (Write("exact.json", sampleText), true),
+                (Write("lf.json", lf), true),
+                (Write("crlf.json", lf.Replace("\n", "\r\n")), true),
+                (Write("trailing.json", lf.Replace("\n", "   \n") + "\n\n"), true),
+                (Write("edited.json", lf.Replace("\"name\": \"SQL2022\"", "\"name\": \"PROD-SQL-01\"")), false),
+                (Write("servers-removed.json", lf.Replace("\"servers\": [", "\"servers\": [] , \"unused\": [")), false),
+                (Write("minimal.json", "{ \"postgres\": { \"managed\": true, \"port\": 5641 }, \"servers\": [] }"), false),
+                (Path.Combine(folder, "missing.json"), false),
+            };
+            Assert.Contains("\"name\": \"SQL2022\"", lf, StringComparison.Ordinal);
+
+            var probe = ExtractFunction(InstallScript, "Test-DarlingConfigIsUnchangedSample") + "\n";
+            foreach (var (config, _) in cases)
+            {
+                probe += $"if (Test-DarlingConfigIsUnchangedSample '{config.Replace("'", "''")}' '{sample.Replace("'", "''")}') {{ 'True' }} else {{ 'False' }}\n";
+            }
+
+            probe += $"if (Test-DarlingConfigIsUnchangedSample '{cases[0].Config.Replace("'", "''")}' '{Path.Combine(folder, "no-sample.json").Replace("'", "''")}') {{ 'True' }} else {{ 'False' }}\n";
+
+            var answers = RunWindowsPowerShell(probe);
+            Assert.Equal(cases.Length + 1, answers.Count);
+            for (var i = 0; i < cases.Length; i++)
+            {
+                Assert.True(
+                    string.Equals(cases[i].Expected.ToString(), answers[i], StringComparison.Ordinal),
+                    $"{Path.GetFileName(cases[i].Config)}: expected {cases[i].Expected}, got {answers[i]}");
+            }
+
+            Assert.Equal("False", answers[^1]);
+        }
+        finally
+        {
+            Directory.Delete(folder, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// #6475: the shortcuts go to the all-users Desktop and Start Menu, never the running account's own, and a folder that does not
+    /// resolve is left out. The installer and the uninstaller both use the function, so both are run: the uninstaller also names the
+    /// per-user folders an older install used.
+    /// </summary>
+    [Fact]
+    public void GetDarlingShortcutPaths_UsesTheNamedFolders_AndSkipsOneThatDoesNotResolve()
+    {
+        const string StandIn = "{ param($name) switch ($name) { 'CommonDesktopDirectory' { 'C:\\Users\\Public\\Desktop' } 'CommonPrograms' { 'C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs' } 'Desktop' { 'C:\\Users\\the-admin\\Desktop' } 'Programs' { 'C:\\Users\\the-admin\\Start Menu\\Programs' } default { '' } } }";
+        foreach (var script in new[] { "install-darling.ps1", "uninstall-darling.ps1" })
+        {
+            var source = ReadRepoFile(Path.Combine("Darling", "tools", script));
+            var answers = RunWindowsPowerShell(
+                ExtractFunction(source, "Get-DarlingShortcutPaths") + "\n"
+                + $"Get-DarlingShortcutPaths @('CommonDesktopDirectory', 'CommonPrograms', 'Desktop', 'Programs', 'Nowhere') {StandIn}\n"
+                + $"'--'\n"
+                + $"Get-DarlingShortcutPaths @('Nowhere') {StandIn}\n"
+                + "'end'\n");
+
+            Assert.Equal(
+                [
+                    @"C:\Users\Public\Desktop\Darling Viewer.lnk",
+                    @"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Darling Viewer.lnk",
+                    @"C:\Users\the-admin\Desktop\Darling Viewer.lnk",
+                    @"C:\Users\the-admin\Start Menu\Programs\Darling Viewer.lnk",
+                    "--",
+                    "end",
+                ],
+                answers);
+        }
+    }
+
     /// <summary>Runs a script under Windows PowerShell 5.1 and returns its non-blank output lines.</summary>
     internal static List<string> RunWindowsPowerShell(string script)
     {
