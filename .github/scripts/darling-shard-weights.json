@@ -1043,7 +1043,6 @@
     "Darling.Tests.McpReadCommandTimeoutTests": 0.42,
     "Darling.Tests.McpReadToolBudgetLiveTests": 2.2,
     "Darling.Tests.McpSchemaCompatServiceLeakRaceTests": 0.49,
-    "Darling.Tests.McpServiceParameterDiSeatCensusTests": 0.03,
     "Darling.Tests.McpToolAudit5633L3LivePostgresTests": 0.25,
     "Darling.Tests.McpToolAudit5633L3Tests": 0,
     "Darling.Tests.McpToolAudit5633LiveTests": 0.27,
