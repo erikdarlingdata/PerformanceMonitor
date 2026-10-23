@@ -966,9 +966,11 @@ public sealed partial class DarlingMcpAlertTools
     /// Viewer's Settings window or the web dashboard's admin notification routes page. Null for any other route,
     /// including agent_level 0: that is the route's explicit Off (null inherits, 0 is off, 1 investigates), so it opens
     /// no investigation. It can be turned on over MCP; turning it off or deleting it is <see cref="OffRouteRefusal"/>'s (#6281).
+    /// <para>#6542 part 2: a named operator token (<paramref name="operatorTokenName"/>) passes, so update_notification_route can set the agent
+    /// fields of an agent route. The store functions still refuse its match, scope and destinations, and level 3 stays person-only.</para>
     /// </summary>
-    internal static string? AgentRouteRefusal(PgNotificationRouteStore.RouteSummary route, string tool) =>
-        route.AgentLevel is null or < 1
+    internal static string? AgentRouteRefusal(PgNotificationRouteStore.RouteSummary route, string tool, string? operatorTokenName = null) =>
+        route.AgentLevel is null or < 1 || operatorTokenName is not null
             ? null
             : Outcome("refused",
                 $"Route {route.RouteId} is an agent route (agent_level {route.AgentLevel}): {tool} does not change it over MCP. " +

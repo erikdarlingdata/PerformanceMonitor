@@ -1532,6 +1532,116 @@ BEGIN
 END
 $fn$;
 REVOKE ALL ON FUNCTION config.update_notification_route(integer, text[], text, boolean, integer, integer, boolean, integer) FROM PUBLIC;
+-- #6542: a named operator token sets a route's agent level, its four limits and its fallback over MCP through this function, and
+-- the change is journaled as route_agent_changed under the token's name (operator:<name>), in the same transaction. Level 3 (Act on
+-- servers) is person-only both ways: it is never set here, and a route at level 3 is never changed here, lowering included.
+CREATE OR REPLACE FUNCTION config.set_notification_route_agent(
+   p_route_id integer,
+   p_actor text,
+   p_columns text[],
+   p_agent_level integer,
+   p_agent_max_per_hour integer,
+   p_agent_max_per_day integer,
+   p_agent_lease_minutes integer,
+   p_agent_expiry_minutes integer,
+   p_fallback_route_id integer,
+   p_created boolean)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+   v_row config.config_notification_routes%ROWTYPE;
+   v_level integer;
+   v_hour integer;
+   v_day integer;
+   v_lease integer;
+   v_expiry integer;
+   v_fallback integer;
+   v_changed text[] := ARRAY[]::text[];
+   v_before jsonb;
+   v_after jsonb;
+BEGIN
+   IF p_actor IS NULL OR p_actor !~ '^operator:[A-Za-z0-9._:-]{1,64}$' THEN
+      RAISE EXCEPTION 'The actor is operator:<the operator token''s name>.' USING ERRCODE = 'DL400';
+   END IF;
+   IF p_columns IS NULL OR cardinality(p_columns) = 0
+      OR EXISTS (SELECT 1 FROM unnest(p_columns) AS c(name)
+                 WHERE c.name IS NULL OR c.name NOT IN ('agent_level', 'agent_max_per_hour', 'agent_max_per_day', 'agent_lease_minutes', 'agent_expiry_minutes', 'fallback_route_id')) THEN
+      RAISE EXCEPTION 'The columns to change are agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes and fallback_route_id.' USING ERRCODE = 'DL400';
+   END IF;
+   SELECT * INTO v_row FROM config.config_notification_routes WHERE route_id = p_route_id FOR UPDATE;
+   IF NOT FOUND THEN
+      RAISE EXCEPTION 'No notification route has that route_id.' USING ERRCODE = 'DL404';
+   END IF;
+   IF v_row.agent_level = 3 THEN
+      RAISE EXCEPTION 'That route is at agent level 3 (Act on servers): it is changed by a person in the Viewer, not over MCP, lowering included.' USING ERRCODE = 'DL403';
+   END IF;
+   v_level := CASE WHEN 'agent_level' = ANY (p_columns) THEN p_agent_level ELSE v_row.agent_level END;
+   v_hour := CASE WHEN 'agent_max_per_hour' = ANY (p_columns) THEN p_agent_max_per_hour ELSE v_row.agent_max_per_hour END;
+   v_day := CASE WHEN 'agent_max_per_day' = ANY (p_columns) THEN p_agent_max_per_day ELSE v_row.agent_max_per_day END;
+   v_lease := CASE WHEN 'agent_lease_minutes' = ANY (p_columns) THEN p_agent_lease_minutes ELSE v_row.agent_lease_minutes END;
+   v_expiry := CASE WHEN 'agent_expiry_minutes' = ANY (p_columns) THEN p_agent_expiry_minutes ELSE v_row.agent_expiry_minutes END;
+   v_fallback := CASE WHEN 'fallback_route_id' = ANY (p_columns) THEN p_fallback_route_id ELSE v_row.fallback_route_id END;
+   IF v_level = 3 THEN
+      RAISE EXCEPTION 'Agent level 3 (Act on servers) is set by a person in the Viewer, not over MCP. Over MCP a route takes Off (0), Investigate (1) or Act (2).' USING ERRCODE = 'DL403';
+   END IF;
+   IF v_level IS NOT NULL AND v_level NOT IN (0, 1, 2) THEN
+      RAISE EXCEPTION 'The agent level is Off (0), Investigate (1) or Act (2).' USING ERRCODE = 'DL400';
+   END IF;
+   IF v_hour IS NULL OR v_hour NOT BETWEEN 1 AND 60 THEN
+      RAISE EXCEPTION 'Requests per hour must be between 1 and 60.' USING ERRCODE = 'DL400';
+   END IF;
+   IF v_day IS NULL OR v_day NOT BETWEEN 1 AND 500 THEN
+      RAISE EXCEPTION 'Requests per day must be between 1 and 500.' USING ERRCODE = 'DL400';
+   END IF;
+   IF v_lease IS NULL OR v_lease NOT BETWEEN 5 AND 120 THEN
+      RAISE EXCEPTION 'Lease minutes must be between 5 and 120.' USING ERRCODE = 'DL400';
+   END IF;
+   IF v_expiry IS NULL OR v_expiry NOT BETWEEN 15 AND 1440 THEN
+      RAISE EXCEPTION 'Expiry minutes must be between 15 and 1440.' USING ERRCODE = 'DL400';
+   END IF;
+   IF v_fallback IS NOT NULL AND v_fallback = p_route_id THEN
+      RAISE EXCEPTION 'A route cannot be its own fallback route.' USING ERRCODE = 'DL400';
+   END IF;
+   IF v_fallback IS NOT NULL AND v_fallback IS DISTINCT FROM v_row.fallback_route_id
+      AND NOT EXISTS (SELECT 1 FROM config.config_notification_routes WHERE route_id = v_fallback) THEN
+      RAISE EXCEPTION 'The fallback route does not exist.' USING ERRCODE = 'DL404';
+   END IF;
+   IF v_level IS DISTINCT FROM v_row.agent_level THEN v_changed := v_changed || 'agent_level'; END IF;
+   IF v_hour IS DISTINCT FROM v_row.agent_max_per_hour THEN v_changed := v_changed || 'agent_max_per_hour'; END IF;
+   IF v_day IS DISTINCT FROM v_row.agent_max_per_day THEN v_changed := v_changed || 'agent_max_per_day'; END IF;
+   IF v_lease IS DISTINCT FROM v_row.agent_lease_minutes THEN v_changed := v_changed || 'agent_lease_minutes'; END IF;
+   IF v_expiry IS DISTINCT FROM v_row.agent_expiry_minutes THEN v_changed := v_changed || 'agent_expiry_minutes'; END IF;
+   UPDATE config.config_notification_routes
+      SET agent_level = v_level::smallint,
+          agent_max_per_hour = v_hour,
+          agent_max_per_day = v_day,
+          agent_lease_minutes = v_lease,
+          agent_expiry_minutes = v_expiry,
+          fallback_route_id = v_fallback,
+          modified_at = (now() AT TIME ZONE 'UTC')
+    WHERE route_id = p_route_id;
+   -- The journal row the Viewer's save writes (NotificationRouteWriter.AgentChange): a new route journals only when it sets a level,
+   -- an edit when a level or a limit changed. A fallback alone changes no agent coverage, so it is not journaled, as in the Viewer.
+   IF (COALESCE(p_created, false) AND v_level IS NOT NULL) OR (NOT COALESCE(p_created, false) AND cardinality(v_changed) > 0) THEN
+      v_before := CASE WHEN COALESCE(p_created, false) THEN NULL ELSE jsonb_build_object(
+         'metric_match', btrim(v_row.metric_match), 'scope_server_id', v_row.scope_server_id, 'scope_tag_id', v_row.scope_tag_id,
+         'agent_level', v_row.agent_level, 'agent_max_per_hour', v_row.agent_max_per_hour, 'agent_max_per_day', v_row.agent_max_per_day,
+         'agent_lease_minutes', v_row.agent_lease_minutes, 'agent_expiry_minutes', v_row.agent_expiry_minutes, 'enabled', v_row.enabled) END;
+      v_after := jsonb_build_object(
+         'metric_match', btrim(v_row.metric_match), 'scope_server_id', v_row.scope_server_id, 'scope_tag_id', v_row.scope_tag_id,
+         'agent_level', v_level, 'agent_max_per_hour', v_hour, 'agent_max_per_day', v_day,
+         'agent_lease_minutes', v_lease, 'agent_expiry_minutes', v_expiry, 'enabled', v_row.enabled);
+      INSERT INTO config.investigation_journal (event_time, request_id, route_id, server_id, event, actor, reason, detail)
+      VALUES (now(), NULL, p_route_id, v_row.scope_server_id, 'route_agent_changed', p_actor,
+              CASE WHEN COALESCE(p_created, false) THEN 'created route' ELSE 'changed ' || array_to_string(v_changed, ', ') END,
+              jsonb_build_object('before', v_before, 'after', v_after));
+   END IF;
+END
+$fn$;
+REVOKE ALL ON FUNCTION config.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean) FROM PUBLIC;
 -- The return type changed (a previous value is now only a flag for whether one was saved), which CREATE OR REPLACE cannot do on its own.
 DROP FUNCTION IF EXISTS config.set_notification_route_destinations(integer, text[], text, text, text, text, text);
 CREATE OR REPLACE FUNCTION config.set_notification_route_destinations(
@@ -1623,6 +1733,7 @@ REVOKE ALL ON FUNCTION config.set_notification_route_destinations(integer, text[
 GRANT EXECUTE ON FUNCTION config.create_notification_route(text, boolean, integer, integer, boolean, integer) TO mcp;
 GRANT EXECUTE ON FUNCTION config.update_notification_route(integer, text[], text, boolean, integer, integer, boolean, integer) TO mcp;
 GRANT EXECUTE ON FUNCTION config.set_notification_route_destinations(integer, text[], text, text, text, text, text) TO mcp;
+GRANT EXECUTE ON FUNCTION config.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean) TO mcp;
 COMMIT;
 
 -- #6230: the MCP incident tools queue analyze_now, purge_now, test_connect, pause and resume through this function, the only way the

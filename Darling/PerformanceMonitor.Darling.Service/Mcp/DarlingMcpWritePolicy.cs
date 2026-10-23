@@ -237,6 +237,10 @@ internal static class DarlingMcpWritePolicy
         /// operator token has a name too, but it is not an agent, so no agent_id is held to it.</summary>
         internal string? AgentTokenName => Investigations ? TokenName : null;
 
+        /// <summary>The name of a named operator token (#6542 part 2), else null: the legacy single token and an agent token have none.
+        /// Only this name may set a route's agent fields over MCP, and the route_agent_changed journal row records it as operator:&lt;name&gt;.</summary>
+        internal string? OperatorTokenName => Writes && !Investigations ? TokenName : null;
+
         /// <summary>True when a tool named <paramref name="toolName"/> is offered under this policy.</summary>
         internal bool Offers(string toolName) => Offers(toolName, AgentActionTools);
 
