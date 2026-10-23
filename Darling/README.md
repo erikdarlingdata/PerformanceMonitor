@@ -248,6 +248,29 @@ Use the same `env:`/`file:` secret references (systemd `LoadCredential=` pairs n
 
 **Add the people who run the Viewer or the CLI to the operator group.** The installer creates the local group `PerformanceMonitor Darling Operators`, empty, and restricts `darling.json` to SYSTEM, Administrators, the service account and that group. `upgrade-darling.ps1` creates the group too when an older install does not have it yet. The service applies the same restriction at its next start. At the end, `install-darling.ps1` asks whether to add the account you are signed in to (default No). `upgrade-darling.ps1` adds no one. Until a person is added, they cannot run the Viewer or the CLI without elevation. See [Security & Least-Privilege Roles](#security--least-privilege-roles) for who to add, why, and the scripted options.
 
+#### Installing with the MSI
+
+A release that includes `PerformanceMonitorDarling-<version>.msi` lets you install without extracting the zip. The MSI carries the same service, viewer and scripts as the zip. It installs the `PerformanceMonitor Darling` Windows service and adds a Start menu and desktop shortcut for the viewer.
+
+To install, double-click the file and follow the wizard, or run this from an elevated prompt:
+
+```
+msiexec /i PerformanceMonitorDarling-<version>.msi /qn OPERATORACCOUNT=CONTOSO\jdoe WEBDASHBOARD=1
+```
+
+These properties are available:
+
+| Property | Effect |
+|---|---|
+| `INSTALLFOLDER` | The install folder. The default is `C:\Program Files\PerformanceMonitorDarling`. |
+| `OPERATORACCOUNT` | A `DOMAIN\user` account to add to the `PerformanceMonitor Darling Operators` group. |
+| `WEBDASHBOARD` | If you set `1`, the `darling.json` that setup writes has `web.enabled` on. If `darling.json` already exists, setup ignores this property. |
+| `PURGEDATA` | If you set `1` on uninstall, the uninstall also deletes the store. |
+
+The MSI and the scripts must not manage the same install. If `install-darling.ps1` already installed the service on this machine, the MSI stops and changes nothing. To switch, run `uninstall-darling.ps1` from the script install's folder, which keeps `darling.json` and the store. Then run the MSI again with the same `INSTALLFOLDER`. To stay on the scripts, keep using `upgrade-darling.ps1`. In the other direction, `install-darling.ps1` and `upgrade-darling.ps1` refuse to run over an MSI install.
+
+A newer MSI upgrades an MSI install in place. It reinstalls into the folder of the first install, and it keeps `darling.json` and the store. Uninstalling from Settings, Apps keeps `darling.json` and the store too, unless you set `PURGEDATA=1`.
+
 #### Upgrading an existing install
 
 `install-darling.ps1` registers a service; it does not lay a new build over an old one. That step — stop, back up, copy, start, verify — is `upgrade-darling.ps1`, shipped in the same zip.

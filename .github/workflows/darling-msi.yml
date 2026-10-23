@@ -28,6 +28,7 @@ on:
       - 'Darling/tools/*.ps1'
       - '.github/workflows/darling-msi.yml'
       - '.github/scripts/darling-msi.ps1'
+      - '.github/scripts/assert-msi-signatures.ps1'
   workflow_call:
   workflow_dispatch:
 
@@ -104,6 +105,106 @@ jobs:
           # Out of the output folder, so the next build cannot be mistaken for it.
           New-Item -ItemType Directory -Force -Path build/msi-current | Out-Null
           Move-Item Darling/msi/bin/Release/*.msi build/msi-current
+
+      # #6480: proves the release job's MSI signature backstop (.github/scripts/assert-msi-signatures.ps1, the same
+      # script build.yml runs on releases\) on a runner, against the package built above. Cheap, so one leg runs it.
+      #   no .msi in the folder                                                      passes (the MSI ships only when
+      #                                                                              DARLING_MSI_SIGNING is 'true')
+      #   the unsigned package built above                                           FAILS
+      #   signed by a trusted certificate that is not SignPath Foundation's          FAILS on the signer, not the chain
+      #   signed by a trusted certificate whose subject names O=SignPath Foundation  passes
+      # The two certificates are throwaway self-signed ones, trusted in the runner's machine Root store for the length
+      # of the step and removed in the finally block. The runner is discarded afterwards either way.
+      - name: Prove the MSI signature backstop
+        if: matrix.leg == 'M1'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $backstop = '${{ github.workspace }}\.github\scripts\assert-msi-signatures.ps1'
+          $built = (Get-ChildItem '${{ github.workspace }}\build\msi-current' -Filter *.msi | Select-Object -First 1).FullName
+          $root = Join-Path ([IO.Path]::GetTempPath()) ('msi-backstop-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $root | Out-Null
+
+          # Runs the backstop in its own process, as the release job does, and returns its exit code and text.
+          function Invoke-Backstop([string]$Dir) {
+            $text = & pwsh -NoProfile -File $backstop -ReleasesDir $Dir 2>&1 | ForEach-Object { "$_" }
+            $code = $LASTEXITCODE
+            $text | ForEach-Object { Write-Host "    $_" }
+            [pscustomobject]@{ Code = $code; Text = ($text -join "`n") }
+          }
+          function New-ReleasesDir([string]$Name) {
+            $dir = Join-Path $root $Name
+            New-Item -ItemType Directory -Path $dir | Out-Null
+            $dir
+          }
+          function New-TrustedSigner([string]$Subject) {
+            $rsa = [Security.Cryptography.RSA]::Create(2048)
+            $req = [Security.Cryptography.X509Certificates.CertificateRequest]::new($Subject, $rsa, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+            $eku = [Security.Cryptography.OidCollection]::new()
+            [void]$eku.Add([Security.Cryptography.Oid]::new('1.3.6.1.5.5.7.3.3'))
+            $req.CertificateExtensions.Add([Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]::new($eku, $true))
+            $req.CertificateExtensions.Add([Security.Cryptography.X509Certificates.X509KeyUsageExtension]::new([Security.Cryptography.X509Certificates.X509KeyUsageFlags]::DigitalSignature, $true))
+            $req.CertificateExtensions.Add([Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]::new($false, $false, 0, $true))
+            $made = $req.CreateSelfSigned([DateTimeOffset]::UtcNow.AddDays(-1), [DateTimeOffset]::UtcNow.AddDays(2))
+            # The key has to be persisted for Set-AuthenticodeSignature: round-trip through a pfx.
+            $pfx = $made.Export([Security.Cryptography.X509Certificates.X509ContentType]::Pfx, 'backstop')
+            $flags = [Security.Cryptography.X509Certificates.X509KeyStorageFlags]::PersistKeySet -bor [Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable
+            $signer = [Security.Cryptography.X509Certificates.X509Certificate2]::new($pfx, 'backstop', $flags)
+            $store = [Security.Cryptography.X509Certificates.X509Store]::new('Root', 'LocalMachine')
+            $store.Open('ReadWrite')
+            $store.Add([Security.Cryptography.X509Certificates.X509Certificate2]::new($made.Export([Security.Cryptography.X509Certificates.X509ContentType]::Cert)))
+            $store.Close()
+            $signer
+          }
+
+          $trusted = @()
+          $failures = @()
+          try {
+            Write-Host "Case 1: no .msi in the folder (a zip beside it is not looked at)"
+            $dir = New-ReleasesDir 'none'
+            Set-Content -LiteralPath (Join-Path $dir 'PerformanceMonitorDarling-1.0.0.zip') -Value 'x'
+            $r = Invoke-Backstop $dir
+            if ($r.Code -ne 0) { $failures += "case 1 expected exit 0, got $($r.Code)" }
+
+            Write-Host "Case 2: the unsigned package built above"
+            $dir = New-ReleasesDir 'unsigned'
+            Copy-Item $built $dir
+            $r = Invoke-Backstop $dir
+            if ($r.Code -ne 1) { $failures += "case 2 expected exit 1, got $($r.Code)" }
+            if ($r.Text -notmatch 'FAIL: the signature is not Valid') { $failures += "case 2 did not fail on the signature status" }
+
+            Write-Host "Case 3: signed by a trusted certificate that is not SignPath Foundation's"
+            $other = New-TrustedSigner 'CN=Some Other Publisher, O=Some Other Publisher'
+            $trusted += $other
+            $dir = New-ReleasesDir 'other'
+            Copy-Item $built $dir
+            $sig = Set-AuthenticodeSignature -FilePath (Join-Path $dir (Split-Path $built -Leaf)) -Certificate $other
+            Write-Host "    signing: $($sig.Status) $($sig.StatusMessage)"
+            $r = Invoke-Backstop $dir
+            if ($r.Code -ne 1) { $failures += "case 3 expected exit 1, got $($r.Code)" }
+            if ($r.Text -notmatch 'FAIL: not signed by the SignPath Foundation certificate') { $failures += "case 3 did not fail on the signer" }
+
+            Write-Host "Case 4: signed by a trusted certificate whose subject names O=SignPath Foundation"
+            $good = New-TrustedSigner 'CN=Backstop Fixture, O=SignPath Foundation, C=US'
+            $trusted += $good
+            $dir = New-ReleasesDir 'good'
+            Copy-Item $built $dir
+            $sig = Set-AuthenticodeSignature -FilePath (Join-Path $dir (Split-Path $built -Leaf)) -Certificate $good
+            Write-Host "    signing: $($sig.Status) $($sig.StatusMessage)"
+            $r = Invoke-Backstop $dir
+            if ($r.Code -ne 0) { $failures += "case 4 expected exit 0, got $($r.Code)" }
+          } finally {
+            $store = [Security.Cryptography.X509Certificates.X509Store]::new('Root', 'LocalMachine')
+            $store.Open('ReadWrite')
+            foreach ($c in $trusted) {
+              foreach ($m in @($store.Certificates | Where-Object { $_.Thumbprint -eq $c.Thumbprint })) { $store.Remove($m) }
+            }
+            $store.Close()
+            Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+          }
+          if ($failures) { $failures | ForEach-Object { Write-Host "::error::$_" }; exit 1 }
+          Write-Host "The backstop passed the empty folder and the SignPath-subject MSI and failed the unsigned and the wrong-signer MSI."
+          exit 0
 
       # M4 upgrades from the package above to a newer one: the same payload with a higher version. --no-incremental,
       # because a changed version alone does not make the incremental build redo the package.
