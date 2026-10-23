@@ -59,7 +59,7 @@ public sealed class McpPerfmonTools
     public static async Task<string> GetPerfmonTrend(
         LocalDataService dataService,
         ServerManager serverManager,
-        [Description("The exact counter name, e.g. 'Batch Requests/sec'.")] string counter_name,
+        [Description("The exact counter name, e.g. 'Batch Requests/sec'. get_perfmon_stats lists the names.")] string counter_name,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
