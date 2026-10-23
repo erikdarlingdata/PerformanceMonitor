@@ -248,7 +248,7 @@ internal static class DarlingMcpWritePolicy
         /// (<see cref="ReadCaller.AmbientMcpToken"/>, the fingerprint). Never a token value.</summary>
         internal string? OperatorActor => !IsOperator ? null
             : TokenName is { } name ? "operator:" + name
-            : TokenName;
+            : "operator:" + (ReadCaller.AmbientMcpToken ?? "token unknown");
 
         /// <summary>True when a tool named <paramref name="toolName"/> is offered under this policy.</summary>
         internal bool Offers(string toolName) => Offers(toolName, AgentActionTools);
