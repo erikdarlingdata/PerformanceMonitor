@@ -433,13 +433,30 @@ credential already exist, provisioned on every service start:
 
 ### 3.1 Why it is off
 
-On loopback the browser surface has no token unless you configure one (`web.network.token` / `encryptedToken`), and TLS is opt-in rather than on. Shipping it on by default
-would mean every install serves its monitoring data to anything that can open a socket on the box. So it is
-off, and turning it on is one command.
+The dashboard reads the monitoring store. A sign-in that can edit also changes monitoring settings: the
+server list, alert routes, mute rules and custom alert rules. Once on, it needs a token on loopback too, and
+TLS is opt-in rather than on. So it is off, and turning it on is a token plus one command.
 
 ### 3.2 Turn it on
 
-**Headless**, from an **elevated** PowerShell on the service host:
+**First, give it a token.** An enabled dashboard with no token does not start. The service log says so and
+names the settings. Add a `network` block with only a token to `web` in `darling.json` (no `listen`, so it
+stays loopback-only), then restart the service:
+
+```json
+"web": {
+  "network": {
+    "encryptedToken": "<output of --encrypt-password>"
+  }
+}
+```
+
+To make a token, use [the PowerShell one-liner in the README](../Darling/README.md#mcp-endpoint-assistant-over-the-lan). On Windows keep it in `encryptedToken`.
+`web.network.token` also takes the token itself, an `env:NAME` or a `file:PATH`. The references are for the
+compose and Linux setups. To serve local browsers with no token instead, set `"allowTokenlessLoopback": true` in
+the `web` block. The dashboard then serves reads only, and every start logs a line saying so.
+
+**Then turn it on**, from an **elevated** PowerShell on the service host:
 
 ```powershell
 cd "C:\Program Files\PerformanceMonitorDarling"
@@ -467,9 +484,10 @@ Starting web dashboard on http://localhost:5153 (loopback only) — enabled/port
 
 ### 3.3 Look at it
 
-On the service host, open `http://localhost:5153/`. **A loopback-only dashboard — one with no `web.network`
-block — is tokenless**; the auth middleware is not installed at all in that mode. (That changes once you
-expose it on the LAN. See 3.5, and do not assume loopback keeps a free pass.)
+On the service host, open `http://localhost:5153/`. The dashboard shows its sign-in page. Paste the token from
+3.2 once, and it is exchanged for a session cookie. `--print-web-token`, run elevated, prints it again. Only
+with `web.allowTokenlessLoopback` on does a loopback-only dashboard skip the sign-in. It then serves reads only:
+a change gets 403 and a message that names the token setting.
 
 **Proof:** a sidebar titled **Darling Web** with **Fleet Overview**, **Alert History** and **Custom Views**, a
 list of your servers under them, and fleet cards in the main pane. (**Availability Groups** appears only once
@@ -717,7 +735,7 @@ Two gates, and the order matters:
 
 **It is fail-closed.** An unparseable `listen`, an invalid `allowFrom`, a missing token, or bring-your-own
 PostgreSQL all degrade the endpoint back to loopback and log a critical line saying which one — the endpoint
-never half-exposes.
+never half-exposes. With no token at all, the loopback dashboard does not start either (see 3.2).
 
 **TLS is opt-in, and without it the token and cookie travel in clear on the segment.** The CIDR bounds *who
 can route to* the port; it does not protect the wire, and an exposed dashboard with no certificate says so at
@@ -738,9 +756,11 @@ alert tuning, adding and removing monitored servers). That is a bigger blast rad
 which is why the two are separate surfaces with separate flags, ports and tokens.
 
 Worth stating plainly, because it is the first question anyone asks: **no MCP tool runs SQL that an AI client
-wrote against your monitored servers.** No such tool exists. Every tool answers from the monitoring store, and
-the only live contact with a monitored server — `analyze_server`'s plan fetch and `add_servers`' connection
-probe — runs the product's own fixed, read-only queries under the collectors' least-privilege login.
+wrote against your monitored servers.** No such tool exists. Every read answers from the monitoring store.
+These tools reach a monitored server live, always with the product's own fixed statements:
+`analyze_server`'s plan fetch, `add_servers`' connection probe, the connection test `edit_server` runs before
+it saves a changed connection, `test_connection` and `run_collectors_now` run under the monitoring login; `force_query_store_plan`, `unforce_query_store_plan`, `evict_cached_plan` and
+`kill_session` run under a separate remediation login, each only after that server's switch for it is on.
 
 ### 4.2 Turn it on and connect from the same box
 
@@ -765,16 +785,29 @@ and:
 Get-NetTCPConnection -State Listen | Where-Object LocalPort -eq 5152
 ```
 
-Then register it. **On loopback there is no token unless you configure one** — the bearer requirement applies once you
-expose the endpoint on the LAN, or set `mcp.network.token` / `encryptedToken` (then local clients send
-`Authorization: Bearer <token>` too):
+Then register it. **MCP needs a bearer token on loopback too.** Before you turn it on, add a `network` block
+with only a token to `mcp` (`"encryptedToken": "<output of --encrypt-password>"`, or `"token"` with the token
+itself, an `env:NAME` or a `file:PATH`) and restart the service. On Windows use `encryptedToken`. The references
+are for the compose and Linux setups. To make a token, use [the PowerShell one-liner in the README](../Darling/README.md#mcp-endpoint-assistant-over-the-lan). With no token an
+enabled MCP server does not start, and the service log names these settings. To serve local clients with no
+token instead, set `"allowTokenlessLoopback": true` in the `mcp` block. The write and investigation tools then
+stay off, and every start logs a line saying so.
+Every client sends the token as `Authorization: Bearer <token>`:
 
 ```powershell
-claude mcp add --transport http --scope user sql-monitor-darling http://localhost:5152/
+claude mcp add --transport http --scope user sql-monitor-darling http://localhost:5152/ --header "Authorization: Bearer <token>"
 ```
 
-(The Viewer's Settings has a **Copy Setup Command** button that puts exactly this on your clipboard with the
-port you configured.)
+In a project's `.mcp.json`, read the token from an environment variable, because project files get committed:
+
+```json
+{ "mcpServers": { "sql-monitor-darling": { "type": "http", "url": "http://localhost:5152/", "headers": { "Authorization": "Bearer ${DARLING_MCP_TOKEN}" } } } }
+```
+
+Set `DARLING_MCP_TOKEN` in the environment that starts Claude Code, or keep the token in the user-scope entry above.
+
+(The Viewer's Settings has a **Copy Setup Command** button that puts the command on your clipboard with the
+port you configured; replace `<token>` with the output of `--print-mcp-token`.)
 
 **Proof:** `claude mcp list` shows `sql-monitor-darling` as connected, and `/mcp` in a new Claude Code session
 lists the Darling tools — `list_servers`, `get_fleet_overview`, `get_wait_stats`, `analyze_server` and the rest.
@@ -922,9 +955,9 @@ Every one of these has cost somebody real time.
    not change, and the exact elevated command is printed for you to run by hand.
 9. **An off-box MCP client pointed at `localhost` fails quietly.** Use the box's LAN IP.
    ([4.4](#44-when-it-says-enabled-and-still-will-not-connect))
-10. **Exposing the web dashboard on the LAN takes loopback's free pass away.** A loopback-only dashboard is
-    tokenless; the moment a `web.network` block exposes it, the browser on the service host has to present the
-    token too, because the Custom Views composer made the surface writable.
+10. **The web dashboard asks for its token on loopback too.** A loopback-only dashboard needs the token like an
+    exposed one, and the browser on the service host signs in with it. Only `web.allowTokenlessLoopback` serves it
+    with no token, and then for reads only.
     ([3.5](#35-reach-it-from-a-browser-on-another-machine))
 11. **`Warning` means three different things, and you have to look at the card to tell which.**
     `ClassifyBand` returns `Warning` for any of: a metric at warning severity (CPU, blocking, deadlocks,
