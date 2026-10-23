@@ -324,7 +324,7 @@
                                 <StackPanel Margin="10">
                                     <Grid Margin="0,0,0,8">
                                         <Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/><ColumnDefinition Width="60"/></Grid.ColumnDefinitions>
-                                        <TextBlock Grid.Column="0" Text="Avg CPU" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
+                                        <TextBlock Grid.Column="0" Text="{x:Static local:ViewerLabels.AvgSqlServerCpu}" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
                                         <Grid Grid.Column="1" Margin="0,0,8,0">
                                             <Border Height="16" CornerRadius="3" Background="#1AFFFFFF"/>
                                             <Grid>
@@ -336,7 +336,7 @@
                                     </Grid>
                                     <Grid Margin="0,0,0,8">
                                         <Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/><ColumnDefinition Width="60"/></Grid.ColumnDefinitions>
-                                        <TextBlock Grid.Column="0" Text="P95 CPU" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
+                                        <TextBlock Grid.Column="0" Text="{x:Static local:ViewerLabels.P95SqlServerCpu}" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
                                         <Grid Grid.Column="1" Margin="0,0,8,0">
                                             <Border Height="16" CornerRadius="3" Background="#1AFFFFFF"/>
                                             <Grid>
@@ -348,7 +348,7 @@
                                     </Grid>
                                     <Grid Margin="0,0,0,8">
                                         <Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/><ColumnDefinition Width="60"/></Grid.ColumnDefinitions>
-                                        <TextBlock Grid.Column="0" Text="Max CPU" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
+                                        <TextBlock Grid.Column="0" Text="{x:Static local:ViewerLabels.MaxSqlServerCpu}" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
                                         <Grid Grid.Column="1" Margin="0,0,8,0">
                                             <Border Height="16" CornerRadius="3" Background="#1AFFFFFF"/>
                                             <Grid>
@@ -428,9 +428,9 @@
                                             </Style>
                                         </DataGridTextColumn.ElementStyle>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Header="Avg CPU %" Binding="{Binding AvgCpuPct, StringFormat=N1}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Header="P95 CPU %" Binding="{Binding P95CpuPct, StringFormat=N1}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Header="Max CPU %" Binding="{Binding MaxCpuPct}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="{x:Static local:ViewerLabels.AvgSqlServerCpuPercent}" Binding="{Binding AvgCpuPct, StringFormat=N1}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="{x:Static local:ViewerLabels.P95SqlServerCpuPercent}" Binding="{Binding P95CpuPct, StringFormat=N1}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="{x:Static local:ViewerLabels.MaxSqlServerCpuPercent}" Binding="{Binding MaxCpuPct}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Mem Ratio" Binding="{Binding MemoryRatio, StringFormat=N2}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
                                 </DataGrid.Columns>
                             </DataGrid>

@@ -2274,7 +2274,7 @@
                                     <TextBlock x:Name="BufferPoolText" Text="--" FontSize="18" FontWeight="SemiBold"/>
                                 </StackPanel>
                                 <StackPanel Margin="0,0,24,0">
-                                    <TextBlock Text="Plan Cache" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
+                                    <TextBlock Text="{x:Static local:ViewerLabels.PlanCacheAllStores}" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
                                     <TextBlock x:Name="PlanCacheText" Text="--" FontSize="18" FontWeight="SemiBold"/>
                                 </StackPanel>
                                 <StackPanel Margin="0,0,24,0">
