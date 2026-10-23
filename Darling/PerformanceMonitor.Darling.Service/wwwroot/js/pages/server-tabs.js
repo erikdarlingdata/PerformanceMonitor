@@ -43,6 +43,7 @@ import { el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStr
 import { renderPanel, emptyHeadline, setPanelSignal, getPanelSignal, VIZ, worstFirst, newestFirst } from "../panels.js";
 import { memoryGrantChartPanels } from "./memory-grant-charts.js";
 import { activeQueriesSnapshotSlot, SNAPSHOT_ROW_CAP, SNAPSHOT_LIST_CAP, snapshotTruncatedNote } from "./active-snapshots.js";
+import { activeQueriesLiveBar } from "./active-live.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../charts.js";
 import { statsHistoryColumn, historyTarget, procedurePoints } from "./stats-history.js";
 import { multiPicker, mergeSeriesRows } from "../multi-picker.js";
@@ -2004,8 +2005,8 @@ export const SERVER_TABS = [
   {
     id: "queries",
     label: "Queries",
-    note: "Plan analysis, cached-plan retrieval and actual-plan re-execution are in the desktop viewer, not on this page.",
-    noteInfo: "They need a plan renderer and a connection back to the monitored server. This page only shows collected data.",
+    note: "Plan analysis, cached-plan retrieval and actual-plan re-execution are in the desktop viewer, not on this page. The Active Queries panel can read the running requests live with Run live now (accounts that can edit; otherwise use the viewer's Current Active Queries).",
+    noteInfo: "They need a plan renderer and a connection back to the monitored server. Apart from the Active Queries live read, this page only shows collected data.",
     build: (server, ctx) => [
       activeQueriesPanel(server, ctx),
       /* #2484: the viewer's Performance Trends tab is four charts over three reads. Duration and the
@@ -3803,11 +3804,15 @@ function activeQueriesPanel(server, ctx) {
   /* #6302: the snapshot picker (active-snapshots.js) reads the window's snapshot times, under the tag pick and the wait filter the grid
      uses, and draws the grid for the latest one, or the one picked; "All snapshots in window" draws it as it was. */
   /* #6301: under the time slicer. `w` is the page range or the slicer's selection; the snapshot list and the grid both read it. */
-  return slicedTagCard("active", { server, ctx }, (tagPicker, w) =>
+  const card = slicedTagCard("active", { server, ctx }, (tagPicker, w) =>
     activeQueriesSnapshotSlot(server, w, wait, withTagPick({}, "active"), (snapshotTime, snapPicker) =>
       activeQueriesGrid(server, w, wait, snapshotTime, snapPicker ? el("div", {}, [tagPicker, snapPicker]) : tagPicker)
     )
   );
+  /* #6386: the live read ("Run live now") sits above the stored snapshots, in the stored grid's columns. */
+  const wrap = el("div", {}, [activeQueriesLiveBar(server, ACTIVE_COLUMNS), card]);
+  wrap.style.display = "contents";
+  return wrap;
 }
 
 function activeQueriesGrid(server, ctx, wait, snapshotTime, control) {

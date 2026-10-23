@@ -155,10 +155,11 @@ internal static class DarlingMcpAgentActions
 
     /// <summary>A refusal the tool makes after the argument parses but before any live check, journaled once per request, tool, code and hour.</summary>
     private static async Task<string> RefuseEarlyAsync(NpgsqlDataSource postgres, AgentAction action, string tool,
-        AgentActionRefusal refusal, CancellationToken ct)
+        AgentActionRefusal refusal, CancellationToken ct, string? agentTokenName = null)
     {
         var store = new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds);
-        await store.RecordAgentActionRefusalAsync(action.RequestId, action.AgentId, tool, refusal.Reason, ct);
+        /* #6542: a named agent token journals under its own name, never the agent_id it passed. */
+        await store.RecordAgentActionRefusalAsync(action.RequestId, agentTokenName ?? action.AgentId, tool, refusal.Reason, ct);
         return DarlingAgentActionGate.RefusalAnswer(refusal);
     }
 
@@ -198,7 +199,7 @@ internal static class DarlingMcpAgentActions
             return DarlingMcpAlertTools.Outcome("invalid", StartsAtRefusal);
         var parsed = InvestigationToolCore.ParseAgentAction(agentAction, out var action);
         if (parsed is null && (server_id is null || string.IsNullOrWhiteSpace(metric_name)))
-            return await RefuseEarlyAsync(postgres, action!, tool, NeedsMetric, ct);
+            return await RefuseEarlyAsync(postgres, action!, tool, NeedsMetric, ct, seat.Policy.AgentTokenName);
 
         var target = await ServerTargetAsync(postgres, server_id ?? -1, null);
         return await RunAsync(seat, postgres, logger, tool, MuteRuleImage.Kind, agentAction, target,

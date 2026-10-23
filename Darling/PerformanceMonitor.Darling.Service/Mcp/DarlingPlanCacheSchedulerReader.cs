@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -37,11 +38,6 @@ internal static class DarlingPlanCacheSchedulerReader
 {
     /* ─────────────────────────── result rows ─────────────────────────── */
 
-    /// <summary>One (cacheobjtype, objtype) group at the latest plan-cache snapshot.</summary>
-    public sealed record PlanCacheGroupRow(
-        DateTime CollectionTime, string CacheObjType, string ObjType, int TotalPlans, int TotalSizeMb,
-        int SingleUsePlans, int SingleUseSizeMb, int MultiUsePlans, int MultiUseSizeMb, decimal AvgUseCount);
-
     /// <summary>The latest CPU-scheduler snapshot — the columns get_cpu_scheduler_pressure surfaces plus the
     /// pressure-level classification inputs.</summary>
     public sealed record CpuSchedulerRow(
@@ -52,63 +48,17 @@ internal static class DarlingPlanCacheSchedulerReader
 
     /* ─────────────────────────── plan cache (latest snapshot, all groups) ─────────────────────────── */
 
-    /// <summary>
-    /// Every (cacheobjtype, objtype) group at the latest collection in the window — the Dashboard's
-    /// <c>get_plan_cache_bloat</c> composition, ordered by cache size. The group cardinality is small
-    /// (cacheobjtype × objtype), so the read is uncapped and the tool sums it for the exact summary strip.
-    /// $1 server_id, $2 window start, $3 window end (naive UTC).
-    /// </summary>
-    public const string PlanCacheBloatSql = """
-        WITH latest AS
-        (
-            SELECT MAX(collection_time) AS mx
-            FROM v_plan_cache_stats
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-        )
-        SELECT
-            collection_time,
-            cacheobjtype,
-            objtype,
-            total_plans,
-            total_size_mb,
-            single_use_plans,
-            single_use_size_mb,
-            multi_use_plans,
-            multi_use_size_mb,
-            avg_use_count
-        FROM v_plan_cache_stats
-        WHERE server_id = $1
-        AND   collection_time = (SELECT mx FROM latest)
-        ORDER BY total_size_mb DESC, total_plans DESC
-        """;
+    /* ─────────────────────────── plan cache: moved to Storage (#6388) ─────────────────────────── */
 
-    public static async Task<List<PlanCacheGroupRow>> GetPlanCacheBloatAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
-    {
-        var rows = new List<PlanCacheGroupRow>();
-        await using var command = postgres.CreateCommand(PlanCacheBloatSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            rows.Add(new PlanCacheGroupRow(
-                reader.GetDateTime(0),
-                reader.IsDBNull(1) ? "" : reader.GetString(1),
-                reader.IsDBNull(2) ? "" : reader.GetString(2),
-                reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
-                reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
-                reader.IsDBNull(5) ? 0 : reader.GetInt32(5),
-                reader.IsDBNull(6) ? 0 : reader.GetInt32(6),
-                reader.IsDBNull(7) ? 0 : reader.GetInt32(7),
-                reader.IsDBNull(8) ? 0 : reader.GetInt32(8),
-                reader.IsDBNull(9) ? 0m : reader.GetDecimal(9)));
-        }
+    /// <summary>The composition read, now <see cref="DarlingPlanCacheBloatReader.Sql"/> in Storage so the Viewer reads the
+    /// same text (#6388).</summary>
+    public const string PlanCacheBloatSql = DarlingPlanCacheBloatReader.Sql;
 
-        return rows;
-    }
+    public static Task<List<PlanCacheGroupRow>> GetPlanCacheBloatAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        DarlingPlanCacheBloatReader.GetAsync(postgres, serverId, startUtc, endUtc, McpCommandDeadlines.ReadSeconds, cancellationToken);
+
+
 
     /// <summary>
     /// The plan-cache bloat classification — <c>report.plan_cache_bloat</c> / the viewer's
