@@ -70,10 +70,22 @@ catch {
     Write-Host "  Remove-NetFirewallRule -DisplayName 'PerformanceMonitor Darling *'" -ForegroundColor Yellow
 }
 
-foreach ($lnkPath in @(
-    (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Darling Viewer.lnk'),
-    (Join-Path ([Environment]::GetFolderPath('StartMenu')) 'Programs\Darling Viewer.lnk')
-)) {
+# The 'Darling Viewer' shortcut paths under the named special folders (#6475). A folder that does not resolve (GetFolderPath
+# returns '' when there is no such folder for the account) is left out. The folder lookup is a parameter so a test can stand in
+# for the machine. Kept byte-identical in install-darling.ps1 and uninstall-darling.ps1.
+function Get-DarlingShortcutPaths([string[]]$Folders, [scriptblock]$GetFolder = $null) {
+    if (-not $GetFolder) { $GetFolder = { param($name) [Environment]::GetFolderPath($name) } }
+    $paths = @()
+    foreach ($folder in $Folders) {
+        $base = & $GetFolder $folder
+        if ($base) { $paths += (Join-Path $base 'Darling Viewer.lnk') }
+    }
+    return $paths
+}
+
+# The all-users shortcuts the installer makes now (#6475), and the running account's own Desktop and Start Menu, where an
+# older install put them.
+foreach ($lnkPath in (Get-DarlingShortcutPaths @('CommonDesktopDirectory', 'CommonPrograms', 'Desktop', 'Programs'))) {
     if (Test-Path $lnkPath) {
         Remove-Item $lnkPath -Force
         Write-Host "Removed shortcut $lnkPath"

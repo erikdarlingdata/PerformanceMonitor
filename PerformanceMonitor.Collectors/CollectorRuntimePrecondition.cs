@@ -413,6 +413,44 @@ public static class CollectorRuntimePrecondition
     }
 
     /// <summary>
+    /// #6453: the sentence for a read that found no stored rows while the collector serving it is HEALTHY, or null when it is
+    /// not. Healthy here is the newest <c>collection_log</c> run being <c>SUCCESS</c> with no note: the monitored server
+    /// answered and had nothing for the collector, which <c>get_collection_health</c> reports as "every run completed and its
+    /// source returned no rows". The caller answers it with <c>empty</c>, a true negative; a read that said <c>unavailable</c>
+    /// beside that health verdict sent the reader in a circle. Null for no run, a fault, a denial, a missing session, or a
+    /// run whose note may explain the zero, so the caller keeps its own text. Shared by Lite and Darling so the two cannot
+    /// drift.
+    /// </summary>
+    /// <param name="serverName">The server as the caller named it.</param>
+    /// <param name="collectorName">The collector serving the read.</param>
+    /// <param name="what">What the read found none of, as a plural noun phrase.</param>
+    /// <param name="status">The <c>collection_log</c> status of that collector's most recent run.</param>
+    /// <param name="errorMessage">That run's stored note, if any.</param>
+    /// <param name="observedUtc">When that run happened.</param>
+    public static string? HealthyEmptyMessage(
+        string serverName,
+        string collectorName,
+        string what,
+        string? status,
+        string? errorMessage,
+        DateTime? observedUtc)
+    {
+        if (observedUtc is not DateTime at
+            || !string.Equals(status, "SUCCESS", StringComparison.OrdinalIgnoreCase)
+            || !string.IsNullOrWhiteSpace(errorMessage))
+        {
+            return null;
+        }
+
+        return string.Format(
+            CultureInfo.InvariantCulture,
+            "No {0} are stored for {1}, and that is a true negative rather than missing data: the {2} collector's newest run "
+            + "({3:yyyy-MM-dd HH:mm:ss} UTC) completed without a fault or a note and its source returned no rows. "
+            + "get_collection_health shows the run history.",
+            what, serverName, collectorName, at);
+    }
+
+    /// <summary>
     /// The status word for the sentence <see cref="GatedOffMessage"/> gives inside a collector's first-run grace. Nothing is
     /// in the way of a collector that is not due yet: this server could have the data and does not have it right now.
     /// </summary>

@@ -171,6 +171,41 @@ ORDER BY database_name";
     }
 
     /// <summary>
+    /// #6453: the sentence for a read that found no stored rows while the collector serving it is HEALTHY: its newest
+    /// <c>collection_log</c> run is <c>SUCCESS</c> with no note, so the monitored server answered and had nothing for it. Null
+    /// when there is no run, the newest run is anything else (a fault, a denial, a missing session, a note that explains the
+    /// zero), or the log read fails; the caller then keeps its own <c>unavailable</c> text. The caller answers it with
+    /// <c>empty</c>: <c>get_collection_health</c> calls the same collector HEALTHY ("every run completed and its source returned
+    /// no rows"), and a read that said <c>unavailable</c> beside it sent the reader in a circle.
+    /// <para>Call this AFTER <see cref="StatusAsync"/> and the engine gate, never before: a recorded precondition or a
+    /// wrong-engine target is a stronger answer than a clean run.</para>
+    /// </summary>
+    public static async Task<string?> HealthyEmptyMessageAsync(
+        NpgsqlDataSource postgres,
+        int serverId,
+        string serverName,
+        string collectorName,
+        string what,
+        CancellationToken cancellationToken = default)
+    {
+        string? status;
+        string? errorMessage;
+        DateTime? observedUtc;
+
+        try
+        {
+            (status, errorMessage, observedUtc) =
+                await ReadLatestOutcomeAsync(postgres, serverId, collectorName, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+
+        return CollectorRuntimePrecondition.HealthyEmptyMessage(serverName, collectorName, what, status, errorMessage, observedUtc);
+    }
+
+    /// <summary>
     /// The <c>precondition</c> envelope when the collector serving this read is not being invoked against
     /// this server while the server is collecting normally — i.e. its <c>AppliesTo</c> gate is off — or
     /// <c>null</c> otherwise. A collector that has never run and is not due yet gets the <c>unavailable</c>
