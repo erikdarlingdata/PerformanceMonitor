@@ -637,6 +637,54 @@ public sealed class DarlingMcpHostGateLiveTests
         Assert.DoesNotContain(log.Lines, l => l.Contains("not-a-protected-blob", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// #6542 part 2 (item 9 of #6556's security review): named tokens are configured, none of them can be served (each is under the length
+    /// floor) and there is no legacy token. The real start returns false, logs its Critical line, and nothing answers on the port. Without
+    /// the stop, this start would go on to serve the listener with no credential at all.
+    /// </summary>
+    [Fact]
+    public async Task NamedTokensThatCannotBeServed_WithNoLegacyToken_StopTheStart_AndNothingAnswers()
+    {
+        var port = FreeTcpPort();
+        var config = DarlingConfig.Parse(
+            ("{ 'postgres': { 'connectionString': 'Host=127.0.0.1;Port=1;Database=none;Username=none;Timeout=1' }, 'servers': [ { 'host': 'SQL2022' } ], "
+            + "'mcp': { 'enabled': true, 'port': " + port + ", 'allowWrites': true, "
+            + "'tokens': [ { 'name': 'ops-lead', 'token': 'too-short', 'role': 'operator' }, { 'name': 'triage-bot', 'token': 'also-short', 'role': 'agent' } ] } }")
+            .Replace('\'', '"'));
+        var log = new CapturingTestLogger();
+        var host = new DarlingMcpHostService(new CapturingHostLogger(log), new McpRuntimeState(), new MonitoredServerRegistryState());
+        var toggle = new PerformanceMonitor.Darling.Service.Hosting.DarlingHostBinding.EndpointToggle(
+            true, port, PerformanceMonitor.Darling.Service.Hosting.DarlingHostBinding.EndpointToggleOrigin.File, false, false);
+        var tryStart = typeof(DarlingMcpHostService).GetMethod(
+            "TryStartServerAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        var started = true;
+        var answered = false;
+        try
+        {
+            started = await (Task<bool>)tryStart.Invoke(host, [config, toggle, System.Threading.CancellationToken.None])!;
+            try
+            {
+                using var client = new System.Net.Sockets.TcpClient();
+                using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(5));
+                await client.ConnectAsync(IPAddress.Loopback, port, cts.Token);
+                answered = true;
+            }
+            catch (System.Net.Sockets.SocketException)
+            {
+            }
+        }
+        finally
+        {
+            await host.DisposeFailedStartAsync();
+        }
+
+        Assert.False(started, "named tokens that cannot be served, with no legacy token, must stop the start: " + log.Joined);
+        Assert.False(answered, "nothing may answer on the port");
+        Assert.Contains(log.Lines, l => l.Contains("none can be served", StringComparison.Ordinal)
+            && l.Contains("MCP server not started", StringComparison.Ordinal));
+        Assert.DoesNotContain(log.Lines, l => l.Contains("too-short", StringComparison.Ordinal) || l.Contains("also-short", StringComparison.Ordinal));
+    }
+
     /// <summary>The start itself calls the resolver on a loopback-only bind and stops on a refusal, so the pipeline
     /// tests above describe what production serves.</summary>
     [Fact]
