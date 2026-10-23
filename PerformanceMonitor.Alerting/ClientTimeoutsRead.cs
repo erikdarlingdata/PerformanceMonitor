@@ -150,6 +150,7 @@ public static class ClientTimeoutsRead
                 database_name = s.DatabaseName,
                 client_app_name = s.ClientAppName,
                 client_hostname = s.ClientHostName,
+                excluded = AttentionEvaluator.IsExcludedApp(s.ClientAppName),
                 session_id = s.SessionId,
                 interrupt_duration_ms = s.InterruptDurationUs is null ? (double?)null : s.InterruptDurationUs.Value / 1000.0,
                 statement_fingerprint = s.StatementFingerprint,
@@ -170,10 +171,37 @@ public static class ClientTimeoutsRead
             top_statements = topStatements,
             top_hosts = window.Hosts.Select(t => new { client_hostname = t.Name, sampled_events = t.Samples }).ToList(),
             top_databases = window.TopDatabases.Select(t => new { database_name = t.Name, sampled_events = t.Samples }).ToList(),
-            top_client_apps = window.TopApplications.Select(t => new { client_app_name = t.Name, sampled_events = t.Samples }).ToList(),
+            top_client_apps = window.TopApplications.Select(t => new { client_app_name = t.Name, sampled_events = t.Samples, excluded = AttentionEvaluator.IsExcludedApp(t.Name) }).ToList(),
+            excluded_from_alert = Excluded(reading, rate),
             sampled_events_returned = Math.Min(samples.Count, limit),
             sampled_events_truncated = samples.Count > limit,
             sampled_events = events,
+        };
+    }
+
+    /// <summary>
+    /// SSMS IntelliSense's own cancels (#6552), which the Client Timeouts alert leaves out: how many sampled events in the range came from it,
+    /// and the count and rate the alert judges without them. The judged count is the exact count times the share of sampled events that
+    /// are not IntelliSense, the same proportion <see cref="AttentionEvaluator.Evaluate"/> applies, so it is an estimate whenever
+    /// <c>sampled_events</c> is above zero. <c>count</c> and <c>rate_per_minute</c> stay the exact event_counter figures.
+    /// </summary>
+    private static object Excluded(AttentionReading reading, double rate)
+    {
+        var excluded = reading.ExcludedSamples;
+        var judgedCount = reading.SampleTotal > 0 && excluded > 0
+            ? reading.TotalCount * (double)(reading.SampleTotal - excluded) / reading.SampleTotal
+            : reading.TotalCount;
+        return new
+        {
+            client_app_name = AttentionEvaluator.IntelliSenseClientApp,
+            sampled_events = excluded,
+            count_judged = Math.Round(judgedCount, 1, MidpointRounding.AwayFromZero),
+            rate_per_minute_judged = excluded > 0
+                ? Math.Round(judgedCount / reading.CoveredMinutes, 2, MidpointRounding.AwayFromZero)
+                : rate,
+            note = "SSMS IntelliSense cancels its own metadata queries when the user keeps typing. The Client Timeouts alert leaves these " +
+                   "sampled events out of the rate it judges (count_judged is an estimate from the sampled share); they stay listed here, " +
+                   "marked excluded.",
         };
     }
 

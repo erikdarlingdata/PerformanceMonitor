@@ -473,6 +473,38 @@ public sealed class InvestigationBriefComposerTests
         Assert.True((int)brief["truncated"]!["chars"]! > 0);
     }
 
+    [Fact]
+    public void Budget_AnOnlyAlertLongerThanTheSection_IsKeptWithItsLongTextCutFurther_AndNamedInTruncated()
+    {
+        // #6547: one alert whose detail text and ten top-statement blocks together exceed the alerts section's cap.
+        var context = Enumerable.Range(0, 10).Select(i => new InvestigationBriefContextItem("Top statement " + i,
+            new[]
+            {
+                new KeyValuePair<string, string>("Database", "SalesDb"),
+                new KeyValuePair<string, string>("Query", "SELECT " + new string('q', 5_000)),
+            })).ToArray();
+        var only = new InvestigationBriefAlert(Now.AddMinutes(-3), "Analysis: queries [ab12cd34]", 12.5, 5, false,
+            new string('d', 5_000), null, context);
+
+        var json = InvestigationBriefComposer.Compose(Sources(alerts: new[] { only }), DarlingInvestigationBriefTools.Tools, McpDataDetail.Full, Now);
+
+        Assert.True(json.Length <= InvestigationBriefComposer.TotalCharCap);
+        var brief = JsonNode.Parse(json)!.AsObject();
+        var kept = brief["alerts"]!.AsArray();
+        var alert = Assert.Single(kept)!;
+        Assert.Equal("Analysis: queries [ab12cd34]", (string?)alert["metric"]);
+        Assert.Equal("2026-10-14T11:57:00.000000Z", (string?)alert["alert_time"]);
+        Assert.Equal(12.5, (double)alert["current_value"]!);
+        Assert.Equal(5, (double)alert["threshold_value"]!);
+        Assert.NotNull((string?)alert["detail_text"]);
+        Assert.True(((string)alert["detail_text"]!).Length < InvestigationBriefComposer.FieldCharCap);
+
+        var cut = brief["truncated"]!["sections"]!.AsArray().Single(c => (string?)c!["section"] == "alerts")!;
+        Assert.Equal(1, (int)cut["kept"]!);
+        Assert.Equal(0, (int)cut["dropped"]!);
+        Assert.True((bool)cut["shortened"]!);
+    }
+
     /* ---- #6000 recurrence: the pure half, no store ---- */
 
     [Fact]

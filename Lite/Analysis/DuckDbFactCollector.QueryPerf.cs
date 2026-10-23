@@ -526,6 +526,9 @@ WHERE regression_factor >= 2
 -- near-zero-cost queries whose ratios are all sampling jitter; magnitude ranking stays with
 -- regression_factor and the scorer.
 AND   latest_total_cpu_us >= 10000000
+-- #6548: SQL Server own housekeeping statements (change tracking cleanup and the like) are not application code. Left out
+-- BEFORE the LIMIT below, so they cannot use up its rows or lead the fact.
+AND   NOT regexp_matches(lower(COALESCE(query_text, '')), '" + PerformanceMonitor.Common.InternalStatements.LowerTextPattern + @"')
 ORDER BY regression_factor DESC
 -- #5630: more rows than the fact keeps. The C# side drops the rows the shared input rule rules out and keeps
 -- the first MaxPlanRegressionOffenders (20) of what is left, so a dropped row does not leave the fact one

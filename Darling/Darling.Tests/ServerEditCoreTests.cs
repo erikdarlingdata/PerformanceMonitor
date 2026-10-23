@@ -395,7 +395,16 @@ public sealed class ServerEditCoreTests : IDisposable
         var (plan, error) = Plan(SqlRow(), "{\"port\":1444}");
 
         Assert.Null(plan);
-        Assert.Equal("A SQL Server port goes in host, as host,port.", error);
+        Assert.Equal(SqlServerPortAdvice.Refusal, error);
+    }
+
+    [Fact]
+    public void APortOfZeroOnASqlServerRow_IsAccepted_SoAStoredPortCanBeCleared()
+    {
+        var (plan, error) = Plan(SqlRow(), "{\"port\":0}");
+
+        Assert.Null(error);
+        Assert.NotNull(plan);
     }
 
     [Fact]

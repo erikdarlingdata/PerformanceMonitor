@@ -359,6 +359,40 @@ VALUES ({id}, '{Ts(seen)}', {Server}, 'srv', 'AppDb', 7, {plan}, 'Regular', '{Ts
     }
 
     [Fact]
+    public async Task RegressionTargetsSection_LeavesOutSqlServerOwnHousekeepingStatements_SoTheApplicationQueryLeads()
+    {
+        // #6548: the change tracking cleanup regressed 100 times over, the application query 10 times over.
+        var opened = await Open("Query Slow", InvestigationFamily.QueryPerformance);
+        var seen = T0.AddMinutes(-5);
+        void Plan(int id, int queryId, int plan, long avgCpu, long executions, string text) =>
+            Exec($@"INSERT INTO query_store_stats (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time, execution_count, avg_cpu_time_us, avg_duration_us, query_plan_hash, runtime_stats_interval_id, query_text)
+VALUES ({id}, '{Ts(seen)}', {Server}, 'srv', 'AppDb', {queryId}, {plan}, 'Regular', '{Ts(seen.AddHours(-1))}', '{Ts(seen.AddMinutes(plan))}', {executions}, {avgCpu}, {avgCpu}, '0xHASH{plan}', {plan}, '{text}')");
+        Plan(1, 7, 1, 100, 50, "SELECT * FROM dbo.Orders");
+        Plan(2, 7, 2, 1000, 40, "SELECT * FROM dbo.Orders");
+        const string cleanup = "delete top(@batch_size) from sys.change_tracking_1234567 where sys_change_xdes_id < @cutoff";
+        Plan(3, 8, 3, 100, 50, cleanup);
+        Plan(4, 8, 4, 10000, 40, cleanup);
+        CollectorRan("query_store", T0.AddMinutes(2));
+        _now = T0.AddMinutes(3);
+        await Capture().CaptureOnceAsync(Ct);
+
+        var ready = Assert.Single(await _store.ReadEvidenceAsync(opened.RequestId, Ct));
+        var target = OnlyRow(JsonNode.Parse(ready.ContentJson!)!);
+        Assert.Equal(7L, target["query_id"]!.GetValue<long>());
+    }
+
+    [Theory]
+    [InlineData("delete top(@batch_size) from sys.change_tracking_1234567 where x < @y", true)]
+    [InlineData("DELETE TOP (@batch_size)\r\n FROM sys.change_tracking_99", true)]
+    [InlineData("EXEC sys.sp_flush_commit_table_on_demand 1000", true)]
+    [InlineData("EXEC sys.sp_cdc_cleanup_change_table @capture_instance = N'dbo_Orders'", true)]
+    [InlineData("SELECT * FROM sys.change_tracking_tables", false)]
+    [InlineData("SELECT * FROM dbo.Orders", false)]
+    [InlineData(null, false)]
+    public void InternalStatements_RecognizesTheEnginesOwnCleanup_AndNothingElse(string? text, bool expected) =>
+        Assert.Equal(expected, PerformanceMonitor.Common.InternalStatements.IsInternal(text));
+
+    [Fact]
     public async Task SectionWithNoCollectorRun_BecomesNotCollected_AfterItsGrace()
     {
         var opened = await Open("Deadlocks Detected", "blocking");

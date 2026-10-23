@@ -54,6 +54,8 @@ public partial class AddServerDialog : Window
     /// secret the user typed can be told apart from the saved one.</summary>
     private string? _prefilledSecret;
     private string? _originalReplica;
+    /* #6559: true after the user answered Yes to this server's own connect question in the current Test. */
+    private bool _hostConfirmedInDialog;
 
     public AddServerDialog(ServerManager serverManager, ProfileManager profileManager)
     {
@@ -145,7 +147,7 @@ public partial class AddServerDialog : Window
             
             // Load username if stored
             var credentialService = new CredentialService();
-            var cred = credentialService.GetCredential(existing.Id);
+            var cred = ServerCredentialIds.Allows(existing.Id, existing.DisplayName) ? credentialService.GetCredential(existing.Id) : null;
             if (cred.HasValue)
             {
                 EntraMfaUsernameBox.Text = cred.Value.Username;
@@ -157,7 +159,7 @@ public partial class AddServerDialog : Window
 
             // Load credentials if stored
             var credentialService = new CredentialService();
-            var cred = credentialService.GetCredential(existing.Id);
+            var cred = ServerCredentialIds.Allows(existing.Id, existing.DisplayName) ? credentialService.GetCredential(existing.Id) : null;
             if (cred.HasValue)
             {
                 UsernameBox.Text = cred.Value.Username;
@@ -174,7 +176,7 @@ public partial class AddServerDialog : Window
 
             // Pre-fill the client id and secret from Credential Manager (mirrors SQL-password pre-fill).
             var credentialService = new CredentialService();
-            var cred = credentialService.GetCredential(existing.Id);
+            var cred = ServerCredentialIds.Allows(existing.Id, existing.DisplayName) ? credentialService.GetCredential(existing.Id) : null;
             if (cred.HasValue)
             {
                 // The stored credential's username is the client id; prefer the model value when present.
@@ -615,6 +617,11 @@ public partial class AddServerDialog : Window
     /// </summary>
     private bool ConfirmConnectWithUnconfirmedSettings(bool replica)
     {
+        /* #6559: the replica Test follows the server's own Test; a Yes given there covers the replica, which that question names. */
+        var confirmedInDialog = replica && _hostConfirmedInDialog;
+        if (!replica)
+            _hostConfirmedInDialog = false;
+
         if (_editing == null)
             return true;
 
@@ -653,12 +660,16 @@ public partial class AddServerDialog : Window
             isEdit: true,
             HostConfirmationGate.CredentialWords(authType, profile?.Name),
             typedSecret,
-            replica);
+            replica,
+            confirmedInDialog);
         if (question == null)
             return true;
 
-        return MessageBox.Show(this, question, "Connect to this server?", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No)
+        var answeredYes = MessageBox.Show(this, question, "Connect to this server?", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No)
             == MessageBoxResult.Yes;
+        if (!replica)
+            _hostConfirmedInDialog = answeredYes;
+        return answeredYes;
     }
 
     /// <summary>
@@ -755,7 +766,7 @@ public partial class AddServerDialog : Window
 
             /* #6254: a server that names a Query Store replica is tested on both connections, and the two results are shown apart. A
                replica that does not open is a warning and not a failed test: collection reads Query Store from the primary. */
-            var replicaTest = ConfirmConnectWithUnconfirmedSettings(replica: true) ? await RunReplicaConnectionTestAsync() : null;
+            var replicaTest = !string.IsNullOrWhiteSpace(QueryStoreReplicaBox.Text) && ConfirmConnectWithUnconfirmedSettings(replica: true) ? await RunReplicaConnectionTestAsync() : null;
             if (replicaTest is { } replicaResult)
             {
                 MessageBox.Show(
@@ -1040,7 +1051,10 @@ public partial class AddServerDialog : Window
                     AddedServer.AzureTenantId = null;
                     AddedServer.ManagedIdentityClientId = null;
                     _serverManager.UpdateServer(AddedServer, null, null);
-                    _serverManager.CredentialService.DeleteCredential(AddedServer.Id);
+                    if (ServerCredentialIds.Allows(AddedServer.Id, AddedServer.DisplayName))
+                    {
+                        _serverManager.CredentialService.DeleteCredential(AddedServer.Id);
+                    }
                 }
                 else
                 {
