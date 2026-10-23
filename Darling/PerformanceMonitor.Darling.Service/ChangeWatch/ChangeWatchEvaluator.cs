@@ -668,7 +668,8 @@ HAVING sum(delta_execution_count) > 0";
             text.Append('+').Append(watch.Changes.Count - 5).Append(" more; ");
         }
 
-        foreach (var m in measures.Where(m => m.Moved).Take(5))
+        var moved = measures.Where(m => m.Moved).Take(5).ToList();
+        foreach (var m in moved)
         {
             text.Append(m.Name).Append(" before ").Append(Num(m.Before)).Append(" after ").Append(Num(m.After))
                 .Append(" week earlier ").Append(Num(m.WeekEarlier)).Append(' ').Append(m.Unit);
@@ -680,6 +681,14 @@ HAVING sum(delta_execution_count) > 0";
             }
 
             text.Append("; ");
+        }
+
+        /* #6551: a query measure's note names the database and the read (plan cache or Query Store) it came from, so an agent can call the
+           matching trend read for the right database without guessing it from another change line. The notes come after every measure line:
+           the cut below drops the end of the text, and a note must never push a moved measure out of it. */
+        foreach (var m in moved.Where(m => !string.IsNullOrEmpty(m.Note)))
+        {
+            text.Append(m.Name).Append(": ").Append(m.Note).Append("; ");
         }
 
         var result = text.ToString().TrimEnd(' ', ';');

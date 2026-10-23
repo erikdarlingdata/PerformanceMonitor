@@ -1460,7 +1460,7 @@
                     <TextBlock Text="No Servers Registered"
                                FontSize="24" FontWeight="Light"
                                Foreground="{DynamicResource ForegroundMutedBrush}" HorizontalAlignment="Center"/>
-                    <TextBlock Text="Start the Darling service to populate the store, then double-click a server to open its dashboard."
+                    <TextBlock Text="Click Add Server to register the first server. Once the Darling service is running, double-click it to open its dashboard."
                                FontSize="14" Foreground="{DynamicResource ForegroundMutedBrush}"
                                Margin="0,8,0,0" HorizontalAlignment="Center"
                                TextAlignment="Center" MaxWidth="480" TextWrapping="Wrap"/>

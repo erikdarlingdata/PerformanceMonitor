@@ -54,6 +54,8 @@ public partial class AddServerDialog : Window
     /// secret the user typed can be told apart from the saved one.</summary>
     private string? _prefilledSecret;
     private string? _originalReplica;
+    /* #6559: true after the user answered Yes to this server's own connect question in the current Test. */
+    private bool _hostConfirmedInDialog;
 
     public AddServerDialog(ServerManager serverManager, ProfileManager profileManager)
     {
@@ -145,7 +147,7 @@ public partial class AddServerDialog : Window
             
             // Load username if stored
             var credentialService = new CredentialService();
-            var cred = credentialService.GetCredential(existing.Id);
+            var cred = ServerCredentialIds.Allows(existing.Id, existing.DisplayName) ? credentialService.GetCredential(existing.Id) : null;
             if (cred.HasValue)
             {
                 EntraMfaUsernameBox.Text = cred.Value.Username;
@@ -157,7 +159,7 @@ public partial class AddServerDialog : Window
 
             // Load credentials if stored
             var credentialService = new CredentialService();
-            var cred = credentialService.GetCredential(existing.Id);
+            var cred = ServerCredentialIds.Allows(existing.Id, existing.DisplayName) ? credentialService.GetCredential(existing.Id) : null;
             if (cred.HasValue)
             {
                 UsernameBox.Text = cred.Value.Username;
@@ -174,7 +176,7 @@ public partial class AddServerDialog : Window
 
             // Pre-fill the client id and secret from Credential Manager (mirrors SQL-password pre-fill).
             var credentialService = new CredentialService();
-            var cred = credentialService.GetCredential(existing.Id);
+            var cred = ServerCredentialIds.Allows(existing.Id, existing.DisplayName) ? credentialService.GetCredential(existing.Id) : null;
             if (cred.HasValue)
             {
                 // The stored credential's username is the client id; prefer the model value when present.
@@ -442,6 +444,9 @@ public partial class AddServerDialog : Window
         return builder;
     }
 
+    /// <summary>#6459: SERVERPROPERTY('EngineEdition') the last connection test read, or 0 before one succeeded.</summary>
+    private int _testedEngineEdition;
+
     private async System.Threading.Tasks.Task<(bool Connected, string? ErrorMessage, bool SignInCancelled, string? ServerVersion, EntraBrokerFailureKind BrokerFailure, EntraAmbientCredentialFailureKind AmbientFailure)> RunConnectionTestAsync()
     {
         TestButton.IsEnabled = false;
@@ -495,8 +500,21 @@ public partial class AddServerDialog : Window
                 }
             }
 
-            using var cmd = new SqlCommand("SELECT @@VERSION", connection);
-            var version = await cmd.ExecuteScalarAsync() as string;
+            /* #6459: the engine edition rides on the same round trip (the shared detection query, read by column name), so the replica test can say an Azure SQL Database never reads one. */
+            using var cmd = new SqlCommand(ServerManager.DetectionQueryText, connection);
+            string? version = null;
+            _testedEngineEdition = 0;
+            using (var reader = await cmd.ExecuteReaderAsync())
+            {
+                if (await reader.ReadAsync())
+                {
+                    var versionOrdinal = reader.GetOrdinal("sql_version");
+                    var editionOrdinal = reader.GetOrdinal("engine_edition");
+                    version = reader.IsDBNull(versionOrdinal) ? null : reader.GetString(versionOrdinal);
+                    _testedEngineEdition = reader.IsDBNull(editionOrdinal) ? 0 : reader.GetInt32(editionOrdinal);
+                }
+            }
+
             serverVersion = version?.Split('\n')[0]?.Trim();
             connected = true;
         }
@@ -599,6 +617,11 @@ public partial class AddServerDialog : Window
     /// </summary>
     private bool ConfirmConnectWithUnconfirmedSettings(bool replica)
     {
+        /* #6559: the replica Test follows the server's own Test; a Yes given there covers the replica, which that question names. */
+        var confirmedInDialog = replica && _hostConfirmedInDialog;
+        if (!replica)
+            _hostConfirmedInDialog = false;
+
         if (_editing == null)
             return true;
 
@@ -637,12 +660,16 @@ public partial class AddServerDialog : Window
             isEdit: true,
             HostConfirmationGate.CredentialWords(authType, profile?.Name),
             typedSecret,
-            replica);
+            replica,
+            confirmedInDialog);
         if (question == null)
             return true;
 
-        return MessageBox.Show(this, question, "Connect to this server?", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No)
+        var answeredYes = MessageBox.Show(this, question, "Connect to this server?", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No)
             == MessageBoxResult.Yes;
+        if (!replica)
+            _hostConfirmedInDialog = answeredYes;
+        return answeredYes;
     }
 
     /// <summary>
@@ -666,6 +693,12 @@ public partial class AddServerDialog : Window
     private async System.Threading.Tasks.Task<(string Host, string? Error)?> RunReplicaConnectionTestAsync()
     {
         if (string.IsNullOrWhiteSpace(QueryStoreReplicaBox.Text))
+        {
+            return null;
+        }
+
+        /* #6459: an Azure SQL Database never reads a replica, so there is nothing to open: the caller shows the note instead. */
+        if (QueryStoreReplicaConnectionTest.IgnoredOnAzureSqlDatabaseNote(_testedEngineEdition, QueryStoreReplicaBox.Text) is not null)
         {
             return null;
         }
@@ -733,7 +766,7 @@ public partial class AddServerDialog : Window
 
             /* #6254: a server that names a Query Store replica is tested on both connections, and the two results are shown apart. A
                replica that does not open is a warning and not a failed test: collection reads Query Store from the primary. */
-            var replicaTest = ConfirmConnectWithUnconfirmedSettings(replica: true) ? await RunReplicaConnectionTestAsync() : null;
+            var replicaTest = !string.IsNullOrWhiteSpace(QueryStoreReplicaBox.Text) && ConfirmConnectWithUnconfirmedSettings(replica: true) ? await RunReplicaConnectionTestAsync() : null;
             if (replicaTest is { } replicaResult)
             {
                 MessageBox.Show(
@@ -741,6 +774,11 @@ public partial class AddServerDialog : Window
                     replicaResult.Error is null ? "Connection Successful" : "Connection Successful, replica not reached",
                     MessageBoxButton.OK,
                     replicaResult.Error is null ? MessageBoxImage.Information : MessageBoxImage.Warning);
+            }
+            else if (QueryStoreReplicaConnectionTest.IgnoredOnAzureSqlDatabaseNote(_testedEngineEdition, QueryStoreReplicaBox.Text) is { } azureReplicaNote)
+            {
+                /* #6459: the setting is accepted and has no effect on an Azure SQL Database; say so now, not never. */
+                MessageBox.Show(message + "\n\n" + azureReplicaNote, "Connection Successful, replica setting not used", MessageBoxButton.OK, MessageBoxImage.Warning);
             }
             else
             {
@@ -929,9 +967,17 @@ public partial class AddServerDialog : Window
         }
 
         // Test connection when data collection is enabled
+        string? azureReplicaNote = null;
         if (EnabledCheckBox.IsChecked == true)
         {
             var (connected, errorMessage, signInCancelled, _, brokerFailure, ambientFailure) = await RunConnectionTestAsync();
+
+            /* #6459: the test just ran on this save; if it found an Azure SQL Database and a replica is typed, the setting is
+               saved but never read, and the note is shown once the save has gone through. */
+            if (connected)
+            {
+                azureReplicaNote = QueryStoreReplicaConnectionTest.IgnoredOnAzureSqlDatabaseNote(_testedEngineEdition, QueryStoreReplicaBox.Text);
+            }
 
             if (!connected)
             {
@@ -1005,7 +1051,10 @@ public partial class AddServerDialog : Window
                     AddedServer.AzureTenantId = null;
                     AddedServer.ManagedIdentityClientId = null;
                     _serverManager.UpdateServer(AddedServer, null, null);
-                    _serverManager.CredentialService.DeleteCredential(AddedServer.Id);
+                    if (ServerCredentialIds.Allows(AddedServer.Id, AddedServer.DisplayName))
+                    {
+                        _serverManager.CredentialService.DeleteCredential(AddedServer.Id);
+                    }
                 }
                 else
                 {
@@ -1061,6 +1110,11 @@ public partial class AddServerDialog : Window
                 {
                     _serverManager.AddServer(AddedServer, username, password);
                 }
+            }
+
+            if (azureReplicaNote is not null)
+            {
+                MessageBox.Show(azureReplicaNote, "Server saved, replica setting not used", MessageBoxButton.OK, MessageBoxImage.Warning);
             }
 
             DialogResult = true;

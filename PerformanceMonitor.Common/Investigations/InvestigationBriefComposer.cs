@@ -234,7 +234,11 @@ public sealed class InvestigationBriefComposer
             {
                 ["tool"] = ReportTool,
                 ["report_format"] = InvestigationFormats.ReportFormat,
-                ["required"] = new JsonArray("request_id", "claim_id", "report_format", "verdict", "root_cause", "evidence", "summary"),
+                /* #6462: exactly the parameters the tool requires. root_cause_found is not one of them: the service sets it from the
+                   verdict (false only for needs_person), so it is named under service_sets and never asked of the agent. summary is
+                   required by the tool and was missing here. */
+                ["required"] = new JsonArray(InvestigationToolCore.SubmitReportRequired.Select(name => (JsonNode?)name).ToArray()),
+                ["service_sets"] = new JsonArray("root_cause_found: false for a needs_person verdict, true otherwise; do not send it"),
             },
         };
         /* #5632: under maskLiterals and metadataOnly the compiled parameter values are hidden, and they explain most plan flips, so
@@ -242,6 +246,10 @@ public sealed class InvestigationBriefComposer
            for byte as before (Lite's golden pin). */
         if (mode != McpDataDetail.Full)
             ((JsonArray)root["read_rules"]!).Add(ParameterValuesHiddenRule);
+        /* #6554: a Change Watch request on a server whose Query Store is not collected (a readable secondary, query_store_replica off)
+           says so, so an empty Query Store read is not taken for "nothing changed". Absent otherwise, so no other brief moves a byte. */
+        if (!string.IsNullOrWhiteSpace(sources.QueryStoreNotCollected))
+            ((JsonArray)root["read_rules"]!).Add("Query Store reads for this server will be empty. " + sources.QueryStoreNotCollected);
         /* #5999: the registry's names for the server, read when the brief is composed. display_name is always present on Darling;
            instance_name is absent once the server has left the registry. Lite names both from its server list (#6011). Not host_name: that key is a masked client host (see InvestigationToolCore.RequestPayload). */
         if (request.DisplayName is { } displayName)

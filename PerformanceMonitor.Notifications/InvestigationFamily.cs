@@ -124,6 +124,18 @@ public static class InvestigationFamily
         ["tempdb_pressure"] = Resources,
         ["bloat_growth"] = Resources,
         ["object_growth"] = Resources,
+        /* An anomaly is a spike against the server's own baseline in CPU, waits, I/O or latency, so resources is the
+           closest family. One caused by blocking or a query story is still reported by the agent that gets it. */
+        ["anomaly"] = Resources,
+        /* A story's category is its root fact's source (InferenceEngine: rootFact.Source), so these SQL Server fact sources are
+           the categories a live run emits. The edge categories above (cpu_pressure and the rest) only match a story whose
+           category happens to equal one. config, database_config, coverage, bad_actor, tempdb and waits stay other. */
+        ["cpu"] = Resources,
+        ["memory"] = Resources,
+        ["io"] = Resources,
+        ["disk"] = Resources,
+
+        ["jobs"] = Jobs,
 
         ["ag_health"] = Availability,
         ["replication_risk"] = Availability,

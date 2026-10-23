@@ -3978,6 +3978,41 @@
                             </DataGrid.Columns>
                         </DataGrid>
                     </TabItem>
+                    <!-- #6384: the web's Sweep Pressure and Heaviest Collectors panels (get_collection_health's sweep_pressure block), read from the
+                         same statement and ranked by the same SweepPressureReport. Both cover the trailing 7 days whatever the toolbar window is. -->
+                    <TabItem Header="Sweep Pressure">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" Text="Sweep Pressure (trailing 7 days)" FontWeight="SemiBold" Margin="0,4,0,4"
+                                       Foreground="{DynamicResource ForegroundBrush}"/>
+                            <DataGrid Grid.Row="1" x:Name="SweepPressureStatsGrid" Style="{StaticResource DarkGrid}" Margin="0,0,0,12">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Measure" Binding="{Binding Label}" Width="180"/>
+                                    <DataGridTextColumn Header="Value" Binding="{Binding Value}" Width="*"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                            <TextBlock Grid.Row="2" Text="Heaviest Collectors (trailing 7 days)" FontWeight="SemiBold" Margin="0,4,0,4"
+                                       Foreground="{DynamicResource ForegroundBrush}"/>
+                            <TextBlock Grid.Row="3" x:Name="SweepPressureNoDataMessage" Style="{StaticResource EmptyHint}" Visibility="Collapsed"/>
+                            <DataGrid Grid.Row="4" x:Name="HeaviestCollectorsGrid" Style="{StaticResource DarkGrid}">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Collector" Binding="{Binding Collector}" Width="200"/>
+                                    <DataGridTextColumn Header="Avg" Binding="{Binding Avg}" Width="90" SortMemberPath="AvgMs"/>
+                                    <DataGridTextColumn Header="p95" Binding="{Binding P95}" Width="90" SortMemberPath="P95Ms"/>
+                                    <DataGridTextColumn Header="Max" Binding="{Binding Max}" Width="90" SortMemberPath="MaxMs"/>
+                                    <DataGridTextColumn Header="Every (min)" Binding="{Binding EveryMinutes}" Width="90" SortMemberPath="Every"/>
+                                    <DataGridTextColumn Header="ms/min" Binding="{Binding MsPerMinute}" Width="90" SortMemberPath="PerMinute"/>
+                                    <DataGridTextColumn Header="% of run budget" Binding="{Binding PctOfRunBudget}" Width="120" SortMemberPath="PctBudget"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </Grid>
+                    </TabItem>
                     <TabItem Header="Collection Log">
                         <!-- Lite's "Open Log File" button dropped (it opens Lite's local log file; the
                              viewer has no equivalent), so the grid fills the whole sub-tab. -->
@@ -4649,6 +4684,20 @@
                             </DataGrid>
                         </Grid>
                     </TabItem>
+                    <!-- #6385: the web's Database Trend and Query Duration Trend, as charts. Built in code
+                         (ViewerServerTab.PgTrends.cs) into the two hosts below; the notes name the subject followed. -->
+                    <TabItem Header="Trends">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                            <StackPanel Margin="0,4,0,0">
+                                <TextBlock x:Name="PgDatabaseTrendNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                <UniformGrid x:Name="PgDatabaseTrendHost" Columns="2" Height="500"/>
+                                <TextBlock x:Name="PgQueryDurationTrendNote" FontSize="12" Margin="0,12,0,6" TextWrapping="Wrap"
+                                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                <UniformGrid x:Name="PgQueryDurationTrendHost" Columns="2" Height="250"/>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </TabItem>
                 </TabControl>
             </Grid>
         </TabItem>
@@ -4891,6 +4940,7 @@
                     <RowDefinition Height="*"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
                 <StackPanel Grid.Row="0">
                     <TextBlock x:Name="PgWaitsNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
@@ -4942,6 +4992,12 @@
                         <DataGridTextColumn Header="Last Seen" Binding="{Binding CaptureTime}" Width="*" SortMemberPath="CaptureTimeUtc"/>
                     </DataGrid.Columns>
                 </DataGrid>
+                <!-- #6385: the web's Wait Trend, as a chart (ViewerServerTab.PgTrends.cs). -->
+                <StackPanel Grid.Row="4">
+                    <TextBlock x:Name="PgWaitTrendNote" FontSize="12" Margin="0,12,0,6" TextWrapping="Wrap"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <UniformGrid x:Name="PgWaitTrendHost" Columns="1" Height="230"/>
+                </StackPanel>
             </Grid>
         </TabItem>
 
@@ -4954,6 +5010,7 @@
                     <RowDefinition Height="*"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
                 <StackPanel Grid.Row="0">
                     <TextBlock x:Name="PgIoNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
@@ -5052,6 +5109,12 @@
                         <DataGridTextColumn Header="Collected" Binding="{Binding CaptureTime}" Width="150" SortMemberPath="CaptureTimeUtc"/>
                     </DataGrid.Columns>
                 </DataGrid>
+                <!-- #6385: the web's I/O Trend, as four charts (ViewerServerTab.PgTrends.cs). -->
+                <StackPanel Grid.Row="6">
+                    <TextBlock x:Name="PgIoTrendNote" FontSize="12" Margin="0,12,0,6" TextWrapping="Wrap"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <UniformGrid x:Name="PgIoTrendHost" Columns="4" Height="230"/>
+                </StackPanel>
             </Grid>
         </TabItem>
 

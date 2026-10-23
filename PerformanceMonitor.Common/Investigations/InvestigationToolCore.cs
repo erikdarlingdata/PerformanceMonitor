@@ -31,6 +31,15 @@ internal static class InvestigationToolCore
     internal static readonly string[] Families =
         ["blocking", "query_performance", "resources", "availability", "jobs", "self_monitor", "other"];
 
+    /// <summary>
+    /// #6462: the parameters <c>submit_investigation_report</c> requires, in the tool's own order, written once. The brief's
+    /// <c>report_contract.required</c> and the tool contract table in the tests both read it, and the tests that reflect the contract
+    /// against both products' real tool methods therefore check the brief too. A tool method that gains or loses a required parameter
+    /// fails them until this list follows.
+    /// </summary>
+    internal static readonly string[] SubmitReportRequired =
+        ["request_id", "claim_id", "report_format", "verdict", "root_cause", "evidence", "summary"];
+
     /// <summary>The verdicts a report may give (V184's check constraint).</summary>
     internal static readonly string[] Verdicts = ["real", "false_positive", "needs_person"];
 
