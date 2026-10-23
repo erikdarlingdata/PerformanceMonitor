@@ -36,7 +36,7 @@ public sealed class DarlingMcpObjectStatsTools
 {
     /// <summary>Lite's default result caps (get_table_index_sizes takes no top parameter; get_index_usage and
     /// get_object_locking do, and these are the DEFAULT each falls back to, not a hard cap).</summary>
-    private const int TableSizesTop = 100;
+    private const int TableSizesTop = DarlingTableSizeGrowthReader.TopTables;
 
     /// <summary>
     /// #4198: <c>get_index_usage</c>'s caller-optional <c>limit</c> DEFAULT (#2636 made it optional; this lane
@@ -179,7 +179,7 @@ public sealed class DarlingMcpObjectStatsTools
     /// span at all. Null when every figure is defined, so the common row carries no note. Lite's twin words
     /// it identically.
     /// </summary>
-    internal static string? GrowthNote(DarlingObjectStatsReader.ObjectSizeGrowthRow r)
+    internal static string? GrowthNote(TableSizeGrowthRow r)
     {
         var notes = new List<string>();
         if (r.DaysOfData < 1)

@@ -434,8 +434,8 @@ LIMIT 50";
         NpgsqlDataSource postgres, int serverId, DatabaseFilter databases, long? queryId, DateTime start, DateTime end,
         IReadOnlyDictionary<(string Database, long PlanId), DateTime>? forcedAt = null,
         int commandTimeoutSeconds = StorageCommandDeadlines.McpReadSeconds,
-        CancellationToken cancellationToken = default,
-        long? planId = null)
+        long? planId = null,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(postgres);
         var from = DateTime.SpecifyKind(start, DateTimeKind.Unspecified);

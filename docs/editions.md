@@ -43,4 +43,4 @@ All editions include real-time alerts (email + webhooks), charts and graphs, Dar
 | Agent changes on a monitored server (force or unforce a Query Store plan, evict a cached plan, kill a session) | Not available | Yes, one switch per server and action, all off until you turn them on | Not available |
 | Query tags (name a group of queries and see its resource use) | Yes | Yes | Not available |
 | Notification routes limited to a server or a tag | Yes | Yes | Not available |
-| MCP server (LLM integration) | Built-in (113 tools, 97 served by default) | On request (252 tools, 183 served by default) | Built into Dashboard (66 tools) |
+| MCP server (LLM integration) | Built-in (113 tools, 97 served by default) | On request (254 tools, 183 served by default) | Built into Dashboard (66 tools) |

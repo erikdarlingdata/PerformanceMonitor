@@ -425,6 +425,25 @@ public partial class FinOpsTab
 
         /* The Note column holds words only for a row that has a note, so a server with none gets no empty column. */
         FinOpsDatabaseSizesNoteColumn.Visibility = data.Any(r => r.Note != null) ? Visibility.Visible : Visibility.Collapsed;
+
+        await LoadFinOpsTableSizesAsync();
+    }
+
+    /// <summary>#6388: Table &amp; Index Sizes under the database files, the same shared read as the web's <c>get_table_index_sizes</c>
+    /// (one page of the largest tables, one row past it observing truncation). A moment, not the toolbar's window.</summary>
+    private async Task LoadFinOpsTableSizesAsync()
+    {
+        var rows = await _dataService.GetTableSizesAsync(_server.ServerId, SelectedDatabaseFilter);
+        var truncated = rows.Count > DarlingTableSizeGrowthReader.TopTables;
+        var page = truncated ? rows.Take(DarlingTableSizeGrowthReader.TopTables).ToList() : rows;
+
+        FinOpsTableSizesDataGrid.ItemsSource = page;
+        FinOpsNoTableSizesMessage.Visibility = page.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        FinOpsTableSizesNote.Text = page.Count == 0
+            ? ""
+            : $"{page.Count} table(s), largest first, at the {HistoryTime.SnapshotCollected(page[0].LatestSnapshotTime, "--")} snapshot"
+              + (truncated ? $"; the {DarlingTableSizeGrowthReader.TopTables} largest of more" : "")
+              + (page[0].DaysOfData < 30 ? $"; the store holds {page[0].DaysOfData} day(s) of snapshots, so growth the history does not reach shows n/a" : "");
     }
 
     // ── Version Store (PVS) ──

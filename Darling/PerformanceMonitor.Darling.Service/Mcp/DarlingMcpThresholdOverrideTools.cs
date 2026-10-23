@@ -70,6 +70,7 @@ public sealed class DarlingMcpThresholdOverrideTools
         "the top is allowed, and its alert still fires if that count is reached. " +
         "set_by names who made the change (writes arm; default mcp). On an investigation request's agent arm, agent_action is " +
         "REQUIRED and the change is for the request's server only; the writes arm ignores agent_action. " +
+        "The answer carries previous_override (null when there was none) and undo, the call that puts the override back as it was (the same call with the previous value, or clear: true). " +
         "status ok, cleared, refused, precondition (the store role lacks the grant; the message names provision-roles.sql).")]
     public static async Task<string> SetAlertThresholdOverride(
         NpgsqlDataSource postgres,
@@ -180,6 +181,16 @@ public sealed class DarlingMcpThresholdOverrideTools
                 database = database,
                 value = clear ? (int?)null : value,
                 previous_override = applied.Previous,
+                /* #6403: the call that puts the override back as it was: the same tool with the previous value, or clear when there was none. */
+                undo = DarlingMcpAlertTools.UndoCall(ToolName, applied.Previous is { } was
+                    ? new System.Collections.Generic.Dictionary<string, object?>
+                    {
+                        ["server_name"] = resolved.DisplayName, ["key"] = wire, ["value"] = was, ["database_name"] = database,
+                    }
+                    : new System.Collections.Generic.Dictionary<string, object?>
+                    {
+                        ["server_name"] = resolved.DisplayName, ["key"] = wire, ["clear"] = true, ["database_name"] = database,
+                    }),
                 set_by = applied.SetBy,
                 request_id = applied.RequestId,
                 message = clear

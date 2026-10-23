@@ -74,11 +74,11 @@ public sealed partial class ViewerDataService
 
     /// <summary>Deletes every fleet-wide override row (revert the fleet scope to code defaults).</summary>
     public const string CollectorScheduleDeleteFleetScopeSql =
-        "DELETE FROM config_collector_schedules WHERE server_id IS NULL";
+        CollectorScheduleSql.DeleteFleetScope;
 
     /// <summary>Deletes every override row for one server (the "use default schedule" revert). $1 server_id.</summary>
     public const string CollectorScheduleDeleteServerScopeSql =
-        "DELETE FROM config_collector_schedules WHERE server_id = $1";
+        CollectorScheduleSql.DeleteServerScope;
 
     /// <summary>Deletes EVERY per-server override row in one statement (the fleet-wide "Apply Default to All"
     /// reset), leaving the fleet-wide defaults (<c>server_id IS NULL</c>) untouched.</summary>
@@ -127,18 +127,18 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
     /// <summary>Deletes EVERY fleet-wide run time, whatever the collector: the run-time half of a fleet-scope schedule Reset, which
     /// goes back to the shipped defaults, and they have no fixed time.</summary>
     public const string CollectorRunTimeDeleteFleetScopeSql =
-        "DELETE FROM config.config_collector_run_times WHERE server_id IS NULL";
+        CollectorScheduleSql.RunTimeDeleteFleetScope;
 
     /// <summary>Deletes EVERY run time of one server, whatever the collector: the run-time half of a server-scope schedule Reset.
     /// $1 server_id.</summary>
     public const string CollectorRunTimeDeleteServerScopeSql =
-        "DELETE FROM config.config_collector_run_times WHERE server_id = $1";
+        CollectorScheduleSql.RunTimeDeleteServerScope;
 
     /// <summary>Whether the run-time table exists, looked up by name in the catalog, so the answer does not depend on the connecting
     /// role's privileges on it (the connect gate's probe asks the same way). A statement that fails aborts its transaction, so a
     /// delete that has to tolerate a store below V160 asks first and is skipped there.</summary>
     public const string CollectorRunTimeTableExistsSql =
-        "SELECT to_regclass('config.config_collector_run_times') IS NOT NULL";
+        CollectorScheduleSql.RunTimeTableExists;
 
     /// <summary>All override rows in the store (both fleet + per-server), for the editor overlay.</summary>
     public async Task<List<CollectorScheduleRow>> GetCollectorSchedulesAsync(CancellationToken cancellationToken = default)

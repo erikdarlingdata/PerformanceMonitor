@@ -727,4 +727,24 @@ WHERE id = 1";
 
         return new AlertConfigurationRead(settings, delivery);
     }
+
+    /// <summary>
+    /// The same two-table read over a transaction the CALLER owns (#6403): update_alert_settings reads what its sent fields hold
+    /// inside its own write transaction, after it has locked the rows it is about to update, so the <c>previous</c> it reports is
+    /// exactly what the write replaced. The single-table reads stay private; this and the entry point above are the only ways in.
+    ///
+    /// <para>This is NOT one snapshot: the caller's transaction is plain READ COMMITTED, so the two reads can see different commits
+    /// (the entry point above reads both under one REPEATABLE READ snapshot). That is correct here only because the caller locks
+    /// (FOR UPDATE) the tables its write targets and projects only fields drawn from what it updates, so a value that could be read
+    /// stale is never one that reaches <c>previous</c>. If a caller ever reports a field from a table it did not lock, this stops
+    /// being true.</para>
+    /// </summary>
+    public static async Task<AlertConfigurationRead> GetAlertConfigurationAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, CancellationToken cancellationToken = default)
+    {
+        var settings = await ReadAlertSettingsAsync(connection, transaction, cancellationToken);
+        var delivery = await ReadDeliveryAsync(connection, transaction, cancellationToken);
+
+        return new AlertConfigurationRead(settings, delivery);
+    }
 }

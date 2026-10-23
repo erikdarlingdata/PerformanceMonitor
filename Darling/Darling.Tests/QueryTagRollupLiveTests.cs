@@ -521,7 +521,7 @@ public sealed class QueryTagRollupLiveTests
             while (true)
             {
                 await using var probe = new NpgsqlCommand(
-                    "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%query_store_interval_wide AS q%'", c.Store);
+                    "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%query_store_interval_wide AS q%'", c.Store);
                 if (Convert.ToInt32(await probe.ExecuteScalarAsync(c.Ct), CultureInfo.InvariantCulture) > 0)
                 {
                     break;

@@ -616,7 +616,7 @@ public sealed class McpAlertTools
         "A disabled route is skipped at resolution exactly as if it did not exist, so the alerts it matched fall to " +
         "the next level (a family route, then the parent channels) on the next firing. Returns {status:\"updated\", " +
         "route:{...}} with the route AS STORED, {status:\"unchanged\", route:{...}} when it already holds that value " +
-        "(a retry is safe), or {status:\"not_found\"}. Lite only: {status:\"unavailable\"} while an earlier database " +
+        "(a retry is safe; both carry previous {enabled} and undo, the call that sets the previous value back), or {status:\"not_found\"}. Lite only: {status:\"unavailable\"} while an earlier database " +
         "reset's saved-settings restore is pending (it finishes at the next Lite start). Served only when " +
         "mcp_allow_writes is true. This tool cannot author or re-point a route: destinations are bearer secrets and " +
         "are set only in Settings > Manage Notification Routes.")]
@@ -663,7 +663,13 @@ public sealed class McpAlertTools
 
             if (existing.Enabled == enabled)
             {
-                return JsonSerializer.Serialize(new { status = "unchanged", route = RoutePayload(existing, ServerNames(servers), tags.ToDictionary(t => t.Id, t => t.Name)) }, McpHelpers.JsonOptions);
+                return JsonSerializer.Serialize(new
+                {
+                    status = "unchanged",
+                    route = RoutePayload(existing, ServerNames(servers), tags.ToDictionary(t => t.Id, t => t.Name)),
+                    previous = new { enabled = existing.Enabled },
+                    undo = UndoCall("set_notification_route_enabled", new { route_id, enabled = existing.Enabled }),
+                }, McpHelpers.JsonOptions);
             }
 
             if (!await store.SetEnabledAsync(route_id, enabled))
@@ -677,6 +683,8 @@ public sealed class McpAlertTools
             {
                 status = "updated",
                 route = stored is null ? null : RoutePayload(stored, ServerNames(servers), tags.ToDictionary(t => t.Id, t => t.Name)),
+                previous = new { enabled = existing.Enabled },
+                undo = UndoCall("set_notification_route_enabled", new { route_id, enabled = existing.Enabled }),
             }, McpHelpers.JsonOptions);
         }
         catch (PendingRestoreException ex)
@@ -687,7 +695,7 @@ public sealed class McpAlertTools
 
     [McpServerTool(Name = "delete_notification_route"), Description(
         "Deletes a notification route by its route_id (from get_notification_routes), and its saved URLs and key from Windows Credential Manager. Permanent: the alerts it matched fall to the next level (a family route, then the parent channels) on the next firing. " +
-        "Returns {status:\"deleted\", route_id}, {status:\"not_found\"}, or {status:\"unavailable\"} while an earlier database reset's saved-settings restore is pending (it finishes at the next Lite start). " +
+        "Returns {status:\"deleted\", route_id, previous (the route as it was), undo: null, undo_note} (Lite has no tool that creates a route, so no call restores it), {status:\"not_found\"}, or {status:\"unavailable\"} while an earlier database reset's saved-settings restore is pending (it finishes at the next Lite start). " +
         "Prefer set_notification_route_enabled for a temporary change - a deleted route's destinations are gone and only Settings > Manage Notification Routes can author them again. Served only when mcp_allow_writes is true.")]
     public static async Task<string> DeleteNotificationRoute(
         LocalDataService dataService,
@@ -696,7 +704,8 @@ public sealed class McpAlertTools
     {
         try
         {
-            return await DeleteRouteAsync(CreateRouteStore(dataService, serverManager), route_id);
+            return await DeleteRouteAsync(
+                CreateRouteStore(dataService, serverManager), route_id, serverManager.GetAllServers(), await dataService.GetServerTagsAsync());
         }
         catch (Exception ex)
         {
@@ -704,24 +713,49 @@ public sealed class McpAlertTools
         }
     }
 
-    internal static async Task<string> DeleteRouteAsync(DuckDbNotificationRouteStore store, int route_id)
+    internal static async Task<string> DeleteRouteAsync(
+        DuckDbNotificationRouteStore store,
+        int route_id,
+        IReadOnlyCollection<ServerConnection>? servers = null,
+        IReadOnlyCollection<ServerTag>? tags = null)
     {
         try
         {
-            if (await store.GetAsync(route_id) is { } existing && AgentRouteRefusal(existing, "delete_notification_route") is { } agentRefusal)
+            var existing = await store.GetAsync(route_id);
+            if (existing is not null && AgentRouteRefusal(existing, "delete_notification_route") is { } agentRefusal)
             {
                 return agentRefusal;
             }
 
-            return await store.DeleteAsync(route_id)
-                ? JsonSerializer.Serialize(new { status = "deleted", route_id }, McpHelpers.JsonOptions)
-                : McpHelpers.Status("not_found", $"No notification route with route_id {route_id}.");
+            if (!await store.DeleteAsync(route_id))
+            {
+                return McpHelpers.Status("not_found", $"No notification route with route_id {route_id}.");
+            }
+
+            /* #6403: the row as it was (no destination is in it; they are secrets). Lite has no tool that creates a route, so no
+               single call restores it: undo is null and the note says where the route is authored again. */
+            return JsonSerializer.Serialize(new
+            {
+                status = "deleted",
+                route_id,
+                previous = existing is null
+                    ? null
+                    : RoutePayload(
+                        existing,
+                        servers is null ? new Dictionary<int, string>() : ServerNames(servers),
+                        tags is null ? new Dictionary<int, string>() : tags.ToDictionary(t => t.Id, t => t.Name)),
+                undo = (object?)null,
+                undo_note = "No tool call restores a deleted route: Lite cannot author a route over MCP because its destinations are secrets that cannot be read back. Author it again in Settings > Manage Notification Routes.",
+            }, McpHelpers.JsonOptions);
         }
         catch (PendingRestoreException ex)
         {
             return McpHelpers.Status("unavailable", ex.Message);
         }
     }
+
+    /// <summary>The one shape of an undo call (#6403): <c>{tool, arguments}</c>, the same as Darling's write tools.</summary>
+    private static object UndoCall(string tool, object arguments) => new { tool, arguments };
 
     /// <summary>A Lite server's id is the hash of its storage name, the id the alert path and the tag map use.</summary>
     private static Dictionary<int, string> ServerNames(IReadOnlyCollection<ServerConnection> servers)

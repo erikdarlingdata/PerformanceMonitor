@@ -552,7 +552,8 @@ public sealed class DarlingMcpHostTests
     {
         var cidr = CidrAllowList.Parse(allowFrom);
         var expected = OldStartTemplate
-            .Replace("{Listen}", IPAddress.Parse(listen).ToString(), StringComparison.Ordinal)
+            // #6609: an IPv6 listen is a bracketed URL host; the IPv4 cases are the old text unchanged.
+            .Replace("{Listen}", listen == "::" ? "[::]" : IPAddress.Parse(listen).ToString(), StringComparison.Ordinal)
             .Replace("{Port}", "5152", StringComparison.Ordinal)
             .Replace("{Cidr}", cidr.ToString(), StringComparison.Ordinal)
             .Replace("{Origin}", StartOrigin, StringComparison.Ordinal);
@@ -584,7 +585,7 @@ public sealed class DarlingMcpHostTests
         var line = Host.DescribeNetworkStart(
             true, IPAddress.Parse(listen), 5152, CidrAllowList.Parse(allowFrom), StartOrigin);
 
-        Assert.StartsWith($"Starting MCP server on https://{IPAddress.Parse(listen)}:5152 (LAN-exposed to ", line, StringComparison.Ordinal);
+        Assert.StartsWith($"Starting MCP server on https://{(listen == "::" ? "[::]" : listen)}:5152 (LAN-exposed to ", line, StringComparison.Ordinal);
         Assert.Contains("; the one listener serves HTTPS to loopback too) \u2014 ", line, StringComparison.Ordinal);
         Assert.DoesNotContain("plain HTTP", line, StringComparison.Ordinal);
         Assert.Contains("listen/allowFrom/token/tls from darling.json", line, StringComparison.Ordinal);

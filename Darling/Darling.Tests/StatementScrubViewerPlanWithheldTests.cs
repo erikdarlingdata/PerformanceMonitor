@@ -33,13 +33,20 @@ public sealed class StatementScrubViewerPlanWithheldTests
     [Fact]
     public void APlanWithheldWhole_ShowsTheWithheldSentenceInTheViewer_NotAParseError()
     {
+        /* #6632: this body hung for 60 s in three Guard-stage runs, as the first WPF body in the process, so the hang guard's
+           report (#6216) could say only "the body named no step". Each step below is named so the next report says which call
+           it stopped in: the control's constructor (the process's first WPF use: InitializeComponent, theme and system
+           resources), the marker path of LoadPlan, the reads of the result, or Cleanup. */
         StaTestThread.Run(() =>
         {
+            StaTestThread.Step("new PlanViewerControl(): InitializeComponent, the process's first WPF use in a Guard run");
             var control = new PlanViewerControl();
             try
             {
+                StaTestThread.Step("LoadPlan(marker): the withheld path, which returns before its first await");
                 control.LoadPlan(Marker, "Stored Plan").GetAwaiter().GetResult();
 
+                StaTestThread.Step("reading the empty-state title and visibilities");
                 var title = (TextBlock)control.FindName("EmptyStateTitle");
                 Assert.Equal("This plan was withheld by the statement filter (#4348).", title.Text);
                 Assert.DoesNotContain("could not be read", title.Text, StringComparison.Ordinal);
@@ -49,6 +56,7 @@ public sealed class StatementScrubViewerPlanWithheldTests
             }
             finally
             {
+                StaTestThread.Step("Cleanup(): unsubscribing from ThemeManager.ThemeChanged");
                 control.Cleanup();
             }
         });
