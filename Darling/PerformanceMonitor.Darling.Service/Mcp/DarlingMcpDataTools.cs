@@ -2189,35 +2189,9 @@ ORDER BY server_name";
                collector that owns a body it never ran in. One filter feeds both readings, so the roll-up and
                the heaviest list describe the same population. */
             var pressure = SweepPressureClassifier.Compute(SweepBodyCollectors(rows));
-            var heaviest = SweepBodyRows(rows)
-                .Where(r => r.FrequencyMinutes > 0 && r.AvgDurationMs > 0)
-                .OrderByDescending(r => r.AvgDurationMs / r.FrequencyMinutes)
-                .Take(3)
-                .Select(r => new
-                {
-                    collector = r.CollectorName,
-                    avg_duration_ms = Math.Round(r.AvgDurationMs, 0),
-                    p95_duration_ms = Math.Round(r.P95DurationMs, 0),
-                    max_duration_ms = Math.Round(r.MaxDurationMs, 0),
-                    frequency_minutes = r.FrequencyMinutes,
-                    /* #4938: the run time beside the shipped cadence it replaces for a daily collector; null when the
-                       collector has none. The web table shows it next to "Every (min)". */
-                    run_at = runTimes.TryGetValue(r.CollectorName, out var heaviestRunTime) ? heaviestRunTime.RunAt : null,
-                    /* #2446: the ranking key said out loud, beside the single-run cost it is derived from.
-                       The list still ranks by amortized contribution, because that is what explains
-                       busy_percent — but an operator reading it to find the collector that overran a body
-                       was reading the wrong column with nothing on the row to say so. */
-                    amortized_ms_per_minute = Math.Round(r.AvgDurationMs / r.FrequencyMinutes, 0),
-                    /* #2460: "% of the budget PER RUN" now comes from the run that actually costs
-                       something — PeakRunMs, the p95 floored at the mean — rather than from a mean that
-                       on a bimodal collector describes no run at all. It is the same number the peak
-                       cycle charges this collector, so the column and the cycle reconcile by hand;
-                       taken from the mean, this row said query_store cost 23% of a body when its heavy
-                       run costs 135% of one. Through the shared helper rather than re-derived here, so
-                       the floor rule cannot drift between the two SKUs' tools. */
-                    pct_of_sweep_budget_per_run = Math.Round(
-                        SweepPressureClassifier.PeakRunMs(r.AvgDurationMs, r.P95ChargedMs) / SweepPressureClassifier.SweepBudgetMs * 100.0, 1)
-                });
+            /* #6384: the ranking and its rounding are SweepPressureReport.HeaviestOf's, the one the viewer's Heaviest
+               Collectors panel runs too. Only the run time is joined here. */
+            var heaviest = HeaviestCollectorRows(rows, runTimes);
 
             /* #2446: the collector that owns the most of ONE sweep, which is a different collector from
                the ones above whenever it is infrequent enough for amortization to hide it. Named on every
@@ -2508,6 +2482,42 @@ ORDER BY server_name";
         last_slowest_step_ms = s?.LastSlowestStepMs,
         last_message = s?.LastMessage
     };
+
+    /// <summary>#6384: the rows of <c>sweep_pressure.heaviest_collectors</c>: the ranking and its rounding are
+    /// <see cref="SweepPressureReport.HeaviestOf"/>'s (the one the viewer's Heaviest Collectors panel runs too), and the
+    /// run time (#4938) is joined here, null for a collector with none. Its own method so a test can read the rows
+    /// the tool answers with.</summary>
+    internal static IReadOnlyList<object> HeaviestCollectorRows(
+        IEnumerable<CollectorHealth> rows, IReadOnlyDictionary<string, CollectorRunTimeReading> runTimes) =>
+        SweepPressureReport.HeaviestOf(rows.Select(ToSweepCost))
+            .Select(r => (object)new
+            {
+                collector = r.Collector,
+                avg_duration_ms = r.AvgDurationMs,
+                p95_duration_ms = r.P95DurationMs,
+                max_duration_ms = r.MaxDurationMs,
+                frequency_minutes = r.FrequencyMinutes,
+                /* #4938: the run time beside the shipped cadence it replaces for a daily collector; null when the
+                   collector has none. The web table shows it next to "Every (min)". */
+                run_at = runTimes.TryGetValue(r.Collector, out var heaviestRunTime) ? heaviestRunTime.RunAt : null,
+                /* #2446: the ranking key said out loud, beside the single-run cost it is derived from.
+                   The list still ranks by amortized contribution, because that is what explains
+                   busy_percent — but an operator reading it to find the collector that overran a body
+                   was reading the wrong column with nothing on the row to say so. */
+                amortized_ms_per_minute = r.AmortizedMsPerMinute,
+                /* #2460: "% of the budget PER RUN" now comes from the run that actually costs
+                   something — PeakRunMs, the p95 floored at the mean — rather than from a mean that
+                   on a bimodal collector describes no run at all. It is the same number the peak
+                   cycle charges this collector, so the column and the cycle reconcile by hand;
+                   taken from the mean, this row said query_store cost 23% of a body when its heavy
+                   run costs 135% of one. Through the shared helper rather than re-derived here, so
+                   the floor rule cannot drift between the two SKUs' tools. */
+                pct_of_sweep_budget_per_run = r.PctOfSweepBudgetPerRun
+            }).ToList();
+
+    /// <summary>#6384: the sweep arithmetic's input row for one health row (shared with the viewer through <see cref="SweepPressureReport"/>).</summary>
+    internal static SweepCollectorCost ToSweepCost(CollectorHealth r) =>
+        new(r.CollectorName, r.AvgDurationMs, r.P95DurationMs, r.P95Bucketed, r.MaxDurationMs, r.FrequencyMinutes);
 
     /// <summary>
     /// #4999: the collectors whose single-run cost the server's sequential pass pays: every row except those that
@@ -3530,6 +3540,18 @@ ORDER BY server_name";
                 }
 
                 var everCollected = await DarlingDataReader.HasAnyWaitingTaskSampleAsync(postgres, resolved.ServerId, cancellationToken);
+
+                /* #6453: no row EVER stored is not "unavailable" when the collector's own newest run completed clean: the
+                   server was sampled and had nothing waiting, which is what get_collection_health calls HEALTHY. */
+                var healthyEmpty = everCollected
+                    ? null
+                    : await DarlingRuntimePrecondition.HealthyEmptyMessageAsync(
+                        postgres, resolved.ServerId, resolved.DisplayName, "waiting_tasks", "waiting-task samples", cancellationToken);
+                if (healthyEmpty != null)
+                {
+                    return McpHelpers.Status("empty", healthyEmpty);
+                }
+
                 return everCollected
                     ? McpHelpers.Status(
                         "empty",

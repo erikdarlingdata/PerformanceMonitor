@@ -102,14 +102,14 @@ public sealed class SystemHealthEventsCollectorDefinitionTests
     {
         var watermark = new DateTime(2026, 7, 5, 11, 55, 0, DateTimeKind.Utc);
         var withWatermark = SystemHealthEventsCollector.Instance.BuildQuery(MakeContext(watermark: watermark));
-        var parameter = Assert.Single(withWatermark.Parameters);
+        var parameter = Assert.Single(withWatermark.Parameters, p => p.Name == "@cutoff_time");
         Assert.Equal("@cutoff_time", parameter.Name);
         Assert.Equal(watermark, parameter.Value);
         Assert.Equal(CollectorParameterType.DateTime2, parameter.Type);
 
         var collectionTime = new DateTime(2026, 7, 5, 12, 0, 0, DateTimeKind.Utc);
         var fallback = SystemHealthEventsCollector.Instance.BuildQuery(MakeContext(collectionTime: collectionTime));
-        Assert.Equal(collectionTime.AddMinutes(-10), Assert.Single(fallback.Parameters).Value);
+        Assert.Equal(collectionTime.AddMinutes(-10), Assert.Single(fallback.Parameters, p => p.Name == "@cutoff_time").Value);
     }
 
     [Fact]

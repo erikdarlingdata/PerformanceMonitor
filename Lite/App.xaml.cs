@@ -62,6 +62,13 @@ public partial class App : Application
     public static string DataDirectory { get; private set; } = string.Empty;
 
     /// <summary>
+    /// Whether this is the first start of this build with a data folder an earlier Lite used (its monitor.duckdb or
+    /// settings.json existed). Decides whether the first run of the per-user record of confirmed server settings binds
+    /// anything (ServerHostBindings.IsFirstStartInUsedFolder).
+    /// </summary>
+    public static bool HadLiteDataAtStart { get; private set; }
+
+    /// <summary>
     /// Gets the path to the DuckDB database file.
     /// </summary>
     public static string DatabasePath { get; private set; } = string.Empty;
@@ -640,6 +647,12 @@ public partial class App : Application
         ConfigDirectory = Path.Combine(appDataRoot, "config");
         DatabasePath = Path.Combine(appDataRoot, "monitor.duckdb");
         ArchiveDirectory = Path.Combine(appDataRoot, "archive");
+
+        /* Read before anything below creates either file: whether this Windows user ran an earlier Lite with this folder. A
+           user who did is upgrading, and the servers they collected from are bound to their current settings; a new user
+           confirms each one. The marker it writes makes every later start read false, so a folder this build created never
+           counts as an upgrade, even when its first record write failed. */
+        HadLiteDataAtStart = Services.ServerHostBindings.IsFirstStartInUsedFolder(DatabasePath, ConfigDirectory);
 
         // Ensure directories exist
         Directory.CreateDirectory(ConfigDirectory);

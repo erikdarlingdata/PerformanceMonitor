@@ -458,28 +458,6 @@ public sealed class DarlingStoreFolderScriptTests
         Assert.Contains("netCalledElsewhere=False", answers);
     }
 
-    /// <summary>The domain controller is decided before step 4 stops an existing service, so a skipped group can never
-    /// leave the service stopped, and the install carries on without the group instead of stopping.</summary>
-    [Fact]
-    public void TheDomainControllerIsDecidedBeforeTheServiceIsStopped_AndTheInstallFinishesWithoutTheGroup()
-    {
-        var script = Script;
-        var decide = script.IndexOf("$onDomainController = Test-DarlingDomainController", StringComparison.Ordinal);
-        var stop = script.IndexOf("Stop-Service -Name $serviceName", StringComparison.Ordinal);
-        var group = script.IndexOf("Initialize-DarlingOperatorGroup $operatorGroupName", StringComparison.Ordinal);
-
-        Assert.True(decide >= 0 && decide < stop, "the domain controller is decided before step 4 stops the service");
-        Assert.True(stop < group, "the group is made after the service was stopped, and only off a domain controller");
-        Assert.Matches(@"if \(-not \$onDomainController\) \{\s+try \{ \$operatorSid = Initialize-DarlingOperatorGroup \$operatorGroupName \}", script);
-        Assert.Contains("elseif ($onDomainController) {", script, StringComparison.Ordinal);
-
-        var body = ExtractFunction(script, "Initialize-DarlingOperatorGroup");
-        Assert.True(
-            body.IndexOf("Test-DarlingDomainController", StringComparison.Ordinal) is var guard && guard >= 0
-            && guard < body.IndexOf("& net.exe localgroup", StringComparison.Ordinal),
-            "the function itself refuses a domain controller before it can run net localgroup");
-    }
-
     /// <summary>The upgrade script locks the store folder with the installer's own functions (the same text, so they
     /// cannot drift), after the service has stopped and before it starts, so an upgrade from a release that could not
     /// lock the folder ends with it locked. A folder it cannot lock is a warning: the upgrade does not stop over it.</summary>

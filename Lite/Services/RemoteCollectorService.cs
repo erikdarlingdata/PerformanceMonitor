@@ -625,6 +625,16 @@ public partial class RemoteCollectorService
                 continue;
             }
 
+            /* A server whose host this user has not confirmed is not connected to at all: its status and the Edit dialog
+               say why. Every connection string is refused for it anyway; skipping here keeps the cycle from logging one
+               refusal per collector. */
+            if (_serverManager.HostChange(server) != null)
+            {
+                skippedOffline++;
+                AppLogger.Debug("Scheduler", $"Skipping server '{server.DisplayName}': its host is not confirmed");
+                continue;
+            }
+
             NoteServerOnline(server);
             onlineServers.Add(server);
         }
@@ -1697,7 +1707,7 @@ public partial class RemoteCollectorService
 
             /* #6254: the Query Store replica connection is this same open with the replica host and read-only intent. */
             var connectionString = replica
-                ? ServerConnection.ResolveQueryStoreReplicaConnectionString(server, _serverManager.CredentialResolver.CredentialService, _serverManager.ProfileLookup)
+                ? _serverManager.CredentialResolver.GetQueryStoreReplicaConnectionString(server)
                     ?? throw new InvalidOperationException("No Query Store replica is set for this server.")
                 : _serverManager.CredentialResolver.GetConnectionString(server);
 
