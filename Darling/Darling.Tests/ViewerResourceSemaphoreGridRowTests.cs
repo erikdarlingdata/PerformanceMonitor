@@ -19,6 +19,7 @@ namespace Darling.Tests;
 /// arbitrary row), and a row stored with the 0 interval marker has two fabricated delta zeros that are not "no timeouts
 /// this interval". Pure row-shaping, no database.
 /// </summary>
+[Collection("viewer-time-statics")]
 public sealed class ViewerResourceSemaphoreGridRowTests
 {
     private static MemoryGrantWindowRow Window(long peakWaiters, double peakGrantedMb)
@@ -38,8 +39,8 @@ public sealed class ViewerResourceSemaphoreGridRowTests
         Assert.Null(quiet.PeakGrantedAtLocal);
 
         var busy = ResourceSemaphorePressureGridRow.From(Window(6, 128.5));
-        Assert.False(string.IsNullOrEmpty(busy.PeakWaitersAtLocal);
-        Assert.False(string.IsNullOrEmpty(busy.PeakGrantedAtLocal);
+        Assert.False(string.IsNullOrEmpty(busy.PeakWaitersAtLocal));
+        Assert.False(string.IsNullOrEmpty(busy.PeakGrantedAtLocal));
 
         /* Each instant follows its own peak: waiters with none granted, and the reverse. */
         var waitersOnly = ResourceSemaphorePressureGridRow.From(Window(3, 0));
@@ -56,7 +57,7 @@ public sealed class ViewerResourceSemaphoreGridRowTests
     [Fact]
     public void ARowStoredWithTheZeroIntervalMarker_ShowsNoDeltas_NotAMeasuredZero()
     {
-        var restart = new ResourceSemaphoreSnapshotGridRow(Snapshot(0);
+        var restart = new ResourceSemaphoreSnapshotGridRow(Snapshot(0));
         Assert.Null(restart.TimeoutErrorCountDelta);
         Assert.Null(restart.ForcedGrantCountDelta);
         Assert.Equal(PerformanceMonitor.Common.DeltaSeriesShaping.UnknowableIntervalDisplay, restart.IntervalDisplay);
@@ -64,13 +65,13 @@ public sealed class ViewerResourceSemaphoreGridRowTests
         Assert.Equal(9, restart.TimeoutErrorCount);
         Assert.Equal(8, restart.ForcedGrantCount);
 
-        var measured = new ResourceSemaphoreSnapshotGridRow(Snapshot(60);
+        var measured = new ResourceSemaphoreSnapshotGridRow(Snapshot(60));
         Assert.Equal(0L, measured.TimeoutErrorCountDelta);
         Assert.Equal(0L, measured.ForcedGrantCountDelta);
         Assert.Equal("60", measured.IntervalDisplay);
 
         /* A pre-V127 row has no stored interval, but its deltas are real and kept. */
-        var unrecorded = new ResourceSemaphoreSnapshotGridRow(Snapshot(null);
+        var unrecorded = new ResourceSemaphoreSnapshotGridRow(Snapshot(null));
         Assert.Equal(0L, unrecorded.TimeoutErrorCountDelta);
     }
 }
