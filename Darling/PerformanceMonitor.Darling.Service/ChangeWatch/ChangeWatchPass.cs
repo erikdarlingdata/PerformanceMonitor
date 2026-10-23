@@ -19,6 +19,7 @@ using NpgsqlTypes;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitor.Darling.Storage;
@@ -148,6 +149,14 @@ WHERE after.hit IS NULL
   AND NOT EXISTS (SELECT 1 FROM collect.plan_force_actions AS a
                   WHERE a.server_id = $1 AND a.database_name = p.database_name AND a.query_id = p.query_id AND a.plan_id = p.plan_id
                     AND a.outcome = 'succeeded' AND a.action_time > n.prev_t AND a.action_time <= n.t)";
+
+    /// <summary>#6551: the databases of <paramref name="serverId"/> that are readable-secondary copies, whose plan-snapshot changes are the primary's.
+    /// The rule is the shared one every other read of the store uses (<see cref="PgSecondaryReplicaScope"/>): the newest availability-group snapshots at or
+    /// before <paramref name="end"/>, both within <see cref="AgReplicaScope.SnapshotFreshness"/>, and nothing is left out when they are stale or unreadable.
+    /// A snapshot older than that is not trusted to say this node is still a secondary: when the collectors stopped at or before a failover, a day-old
+    /// SECONDARY row would drop this node's real plan changes.</summary>
+    internal async Task<IReadOnlySet<string>> ReadReplicaDatabasesAsync(int serverId, DateTime end, CancellationToken cancellationToken)
+        => await PgSecondaryReplicaScope.ReadAsync(_readSource, serverId, end, _logger, cancellationToken);
 
     private readonly NpgsqlDataSource _readSource;
     private readonly ChangeWatchStore _store;
@@ -452,6 +461,9 @@ WHERE after.hit IS NULL
             }
         }
 
+        /* #6551: a plan change in a database this server holds as a readable secondary was made on the primary, and the primary's watch records it once.
+           The plan-force ledger (above) is this server's own action and is kept. */
+        var replicaDatabases = await ReadReplicaDatabasesAsync(serverId, end, cancellationToken);
         var gapLimit = CaptureGapLimit(await ForcedPlansFrequencyMinutesAsync(serverId, cancellationToken));
         await using (var command = WithGapLimit(Bind(_readSource.CreateCommand(PlanSnapshotChangesSql), serverId, Mark("plan_snapshots"), naiveEnd), gapLimit))
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
@@ -460,6 +472,11 @@ WHERE after.hit IS NULL
             {
                 var forced = string.Equals(reader.GetString(0), "forced", StringComparison.Ordinal);
                 var database = reader.GetString(2);
+                if (replicaDatabases.Contains(database))
+                {
+                    continue;
+                }
+
                 var time = reader.GetDateTime(1);
                 var queryId = reader.GetInt64(3);
                 var planId = reader.GetInt64(4);
