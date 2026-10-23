@@ -23,7 +23,7 @@ public sealed partial class PlanForceToolLiveTests
     private const string GuideKind = "plan_guide_create";
     private const string GuideStatement = "SELECT n = COUNT_BIG(*) FROM dbo.t WHERE a >= 1";
 
-    private static Task<string> CreateGuideAsync(Ctx c, string name, bool dryRun, string type = "OBJECT", string? statement = null, string? moduleOrBatch = null, string hints = "OPTION (RECOMPILE)",
+    private static Task<string> CreateGuideAsync(Ctx c, string name, bool dryRun, string type = "OBJECT", string? statement = null, string? moduleOrBatch = null, string? hints = "OPTION (RECOMPILE)",
         string? parameters = null, string server = "srv-7", string? database = null) =>
         DarlingMcpPlanForceTools.RunCreatePlanGuideAsync(c.Source, c.Source, c.Log, server, database ?? c.Sql.Database, name, statement ?? GuideStatement, type, moduleOrBatch, parameters, hints, c.Arg, dryRun, c.Ct);
 
@@ -234,7 +234,7 @@ public sealed partial class PlanForceToolLiveTests
     }
 
     [Fact]
-    public async Task AStatementNotInTheModule_AndATakenName_AndATemplate_AreRefused_AndNothingRuns()
+    public async Task AStatementNotInTheModule_AndATakenName_AndATemplateWithoutParams_AreRefused_AndNothingRuns()
     {
         await RunAsync(Without.Nothing, async c =>
         {
@@ -250,8 +250,9 @@ public sealed partial class PlanForceToolLiveTests
                 Assert.Equal("statement_not_in_module", (string?)missing["reason"]);
                 var table = Parse(await CreateGuideAsync(c, guide, dryRun, moduleOrBatch: "dbo.t"));
                 Assert.Equal("not_a_module", (string?)table["reason"]);
+                /* A TEMPLATE guide is taken, but it needs params. */
                 var template = Parse(await CreateGuideAsync(c, guide, dryRun, type: "TEMPLATE"));
-                Assert.Equal("bad_guide_type", (string?)template["reason"]);
+                Assert.Equal("bad_guide_argument", (string?)template["reason"]);
             }
 
             Assert.Null(await GuideColumnAsync(c, guide, "name"));

@@ -66,7 +66,7 @@ public sealed partial class PlanForceToolLiveTests
             {
                 ("hints that do not start with OPTION (", d => d["before"]!["guide"]!["hints"] = "RECOMPILE"),
                 ("an OBJECT module that does not normalize", d => d["before"]!["guide"]!["module_or_batch"] = "a.b.c.d"),
-                ("a TEMPLATE type", d => d["before"]!["guide"]!["type"] = "TEMPLATE"),
+                ("a TEMPLATE type on a guide that has a module", d => d["before"]!["guide"]!["type"] = "TEMPLATE"),
                 ("a name over 128 characters", d => d["target"]!["id"] = new string('g', 129)),
             };
             foreach (var (why, edit) in edits)

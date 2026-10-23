@@ -49,15 +49,20 @@ public sealed class PlanGuideTests
     }
 
     [Theory]
-    [InlineData("g", Statement, "TEMPLATE", "dbo.p", null, "OPTION (RECOMPILE)", "bad_guide_type")]
-    [InlineData("g", Statement, "template", null, null, "OPTION (RECOMPILE)", "bad_guide_type")]
+    [InlineData("g", Statement, "TEMPLATE", "dbo.p", "@0 int", "OPTION (PARAMETERIZATION FORCED)", "bad_guide_argument")]
+    [InlineData("g", Statement, "template", "SELECT 1", "@0 int", "OPTION (PARAMETERIZATION FORCED)", "bad_guide_argument")]
+    [InlineData("g", Statement, "TEMPLATE", null, null, "OPTION (PARAMETERIZATION FORCED)", "bad_guide_argument")]
+    [InlineData("g", Statement, "TEMPLATE", null, "  ", "OPTION (PARAMETERIZATION FORCED)", "bad_guide_argument")]
+    [InlineData("g", Statement, "TEMPLATES", null, "@0 int", "OPTION (PARAMETERIZATION FORCED)", "bad_guide_type")]
     [InlineData("g", Statement, "OTHER", "dbo.p", null, "OPTION (RECOMPILE)", "bad_guide_type")]
     [InlineData("g", Statement, null, "dbo.p", null, "OPTION (RECOMPILE)", "bad_guide_type")]
     [InlineData("", Statement, "SQL", null, null, "OPTION (RECOMPILE)", "bad_guide_name")]
     [InlineData("#g", Statement, "SQL", null, null, "OPTION (RECOMPILE)", "bad_guide_name")]
     [InlineData("g\u0001", Statement, "SQL", null, null, "OPTION (RECOMPILE)", "bad_guide_name")]
     [InlineData("g", "", "SQL", null, null, "OPTION (RECOMPILE)", "bad_guide_argument")]
-    [InlineData("g", Statement, "SQL", null, null, "", "bad_guide_argument")]
+    [InlineData("g", Statement, "SQL", null, null, "<", "bad_guide_argument")]
+    [InlineData("g", Statement, "SQL", null, null, "<?xml version=\"1.0\"?>", "bad_guide_argument")]
+    [InlineData("g", Statement, "SQL", null, null, "<?xml version=\"1.0\"?> OPTION (RECOMPILE)", "bad_guide_argument")]
     [InlineData("g", Statement, "SQL", null, null, "RECOMPILE", "bad_guide_argument")]
     [InlineData("g", Statement, "SQL", null, null, "DROP TABLE t; --", "bad_guide_argument")]
     [InlineData("g", Statement, "OBJECT", "dbo.p", "@p int", "OPTION (RECOMPILE)", "bad_guide_argument")]
@@ -69,6 +74,51 @@ public sealed class PlanGuideTests
         Assert.Null(definition);
         Assert.Equal(reason, code);
         Assert.EndsWith("Nothing was run.", message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("<ShowPlanXML xmlns=\"http://schemas.microsoft.com/sqlserver/2004/07/showplan\"></ShowPlanXML>")]
+    [InlineData("  <?xml version=\"1.0\" encoding=\"utf-16\"?>\r\n<ShowPlanXML></ShowPlanXML>  ")]
+    public void AnXmlShowplanHint_IsTaken_ForAnObjectGuideAndASqlGuide(string hints)
+    {
+        var (sql, code, _) = PlanGuideDefinition.TryCreate("g", Statement, "SQL", null, null, hints);
+        Assert.Null(code);
+        Assert.Equal(hints.Trim(), sql!.Hints);
+        var (obj, objCode, _) = PlanGuideDefinition.TryCreate("g", Statement, "OBJECT", "dbo.p", null, hints);
+        Assert.Null(objCode);
+        Assert.Equal(hints.Trim(), obj!.Hints);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void NoHints_AreTaken_AsNull_ForEachGuideType(string? hints)
+    {
+        Assert.Null(PlanGuideDefinition.TryCreate("g", Statement, "SQL", null, null, hints).Definition!.Hints);
+        Assert.Null(PlanGuideDefinition.TryCreate("g", Statement, "OBJECT", "dbo.p", null, hints).Definition!.Hints);
+        Assert.Null(PlanGuideDefinition.TryCreate("g", Statement, "TEMPLATE", null, "@0 int", hints).Definition!.Hints);
+    }
+
+    [Fact]
+    public void ATemplateGuide_HasNoModule_KeepsItsParams_AndPrintsItsNullHintsAsNull()
+    {
+        var (template, code, _) = PlanGuideDefinition.TryCreate(" t1 ", "SELECT n FROM dbo.t WHERE a = @0", "template", "  ", "@0 int", "OPTION (PARAMETERIZATION FORCED)");
+        Assert.Null(code);
+        Assert.Equal(new PlanGuideDefinition("t1", "TEMPLATE", "SELECT n FROM dbo.t WHERE a = @0", null, "@0 int", "OPTION (PARAMETERIZATION FORCED)"), template);
+
+        var statement = PlanGuideStatement.Create("Sales", PlanGuideDefinition.TryCreate("g", Statement, "SQL", null, null, null).Definition!);
+        Assert.EndsWith(", @params = NULL, @hints = NULL;", statement, StringComparison.Ordinal);
+        Assert.Contains("@type = N'SQL'", statement, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ATemplateGuide_ReportsNoCachedBatchCount_AndTheTextSaysSo()
+    {
+        var template = new PlanGuideDefinition("t", "TEMPLATE", "SELECT n FROM dbo.t WHERE a = @0", null, "@0 int", "OPTION (PARAMETERIZATION FORCED)");
+        var words = SqlServerRemediationExecutor.MatchWords(template, 5);
+        Assert.Contains("TEMPLATE", words, StringComparison.Ordinal);
+        Assert.DoesNotContain("5 cached", words, StringComparison.Ordinal);
     }
 
     [Fact]

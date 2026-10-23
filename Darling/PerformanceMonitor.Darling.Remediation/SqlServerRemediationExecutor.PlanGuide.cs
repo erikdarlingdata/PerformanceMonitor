@@ -19,7 +19,7 @@ using PerformanceMonitor.Darling.Storage;
 namespace PerformanceMonitor.Darling.Remediation;
 
 /// <summary>A plan guide as <c>sys.sp_create_plan_guide</c> takes it (#6569, slice 2a): what a create makes, what its journal row holds, and what a re-create (slice 2b) reads back.</summary>
-public sealed record PlanGuideDefinition(string Name, string Type, string Statement, string? ModuleOrBatch, string? Params, string Hints)
+public sealed record PlanGuideDefinition(string Name, string Type, string Statement, string? ModuleOrBatch, string? Params, string? Hints)
 {
     /// <summary>The longest text of a statement, batch, parameter list or hint clause: a <c>USE PLAN</c> hint carries a whole plan, so the cap is generous and only stops a runaway argument.</summary>
     public const int MaxText = 4_000_000;
@@ -29,10 +29,21 @@ public sealed record PlanGuideDefinition(string Name, string Type, string Statem
 
     private static readonly Regex OptionClause = new(@"^OPTION\s*\(", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
+    /// <summary>An optional <c>&lt;?xml ... ?&gt;</c> prologue at the start of an XML showplan.</summary>
+    private static readonly Regex XmlProlog = new(@"^<\?xml\b.*?\?>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Singleline | RegexOptions.Compiled);
+
+    /// <summary>True when <paramref name="trimmed"/> is an XML showplan the way <c>sp_create_plan_guide</c> takes one in <c>@hints</c>: text that starts with <c>&lt;</c>, after an optional <c>&lt;?xml ...?&gt;</c> prologue. SQL Server parses it.</summary>
+    private static bool LooksLikeXmlShowplan(string trimmed)
+    {
+        var body = XmlProlog.Replace(trimmed, "", 1).TrimStart();
+        return body.Length > 1 && body[0] == '<';
+    }
+
     /// <summary>
     /// Checks the arguments of a create and returns the definition in its one normal form, or the refusal that names what is wrong. An OBJECT guide's module is
     /// normalized to <c>[schema].[name]</c> (<see cref="ModuleRecompileStatement.TryNormalize"/>) and takes no parameter list. A SQL guide's batch is optional (none means the
-    /// statement is the batch). TEMPLATE is refused. Pure: nothing here reads a server.
+    /// statement is the batch). A TEMPLATE guide takes no module_or_batch and needs params. The hints are an <c>OPTION (...)</c> clause, an XML showplan, or none
+    /// (empty or null: the guide removes the statement's own OPTION hints); <c>sp_create_plan_guide</c> checks the rest (which hints a type takes, whether the plan parses). Pure: nothing here reads a server.
     /// </summary>
     public static (PlanGuideDefinition? Definition, string? Code, string? Message) TryCreate(string? name, string? statement, string? type, string? moduleOrBatch, string? parameters, string? hints)
     {
@@ -41,15 +52,14 @@ public sealed record PlanGuideDefinition(string Name, string Type, string Statem
             return (null, RemediationResult.Reasons.BadGuideName, BadNameMessage);
 
         var kind = type?.Trim().ToUpperInvariant();
-        if (kind == "TEMPLATE")
-            return (null, RemediationResult.Reasons.BadGuideType, "A TEMPLATE plan guide is not supported here: type is OBJECT or SQL. Nothing was run.");
-        if (kind is not ("OBJECT" or "SQL"))
-            return (null, RemediationResult.Reasons.BadGuideType, "type is OBJECT (a guide on a procedure, function or trigger) or SQL (a guide on a batch). Nothing was run.");
+        if (kind is not ("OBJECT" or "SQL" or "TEMPLATE"))
+            return (null, RemediationResult.Reasons.BadGuideType, "type is OBJECT (a guide on a procedure, function or trigger), SQL (a guide on a batch) or TEMPLATE (a guide on every statement that parameterizes to the statement's form). Nothing was run.");
 
         if (string.IsNullOrWhiteSpace(statement) || statement.Length > MaxText)
             return (null, RemediationResult.Reasons.BadGuideArgument, "statement is the text of the statement the guide applies to, exactly as it is written in the module or batch. Nothing was run.");
-        if (string.IsNullOrWhiteSpace(hints) || hints.Length > MaxText || !OptionClause.IsMatch(hints.Trim()))
-            return (null, RemediationResult.Reasons.BadGuideArgument, "hints is the OPTION (...) clause to attach, for example OPTION (RECOMPILE) or OPTION (MAXDOP 1). Nothing was run.");
+        var trimmedHints = string.IsNullOrWhiteSpace(hints) ? null : hints.Trim();
+        if (trimmedHints is not null && (trimmedHints.Length > MaxText || !(OptionClause.IsMatch(trimmedHints) || LooksLikeXmlShowplan(trimmedHints))))
+            return (null, RemediationResult.Reasons.BadGuideArgument, "hints is the OPTION (...) clause to attach, for example OPTION (RECOMPILE) or OPTION (MAXDOP 1), an XML showplan (text that starts with <), or empty for none. Nothing was run.");
         if (parameters is { Length: > MaxText } || moduleOrBatch is { Length: > MaxText })
             return (null, RemediationResult.Reasons.BadGuideArgument, "module_or_batch or params is longer than a plan guide can take. Nothing was run.");
 
@@ -64,13 +74,22 @@ public sealed record PlanGuideDefinition(string Name, string Type, string Statem
             target = module;
             declared = null;
         }
+        else if (kind == "TEMPLATE")
+        {
+            if (!string.IsNullOrWhiteSpace(moduleOrBatch))
+                return (null, RemediationResult.Reasons.BadGuideArgument, "A TEMPLATE guide takes no module_or_batch: leave it empty. Nothing was run.");
+            if (string.IsNullOrWhiteSpace(parameters))
+                return (null, RemediationResult.Reasons.BadGuideArgument, "A TEMPLATE guide needs params, the parameter list of the statement's parameterized form. sys.sp_get_query_template returns the statement and the params for a query. Nothing was run.");
+            target = null;
+            declared = parameters;
+        }
         else
         {
             target = string.IsNullOrWhiteSpace(moduleOrBatch) ? null : moduleOrBatch;
             declared = string.IsNullOrWhiteSpace(parameters) ? null : parameters;
         }
 
-        return (new PlanGuideDefinition(trimmedName, kind, statement, target, declared, hints.Trim()), null, null);
+        return (new PlanGuideDefinition(trimmedName, kind, statement, target, declared, trimmedHints), null, null);
     }
 
     /// <summary>The words of a refused guide name.</summary>
@@ -99,10 +118,10 @@ public sealed partial class SqlServerRemediationExecutor
 
     /// <summary>
     /// The one batch of a plan guide create (#6569), run in the request's database. It reads what decides the create (whether the name is taken, whether an OBJECT guide's
-    /// module resolves and holds the statement, the grants, how many cached batches compiled in this database equal a SQL guide's batch: a SQL guide applies only to batches compiled in its own database) and, only when <c>@run</c> is 1 and nothing refuses, runs
+    /// module resolves and holds the statement, the grants, how many cached batches compiled in this database equal a SQL guide's batch: a SQL guide applies only to batches compiled in its own database; a TEMPLATE guide has no batch, so no count) and, only when <c>@run</c> is 1 and nothing refuses, runs
     /// <c>sys.sp_create_plan_guide</c>, then asks <c>sys.fn_validate_plan_guide</c> about the new guide and drops it in the same batch when that returns a row. Every value is a
     /// typed parameter; none joins the batch text. The grant that decides is the one Microsoft documents for <c>sp_create_plan_guide</c>: <c>ALTER</c> on the module for an
-    /// OBJECT guide, <c>ALTER</c> on the database for a SQL guide; the other is not required. <c>@disable</c> is 1 only for an Undo that re-creates a guide that was disabled: it disables the guide after it validated. The cached-plan count needs <c>VIEW SERVER STATE</c>, so it sits in a TRY block: a login without it gets null, not an error.
+    /// OBJECT guide, <c>ALTER</c> on the database for a SQL or TEMPLATE guide; the other is not required. <c>@disable</c> is 1 only for an Undo that re-creates a guide that was disabled: it disables the guide after it validated. The cached-plan count needs <c>VIEW SERVER STATE</c>, so it sits in a TRY block: a login without it gets null, not an error.
     /// </summary>
     internal static readonly string CreatePlanGuideBatchSql = @"
 DECLARE @exists bit = 0, @id integer = NULL, @otype varchar(2) = NULL, @module nvarchar(600) = NULL, @parent nvarchar(600) = NULL, @in_module bit = 0, @target nvarchar(max) = NULL,
@@ -127,18 +146,21 @@ END
 ELSE
 BEGIN
     SET @target = @mob;
-    BEGIN TRY
-        SELECT @cached = COUNT_BIG(*)
-        FROM sys.dm_exec_cached_plans AS cp
-        CROSS APPLY sys.dm_exec_sql_text(cp.plan_handle) AS st
-        WHERE st.dbid = DB_ID() AND st.text COLLATE Latin1_General_BIN2 = ISNULL(@mob, @stmt) COLLATE Latin1_General_BIN2;
-    END TRY
-    BEGIN CATCH
-        SET @cached = NULL;
-    END CATCH;
+    IF @type = N'SQL'
+    BEGIN
+        BEGIN TRY
+            SELECT @cached = COUNT_BIG(*)
+            FROM sys.dm_exec_cached_plans AS cp
+            CROSS APPLY sys.dm_exec_sql_text(cp.plan_handle) AS st
+            WHERE st.dbid = DB_ID() AND st.text COLLATE Latin1_General_BIN2 = ISNULL(@mob, @stmt) COLLATE Latin1_General_BIN2;
+        END TRY
+        BEGIN CATCH
+            SET @cached = NULL;
+        END CATCH;
+    END;
 END;
-IF @run = 1 AND @exists = 0 AND ((@type = N'SQL' AND @can_db = 1) OR (@type = N'OBJECT' AND @can_mod = 1))
-   AND (@type = N'SQL' OR (@id IS NOT NULL AND @otype IN (" + string.Join(", ", Array.ConvertAll(PlanGuideModuleTypes, t => "N'" + t + "'")) + @") AND @in_module = 1))
+IF @run = 1 AND @exists = 0 AND ((@type IN (N'SQL', N'TEMPLATE') AND @can_db = 1) OR (@type = N'OBJECT' AND @can_mod = 1))
+   AND (@type IN (N'SQL', N'TEMPLATE') OR (@id IS NOT NULL AND @otype IN (" + string.Join(", ", Array.ConvertAll(PlanGuideModuleTypes, t => "N'" + t + "'")) + @") AND @in_module = 1))
 BEGIN
     EXEC sys.sp_create_plan_guide @name = @name, @stmt = @stmt, @type = @type, @module_or_batch = @target, @params = @params, @hints = @hints;
     SELECT @gid = pg.plan_guide_id FROM sys.plan_guides AS pg WHERE pg.name = @name;
@@ -164,7 +186,7 @@ SELECT name_taken = CONVERT(bigint, @exists), module_found = CASE WHEN @id IS NU
     /// <c>sys.sp_control_plan_guide N'DROP'</c>. A guide somebody replaced under the same name does not match and is not dropped.
     /// The grant that decides is the one Microsoft documents for <c>sp_control_plan_guide</c>: <c>ALTER</c> on the referenced object for an OBJECT guide, <c>ALTER</c> on the
     /// database for every other; the grant that does not apply is reported as 1. It also returns the whole definition it read (scope, the module's two-part name, query text,
-    /// hints, scope batch, parameters, <c>is_disabled</c>), which the drop action journals; <c>@refuse_template</c> is 1 for the drop action, which never drops a TEMPLATE guide.
+    /// hints (NULL stays NULL; a NULL on one side of the compare and not the other counts as changed), scope batch, parameters, <c>is_disabled</c>), which the drop action journals.
     /// </summary>
     internal static readonly string DropPlanGuideBatchSql = @"
 DECLARE @found bit = 0, @scope integer = NULL, @scope_obj integer = NULL, @stmt_db nvarchar(max) = NULL, @hints_db nvarchar(max) = NULL, @module nvarchar(600) = NULL, @parent nvarchar(600) = NULL,
@@ -186,9 +208,11 @@ BEGIN
         FROM sys.objects AS o
         WHERE o.object_id = @scope_obj AND o.type = 'TR' AND o.parent_object_id <> 0;
     END;
-    IF @expect_stmt IS NOT NULL AND (@stmt_db COLLATE Latin1_General_BIN2 <> @expect_stmt COLLATE Latin1_General_BIN2 OR @hints_db COLLATE Latin1_General_BIN2 <> @expect_hints COLLATE Latin1_General_BIN2) SET @same = 0;
+    IF @expect_stmt IS NOT NULL AND (@stmt_db COLLATE Latin1_General_BIN2 <> @expect_stmt COLLATE Latin1_General_BIN2
+                                     OR @hints_db COLLATE Latin1_General_BIN2 <> @expect_hints COLLATE Latin1_General_BIN2
+                                     OR (@hints_db IS NULL AND @expect_hints IS NOT NULL) OR (@hints_db IS NOT NULL AND @expect_hints IS NULL)) SET @same = 0;
 END;
-IF @run = 1 AND @found = 1 AND @same = 1 AND @can_db = 1 AND @can_mod = 1 AND NOT (@refuse_template = 1 AND @scope = 3)
+IF @run = 1 AND @found = 1 AND @same = 1 AND @can_db = 1 AND @can_mod = 1
 BEGIN
     EXEC sys.sp_control_plan_guide N'DROP', @name;
     SET @ran = 1;
@@ -200,7 +224,7 @@ SELECT found = CONVERT(bigint, @found), same = CONVERT(bigint, @same), can_db = 
     /// Creates ONE plan guide with <c>sys.sp_create_plan_guide</c> in the permit's database (#6569, slice 2a), after the checks the batch gathers, and validates it before it
     /// stays: a guide <c>sys.fn_validate_plan_guide</c> reports on is dropped in the same batch and the result is <c>failed</c> with <c>guide_invalid</c> and the message the
     /// server gave. A refused call changes nothing. A dry run reads the same facts and writes nothing. <see cref="RemediationResult.CachedMatches"/> is the count of cached
-    /// batches equal to a SQL guide's batch (null for an OBJECT guide, or when the login cannot read the cache). The permit's id is the guide's name.
+    /// batches equal to a SQL guide's batch (null for an OBJECT or TEMPLATE guide, or when the login cannot read the cache). The permit's id is the guide's name.
     /// </summary>
     public async Task<RemediationResult> CreatePlanGuideAsync(ServerActionPermit permit, PlanGuideDefinition guide, bool dryRun, CancellationToken ct, bool disableAfter = false)
     {
@@ -228,7 +252,7 @@ SELECT found = CONVERT(bigint, @found), same = CONVERT(bigint, @same), can_db = 
             batch.Parameters.Add(new SqlParameter("@type", SqlDbType.NVarChar, 60) { Value = guide.Type });
             batch.Parameters.Add(new SqlParameter("@mob", SqlDbType.NVarChar, -1) { Value = (object?)guide.ModuleOrBatch ?? DBNull.Value });
             batch.Parameters.Add(new SqlParameter("@params", SqlDbType.NVarChar, -1) { Value = (object?)guide.Params ?? DBNull.Value });
-            batch.Parameters.Add(new SqlParameter("@hints", SqlDbType.NVarChar, -1) { Value = guide.Hints });
+            batch.Parameters.Add(new SqlParameter("@hints", SqlDbType.NVarChar, -1) { Value = (object?)guide.Hints ?? DBNull.Value });
             batch.Parameters.Add(new SqlParameter("@run", SqlDbType.Bit) { Value = !dryRun });
             batch.Parameters.Add(new SqlParameter("@disable", SqlDbType.Bit) { Value = disableAfter });
             try
@@ -277,6 +301,7 @@ SELECT found = CONVERT(bigint, @found), same = CONVERT(bigint, @same), can_db = 
     /// <summary>What the create says about the plans a guide would apply to. An OBJECT guide applies to the module's own statement; a SQL guide to cached or future batches that equal its batch.</summary>
     internal static string MatchWords(PlanGuideDefinition guide, long? matches) =>
         guide.Type == "OBJECT" ? "The statement was found in the module's definition."
+        : guide.Type == "TEMPLATE" ? "A TEMPLATE guide applies to every statement that parameterizes to its text, so no cached batch count applies."
         : matches is null ? "Darling could not count the cached batches that match (the login cannot read the plan cache)."
         : matches == 0 ? "No cached batch in this database matches this guide right now, so it applies to nothing cached yet; it applies when a batch equal to its text next compiles in this database."
         : string.Create(CultureInfo.InvariantCulture, $"{matches} cached batch{(matches == 1 ? "" : "es")} in this database equal this guide's text right now.");
@@ -313,7 +338,7 @@ SELECT found = CONVERT(bigint, @found), same = CONVERT(bigint, @same), can_db = 
                     ? TriggerTableWords(parentTable) is { } tableWords
                         ? $"The remediation login does not hold ALTER on {tableWords}, which sp_create_plan_guide needs for an OBJECT guide on the DML trigger {guide.ModuleOrBatch}."
                         : $"The remediation login does not hold ALTER on {guide.ModuleOrBatch}, which sp_create_plan_guide needs for an OBJECT guide."
-                    : $"The remediation login does not hold ALTER on the database {database}, which sp_create_plan_guide needs for a SQL guide.") + " Nothing was run.") with { Statement = statement };
+                    : $"The remediation login does not hold ALTER on the database {database}, which sp_create_plan_guide needs for a {(guide.Type == "TEMPLATE" ? "TEMPLATE" : "SQL")} guide.") + " Nothing was run.") with { Statement = statement };
         return null;
     }
 
@@ -321,7 +346,7 @@ SELECT found = CONVERT(bigint, @found), same = CONVERT(bigint, @same), can_db = 
     /// Drops ONE plan guide by name with <c>sys.sp_control_plan_guide N'DROP'</c> (#6569), in the permit's database. Used by the undo of a create (the permit is the create switch's)
     /// and by the drop action (slice 2b, the drop switch's). With <paramref name="expected"/> it drops only a guide that still holds that statement and those hints (<c>guide_changed</c>
     /// otherwise), so an undo never drops a guide somebody made under the same name since. A guide that is not there is <c>guide_not_found</c>: nothing to drop.
-    /// With a <c>drop_plan_guide</c> permit it is the drop action (slice 2b): a TEMPLATE guide is refused (<c>guide_template</c>, an Undo cannot re-create one), and the result carries the
+    /// With a <c>drop_plan_guide</c> permit it is the drop action (slice 2b): any guide form is dropped (OBJECT, SQL or TEMPLATE, with OPTION, XML showplan or NULL hints), and the result carries the
     /// definition the batch read (<see cref="RemediationResult.Guide"/>, <see cref="RemediationResult.GuideDisabled"/>) for the journal, on a dry run and on a write.
     /// </summary>
     public async Task<RemediationResult> DropPlanGuideAsync(ServerActionPermit permit, string guideName, PlanGuideDefinition? expected, bool dryRun, CancellationToken ct)
@@ -347,7 +372,6 @@ SELECT found = CONVERT(bigint, @found), same = CONVERT(bigint, @same), can_db = 
             batch.Parameters.Add(new SqlParameter("@expect_stmt", SqlDbType.NVarChar, -1) { Value = (object?)expected?.Statement ?? DBNull.Value });
             batch.Parameters.Add(new SqlParameter("@expect_hints", SqlDbType.NVarChar, -1) { Value = (object?)expected?.Hints ?? DBNull.Value });
             batch.Parameters.Add(new SqlParameter("@run", SqlDbType.Bit) { Value = !dryRun });
-            batch.Parameters.Add(new SqlParameter("@refuse_template", SqlDbType.Bit) { Value = dropAction });
             try
             {
                 await using var reader = await batch.ExecuteReaderAsync(ct);
@@ -385,10 +409,8 @@ SELECT found = CONVERT(bigint, @found), same = CONVERT(bigint, @same), can_db = 
             PlanGuideDefinition? read = null;
             if (dropAction)
             {
-                if (scope == 3)
-                    return RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.GuideTemplate,
-                        $"Plan guide {guideName} in {database} is a TEMPLATE guide. Darling does not drop one, because the Undo could not re-create it (create_plan_guide makes OBJECT and SQL guides only). Nothing was changed.") with { Statement = statement };
-                read = new PlanGuideDefinition(guideName, scope == 1 ? "OBJECT" : "SQL", queryText ?? "", scope == 1 ? module : scopeBatch, scope == 1 ? null : declared, hintsText ?? "");
+                /* A TEMPLATE guide (scope 3) has no module or batch; its parameter list is what the Undo needs. NULL hints stay NULL. */
+                read = new PlanGuideDefinition(guideName, scope == 1 ? "OBJECT" : scope == 3 ? "TEMPLATE" : "SQL", queryText ?? "", scope == 1 ? module : scope == 3 ? null : scopeBatch, scope == 1 ? null : declared, hintsText);
             }
 
             if (!same)
@@ -401,7 +423,7 @@ SELECT found = CONVERT(bigint, @found), same = CONVERT(bigint, @same), can_db = 
                         : $"The remediation login does not hold ALTER on the object plan guide {guideName} is on, which sp_control_plan_guide needs to drop an OBJECT guide.") + " Nothing was changed.") with { Statement = statement };
             if (!grantedDb)
                 return RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.GuidePermissionDenied,
-                    $"The remediation login does not hold ALTER on the database {database}, which sp_control_plan_guide needs to drop a SQL guide. Nothing was changed.") with { Statement = statement };
+                    $"The remediation login does not hold ALTER on the database {database}, which sp_control_plan_guide needs to drop a SQL or TEMPLATE guide. Nothing was changed.") with { Statement = statement };
             if (dryRun)
                 return RemediationResult.Done(name, dryRun, wrote: false, $"Dry run: plan guide {guideName} would be dropped from {database}. Nothing was run.") with { Statement = statement, Guide = read, GuideDisabled = read is null ? null : disabled };
             if (!ran)

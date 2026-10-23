@@ -193,7 +193,7 @@ public sealed partial class DarlingMcpPlanForceTools
         if (GuideUndoNameRefusal(guideName) is { } badName)
             return badName;
         string? Text(string key) => facts.Guide is System.Text.Json.Nodes.JsonObject g && g[key] is System.Text.Json.Nodes.JsonValue v && v.TryGetValue(out string? s) ? s : null;
-        var expected = new PlanGuideDefinition(guideName, Text("type") ?? "", Text("statement") ?? "", Text("module_or_batch"), Text("params"), Text("hints") ?? "");
+        var expected = new PlanGuideDefinition(guideName, Text("type") ?? "", Text("statement") ?? "", Text("module_or_batch"), Text("params"), Text("hints"));
         var stateNode = facts.Guide?.DeepClone();
 
         var decision = await session.AuthorizeAsync(guideName, owner, ct);
@@ -356,7 +356,7 @@ public sealed partial class DarlingMcpPlanForceTools
             var executor = new SqlServerRemediationExecutor(resolved.ServerId, row.Server, row.UserName, row.SecretSlot, logger);
             var statementText = PlanGuideStatement.Drop(database, guideName);
 
-            /* 4: one batch in the request's database reads the guide, and the executor refuses a missing or TEMPLATE guide and a missing grant before anything is dropped. */
+            /* 4: one batch in the request's database reads the guide, and the executor refuses a missing guide and a missing grant before anything is dropped. */
             var dry = await executor.DropPlanGuideAsync(permit, guideName, expected: null, dryRun: true, ct);
             if (dry.Outcome != RemediationOutcome.Done || dry.Guide is null)
             {
@@ -441,7 +441,7 @@ public sealed partial class DarlingMcpPlanForceTools
         var stateNode = facts.Guide?.DeepClone();
         if (GuideUndoNameRefusal(guideName) is { } badName)
             return badName;
-        /* The journaled definition goes through the same shape checks the create tool applies: hints start with OPTION (, an OBJECT guide's module still normalizes to [schema].[name], no TEMPLATE, the length caps. */
+        /* The journaled definition goes through the same shape checks the create tool applies: hints are an OPTION (...) clause, an XML showplan or none, an OBJECT guide's module still normalizes to [schema].[name], a TEMPLATE guide has no module and has params, the length caps. */
         var (definition, _, badMessage) = PlanGuideDefinition.TryCreate(guideName, Text("statement"), Text("type"), Text("module_or_batch"), Text("params"), Text("hints"));
         if (definition is null)
             return PlanUndoAnswer.Refused("not_undoable", "The definition journaled with this drop does not pass the checks a create makes (" + badMessage!.Replace(" Nothing was run.", "", StringComparison.Ordinal) + "), so the guide cannot be re-created from it.");
@@ -503,8 +503,9 @@ public sealed partial class DarlingMcpPlanForceTools
     [McpServerTool(Name = "create_plan_guide"), Description(
         "Agent arm, SQL Server only (Azure SQL is refused): creates ONE plan guide with sys.sp_create_plan_guide, so a statement runs with the OPTION (...) hints you give it (OPTIMIZE FOR, RECOMPILE, MAXDOP, USE PLAN) without a change to the application. Dry run by default: returns the exact statement and what the guide matches, and writes nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's create_plan_guide switch and remediation login (with ALTER on the module for an OBJECT guide, ALTER on the database for a SQL guide); ships off. " +
         "<<GUIDE>>" +
-        "type is OBJECT (module_or_batch is the two-part schema.name of a procedure, function or trigger, and statement must appear exactly in its definition) or SQL (module_or_batch is the batch text, or empty when statement is the batch; params is the parameter list for a parameterized batch). TEMPLATE is refused. hints is required and is the OPTION (...) clause. Table hints that change isolation or locking (NOLOCK, READUNCOMMITTED, READPAST, TABLOCKX, XLOCK and the like) change which rows the query returns or how it blocks other sessions: use them only when the person asked for them, or after comparing the query's results and run time with and without the hint, and state what you compared in your report. Every value goes to the server as a parameter, never as batch text. " +
-        "Before it creates, the guide is matched and reported: an OBJECT guide's module must resolve and hold the statement, a SQL guide reports how many cached batches compiled in its database equal its text (zero is allowed: the guide then matches nothing cached right now). A name already used in the database is refused. After it creates, the guide is validated with sys.fn_validate_plan_guide in the same batch: an invalid guide is dropped again and the call is journaled failed with the server's message. " +
+        "type is OBJECT (module_or_batch is the two-part schema.name of a procedure, function or trigger, and statement must appear exactly in its definition) or SQL (module_or_batch is the batch text, or empty when statement is the batch; params is the parameter list for a parameterized batch) or TEMPLATE (the guide applies to every statement that parameterizes to the form in statement: module_or_batch stays empty, params is required, and hints is OPTION (PARAMETERIZATION SIMPLE) or OPTION (PARAMETERIZATION FORCED); get statement and params for a query from sys.sp_get_query_template, because the parameterized text has to match exactly). " +
+        "hints has three forms. (1) An OPTION (...) clause, for example OPTION (RECOMPILE) or OPTION (MAXDOP 1): the usual form. (2) An XML showplan (text that starts with <, optionally after an <?xml ...?> line): the statement is compiled to that plan, so use it only for a plan you took from the plan cache or Query Store for this same statement, and read the guide's validation result. (3) Empty: the guide applies no hints and removes the OPTION hints the statement itself carries, so use it only when that is what the person asked for. Table hints that change isolation or locking (NOLOCK, READUNCOMMITTED, READPAST, TABLOCKX, XLOCK and the like) change which rows the query returns or how it blocks other sessions: use them only when the person asked for them, or after comparing the query's results and run time with and without the hint, and state what you compared in your report. Every value goes to the server as a parameter, never as batch text. " +
+        "Before it creates, the guide is matched and reported: an OBJECT guide's module must resolve and hold the statement, a SQL guide reports how many cached batches compiled in its database equal its text (zero is allowed: the guide then matches nothing cached right now); a TEMPLATE guide reports no count, because it matches by the statement's parameterized form, and needs ALTER on the database like a SQL guide. A name already used in the database is refused. After it creates, the guide is validated with sys.fn_validate_plan_guide in the same batch: an invalid guide is dropped again and the call is journaled failed with the server's message. " +
         "This tool blocks only a call that cannot do anything: bad_guide_name, bad_guide_type, bad_guide_argument, bad_module_name, bad_database, engine_not_supported, guide_exists, module_not_found, not_a_module, statement_not_in_module, guide_permission_denied, guide_invalid. " +
         "mcp.allowWrites never bypasses the gate, and a dry run needs it too (it signs in with the remediation login). The change is journaled in Agent changes (kind plan_guide_create) with the whole definition, and a person can undo it there: the undo drops the guide by name. Answers status dry_run, done, refused (reason) or failed, with statement, before, matches and journal_id.")]
     public static Task<string> CreatePlanGuide(
@@ -512,10 +513,10 @@ public sealed partial class DarlingMcpPlanForceTools
         [Description("The database the guide is created in.")] string database_name,
         [Description("The plan guide's name: 1 to 128 characters, not starting with #. A name already used in the database is refused.")] string name,
         [Description("The text of the statement the guide applies to, exactly as written in the module or batch (case and spacing included).")] string statement,
-        [Description("OBJECT or SQL. TEMPLATE is refused.")] string type,
-        [Description("The OPTION (...) clause to attach, for example OPTION (RECOMPILE), OPTION (MAXDOP 1), OPTION (OPTIMIZE FOR (@p = 1)) or OPTION (USE PLAN N'<xml>').")] string hints,
+        [Description("OBJECT, SQL or TEMPLATE. TEMPLATE: module_or_batch empty, params required, hints OPTION (PARAMETERIZATION SIMPLE|FORCED); statement and params come from sys.sp_get_query_template.")] string type,
+        [Description("The OPTION (...) clause to attach, for example OPTION (RECOMPILE), OPTION (MAXDOP 1), OPTION (OPTIMIZE FOR (@p = 1)) or OPTION (USE PLAN N'<xml>'); or an XML showplan (text that starts with <); or empty to apply no hints (removes the statement's own OPTION hints).")] string? hints = null,
         [Description("OBJECT: the two-part schema.name of the procedure, function or trigger. SQL: the batch text, or empty when statement is the whole batch.")] string? module_or_batch = null,
-        [Description("SQL only: the parameter list of a parameterized batch, for example '@p int'. Empty for none.")] string? @params = null,
+        [Description("SQL: the parameter list of a parameterized batch, for example '@p int'; empty for none. TEMPLATE: required. OBJECT: empty.")] string? @params = null,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Required: the agent_action object (request_id, claim_id, agent_id, reason, evidence); see the tool guide. The reason is recorded with the change.")] string? agent_action = null,
         [Description("Default true: return the exact statement and what the guide matches, write nothing. Pass false to write.")] bool dry_run = true,
@@ -529,8 +530,8 @@ public sealed partial class DarlingMcpPlanForceTools
     [McpServerTool(Name = "drop_plan_guide"), Description(
         "Agent arm, SQL Server only (an Azure SQL target is refused as engine_not_supported): drops ONE plan guide by name with sys.sp_control_plan_guide N'DROP', so the statement it applied to runs without the guide's hints again. Dry run by default: reads the guide and returns the exact statement and the whole definition that would be journaled, and writes nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's drop_plan_guide switch and remediation login (with ALTER on the module for an OBJECT guide, ALTER on the database for a SQL guide); ships off. " +
         "<<GUIDE>>" +
-        "The guide is read from sys.plan_guides in the database_name you give, in the same batch that drops it. A name that is not there is refused as guide_not_found. A TEMPLATE guide is refused as guide_template, because the Undo could not re-create one. " +
-        "This tool blocks only a call that cannot do anything: bad_guide_name, bad_database, engine_not_supported, guide_not_found, guide_template, guide_changed (the guide was replaced between the read and the drop), guide_permission_denied. " +
+        "The guide is read from sys.plan_guides in the database_name you give, in the same batch that drops it. A name that is not there is refused as guide_not_found. Every guide form is dropped: OBJECT, SQL and TEMPLATE (a SQL or TEMPLATE guide needs ALTER on the database), with OPTION, XML showplan or no (NULL) hints, and the Undo re-creates any of them from the journaled definition. Read the guide with a dry run first and check the name: dropping a guide stops its hints or its forced plan applying to the statement. " +
+        "This tool blocks only a call that cannot do anything: bad_guide_name, bad_database, engine_not_supported, guide_not_found, guide_changed (the guide was replaced between the read and the drop), guide_permission_denied. " +
         "mcp.allowWrites never bypasses the gate, and a dry run needs it too (it signs in with the remediation login). The change is journaled in Agent changes (kind plan_guide_drop) with the whole definition (name, type, statement, module_or_batch, params, hints, is_disabled), and a person can undo it there: the undo re-creates the guide from that definition (validated, and disabled again if it was disabled), and is refused as guide_exists if a guide with that name exists by then. Answers status dry_run, done, refused (reason) or failed, with statement, before and journal_id.")]
     public static Task<string> DropPlanGuide(
         NpgsqlDataSource postgres,
