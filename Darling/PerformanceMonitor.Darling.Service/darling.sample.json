@@ -526,9 +526,11 @@
     // "allowTokenlessLoopback": true,
 
     // On the managed store the dashboard reads as the read-only "viewer" login. Default true: a person signed in to
-    // the dashboard as an admin can also make its Admin writes (routes and profiles, threshold overrides, report
-    // feedback, server actions), through a second small connection pool that signs in as the managed "admin" login
-    // (the one the Viewer uses). Set false to keep the dashboard list-only on the managed store. Restart to change.
+    // the dashboard as an admin (the shared web token or an OIDC admin) can also make its Admin writes (routes and
+    // environment profiles, threshold overrides, report feedback, server actions, note decisions, undoing an agent
+    // change and the agent switch, closing a request, writing a note, practice requests, case export), through a
+    // second small connection pool that signs in as the managed "admin" login (the one the Viewer uses). Set false
+    // to keep the dashboard list-only on the managed store. Restart to change.
     // A store you bring yourself is not affected.
     // "allowAdminWrites": false,
 

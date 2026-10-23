@@ -71,6 +71,7 @@ public sealed class WebAdminArm : IDisposable
             return null;
         }
 
+        logger.LogInformation("Web dashboard Admin writes are on (web.allowAdminWrites): a signed-in admin's Admin writes use the managed admin login. Set it to false to keep the dashboard list-only.");
         return new WebAdminArm(() => DarlingManagedPostgres.TryBuildWebAdminConnectionStringFromStoredCredential(postgres));
     }
 

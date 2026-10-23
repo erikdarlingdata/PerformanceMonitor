@@ -103,6 +103,45 @@ public sealed class WebAdminArmTests
     }
 
     [Fact]
+    public void ForHost_LogsTheOnLineWhenTheArmIsBuilt_AndTheOffLineInsteadWhenItIsOff()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var on = new ListLogger();
+        using (WebAdminArm.ForHost(new PostgresConfig { Managed = true }, true, on))
+        {
+        }
+
+        var line = Assert.Single(on.Lines);
+        Assert.Contains("Admin writes are on (web.allowAdminWrites)", line, StringComparison.Ordinal);
+        Assert.Contains("Set it to false to keep the dashboard list-only", line, StringComparison.Ordinal);
+
+        var off = new ListLogger();
+        Assert.Null(WebAdminArm.ForHost(new PostgresConfig { Managed = true }, false, off));
+        Assert.DoesNotContain(off.Lines, l => l.Contains("are on", StringComparison.Ordinal));
+        Assert.Contains("are off", Assert.Single(off.Lines), StringComparison.Ordinal);
+
+        var byo = new ListLogger();
+        Assert.Null(WebAdminArm.ForHost(new PostgresConfig { Managed = false }, true, byo));
+        Assert.Empty(byo.Lines);
+    }
+
+    private sealed class ListLogger : Microsoft.Extensions.Logging.ILogger
+    {
+        public System.Collections.Generic.List<string> Lines { get; } = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+
+        public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state,
+            Exception? exception, Func<TState, Exception?, string> formatter) => Lines.Add(formatter(state, exception));
+    }
+
+    [Fact]
     public void TheRefusalSentence_NamesTheSwitch_OnlyOnTheManagedStoreWithTheSwitchOff()
     {
         Assert.Contains("web.allowAdminWrites", DarlingWebStoreWrites.Refused("record feedback", true, adminWritesOff: true), StringComparison.Ordinal);
