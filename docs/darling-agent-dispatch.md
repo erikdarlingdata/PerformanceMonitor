@@ -253,7 +253,7 @@ Grants for the remediation login:
 |---|---|
 | Force or unforce a plan (SQL Server) | `ALTER` on each database where it forces a plan. |
 | Evict a plan (SQL Server) | `ALTER SERVER STATE`. Without it, an eviction is refused as `evict_permission_denied`. |
-| Recompile a module (SQL Server, Azure SQL Database) | `ALTER` on the procedure, function or trigger. Without it, a recompile is refused as `recompile_permission_denied`. |
+| Recompile a module (SQL Server, Azure SQL Database) | A procedure or function needs `ALTER` on the module. A DML trigger needs `ALTER` on its table, and that grant also allows changing and emptying that table (`ALTER TABLE`, `TRUNCATE`), so grant it only where that is acceptable. Without the grant, a recompile is refused as `recompile_permission_denied`. |
 | Kill a session (SQL Server) | `ALTER ANY CONNECTION`. This grant lets the login kill any session on that server. Grant it only where you want an agent to kill. |
 | Kill a session (Azure SQL Database) | A user in each database, with `VIEW DATABASE STATE` and `KILL DATABASE CONNECTION`. |
 | Kill a session (PostgreSQL) | `pg_signal_backend` and `pg_read_all_stats`. |

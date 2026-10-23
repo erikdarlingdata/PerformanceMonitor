@@ -20,26 +20,37 @@ namespace PerformanceMonitor.Darling.Remediation;
 
 public sealed partial class SqlServerRemediationExecutor
 {
-    /// <summary>
-    /// The read batch of a module recompile (#6569), run in the request's database before any write: whether the name resolves, what it is, and
-    /// whether the login holds <c>ALTER</c> on it. The name goes in as <c>@p0</c>, a typed parameter, and never joins the batch text.
-    /// </summary>
-    internal const string RecompileFactsSql = @"
-DECLARE @id integer = OBJECT_ID(@p0);
-SELECT found = CASE WHEN @id IS NULL THEN 0 ELSE 1 END,
-       type = (SELECT RTRIM(o.type) FROM sys.objects AS o WHERE o.object_id = @id),
-       type_desc = (SELECT o.type_desc FROM sys.objects AS o WHERE o.object_id = @id),
-       can_alter = CONVERT(bigint, ISNULL(HAS_PERMS_BY_NAME(@p0, N'OBJECT', N'ALTER'), 0));";
-
-    /// <summary>The recompile itself, with the object name as the parameter <c>@p0</c>.</summary>
-    internal const string RecompileSql = "EXEC sys.sp_recompile @objname = @p0;";
-
     /// <summary>The <c>sys.objects.type</c> codes <c>recompile_module</c> accepts: stored procedures (T-SQL and CLR), scalar, inline and table-valued functions (T-SQL and CLR) and DML triggers.</summary>
     internal static readonly string[] RecompilableTypes = ["P", "PC", "FN", "IF", "TF", "FS", "FT", "TR"];
 
     /// <summary>
+    /// The one batch of a module recompile (#6569), run in the request's database: it resolves the name to an object id, reads what that object is and
+    /// whether the login holds <c>ALTER</c> on it, and, only when <c>@run</c> is 1 and the object is an accepted module the login may alter, runs
+    /// <c>sys.sp_recompile</c> on that same object's schema and name. It answers which object it resolved and whether the recompile ran, so the check
+    /// and the recompile cannot see two different objects. The name goes in as <c>@p0</c>, a typed parameter, and never joins the batch text.
+    /// </summary>
+    internal static readonly string RecompileBatchSql = @"
+DECLARE @id integer = OBJECT_ID(@p0);
+DECLARE @type varchar(2), @type_desc nvarchar(60), @schema sysname, @name sysname, @resolved nvarchar(600), @can_alter bigint = 0, @ran bit = 0;
+SELECT @type = RTRIM(o.type), @type_desc = o.type_desc, @schema = OBJECT_SCHEMA_NAME(o.object_id), @name = o.name
+FROM sys.objects AS o
+WHERE o.object_id = @id;
+IF @id IS NOT NULL
+BEGIN
+    SET @resolved = QUOTENAME(@schema) + N'.' + QUOTENAME(@name);
+    SET @can_alter = CONVERT(bigint, ISNULL(HAS_PERMS_BY_NAME(@resolved, N'OBJECT', N'ALTER'), 0));
+END;
+IF @run = 1 AND @id IS NOT NULL AND @can_alter = 1 AND @type IN (" + string.Join(", ", Array.ConvertAll(RecompilableTypes, t => "N'" + t + "'")) + @")
+BEGIN
+    EXEC sys.sp_recompile @objname = @resolved;
+    SET @ran = 1;
+END;
+SELECT found = CASE WHEN @id IS NULL THEN 0 ELSE 1 END, type = @type, type_desc = @type_desc, can_alter = @can_alter,
+       schema_name = @schema, object_name = @name, ran = CONVERT(bigint, @ran);";
+
+    /// <summary>
     /// Recompiles ONE procedure, function or trigger with <c>sys.sp_recompile</c> (#6569), so the next run compiles a new plan. The permit names the
-    /// database and the object (<see cref="ModuleRecompileStatement.TryNormalize"/>'s form). One read batch, in that database, gathers whether the name
+    /// database and the object (<see cref="ModuleRecompileStatement.TryNormalize"/>'s form). One batch, in that database, gathers whether the name
     /// resolves (<c>module_not_found</c>), whether it is a procedure, function or trigger (<c>not_a_module</c>: a table or a view is refused) and whether the
     /// login holds <c>ALTER</c> on it (<c>recompile_permission_denied</c>). Those are the only refusals. SQL Server and Azure SQL Database both have the procedure.
     /// </summary>
@@ -63,40 +74,46 @@ SELECT found = CASE WHEN @id IS NULL THEN 0 ELSE 1 END,
             string? type;
             string? typeDesc;
             bool granted;
-            await using (var read = Command(connection, RecompileFactsSql))
+            string? resolvedSchema;
+            string? resolvedName;
+            bool ran;
+            await using var batch = Command(connection, RecompileBatchSql);
+            batch.Parameters.Add(new SqlParameter("@p0", SqlDbType.NVarChar, ModuleRecompileStatement.MaxNormalLength) { Value = normal });
+            batch.Parameters.Add(new SqlParameter("@run", SqlDbType.Bit) { Value = !dryRun });
+            try
             {
-                read.Parameters.Add(new SqlParameter("@p0", SqlDbType.NVarChar, 256) { Value = normal });
-                await using var reader = await read.ExecuteReaderAsync(ct);
+                await using var reader = await batch.ExecuteReaderAsync(ct);
                 if (!await reader.ReadAsync(ct))
                     return RemediationResult.Failed(name, dryRun, "The server returned no answer to the module check.");
                 found = Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture) == 1;
                 type = reader.IsDBNull(1) ? null : reader.GetString(1);
                 typeDesc = reader.IsDBNull(2) ? null : reader.GetString(2);
                 granted = !reader.IsDBNull(3) && Convert.ToInt64(reader.GetValue(3), CultureInfo.InvariantCulture) == 1;
+                resolvedSchema = reader.IsDBNull(4) ? null : reader.GetString(4);
+                resolvedName = reader.IsDBNull(5) ? null : reader.GetString(5);
+                ran = !reader.IsDBNull(6) && Convert.ToInt64(reader.GetValue(6), CultureInfo.InvariantCulture) == 1;
             }
-
-            if (RecompileRefusal(name, dryRun, normal, database, found, type, typeDesc, granted, statement) is { } refusal)
-                return refusal;
-            if (dryRun)
-                return RemediationResult.Done(name, dryRun, wrote: false, $"Dry run: {normal} is a {typeDesc} in {database}. Nothing was run.")
-                    with { Statement = statement, ObjectType = typeDesc };
-
-            await using var recompile = Command(connection, RecompileSql);
-            recompile.Parameters.Add(new SqlParameter("@p0", SqlDbType.NVarChar, 256) { Value = normal });
-            try
+            catch (Exception ex) when (!dryRun && (ex is OperationCanceledException || IsOutcomeUnknown(ex, connection.State == ConnectionState.Open, ct.IsCancellationRequested)))
             {
-                await recompile.ExecuteNonQueryAsync(ct);
-            }
-            catch (Exception ex) when (ex is OperationCanceledException || IsOutcomeUnknown(ex, connection.State == ConnectionState.Open, ct.IsCancellationRequested))
-            {
-                /* The call was sent and its reply was lost, or the call was cancelled while it ran: the server may have recompiled it (#5632). */
+                /* The batch was sent and its reply was lost, or the call was cancelled while it ran: the server may have recompiled it (#5632). */
                 var detail = ex is OperationCanceledException ? "the call was cancelled while the server ran it" : ErrorText(ex, secret);
                 return RemediationResult.Unknown(name,
                     $"The recompile of {normal} in {database} was sent, but its reply was lost ({detail}). The module may have been marked for recompile. Running it again does no harm.");
             }
 
-            return RemediationResult.Done(name, dryRun, wrote: true, $"{normal} was marked for recompile in {database}.")
-                with { Statement = statement, ObjectType = typeDesc };
+            if (RecompileRefusal(name, dryRun, normal, database, found, type, typeDesc, granted, statement) is { } refusal)
+                return refusal;
+
+            /* The object the server resolved, not the text the caller typed (the two can differ in case). */
+            var resolved = "[" + (resolvedSchema ?? "").Replace("]", "]]", StringComparison.Ordinal) + "].[" + (resolvedName ?? "").Replace("]", "]]", StringComparison.Ordinal) + "]";
+            if (dryRun)
+                return RemediationResult.Done(name, dryRun, wrote: false, $"Dry run: {resolved} is a {typeDesc} in {database}. Nothing was run.")
+                    with { Statement = statement, ObjectType = typeDesc, ObjectSchema = resolvedSchema, ObjectName = resolvedName };
+            if (!ran)
+                return RemediationResult.Failed(name, dryRun, $"The server did not recompile {resolved} in {database}.");
+
+            return RemediationResult.Done(name, dryRun, wrote: true, $"{resolved} was marked for recompile in {database}.")
+                with { Statement = statement, ObjectType = typeDesc, ObjectSchema = resolvedSchema, ObjectName = resolvedName };
         }, ct);
     }
 
@@ -115,7 +132,7 @@ SELECT found = CASE WHEN @id IS NULL THEN 0 ELSE 1 END,
                 $"{module} is a {typeDesc ?? "different kind of object"}, not a procedure, function or trigger. Nothing was run.") with { Statement = statement, ObjectType = typeDesc };
         if (!granted)
             return RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.RecompilePermissionDenied,
-                $"The remediation login does not hold ALTER on {module} in {database}, which sp_recompile needs. A person can grant it. Nothing was run.")
+                $"The remediation login does not hold ALTER on {module} in {database}, which sp_recompile needs. A procedure or function needs ALTER on the module; a DML trigger needs ALTER on its table, which also allows changing and emptying that table, so a person should grant it only where that is acceptable. Nothing was run.")
                 with { Statement = statement, ObjectType = typeDesc };
         return null;
     }
@@ -125,6 +142,9 @@ SELECT found = CASE WHEN @id IS NULL THEN 0 ELSE 1 END,
 public static class ModuleRecompileStatement
 {
     private const int MaxPart = 128;
+
+    /// <summary>The longest normal form: two parts of 128 characters, each all <c>]</c> doubled, plus two pairs of brackets and the dot.</summary>
+    public const int MaxNormalLength = 2 * (2 * MaxPart + 2) + 1;
 
     /// <summary>
     /// The name as <c>[schema].[name]</c> (each part bracket-quoted, a <c>]</c> doubled), or false when it is not exactly two non-empty parts of at most

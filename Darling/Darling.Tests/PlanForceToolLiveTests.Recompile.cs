@@ -153,6 +153,83 @@ public sealed partial class PlanForceToolLiveTests
     }
 
     [Fact]
+    public async Task ADatabaseTheServersEntryExcludes_IsRefused_ForADryRunAndAWrite_AndNothingIsReadOrRun()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var name = "p_" + Guid.NewGuid().ToString("N")[..8];
+            await MakeProcedureAsync(c, name);
+            await TurnRecompileOnAsync(c);
+            await PgExecAsync(c.Connection, $"UPDATE config.config_monitored_servers SET excluded_databases = ARRAY['{c.Sql.Database.ToUpperInvariant()}'] WHERE server_id = 7", c.Ct);
+
+            foreach (var dryRun in new[] { true, false })
+            {
+                var json = Parse(await RecompileAsync(c, "dbo." + name, dryRun));
+                Assert.Equal("refused", (string?)json["status"]);
+                Assert.Equal("database_excluded", (string?)json["reason"]);
+                Assert.Contains("is excluded in this server's entry, so Darling does not act in it", (string?)json["message"], StringComparison.Ordinal);
+            }
+
+            /* Nothing ran on the server (the procedure kept its three cached runs), and nothing was journaled as a call. */
+            Assert.Equal(3, await ProcedureExecutionsAsync(c, name));
+            Assert.Equal(0, await JournalActionRowsAsync(c));
+        });
+    }
+
+    [Fact]
+    public async Task AValidTwoPartNameLongerThan256Characters_Resolves_AndRuns_AndTheJournalNamesTheResolvedObject()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            /* Two parts of 128 characters: the normal form [schema].[name] is 261 characters, past the 256 the parameter used to hold. */
+            var schema = "s" + new string('a', 127);
+            var name = "p" + new string('b', 127);
+            await using (var admin = await OpenAsync(c.Sql.Admin(c.Sql.Database), c.Ct))
+            {
+                await ExecAsync(admin, $"CREATE SCHEMA [{schema}];", c.Ct);
+                await ExecAsync(admin, $"CREATE PROCEDURE [{schema}].[{name}] AS SELECT n = COUNT_BIG(*) FROM dbo.t WHERE a >= 1;", c.Ct);
+                for (var i = 0; i < 3; i++)
+                    await ExecAsync(admin, $"EXEC [{schema}].[{name}];", c.Ct);
+            }
+
+            await TurnRecompileOnAsync(c);
+            var typed = $"{schema}.{name}";
+            Assert.True($"[{schema}].[{name}]".Length > 256);
+
+            var dryText = await RecompileAsync(c, typed, dryRun: true);
+            var dry = Parse(dryText);
+            Assert.True("dry_run" == (string?)dry["status"], dryText);
+            Assert.Equal(schema, (string?)dry["before"]!["schema"]);
+            Assert.Equal(name, (string?)dry["before"]!["name"]);
+
+            var done = Parse(await RecompileAsync(c, typed, dryRun: false));
+            Assert.Equal("done", (string?)done["status"]);
+            Assert.Equal(schema, (string?)done["before"]!["schema"]);
+            Assert.Equal(name, (string?)done["before"]!["name"]);
+            var doneRow = Assert.Single(await RowsAsync(c, "action_done"));
+            Assert.Contains($"[{schema}].[{name}] was marked for recompile", (string?)doneRow["after"]!["message"], StringComparison.Ordinal);
+
+            /* The journal row names the schema and name the server resolved. */
+            var called = Assert.Single(await RowsAsync(c, "action_called"));
+            Assert.Equal(schema, (string?)called["before"]!["schema"]);
+            Assert.Equal(name, (string?)called["before"]!["name"]);
+            Assert.Equal($"[{schema}].[{name}]", (string?)called["before"]!["module"]);
+        });
+    }
+
+    [Fact]
+    public async Task ANameOverTheLimit_IsRefusedBeforeTheServerIsReached()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            await TurnRecompileOnAsync(c);
+            var json = Parse(await RecompileAsync(c, "dbo." + new string('x', 129), dryRun: false));
+            Assert.Equal("refused", (string?)json["status"]);
+            Assert.Equal("bad_module_name", (string?)json["reason"]);
+        });
+    }
+
+    [Fact]
     public async Task ABadName_IsRefusedBadModuleName_BeforeTheGate_AndJournaled()
     {
         await RunAsync(Without.Switch, async c =>

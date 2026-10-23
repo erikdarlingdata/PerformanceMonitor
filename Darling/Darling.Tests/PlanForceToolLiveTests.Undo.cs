@@ -308,7 +308,10 @@ public sealed partial class PlanForceToolLiveTests
         await RunAsync(Without.Nothing, async c =>
         {
             Assert.Equal("not_found", (await UndoAsync(c, 987654, confirm: true)).Code);
-            Assert.Equal("bad_login", (await UndoAsync(c, 1, confirm: true, login: "bad login!")).Code);
+            /* A journal row this test makes, so the login refusal is checked whatever ran before it (a fresh store has no row 1). The login holds a
+               control character, which a person's name never does ("bad login!" is a valid name: inner spaces and ! are allowed). */
+            var seeded = await SeedCallAsync(c, ForceKind, 1, 1, null, "", "done");
+            Assert.Equal("bad_login", (await UndoAsync(c, seeded, confirm: true, login: "bad\u0001login")).Code);
             var request = await PgScalarAsync(c.Connection, "SELECT request_id FROM config.investigation_requests LIMIT 1", c.Ct);
             var mute = await InsertJournalAsync(c, request!, "action_called", "agent:agent-a", new JsonObject { ["kind"] = "mute" }.ToJsonString());
             Assert.Equal("not_undoable", (await UndoAsync(c, mute, confirm: true)).Code);

@@ -39,6 +39,12 @@ public sealed record RemediationResult(
     /// <summary>A module recompile's read of the object it named (#6569): its <c>sys.objects.type_desc</c> (for example <c>SQL_STORED_PROCEDURE</c>). Null for every other action, and when the object was not found.</summary>
     public string? ObjectType { get; init; }
 
+    /// <summary>A module recompile's resolved object (#6569): the schema the server resolved the input to (<c>OBJECT_SCHEMA_NAME</c> of the resolved id), not the input text. Null for every other action, and when the name did not resolve.</summary>
+    public string? ObjectSchema { get; init; }
+
+    /// <summary>A module recompile's resolved object name (<c>OBJECT_NAME</c> of the resolved id), not the input text. Null for every other action, and when the name did not resolve.</summary>
+    public string? ObjectName { get; init; }
+
     /// <summary>A kill's facts about the session it named, read in the batch that decided (#5632, step 12). Null for every other action, and when no such session was found.</summary>
     public KillSessionFacts? Session { get; init; }
 

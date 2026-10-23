@@ -74,8 +74,11 @@ public sealed class RecompileModuleTests
         Assert.True(ModuleRecompileStatement.TryNormalize("dbo.x'; DROP TABLE t; --", out var normal));
         Assert.Equal("USE [Sales]; EXEC sys.sp_recompile @objname = N'[dbo].[x''; DROP TABLE t; --]';", ModuleRecompileStatement.For("Sales", normal));
         /* The executor sends the name as a parameter: the batch text it runs holds no name at all. */
-        Assert.Equal("EXEC sys.sp_recompile @objname = @p0;", SqlServerRemediationExecutor.RecompileSql);
-        Assert.DoesNotContain("DROP", SqlServerRemediationExecutor.RecompileFactsSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("DROP", SqlServerRemediationExecutor.RecompileBatchSql, StringComparison.Ordinal);
+        /* The parameter holds the longest normal form: two 128-character parts, every character a doubled bracket. */
+        var doubled = new string(']', 256);
+        Assert.True(ModuleRecompileStatement.TryNormalize("[" + doubled + "].[" + doubled + "]", out var longest));
+        Assert.Equal(ModuleRecompileStatement.MaxNormalLength, longest.Length);
     }
 
     [Fact]

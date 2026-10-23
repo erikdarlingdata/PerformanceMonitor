@@ -86,12 +86,24 @@ public sealed partial class DarlingMcpPlanForceTools
             var row = await ReadServerRowAsync(owner, resolved.ServerId, ct);
             if (row is null)
                 return Answer("failed", "server_row_missing", $"{resolved.DisplayName} has no row in the monitored-server settings.");
+
+            /* 3b: a database the server's entry excludes is one Darling does not act in. Refused before the dry run reads anything, with the Azure kill's sentence. */
+            if (IsExcludedDatabase(row.ExcludedDatabases, database))
+            {
+                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, AzureDatabaseExcluded, ct);
+                return DarlingAgentActionGate.RefusalAnswer(ExcludedDatabaseRefusal(database));
+            }
+
             var executor = new SqlServerRemediationExecutor(resolved.ServerId, row.Server, row.UserName, row.SecretSlot, logger);
             var statement = ModuleRecompileStatement.For(database, module);
 
             /* 4: the executor's own checks run on a dry run and before a write: the name resolves, it is a procedure, function or trigger, the grant. */
             var dry = await executor.RecompileModuleAsync(permit, module, dryRun: true, ct);
-            var before = new { database, module, object_type = dry.ObjectType };
+            /* The journal and the answer name the object the server resolved (its schema and name), not the input text. Before it resolves, only the input is known. */
+            var resolvedModule = dry.ObjectSchema is null || dry.ObjectName is null
+                ? module
+                : "[" + dry.ObjectSchema.Replace("]", "]]", StringComparison.Ordinal) + "].[" + dry.ObjectName.Replace("]", "]]", StringComparison.Ordinal) + "]";
+            var before = new { database, module = resolvedModule, schema = dry.ObjectSchema, name = dry.ObjectName, object_type = dry.ObjectType };
             if (dry.Outcome != RemediationOutcome.Done)
             {
                 if (dry.Outcome == RemediationOutcome.Refused && dry.Reason is not null)

@@ -1128,7 +1128,7 @@ SELECT EXISTS (SELECT 1 FROM v_dmv_blocking_snapshots WHERE server_id = $1 AND d
         string database, CancellationToken ct)
     {
         if (IsExcludedDatabase(row.ExcludedDatabases, database))
-            return new AgentActionRefusal(AzureDatabaseExcluded, $"Database {database} is excluded in this server's entry, so Darling does not act in it. Nothing was run.");
+            return ExcludedDatabaseRefusal(database);
 
         if (string.Equals(row.Server.Database, database, StringComparison.OrdinalIgnoreCase))
             return null;
@@ -1143,6 +1143,10 @@ SELECT EXISTS (SELECT 1 FROM v_dmv_blocking_snapshots WHERE server_id = $1 AND d
             : new AgentActionRefusal(AzureDatabaseUnknown,
                 $"Database {database} is not this server's registered database, and Darling has collected no blocking row from it in the last day, so the kill does not connect to it. Pass the database_name of the get_blocking row you read. Nothing was run.");
     }
+
+    /// <summary>The refusal for a database the server's entry excludes, shared by the Azure kill and <c>recompile_module</c>.</summary>
+    internal static AgentActionRefusal ExcludedDatabaseRefusal(string database) =>
+        new(AzureDatabaseExcluded, $"Database {database} is excluded in this server's entry, so Darling does not act in it. Nothing was run.");
 
     /// <summary>Whether the server entry's excluded list names <paramref name="database"/>: entries are compared trimmed, and without regard to case (#5632).</summary>
     internal static bool IsExcludedDatabase(string[]? excluded, string database) =>
