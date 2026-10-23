@@ -324,6 +324,41 @@ public sealed class SignedWebhookSendTests
         Assert.Equal("BadSignature", Check(parentKey));
     }
 
+    /// <summary>
+    /// #6456: an investigation event post carries the same <c>User-Agent</c> an alert post to the same receiver does, beside its
+    /// three <c>webhook-*</c> headers.
+    /// </summary>
+    [Fact]
+    public async Task AnInvestigationEventPost_CarriesTheSameUserAgentAnAlertPostDoes()
+    {
+        using var receiver = new RawEndpoint();
+        var ring = DarlingPasswordKey.FromPrivateKey(RingKey);
+        var routeKey = WebhookSigning.NewKey();
+        var config = new DarlingConfig();
+        var routeRow = PasswordBinding.WebhookRouteRow(7);
+        var routeUrl = Seal(ring, "generic", routeRow, receiver.Url, "", null);
+        config.NotificationRoutes = new[]
+        {
+            new NotificationRoute(7, "CPU High", "", "", routeUrl, "", "", true) { GenericSigning = SealedKeys(ring, routeRow, routeUrl, routeKey) },
+        };
+        var settings = new DarlingAlertSettings(config, ring: ring);
+        var service = new WebhookAlertService(settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance);
+
+        /* The route owns the "CPU High" alert, so the alert and the event reach the same receiver: the alert first. */
+        await service.TrySendWebhookAlertsAsync("CPU High", "sql-01", "95", "80", serverId: "1");
+        var error = await service.TrySendInvestigationEventAsync(
+            7, receiver.Url, "{\"event\":\"claimed\"}", "evt-6456", TestContext.Current.CancellationToken);
+
+        Assert.Null(error);
+        Assert.Equal(2, receiver.Requests.Count);
+        var alert = receiver.Requests[0];
+        var evt = receiver.Requests[1];
+        Assert.False(string.IsNullOrWhiteSpace(alert.Header("User-Agent")));
+        Assert.Equal(alert.Header("User-Agent"), evt.Header("User-Agent"));
+        Assert.Equal("evt-6456", evt.Header(WebhookSigning.IdHeader));
+        Assert.NotNull(evt.Header(WebhookSigning.SignatureHeader));
+    }
+
     [Fact]
     public async Task AKeyThatWillNotOpen_TurnsTheChannelOff_SendsNothingUnsigned_AndNoTextOrLogCarriesTheKey()
     {
