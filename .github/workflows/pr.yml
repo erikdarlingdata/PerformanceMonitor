@@ -6,8 +6,8 @@ name: PR CI
 # as passing, so a draft's skipped run could leave a green on a SHA nobody tested. The status stays pending until the
 # verdict sets it, so a run that is cancelled or dies early never passes.
 #
-# While the `ci-next` label gate is on (PR 1 of the rollout), only a pull request that carries the label, or the branch
-# that builds this workflow, runs anything; every other pull request costs the plan job and no status.
+# Every pull request that is ready for review runs (PR 2 of the rollout removed the `ci-next` label gate); a draft costs
+# the plan job and sets no status.
 # No `labeled` trigger: an unrelated label would cancel and restart the run.
 
 on:
@@ -65,7 +65,18 @@ jobs:
           # A push runs every area whatever it changed, so it needs no file list.
           : > changed.txt
           if [ "${EVENT_NAME}" = "pull_request" ]; then
-            gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" --jq '.[].filename' > changed.txt
+            # The files API can fail (a 5xx, a rate limit) and caps its list at 3000 files. Either way the list cannot be
+            # trusted, so give the plan one path no area knows: it then runs every area, and the PR is slower, not red.
+            if gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" --jq '.[].filename' > changed.part; then
+              mv changed.part changed.txt
+              if [ "$(wc -l < changed.txt)" -ge 3000 ]; then
+                echo "::warning title=Changed-file list may be cut::The files API returned 3000 or more files, its limit, so the list may be cut short. Running every area."
+                echo "unknown/changed-files-cut-off" > changed.txt
+              fi
+            else
+              echo "::warning title=Changed-file list unavailable::The pull request files API call failed, so the changed files are unknown. Running every area."
+              echo "unknown/changed-files-unavailable" > changed.txt
+            fi
           fi
           echo "$(wc -l < changed.txt) changed file(s)"
 
@@ -73,7 +84,7 @@ jobs:
             --draft "${IS_DRAFT}" --labels "${LABELS}" --files-file changed.txt --github-output "${GITHUB_OUTPUT}"
 
       # Pending from the moment the plan says the run goes. A fork's read-only token cannot write it (the verdict job
-      # says so in one notice), and a draft or ungated pull request sets nothing.
+      # says so in one notice), and a draft sets nothing.
       - name: Set CI result to pending
         if: steps.plan.outputs.run == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
         shell: bash
@@ -297,7 +308,7 @@ jobs:
   verdict:
     name: CI verdict
     needs: [plan, build, test]
-    # Nothing to say for a draft or an ungated pull request, which set no status: skip the runner too.
+    # Nothing to say for a draft, which sets no status: skip the runner too.
     if: ${{ always() && (needs.plan.result != 'success' || needs.plan.outputs.run == 'true' || needs.plan.outputs.outcome == 'train-blocked') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
