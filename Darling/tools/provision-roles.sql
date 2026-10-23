@@ -1563,8 +1563,8 @@ DECLARE
    v_before jsonb;
    v_after jsonb;
 BEGIN
-   IF p_actor IS NULL OR p_actor !~ '^operator:[A-Za-z0-9._:-]{1,64}$' THEN
-      RAISE EXCEPTION 'The actor is operator:<the operator token''s name>.' USING ERRCODE = 'DL400';
+   IF p_actor IS NULL OR p_actor !~ '^operator:[A-Za-z0-9._: -]{1,64}$' THEN
+      RAISE EXCEPTION 'The actor is operator: and the operator token''s name, or the single token''s identity.' USING ERRCODE = 'DL400';
    END IF;
    IF p_columns IS NULL OR cardinality(p_columns) = 0
       OR EXISTS (SELECT 1 FROM unnest(p_columns) AS c(name)

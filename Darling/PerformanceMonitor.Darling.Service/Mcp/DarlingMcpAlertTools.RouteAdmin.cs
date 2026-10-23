@@ -43,7 +43,7 @@ public sealed partial class DarlingMcpAlertTools
     private const string MatchHelp = "a family (performance, self-monitor, reports, agent-jobs, external), 'Analysis: <category>', an exact metric name, or * (scoped routes only)";
 
     [McpServerTool(Name = "create_notification_route"), Description(
-        "Creates a notification route, optionally with its own destinations (Slack, Teams, generic webhook, PagerDuty, email). With none, each channel goes where it went before (the next matching route, else Settings). Changes shared alert configuration; the service delivers on it at its next sweep. Returns created (the route with its recipient list in full, and for each destination set whether it is saved: the host for Teams and Slack, never a URL or key) with the undo call, or invalid. Only a named operator token sets the agent fields (levels 0 to 3)." +
+        "Creates a notification route, optionally with its own destinations (Slack, Teams, generic webhook, PagerDuty, email). With none, each channel goes where it went before (the next matching route, else Settings). Changes shared alert configuration; the service delivers on it at its next sweep. Returns created (the route with its recipient list in full, and for each destination set whether it is saved: the host for Teams and Slack, never a URL or key) with the undo call, or invalid. Only an operator token sets the agent fields (levels 0 to 3)." +
         "<<GUIDE>>" +
         "Creates a route that decides WHICH alerts it covers and, when you pass them, where they go. " + DestinationsHelp + " " +
         "With no destination field the route is stored with every destination empty, so it has none of its own and each channel goes where it went before: to the next less specific matching route that sets that channel, else to the Settings > Notifications channels. " +
@@ -79,13 +79,13 @@ public sealed partial class DarlingMcpAlertTools
             new RouteDestinationRequest(teams_webhook_url, slack_webhook_url, generic_webhook_url, pagerduty_routing_key, email_recipients),
             DarlingPasswordKey.Current, logger, cancellationToken,
             new RouteAgentRequest(agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes),
-            served?.Policy.OperatorTokenName);
+            served?.Policy.OperatorActor);
 
     /// <summary>The create: the route and its destinations in one transaction (a sealed value is bound to the route's id, so the id comes first).</summary>
     internal static async Task<string> CreateNotificationRouteAsync(
         NpgsqlDataSource postgres, string metric_match, bool enabled, int? scope_server_id, int? scope_tag_id, string? send_resolutions,
         int? fallback_route_id, RouteDestinationRequest destinations, IPasswordKeyRing ring, ILogger? logger, CancellationToken cancellationToken,
-        RouteAgentRequest? agent = null, string? operatorTokenName = null)
+        RouteAgentRequest? agent = null, string? operatorActor = null)
     {
         try
         {
@@ -106,7 +106,7 @@ public sealed partial class DarlingMcpAlertTools
                     FallbackRouteId = fallback_route_id,
                     TeamsUrl = DestinationStandIn,
                 };
-                if (AgentFieldRefusal(agent, draft, operatorTokenName, "create_notification_route") is { } agentRefusal)
+                if (AgentFieldRefusal(agent, draft, operatorActor, "create_notification_route") is { } agentRefusal)
                 {
                     return agentRefusal;
                 }
@@ -143,7 +143,7 @@ public sealed partial class DarlingMcpAlertTools
 
                 if (agent.Any)
                 {
-                    await SetRouteAgentAsync(connection, transaction, routeId, operatorTokenName!, agent, null, created: true, cancellationToken);
+                    await SetRouteAgentAsync(connection, transaction, routeId, operatorActor!, agent, null, created: true, cancellationToken);
                 }
 
                 await transaction.CommitAsync(cancellationToken);
@@ -180,7 +180,7 @@ public sealed partial class DarlingMcpAlertTools
     }
 
     [McpServerTool(Name = "update_notification_route"), Description(
-        "Edits a notification route by route_id: only the fields you pass change: its match and scope, enabled flag, resolution override, fallback and own destinations (Slack, Teams, generic webhook, PagerDuty, email). Changes shared alert configuration the service delivers on. Returns updated (the route with its recipient list in full, and each destination changed as saved or none, with the host for Teams and Slack and never a URL or key), previous and the undo call, or unchanged, invalid, not_found or refused (an agent route, or a match or scope change on a route with an agent setting). Only a named operator token sets the agent fields (levels 0 to 3)." +
+        "Edits a notification route by route_id: only the fields you pass change: its match and scope, enabled flag, resolution override, fallback and own destinations (Slack, Teams, generic webhook, PagerDuty, email). Changes shared alert configuration the service delivers on. Returns updated (the route with its recipient list in full, and each destination changed as saved or none, with the host for Teams and Slack and never a URL or key), previous and the undo call, or unchanged, invalid, not_found or refused (an agent route, or a match or scope change on a route with an agent setting). Only an operator token sets the agent fields (levels 0 to 3)." +
         "<<GUIDE>>" +
         "Edits what a route matches and applies to, and where it sends. " + DestinationsHelp + " " +
         "A route that is an agent route keeps everything in the Viewer, and a route with an agent setting (Off included) keeps its match and scope there: changing metric_match, scope_server_id, scope_tag_id or fleet_wide on it answers refused. " +
@@ -224,13 +224,13 @@ public sealed partial class DarlingMcpAlertTools
             new RouteDestinationRequest(teams_webhook_url, slack_webhook_url, generic_webhook_url, pagerduty_routing_key, email_recipients),
             DarlingPasswordKey.Current, logger, cancellationToken,
             new RouteAgentRequest(agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes),
-            served?.Policy.OperatorTokenName);
+            served?.Policy.OperatorActor);
 
     /// <summary>The edit: the match, scope and flag columns and the destinations in one transaction.</summary>
     internal static async Task<string> UpdateNotificationRouteAsync(
         NpgsqlDataSource postgres, int route_id, string? metric_match, bool? enabled, int? scope_server_id, int? scope_tag_id, bool? fleet_wide,
         string? send_resolutions, int? fallback_route_id, bool? clear_fallback, RouteDestinationRequest destinations, IPasswordKeyRing ring,
-        ILogger? logger, CancellationToken cancellationToken, RouteAgentRequest? agent = null, string? operatorTokenName = null)
+        ILogger? logger, CancellationToken cancellationToken, RouteAgentRequest? agent = null, string? operatorActor = null)
     {
         try
         {
@@ -242,12 +242,12 @@ public sealed partial class DarlingMcpAlertTools
             }
 
             agent ??= RouteAgentRequest.None;
-            if (AgentRouteRefusal(existing, "update_notification_route", operatorTokenName) is { } agentRefusal)
+            if (AgentRouteRefusal(existing, "update_notification_route", operatorActor) is { } agentRefusal)
             {
                 return agentRefusal;
             }
 
-            if (agent.Any && operatorTokenName is null)
+            if (agent.Any && operatorActor is null)
             {
                 return AgentFieldsNeedOperator("update_notification_route");
             }
@@ -323,7 +323,7 @@ public sealed partial class DarlingMcpAlertTools
 
             /* #6542: with a named operator token, the fallback of an agent route, or of a route this call gives agent fields, is written by the
                agent function with them: config.update_notification_route refuses an agent route. */
-            var fallbackWithAgent = operatorTokenName is not null && (agent.Any || existing.AgentLevel is >= 1);
+            var fallbackWithAgent = operatorActor is not null && (agent.Any || existing.AgentLevel is >= 1);
             if (fallback != existing.FallbackRouteId && !fallbackWithAgent)
             {
                 columns.Add("fallback_route_id");
@@ -350,7 +350,7 @@ public sealed partial class DarlingMcpAlertTools
                     AgentExpiryMinutes = existing.AgentExpiryMinutes,
                     TeamsUrl = DestinationStandIn,
                 };
-                if (AgentFieldRefusal(agent, draft, operatorTokenName, "update_notification_route") is { } agentFieldRefusal)
+                if (AgentFieldRefusal(agent, draft, operatorActor, "update_notification_route") is { } agentFieldRefusal)
                 {
                     return agentFieldRefusal;
                 }
@@ -394,7 +394,7 @@ public sealed partial class DarlingMcpAlertTools
 
                 if (agent.Any)
                 {
-                    await SetRouteAgentAsync(connection, transaction, route_id, operatorTokenName!, agent, fallback, created: false, cancellationToken);
+                    await SetRouteAgentAsync(connection, transaction, route_id, operatorActor!, agent, fallback, created: false, cancellationToken);
                 }
 
                 await transaction.CommitAsync(cancellationToken);
@@ -472,16 +472,16 @@ public sealed partial class DarlingMcpAlertTools
 
     /// <summary>The refusal for agent fields from a caller that is not a named operator token (the legacy token keeps today's rule).</summary>
     internal static string AgentFieldsNeedOperator(string tool) =>
-        Outcome("refused", $"{tool} sets a route's agent fields only for a named operator token (mcp.tokens, role operator). Set them in the Viewer's Settings window or on the web dashboard.");
+        Outcome("refused", $"{tool} sets a route's agent fields only for an operator token (a named operator token, or the single token with mcp.allowWrites). Set them in the Viewer's Settings window or on the web dashboard.");
 
     /// <summary>
     /// The check an operator token's agent fields get before anything is written (#6542 part 2): a named operator token only (MCP is full
     /// admin, so it sets levels 0 to 3 and changes a route at any level), then <see cref="NotificationRouteWriter.Validate"/> (the Viewer's save rules) over the route as it would be.
     /// Null when the write may go on. The agent function checks the same again under the row's lock.
     /// </summary>
-    internal static string? AgentFieldRefusal(RouteAgentRequest agent, NotificationRouteDraft draft, string? operatorTokenName, string tool)
+    internal static string? AgentFieldRefusal(RouteAgentRequest agent, NotificationRouteDraft draft, string? operatorActor, string tool)
     {
-        if (operatorTokenName is null)
+        if (operatorActor is null)
         {
             return AgentFieldsNeedOperator(tool);
         }
@@ -496,14 +496,14 @@ public sealed partial class DarlingMcpAlertTools
 
     /// <summary>Writes the agent fields through <c>config.set_notification_route_agent</c> on the write's own transaction. The function
     /// journals <c>route_agent_changed</c> as <c>operator:&lt;token name&gt;</c> in the same transaction (never the token's value).</summary>
-    private static async Task SetRouteAgentAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, int routeId, string operatorTokenName,
+    private static async Task SetRouteAgentAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, int routeId, string operatorActor,
         RouteAgentRequest agent, int? fallback, bool created, CancellationToken cancellationToken)
     {
         const string sql = "SELECT config.set_notification_route_agent($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)";
         await using var command = new NpgsqlCommand(sql, connection) { Transaction = transaction };
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });
-        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = OperatorActor(operatorTokenName) });
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = operatorActor });
         command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = agent.Columns.ToArray() });
         NotificationRouteWriter.AddNullableInt(command, agent.Level);
         NotificationRouteWriter.AddNullableInt(command, agent.PerHour);
@@ -515,8 +515,6 @@ public sealed partial class DarlingMcpAlertTools
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    /// <summary>The journal actor of a named operator token's route change: <c>operator:&lt;name&gt;</c>.</summary>
-    internal static string OperatorActor(string operatorTokenName) => "operator:" + operatorTokenName;
 
     /// <summary>The route's recipient list as stored now, read on the write's own transaction (the <c>mcp</c> login may read that column).</summary>
     private static async Task<string> ReadRecipientsAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, int routeId, CancellationToken cancellationToken)

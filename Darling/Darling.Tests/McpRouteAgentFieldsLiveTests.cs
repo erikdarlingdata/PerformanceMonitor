@@ -27,8 +27,8 @@ namespace Darling.Tests;
 /// <summary>
 /// #6542 part 2: the route agent fields over MCP, AS the <c>mcp</c> role with the grants taken from
 /// <see cref="DarlingManagedRoles.BuildProvisioningSql"/> and the functions and the journal trigger built by the owner, as in a
-/// deployment. A named operator token sets levels 0 to 3 and journals <c>route_agent_changed</c> as <c>operator:&lt;name&gt;</c>. The legacy
-/// token still sets no agent field.
+/// deployment. An operator-class token (a named operator, or the legacy token with writes) sets levels 0 to 3 and journals
+/// <c>route_agent_changed</c> as <c>operator:</c> and its name or identity.
 /// </summary>
 public sealed class McpRouteAgentFieldsLiveTests
 {
@@ -38,7 +38,7 @@ public sealed class McpRouteAgentFieldsLiveTests
     private static DarlingMcpServedPolicy OperatorPolicy() =>
         new(new DarlingMcpWritePolicy.Effective(true, false, false, Operator));
 
-    /// <summary>The legacy single token with writes on: no token name.</summary>
+    /// <summary>The legacy single token with writes on: no token name, operator-class.</summary>
     private static DarlingMcpServedPolicy LegacyPolicy() => new(new DarlingMcpWritePolicy.Effective(true, false));
 
     private static string Status(string answer) => JsonDocument.Parse(answer).RootElement.GetProperty("status").GetString()!;
@@ -126,29 +126,39 @@ public sealed class McpRouteAgentFieldsLiveTests
         });
     }
 
+    /// <summary>Agreed with the coordinator, 10-23: the legacy single token served the writes is operator-class, so it sets agent levels 1 and 3
+    /// and edits an agent route, each change journaled under operator: and the token identity the route write logs carry. A token served the
+    /// investigations instead (writes off) is not operator-class and sets no agent field.</summary>
     [Fact]
-    public async Task TheLegacyToken_StillSetsNoAgentField_AndStillCannotEditAnAgentRoute()
+    public async Task TheLegacyWritesToken_SetsLevels1And3_AndEachIsJournaled_ButAnInvestigationsTokenSetsNone()
     {
         await WithMcpRoleAsync(async (owner, asMcp, ct) =>
         {
-            var create = await DarlingMcpAlertTools.CreateNotificationRoute(
+            var created = await DarlingMcpAlertTools.CreateNotificationRoute(
                 asMcp, "Blocking", agent_level: 1, served: LegacyPolicy(), cancellationToken: ct);
-            Assert.Equal("refused", Status(create));
-            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.config_notification_routes", ct));
+            Assert.Equal("created", Status(created));
+            var routeId = RouteIdOf(created);
 
-            var routeId = RouteIdOf(await DarlingMcpAlertTools.CreateNotificationRoute(asMcp, "Blocking", served: LegacyPolicy(), cancellationToken: ct));
-            Assert.Equal("refused", Status(await DarlingMcpAlertTools.UpdateNotificationRoute(
-                asMcp, routeId, agent_level: 1, served: LegacyPolicy(), cancellationToken: ct)));
+            Assert.Equal("updated", Status(await DarlingMcpAlertTools.UpdateNotificationRoute(
+                asMcp, routeId, agent_level: 3, served: LegacyPolicy(), cancellationToken: ct)));
+            Assert.Equal("3", await ScalarAsync(owner, $"SELECT agent_level FROM config.config_notification_routes WHERE route_id = {routeId}", ct));
+            Assert.Equal("2", await ScalarAsync(owner,
+                $"SELECT count(*) FROM config.investigation_journal WHERE route_id = {routeId} AND event = 'route_agent_changed' " +
+                "AND actor LIKE 'operator:%' AND actor NOT LIKE 'operator:" + Operator + "'", ct));
+            Assert.Equal("1", await ScalarAsync(owner,
+                $"SELECT count(*) FROM config.investigation_journal WHERE route_id = {routeId} AND (detail -> 'after' ->> 'agent_level') = '3'", ct));
 
-            /* A route a person made an agent route: the legacy token is refused on any field, as before part 2. */
-            await using (var person = owner.CreateCommand($"UPDATE config.config_notification_routes SET agent_level = 1 WHERE route_id = {routeId}"))
-            {
-                await person.ExecuteNonQueryAsync(ct);
-            }
-
-            Assert.Equal("refused", Status(await DarlingMcpAlertTools.UpdateNotificationRoute(
+            /* The agent route's other fields are no longer refused for it either. */
+            Assert.Equal("updated", Status(await DarlingMcpAlertTools.UpdateNotificationRoute(
                 asMcp, routeId, send_resolutions: "always", served: LegacyPolicy(), cancellationToken: ct)));
-            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'route_agent_changed'", ct));
+
+            /* Investigations on, writes off: not operator-class, so no agent field. */
+            var investigations = new DarlingMcpServedPolicy(new DarlingMcpWritePolicy.Effective(false, false, Investigations: true));
+            Assert.Equal("refused", Status(await DarlingMcpAlertTools.CreateNotificationRoute(
+                asMcp, "Deadlocks", agent_level: 1, served: investigations, cancellationToken: ct)));
+            Assert.Equal("refused", Status(await DarlingMcpAlertTools.UpdateNotificationRoute(
+                asMcp, routeId, agent_level: 1, served: investigations, cancellationToken: ct)));
+            Assert.Equal("3", await ScalarAsync(owner, $"SELECT agent_level FROM config.config_notification_routes WHERE route_id = {routeId}", ct));
         });
     }
 
