@@ -463,6 +463,9 @@ public sealed class DarlingConfig
             throw new InvalidDataException("Configuration file parsed to null.");
         }
 
+        /* #6468: a file with no "servers" key, or "servers": null, is the same as an empty list (a start with no servers yet). */
+        config.Servers ??= new List<MonitoredServer>();
+
         /* Capture every env:/file: reference AS WRITTEN, before the resolution below overwrites any slot
            with the secret it points at. */
         config.SecretReferencesAsWritten = DarlingOwnedSecrets.CollectReferences(config);
@@ -568,11 +571,9 @@ public sealed class DarlingConfig
         /* #5450: the heartbeat block, for the same reason (a broken one is reported even with no servers yet). */
         problems.AddRange(HeartbeatConfig.Validate(Heartbeat));
 
-        if (Servers is null || Servers.Count == 0)
-        {
-            problems.Add("servers must contain at least one entry.");
-            return problems;
-        }
+        /* #6468: no servers is a valid configuration. A first install starts with an empty list and the person adds the
+           first server in the Viewer or the web dashboard, so an empty list is not a problem to report here. */
+        Servers ??= new List<MonitoredServer>();
 
         for (int i = 0; i < Servers.Count; i++)
         {

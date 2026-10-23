@@ -458,13 +458,14 @@ public sealed class NotificationRouteRow
     };
 
     /// <summary>
-    /// When the route was last saved, in the viewer's display mode (#4766). <see cref="ModifiedAtUtc"/> is the store's
-    /// <c>modified_at</c>, written as <c>now() AT TIME ZONE 'UTC'</c>, so it is one UTC instant, and it reads as the
-    /// other grids' times do: Server, Local or UTC per the mode, with the UTC offset added in the repeated autumn
-    /// hour (<see cref="ViewerTimeHelper.FormatForDisplay(DateTime, string)"/>). This used to be the machine's local
-    /// time in every mode. Empty for a route that has not been stored yet.
+    /// When the route was last saved (#4766, #6457). <see cref="ModifiedAtUtc"/> is the store's <c>modified_at</c>,
+    /// written as <c>now() AT TIME ZONE 'UTC'</c>, so it is one UTC instant. A route belongs to the whole fleet and no
+    /// one server, so "Server" display mode has no clock to apply: it used to apply the active server's offset and
+    /// showed a route saved at 10:07 UTC as 03:07. It reads as every fleet-wide window does
+    /// (<see cref="ViewerTimeHelper.FormatFleetWide(DateTime, string)"/>): this machine's time in Local mode, UTC in
+    /// the others, always followed by the zone's name. Empty for a route that has not been stored yet.
     /// </summary>
-    public string ModifiedDisplay => ModifiedAtUtc == default ? "" : ViewerTimeHelper.FormatForDisplay(ModifiedAtUtc, "yyyy-MM-dd HH:mm:ss");
+    public string ModifiedDisplay => ModifiedAtUtc == default ? "" : ViewerTimeHelper.FormatFleetWide(ModifiedAtUtc, "yyyy-MM-dd HH:mm:ss");
 
     /// <summary>The row as the shared writer states it (#6231).</summary>
     public NotificationRouteDraft ToDraft() => new()

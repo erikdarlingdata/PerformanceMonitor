@@ -37,6 +37,12 @@ public enum ViewerConfigSource
 
     /// <summary>darling.json one level up — the release zip's viewer\ under the service root.</summary>
     ServiceRoot,
+
+    /// <summary>
+    /// darling.json in the folder the installed Darling Windows service runs from, found through the service's
+    /// registered ImagePath (#6473) — for a viewer installed in its own folder, where nothing above is near it.
+    /// </summary>
+    InstalledService,
 }
 
 /// <summary>
@@ -229,8 +235,13 @@ public sealed class ViewerSettings
 
     /// <param name="explicitPath">A path handed on the command line; wins outright.</param>
     /// <param name="baseDirectory">The viewer binary's directory; null means AppContext.BaseDirectory (tests pass a temp directory).</param>
-    public static string ResolveConfigPath(string? explicitPath = null, string? baseDirectory = null) =>
-        ResolveConfigLocation(explicitPath, baseDirectory).Path;
+    /// <param name="installedServiceFolder">
+    /// Looks up the folder the installed Darling service runs from, or returns null; null here means the real
+    /// lookup in <see cref="ViewerInstalledService"/>. Tests pass their own so no real service is consulted.
+    /// </param>
+    public static string ResolveConfigPath(
+        string? explicitPath = null, string? baseDirectory = null, Func<string?>? installedServiceFolder = null) =>
+        ResolveConfigLocation(explicitPath, baseDirectory, installedServiceFolder).Path;
 
     /// <summary>
     /// The resolver itself: the same explicit path → <c>DARLING_CONFIG</c> → beside-the-viewer →
@@ -240,7 +251,12 @@ public sealed class ViewerSettings
     /// </summary>
     /// <param name="explicitPath">A path handed on the command line; wins outright.</param>
     /// <param name="baseDirectory">The viewer binary's directory; null means AppContext.BaseDirectory (tests pass a temp directory).</param>
-    public static ViewerConfigLocation ResolveConfigLocation(string? explicitPath = null, string? baseDirectory = null)
+    /// <param name="installedServiceFolder">
+    /// Looks up the folder the installed Darling service runs from (#6473), or returns null; null here means the
+    /// real lookup in <see cref="ViewerInstalledService"/>. Tests pass their own so no real service is consulted.
+    /// </param>
+    public static ViewerConfigLocation ResolveConfigLocation(
+        string? explicitPath = null, string? baseDirectory = null, Func<string?>? installedServiceFolder = null)
     {
         if (!string.IsNullOrWhiteSpace(explicitPath))
         {
@@ -272,6 +288,22 @@ public sealed class ViewerSettings
             if (File.Exists(besideService))
             {
                 return new ViewerConfigLocation(besideService, ViewerConfigSource.ServiceRoot, true);
+            }
+        }
+
+        /* #6473: a viewer installed in its own folder (the Setup.exe on the service host) is near none of the
+           above. Last, ask Windows where the installed service lives and use the darling.json in that folder.
+           Last, so an explicit choice and a file the operator put beside the viewer still win. File.Exists is
+           true for the installer's restricted darling.json even when this account cannot open it, so a refused
+           file is returned here and TryLoad reports "restricted, join the operator group" rather than "not
+           found"; a folder with no darling.json in it falls through. */
+        var serviceFolder = (installedServiceFolder ?? (() => ViewerInstalledService.FindInstallFolder()))();
+        if (!string.IsNullOrWhiteSpace(serviceFolder))
+        {
+            var inServiceFolder = Path.Combine(serviceFolder, "darling.json");
+            if (File.Exists(inServiceFolder))
+            {
+                return new ViewerConfigLocation(inServiceFolder, ViewerConfigSource.InstalledService, true);
             }
         }
 

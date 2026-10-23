@@ -443,13 +443,17 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
            Also no host code: change-only, generic wiring.
 
            NINE with the attention collector (#5640): it keeps the prior event_counter value, the one reading that a
-           MAX() over attention_events cannot recover (a quiet run writes no count row), so the next run can take the delta. */
+           MAX() over attention_events cannot recover (a quiet run writes no count row), so the next run can take the delta.
+
+           TEN since #6441. system_health_events persists the (file, buffer offset) bookmark of the newest event it read from the
+           session's event_file target, the one reading a MAX() over its rows cannot recover (a file offset is not a stored column).
+           It is used only while its event time is not ahead of the stored watermark; no host code, generic wiring. */
         var declaring = CollectorCatalog.All
             .Where(c => c.StateKeys.Count > 0)
             .Select(c => c.Name)
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToArray();
-        Assert.Equal(new[] { "attention", "blocked_process_report", "cpu_utilization", "deadlocks", "default_trace_events", "pg_deadlocks", "pg_log_events", "pg_plan_capture", "pg_statement_stats", "pg_wait_sampling", "pg_wait_stats", "wait_stats" }, declaring);
+        Assert.Equal(new[] { "attention", "blocked_process_report", "cpu_utilization", "deadlocks", "default_trace_events", "pg_deadlocks", "pg_log_events", "pg_plan_capture", "pg_statement_stats", "pg_wait_sampling", "pg_wait_stats", "system_health_events", "wait_stats" }, declaring);
     }
 
     [Fact]
