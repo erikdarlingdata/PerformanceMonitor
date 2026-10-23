@@ -50,13 +50,11 @@ name: Claude Auto Review
 # The review posts
 # comments for its findings and ends every run with ONE formal verdict review (the VERDICT
 # PROTOCOL in the prompt below): changes-requested when a finding is substantive, a comment
-# review otherwise. The verdict's color lives in claude-review-guard.yml, not here: its verdict
-# arm fails while the newest verdict is changes-requested, so a substantive finding shows as a
-# failed check, which a branch rule can require, and not only as a comment (the #3470-#3473
-# train shipped six findings in one night as comments that auto-merge outran; one was
-# real). Since #3650 the job also fails ITSELF when the run submitted no verdict, with the cause and
-# the result block's counts in its log -- a green here means a verdict exists, and the guard is the
-# second line. The review keeps no transcript: the file the action writes stays on the runner, and
+# review otherwise. The review is advisory (#6656): the guard workflows that turned a
+# changes-requested verdict into a failed check are gone, so a substantive finding shows as a
+# comment and a review state only, and nothing here can block a merge. Since #3650 the job also
+# fails ITSELF when the run submitted no verdict, with the cause and the result block's counts
+# in its log -- a green here means a verdict exists. The review keeps no transcript: the file the action writes stays on the runner, and
 # the log carries only that file's result fields, never its message text, even with debug logging
 # on (the review step pins ACTIONS_STEP_DEBUG to "false"). It no-ops cleanly until
 # the CLAUDE_CODE_OAUTH_TOKEN repo secret is set, and on fork PRs (which do not receive secrets),
@@ -86,8 +84,7 @@ name: Claude Auto Review
 # Darling Storage/Analysis/Service trees, Lite's service/MCP/database layers, install/ and every
 # .sql file to a FULL pass (Opus, 1M context, 120 turns) and everything else (tests, docs, viewer
 # XAML, wwwroot) to a LIGHT pass (Sonnet, 100 turns). Same prompt, same verdict contract, one
-# review step -- the guard counts that step's conclusion and the bot's reviews, and neither
-# accounting knows or cares which tier ran.
+# review step, whichever tier ran.
 on:
   pull_request:
     # A draft gets no review: both jobs below skip while the pull request is a draft, and marking it
@@ -105,10 +102,9 @@ on:
 # is due. See there.
 
 jobs:
-  # THE ONE DECISION -- full, follow-up or skip -- is made here and nowhere else. The guard
-  # (claude-review-guard.yml) does not repeat it: it reads what this run did (the review job ran, or
-  # was skipped on purpose), and recomputing it there would be wrong anyway, because by the time the
-  # guard looks, the review this run posted has changed the very history the decision reads. The
+  # THE ONE DECISION -- full, follow-up or skip -- is made here and nowhere else. Nothing
+  # downstream recomputes it, and recomputing it later would be wrong anyway, because once the
+  # review this run posted exists it has changed the very history the decision reads. The
   # decision cannot move into a shared script, composite action or reusable workflow either:
   # claude-code-action runs only while THIS file matches the default branch's copy byte for byte, and
   # a file the pull request can edit would sit outside that check while steering the review job,
@@ -534,8 +530,7 @@ jobs:
             echo "max_turns=$max_turns"
           } >> "$GITHUB_OUTPUT"
 
-      # The step NAME is read by claude-review-guard.yml (REVIEW_STEP) to tell a clean no-op from a
-      # run that said nothing; renaming it blinds the guard. The id is for the steps below.
+      # The id is for the steps below.
       #
       # The `|| 'full'` / `|| 'claude-opus-5[1m]'` / `|| '60'` fallbacks: if the tier step somehow
       # left an output empty, the review still runs, at the full tier -- the same fail-toward-
@@ -668,7 +663,7 @@ jobs:
             non-blocking, or tradeoffs the code or the PR body already documents as deliberate:
             those stay comments, and the verdict is the clean one. Never use --approve — this token
             cannot approve without an org setting this repo does not enable, and no gate needs it.
-            The guard's rule is newest-verdict-wins: on a re-review after new commits, review the
+            The rule is newest-verdict-wins: on a re-review after new commits, review the
             NEW diff and submit a fresh verdict, and a clean fresh verdict clears an earlier
             changes-requested by itself.
 
@@ -779,9 +774,7 @@ jobs:
       # review per run -- changes-requested on a substantive finding, a clean comment review
       # otherwise -- so on this repo a run that submitted no verdict has broken its contract every
       # time; a clean review is never silent, and a zero here is never legitimate. This step turns
-      # that into the job's own colour, with the diagnosis in the log, so the guard (#2229/#3492, the
-      # check that enforces newest-verdict-wins and the drift arm) becomes the second line rather
-      # than the first. Counted: reviews by the bot, submitted inside this run's
+      # that into the job's own colour, with the diagnosis in the log. Counted: reviews by the bot, submitted inside this run's
       # window, with a NON-EMPTY body. The body test is load-bearing: the inline-comment tool files
       # each comment inside a review of its own with an empty body (#3647 carried four bot reviews,
       # two of them bodiless carriers), and both verdict shapes must carry one (gh and the API both
@@ -789,30 +782,26 @@ jobs:
       # verdict" is the #3470 shape and fails here, as it should.
       # Two runs end with zero verdicts and both are defects on this repo, told apart by whether
       # Claude ran at all: the action exits SUCCESS in seconds without running when this file
-      # differs from the default branch's copy (cause 1 in the guard's header), and then it sets no
+      # differs from the default branch's copy (#2229 cause 1), and then it sets no
       # execution_file and writes no transcript. Expected on a PR that edits this file; a repo-wide
-      # outage otherwise -- the guard grades which, because it can read the PR's file list from a
-      # workflow that is free to change. The step's own outcome is left to speak for itself when it
+      # outage otherwise. The step's own outcome is left to speak for itself when it
       # is not success (a failed step already reds the job; a cancelled one is a superseded push).
       # A gh lookup failure is NOT a verdict on the review (#2309): it warns and stands down rather
-      # than forcing a paid re-run of the whole job to clear a transient API error -- the guard's
-      # own tally, a separate and free-to-rerun workflow, stays the enforcement.
+      # than forcing a paid re-run of the whole job to clear a transient API error.
       #
       # #3710: a verdict that EXISTS is no longer enough; it has to have the structured shape. The
       # bare "LGTM — <one line>" this prompt used to ask for was the whole problem the issue names:
       # a verdict with no record of what was checked, indistinguishable from one that checked
       # nothing, and useless to a later pass computing the miss rate. So the newest verdict in the
       # window (last line of the stream -- the API returns oldest-first and --paginate runs --jq per
-      # page, so the newest is the last LINE, as the guard's scan already relies on) is fetched by
+      # page, so the newest is the last LINE) is fetched by
       # id and its body must carry (a) the `## Verdict: LGTM | CHANGES REQUESTED` header, (b) the
       # `<!-- review-ledger: ... -->` line, and (c) a ledger verdict that AGREES with the review's
       # API state -- `verdict=CHANGES_REQUESTED` on a CHANGES_REQUESTED review, `verdict=LGTM` on a
-      # COMMENTED one. (c) is the one that protects the gate: the guard reads the STATE, so a body
-      # that says "CHANGES REQUESTED" inside a review submitted with --comment is a substantive
-      # finding the guard would wave through. A review lacking any of the three fails this job
-      # with the missing piece named; the guard's own verdict arm is untouched and still keys on
-      # the state, so the two checks stay compatible by construction -- this one is stricter about
-      # the body, the guard is authoritative about the state. The section headings are listed in
+      # COMMENTED one. (c) is the one that keeps the verdict honest: the review's STATE is what a
+      # reader sees, so a body that says "CHANGES REQUESTED" inside a review submitted with
+      # --comment is a substantive finding shown as a clean one. A review lacking any of the three
+      # fails this job with the missing piece named. The section headings are listed in
       # the log for the record and not graded: a mark that fails on a heading's wording is one
       # people learn to ignore, and the ledger is what the later pass computes from.
       - name: Verify the review posted a verdict
@@ -858,8 +847,8 @@ jobs:
             [ "$errfile" != /dev/null ] && rm -f "$errfile" || true
             echo "::warning title=Verdict check could not read the PR's reviews::gh api"\
               "repos/$R/pulls/$PR/reviews failed: ${err:-no stderr}. A lookup failure is not a"\
-              "review verdict (#2309), so the review is UNCONFIRMED here; the guard's own tally"\
-              "decides, or read the PR by eye."
+              "review verdict (#2309), so the review is UNCONFIRMED here;"\
+              "read the PR by eye."
             summary "- Verdict check: lookup failed; review UNCONFIRMED (#2309)."
             exit 0
           fi
@@ -875,7 +864,7 @@ jobs:
             # #3710: THE SHAPE CHECK, on the newest verdict in the window. A single-review fetch
             # rather than carrying bodies through the TSV above: bodies hold tabs and newlines. A
             # failure of THIS lookup is the #2309 shape too -- warn and stand down, the verdict
-            # exists and the guard has the state.
+            # exists.
             newest=$(printf '%s\n' "$matched" | tail -n 1)
             IFS=$'\t' read -r verdict_state _ verdict_id verdict_url <<<"$newest"
             errfile=$(mktemp 2>/dev/null || echo /dev/null)
@@ -884,7 +873,7 @@ jobs:
               [ "$errfile" != /dev/null ] && rm -f "$errfile" || true
               echo "::warning title=Verdict shape check could not read the verdict::gh api"\
                 "repos/$R/pulls/$PR/reviews/$verdict_id failed: ${err:-no stderr}. The verdict"\
-                "exists ($verdict_url) and the guard reads its state; its SHAPE is UNCONFIRMED here (#2309)."
+                "exists ($verdict_url); its SHAPE is UNCONFIRMED here (#2309)."
               summary "- Verdict shape: lookup failed; UNCONFIRMED (#2309). $verdict_url"
               exit 0
             fi
@@ -936,8 +925,7 @@ jobs:
               "hundred PRs while every defect it missed was found by behaviour (#3710). An"\
               "unstructured verdict is a contract breach, not a clean review: it records nothing"\
               "about what was checked and cannot be told from a review that checked nothing. Do"\
-              "NOT read this PR as reviewed; re-run the review workflow. The guard reads the"\
-              "verdict's STATE and is not affected by this failure."
+              "NOT read this PR as reviewed; re-run the review workflow."
             summary "- newest verdict is UNSTRUCTURED: missing$missing Not reviewed (#3710). $verdict_url"
             exit 1
           fi
@@ -949,8 +937,8 @@ jobs:
               "Claude -- no execution file, no transcript. That is what it does when this branch's"\
               ".github/workflows/claude-review.yml differs from the default branch's copy (#2229,"\
               "cause 1). Expected on a PR that edits this file; on any other PR it means the file"\
-              "has drifted and EVERY PR in the repo is going unreviewed -- see the guard's verdict"\
-              "on this PR. Either way, do not read this PR as reviewed."
+              "has drifted and EVERY PR in the repo is going unreviewed."\
+              "Either way, do not read this PR as reviewed."
             summary '- Claude never ran (workflow validation refused). Not reviewed.'
             exit 1
           fi
