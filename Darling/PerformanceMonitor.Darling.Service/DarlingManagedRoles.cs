@@ -1895,6 +1895,15 @@ GRANT UPDATE (state, closed_at, closed_by, closed_reason) ON {config}.investigat
 GRANT INSERT ({JournalWriterColumns}) ON {config}.investigation_journal TO {admin};
 GRANT INSERT, DELETE ON {config}.investigation_notes TO {admin};
 GRANT UPDATE (state, decided_at, decided_by, expires_at) ON {config}.investigation_notes TO {admin};
+-- #6400: the four investigation admin tools (write_investigation_note, approve_investigation_note, reject_investigation_note,
+--     close_investigation_request) run the same store code the web routes and the Viewer run, as mcp. They need the columns admin's
+--     statements set and nothing more: close stamps the three close columns beside the state mcp already updates; a written note is
+--     inserted approved (state, the two clock columns, expires_at and the decider) beside the columns an agent's proposal sets; a
+--     decision updates the same four columns admin's does. The journal INSERT is mcp's already. No DELETE on notes, no INSERT on a
+--     request, no profile write: the tools do none of them. Provisioning re-runs every start, so no migration rung carries this.
+GRANT UPDATE (closed_at, closed_by, closed_reason) ON {config}.investigation_requests TO {mcp};
+GRANT INSERT (state, created_at, expires_at, decided_at, decided_by) ON {config}.investigation_notes TO {mcp};
+GRANT UPDATE (state, decided_at, decided_by, expires_at) ON {config}.investigation_notes TO {mcp};
 GRANT INSERT, UPDATE, DELETE ON {config}.agent_environment_profiles TO {admin};
 -- #6003 review: the journal is the event log the service signs and delivers, and mcp and admin hold INSERT on it, so a
 --     trigger keeps the event rows, their delivery and fallback marks and the time order to the owner (see

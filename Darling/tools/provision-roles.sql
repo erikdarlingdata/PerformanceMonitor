@@ -2472,6 +2472,11 @@ $v193c$;
       ON config.investigation_journal TO admin;
    GRANT INSERT, DELETE ON config.investigation_notes TO admin;
    GRANT UPDATE (state, decided_at, decided_by, expires_at) ON config.investigation_notes TO admin;
+   -- #6400: the investigation admin tools (write, approve, reject a note; close a request) run as mcp: the columns admin's
+   --     statements set and nothing more. BRING-YOUR-OWN STORES: re-run this script to add them.
+   GRANT UPDATE (closed_at, closed_by, closed_reason) ON config.investigation_requests TO mcp;
+   GRANT INSERT (state, created_at, expires_at, decided_at, decided_by) ON config.investigation_notes TO mcp;
+   GRANT UPDATE (state, decided_at, decided_by, expires_at) ON config.investigation_notes TO mcp;
    GRANT INSERT, UPDATE, DELETE ON config.agent_environment_profiles TO admin;
 END $do$;
 

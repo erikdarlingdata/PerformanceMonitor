@@ -132,6 +132,10 @@ internal static class DarlingMcpWritePolicy
         "set_collector_frequency",
         "set_collector_run_at",
         "set_collector_retention",
+        "write_investigation_note",
+        "approve_investigation_note",
+        "reject_investigation_note",
+        "close_investigation_request",
     };
 
     /// <summary>The darling.json key that offers the investigation tools (#5632 Phase A, ruling R2).</summary>
@@ -216,6 +220,10 @@ internal static class DarlingMcpWritePolicy
         "edit_server",
         "set_server_action",
         "undo_plan_change",
+        "write_investigation_note",
+        "approve_investigation_note",
+        "reject_investigation_note",
+        "close_investigation_request",
     };
 
     internal static bool IsWrite(string toolName) => WriteTools.Contains(toolName);

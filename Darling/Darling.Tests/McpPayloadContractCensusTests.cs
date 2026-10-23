@@ -155,11 +155,16 @@ public sealed class McpPayloadContractCensusTests
     /// with a status word rather than an error (<c>precondition</c> when the store role lacks the table grant, and a refusal
     /// naming a server removed from the configuration), because a client that reads <c>status</c> must see "do this" and not
     /// a failed call. The same holds for <c>merge_deadlock_signatures</c> (#6006): <c>precondition</c> when the mcp role lacks the merge-table grant.
+    /// The four investigation admin tools (#6400) do likewise: <c>precondition</c> when a bring-your-own store's mcp role was never re-provisioned with their column grants.
     /// </summary>
     public static readonly (string File, string Tool)[] AdHocErrorReturns =
     [
         ("DarlingMcpThresholdOverrideTools.cs", "set_alert_threshold_override"),
         ("DarlingMcpSignatureMergeTools.cs", "merge_deadlock_signatures"),
+        ("DarlingMcpInvestigationAdminTools.cs", "write_investigation_note"),
+        ("DarlingMcpInvestigationAdminTools.cs", "approve_investigation_note"),
+        ("DarlingMcpInvestigationAdminTools.cs", "reject_investigation_note"),
+        ("DarlingMcpInvestigationAdminTools.cs", "close_investigation_request"),
     ];
 
     /// <summary>
