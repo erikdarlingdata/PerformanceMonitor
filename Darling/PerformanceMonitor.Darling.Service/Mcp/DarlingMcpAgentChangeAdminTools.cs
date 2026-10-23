@@ -23,13 +23,18 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 
 /// <summary>
 /// The two agent-change admin writes the Viewer and the web already had (#6401): <c>set_agent_actions_enabled</c> turns the service-wide
-/// agent switch (<c>config_service.agent_actions_enabled</c>) on or off, and <c>undo_agent_change</c> undoes ONE non-plan agent change (a mute
+/// agent switch (<c>config_service.agent_actions_enabled</c>) OFF (turning it on is a person's act, below), and <c>undo_agent_change</c> undoes ONE non-plan agent change (a mute
 /// rule, a custom alert rule, a threshold override or a deadlock signature merge). A plan force or unforce is undone with
 /// <c>undo_plan_change</c>, which reads the monitored server first.
 ///
 /// <para><b>One copy of the logic.</b> Both call <see cref="AgentChangeUndo"/> exactly as <c>PUT /api/agent-changes/switch</c> and
 /// <c>PUT /api/agent-changes/{id}/undo</c> do, so the refusals are the web's: <c>not_found</c>, <c>already_undone</c>, <c>expired</c>,
 /// <c>not_undoable</c>, <c>changed_since</c>, <c>name_taken</c>. The tool adds one: a plan change is pointed to <c>undo_plan_change</c>.</para>
+///
+/// <para><b>Off only.</b> MCP turns agent actions off and never on, the direction the route tools keep for every change that would let agents
+/// act on more alerts or servers (#6281): a person turned agent actions off in the Viewer or on the web, and an MCP client must not be able to
+/// give agents back the actions that person took away. <c>enabled: true</c> is refused and writes nothing; a person turns them on in the
+/// Viewer (Agent changes) or on the web dashboard.</para>
 ///
 /// <para><b>Admin writes.</b> Served only under <c>mcp.allowWrites</c> with a token, and in
 /// <see cref="DarlingMcpWritePolicy.NeverAgentTools"/>, so an investigation agent and a Level 2 or 3 agent call never get either: an agent must
@@ -42,13 +47,17 @@ public sealed class DarlingMcpAgentChangeAdminTools
     internal const string SwitchToolName = "set_agent_actions_enabled";
     internal const string UndoToolName = "undo_agent_change";
 
+    /// <summary>The refusal for <c>enabled: true</c> (#6401): a person turns agent actions on, and nothing is written.</summary>
+    internal const string TurnOnRefusalMessage =
+        "Over MCP agent actions can only be turned off. A person turns them on in the Viewer (Agent changes) or on the web dashboard, so an MCP client cannot give agents back the actions a person took away. Nothing was written.";
+
     /// <summary>The journal actor of these two writes: <c>mcp:</c> plus the caller the request filter worked out.</summary>
     internal static string ActorOf() => "mcp:" + ReadCaller.WriteIdentity();
 
     [McpServerTool(Name = "set_agent_actions_enabled"), Description(
-        "Turns the service-wide agent-actions switch on or off: the one brake over every change an investigation agent can make (mute rules, custom rules, threshold overrides, signature merges, plan force, plan evict, session kill). Off refuses every agent change with actions_off; nothing already done is undone. On is the default. Per-server switches (set_server_action) are separate and still apply. Answers the state before and after, and journals agent_actions_switched. Admin only: never offered to an investigation agent.")]
+        "Turns the service-wide agent-actions switch on or off: the one brake over every change an investigation agent can make (mute rules, custom rules, threshold overrides, signature merges, plan force, plan evict, session kill). Off refuses every agent change with actions_off; nothing already done is undone. Over MCP this only turns agent actions OFF: enabled true is refused and writes nothing, because an MCP client must not give agents back actions a person took away; a person turns them on in the Viewer (Agent changes) or the web dashboard. Per-server switches (set_server_action) are separate and still apply. Answers the state before and after, and journals agent_actions_switched. Refused, writing nothing, when the store has no service row yet. Admin only: never offered to an investigation agent.")]
     public static Task<string> SetAgentActionsEnabled(
-        [Description("True to let agents make changes, false to refuse every agent change.")] bool enabled,
+        [Description("False to refuse every agent change. True is refused over MCP: a person turns agent actions on in the Viewer or the web dashboard.")] bool enabled,
         NpgsqlDataSource postgres,
         ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
@@ -57,12 +66,23 @@ public sealed class DarlingMcpAgentChangeAdminTools
     /// <summary>The switch tool's body, so a test drives it with its own data source and caller.</summary>
     internal static async Task<string> SwitchAsync(NpgsqlDataSource postgres, ILogger? logger, bool enabled, string actor, CancellationToken ct)
     {
+        /* MCP turns agent actions off and never on (#6401, as #6281 keeps for routes): a person turned them off, and an MCP client must not give
+           agents the actions back. Refused before anything is read or written. */
+        if (enabled)
+        {
+            return Refuse("on_is_a_persons_act", TurnOnRefusalMessage);
+        }
+
         string refusal;
         try
         {
             var changes = new AgentChangeUndo(postgres, McpCommandDeadlines.ReadSeconds);
             var before = await changes.ReadEnabledAsync(ct);
-            await changes.SetEnabledAsActorAsync(enabled, actor, ct);
+            if (!await changes.SetEnabledAsActorAsync(enabled, actor, ct))
+            {
+                return Refuse("store_not_set_up", AgentChangeUndo.SwitchStoreNotSetUpMessage);
+            }
+
             var after = await changes.ReadEnabledAsync(ct);
             logger?.LogWarning("MCP agent actions switch {Before} -> {After}, caller {Caller}", before, after, actor);
             return new JsonObject
@@ -72,13 +92,8 @@ public sealed class DarlingMcpAgentChangeAdminTools
                 ["before"] = new JsonObject { ["enabled"] = before },
                 ["after"] = new JsonObject { ["enabled"] = after },
                 ["message"] = before == after
-                    ? "The switch was already " + (after ? "on" : "off") + "; it is written again and journaled."
-                    : "Agent actions are now " + (after ? "on" : "off") + (after ? "." : ". Every agent change is refused with actions_off until it is turned on; nothing already done was undone."),
-                ["undo"] = new JsonObject
-                {
-                    ["tool"] = SwitchToolName,
-                    ["arguments"] = new JsonObject { ["enabled"] = before },
-                },
+                    ? "The switch was already off; it is written again and journaled."
+                    : "Agent actions are now off. Every agent change is refused with actions_off until a person turns them on in the Viewer (Agent changes) or the web dashboard; nothing already done was undone.",
             }.ToJsonString();
         }
         catch (TimeoutException ex) when (ex.Message == AgentChangeUndo.SwitchWaitTimedOutMessage)

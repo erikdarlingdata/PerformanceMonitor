@@ -1808,7 +1808,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     return ErrorResult("Send {\"enabled\": true} or {\"enabled\": false}.", StatusCodes.Status400BadRequest);
                 }
 
-                await changes.SetEnabledAsync(enabled, login, context.RequestAborted);
+                if (!await changes.SetEnabledAsync(enabled, login, context.RequestAborted))
+                {
+                    /* #6401: no service row yet, so nothing was written; the switch never creates the row. */
+                    return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = AgentChangeUndo.SwitchStoreNotSetUpMessage, ["code"] = "store_not_set_up" },
+                        "/api/agent-changes/switch", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status409Conflict);
+                }
+
                 return DarlingWebStatementSweep.JsonText(new JsonObject { ["status"] = enabled ? "on" : "off", ["enabled"] = enabled },
                     "/api/agent-changes/switch", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
             }

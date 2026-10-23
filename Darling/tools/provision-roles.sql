@@ -2661,10 +2661,10 @@ BEGIN
    GRANT INSERT, UPDATE, DELETE ON config.config_threshold_overrides TO admin;
    GRANT INSERT, UPDATE, DELETE ON config.investigation_feedback TO admin;
    GRANT INSERT, UPDATE, DELETE ON config.config_threshold_overrides TO mcp;
-   -- #6401: set_agent_actions_enabled (the MCP twin of the web's PUT /api/agent-changes/switch) upserts the service row's switch and who set it.
-   -- Column-level on exactly those columns (the INSERT of the upsert needs the id too), so mcp still cannot write paused, capture_plans or any other flag.
+   -- #6401: set_agent_actions_enabled (the MCP twin of the web's PUT /api/agent-changes/switch) updates the service row's switch and who set it.
+   -- UPDATE only, column-level on exactly those columns, so mcp still cannot write paused, capture_plans or any other flag, and cannot create the row:
+   -- the service creates it when it copies darling.json into the store, and a switch written before then must not make the store look set up.
    -- agent_actions_enabled arrives with V191, the version that makes the block above run.
-   GRANT INSERT (id, agent_actions_enabled, updated_at, updated_by) ON config.config_service TO mcp;
    GRANT UPDATE (agent_actions_enabled, updated_by) ON config.config_service TO mcp;
    -- #5918 (V191's practice_of column, so here and not in 3i): the Viewer opens a practice request (a replay of a judged case) and copies the case's alert rows.
    GRANT INSERT (request_id, route_id, server_id, server_name, family, first_metric, story_path_hash, first_alert_at, last_alert_at,

@@ -81,7 +81,7 @@ public sealed class AgentChangeAdminToolsLiveTests
         return statements;
     }
 
-    private static async Task<Rig> OpenAsync(CancellationToken ct)
+    private static async Task<Rig> OpenAsync(CancellationToken ct, bool seedServiceRow = true)
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
@@ -103,7 +103,11 @@ public sealed class AgentChangeAdminToolsLiveTests
             await ExecAsync(owner, statement, ct);
         }
 
-        await ExecAsync(owner, "INSERT INTO config.config_service (id) VALUES (1) ON CONFLICT DO NOTHING", ct);
+        if (seedServiceRow)
+        {
+            await ExecAsync(owner, "INSERT INTO config.config_service (id) VALUES (1) ON CONFLICT DO NOTHING", ct);
+        }
+
         var mcp = NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(ownerString) { Username = role, Password = RolePassword }.ConnectionString);
         return new Rig(scratch, owner, mcp, role);
     }
@@ -163,7 +167,7 @@ public sealed class AgentChangeAdminToolsLiveTests
         int.Parse((await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE " + where, ct))!, CultureInfo.InvariantCulture);
 
     [Fact]
-    public async Task TheSwitch_TurnsOffAndOn_AsTheMcpRole_AndJournalsTheCaller()
+    public async Task TheSwitch_TurnsOff_AsTheMcpRole_AndJournalsTheCaller_AndTurningOnIsRefusedWritingNothing()
     {
         var ct = TestContext.Current.CancellationToken;
         await using var rig = await OpenAsync(ct);
@@ -180,16 +184,51 @@ public sealed class AgentChangeAdminToolsLiveTests
             Assert.Equal(Actor + "|false", await ScalarAsync(rig.Owner,
                 "SELECT actor || '|' || (detail->>'enabled') FROM config.investigation_journal WHERE event = 'agent_actions_switched'", ct));
 
-            var on = Parse(await Tools.SwitchAsync(rig.Mcp, null, true, Actor, ct));
-            Assert.Equal("on", (string?)on["status"]);
-            Assert.False((bool?)on["before"]!["enabled"]);
-            Assert.True((bool?)on["after"]!["enabled"]);
-            Assert.Equal("True", await ScalarAsync(rig.Owner, "SELECT agent_actions_enabled FROM config.config_service WHERE id = 1", ct));
-            Assert.Equal(2, await CountAsync(rig.Owner, "event = 'agent_actions_switched'", ct));
+            /* MCP never turns agent actions back on (#6401): refused, and the switch, who set it and the journal are as they were. */
+            var on = Parse(await Tools.SwitchAsync(rig.Mcp, null, true, Actor + "-again", ct));
+            Assert.Equal("refused", (string?)on["status"]);
+            Assert.Equal("on_is_a_persons_act", (string?)on["code"]);
+            Assert.False((bool?)on["changed"]);
+            Assert.Equal(Tools.TurnOnRefusalMessage, (string?)on["message"]);
+            Assert.Equal("false|" + Actor, await ScalarAsync(rig.Owner, "SELECT agent_actions_enabled || '|' || updated_by FROM config.config_service WHERE id = 1", ct));
+            Assert.Equal(1, await CountAsync(rig.Owner, "event = 'agent_actions_switched'", ct));
 
-            /* The same switch through the web's login path writes the same row shape. */
-            await new AgentChangeUndo(rig.Owner, 30).SetEnabledAsync(false, "erik", ct);
+            /* A person's switch through the web and Viewer path still turns it on and off, and writes the same row shape. */
+            Assert.True(await new AgentChangeUndo(rig.Owner, 30).SetEnabledAsync(true, "erik", ct));
+            Assert.Equal("true|person:erik", await ScalarAsync(rig.Owner, "SELECT agent_actions_enabled || '|' || updated_by FROM config.config_service WHERE id = 1", ct));
+            Assert.True(await new AgentChangeUndo(rig.Owner, 30).SetEnabledAsync(false, "erik", ct));
             Assert.Equal("false|person:erik", await ScalarAsync(rig.Owner, "SELECT agent_actions_enabled || '|' || updated_by FROM config.config_service WHERE id = 1", ct));
+            ok = true;
+        }
+        finally
+        {
+            await DropRoleAsync(rig, ok);
+        }
+    }
+
+    [Fact]
+    public async Task TheSwitch_WithNoServiceRow_IsRefusedForTheMcpToolAndTheSharedMethod_AndCreatesNoRow()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct, seedServiceRow: false);
+        var ok = false;
+        try
+        {
+            var refused = Parse(await Tools.SwitchAsync(rig.Mcp, null, false, Actor, ct));
+            Assert.Equal("refused", (string?)refused["status"]);
+            Assert.Equal("store_not_set_up", (string?)refused["code"]);
+            Assert.Equal(AgentChangeUndo.SwitchStoreNotSetUpMessage, (string?)refused["message"]);
+
+            /* The Viewer and the web call this method: false, and the store is as it was. */
+            Assert.False(await new AgentChangeUndo(rig.Owner, 30).SetEnabledAsync(false, "erik", ct));
+            Assert.False(await new AgentChangeUndo(rig.Owner, 30).SetEnabledAsync(true, "erik", ct));
+            Assert.Equal("0", await ScalarAsync(rig.Owner, "SELECT count(*) FROM config.config_service", ct));
+            Assert.Equal(0, await CountAsync(rig.Owner, "event = 'agent_actions_switched'", ct));
+
+            /* With the row there, the same calls update it. */
+            await ExecAsync(rig.Owner, "INSERT INTO config.config_service (id) VALUES (1)", ct);
+            Assert.Equal("off", (string?)Parse(await Tools.SwitchAsync(rig.Mcp, null, false, Actor, ct))["status"]);
+            Assert.Equal("false|" + Actor, await ScalarAsync(rig.Owner, "SELECT agent_actions_enabled || '|' || updated_by FROM config.config_service WHERE id = 1", ct));
             ok = true;
         }
         finally
@@ -300,6 +339,10 @@ public sealed class AgentChangeAdminToolsLiveTests
                 var denied = await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(rig.Mcp, sql, ct));
                 Assert.Equal("42501", denied.SqlState);
             }
+
+            /* The service creates the row, never the MCP login (#6401): no INSERT, so a switch cannot make a store look set up. */
+            var noInsert = await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(rig.Mcp, "INSERT INTO config.config_service (id, agent_actions_enabled) VALUES (2, FALSE)", ct));
+            Assert.Equal("42501", noInsert.SqlState);
 
             /* What the two calls need: the switch columns, and the undone stamp on a merge row. */
             await ExecAsync(rig.Mcp, "UPDATE config.config_service SET agent_actions_enabled = FALSE, updated_by = 'mcp:x' WHERE id = 1", ct);
