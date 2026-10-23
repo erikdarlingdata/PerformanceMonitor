@@ -201,7 +201,7 @@ public sealed partial class DarlingMcpPlanForceTools
             if (query_id <= 0 || plan_id <= 0)
                 return McpHelpers.Refusal("plan_id", "query_id and plan_id are positive numbers from get_query_store_top.");
 
-            var store = new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds);
+            var store = new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds, agentActionSource: owner);
             var target = new AgentActionTarget(resolved.ServerId, resolved.ServerName, plan_id.ToString(CultureInfo.InvariantCulture), database_name.Trim());
 
             /* 1: SQL Server only. A PostgreSQL target is refused with its own reason, before the gate is asked, and the refusal is journaled. */
@@ -378,7 +378,7 @@ public sealed partial class DarlingMcpPlanForceTools
             if (error is not null)
                 return error;
 
-            var store = new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds);
+            var store = new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds, agentActionSource: owner);
 
             /* 1: a handle that does not parse can do nothing. Refused before the gate, and journaled as a block is. */
             if (!PlanEvictStatement.TryNormalize(plan_handle, out var handle))
@@ -483,7 +483,7 @@ public sealed partial class DarlingMcpPlanForceTools
             if (error is not null)
                 return error;
 
-            var store = new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds);
+            var store = new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds, agentActionSource: owner);
 
             /* 1: the engine decides how the session is named. A PostgreSQL target has its own arm (pid plus start second from backend_id). */
             var (engineEdition, engineKind) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, ct);

@@ -66,7 +66,8 @@ public sealed class DarlingMcpPlanUndoTools
                 return Refuse("invalid", "called_id is a positive number from get_agent_changes. Nothing was written.");
             }
 
-            var changes = new AgentChangeUndo(postgres, McpCommandDeadlines.ReadSeconds);
+            /* #6569: an undo whose reply was lost journals an action_called row (kind plan_undo), which only the store owner may write. */
+            var changes = new AgentChangeUndo(owner ?? postgres, McpCommandDeadlines.ReadSeconds);
             var answer = await DarlingMcpPlanForceTools.UndoPlanChangeAsync(changes, owner, logger ?? NullLogger.Instance, calledId, Login, confirm, shown, ct);
             var node = answer.ToJson();
             if (answer.Status == PlanUndoAnswer.Failed)

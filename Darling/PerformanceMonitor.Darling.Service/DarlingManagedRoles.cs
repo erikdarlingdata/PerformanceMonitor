@@ -3546,7 +3546,9 @@ REVOKE ALL ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerLegacy
     /// by <c>event_time</c>. <c>mcp</c> (the claim and submit tools) and <c>admin</c> (the desktop Viewer) hold INSERT on it
     /// (the columns of <see cref="JournalWriterColumns"/>) to journal their own actions, so this <c>BEFORE INSERT</c> trigger
     /// refuses a row from any role but the owner that
-    /// (a) is an event (<see cref="InvestigationEvents.Kinds"/>) or a delivery or fallback mark, but for the one
+    /// (a) is an event (<see cref="InvestigationEvents.Kinds"/>), a delivery or fallback mark, a server action switch (#6269) or one of
+    /// the three rows of an agent action (<see cref="AgentActionEvents.OwnerOnly"/>, #6569: the service journals them itself, on the
+    /// owner connection, and the Agent changes list offers Undo on the <c>action_called</c> row), but for the one
     /// <c>opened</c> row of a practice request (the Viewer opens those, #5918), whose reason is exactly
     /// <c>practice of &lt;the case's request id&gt;</c>; or
     /// (b) carries a once key other than the prefixes the tools and the Viewer write (<see cref="JournalWriterOnceKeyPrefixes"/>),
@@ -3605,7 +3607,7 @@ CREATE OR REPLACE TRIGGER trg_investigation_journal_owner_rows
 
     /// <summary>
     /// The columns of <c>config.investigation_journal</c> that <c>mcp</c> and <c>admin</c> may set on an insert: every column the
-    /// claim, submit and change tools and the Viewer's journal writers name. Not <c>journal_id</c> (the identity: a role that
+    /// claim and submit tools and the Viewer's journal writers name (the change tools' rows are the owner's, #6569). Not <c>journal_id</c> (the identity: a role that
     /// set it could fill the next million values and make every service insert fail) and not <c>event_id</c> (the unique
     /// webhook id): both take their defaults.
     /// </summary>
@@ -3652,9 +3654,12 @@ CREATE OR REPLACE TRIGGER trg_investigation_request_alerts_owner_rows
    FOR EACH ROW EXECUTE FUNCTION {config}.investigation_request_alerts_owner_rows();";
 
     /// <summary>The journal events only the owner writes (<see cref="BuildJournalEventRulesSql"/>), as a SQL list. <c>server_action_switched</c>
-    /// is the owner's alone (#6269): only the switch writer, on the owner connection, journals it, so no other login can forge who changed a switch.</summary>
+    /// is the owner's alone (#6269): only the switch writer, on the owner connection, journals it, so no other login can write who changed a switch.
+    /// So are the three rows of an agent action (<see cref="AgentActionEvents.OwnerOnly"/>, #6569): the Agent changes list offers Undo on an
+    /// <c>action_called</c> row, so only the service, which runs the action and checks the request, journals it and its result.</summary>
     internal static string JournalOwnerEventList => string.Join(", ",
         InvestigationEvents.Kinds.Append(InvestigationEvents.Delivered).Append(InvestigationEvents.FallbackSent).Append(ServerActionSwitches.JournalEvent)
+            .Concat(AgentActionEvents.OwnerOnly)
             .Select(k => "'" + k + "'"));
 
     /// <summary>

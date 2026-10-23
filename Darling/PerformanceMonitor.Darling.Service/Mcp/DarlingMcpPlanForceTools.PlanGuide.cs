@@ -51,7 +51,7 @@ public sealed partial class DarlingMcpPlanForceTools
             if (error is not null)
                 return error;
 
-            var store = new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds);
+            var store = new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds, agentActionSource: owner);
 
             /* 1: arguments that cannot make a guide are refused before the gate, and journaled as a block is. */
             var (definition, badCode, badMessage) = PlanGuideDefinition.TryCreate(name, statement, type, module_or_batch, parameters, hints);
@@ -300,7 +300,7 @@ public sealed partial class DarlingMcpPlanForceTools
             if (error is not null)
                 return error;
 
-            var store = new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds);
+            var store = new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds, agentActionSource: owner);
 
             /* 1: arguments that cannot name a guide are refused before the gate, and journaled as a block is. */
             var guideName = PlanGuideDefinition.TryName(name);

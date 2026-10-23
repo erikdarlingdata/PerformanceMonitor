@@ -45,7 +45,7 @@ public sealed partial class DarlingMcpPlanForceTools
             if (error is not null)
                 return error;
 
-            var store = new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds);
+            var store = new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds, agentActionSource: owner);
 
             /* 1: a name that does not parse can do nothing. Refused before the gate, and journaled as a block is. */
             if (!ModuleRecompileStatement.TryNormalize(module_name, out var module))
