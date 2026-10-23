@@ -141,8 +141,12 @@ export async function buildServerActions(body, generation, ctx) {
   if (bad) return mount(body, nodes.concat([bad]));
   const data = res.data || {};
   const canDecide = data.can_decide === true;
-  const session = await ctx.getSession();
-  nodes.push(noticeStrip(canDecide ? CAN_DECIDE : data.signed_in_admin === false ? NOT_SIGNED_IN : listOnly(session.managed_store === true, session.admin_writes_off === true)));
+  let notice = canDecide ? CAN_DECIDE : data.signed_in_admin === false ? NOT_SIGNED_IN : null;
+  if (notice === null) {
+    const session = await ctx.getSession();
+    notice = listOnly(session.managed_store === true, session.admin_writes_off === true);
+  }
+  nodes.push(noticeStrip(notice));
   /* The on/off control sits before Note, so it stays on screen at 1280 px beside a long note. */
   const changeColumn = {
     key: "change", label: "Change", csv: false, copy: false,

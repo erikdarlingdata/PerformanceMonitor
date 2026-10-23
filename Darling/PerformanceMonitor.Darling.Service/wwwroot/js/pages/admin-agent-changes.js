@@ -124,8 +124,12 @@ export async function buildAgentChanges(body, generation, ctx) {
   if (bad) return mount(body, nodes.concat([bad]));
   const data = res.data || {};
   const canDecide = data.can_decide === true;
-  const session = await ctx.getSession();
-  nodes.push(noticeStrip(canDecide ? CAN_DECIDE : listOnly(session.managed_store === true, session.admin_writes_off === true)));
+  let notice = canDecide ? CAN_DECIDE : null;
+  if (notice === null) {
+    const session = await ctx.getSession();
+    notice = listOnly(session.managed_store === true, session.admin_writes_off === true);
+  }
+  nodes.push(noticeStrip(notice));
   nodes.push(switchBar(data.enabled !== false, canDecide, ctx));
   const rows = agentChangeRows(data);
   const columns = AGENT_CHANGE_COLUMNS.concat(canDecide ? [{
