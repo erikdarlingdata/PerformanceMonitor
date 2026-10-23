@@ -56,7 +56,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// <c>collect</c> + <c>config</c>-minus-the-secret-columns) PLUS a NARROW, enumerated set of writes —
 /// INSERT on <c>collect.analysis_findings</c> and INSERT/DELETE on <c>config.analysis_muted</c> (what <c>analyze_server</c>
 /// persists + the mute and unmute tools need, #6383), INSERT/UPDATE/DELETE on <c>config.custom_views</c> (the
-/// custom-view tools, #1599), the alert-tuning writes (INSERT/UPDATE/DELETE on
+/// custom-view tools, #1599), INSERT/UPDATE/DELETE on <c>config.database_state_expected</c> (the database-state expectation tool, #6397), the alert-tuning writes (INSERT/UPDATE/DELETE on
 /// <c>config.config_mute_rules</c> + UPDATE on the singleton <c>config.config_alert_settings</c> + UPDATE on
 /// the single non-secret <c>email_cooldown_minutes</c> column of <c>config.config_notification</c>, plus the
 /// two beacon columns of <c>config.config_service</c> so the settings write's self-bump trigger can fire),
@@ -1500,7 +1500,10 @@ GRANT INSERT, UPDATE, DELETE ON {config}.custom_alert_rules TO {viewer};
 GRANT INSERT, UPDATE, DELETE ON {config}.custom_alert_rules TO {mcp};
 -- The Viewer's per-database database-state override editor (#1986) writes config.database_state_expected:
 -- the same narrow single-table floor as custom_views. Created by V49, so provisioning runs after migration.
+-- The mcp role gets the same three (#6397): set_database_state_expected upserts (INSERT, UPDATE) and clears (DELETE) one row, and its
+-- read, get_database_state_expectations, already runs on mcp's SELECT on all of config. Nothing wider, and no sibling table.
 GRANT INSERT, UPDATE, DELETE ON {config}.database_state_expected TO {viewer};
+GRANT INSERT, UPDATE, DELETE ON {config}.database_state_expected TO {mcp};
 
 -- 8. Alert tuning (the MCP alert-tuning write tools): the mcp role's alert-config writes, mirroring section 7's
 --    custom_views grant model (EXPLICIT single-table statements, NO ALTER DEFAULT PRIVILEGES). update_alert_settings
@@ -1550,19 +1553,23 @@ GRANT INSERT, UPDATE, DELETE ON {config}.query_tag_assignments TO {mcp};
 GRANT INSERT, UPDATE, DELETE ON {config}.query_tag_rules TO {mcp};
 GRANT DELETE ON {config}.query_tag_map TO {mcp};
 -- #6227: the collector schedule tools (disable_collector, enable_collector, set_collector_frequency, set_collector_run_at,
---    set_collector_retention) run as mcp. They write the two non-secret schedule tables the Viewer and the --enable-collector /
+--    set_collector_retention, and #6396's set_collector_databases and reset_collector_schedules) run as mcp. They write the two non-secret schedule tables the Viewer and the --enable-collector /
 --    --set-collector-run-at verbs write: the sparse override rows (enabled, frequency, retention, databases) and the run times (V160).
 --    Both carry a statement-level reload-beacon trigger (INVOKER) that UPDATEs config_service.config_version as the writer, which the
 --    two-column config_service grant above covers; the tables are SELECT-able by mcp already. The tools are served only with
 --    mcp.allowWrites and a token, and are never offered to an investigation agent. Provisioning re-runs every start, so no migration
 --    rung carries this.
---    The grants are by column, the narrowest the tools' statements need: the override rows take an INSERT of the five columns the tools
---    set and an UPDATE of the three values they change (never the database scope, never a DELETE: no tool removes a row, and the
---    Viewer's delete-and-reinsert Save runs as the owner). The run times take their one value column and a DELETE (set_collector_run_at
+--    The grants are by column, the narrowest the tools' statements need: the override rows take an INSERT of the six columns the tools
+--    set and an UPDATE of the four values they change (#6396 added the database scope, for set_collector_databases; the DELETE is #6454's,
+--    below, and also serves reset_collector_schedules, as the run-time DELETE does). The run times take their one value column and a DELETE (set_collector_run_at
 --    deletes the row for default). The table-level grants an earlier provisioning gave are revoked first, so a re-run narrows them.
 REVOKE INSERT, UPDATE, DELETE ON {config}.config_collector_schedules FROM {mcp};
-GRANT INSERT (server_id, collector_name, enabled, frequency_minutes, retention_days) ON {config}.config_collector_schedules TO {mcp};
-GRANT UPDATE (enabled, frequency_minutes, retention_days) ON {config}.config_collector_schedules TO {mcp};
+GRANT INSERT (server_id, collector_name, enabled, frequency_minutes, retention_days, databases) ON {config}.config_collector_schedules TO {mcp};
+GRANT UPDATE (enabled, frequency_minutes, retention_days, databases) ON {config}.config_collector_schedules TO {mcp};
+-- #6454: remove_server clears a removed server's override rows (a set-and-cleared row stayed behind all-null, and a set one would come
+--    back when the server is re-added), so mcp holds DELETE on the override table. remove_server runs it by server_id, and
+--    reset_collector_schedules (#6396) by server_id, or at the fleet scope with server_id IS NULL.
+GRANT DELETE ON {config}.config_collector_schedules TO {mcp};
 REVOKE INSERT, UPDATE, DELETE ON {config}.config_collector_run_times FROM {mcp};
 GRANT INSERT (server_id, collector_name, run_at_minute) ON {config}.config_collector_run_times TO {mcp};
 GRANT UPDATE (run_at_minute) ON {config}.config_collector_run_times TO {mcp};
@@ -1767,18 +1774,26 @@ GRANT EXECUTE ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerLeg
 --     NOT a versioned migration, for the same reason as the edit function above.
 {BuildRequestSnapshotNowFunctionSql(config)}
 GRANT EXECUTE ON FUNCTION {config}.request_snapshot_now(integer, text, text) TO {viewer}, {mcp};
+-- #6386: the web's Run live now button on the Active Queries panel. The web route (viewer) queues a fetch_active_queries command
+--     through {config}.request_active_queries_live, the only way viewer writes that command row. The command type is fixed in
+--     the body and the caller supplies a server id and nothing else, so it cannot reach the service-credential pivot that
+--     test_connect's args_json is. Owned by the store owner, pinned search_path, no dynamic SQL; created and REVOKEd from
+--     PUBLIC by the builder. NOT a versioned migration, for the same reason as request_snapshot_now above.
+{BuildRequestActiveQueriesLiveFunctionSql(config)}
+GRANT EXECUTE ON FUNCTION {config}.request_active_queries_live(integer, text) TO {viewer};
 -- #6231: the MCP route tools. mcp holds no INSERT on {config}.config_notification_routes and no SELECT or UPDATE on its
 --     destination columns, and gets none here: create_notification_route and update_notification_route reach the table only
 --     through these functions. create leaves every channel empty and update writes the match, scope, enabled flag, resolution
 --     override and fallback (the match or scope only on a route with no explicit agent setting); neither takes a destination.
 --     set_notification_route_destinations is the one function that sets a route's own destinations: the service seals each
 --     webhook value for the route's own row first and passes it in, and the function stores only an empty value or a sealed one
---     (the address list is plain text). All three re-read the row FOR UPDATE and refuse an agent route inside the transaction.
---     Granted to mcp only.
+--     (the address list is plain text). All three re-read the row FOR UPDATE and refuse an agent route inside the transaction,
+--     unless the actor the service passes is an operator-class token (#6542 part 2). Granted to mcp only.
 {BuildNotificationRouteFunctionsSql(config)}
 GRANT EXECUTE ON FUNCTION {config}.create_notification_route(text, boolean, integer, integer, boolean, integer) TO {mcp};
-GRANT EXECUTE ON FUNCTION {config}.update_notification_route(integer, text[], text, boolean, integer, integer, boolean, integer) TO {mcp};
-GRANT EXECUTE ON FUNCTION {config}.set_notification_route_destinations(integer, text[], text, text, text, text, text) TO {mcp};
+GRANT EXECUTE ON FUNCTION {config}.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer) TO {mcp};
+GRANT EXECUTE ON FUNCTION {config}.set_notification_route_destinations(integer, text, text[], text, text, text, text, text) TO {mcp};
+GRANT EXECUTE ON FUNCTION {config}.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean, jsonb) TO {mcp};
 -- #6230: the MCP incident tools (analyze now, purge now, test a connection, pause, resume) queue their command through
 --     {config}.request_mcp_command, the only way the mcp role writes a command row. It names five command types and refuses any
 --     other, builds a connection test from the stored server row (no credential or connection string is an argument), and
@@ -2558,6 +2573,11 @@ DECLARE
    v_last_status text;
    v_last_at timestamp;
 BEGIN
+   -- The one-request-at-a-time rule below reads the newest row of its kind with a fresh snapshot per statement. A transaction that
+   -- keeps one snapshot (REPEATABLE READ and up) could miss a row another session just queued, so it is refused.
+   IF current_setting('transaction_isolation') <> 'read committed' THEN
+      RAISE EXCEPTION 'This request must run at the READ COMMITTED isolation level.' USING ERRCODE = 'DL400';
+   END IF;
    IF p_server_id IS NULL OR NOT EXISTS (SELECT 1 FROM {config}.config_monitored_servers WHERE server_id = p_server_id) THEN
       RAISE EXCEPTION 'No monitored server with that id.' USING ERRCODE = 'DL404';
    END IF;
@@ -2602,14 +2622,76 @@ $fn$;
 REVOKE ALL ON FUNCTION {config}.request_snapshot_now(integer, text, text) FROM PUBLIC;";
 
     /// <summary>
+    /// The SECURITY DEFINER function (#6386) the web route queues a <c>fetch_active_queries</c> command through: a fixed command type
+    /// and a server id, nothing else (the command takes no arguments). One request per server at a time and not within 10 seconds of
+    /// the last, so a holder of the viewer login cannot fill the queue. Created and REVOKEd from PUBLIC here; the caller adds the
+    /// narrow GRANT EXECUTE.
+    /// </summary>
+    internal static string BuildRequestActiveQueriesLiveFunctionSql(string config) => $@"
+CREATE OR REPLACE FUNCTION {config}.request_active_queries_live(
+   p_server_id integer,
+   p_requested_by text)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+   v_id bigint;
+   v_last_status text;
+   v_last_at timestamp;
+BEGIN
+   -- The one-request-at-a-time rule below reads the newest row of its kind with a fresh snapshot per statement. A transaction that
+   -- keeps one snapshot (REPEATABLE READ and up) could miss a row another session just queued, so it is refused.
+   IF current_setting('transaction_isolation') <> 'read committed' THEN
+      RAISE EXCEPTION 'This request must run at the READ COMMITTED isolation level.' USING ERRCODE = 'DL400';
+   END IF;
+   IF p_server_id IS NULL OR NOT EXISTS (SELECT 1 FROM {config}.config_monitored_servers WHERE server_id = p_server_id) THEN
+      RAISE EXCEPTION 'No monitored server with that id.' USING ERRCODE = 'DL404';
+   END IF;
+   -- Never blocks (provisioning rule): a request that holds the lock for this server is a concurrent request, which is the same
+   -- conflict as a pending row, so this refuses with DL409 instead of waiting.
+   IF NOT pg_try_advisory_xact_lock(6386, p_server_id) THEN
+      RAISE EXCEPTION 'A live active-queries read for this server is already queued or running.' USING ERRCODE = 'DL409';
+   END IF;
+   SELECT c.status, c.created_at INTO v_last_status, v_last_at
+   FROM {config}.config_command AS c
+   WHERE c.command_type = 'fetch_active_queries' AND c.target_server_id = p_server_id
+   ORDER BY c.command_id DESC
+   LIMIT 1;
+   IF v_last_status IN ('pending', 'in_progress') THEN
+      RAISE EXCEPTION 'A live active-queries read for this server is already queued or running.' USING ERRCODE = 'DL409';
+   END IF;
+   IF v_last_at IS NOT NULL AND v_last_at > (now() AT TIME ZONE 'UTC') - interval '10 seconds' THEN
+      RAISE EXCEPTION 'A live active-queries read was requested for this server less than 10 seconds ago.'
+         USING ERRCODE = 'DL429',
+               HINT = to_char(v_last_at + interval '10 seconds', 'YYYY-MM-DD') || 'T' || to_char(v_last_at + interval '10 seconds', 'HH24:MI:SS') || 'Z';
+   END IF;
+   -- Finished results do not pile up: a result carries the plan XML with no size cap and the web never deletes the row it reads, so each
+   -- request first removes this server's finished live reads that finished more than an hour ago. Only terminal rows
+   -- (succeeded or failed) with a completed_at are touched, so a pending or running row and every other command type stay. The Viewer
+   -- reads and deletes its own row within seconds, far inside the hour.
+   DELETE FROM {config}.config_command
+   WHERE command_type = 'fetch_active_queries' AND target_server_id = p_server_id
+     AND status IN ('succeeded', 'failed')
+     AND completed_at < (now() AT TIME ZONE 'UTC') - interval '1 hour';
+   INSERT INTO {config}.config_command (requested_by, command_type, target_server_id, args_json, status, created_at)
+   VALUES (left(COALESCE(p_requested_by, 'web'), 200), 'fetch_active_queries', p_server_id, NULL, 'pending', (now() AT TIME ZONE 'UTC'))
+   RETURNING command_id INTO v_id;
+   RETURN v_id;
+END
+$fn$;
+REVOKE ALL ON FUNCTION {config}.request_active_queries_live(integer, text) FROM PUBLIC;";
+
+    /// <summary>
     /// The SECURITY DEFINER functions (#6231) the MCP <c>create_notification_route</c> and <c>update_notification_route</c>
     /// tools write a notification route through; <c>set_notification_route_destinations</c> is the one that sets a route's own
     /// destinations (the service seals the webhook values for the route's row and the function stores only sealed text or empty). The <c>mcp</c> login holds no INSERT on the table and no SELECT or UPDATE on its
     /// destination columns, and these functions are how it still creates and edits a route: create inserts a route with every
     /// destination empty (it has no destinations of its own, so each channel goes where it went before: the next matching route,
     /// else the Settings channels), and update writes the match, scope, enabled flag, resolution override and fallback, never
-    /// a destination, and changes the match or scope only on a route with no destination and no agent setting. Update reads the row again under its lock and refuses an
-    /// agent route inside the transaction. Created and REVOKEd from PUBLIC here; the caller adds the GRANT EXECUTE to mcp only.
+    /// a destination, and changes the match or scope only on a route with no agent setting. Update reads the row again under its lock and refuses an
+    /// agent route inside the transaction, unless the actor the service passes is an operator-class token (#6542 part 2: MCP is full admin). Created and REVOKEd from PUBLIC here; the caller adds the GRANT EXECUTE to mcp only.
     /// </summary>
     internal static string BuildNotificationRouteFunctionsSql(string config) => $@"
 CREATE OR REPLACE FUNCTION {config}.create_notification_route(
@@ -2662,8 +2744,11 @@ BEGIN
 END
 $fn$;
 REVOKE ALL ON FUNCTION {config}.create_notification_route(text, boolean, integer, integer, boolean, integer) FROM PUBLIC;
+-- #6542 part 2: the actor is an argument now and the before row comes back, so the old signature is dropped and stays uncallable.
+DROP FUNCTION IF EXISTS {config}.update_notification_route(integer, text[], text, boolean, integer, integer, boolean, integer);
 CREATE OR REPLACE FUNCTION {config}.update_notification_route(
    p_route_id integer,
+   p_actor text,
    p_columns text[],
    p_metric_match text,
    p_enabled boolean,
@@ -2671,13 +2756,16 @@ CREATE OR REPLACE FUNCTION {config}.update_notification_route(
    p_scope_tag_id integer,
    p_send_resolutions boolean,
    p_fallback_route_id integer)
-RETURNS void
+RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $fn$
 DECLARE
    v_row {config}.config_notification_routes%ROWTYPE;
+   -- #6542 part 2: an operator-class MCP token (MCP is full admin) changes a route with an agent setting too. Every token connects as the
+   -- same mcp role, so this is the label the service passes, and the service's own tool gate is what holds an agent token away.
+   v_operator boolean := COALESCE(p_actor ~ '^operator:[A-Za-z0-9._: -]{{1,64}}$', false);
    v_match text;
    v_enabled boolean;
    v_server integer;
@@ -2696,18 +2784,18 @@ BEGIN
    IF NOT FOUND THEN
       RAISE EXCEPTION 'No notification route has that route_id.' USING ERRCODE = 'DL404';
    END IF;
-   IF v_row.agent_level IS NOT NULL AND v_row.agent_level >= 1 THEN
+   IF v_row.agent_level IS NOT NULL AND v_row.agent_level >= 1 AND NOT v_operator THEN
       RAISE EXCEPTION 'That route is an agent route: it is changed in the Viewer, not over MCP.' USING ERRCODE = 'DL403';
    END IF;
    -- What a route matches and which servers it covers decide which servers an agent route covers, so a route with an
    -- explicit agent setting (Off included) keeps both in the Viewer. A route's own destinations do not stop a change
    -- to what it matches: the destinations are set over MCP too. (#6231)
-   IF ('metric_match' = ANY (p_columns) OR 'scope' = ANY (p_columns)) AND v_row.agent_level IS NOT NULL THEN
+   IF ('metric_match' = ANY (p_columns) OR 'scope' = ANY (p_columns)) AND v_row.agent_level IS NOT NULL AND NOT v_operator THEN
       RAISE EXCEPTION 'That route has an agent setting (Off), so what it matches and which servers it covers are changed in the Viewer or on the web dashboard, not over MCP. Turning it on, send_resolutions and fallback_route_id can still be changed here.' USING ERRCODE = 'DL403';
    END IF;
    -- An Off route keeps servers away from a broader agent route, so turning it off widens agent coverage: that is done in the Viewer
    -- or on the web dashboard. Turning it on stays here. (#6281)
-   IF 'enabled' = ANY (p_columns) AND v_row.agent_level IS NOT NULL AND COALESCE(p_enabled, v_row.enabled) = false THEN
+   IF 'enabled' = ANY (p_columns) AND v_row.agent_level IS NOT NULL AND COALESCE(p_enabled, v_row.enabled) = false AND NOT v_operator THEN
       RAISE EXCEPTION 'That route has an agent setting (Off), so turning it off is done in the Viewer or on the web dashboard, not over MCP. Turning it on can still be done here.' USING ERRCODE = 'DL403';
    END IF;
    v_match := CASE WHEN 'metric_match' = ANY (p_columns) THEN btrim(COALESCE(p_metric_match, '')) ELSE v_row.metric_match END;
@@ -2751,13 +2839,140 @@ BEGIN
           fallback_route_id = v_fallback,
           modified_at = (now() AT TIME ZONE 'UTC')
     WHERE route_id = p_route_id;
+   -- The row as it was before this change, in the journal's words: set_notification_route_agent journals it as the before of a
+   -- route_agent_changed row in the same transaction, so a match or scope change made with the agent fields is named in the row.
+   RETURN jsonb_build_object(
+      'metric_match', btrim(v_row.metric_match), 'scope_server_id', v_row.scope_server_id, 'scope_tag_id', v_row.scope_tag_id,
+      'agent_level', v_row.agent_level, 'agent_max_per_hour', v_row.agent_max_per_hour, 'agent_max_per_day', v_row.agent_max_per_day,
+      'agent_lease_minutes', v_row.agent_lease_minutes, 'agent_expiry_minutes', v_row.agent_expiry_minutes, 'enabled', v_row.enabled);
 END
 $fn$;
-REVOKE ALL ON FUNCTION {config}.update_notification_route(integer, text[], text, boolean, integer, integer, boolean, integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION {config}.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer) FROM PUBLIC;
+-- #6542: a named operator token sets a route's agent level, its four limits and its fallback over MCP through this function, and
+-- the change is journaled as route_agent_changed under the token's name (operator:<name>), in the same transaction. Levels 0 to 3 are
+-- set here (MCP is full admin). A level 3 server action still needs that server's switch (config_server_actions) and its remediation login.
+-- p_before is the row update_notification_route returned in the same transaction, so the journal row names a match, scope or enabled change
+-- made in the same call. The old signature is dropped and stays uncallable.
+DROP FUNCTION IF EXISTS {config}.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean);
+CREATE OR REPLACE FUNCTION {config}.set_notification_route_agent(
+   p_route_id integer,
+   p_actor text,
+   p_columns text[],
+   p_agent_level integer,
+   p_agent_max_per_hour integer,
+   p_agent_max_per_day integer,
+   p_agent_lease_minutes integer,
+   p_agent_expiry_minutes integer,
+   p_fallback_route_id integer,
+   p_created boolean,
+   p_before jsonb)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+   v_row {config}.config_notification_routes%ROWTYPE;
+   v_level integer;
+   v_hour integer;
+   v_day integer;
+   v_lease integer;
+   v_expiry integer;
+   v_fallback integer;
+   v_changed text[] := ARRAY[]::text[];
+   v_before jsonb;
+   v_after jsonb;
+BEGIN
+   IF p_actor IS NULL OR p_actor !~ '^operator:[A-Za-z0-9._: -]{{1,64}}$' THEN
+      RAISE EXCEPTION 'The actor is operator: and the operator token''s name, or the single token''s identity.' USING ERRCODE = 'DL400';
+   END IF;
+   -- No column is allowed only with p_before: a match, scope or enabled change to a route with an agent setting is journaled on its own.
+   IF p_columns IS NULL OR (cardinality(p_columns) = 0 AND p_before IS NULL)
+      OR EXISTS (SELECT 1 FROM unnest(p_columns) AS c(name)
+                 WHERE c.name IS NULL OR c.name NOT IN ('agent_level', 'agent_max_per_hour', 'agent_max_per_day', 'agent_lease_minutes', 'agent_expiry_minutes', 'fallback_route_id')) THEN
+      RAISE EXCEPTION 'The columns to change are agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes and fallback_route_id.' USING ERRCODE = 'DL400';
+   END IF;
+   SELECT * INTO v_row FROM {config}.config_notification_routes WHERE route_id = p_route_id FOR UPDATE;
+   IF NOT FOUND THEN
+      RAISE EXCEPTION 'No notification route has that route_id.' USING ERRCODE = 'DL404';
+   END IF;
+   v_level := CASE WHEN 'agent_level' = ANY (p_columns) THEN p_agent_level ELSE v_row.agent_level END;
+   v_hour := CASE WHEN 'agent_max_per_hour' = ANY (p_columns) THEN p_agent_max_per_hour ELSE v_row.agent_max_per_hour END;
+   v_day := CASE WHEN 'agent_max_per_day' = ANY (p_columns) THEN p_agent_max_per_day ELSE v_row.agent_max_per_day END;
+   v_lease := CASE WHEN 'agent_lease_minutes' = ANY (p_columns) THEN p_agent_lease_minutes ELSE v_row.agent_lease_minutes END;
+   v_expiry := CASE WHEN 'agent_expiry_minutes' = ANY (p_columns) THEN p_agent_expiry_minutes ELSE v_row.agent_expiry_minutes END;
+   v_fallback := CASE WHEN 'fallback_route_id' = ANY (p_columns) THEN p_fallback_route_id ELSE v_row.fallback_route_id END;
+   IF v_level IS NOT NULL AND v_level NOT IN (0, 1, 2, 3) THEN
+      RAISE EXCEPTION 'The agent level is Off (0), Investigate (1), Act (2) or Act on servers (3).' USING ERRCODE = 'DL400';
+   END IF;
+   IF v_hour IS NULL OR v_hour NOT BETWEEN 1 AND 60 THEN
+      RAISE EXCEPTION 'Requests per hour must be between 1 and 60.' USING ERRCODE = 'DL400';
+   END IF;
+   IF v_day IS NULL OR v_day NOT BETWEEN 1 AND 500 THEN
+      RAISE EXCEPTION 'Requests per day must be between 1 and 500.' USING ERRCODE = 'DL400';
+   END IF;
+   IF v_lease IS NULL OR v_lease NOT BETWEEN 5 AND 120 THEN
+      RAISE EXCEPTION 'Lease minutes must be between 5 and 120.' USING ERRCODE = 'DL400';
+   END IF;
+   IF v_expiry IS NULL OR v_expiry NOT BETWEEN 15 AND 1440 THEN
+      RAISE EXCEPTION 'Expiry minutes must be between 15 and 1440.' USING ERRCODE = 'DL400';
+   END IF;
+   IF v_fallback IS NOT NULL AND v_fallback = p_route_id THEN
+      RAISE EXCEPTION 'A route cannot be its own fallback route.' USING ERRCODE = 'DL400';
+   END IF;
+   IF v_fallback IS NOT NULL AND v_fallback IS DISTINCT FROM v_row.fallback_route_id
+      AND NOT EXISTS (SELECT 1 FROM {config}.config_notification_routes WHERE route_id = v_fallback) THEN
+      RAISE EXCEPTION 'The fallback route does not exist.' USING ERRCODE = 'DL404';
+   END IF;
+   -- The names and their order are the Viewer's (NotificationRouteWriter.AgentChange).
+   IF p_before IS NOT NULL THEN
+      IF (p_before ->> 'metric_match') IS DISTINCT FROM btrim(v_row.metric_match) THEN v_changed := array_append(v_changed, 'metric_match'); END IF;
+      IF (p_before ->> 'scope_server_id')::integer IS DISTINCT FROM v_row.scope_server_id THEN v_changed := array_append(v_changed, 'scope_server_id'); END IF;
+      IF (p_before ->> 'scope_tag_id')::integer IS DISTINCT FROM v_row.scope_tag_id THEN v_changed := array_append(v_changed, 'scope_tag_id'); END IF;
+   END IF;
+   IF v_level IS DISTINCT FROM v_row.agent_level THEN v_changed := array_append(v_changed, 'agent_level'); END IF;
+   IF v_hour IS DISTINCT FROM v_row.agent_max_per_hour THEN v_changed := array_append(v_changed, 'agent_max_per_hour'); END IF;
+   IF v_day IS DISTINCT FROM v_row.agent_max_per_day THEN v_changed := array_append(v_changed, 'agent_max_per_day'); END IF;
+   IF v_lease IS DISTINCT FROM v_row.agent_lease_minutes THEN v_changed := array_append(v_changed, 'agent_lease_minutes'); END IF;
+   IF v_expiry IS DISTINCT FROM v_row.agent_expiry_minutes THEN v_changed := array_append(v_changed, 'agent_expiry_minutes'); END IF;
+   IF p_before IS NOT NULL AND ((p_before ->> 'agent_level') IS NOT NULL OR v_level IS NOT NULL)
+      AND (p_before ->> 'enabled')::boolean IS DISTINCT FROM v_row.enabled THEN
+      v_changed := array_append(v_changed, 'enabled');
+   END IF;
+   UPDATE {config}.config_notification_routes
+      SET agent_level = v_level::smallint,
+          agent_max_per_hour = v_hour,
+          agent_max_per_day = v_day,
+          agent_lease_minutes = v_lease,
+          agent_expiry_minutes = v_expiry,
+          fallback_route_id = v_fallback,
+          modified_at = (now() AT TIME ZONE 'UTC')
+    WHERE route_id = p_route_id;
+   -- The journal row the Viewer's save writes (NotificationRouteWriter.AgentChange): a new route journals only when it sets a level,
+   -- an edit when a level or a limit changed. A fallback alone changes no agent coverage, so it is not journaled, as in the Viewer.
+   IF (COALESCE(p_created, false) AND v_level IS NOT NULL) OR (NOT COALESCE(p_created, false) AND cardinality(v_changed) > 0) THEN
+      v_before := CASE WHEN COALESCE(p_created, false) THEN NULL WHEN p_before IS NOT NULL THEN p_before ELSE jsonb_build_object(
+         'metric_match', btrim(v_row.metric_match), 'scope_server_id', v_row.scope_server_id, 'scope_tag_id', v_row.scope_tag_id,
+         'agent_level', v_row.agent_level, 'agent_max_per_hour', v_row.agent_max_per_hour, 'agent_max_per_day', v_row.agent_max_per_day,
+         'agent_lease_minutes', v_row.agent_lease_minutes, 'agent_expiry_minutes', v_row.agent_expiry_minutes, 'enabled', v_row.enabled) END;
+      v_after := jsonb_build_object(
+         'metric_match', btrim(v_row.metric_match), 'scope_server_id', v_row.scope_server_id, 'scope_tag_id', v_row.scope_tag_id,
+         'agent_level', v_level, 'agent_max_per_hour', v_hour, 'agent_max_per_day', v_day,
+         'agent_lease_minutes', v_lease, 'agent_expiry_minutes', v_expiry, 'enabled', v_row.enabled);
+      INSERT INTO {config}.investigation_journal (event_time, request_id, route_id, server_id, event, actor, reason, detail)
+      VALUES (now(), NULL, p_route_id, v_row.scope_server_id, 'route_agent_changed', p_actor,
+              CASE WHEN COALESCE(p_created, false) THEN 'created route' ELSE 'changed ' || array_to_string(v_changed, ', ') END,
+              jsonb_build_object('before', v_before, 'after', v_after));
+   END IF;
+END
+$fn$;
+REVOKE ALL ON FUNCTION {config}.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean, jsonb) FROM PUBLIC;
 -- The return type changed (a previous value is now only a flag for whether one was saved), which CREATE OR REPLACE cannot do on its own.
+-- #6542 part 2: the actor is an argument too, so the old signature is dropped and stays uncallable.
 DROP FUNCTION IF EXISTS {config}.set_notification_route_destinations(integer, text[], text, text, text, text, text);
 CREATE OR REPLACE FUNCTION {config}.set_notification_route_destinations(
    p_route_id integer,
+   p_actor text,
    p_columns text[],
    p_teams_url text,
    p_slack_url text,
@@ -2783,12 +2998,12 @@ BEGIN
       RAISE EXCEPTION 'The destinations to change are teams_url, slack_url, generic_url, pagerduty_routing_key and smtp_recipients.' USING ERRCODE = 'DL400';
    END IF;
    -- The row is read under its lock, so every check below is on what is stored now. The agent-route rule of
-   -- update_notification_route holds here too: an agent route is changed in the Viewer.
+   -- update_notification_route holds here too: an agent route is changed in the Viewer, or by an operator-class MCP token (#6542 part 2).
    SELECT * INTO v_row FROM {config}.config_notification_routes WHERE route_id = p_route_id FOR UPDATE;
    IF NOT FOUND THEN
       RAISE EXCEPTION 'No notification route has that route_id.' USING ERRCODE = 'DL404';
    END IF;
-   IF v_row.agent_level IS NOT NULL AND v_row.agent_level >= 1 THEN
+   IF v_row.agent_level IS NOT NULL AND v_row.agent_level >= 1 AND NOT COALESCE(p_actor ~ '^operator:[A-Za-z0-9._: -]{{1,64}}$', false) THEN
       RAISE EXCEPTION 'That route is an agent route: it is changed in the Viewer, not over MCP.' USING ERRCODE = 'DL403';
    END IF;
    v_teams := CASE WHEN 'teams_url' = ANY (p_columns) THEN COALESCE(p_teams_url, '') ELSE v_row.teams_url END;
@@ -2841,7 +3056,7 @@ BEGIN
       CASE WHEN 'smtp_recipients' = ANY (p_columns) THEN v_row.smtp_recipients <> '' END;
 END
 $fn$;
-REVOKE ALL ON FUNCTION {config}.set_notification_route_destinations(integer, text[], text, text, text, text, text) FROM PUBLIC;";
+REVOKE ALL ON FUNCTION {config}.set_notification_route_destinations(integer, text, text[], text, text, text, text, text) FROM PUBLIC;";
 
     /// <summary>
     /// The SECURITY DEFINER read function (#6230) behind <c>get_command_result</c> and the collector-run state read: one command's
@@ -3545,7 +3760,7 @@ BEGIN
    IF v_moved
       AND COALESCE(OLD.encrypted_password, '') <> ''
       AND NEW.encrypted_password IS NOT DISTINCT FROM OLD.encrypted_password THEN
-      RAISE EXCEPTION '%', 'Changing how this server is reached needs its password again: it is stored encrypted and this surface cannot read it back.' USING ERRCODE = 'PW002';
+      RAISE EXCEPTION '%', 'Changing the host, port or any other connection setting of this server needs its password sent with the change, because a saved password is only ever sent to the server it was saved for. Send the password together with the new settings.' USING ERRCODE = 'PW002';
    END IF;
 
    -- A new AWS role (#5452) never inherits an external ID stored for the old one, unseen: the update names the ID

@@ -935,7 +935,10 @@ ORDER BY collection_time DESC
         var applications = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy("attention_events", "client_app_name", bounded: true), serverId, topFloor, topCeiling,
             r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)), cancellationToken);
 
-        return new AttentionWindow(runs, counts, groups, statements, databases, applications, topsFromLookback);
+        var hosts = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy("attention_events", "client_hostname", bounded: true), serverId, topFloor, topCeiling,
+            r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)), cancellationToken);
+
+        return new AttentionWindow(runs, counts, groups, statements, databases, applications, topsFromLookback, hosts);
     }
 
     /// <summary>The deadline of the Client Timeouts baseline read (#5736): a 7-day range of one server, run about once a day.</summary>

@@ -78,20 +78,41 @@ public sealed class DarlingMcpForcedPlanTools
         "plan_guide names a plan guide that covers the forced query (name, enabled, scope), found from the query's object (an OBJECT-scoped guide) or a guide name in the stored XML of a later plan of the query; " +
         "it sits beside the state and never changes it: a FAILING force with a guide may still be running fine. " +
         "An empty answer says why: no capture in the window (the collector has not run, or Query Store is off for every database), or no forced plans in the newest captures. " +
-        "forced_plans lists the worst states first (truncated marks a cut).")]
+        "forced_plans lists the worst states first, at most limit (default and most 200) per call: when has_more is true, call again with offset = next_offset. " +
+        "query_id and plan_id narrow the read itself, so a force is found even on a server with more forces than one read holds (2000); with either, matched_forces, total_forces and state_counts count only the forces that match. Without them total_forces is capped at 2000. " +
+        "plan_forcing_type AUTO means SQL Server forced the plan itself (automatic plan correction), so force and unforce churn on it is normal; MANUAL is a person or a tool.")]
     public static async Task<string> GetForcedPlans(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of captures ending at as_of (default 24).")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
+        [Description("Only the force(s) of this Query Store query_id. Omit for all.")] long? query_id = null,
+        [Description("Only the force of this Query Store plan_id (it names one plan per database). Omit for all.")] long? plan_id = null,
+        [Description("Maximum forces to list per call, worst state first. Default and most 200.")] int limit = MaxListed,
+        [Description("Forces to skip before listing (a page start). Default 0; use next_offset when has_more is true.")] int offset = 0,
         CancellationToken cancellationToken = default)
-        => await GetForcedPlans(postgres, server_name, hours_back, as_of, DatabaseFilter.One(database_name), cancellationToken);
+        => await GetForcedPlans(postgres, server_name, hours_back, as_of, DatabaseFilter.One(database_name), query_id, plan_id, limit, offset, cancellationToken);
 
     /// <summary>The read over a LIST of databases: the MCP tool passes <c>DatabaseFilter.One</c>, the web route the repeated keys.</summary>
+    internal static Task<string> GetForcedPlans(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, DatabaseFilter databases, CancellationToken cancellationToken) =>
+        GetForcedPlans(postgres, server_name, hours_back, as_of, databases, null, null, MaxListed, 0, cancellationToken);
+
+    /// <summary>
+    /// #6560: the same read with a page and a plan filter. <paramref name="queryId"/> and <paramref name="planId"/> narrow the READ (before the reader's
+    /// <see cref="DarlingForcedPlanStateReader.MaxForces"/> cap, so a force past it is still found), so with either set <c>total_forces</c> and
+    /// <c>state_counts</c> describe the matching forces; without them <c>total_forces</c> is the count under that cap. <paramref name="limit"/> (1 to <see cref="MaxListed"/>) and <paramref name="offset"/> page the ordered list.
+    /// </summary>
     internal static async Task<string> GetForcedPlans(
-        NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, DatabaseFilter databases, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, DatabaseFilter databases,
+        long? queryId, long? planId, int limit, int offset, CancellationToken cancellationToken)
     {
+        if (limit < 1 || limit > MaxListed)
+            return McpHelpers.Refusal("limit", $"Invalid limit value '{limit}'. Must be 1-{MaxListed}.");
+        if (offset < 0)
+            return McpHelpers.Refusal("offset", $"Invalid offset value '{offset}'. Must be 0 or more.");
+
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
@@ -102,7 +123,7 @@ public sealed class DarlingMcpForcedPlanTools
         try
         {
             var read = await DarlingForcedPlanStateReader.ReadAsync(
-                postgres, resolved.ServerId, databases, null, start, windowEnd, null, McpCommandDeadlines.ReadSeconds, cancellationToken);
+                postgres, resolved.ServerId, databases, queryId, start, windowEnd, null, McpCommandDeadlines.ReadSeconds, planId, cancellationToken);
             ReadScope.NoteSource(ReadScope.SourceRaw);
 
             var scope = databases.Describe();
@@ -121,7 +142,9 @@ public sealed class DarlingMcpForcedPlanTools
                 {
                     ["server"] = resolved.DisplayName,
                     ["status"] = "empty",
-                    ["message"] = $"No plan is forced{where} in the newest capture of each database in the window. Captured databases are listed.",
+                    ["message"] = queryId is not null || planId is not null
+                        ? $"No force{where} in the newest captures matches query_id/plan_id. Captured databases are listed."
+                        : $"No plan is forced{where} in the newest capture of each database in the window. Captured databases are listed.",
                     ["as_of"] = Format(windowEnd),
                     ["hours_back"] = hours_back,
                     ["captures"] = read.Captures.Select(CaptureNode),
@@ -129,10 +152,20 @@ public sealed class DarlingMcpForcedPlanTools
             }
 
             var ordered = read.Plans
-                .OrderBy(p => StateRank(p.State)).ThenBy(p => p.DatabaseName, StringComparer.Ordinal).ThenBy(p => p.PlanId)
+                .OrderBy(p => StateRank(p.State)).ThenBy(p => p.DatabaseName, StringComparer.Ordinal).ThenBy(p => p.PlanId).ThenBy(p => p.QueryId)
                 .ToList();
-            var truncated = ordered.Count > MaxListed;
-            var listed = truncated ? ordered.Take(MaxListed).ToList() : ordered;
+            var narrowed = queryId is not null || planId is not null;
+            /* The reader applied query_id and plan_id before its cap, so the list is already the matching forces. */
+            var matched = ordered;
+            var listed = matched.Skip(offset).Take(limit).ToList();
+            var hasMore = offset + listed.Count < matched.Count;
+            string? pageNote = null;
+            if (hasMore)
+                pageNote = $"Listed {listed.Count} of {matched.Count} forces from offset {offset}. Call again with offset {offset + listed.Count} for the next page, or filter by database_name, query_id or plan_id.";
+            else if (narrowed && matched.Count == 0)
+                pageNote = "No force in the newest captures matches query_id/plan_id.";
+            else if (offset >= matched.Count && matched.Count > 0)
+                pageNote = $"offset {offset} is past the {matched.Count} matching forces.";
             return JsonSerializer.Serialize(new Dictionary<string, object?>
             {
                 ["server"] = resolved.DisplayName,
@@ -140,8 +173,14 @@ public sealed class DarlingMcpForcedPlanTools
                 ["hours_back"] = hours_back,
                 ["total_forces"] = ordered.Count,
                 ["state_counts"] = ordered.GroupBy(p => StateName(p.State)).OrderBy(g => g.Key, StringComparer.Ordinal).ToDictionary(g => g.Key, g => g.Count()),
+                ["matched_forces"] = matched.Count,
+                ["offset"] = offset,
+                ["limit"] = limit,
                 ["forced_plans"] = listed.Select(ForceNode),
-                ["truncated"] = truncated,
+                ["truncated"] = hasMore,
+                ["has_more"] = hasMore,
+                ["next_offset"] = hasMore ? offset + listed.Count : null,
+                ["page_note"] = pageNote,
                 ["captures"] = read.Captures.Select(CaptureNode),
                 ["stats_complete"] = read.StatsComplete,
                 ["note"] = FirstSeenNote + (read.StatsComplete

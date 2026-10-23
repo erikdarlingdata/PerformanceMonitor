@@ -36,7 +36,7 @@ public sealed class DarlingMcpObjectStatsTools
 {
     /// <summary>Lite's default result caps (get_table_index_sizes takes no top parameter; get_index_usage and
     /// get_object_locking do, and these are the DEFAULT each falls back to, not a hard cap).</summary>
-    private const int TableSizesTop = 100;
+    private const int TableSizesTop = DarlingTableSizeGrowthReader.TopTables;
 
     /// <summary>
     /// #4198: <c>get_index_usage</c>'s caller-optional <c>limit</c> DEFAULT (#2636 made it optional; this lane
@@ -109,6 +109,7 @@ public sealed class DarlingMcpObjectStatsTools
                 return McpHelpers.WithDatabase(
                            await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "index_object_stats", cancellationToken),
                            databases.Describe())
+                    ?? await HealthyEmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, "table size rows", databases.Describe(), cancellationToken)
                     ?? McpHelpers.StatusForDatabase("unavailable", "No object size data available. Index/object stats are collected daily.", databases.Describe());
             }
 
@@ -178,7 +179,7 @@ public sealed class DarlingMcpObjectStatsTools
     /// span at all. Null when every figure is defined, so the common row carries no note. Lite's twin words
     /// it identically.
     /// </summary>
-    internal static string? GrowthNote(DarlingObjectStatsReader.ObjectSizeGrowthRow r)
+    internal static string? GrowthNote(TableSizeGrowthRow r)
     {
         var notes = new List<string>();
         if (r.DaysOfData < 1)
@@ -260,6 +261,7 @@ public sealed class DarlingMcpObjectStatsTools
                 }
 
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "index_object_stats", cancellationToken)
+                    ?? await HealthyEmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, "index usage rows", null, cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No index usage data available. Index/object stats are collected daily.");
             }
 
@@ -311,6 +313,19 @@ public sealed class DarlingMcpObjectStatsTools
         {
             return McpHelpers.FormatError("get_index_usage", ex);
         }
+    }
+
+    /// <summary>
+    /// #6453: the <c>empty</c> answer for an index_object_stats read with no stored snapshot when the collector's newest run
+    /// completed clean, or null so the caller keeps its <c>unavailable</c> text. The server-wide sentence is true of any
+    /// database filter, because no snapshot exists for any database.
+    /// </summary>
+    private static async Task<string?> HealthyEmptyAsync(
+        NpgsqlDataSource postgres, int serverId, string serverName, string what, string? databaseName, CancellationToken cancellationToken)
+    {
+        var message = await DarlingRuntimePrecondition.HealthyEmptyMessageAsync(
+            postgres, serverId, serverName, "index_object_stats", what, cancellationToken);
+        return message is null ? null : McpHelpers.StatusForDatabase("empty", message, databaseName);
     }
 
     /// <summary>
@@ -379,7 +394,7 @@ public sealed class DarlingMcpObjectStatsTools
     }
 
     [ReadsLatestSnapshot(LatestSnapshotShape.Stamped)]
-    [McpServerTool(Name = "get_object_locking"), Description("Gets per-index locking and latch contention (row/page lock waits in ms, lock escalations, page-latch and page-IO-latch waits) from the latest daily snapshot, top contended objects first. Use to find tables/indexes driving blocking and contention. Counters are cumulative since the last instance restart. LATEST IS A TIME: this reads the newest index/object snapshot for the server, not a window, and captured_at is the instant it was collected - these are the databases and indexes that existed AT that stamp, and because object stats are collected DAILY the stamp can be most of a day old on a healthy server and older still on one whose collector has stalled.")]
+    [McpServerTool(Name = "get_object_locking"), Description("Gets per-index locking and latch contention (row/page lock waits in ms, lock escalations, page-latch and page-IO-latch waits) from the latest daily snapshot, top contended objects first. Use to find tables/indexes driving blocking and contention. Counters are cumulative since the last instance restart. LATEST IS A TIME: this reads the newest index/object snapshot for the server, not a window, and captured_at is the instant it was collected - these are the databases and indexes that existed AT that stamp, and because object stats are collected DAILY the stamp can be most of a day old on a healthy server and older still on one whose collector has stalled. It has no time window, so it cannot show locking during a past incident: use get_blocking_trend or get_blocking_stats for that.")]
     public static async Task<string> GetObjectLocking(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -462,6 +477,19 @@ public sealed class DarlingMcpObjectStatsTools
                         "No lock/latch contention" + (scope is null ? "" : $"{inScope} or in any other database")
                         + $" on {resolved.DisplayName} at the latest snapshot."
                         + (optimizedLockingNote is null ? "" : " " + optimizedLockingNote),
+                        optimizedLockingNote is null && separatelyMonitoredNote is null
+                            ? null
+                            : new { optimized_locking_note = optimizedLockingNote, separately_monitored_note = separatelyMonitoredNote });
+                }
+
+                /* #6453: no snapshot stored, but the index_object_stats collector's newest run completed clean: it looked and
+                   the server had nothing to report, which collection health calls HEALTHY. */
+                var healthyEmpty = await DarlingRuntimePrecondition.HealthyEmptyMessageAsync(
+                    postgres, resolved.ServerId, resolved.DisplayName, "index_object_stats", "locking or contention rows", cancellationToken);
+                if (healthyEmpty != null)
+                {
+                    return McpHelpers.Status("empty",
+                        healthyEmpty + (optimizedLockingNote is null ? "" : " " + optimizedLockingNote),
                         optimizedLockingNote is null && separatelyMonitoredNote is null
                             ? null
                             : new { optimized_locking_note = optimizedLockingNote, separately_monitored_note = separatelyMonitoredNote });

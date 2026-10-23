@@ -66,9 +66,19 @@ internal static class DarlingAgentActionGate
         var problem = InvestigationToolCore.ParseAgentAction(agentAction, out var action);
         if (problem is not null)
         {
-            await store.RecordAgentActionRefusalAsync(LooseRequestId(agentAction), LooseAgentId(agentAction), tool, problem.Reason,
+            /* #6542: a named agent token journals under its own name, never the agent_id the bad argument carried. */
+            await store.RecordAgentActionRefusalAsync(LooseRequestId(agentAction), policy.AgentTokenName ?? LooseAgentId(agentAction), tool, problem.Reason,
                 cancellationToken);
             return AgentActionGateOutcome.Refused(problem);
+        }
+
+        /* #6542: a named agent token is the agent's identity, so its agent_action acts only as that name. */
+        if (policy.AgentTokenName is { } tokenName && !string.Equals(action!.AgentId, tokenName, StringComparison.Ordinal))
+        {
+            await store.RecordAgentActionRefusalAsync(action.RequestId, tokenName, tool, DarlingMcpInvestigationTools.AgentIdNotToken,
+                cancellationToken);
+            return AgentActionGateOutcome.Refused(new AgentActionRefusal(DarlingMcpInvestigationTools.AgentIdNotToken,
+                DarlingMcpInvestigationTools.AgentIdNotTokenMessage(tokenName)));
         }
 
         var hooks = new AgentActionHooks

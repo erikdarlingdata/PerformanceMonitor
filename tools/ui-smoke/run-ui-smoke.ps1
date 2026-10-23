@@ -68,7 +68,11 @@ try {
     # The config: ports filled in, written beside the files the service makes next to its config.
     $cfgDir = Join-Path $WorkDir 'cfg'
     New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
-    $cfg = (Get-Content -Raw (Join-Path $here 'darling.ui-smoke.json')).Replace('__PG_PORT__', "$PgPort").Replace('__WEB_PORT__', "$WebPort")
+    # The dashboard asks for its token on loopback too: a fresh one per run, never printed.
+    $tokenBytes = [byte[]]::new(32)
+    [System.Security.Cryptography.RandomNumberGenerator]::Fill($tokenBytes)
+    $webToken = -join ($tokenBytes | ForEach-Object { $_.ToString('x2') })
+    $cfg = (Get-Content -Raw (Join-Path $here 'darling.ui-smoke.json')).Replace('__PG_PORT__', "$PgPort").Replace('__WEB_PORT__', "$WebPort").Replace('__WEB_TOKEN__', $webToken)
     $cfgPath = Join-Path $cfgDir 'darling.json'
     Set-Content -Path $cfgPath -Value $cfg -Encoding utf8
 
@@ -83,7 +87,8 @@ try {
     $up = $false
     while ((Get-Date) -lt $deadline) {
         if ($serviceProc.HasExited) { throw "the service exited early (code $($serviceProc.ExitCode)); see service.out.log" }
-        try { if ((Invoke-WebRequest -Uri "$base/api/ping" -UseBasicParsing -TimeoutSec 3).StatusCode -eq 200) { $up = $true; break } } catch { }
+        # The dashboard asks for its token on loopback, so a ping with no session answers 401: the service is up either way.
+        try { if ((Invoke-WebRequest -Uri "$base/api/ping" -UseBasicParsing -TimeoutSec 3 -SkipHttpErrorCheck).StatusCode -in 200, 401) { $up = $true; break } } catch { }
         Start-Sleep -Seconds 1
     }
     if (-not $up) { throw "the service did not answer $base/api/ping in 90 s" }
@@ -114,6 +119,13 @@ try {
     try {
         & npm ci --no-audit --no-fund --ignore-scripts
         if ($LASTEXITCODE -ne 0) { throw "npm ci failed ($LASTEXITCODE)" }
+        # Sign in once, the way the sign-in form does, and hand the session cookie to the browser walks.
+        $signIn = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+        $null = Invoke-WebRequest -Uri "$base/auth/login" -Method Post -Body @{ token = $webToken } -Headers @{ Origin = $base } `
+            -WebSession $signIn -UseBasicParsing -TimeoutSec 30
+        $sessionCookie = $signIn.Cookies.GetCookies([Uri]$base)['darling_web_session']
+        if (-not $sessionCookie) { throw "signing in to the dashboard with the run's token returned no session cookie; see service.out.log" }
+        $env:UI_SMOKE_SESSION_COOKIE = $sessionCookie.Value
         $env:UI_SMOKE_URL = $base
         $env:UI_SMOKE_OUT = Join-Path $WorkDir 'out'
         $env:UI_SMOKE_CHANNEL = $Channel

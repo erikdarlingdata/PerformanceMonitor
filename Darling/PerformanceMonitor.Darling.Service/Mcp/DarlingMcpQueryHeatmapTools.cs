@@ -255,8 +255,22 @@ public sealed class DarlingMcpQueryHeatmapTools
 
         if (!hasAny)
         {
-            return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, serverId, serverName, "query_stats", cancellationToken)
-                ?? McpHelpers.Status(
+            var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, serverId, serverName, "query_stats", cancellationToken);
+            if (gated != null)
+            {
+                return gated;
+            }
+
+            /* #6453: nothing ever stored, but the query_stats collector's newest run completed clean: the plan cache had
+               nothing to read, which collection health calls HEALTHY, so this is a true negative and not "unavailable". */
+            var healthyEmpty = await DarlingRuntimePrecondition.HealthyEmptyMessageAsync(
+                postgres, serverId, serverName, "query_stats", "query stats", cancellationToken);
+            if (healthyEmpty != null)
+            {
+                return McpHelpers.Status("empty", healthyEmpty);
+            }
+
+            return McpHelpers.Status(
                     "unavailable",
                     $"No query stats have EVER been collected for {serverName}, so this is NOT a report of a quiet server — there is nothing to draw. query_stats is a PERIODIC table rather than an edge table: the collector writes rows every cycle for whatever is in the plan cache, so an empty history means nobody looked. Check get_collection_health for this server.");
         }

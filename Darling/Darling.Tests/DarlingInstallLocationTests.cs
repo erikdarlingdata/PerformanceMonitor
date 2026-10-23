@@ -63,9 +63,9 @@ public class DarlingInstallLocationTests
         foreach (var (marker, what) in new[]
         {
             ("& $serviceExe --test-connection", "the --test-connection pre-flight"),
-            ("Copy-Item -LiteralPath $samplePath -Destination $configPath", "copying darling.sample.json to darling.json"),
+            ("Write-DarlingMinimalConfig $configPath", "writing the minimal darling.json"),
             ("New-EventLog -LogName Application", "registering the Event Log source"),
-            ("& sc.exe create $serviceName", "creating the service"),
+            ("Invoke-ScWithQuotedBinPath 'create'", "creating the service"),
             ("Set-Acl -LiteralPath $secretFile", "hardening the config's ACL"),
             ("Start-Service -Name $serviceName", "starting the service"),
         })
@@ -3742,10 +3742,10 @@ function Get-CimInstance {
             new[]
             {
                 ("Invoke-InstallTreeLock $lockAccount -StopOnOpen", "the step 1b2 install-tree lock"),
-                ("Copy-Item -LiteralPath $samplePath -Destination $configPath", "copying darling.sample.json to darling.json"),
+                ("Write-DarlingMinimalConfig $configPath", "writing the minimal darling.json"),
                 ("& $serviceExe --test-connection", "the --test-connection pre-flight"),
                 ("New-EventLog -LogName Application", "registering the Event Log source"),
-                ("& sc.exe create $serviceName", "creating the service"),
+                ("Invoke-ScWithQuotedBinPath 'create'", "creating the service"),
                 ("Set-Acl -LiteralPath $secretFile", "hardening the config's ACL"),
                 ("Start-Service -Name $serviceName", "starting the service"),
             });

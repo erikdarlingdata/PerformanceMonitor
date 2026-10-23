@@ -239,7 +239,9 @@ public sealed class ViewerPostgresTabsTests
         {
             /* The PostgreSQL tab's own partial: its data-start probe helper (#4966) is a PostgreSQL read by design. */
             if (Path.GetFileName(file).Equals("ViewerServerTab.Postgres.cs", StringComparison.OrdinalIgnoreCase)
-                || Path.GetFileName(file).Equals("ViewerServerTab.PostgresDataStart.cs", StringComparison.OrdinalIgnoreCase))
+                || Path.GetFileName(file).Equals("ViewerServerTab.PostgresDataStart.cs", StringComparison.OrdinalIgnoreCase)
+                /* #6385: the four PostgreSQL trend charts, loaded from the Activity, Waits and I/O loaders above. */
+                || Path.GetFileName(file).Equals("ViewerServerTab.PgTrends.cs", StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }
@@ -389,7 +391,8 @@ public sealed class ViewerPostgresTabsTests
     public void EveryPostgresPanel_ExplainsItsOwnEmptyState()
     {
         var xaml = ViewerFile("ViewerServerTab.xaml");
-        var loaders = ViewerFile("ViewerServerTab.Postgres.cs");
+        /* #6385: the trend charts' notes are filled in the PostgreSQL trend partial. */
+        var loaders = ViewerFile("ViewerServerTab.Postgres.cs") + ViewerFile("ViewerServerTab.PgTrends.cs");
 
         var notes = Regex
             .Matches(xaml, "x:Name=\"(Pg[A-Za-z]*Note)\"")

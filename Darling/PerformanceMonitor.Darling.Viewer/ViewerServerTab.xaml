@@ -1,4 +1,4 @@
-﻿<UserControl x:Class="PerformanceMonitor.Darling.Viewer.ViewerServerTab"
+<UserControl x:Class="PerformanceMonitor.Darling.Viewer.ViewerServerTab"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:local="clr-namespace:PerformanceMonitor.Darling.Viewer"
@@ -2373,17 +2373,93 @@
                     </Grid>
                 </TabItem>
 
+                <!-- Resource Semaphore Sub-Tab (#6388, the web's Memory Grants tab panels Resource Semaphore Pressure and
+                     Resource Semaphore): the window aggregate per pool and semaphore over the newest snapshot's rows,
+                     both from the read get_resource_semaphore serves. -->
+                <TabItem Header="Resource Semaphore">
+                    <Grid Margin="8">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+                        <TextBlock Grid.Row="0" Text="Resource Semaphore Pressure (every snapshot in the window)" Style="{StaticResource SectionHeader}"/>
+                        <DataGrid Grid.Row="1" x:Name="ResourceSemaphorePressureGrid" Style="{StaticResource DarkGrid}">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="Pool" Binding="{Binding PoolId}" Width="60"/>
+                                <DataGridTextColumn Header="Semaphore" Binding="{Binding ResourceSemaphoreId}" Width="85"/>
+                                <DataGridTextColumn Header="Snapshots" Binding="{Binding Snapshots, StringFormat=N0}" Width="85"/>
+                                <DataGridTextColumn Header="Peak Waiters" Binding="{Binding PeakWaiters, StringFormat=N0}" Width="100"/>
+                                <DataGridTextColumn Header="Peak Waiters At" Binding="{Binding PeakWaitersAtLocal, TargetNullValue=—}" Width="140" SortMemberPath="PeakWaitersAt"/>
+                                <DataGridTextColumn Header="Peak Granted MB" Binding="{Binding PeakGrantedMb, StringFormat=N1}" Width="115"/>
+                                <DataGridTextColumn Header="Peak Granted At" Binding="{Binding PeakGrantedAtLocal, TargetNullValue=—}" Width="140" SortMemberPath="PeakGrantedAt"/>
+                                <DataGridTextColumn Header="Min Available MB" Binding="{Binding MinAvailableMb, StringFormat=N1}" Width="120"/>
+                                <DataGridTextColumn Header="Timeouts In Window" Binding="{Binding TimeoutsInWindow, StringFormat=N0}" Width="130"/>
+                                <DataGridTextColumn Header="Forced Grants In Window" Binding="{Binding ForcedGrantsInWindow, StringFormat=N0}" Width="150"/>
+                                <DataGridTextColumn Header="First Snapshot" Binding="{Binding FirstSnapshotLocal}" Width="140" SortMemberPath="FirstSnapshotAt"/>
+                                <DataGridTextColumn Header="Last Snapshot" Binding="{Binding LastSnapshotLocal}" Width="140" SortMemberPath="LastSnapshotAt"/>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                        <TextBlock Grid.Row="1" x:Name="ResourceSemaphorePressureNoDataMessage" Text="No resource-semaphore snapshots in this window." Style="{StaticResource EmptyHint}"/>
+                        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,8,0,4">
+                            <TextBlock Text="Resource Semaphore (newest snapshot, a moment not the window)" Style="{StaticResource SectionHeader}" VerticalAlignment="Center" Margin="0,0,16,0"/>
+                            <TextBlock Text="Collected:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                            <TextBlock x:Name="ResourceSemaphoreCollectedText" Text="--" VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <DataGrid Grid.Row="3" x:Name="ResourceSemaphoreGrid" Style="{StaticResource DarkGrid}">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="Pool" Binding="{Binding PoolId}" Width="60"/>
+                                <DataGridTextColumn Header="Semaphore" Binding="{Binding ResourceSemaphoreId}" Width="85"/>
+                                <DataGridTextColumn Header="Target MB" Binding="{Binding TargetMemoryMb, StringFormat=N1}" Width="95"/>
+                                <DataGridTextColumn Header="Max Target MB" Binding="{Binding MaxTargetMemoryMb, StringFormat=N1}" Width="110"/>
+                                <DataGridTextColumn Header="Total MB" Binding="{Binding TotalMemoryMb, StringFormat=N1}" Width="95"/>
+                                <DataGridTextColumn Header="Available MB" Binding="{Binding AvailableMemoryMb, StringFormat=N1}" Width="105"/>
+                                <DataGridTextColumn Header="Granted MB" Binding="{Binding GrantedMemoryMb, StringFormat=N1}" Width="100"/>
+                                <DataGridTextColumn Header="Used MB" Binding="{Binding UsedMemoryMb, StringFormat=N1}" Width="95"/>
+                                <DataGridTextColumn Header="Grantees" Binding="{Binding GranteeCount, StringFormat=N0}" Width="80"/>
+                                <DataGridTextColumn Header="Waiters" Binding="{Binding WaiterCount, StringFormat=N0}" Width="75"/>
+                                <DataGridTextColumn Header="Timeouts" Binding="{Binding TimeoutErrorCount, StringFormat=N0}" Width="85"/>
+                                <DataGridTextColumn Header="Forced Grants" Binding="{Binding ForcedGrantCount, StringFormat=N0}" Width="105"/>
+                                <!-- The two deltas are null on a restart / first-sample row (stored interval 0) and render a dash, never 0;
+                                     the Interval (sec) column says why, or gives the seconds they accrued over. -->
+                                <DataGridTextColumn Header="Timeouts Delta" Binding="{Binding TimeoutErrorCountDelta, StringFormat=N0, TargetNullValue=—}" Width="110"/>
+                                <DataGridTextColumn Header="Forced Delta" Binding="{Binding ForcedGrantCountDelta, StringFormat=N0, TargetNullValue=—}" Width="100"/>
+                                <DataGridTextColumn Header="Interval (sec)" Binding="{Binding IntervalDisplay}" SortMemberPath="SampleIntervalSeconds" Width="130"/>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                        <TextBlock Grid.Row="3" x:Name="ResourceSemaphoreNoDataMessage" Text="No resource-semaphore snapshot in this window." Style="{StaticResource EmptyHint}"/>
+                    </Grid>
+                </TabItem>
+
                 <!-- Plan Cache Sub-Tab (plan_cache_stats parity, matching the Dashboard's Memory > Plan
                      Cache): single-use vs multi-use size trend over the total-plans / oldest-plan
                      summary strip. -->
                 <TabItem Header="Plan Cache">
                     <Grid Margin="8">
                         <Grid.RowDefinitions>
-                            <RowDefinition Height="*"/>
+                            <RowDefinition Height="2*"/>
+                            <RowDefinition Height="*" MinHeight="90"/>
                             <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
                         <scottplot:WpfPlot Grid.Row="0" x:Name="PlanCacheChart"/>
-                        <Border Grid.Row="1" Background="{DynamicResource BackgroundDarkBrush}" CornerRadius="4" Padding="12,8" Margin="0,8,0,0">
+                        <!-- Plan Cache by Type (#6388): every (cacheobjtype, objtype) group at the newest snapshot in the window, the read
+                             get_plan_cache_bloat serves as cache_types. -->
+                        <DataGrid Grid.Row="1" x:Name="PlanCacheByTypeGrid" Style="{StaticResource DarkGrid}" Margin="0,8,0,0">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="Cache Type" Binding="{Binding CacheObjType}" Width="150"/>
+                                <DataGridTextColumn Header="Object Type" Binding="{Binding ObjType}" Width="120"/>
+                                <DataGridTextColumn Header="Plans" Binding="{Binding TotalPlans, StringFormat=N0}" Width="80"/>
+                                <DataGridTextColumn Header="Size MB" Binding="{Binding TotalSizeMb, StringFormat=N0}" Width="85"/>
+                                <DataGridTextColumn Header="Single-Use Plans" Binding="{Binding SingleUsePlans, StringFormat=N0}" Width="125"/>
+                                <DataGridTextColumn Header="Single-Use MB" Binding="{Binding SingleUseSizeMb, StringFormat=N0}" Width="110"/>
+                                <DataGridTextColumn Header="Multi-Use Plans" Binding="{Binding MultiUsePlans, StringFormat=N0}" Width="120"/>
+                                <DataGridTextColumn Header="Multi-Use MB" Binding="{Binding MultiUseSizeMb, StringFormat=N0}" Width="105"/>
+                                <DataGridTextColumn Header="Avg Use Count" Binding="{Binding AvgUseCount, StringFormat=N1}" Width="110"/>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                        <TextBlock Grid.Row="1" x:Name="PlanCacheByTypeNoDataMessage" Text="No plan cache snapshot in this window." Style="{StaticResource EmptyHint}"/>
+                        <Border Grid.Row="2" Background="{DynamicResource BackgroundDarkBrush}" CornerRadius="4" Padding="12,8" Margin="0,8,0,0">
                             <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
                                 <TextBlock Text="Total Plans:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                                 <TextBlock x:Name="PlanCacheTotalPlansText" Text="--" VerticalAlignment="Center" Margin="0,0,20,0"/>
@@ -2946,12 +3022,32 @@
             <Grid Margin="8">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="2*"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*" MinHeight="90"/>
                     <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
                 <TextBlock Grid.Row="0" Text="Session Counts Over Time" Style="{StaticResource SectionHeader}"/>
                 <scottplot:WpfPlot Grid.Row="1" x:Name="SessionStatsChart"/>
-                <Border Grid.Row="2" Background="{DynamicResource BackgroundDarkBrush}" CornerRadius="4" Padding="12,8" Margin="0,4,0,0">
+                <!-- Sessions by Application (#6388): the newest per-application snapshot, the read get_session_stats serves as applications. -->
+                <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,8,0,0">
+                    <TextBlock Text="Sessions by Application (newest snapshot, a moment not the window)" Style="{StaticResource SectionHeader}" VerticalAlignment="Center" Margin="0,0,16,0"/>
+                    <TextBlock Text="Collected:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                    <TextBlock x:Name="SessionsByApplicationCollectedText" Text="--" VerticalAlignment="Center"/>
+                </StackPanel>
+                <DataGrid Grid.Row="3" x:Name="SessionsByApplicationGrid" Style="{StaticResource DarkGrid}" Margin="0,4,0,0">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="App" Binding="{Binding ProgramName}" Width="260"/>
+                        <DataGridTextColumn Header="Connections" Binding="{Binding ConnectionCount, StringFormat=N0}" Width="105"/>
+                        <DataGridTextColumn Header="Running" Binding="{Binding RunningCount, StringFormat=N0}" Width="80"/>
+                        <DataGridTextColumn Header="Sleeping" Binding="{Binding SleepingCount, StringFormat=N0}" Width="85"/>
+                        <DataGridTextColumn Header="Dormant" Binding="{Binding DormantCount, StringFormat=N0}" Width="85"/>
+                        <DataGridTextColumn Header="CPU ms" Binding="{Binding TotalCpuTimeMs, StringFormat=N0}" Width="110"/>
+                        <DataGridTextColumn Header="Logical Reads" Binding="{Binding TotalLogicalReads, StringFormat=N0}" Width="125"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+                <TextBlock Grid.Row="3" x:Name="SessionsByApplicationNoDataMessage" Text="No application rows in the latest session snapshot." Style="{StaticResource EmptyHint}"/>
+                <Border Grid.Row="4" Background="{DynamicResource BackgroundDarkBrush}" CornerRadius="4" Padding="12,8" Margin="0,4,0,0">
                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
                         <TextBlock Text="Top Application:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                         <TextBlock x:Name="SessionStatsTopAppText" Text="N/A" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Margin="0,0,20,0"/>
@@ -3978,6 +4074,41 @@
                             </DataGrid.Columns>
                         </DataGrid>
                     </TabItem>
+                    <!-- #6384: the web's Sweep Pressure and Heaviest Collectors panels (get_collection_health's sweep_pressure block), read from the
+                         same statement and ranked by the same SweepPressureReport. Both cover the trailing 7 days whatever the toolbar window is. -->
+                    <TabItem Header="Sweep Pressure">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" Text="Sweep Pressure (trailing 7 days)" FontWeight="SemiBold" Margin="0,4,0,4"
+                                       Foreground="{DynamicResource ForegroundBrush}"/>
+                            <DataGrid Grid.Row="1" x:Name="SweepPressureStatsGrid" Style="{StaticResource DarkGrid}" Margin="0,0,0,12">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Measure" Binding="{Binding Label}" Width="180"/>
+                                    <DataGridTextColumn Header="Value" Binding="{Binding Value}" Width="*"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                            <TextBlock Grid.Row="2" Text="Heaviest Collectors (trailing 7 days)" FontWeight="SemiBold" Margin="0,4,0,4"
+                                       Foreground="{DynamicResource ForegroundBrush}"/>
+                            <TextBlock Grid.Row="3" x:Name="SweepPressureNoDataMessage" Style="{StaticResource EmptyHint}" Visibility="Collapsed"/>
+                            <DataGrid Grid.Row="4" x:Name="HeaviestCollectorsGrid" Style="{StaticResource DarkGrid}">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Collector" Binding="{Binding Collector}" Width="200"/>
+                                    <DataGridTextColumn Header="Avg" Binding="{Binding Avg}" Width="90" SortMemberPath="AvgMs"/>
+                                    <DataGridTextColumn Header="p95" Binding="{Binding P95}" Width="90" SortMemberPath="P95Ms"/>
+                                    <DataGridTextColumn Header="Max" Binding="{Binding Max}" Width="90" SortMemberPath="MaxMs"/>
+                                    <DataGridTextColumn Header="Every (min)" Binding="{Binding EveryMinutes}" Width="90" SortMemberPath="Every"/>
+                                    <DataGridTextColumn Header="ms/min" Binding="{Binding MsPerMinute}" Width="90" SortMemberPath="PerMinute"/>
+                                    <DataGridTextColumn Header="% of run budget" Binding="{Binding PctOfRunBudget}" Width="120" SortMemberPath="PctBudget"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </Grid>
+                    </TabItem>
                     <TabItem Header="Collection Log">
                         <!-- Lite's "Open Log File" button dropped (it opens Lite's local log file; the
                              viewer has no equivalent), so the grid fills the whole sub-tab. -->
@@ -4239,7 +4370,13 @@
                      step rather than a wall, and this is where the step is named. -->
                 <TextBlock Grid.Row="3" x:Name="PgExtensionsNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
-                <DataGrid Grid.Row="4" x:Name="PgExtensionsGrid" Style="{StaticResource DarkGrid}"
+                <Grid Grid.Row="4">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <DataGrid Grid.Row="0" x:Name="PgExtensionsGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
                         <!-- installed/outdated are per-database facts and available/absent are cluster-wide,
@@ -4260,6 +4397,22 @@
                         <DataGridTextColumn Header="Collected" Binding="{Binding CaptureTime}" Width="150" SortMemberPath="CaptureTimeUtc"/>
                     </DataGrid.Columns>
                 </DataGrid>
+                    <!-- #6388 the Extension Install Census (the web's install_census): one row per extension somebody created
+                         anywhere on this server, aggregated, so no row limit above touches it. -->
+                    <TextBlock Grid.Row="1" x:Name="PgExtensionCensusNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <DataGrid Grid.Row="2" x:Name="PgExtensionCensusGrid" Style="{StaticResource DarkGrid}" MaxHeight="180"
+                              HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Extension" Binding="{Binding ExtensionName}" Width="200"/>
+                            <DataGridTextColumn Header="Created In" Binding="{Binding DatabasesCreated}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                            <DataGridTextColumn Header="At Default" Binding="{Binding DatabasesInstalled}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                            <DataGridTextColumn Header="Outdated" Binding="{Binding DatabasesOutdated}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                            <DataGridTextColumn Header="Reported" Binding="{Binding DatabasesReporting}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                            <DataGridTextColumn Header="Databases" Binding="{Binding DatabasesTotal}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </Grid>
 
                 <!-- #2658 the server's own configuration, beneath the extension axis because it is the same
                      kind of fact one layer in: extensions say what this server CAN do, settings say what it
@@ -4649,6 +4802,20 @@
                             </DataGrid>
                         </Grid>
                     </TabItem>
+                    <!-- #6385: the web's Database Trend and Query Duration Trend, as charts. Built in code
+                         (ViewerServerTab.PgTrends.cs) into the two hosts below; the notes name the subject followed. -->
+                    <TabItem Header="Trends">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                            <StackPanel Margin="0,4,0,0">
+                                <TextBlock x:Name="PgDatabaseTrendNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                <UniformGrid x:Name="PgDatabaseTrendHost" Columns="2" Height="500"/>
+                                <TextBlock x:Name="PgQueryDurationTrendNote" FontSize="12" Margin="0,12,0,6" TextWrapping="Wrap"
+                                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                <UniformGrid x:Name="PgQueryDurationTrendHost" Columns="2" Height="250"/>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </TabItem>
                 </TabControl>
             </Grid>
         </TabItem>
@@ -4891,6 +5058,7 @@
                     <RowDefinition Height="*"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
                 <StackPanel Grid.Row="0">
                     <TextBlock x:Name="PgWaitsNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
@@ -4942,6 +5110,12 @@
                         <DataGridTextColumn Header="Last Seen" Binding="{Binding CaptureTime}" Width="*" SortMemberPath="CaptureTimeUtc"/>
                     </DataGrid.Columns>
                 </DataGrid>
+                <!-- #6385: the web's Wait Trend, as a chart (ViewerServerTab.PgTrends.cs). -->
+                <StackPanel Grid.Row="4">
+                    <TextBlock x:Name="PgWaitTrendNote" FontSize="12" Margin="0,12,0,6" TextWrapping="Wrap"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <UniformGrid x:Name="PgWaitTrendHost" Columns="1" Height="230"/>
+                </StackPanel>
             </Grid>
         </TabItem>
 
@@ -4954,6 +5128,7 @@
                     <RowDefinition Height="*"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
                 <StackPanel Grid.Row="0">
                     <TextBlock x:Name="PgIoNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
@@ -5052,6 +5227,12 @@
                         <DataGridTextColumn Header="Collected" Binding="{Binding CaptureTime}" Width="150" SortMemberPath="CaptureTimeUtc"/>
                     </DataGrid.Columns>
                 </DataGrid>
+                <!-- #6385: the web's I/O Trend, as four charts (ViewerServerTab.PgTrends.cs). -->
+                <StackPanel Grid.Row="6">
+                    <TextBlock x:Name="PgIoTrendNote" FontSize="12" Margin="0,12,0,6" TextWrapping="Wrap"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <UniformGrid x:Name="PgIoTrendHost" Columns="4" Height="230"/>
+                </StackPanel>
             </Grid>
         </TabItem>
 

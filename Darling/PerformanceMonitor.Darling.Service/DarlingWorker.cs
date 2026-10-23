@@ -2083,6 +2083,7 @@ LIMIT 1";
                 var next = StartupFailureTriage.NextAction(attempt, configRetryBudget.Elapsed, ex);
                 if (!configSustainedRetryCriticalLogged)
                 {
+                    // install-darling.ps1 waits for this text (#6470): reword both together.
                     _logger.LogCritical(
                         ex,
                         "Cannot load configuration within the {Budget}s retry budget ({Message}); this is " +
@@ -2108,6 +2109,7 @@ LIMIT 1";
             }
             catch (Exception ex)
             {
+                // install-darling.ps1 waits for this text (#6470): reword both together.
                 _logger.LogCritical(ex, "Cannot load configuration: {Message}", ex.Message);
                 _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.Configuration);
                 return;
@@ -2125,6 +2127,7 @@ LIMIT 1";
         {
             foreach (var problem in problems)
             {
+                // install-darling.ps1 waits for this text (#6470): reword both together.
                 _logger.LogCritical("Configuration problem: {Problem}", problem);
             }
 
@@ -2171,6 +2174,12 @@ LIMIT 1";
             _logger.LogWarning("{Warning}", warning);
         }
 
+        /* #6583: a SQL Server entry's port is ignored (the connection uses the host as written); the store registry's entries are named when it is read. */
+        foreach (var warning in SqlServerPortAdvice.Warnings(config.Servers))
+        {
+            _logger.LogWarning("{Warning}", warning);
+        }
+
         /* #5307: a key under web.network / mcp.network (or their tls blocks, or web.network.oidc) that no config
            class declares is dropped at load; name each one so a mistyped key is visible. Paths only. */
         foreach (var warning in GetUnknownNetworkKeyWarnings(config))
@@ -2207,6 +2216,7 @@ LIMIT 1";
         {
             if (!OperatingSystem.IsWindows())
             {
+                // install-darling.ps1 waits for this text (#6470): reword both together.
                 _logger.LogCritical(
                     "postgres.managed = true requires Windows (the bundled runtime and the DPAPI-protected credential); " +
                     "set postgres.managed = false and point postgres.connectionString at your own PostgreSQL instead.");
@@ -2280,6 +2290,7 @@ LIMIT 1";
                     var next = StartupFailureTriage.NextAction(attempt, bootstrapRetryBudget.Elapsed, ex);
                     if (!bootstrapSustainedRetryCriticalLogged)
                     {
+                        // install-darling.ps1 waits for this text (#6470): reword both together.
                         _logger.LogCritical(
                             ex,
                             "Managed Postgres bootstrap has not succeeded within the {Budget}s retry budget " +
@@ -2305,6 +2316,7 @@ LIMIT 1";
                 }
                 catch (Exception ex)
                 {
+                    // install-darling.ps1 waits for this text (#6470): reword both together.
                     _logger.LogCritical(ex, "Managed Postgres bootstrap failed: {Message}", ex.Message);
                     _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.ManagedStore);
                     return;
@@ -2897,6 +2909,7 @@ LIMIT 1";
                 var next = StartupFailureTriage.NextAction(attempt, storeRetryBudget.Elapsed, ex);
                 if (!storeSustainedRetryCriticalLogged)
                 {
+                    // install-darling.ps1 waits for this text (#6470): reword both together.
                     _logger.LogCritical(
                         ex,
                         "Cannot reach or migrate the Postgres store within the {Budget}s retry budget " +
@@ -2921,7 +2934,7 @@ LIMIT 1";
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                _logger.LogCritical(ex, "Cannot reach or migrate the Postgres store: {Message}", ex.Message);
+                _logger.LogCritical(ex, "Cannot reach or migrate the Postgres store: {Message}", ex.Message); // install-darling.ps1 waits for this text (#6470): reword both together.
                 /* #2953: AFTER the critical line, deliberately. The log line is the diagnosis of record and
                    predates this seam; publishing first would put a new call between the failure and the one
                    message an operator greps for. */
@@ -3352,6 +3365,14 @@ LIMIT 1";
            else the darling.json servers, which is what this run will actually collect from either way. The
            MCP host's plan-fetch resolver reads this instead of re-reading the store as the mcp role. */
         _registryState.Publish(initialServers);
+        /* #6468: an install that has no servers yet is a normal first start, so say so once, at Information, and name the ways to add
+           one. The service keeps running: it picks up the first server the Viewer or the web dashboard registers, with no restart. */
+        if (initialServers.Count == 0)
+        {
+            _logger.LogInformation(
+                "No monitored servers are configured yet. Add one in the Viewer (Add Server) or with " +
+                "PerformanceMonitor.Darling.Service.exe --add-server; the service starts collecting from it without a restart.");
+        }
         /* #5812 (L1): the PLAN_REGRESSION candidate cache evicts the entries of servers outside this set on its next store. */
         PerformanceMonitor.Darling.Analysis.PgFactCollector.PlanRegressionCandidateCache.Shared.RetainServers(initialServers.Select(s => s.ServerId));
 
@@ -3789,6 +3810,7 @@ LIMIT 1";
            once, here. No daily run can be going yet, so nothing has to give a permit back. */
         ApplyDailyRunCap(StorePoolMaxSize(postgres), initialSweepWidth);
 
+        // install-darling.ps1 waits for this text (#6470): reword both together.
         _logger.LogInformation("PerformanceMonitor Darling collection loop started");
         /* #2953: the one publish that clears the failure phases. Set HERE — the last statement before the
            sweep loop's first iteration — and not re-published per cycle: this seam answers "did collection
@@ -5965,7 +5987,7 @@ LIMIT 1";
     /// five on-load collectors' once-a-day recapture, the catalog's 1440-minute collectors, and any collector an
     /// operator slows to a day or more.
     /// </summary>
-    internal const int DailyCollectorIntervalMinutes = 1440;
+    internal const int DailyCollectorIntervalMinutes = SweepPressureReport.DailyCollectorIntervalMinutes;
 
     /// <summary>
     /// #4938: the most detached daily runs that may be going at once across the whole fleet. Each holds a connection
@@ -6228,7 +6250,7 @@ LIMIT 1";
     /// interval, where an on-load collector's 0 has already become its daily recapture.
     /// </summary>
     internal static bool IsDailyInterval(int effectiveIntervalMinutes) =>
-        effectiveIntervalMinutes >= DailyCollectorIntervalMinutes;
+        SweepPressureReport.IsDailyInterval(effectiveIntervalMinutes);
 
     /// <summary>
     /// #4938, #4999: whether a finished run's cost goes into the sweep body's peer high-water mark (#2864). Not
@@ -6456,7 +6478,7 @@ LIMIT 1";
     /// the gate acquisition tests it once, and this is not that call.
     /// </summary>
     internal static bool IsDetachedByName(string name) =>
-        IsQueryStoreCollector(name) || IsPlanCorrectionCollector(name) || IsPgWaitSamplingCollector(name);
+        SweepPressureReport.IsDetachedByName(name);
 
     /// <summary>
     /// #4999: THE test for whether a collector's scheduled run leaves its server's sequential pass: the three
@@ -6467,7 +6489,7 @@ LIMIT 1";
     /// run is not part of the body, and a long run of it is not an overrun of the body.
     /// </summary>
     internal static bool RunsDetached(string name, int effectiveIntervalMinutes) =>
-        IsDetachedByName(name) || IsDailyInterval(effectiveIntervalMinutes);
+        SweepPressureReport.RunsDetached(name, effectiveIntervalMinutes);
 
     /// <summary>
     /// #4999: the (server, collector) slot an INLINE run of a daily collector takes: the at-connect run of an on-load

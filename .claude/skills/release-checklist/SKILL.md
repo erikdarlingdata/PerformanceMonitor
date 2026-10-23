@@ -237,6 +237,7 @@ Before cutting the release, verify the nightly build has been clean:
 - Do the version-bump + changelog commits on a branch off `dev` (e.g. `release/v{version}`) — NEVER commit directly to `dev` or `main` (branch protection)
 - Push the branch and merge it into `dev` first (open that PR with base `dev`)
 - Then open the release PR **from `dev` to `main`** — the head MUST be `dev`. `check-pr-branch.yml` rejects any PR to `main` whose head is not `dev`, so a `release/*` → `main` PR fails CI (the "all jobs failed" email)
+- Merge the `dev` to `main` release PR with **Create a merge commit**, never squash. A squash leaves `dev`'s commits out of `main`'s history, so the next release PR conflicts on every file `dev` changed. 3.10.0 was squashed, and the 3.11.0 release PR could merge only after `main` was merged into `dev` with a merge commit (#6485). An admin merge does not get past a conflict.
 - At release-PR merge time, dev must equal the sha the field validation ran against (or the delta must be explicitly accepted)
 
 ### 11. Tag and Release

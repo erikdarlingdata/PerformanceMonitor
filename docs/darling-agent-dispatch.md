@@ -45,7 +45,50 @@ Run `PerformanceMonitor.Darling.Service.exe --validate-config`. With `mcp.allowI
 - `mcp.allowWrites` is also on. Turn `mcp.allowWrites` off to serve the investigation tools.
 - No enabled route has an agent level above Off. This one prints as a `NOTE:`. No request opens until you add a route.
 
+With `mcp.tokens` set, it also prints its findings about named tokens, whether or not `mcp.allowInvestigations` is on. See "Named tokens" below.
+
 The service log says the same at start-up. None of these changes the exit code of `--validate-config`, and none stops the service from starting. The first three keep the investigation tools from working. The route note does not stop anything.
+
+## Named tokens: an operator and agents on one service
+
+One bearer token cannot tell a person from an agent. So with `mcp.allowWrites` and `mcp.allowInvestigations` you serve the write tools or the investigation tools, never both. Named tokens remove that limit. Each token has a name and a role, and the token on a request decides which tools that request sees.
+
+Set them in `darling.json`:
+
+```json
+"mcp": {
+  "enabled": true,
+  "tokens": [
+    { "name": "ops-lead",   "encryptedToken": "...", "role": "operator" },
+    { "name": "triage-bot", "encryptedToken": "...", "role": "agent" }
+  ]
+}
+```
+
+| Field | Rule |
+|---|---|
+| `name` | 1 to 64 characters from `A-Za-z0-9._:-`. Each name is used once. |
+| `encryptedToken` or `token` | The same rules as the `mcp.network` token. At least 16 characters, and at least 6 of them different. Each value is used once. |
+| `role` | `operator` or `agent`. |
+
+What each role sees:
+
+| Role | Sees | Never sees |
+|---|---|---|
+| `operator` | The reads and the write tools. The four server admin tools (`add_servers`, `edit_server`, `remove_server` and `set_server_action`) only when `mcp.allowWrites` and `mcp.allowServerAdmin` are both on. | `claim_investigation_request` and `submit_investigation_report`. |
+| `agent` | The reads, the two investigation tools, and the Level 2 action tools through the `agent_action` gate. | Every tool in the never-agent list: the route tools, alert settings, Custom Views, tags, collector and server controls. |
+
+`tools/list` shows only that set. A call to a tool outside it fails as an unknown tool. An unknown token gets 401, and so does a request with no token, loopback included.
+
+An agent's name is its identity. `agent_id` must equal the name of the agent token. A different `agent_id` is refused as `agent_id_not_token`, and the refusal is journaled under the token's name. The log names a named token by its name. It never logs a token value. The legacy token still shows as a short fingerprint.
+
+The old single token (`mcp.network.token` or `mcp.network.encryptedToken`) works as before. Its role still comes from `mcp.allowWrites` and `mcp.allowInvestigations`. With no `mcp.tokens`, nothing changes. You can set both, but give the legacy token a name and a role in `mcp.tokens` and remove it from `mcp.network` instead.
+
+A named token that cannot be served is left out, and the start logs one Critical line that names the token and never its value. This covers a bad name or role, an unreadable value, a value that is too short, and a name or value shared with another token. If you set `mcp.tokens` and none can be served, and no legacy token is set, the MCP server does not start. `--validate-config` prints the same problems as `WARNING:` lines whenever `mcp.tokens` is set. It also warns when an enabled route has an agent level and no agent token can be served.
+
+Darling reads `mcp.tokens` once, at start.
+
+Route agent fields over MCP (the agent level and its limits on `create_notification_route` and `update_notification_route`, for the operator role only) come in a later change. Until then you set agent routes in the Viewer.
 
 ## Create an agent route
 
@@ -80,6 +123,16 @@ Past the hourly or daily limit, no request opens, and the journal says `limit_re
 
 You can also pick a **Fallback route**. A request that nobody claims goes to that route's channels.
 
+### Change Watch requests
+
+A Change Watch request opens when a watch window saw the measures move after a recorded change (a plan forced or unforced, a setting changed). It is not an alert: the metric on the request is `Change Watch`, and its investigation family is `query_performance`.
+
+A Change Watch request is routed like an alert. Without a route of its own it matches the route for the `performance` alert family, or a route for every metric, and it spends that route's hourly and daily limits next to real alerts. A burst of forced-plan changes can use most of an hourly limit and leave a CPU alert with no request. To keep the two apart, add a route whose metric is exactly `Change Watch` and give it its own agent, level and limits. A route that names the metric exactly wins over a route for the family or for every metric.
+
+The request has no alert row in `get_alert_history`. The changes the watch named, and the query measures that moved, are in the request's brief after a claim, and in `detail_text` on its row in `list_investigation_requests` and `wait_for_investigation_requests`, so an agent can triage the request before it claims. Each query measure names its database and the read it came from (the plan cache or Query Store).
+
+When a server is a readable secondary of an availability group, the plan changes its Query Store shows are the primary's, replicated. Darling does not open a request for them on the secondary: the primary's own watch reports the change once. A forced plan the plan-force ledger recorded on the secondary itself still counts.
+
 ## How an agent gets and works a request
 
 The agent calls these tools in order:
@@ -87,7 +140,7 @@ The agent calls these tools in order:
 1. `wait_for_investigation_requests` waits up to 25 seconds for a request to open on the routes you name. It answers each new request's id, route, server, family and time, with a cursor. Call it again with the cursor. `list_investigation_requests` lists the open requests instead.
 2. `claim_investigation_request` takes one request. The first claim wins. The answer holds a `claim_id` and the brief. To keep a request past its lease, claim it again with the same `claim_id`.
 3. The agent calls the read tools that the brief names. The brief has a budget of minutes and tool calls.
-4. `get_investigation_evidence` reads the evidence sections that Darling froze for the request. A section that is still collecting says `pending`. The call never waits.
+4. `get_investigation_evidence` reads the evidence sections that Darling froze for the request. A section that is still collecting says `pending`. The call never waits. A request that a Client Timeouts alert opened also gets a `client_timeouts` section. It lists the top client applications, client hosts, databases and statements of the alert window, and the brief names `get_client_timeouts` first in `next_calls`.
 5. `submit_investigation_report` ends the work.
 
 ### The brief
@@ -104,7 +157,7 @@ A report has these fields:
 - `evidence`: a JSON array of at least one entry, at most 50. Each entry has `tool`, `arguments`, `key_numbers` and `basis`. `basis` is `verified` when the agent checked the claim against data. It is `inferred` when the agent reasoned to it.
 - `summary`, at most 4,000 characters.
 - `proposed_note` (optional), at most 2,000 characters. See "Agent notes".
-- `family_of` (optional): the `request_id` of the first report in this alert family.
+- `family_of` (optional): the `request_id` of an earlier request on this store. It need not have a report yet.
 - `links` (optional): at most 10 ticket, pull request, bug report, commit or release links. A link must use https. Darling stores the link and never calls Jira or git.
 - `queries_run` (optional): the statements the agent ran.
 - `follow_up_at` (optional): a time for Darling to open a new request for this case. It must be an ISO 8601 time after now and at most 30 days ahead. A route can hold at most 20 pending follow-ups. The new request names the first one, and its brief carries the first report.

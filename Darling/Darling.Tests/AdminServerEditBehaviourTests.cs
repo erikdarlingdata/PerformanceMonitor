@@ -33,7 +33,7 @@ public sealed class AdminServerEditBehaviourTests
     private const string Token = "2026-01-02T03:04:05.1234567Z";
 
     private const string PasswordNeeded =
-        "Changing how this server is reached needs its password again: it is stored encrypted and this surface cannot read it back.";
+        "Changing the host, port or any other connection setting of this server needs its password sent with the change, because a saved password is only ever sent to the server it was saved for. Send the password together with the new settings.";
 
     internal static JsonElement Run(string scenario, string? stdin = null)
     {

@@ -1,0 +1,230 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using PerformanceMonitor.Darling.Storage;
+
+namespace PerformanceMonitor.Darling.Service;
+
+public static partial class DarlingCliCommands
+{
+    /// <summary>The verb <see cref="GrantScriptAsync"/> handles (#6472): print the login and grant script for a server.</summary>
+    public static bool IsGrantScriptVerb(string arg) =>
+        string.Equals(arg, "--grant-script", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>What <c>--grant-script</c> was asked for. <see cref="ServerName"/> picks a registered server; <see cref="Host"/> describes
+    /// one not yet added. Exactly one of the two is set.</summary>
+    internal sealed record GrantScriptArgs(
+        string? ServerName, string? Host, string? Auth, string? Username, string? ServiceAccount, bool FinOps, bool Azure, string? ConfigPath);
+
+    /// <summary>The grammar <c>--grant-script</c> prints when its arguments are wrong. Pure ASCII.</summary>
+    public static string GrantScriptUsageText() =>
+        "Usage:" + Environment.NewLine +
+        "  --grant-script <server-name> [--finops] [--azure] [--service-account <account>] [--config <path>]" + Environment.NewLine +
+        "      Print the T-SQL that creates the monitoring login and grants what Darling needs, for a server this install monitors." + Environment.NewLine +
+        "      The principal follows the server entry: its SQL login, or for Windows authentication the account the service runs as." + Environment.NewLine +
+        "  --grant-script --host <host> [--auth sql|integrated|serviceprincipal|managedidentity] [--username <login>] [--finops] [--azure] [--service-account <account>]" + Environment.NewLine +
+        "      The same for a host not yet added. Connects to no monitored server." + Environment.NewLine +
+        "  --finops adds the per-database grants the FinOps Index Analysis tab needs. --azure (implied by a *.database.windows.net host)" + Environment.NewLine +
+        "  prints the Azure SQL Database form: a contained user and database-scoped grants. --service-account names the account the service" + Environment.NewLine +
+        "  runs as when it is a domain account or a gMSA and this machine cannot tell. Run the output as a sysadmin; it is safe to run twice." + Environment.NewLine +
+        "The script never holds a password: a SQL login gets a placeholder to replace.";
+
+    /// <summary>Parses <c>--grant-script</c>'s arguments strictly: one bare server name or <c>--host</c>, the flags, and the options that take
+    /// a value. Anything else that starts with '-' is refused.</summary>
+    internal static bool TryParseGrantScriptArgs(string[] rest, out GrantScriptArgs? parsed, out string? errorMessage)
+    {
+        parsed = null;
+        errorMessage = null;
+        string? name = null, host = null, auth = null, username = null, serviceAccount = null, configPath = null;
+        bool finOps = false, azure = false;
+        for (var i = 0; i < rest.Length; i++)
+        {
+            var arg = rest[i];
+            switch (arg.ToLowerInvariant())
+            {
+                case "--finops":
+                    finOps = true;
+                    continue;
+                case "--azure":
+                    azure = true;
+                    continue;
+                case "--host" or "--auth" or "--username" or "--service-account" or "--config":
+                    if (i + 1 >= rest.Length || rest[i + 1].StartsWith("--", StringComparison.Ordinal))
+                    {
+                        errorMessage = $"{arg} needs a value.";
+                        return false;
+                    }
+
+                    var value = rest[++i];
+                    switch (arg.ToLowerInvariant())
+                    {
+                        case "--host":
+                            host = value;
+                            break;
+                        case "--auth":
+                            auth = value.ToLowerInvariant();
+                            break;
+                        case "--username":
+                            username = value;
+                            break;
+                        case "--service-account":
+                            serviceAccount = value;
+                            break;
+                        default:
+                            configPath = value;
+                            break;
+                    }
+
+                    continue;
+            }
+
+            if (arg.StartsWith('-'))
+            {
+                errorMessage = $"Unknown option {arg}.";
+                return false;
+            }
+
+            if (name is not null)
+            {
+                errorMessage = $"--grant-script takes ONE server name; got '{name}' and '{arg}'.";
+                return false;
+            }
+
+            name = arg;
+        }
+
+        if ((name is null) == (host is null))
+        {
+            errorMessage = "Name a monitored server, or give --host for one not yet added (not both).";
+            return false;
+        }
+
+        if (auth is not null and not ("sql" or "integrated" or "serviceprincipal" or "managedidentity"))
+        {
+            errorMessage = $"--auth must be sql, integrated, serviceprincipal or managedidentity; got '{auth}'.";
+            return false;
+        }
+
+        if (name is not null && (auth is not null || username is not null))
+        {
+            errorMessage = "--auth and --username describe a host not yet added; a registered server already has its own.";
+            return false;
+        }
+
+        parsed = new GrantScriptArgs(name, host, auth, username, serviceAccount, finOps, azure, configPath);
+        return true;
+    }
+
+    /// <summary>The account the Darling Windows service is configured to run as (<c>sc qc</c>'s SERVICE_START_NAME), or null when this is
+    /// not the service's machine, not Windows, or the key cannot be read. A read of one registry value; it never throws.</summary>
+    internal static string? ReadServiceAccountName()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return null;
+        }
+
+        try
+        {
+            using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\" + ServiceName);
+            return key?.GetValue("ObjectName") as string;
+        }
+        catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException or IOException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>The wording for the registry list <c>--grant-script</c> reads: it needs the entry's login and auth, nothing more.</summary>
+    private static readonly RegistryListWording GrantScriptRegistryWording = new(
+        "using darling.json's own server list instead.",
+        "They are not part of this script; the store governs which servers actually run.");
+
+    /// <summary>
+    /// <c>--grant-script</c> (#6472): prints the login and grant script for a monitored server, or for a host not yet added. It connects to no monitored SQL Server (the <c>server-name</c> form reads the store registry)
+    /// and prints no password. The server list is the store's registry, with darling.json's own list when the store cannot be
+    /// reached, as <c>--validate-config</c> resolves it. Exit 0 with the script on stdout; 1 for an argument, configuration or name problem.
+    /// </summary>
+    public static async Task<int> GrantScriptAsync(
+        string[] rest, TextWriter output, TextWriter error, CancellationToken cancellationToken,
+        Func<string?>? readServiceAccount = null, string? machineName = null, string? domainName = null)
+    {
+        if (!TryParseGrantScriptArgs(rest, out var args, out var argError))
+        {
+            error.WriteLine(argError);
+            output.WriteLine(GrantScriptUsageText());
+            return 1;
+        }
+
+        string host, label;
+        string? auth, username;
+        if (args!.ServerName is { } typed)
+        {
+            DarlingConfig config;
+            try
+            {
+                config = LoadConfigForGrantScript(args.ConfigPath);
+            }
+            catch (Exception ex)
+            {
+                error.WriteLine($"Could not load configuration: {ex.Message}");
+                return 1;
+            }
+
+            var targets = await ResolveValidationTargetsAsync(config, error, error, cancellationToken, GrantScriptRegistryWording);
+            if (targets is null)
+            {
+                return 1;
+            }
+
+            var matches = MatchDropXeSessionsTarget(targets, typed);
+            if (matches.Count != 1)
+            {
+                error.WriteLine(matches.Count == 0
+                    ? $"No monitored server named '{typed}' is in the store's registry or the configuration."
+                    : $"'{typed}' names {matches.Count} monitored servers: {string.Join(", ", matches.Select(m => m.StorageName))}. Use the storage name.");
+                error.WriteLine("For a host not yet added, use --grant-script --host <host>.");
+                return 1;
+            }
+
+            var server = matches[0];
+            if (server.IsPostgres)
+            {
+                error.WriteLine($"'{server.DisplayName}' is a PostgreSQL target. It needs pg_monitor, not this script; see the Darling operator guide.");
+                return 1;
+            }
+
+            host = server.Host;
+            label = server.DisplayName;
+            auth = server.Auth;
+            username = server.Username;
+        }
+        else
+        {
+            host = args.Host!;
+            label = host;
+            auth = args.Auth ?? "integrated";
+            username = args.Username;
+        }
+
+        var inputs = new GrantPrincipalInputs(
+            auth, username, host,
+            args.ServiceAccount ?? (readServiceAccount ?? ReadServiceAccountName)(),
+            machineName ?? Environment.MachineName,
+            domainName ?? Environment.UserDomainName);
+        var azure = args.Azure || MonitoringGrantScript.IsAzureSqlDatabaseHost(host);
+        output.Write(MonitoringGrantScript.Build(MonitoringGrantScript.ChoosePrincipal(inputs), args.FinOps, azure, label));
+        return 0;
+    }
+}
