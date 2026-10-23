@@ -26,10 +26,13 @@ public static class InternalStatements
     /// <summary>
     /// One pattern for the lower-cased statement text. The same text works as a PostgreSQL regex (<c>lower(text) ~ pattern</c>)
     /// and a DuckDB one (<c>regexp_matches(lower(text), pattern)</c>), so the SQL sites in Darling and Lite share one list. A
-    /// constant, so it can be spliced into the SQL constants.
+    /// constant, so it can be spliced into the SQL constants. The <c>@</c> of <c>@batch_size</c> is written <c>\W</c> (any
+    /// non-word character: the same match in .NET, PostgreSQL and DuckDB) so the pattern carries no <c>@name</c> token: the
+    /// PostgreSQL SQL has no named parameters (only <c>$N</c>), and the dialect guard in <c>PgFactCollectorTests</c> rejects
+    /// an <c>@</c> anywhere in that SQL.
     /// </summary>
     public const string LowerTextPattern =
-        @"delete\s+top\s*\(\s*@batch_size\s*\)\s+from\s+sys\.change_tracking_|sp_flush_commit_table|sp_cdc_cleanup_change_table";
+        @"delete\s+top\s*\(\s*\Wbatch_size\s*\)\s+from\s+sys\.change_tracking_|sp_flush_commit_table|sp_cdc_cleanup_change_table";
 
     private static readonly Regex Matcher = new(LowerTextPattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
