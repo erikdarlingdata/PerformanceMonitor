@@ -232,6 +232,8 @@ public static class DarlingWebEndpoints
         "set_collector_run_at",
         "set_collector_retention",
         "get_collector_schedules",
+        /* #6393: update_service_flags is MCP-only; the Viewer's Settings window is the page for a person. */
+        "update_service_flags",
         /* #6269: the server action switches have their own web routes (GET /api/server-actions and PUT /api/servers/{id}/actions/{action}, admin role); the MCP write is under mcp.allowServerAdmin. */
         "set_server_action",
         "get_server_actions",
