@@ -51,6 +51,8 @@ public sealed record AttentionTopItem(string Name, long Samples, string? SampleT
 /// <param name="TopsFromLookback">False (the default): the three top lists cover the samples inside the covered span
 /// (<see cref="AttentionEvaluator.SpanBoundary"/> onward), the alert card's reading. True: the span kept no samples, so the lists
 /// cover the whole lookback and the card says so in its headings (round 2 of #5714, L6).</param>
+/// <param name="TopHosts">The top 5 client hosts by sampled events (#6553), over the same range as the other top lists. Null on a window
+/// built without them; read it through <see cref="AttentionWindow.Hosts"/>.</param>
 public sealed record AttentionWindow(
     IReadOnlyList<DateTime> RunTimes,
     IReadOnlyList<AttentionCountRow> Counts,
@@ -58,8 +60,12 @@ public sealed record AttentionWindow(
     IReadOnlyList<AttentionTopItem> TopStatements,
     IReadOnlyList<AttentionTopItem> TopDatabases,
     IReadOnlyList<AttentionTopItem> TopApplications,
-    bool TopsFromLookback = false)
+    bool TopsFromLookback = false,
+    IReadOnlyList<AttentionTopItem>? TopHosts = null)
 {
+    /// <summary>The top client hosts (#6553), empty when the window carries none.</summary>
+    public IReadOnlyList<AttentionTopItem> Hosts => TopHosts ?? Array.Empty<AttentionTopItem>();
+
     /// <summary>No runs, no rows: what a read of a server that never ran the collector returns.</summary>
     public static AttentionWindow Empty { get; } = new(
         Array.Empty<DateTime>(), Array.Empty<AttentionCountRow>(), Array.Empty<AttentionSampleGroup>(),

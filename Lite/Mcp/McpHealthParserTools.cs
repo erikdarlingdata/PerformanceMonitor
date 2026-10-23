@@ -651,7 +651,9 @@ public sealed class McpHealthParserTools
     /// stored so the caller knows how far. <b>Rung 3 — this type never, but the session IS being read.</b>
     /// Other categories have been stored, so the ring buffer is reachable and the engine has simply never
     /// recorded one of these — for a memory-node OOM or a severe error that is the healthy measurement, not a
-    /// blind spot, and it must not be called unavailable. <b>Rung 4 — nothing of any type, ever.</b> A dead
+    /// blind spot, and it must not be called unavailable. <b>Rung 4 — nothing of any type, ever.</b> When the collector's newest run is SUCCESS and read the live
+    /// session through its event_file target (<c>SystemHealthSourceNote.ReadThroughEventFile</c>, #6453) the session was read to the
+    /// end and held nothing: <c>empty</c>, a true negative. Otherwise a dead
     /// session or a collector that never ran: <c>unavailable</c>, the #3524 shape, never <c>empty</c>. The
     /// #2511 engine-capability probe goes first on this rung because it is the stronger claim (an Azure SQL
     /// Database has no session to start), and its text stays exactly right for every engine that does
@@ -679,8 +681,8 @@ public sealed class McpHealthParserTools
 
         /* #6441, ahead of every rung: when the newest collection run found the ring buffer truncated, the read is blind
            to the newest events, so none of "healthy", "quiet" or "never fired" is true. */
-        if (RingBufferTruncationNote.Describe(
-                await dataService.GetLatestCollectorRunNoteAsync(serverId, SystemHealthCollectorName)) is { } truncation)
+        var runNote = await dataService.GetLatestCollectorRunNoteAsync(serverId, SystemHealthCollectorName);
+        if (RingBufferTruncationNote.Describe(runNote) is { } truncation)
         {
             return WitnessStatus(
                 "unavailable",
@@ -723,8 +725,25 @@ public sealed class McpHealthParserTools
                 hints: (await WindowNoticeAsync(dataService, serverId, hoursBack, windowEnd, emptyAnswer: true)).AsHints());
         }
 
-        return await McpEngineCapability.NotCollectedStatusAsync(dataService, serverId, serverName, SystemHealthCollectorName)
-            ?? WitnessStatus(
+        if (await McpEngineCapability.NotCollectedStatusAsync(dataService, serverId, serverName, SystemHealthCollectorName) is { } notCollected)
+        {
+            return notCollected;
+        }
+
+        /* #6453: nothing of any type ever, but the collector's newest run is SUCCESS and read the live session through its
+           event_file target (no ring buffer fallback, no truncation): a running session was read to the end and held no
+           events. That is a true negative. Every other newest run (a ring buffer read, a fallback, no run) keeps the
+           unavailable text below, because the ring buffer path also records SUCCESS for a dead session. */
+        if (SystemHealthSourceNote.ReadThroughEventFile(runNote))
+        {
+            return WitnessStatus(
+                "empty",
+                $"No system_health events of ANY type have been captured for {serverName}, and that is a true negative rather than missing data: the system_health collector's newest run read the live session through its event_file target and found no events. get_collection_health shows the run history.",
+                sourceObserved: true, lastCapturedAt: null, lastCapturedOfTypeAt: null, eventsInWindow: 0,
+                hints: (await WindowNoticeAsync(dataService, serverId, hoursBack, windowEnd, emptyAnswer: true)).AsHints());
+        }
+
+        return WitnessStatus(
                 "unavailable",
                 $"No system_health events of ANY type have EVER been captured for {serverName}, so this is NOT an all-clear — there is nothing here to be clear about. This read is served from the collected system_health ring buffer: check that collection is running for this server and that its system_health session is started before concluding nothing happened.",
                 sourceObserved: false, lastCapturedAt: null, lastCapturedOfTypeAt: null, eventsInWindow: 0);

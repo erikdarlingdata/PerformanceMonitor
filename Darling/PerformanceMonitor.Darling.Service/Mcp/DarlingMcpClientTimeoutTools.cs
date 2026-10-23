@@ -155,6 +155,8 @@ public sealed class DarlingMcpClientTimeoutTools
             r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)));
         var applications = await Query(AttentionWindowSql.TopBy("attention_events", "client_app_name", bounded: true), spanFloor, spanCeiling,
             r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)));
+        var hosts = await Query(AttentionWindowSql.TopBy("attention_events", "client_hostname", bounded: true), spanFloor, spanCeiling,
+            r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)));
         var samples = await Query(AttentionWindowSql.Samples("attention_events", sampleLimit + 1), spanFloor, spanCeiling,
             r => new ClientTimeoutSample(
                 r.IsDBNull(0) ? null : r.GetDateTime(0),
@@ -167,6 +169,6 @@ public sealed class DarlingMcpClientTimeoutTools
                 r.IsDBNull(7) ? null : r.GetString(7),
                 r.IsDBNull(8) ? null : r.GetString(8)));
 
-        return (new AttentionWindow(runs, counts, groups, statements, databases, applications), samples);
+        return (new AttentionWindow(runs, counts, groups, statements, databases, applications, TopHosts: hosts), samples);
     }
 }

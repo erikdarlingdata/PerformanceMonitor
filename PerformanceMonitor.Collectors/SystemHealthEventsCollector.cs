@@ -67,7 +67,7 @@ namespace PerformanceMonitor.Collectors;
 /// last buffer it scanned, even when every event there was older than the watermark, and the next one continues. Anything
 /// that stops the file read (no event_file target, a permission refusal, Managed Instance or RDS, an error) drops back to
 /// the ring buffer exactly as before, truncation measurement included. The run records <c>event_file_events</c> for a
-/// file read, <c>event_file_fallback</c> for the fallback, <c>event_file_error</c> (the SQL Server error number) next to
+/// file read that reached the end of what the file holds (a pass the cap stopped does not, #6453), <c>event_file_fallback</c> for the fallback, <c>event_file_error</c> (the SQL Server error number) next to
 /// it when an error caused it, and <c>event_file_buffer_cut</c> when one buffer held more than <see cref="BufferReReadFactor"/> times the cap, and <c>event_file_wildcard</c> when the bookmark's file had rolled over and the read opened every rollover file (#6544).</para>
 /// </summary>
 public sealed class SystemHealthEventsCollector : CollectorDefinitionBase<SystemHealthEventsCollector.Row>
@@ -97,7 +97,7 @@ public sealed class SystemHealthEventsCollector : CollectorDefinitionBase<System
     /// <summary>The state key of the event_file bookmark: <c>&lt;event_time round-trip&gt;|&lt;buffer offset&gt;|&lt;file path&gt;</c>.</summary>
     public const string BookmarkStateKey = "sh_event_file_bookmark";
 
-    /// <summary>Counts events a pass read from the event_file target (0 on a quiet pass). Written only on a file read.</summary>
+    /// <summary>Counts events a pass read from the event_file target (0 on a quiet pass). Written only on a file read the cap did not stop: it says the session was read to the end.</summary>
     internal const string EventFileEventsMeasurement = "event_file_events";
 
     /// <summary>1 on a pass that read the ring buffer because the event_file target could not be read. Written only then.</summary>
@@ -693,6 +693,7 @@ SELECT
 
         var hasSource = reader.FieldCount >= 5;
         var bookmarkRefused = false;
+        var fileRead = false;
         string? scanFile = null;
         long? scanOffset = null;
         string? lastFile = null;
@@ -745,7 +746,7 @@ SELECT
             {
                 if (reader.GetBoolean(3))
                 {
-                    context.Measure(EventFileEventsMeasurement, rows.Count);
+                    fileRead = true;
                 }
                 else
                 {
@@ -767,6 +768,15 @@ SELECT
             {
                 scanFile = reader.GetString(6);
                 scanOffset = reader.GetInt64(7);
+            }
+
+            /* #6453: event_file_events says the session was read to the end, so a pass that stopped at the cap does not write it: its
+               stored rows are only the oldest events past the watermark (on a first connect, possibly none of them inside the
+               cutoff), and a reader that took 0 of them for "nothing happened" would answer empty over events it never reached. The
+               scan position is non-NULL only when the cap bound. */
+            if (fileRead && scanFile is null)
+            {
+                context.Measure(EventFileEventsMeasurement, rows.Count);
             }
 
             if (reader.FieldCount > 8 && !reader.IsDBNull(8) && reader.GetBoolean(8))
