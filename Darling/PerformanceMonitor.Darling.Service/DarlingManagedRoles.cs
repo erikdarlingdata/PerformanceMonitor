@@ -1926,6 +1926,11 @@ GRANT SELECT ON {config}.config_threshold_overrides, {config}.investigation_feed
 GRANT INSERT, UPDATE, DELETE ON {config}.config_threshold_overrides TO {admin};
 GRANT INSERT, UPDATE, DELETE ON {config}.investigation_feedback TO {admin};
 GRANT INSERT, UPDATE, DELETE ON {config}.config_threshold_overrides TO {mcp};
+-- #6401: set_agent_actions_enabled (the MCP twin of the web's PUT /api/agent-changes/switch) upserts the service row's switch and who set it.
+-- Column-level on exactly those columns (the INSERT of the upsert needs the id too), so mcp still cannot write paused, capture_plans or any other flag.
+-- agent_actions_enabled arrives with V191, the version that makes the block above run.
+GRANT INSERT (id, agent_actions_enabled, updated_at, updated_by) ON {config}.config_service TO {mcp};
+GRANT UPDATE (agent_actions_enabled, updated_by) ON {config}.config_service TO {mcp};
 -- #5918: the Viewer opens a practice request (V191's practice_of) and copies its case's alert rows, so these two grants are here, after 10d's revoke.
 GRANT INSERT (request_id, route_id, server_id, server_name, family, first_metric, story_path_hash, first_alert_at, last_alert_at,
    window_until, opened_at, expires_at, lease_minutes, autonomy_level, alert_count, practice_of) ON {config}.investigation_requests TO {admin};
@@ -1959,6 +1964,8 @@ GRANT SELECT ON {config}.investigation_evidence, {config}.investigation_signatur
 -- agent supplies (merge_id and merged_at are the table's own); a person's undo runs as admin and stamps undone_at and undone_by.
 GRANT INSERT (server_id, signature, merged_into, reason, merged_by) ON {config}.investigation_signature_merges TO {mcp};
 GRANT UPDATE (undone_at, undone_by) ON {config}.investigation_signature_merges TO {admin};
+-- #6401: undo_agent_change undoes a signature merge the way the web's undo does, by stamping the row; so mcp gets the same two columns.
+GRANT UPDATE (undone_at, undone_by) ON {config}.investigation_signature_merges TO {mcp};
 
 -- 10a. The password key tables (V165, #5366; V167 adds the legacy pin candidate table): written only by the store owner (the service, its command line and the
 --     migration runner); a trigger on each table refuses every other writer. This is the grant side of the same rule,

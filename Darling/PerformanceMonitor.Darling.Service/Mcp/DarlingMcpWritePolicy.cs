@@ -127,6 +127,8 @@ internal static class DarlingMcpWritePolicy
         "analyze_now",
         "purge_now",
         "undo_plan_change",
+        "set_agent_actions_enabled",
+        "undo_agent_change",
         "disable_collector",
         "enable_collector",
         "set_collector_frequency",
@@ -216,6 +218,8 @@ internal static class DarlingMcpWritePolicy
         "edit_server",
         "set_server_action",
         "undo_plan_change",
+        "set_agent_actions_enabled",
+        "undo_agent_change",
     };
 
     internal static bool IsWrite(string toolName) => WriteTools.Contains(toolName);

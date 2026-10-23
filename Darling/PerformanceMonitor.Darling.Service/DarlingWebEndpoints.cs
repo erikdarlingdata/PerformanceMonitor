@@ -160,6 +160,10 @@ public static class DarlingWebEndpoints
         "analyze_now",
         "purge_now",
         "undo_plan_change",
+        /* #6401: the global agent switch and the undo of a non-plan agent change over MCP; the web has its own PUT /api/agent-changes/switch and
+           PUT /api/agent-changes/{id}/undo, neither a generic read. */
+        "set_agent_actions_enabled",
+        "undo_agent_change",
         "get_command_result",
         "get_agent_changes",
         "set_notification_route_enabled",

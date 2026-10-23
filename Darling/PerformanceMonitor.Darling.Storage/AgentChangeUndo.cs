@@ -388,9 +388,13 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
 
     /// <summary>Turns every agent change on or off at once and journals <c>agent_actions_switched</c> by <c>person:&lt;login&gt;</c>, in one
     /// transaction. Off makes the gate refuse <c>actions_off</c>; nothing in flight is undone.</summary>
-    public async Task SetEnabledAsync(bool enabled, string login, CancellationToken cancellationToken = default)
+    public Task SetEnabledAsync(bool enabled, string login, CancellationToken cancellationToken = default) =>
+        SetEnabledAsActorAsync(enabled, PersonActor(login), cancellationToken);
+
+    /// <summary><see cref="SetEnabledAsync"/> for a caller that is not a person (#6401): the MCP switch tool journals <c>mcp:</c> and the
+    /// token and client it came in on, so a person is never credited with what a tool did. <paramref name="actor"/> is written as is.</summary>
+    public async Task SetEnabledAsActorAsync(bool enabled, string actor, CancellationToken cancellationToken = default)
     {
-        var actor = PersonActor(login);
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         await using (var command = Command(connection, transaction, @"
@@ -422,9 +426,13 @@ ON CONFLICT (id) DO UPDATE SET agent_actions_enabled = EXCLUDED.agent_actions_en
     /// that takes an advisory lock on the call (a second click waits, then sees <c>already_undone</c>), reads the target
     /// <c>FOR UPDATE</c>, compares and restores. Never throws for a refusal.
     /// </summary>
-    public async Task<AgentUndoResult> UndoAsync(long calledId, string login, CancellationToken cancellationToken = default)
+    public Task<AgentUndoResult> UndoAsync(long calledId, string login, CancellationToken cancellationToken = default) =>
+        UndoAsActorAsync(calledId, PersonActor(login), cancellationToken);
+
+    /// <summary><see cref="UndoAsync"/> for a caller that is not a person (#6401): the MCP undo tool journals <c>mcp:</c> and the token and
+    /// client it came in on. <paramref name="actor"/> is written as is. The web route and the tool share this one copy of the undo.</summary>
+    public async Task<AgentUndoResult> UndoAsActorAsync(long calledId, string actor, CancellationToken cancellationToken = default)
     {
-        var actor = PersonActor(login);
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
