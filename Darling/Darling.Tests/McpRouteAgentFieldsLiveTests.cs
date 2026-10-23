@@ -115,14 +115,84 @@ public sealed class McpRouteAgentFieldsLiveTests
             Assert.Equal("3", await ScalarAsync(owner,
                 $"SELECT count(*) FROM config.investigation_journal WHERE route_id = {routeId} AND event = 'route_agent_changed'", ct));
 
-            /* The store function holds the actor to operator:<name>, so no caller of it journals as anyone else. */
+            /* The store function refuses an actor that is not operator:<name>. Every token connects as the same mcp role, so the actor is a label
+               the service passes: the real gate is the service's tool filter (NeverAgentTools, IsOperator). This pins the label's check. */
             var direct = await Assert.ThrowsAsync<PostgresException>(async () =>
             {
                 await using var command = asMcp.CreateCommand(
-                    $"SELECT config.set_notification_route_agent({routeId}, 'agent:{Operator}', ARRAY['agent_level'], 2, NULL, NULL, NULL, NULL, NULL, false)");
+                    $"SELECT config.set_notification_route_agent({routeId}, 'agent:{Operator}', ARRAY['agent_level'], 2, NULL, NULL, NULL, NULL, NULL, false, NULL)");
                 await command.ExecuteNonQueryAsync(ct);
             });
             Assert.Equal("DL400", direct.SqlState);
+        });
+    }
+
+    /// <summary>#6395 and M2 of the #6593 review: MCP is full admin, so an operator token changes send_resolutions and enabled on a level 3 route
+    /// (each answers updated, and the enabled change is journaled as the Viewer's toggle journals it). The store's update function refuses the
+    /// same change for any actor that is not operator:, so a caller the service does not pass as an operator gets DL403.</summary>
+    [Fact]
+    public async Task AnOperatorToken_ChangesSendResolutionsAndEnabled_OnALevel3Route_AndTheStoreRefusesAnyOtherActor()
+    {
+        await WithMcpRoleAsync(async (owner, asMcp, ct) =>
+        {
+            var routeId = RouteIdOf(await DarlingMcpAlertTools.CreateNotificationRoute(
+                asMcp, "Deadlocks", agent_level: 3, served: OperatorPolicy(), cancellationToken: ct));
+
+            Assert.Equal("updated", Status(await DarlingMcpAlertTools.UpdateNotificationRoute(
+                asMcp, routeId, send_resolutions: "always", served: OperatorPolicy(), cancellationToken: ct)));
+            Assert.Equal("updated", Status(await DarlingMcpAlertTools.UpdateNotificationRoute(
+                asMcp, routeId, enabled: false, served: OperatorPolicy(), cancellationToken: ct)));
+            Assert.Equal("true|false|3", await ScalarAsync(owner,
+                $"SELECT send_resolutions::text || '|' || enabled::text || '|' || agent_level::text FROM config.config_notification_routes WHERE route_id = {routeId}", ct));
+            Assert.Equal("1", await ScalarAsync(owner,
+                $"SELECT count(*) FROM config.investigation_journal WHERE route_id = {routeId} AND event = 'route_agent_changed' " +
+                $"AND actor = 'operator:{Operator}' AND reason = 'changed enabled' AND (detail -> 'before' ->> 'enabled') = 'true' " +
+                "AND (detail -> 'after' ->> 'enabled') = 'false'", ct));
+
+            /* The two single-field tools take the same path for an operator token. */
+            Assert.Equal("updated", Status(await DarlingMcpAlertTools.SetNotificationRouteEnabled(
+                asMcp, routeId, true, served: OperatorPolicy(), cancellationToken: ct)));
+            Assert.Equal("true", await ScalarAsync(owner, $"SELECT enabled FROM config.config_notification_routes WHERE route_id = {routeId}", ct));
+
+            /* Any other actor: NULL (a caller that is not operator-class) and an agent: label are refused in the store, and nothing changes. */
+            foreach (var actor in new[] { "NULL", "'agent:triage-bot'" })
+            {
+                var refused = await Assert.ThrowsAsync<PostgresException>(async () =>
+                {
+                    await using var command = asMcp.CreateCommand(
+                        $"SELECT config.update_notification_route({routeId}, {actor}, ARRAY['send_resolutions'], 'Deadlocks', true, NULL, NULL, false, NULL)");
+                    await command.ExecuteNonQueryAsync(ct);
+                });
+                Assert.Equal("DL403", refused.SqlState);
+            }
+
+            Assert.Equal("true", await ScalarAsync(owner, $"SELECT send_resolutions FROM config.config_notification_routes WHERE route_id = {routeId}", ct));
+
+            /* A caller that is not operator-class still gets refused by the tool, before the store. */
+            var investigations = new DarlingMcpServedPolicy(new DarlingMcpWritePolicy.Effective(false, false, Investigations: true));
+            Assert.Equal("refused", Status(await DarlingMcpAlertTools.UpdateNotificationRoute(
+                asMcp, routeId, send_resolutions: "never", served: investigations, cancellationToken: ct)));
+        });
+    }
+
+    /// <summary>L2 of the #6593 review: one call that changes metric_match and agent_level journals what the Viewer's save would, "changed
+    /// metric_match, agent_level", with the match before the change in before.</summary>
+    [Fact]
+    public async Task OneCall_ChangingTheMatchAndTheLevel_JournalsBoth_WithTheOldMatchInBefore()
+    {
+        await WithMcpRoleAsync(async (owner, asMcp, ct) =>
+        {
+            var routeId = RouteIdOf(await DarlingMcpAlertTools.CreateNotificationRoute(
+                asMcp, "Blocking", served: OperatorPolicy(), cancellationToken: ct));
+
+            Assert.Equal("updated", Status(await DarlingMcpAlertTools.UpdateNotificationRoute(
+                asMcp, routeId, metric_match: "Deadlocks", agent_level: 1, served: OperatorPolicy(), cancellationToken: ct)));
+
+            Assert.Equal("1", await ScalarAsync(owner,
+                $"SELECT count(*) FROM config.investigation_journal WHERE route_id = {routeId} AND event = 'route_agent_changed' " +
+                $"AND actor = 'operator:{Operator}' AND reason = 'changed metric_match, agent_level' " +
+                "AND (detail -> 'before' ->> 'metric_match') = 'Blocking' AND (detail -> 'after' ->> 'metric_match') = 'Deadlocks' " +
+                "AND (detail -> 'before' ->> 'agent_level') IS NULL AND (detail -> 'after' ->> 'agent_level') = '1'", ct));
         });
     }
 

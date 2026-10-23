@@ -37,7 +37,7 @@ public sealed class AgentTokenIdentityGateLiveTests
 
     private static readonly DarlingMcpWritePolicy.Effective AgentPolicy = new(false, false, true, Token);
 
-    private sealed record Ctx(NpgsqlDataSource Source, NpgsqlConnection Connection, string RequestId, string ClaimId, CancellationToken Ct)
+    private sealed record Ctx(NpgsqlDataSource Source, NpgsqlConnection Connection, string RequestId, string ClaimId, CancellationToken Ct, string ConnectionString = "")
     {
         public string Arg(string agentId) => AgentActionArgumentTests.Arg(RequestId, ClaimId, agentId: agentId, reason: "identity check");
     }
@@ -65,7 +65,7 @@ public sealed class AgentTokenIdentityGateLiveTests
             LeaseMinutes: 15, ExpiryMinutes: 240) { AutonomyLevel = 3 };
         var opened = await store.OpenOrJoinAsync(alert, ct);
         var claim = await store.ClaimAsync(opened.RequestId!.Value, Token, ct);
-        await body(new Ctx(source, connection, opened.RequestId.Value.ToString(), claim.ClaimId!.Value.ToString(), ct));
+        await body(new Ctx(source, connection, opened.RequestId.Value.ToString(), claim.ClaimId!.Value.ToString(), ct, builder.ConnectionString));
     }
 
     private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
@@ -165,6 +165,75 @@ public sealed class AgentTokenIdentityGateLiveTests
             Assert.Equal("1|0", await RefusedActorsAsync(c, "update_mute_rule", outcome.Refusal!.Reason));
 
             Assert.Equal("0", await ScalarAsync(c.Connection, $"SELECT count(*) FROM config.investigation_journal WHERE actor = 'agent:{Other}'", c.Ct));
+        });
+    }
+
+    /// <summary>L3 of the #6593 review: each kill refusal made before the gate journals the token's name, not the agent_id passed. A case fails
+    /// when its call site drops agentTokenName: the row then names agent:someone-else.</summary>
+    [Theory]
+    [InlineData("bad_session")]
+    [InlineData("bad_login_time")]
+    [InlineData("azure_no_database")]
+    [InlineData("pg_bad_backend_id")]
+    [InlineData("pg_pid_mismatch")]
+    public async Task EachKillRefusalBeforeTheGate_IsJournaledUnderTheTokensName(string kind)
+    {
+        await RunAsync(async c =>
+        {
+            const string LoginTime = "2026-10-01T12:00:00.0000000Z";
+            if (kind == "azure_no_database")
+                await ExecAsync(c.Connection, "UPDATE collect.servers SET sql_engine_edition = 5 WHERE server_id = 7", c.Ct);
+
+            var (server, session, login, backend, code) = kind switch
+            {
+                "bad_session" => ("srv-7", (int?)0, LoginTime, (string?)null, PerformanceMonitor.Darling.Remediation.RemediationResult.Reasons.BadSession),
+                "bad_login_time" => ("srv-7", 87, "not-a-time", null, DarlingMcpPlanForceTools.BadLoginTime),
+                "azure_no_database" => ("srv-7", 87, LoginTime, null, DarlingMcpPlanForceTools.AzureDatabaseRequired),
+                "pg_bad_backend_id" => ("srv-8", 42, null, "not-digits", DarlingMcpPlanForceTools.BadBackendId),
+                _ => ("srv-8", 43, (string?)null, "17000000000000042", DarlingMcpPlanForceTools.BadBackendId),
+            };
+
+            var answer = await DarlingMcpPlanForceTools.RunKillAsync(
+                c.Source, c.Source, null, server, session, login, backend, c.Arg(Other), true, c.Ct, null, Token);
+
+            Assert.Equal(code, ReasonOf(answer));
+            Assert.Equal("1|0", await RefusedActorsAsync(c, DarlingMcpPlanForceTools.KillToolName, code));
+        });
+    }
+
+    /// <summary>L3 of the #6593 review: the kill_session wrapper passes the served policy's token name. A tools/call through the host with a
+    /// named agent token, refused before the gate (session_id 0), journals the token's name. It fails when the wrapper drops
+    /// served?.Policy.AgentTokenName.</summary>
+    [Fact]
+    public async Task AKillCallThroughTheHost_WithANamedAgentToken_JournalsTheTokensName()
+    {
+        await RunAsync(async c =>
+        {
+            const string agentBearer = "agent-token-value-identity-gate-cccc-3";
+            var mcp = new PerformanceMonitor.Darling.Service.McpConfig
+            {
+                Tokens = new System.Collections.Generic.List<PerformanceMonitor.Darling.Service.McpTokenEntry>
+                {
+                    new() { Name = "ops-lead", Token = "operator-token-value-identity-gate-dd-4", Role = "operator" },
+                    new() { Name = Token, Token = agentBearer, Role = "agent" },
+                },
+            };
+            var legacy = DarlingMcpWritePolicy.ResolveForStart(mcp, "", out _);
+            var tokens = DarlingMcpTokenSet.Resolve(mcp, "", legacy, null);
+            using var server = await DarlingMcpWritePolicyTests.BuildServer(mcp, "", c.ConnectionString, tokens: tokens);
+
+            var arguments = new JsonObject
+            {
+                ["server_name"] = "srv-7",
+                ["session_id"] = 0,
+                ["login_time"] = "2026-10-01T12:00:00.0000000Z",
+                ["agent_action"] = c.Arg(Other),
+            }.ToJsonString();
+            var (_, body) = await DarlingMcpWritePolicyTests.ToolsCallAsync(server, DarlingMcpPlanForceTools.KillToolName, arguments, agentBearer);
+
+            Assert.Contains(PerformanceMonitor.Darling.Remediation.RemediationResult.Reasons.BadSession, body, StringComparison.Ordinal);
+            Assert.Equal("1|0", await RefusedActorsAsync(c, DarlingMcpPlanForceTools.KillToolName,
+                PerformanceMonitor.Darling.Remediation.RemediationResult.Reasons.BadSession));
         });
     }
 
