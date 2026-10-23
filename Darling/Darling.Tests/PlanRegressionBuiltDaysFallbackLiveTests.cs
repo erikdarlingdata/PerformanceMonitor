@@ -318,6 +318,57 @@ public sealed class PlanRegressionBuiltDaysFallbackLiveTests
         Assert.Null(JsonNode.Parse(DarlingCollectionCaveatReader.AttachToJson("{\"server\":\"s\"}", after))!.AsObject()[DarlingCollectionCaveatReader.PayloadKey]);
     }
 
+    /// <summary>
+    /// #6548: a regression of SQL Server's own change tracking cleanup is not an offender. The seeded query (id 1, a 10x CPU
+    /// regression) is read with no stored text, then with the text of a DMV read that merely names sys.change_tracking_tables
+    /// (still an offender: the rule is the engine's own wording, not any mention), then with the cleanup delete's text (no
+    /// PLAN_REGRESSION fact at all).
+    /// </summary>
+    [Fact]
+    public async Task ARegressionOfSqlServersOwnCleanup_IsNotAnOffender_AndALookalikeStillIs()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #6548 internal-statement test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        var (periodStart, periodEnd) = await SeedAndBuildAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        async Task<Fact?> ReadAsync() =>
+            (await new PgFactCollector(postgres).CollectFactsAsync(NewContext(periodStart, periodEnd))).SingleOrDefault(f => f.Key == "PLAN_REGRESSION");
+
+        var control = await ReadAsync();
+        Assert.NotNull(control);
+        Assert.Equal(1, control!.Metadata["offender_count"]);
+
+        await using (var insert = new NpgsqlCommand(
+            "INSERT INTO collect.query_store_text (server_id, database_name, query_id, query_sql_text, last_seen) VALUES ($1, 'fallbackdb', 1, $2, $3)", connection))
+        {
+            insert.Parameters.AddWithValue(ServerId);
+            insert.Parameters.AddWithValue("SELECT name FROM sys.change_tracking_tables WHERE name = @name");
+            insert.Parameters.AddWithValue(NpgsqlDbType.Timestamp, periodEnd);
+            await insert.ExecuteNonQueryAsync(ct);
+        }
+
+        var lookalike = await ReadAsync();
+        Assert.NotNull(lookalike);
+        Assert.Equal(1, lookalike!.Metadata["offender_count"]);
+
+        await using (var update = new NpgsqlCommand(
+            "UPDATE collect.query_store_text SET query_sql_text = $1 WHERE server_id = $2 AND database_name = 'fallbackdb' AND query_id = 1", connection))
+        {
+            update.Parameters.AddWithValue("(@p0 bigint)DELETE TOP(@batch_size) FROM sys.change_tracking_1234567 WHERE commit_ts < @p0");
+            update.Parameters.AddWithValue(ServerId);
+            await update.ExecuteNonQueryAsync(ct);
+        }
+
+        Assert.Null(await ReadAsync());
+    }
+
     private static List<CollectionFailure> PlanRegressionFailures(AnalysisContext context) =>
         context.CollectionFailures.Where(f => f.Family == "plan_regression").ToList();
 

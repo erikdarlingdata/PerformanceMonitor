@@ -101,7 +101,9 @@ public sealed partial class DarlingMcpServerAdminTools
     internal static string ConnectFailureReply(
         MonitoredServer server, ConnectionProbeResult probe, ILogger? logger, bool revealConnectError, params string?[] secrets)
     {
-        var target = server.Port > 0 ? $"{server.Host},{server.Port}" : server.Host;
+        /* #6583: the target that was tried. A SQL Server connection uses the host alone (its port rides in the host as host,port), so a
+           stored SQL Server port was never dialled and is not named; only a PostgreSQL target connects on its port. */
+        var target = server.IsPostgres && server.Port > 0 ? $"{server.Host},{server.Port}" : server.Host;
         var driverText = string.IsNullOrWhiteSpace(probe.Error) ? "(no driver text)" : RedactEditSecret(probe.Error, secrets);
         /* The logged copy is one line of bounded length: the driver text and the target both come from the server the
            caller named, so each goes through the refusal log's sanitizer. The --add-server reply below keeps the
@@ -1073,6 +1075,13 @@ ORDER BY d.host, d.database";
             return (null, Invalid(portError));
         }
 
+        /* #6583: a SQL Server connection never uses the port (it rides in the host as host,port), so a non-zero one is refused
+           rather than stored and silently ignored. Zero is the omitted value and stays accepted. */
+        if (engine == EngineSqlServer && port != 0)
+        {
+            return (null, Invalid(SqlServerPortAdvice.Refusal));
+        }
+
         /* #5452: the AWS role for an RDS or Aurora target, and its external ID. Blank is "not set"; the formats and the
            pairing are AwsRoleSettings' own; a role is PostgreSQL-only; and, from the web and MCP, it must be on the list. */
         if (obj["aws_role_arn"] is not null && TryGetString(obj, "aws_role_arn") is null)
@@ -1816,7 +1825,7 @@ ON CONFLICT (server_id) DO NOTHING";
 
     /// <summary>
     /// Validates the optional <c>port</c>; absent or 0 → the driver's default. Consumed only by the PostgreSQL
-    /// connection builder (a SQL Server target carries its port in the host string), and range-checked here to
+    /// connection builder (a SQL Server target carries its port in the host string, and a non-zero one is refused, #6583), and range-checked here to
     /// match <c>DarlingConfig.Validate</c> rather than failing later inside Npgsql.
     /// </summary>
     internal static (int Port, string? Error) ResolvePort(JsonObject obj)

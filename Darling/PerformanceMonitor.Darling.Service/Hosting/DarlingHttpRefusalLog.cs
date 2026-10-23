@@ -57,6 +57,11 @@ internal enum DarlingRefusalGate
     /// gate because the fix is usually <c>web.publicBaseUrl</c> behind a proxy that rewrites Host, and because
     /// its (gate, source) fold key must not share a budget with the OIDC flow's refusals or with <see cref="Token"/>.</summary>
     TokenSignInSite,
+
+    /// <summary>A dashboard that serves reads only refused a change. 403. Two starts serve reads only:
+    /// <c>web.allowTokenlessLoopback</c> with no token, and a token under the length floor. The fix is a token
+    /// (a longer one), not a role, so it is not <see cref="ReadOnlySeat"/>.</summary>
+    ReadsOnlyDashboard,
 }
 
 /// <summary>
@@ -282,6 +287,7 @@ internal sealed class DarlingHttpRefusalLog
         DarlingRefusalGate.SignIn => "OIDC sign-in flow (web.network.oidc)",
         DarlingRefusalGate.PreAuthFailure => "failure before the request was authenticated",
         DarlingRefusalGate.JsonContentType => "JSON-only POST check (Content-Type)",
+        DarlingRefusalGate.ReadsOnlyDashboard => $"reads-only dashboard (set web.network.encryptedToken, at least {DarlingHostBinding.MinimumTokenLength} characters, to make changes)",
         DarlingRefusalGate.TokenSignInSite => "same-site check on the token sign-in form (set web.publicBaseUrl behind a proxy that rewrites Host)",
         _ => gate.ToString(),
     };
