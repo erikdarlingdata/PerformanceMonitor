@@ -2125,6 +2125,8 @@ PerformanceMonitor.Darling.Service.exe --disable-web
 
 Each flips only its endpoint's **live store flag** with a targeted `config_service` write; the service **hot-reloads within one collection sweep — no restart.** If that endpoint's `network` block opts into LAN exposure (a non-loopback `listen`), the verb also reconciles that endpoint's **scoped, idempotent-by-name firewall rule**: **run elevated**, it opens (or, on `--disable-*`, removes) the rule; **run non-elevated**, the store toggle still succeeds and it prints the exact elevated firewall command to run by hand (a loopback-only endpoint needs no rule and says so). Managed-mode only, Windows only. So the headless bring-up is: write the `network` block (the wizard above or the manual reference below), then `--enable-mcp` / `--enable-web` from an **elevated** shell.
 
+After `--enable-web` the verb prints the address to open, for example `http://localhost:5153/`. After `--enable-mcp` it prints the `claude mcp add` command, the same one the Viewer's Settings copies, with `<token>` in place of the token. When `darling.json` sets a token, the verb also names the command that shows it: `--print-web-token` or `--print-mcp-token`. The verb never prints the token itself.
+
 ### Verify it's actually reachable (and the two failures that look like bugs)
 
 Enabling an endpoint is **not** the same as reaching it, and both common failures leave the store flag reading `true`, so "it says enabled" is not proof. After `--enable-mcp` / `--enable-web`, verify on the **service host**:
