@@ -3123,8 +3123,9 @@ BEGIN
    'config.request_snapshot_now(integer, text, text)',
    'config.request_active_queries_live(integer, text)',
    'config.create_notification_route(text, boolean, integer, integer, boolean, integer)',
-   'config.update_notification_route(integer, text[], text, boolean, integer, integer, boolean, integer)',
-   'config.set_notification_route_destinations(integer, text[], text, text, text, text, text)',
+   'config.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer)',
+   'config.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean, jsonb)',
+   'config.set_notification_route_destinations(integer, text, text[], text, text, text, text, text)',
    'config.request_mcp_command(text, integer, integer, text)',
    'config.read_mcp_command_result(bigint)',
    'config.submit_external_alert(text, text, text, text, text, text, double precision)'
