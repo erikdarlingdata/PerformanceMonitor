@@ -672,15 +672,7 @@ HAVING sum(delta_execution_count) > 0";
         foreach (var m in moved)
         {
             text.Append(m.Name).Append(" before ").Append(Num(m.Before)).Append(" after ").Append(Num(m.After))
-                .Append(" week earlier ").Append(Num(m.WeekEarlier)).Append(' ').Append(m.Unit);
-            /* #6551: the note names the database and the read (plan cache or Query Store) a query measure came from, so an agent can call the
-               matching trend read for the right database without guessing it from another change line. */
-            if (!string.IsNullOrEmpty(m.Note))
-            {
-                text.Append(" (").Append(m.Note).Append(')');
-            }
-
-            text.Append("; ");
+                .Append(" week earlier ").Append(Num(m.WeekEarlier)).Append(' ').Append(m.Unit).Append("; ");
         }
 
         /* #6551: a query measure's note names the database and the read (plan cache or Query Store) it came from, so an agent can call the
