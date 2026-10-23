@@ -90,7 +90,6 @@ public sealed record RemediationResult(
         public const string StatementNotInModule = "statement_not_in_module";
         public const string GuideExists = "guide_exists";
         public const string GuideNotFound = "guide_not_found";
-        public const string GuideTemplate = "guide_template";
         public const string GuideChanged = "guide_changed";
         public const string GuideInvalid = "guide_invalid";
         public const string GuidePermissionDenied = "guide_permission_denied";

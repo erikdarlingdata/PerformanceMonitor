@@ -174,7 +174,7 @@ public sealed partial class PlanForceToolLiveTests
     }
 
     [Fact]
-    public async Task AGuideThatIsNotThere_AndATemplateGuide_AreRefused_AndNothingIsDropped()
+    public async Task AGuideThatIsNotThere_IsRefused_AndATemplateGuide_IsDropped_AndUndone()
     {
         await RunAsync(Without.Nothing, async c =>
         {
@@ -192,15 +192,19 @@ public sealed partial class PlanForceToolLiveTests
                 var missing = Parse(await DropGuideAsync(c, "g_" + name, dryRun));
                 Assert.Equal("refused", (string?)missing["status"]);
                 Assert.Equal("guide_not_found", (string?)missing["reason"]);
-
-                var refused = Parse(await DropGuideAsync(c, template, dryRun));
-                Assert.Equal("refused", (string?)refused["status"]);
-                Assert.Equal("guide_template", (string?)refused["reason"]);
-                Assert.Contains("TEMPLATE", (string?)refused["message"] ?? "", StringComparison.Ordinal);
             }
 
+            var dry = Parse(await DropGuideAsync(c, template, dryRun: true));
+            Assert.Equal("dry_run", (string?)dry["status"]);
+            Assert.Equal("TEMPLATE", (string?)dry["before"]!["guide"]!["type"]);
             Assert.Equal(original, await GuideRowAsync(c, template));
             Assert.Equal(0, await JournalActionRowsAsync(c));
+
+            var dropped = await RealDropAsync(c, template);
+            Assert.Null(await GuideRowAsync(c, template));
+            var undone = await UndoAsync(c, dropped, confirm: true);
+            Assert.Equal(PlanUndoAnswer.Undone, undone.Status);
+            Assert.Equal(original, await GuideRowAsync(c, template));
         });
     }
 
