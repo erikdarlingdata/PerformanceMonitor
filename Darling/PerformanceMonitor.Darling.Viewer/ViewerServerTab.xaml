@@ -451,10 +451,12 @@
                 </StackPanel>
                 <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}" Margin="8,2"/>
                 <!-- #5988: the query tag filter for the Queries grids (read only; tags are edited on the web page and over MCP). -->
-                <TextBlock Text="Query tag:" VerticalAlignment="Center" Margin="0,0,4,4" FontSize="11"/>
-                <ComboBox x:Name="QueryTagFilterCombo" Width="170" Margin="0,0,8,4" Padding="4,2" FontSize="11"
-                          DropDownOpened="QueryTagFilterCombo_DropDownOpened" SelectionChanged="QueryTagFilterCombo_SelectionChanged"
-                          ToolTip="Show only the Queries grids' rows with this tag (a parent shows its children), or only untagged rows. Applied before each grid's top-N cut."/>
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="Query tag:" VerticalAlignment="Center" Margin="0,0,4,4" FontSize="11"/>
+                    <ComboBox x:Name="QueryTagFilterCombo" Width="170" Margin="0,0,8,4" Padding="4,2" FontSize="11"
+                              DropDownOpened="QueryTagFilterCombo_DropDownOpened" SelectionChanged="QueryTagFilterCombo_SelectionChanged"
+                              ToolTip="Show only the Queries grids' rows with this tag (a parent shows its children), or only untagged rows. Applied before each grid's top-N cut."/>
+                </StackPanel>
                 <!-- #1319: per-server global database filter (display-only) -->
                 <Button x:Name="DatabaseFilterButton" Content="Databases: All" Click="DatabaseFilterButton_Click"
                         Padding="8,4" Margin="0,0,8,4"
@@ -503,41 +505,47 @@
                                     ToolTip="Time window every inner tab reads"/>
                 <Button Content="Apply to All" Click="ApplyTimeRangeToAll_Click" Padding="8,4" Margin="0,0,8,4"
                         ToolTip="Apply this time range to all open server tabs"/>
-                <TextBlock Text="Compare:" VerticalAlignment="Center" Margin="0,0,4,0"
-                           Foreground="{DynamicResource ForegroundBrush}"/>
-                <ComboBox x:Name="CompareToCombo" AutomationProperties.Name="Compare to" ToolTipService.ShowOnDisabled="True" SelectedIndex="0" Width="150" Margin="0,0,8,4"
-                          SelectionChanged="CompareToCombo_SelectionChanged"
-                          ToolTip="Compare the current window against a baseline period">
-                    <ComboBoxItem Content="None"/>
-                    <ComboBoxItem Content="Yesterday"/>
-                    <ComboBoxItem Content="Last week"/>
-                    <ComboBoxItem Content="Same day last week"/>
-                </ComboBox>
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="Compare:" VerticalAlignment="Center" Margin="0,0,4,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <ComboBox x:Name="CompareToCombo" AutomationProperties.Name="Compare to" ToolTipService.ShowOnDisabled="True" SelectedIndex="0" Width="150" Margin="0,0,8,4"
+                              SelectionChanged="CompareToCombo_SelectionChanged"
+                              ToolTip="Compare the current window against a baseline period">
+                        <ComboBoxItem Content="None"/>
+                        <ComboBoxItem Content="Yesterday"/>
+                        <ComboBoxItem Content="Last week"/>
+                        <ComboBoxItem Content="Same day last week"/>
+                    </ComboBox>
+                </StackPanel>
                 <Button x:Name="RefreshDataButton" Content="Refresh" Click="RefreshDataButton_Click"
                         Padding="12,4" Margin="0,0,8,4"/>
                 <Button x:Name="ResourceUseByTagButton" Content="Use by tag" Click="ResourceUseByTagButton_Click"
                         Padding="12,4" Margin="0,0,8,4" ToolTip="Resource use rolled up by query tag, for this server or the fleet"/>
                 <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}" Margin="8,2"/>
-                <CheckBox x:Name="AutoRefreshCheckBox" Content="_Auto-refresh" VerticalAlignment="Center"
-                          Margin="0,0,4,4" Foreground="{DynamicResource ForegroundBrush}"
-                          IsChecked="True" Checked="AutoRefreshCheckBox_Changed" Unchecked="AutoRefreshCheckBox_Changed"/>
-                <ComboBox x:Name="AutoRefreshIntervalCombo" AutomationProperties.Name="Auto-refresh interval" SelectedIndex="1" Width="70" Margin="0,0,0,4"
-                          SelectionChanged="AutoRefreshInterval_Changed"
-                          ToolTip="Auto-refresh interval">
-                    <ComboBoxItem Content="30s"/>
-                    <ComboBoxItem Content="1m"/>
-                    <ComboBoxItem Content="5m"/>
-                </ComboBox>
+                <StackPanel Orientation="Horizontal">
+                    <CheckBox x:Name="AutoRefreshCheckBox" Content="_Auto-refresh" VerticalAlignment="Center"
+                              Margin="0,0,4,4" Foreground="{DynamicResource ForegroundBrush}"
+                              IsChecked="True" Checked="AutoRefreshCheckBox_Changed" Unchecked="AutoRefreshCheckBox_Changed"/>
+                    <ComboBox x:Name="AutoRefreshIntervalCombo" AutomationProperties.Name="Auto-refresh interval" SelectedIndex="1" Width="70" Margin="0,0,0,4"
+                              SelectionChanged="AutoRefreshInterval_Changed"
+                              ToolTip="Auto-refresh interval">
+                        <ComboBoxItem Content="30s"/>
+                        <ComboBoxItem Content="1m"/>
+                        <ComboBoxItem Content="5m"/>
+                    </ComboBox>
+                </StackPanel>
                 <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}" Margin="8,2"/>
-                <TextBlock Text="Times:" VerticalAlignment="Center" Margin="0,0,4,0"
-                           Foreground="{DynamicResource ForegroundBrush}"/>
-                <ComboBox x:Name="TimeDisplayModeBox" AutomationProperties.Name="Time display" Width="120" Margin="0,0,0,4"
-                          SelectionChanged="TimeDisplayMode_SelectionChanged"
-                          ToolTip="How timestamps are displayed">
-                    <ComboBoxItem Content="Server Time" Tag="ServerTime"/>
-                    <ComboBoxItem Content="Local Time" Tag="LocalTime"/>
-                    <ComboBoxItem Content="UTC" Tag="UTC"/>
-                </ComboBox>
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="Times:" VerticalAlignment="Center" Margin="0,0,4,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <ComboBox x:Name="TimeDisplayModeBox" AutomationProperties.Name="Time display" Width="120" Margin="0,0,0,4"
+                              SelectionChanged="TimeDisplayMode_SelectionChanged"
+                              ToolTip="How timestamps are displayed">
+                        <ComboBoxItem Content="Server Time" Tag="ServerTime"/>
+                        <ComboBoxItem Content="Local Time" Tag="LocalTime"/>
+                        <ComboBoxItem Content="UTC" Tag="UTC"/>
+                    </ComboBox>
+                </StackPanel>
             </WrapPanel>
         </Border>
 
