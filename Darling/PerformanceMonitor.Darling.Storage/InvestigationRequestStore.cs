@@ -368,7 +368,11 @@ LIMIT $2";
        non-ASCII character, so no one encoding of a metric name is the stored one. The candidate rows come back and C# parses
        each context_json (System.Text.Json reads every escaping); one a text column holds but jsonb refuses (a NUL
        escape) is no problem there. The prefilter is the member's key, which no encoder escapes. A metric with no candidate
-       comes back once with a NULL context, so a request with an uncleared metric is seen as unresolved. */
+       comes back once with a NULL context, so a request with an uncleared metric is seen as unresolved.
+       The constant bound on h.alert_time lets the planner read the alert log through its time index: without it the join
+       read the whole 90-day log and tested every row's context, about 60 ms a minute on a store with 30,000 alert rows.
+       It drops no candidate. A request here opened in the last 2 days, and each alert linked to it opened or joined it, so
+       its last alert is at most minutes before it opened. A practice request can link an older alert, and it is left out above. */
     internal const string ResolveCandidatesSql = @"
 SELECT m.request_id, m.metric_name, h.context_json
 FROM (SELECT a.request_id, a.server_id, a.metric_name, max(a.alert_time) AS last_alert
@@ -382,6 +386,7 @@ FROM (SELECT a.request_id, a.server_id, a.metric_name, max(a.alert_time) AS last
 LEFT JOIN config.config_alert_log AS h
        ON h.server_id = m.server_id
       AND h.alert_time > m.last_alert
+      AND h.alert_time > $1 - interval '3 days'
       AND strpos(h.context_json, 'Resolves') > 0";
 
     /* Journals resolved once per request (once key resolved:<request_id>). The state is checked again: the candidates were

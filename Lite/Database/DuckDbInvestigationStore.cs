@@ -1051,7 +1051,10 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
        metric's last alert on the same server. A resolution row's context_json names the metric it resolves in its top-level
        Resolves member; the candidate rows come back and C# parses each context (a text match would miss the escapings).
        A metric with no candidate comes back once with a NULL context, so a request with an uncleared metric is unresolved.
-       Read through v_config_alert_log (live plus archive) so an archived resolution still counts. */
+       Read through v_config_alert_log (live plus archive) so an archived resolution still counts.
+       The constant bound on h.alert_time keeps the join from reading the whole alert log, the archive included, every pass
+       (Darling's twin read its whole 90-day log, about 60 ms a minute at 30,000 rows). It drops no candidate: a request here
+       opened in the last 2 days, and each alert linked to it opened or joined it, so its last alert is at most minutes before it opened. */
     internal const string ResolveCandidatesSql = @"
 SELECT m.request_id, m.metric_name, h.context_json
 FROM (SELECT a.request_id, a.server_id, a.metric_name, max(a.alert_time) AS last_alert
@@ -1064,6 +1067,7 @@ FROM (SELECT a.request_id, a.server_id, a.metric_name, max(a.alert_time) AS last
 LEFT JOIN v_config_alert_log AS h
        ON h.server_id = m.server_id
       AND h.alert_time > m.last_alert
+      AND h.alert_time > $1 - INTERVAL 3 DAY
       AND strpos(h.context_json, 'Resolves') > 0";
 
     /* Journals resolved once per request (once key resolved:<request_id>); the state is checked again under the write lock. */
