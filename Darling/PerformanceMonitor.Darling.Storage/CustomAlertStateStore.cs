@@ -14,7 +14,7 @@ using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Alerting;
 
-namespace PerformanceMonitor.Darling.Service;
+namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
 /// Persists the <see cref="AlertPersistenceGate"/>'s per-<c>(rule_id, server_id)</c> hysteresis state to
@@ -33,10 +33,13 @@ namespace PerformanceMonitor.Darling.Service;
 public sealed class CustomAlertStateStore
 {
     private readonly NpgsqlDataSource _dataSource;
+    private readonly int _commandTimeoutSeconds;
 
-    public CustomAlertStateStore(NpgsqlDataSource dataSource)
+    /// <summary><paramref name="commandTimeoutSeconds"/> is the deadline of every statement this store runs (the service passes its own).</summary>
+    public CustomAlertStateStore(NpgsqlDataSource dataSource, int commandTimeoutSeconds = StorageCommandDeadlines.McpReadSeconds)
     {
         _dataSource = dataSource ?? throw new ArgumentNullException(nameof(dataSource));
+        _commandTimeoutSeconds = commandTimeoutSeconds;
     }
 
     /// <summary>Reads one subject's state. $1 rule_id, $2 server_id.</summary>
@@ -100,7 +103,7 @@ JOIN custom_alert_rules r ON r.id = s.rule_id";
         long ruleId, int serverId, int currentRuleVersion, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(LoadSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.CommandTimeout = _commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = ruleId });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -132,7 +135,7 @@ JOIN custom_alert_rules r ON r.id = s.rule_id";
         long ruleId, int serverId, CustomAlertRuleState state, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(SaveSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.CommandTimeout = _commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = ruleId });                          // $1
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });                         // $2
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = state.RuleVersion });                // $3
@@ -155,7 +158,7 @@ JOIN custom_alert_rules r ON r.id = s.rule_id";
     {
         var rows = new List<(int, bool)>();
         await using var command = _dataSource.CreateCommand(ListForRuleSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.CommandTimeout = _commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = ruleId });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -170,7 +173,7 @@ JOIN custom_alert_rules r ON r.id = s.rule_id";
     public async Task DeleteAsync(long ruleId, int serverId, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(DeleteSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.CommandTimeout = _commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = ruleId });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         await command.ExecuteNonQueryAsync(cancellationToken);
@@ -182,7 +185,7 @@ JOIN custom_alert_rules r ON r.id = s.rule_id";
     {
         var rows = new List<(int, string)>();
         await using var command = _dataSource.CreateCommand(ListFiringWithNamesSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.CommandTimeout = _commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = ruleId });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -198,7 +201,7 @@ JOIN custom_alert_rules r ON r.id = s.rule_id";
     {
         var rows = new List<CustomAlertStateRow>();
         await using var command = _dataSource.CreateCommand(ListAllWithRuleSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.CommandTimeout = _commandTimeoutSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
