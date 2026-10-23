@@ -232,6 +232,7 @@ public sealed class ViewerGridTimeColumnSortMemberTests
         [("ViewerServerTab.xaml", "PgPlanCaptureGrid", "Observed")] = "the setting value the readiness check observed, not a time",
         [("ViewerServerTab.xaml", "PgIndexBloatGrid", "EstimatedReclaimableBytes")] = "a byte count",
         [("ViewerServerTab.xaml", "PgIndexBloatGrid", "SkippedReason")] = "the reason a measurement was skipped, text",
+        [("ViewerServerTab.xaml", "PgExtensionCensusGrid", "DatabasesCreated")] = "a count of databases the extension is created in",
         [("KnownPatternsWindow.xaml", "PatternsGrid", "CreatedBy")] = "the name of whoever created the entry, not when",
     };
 
