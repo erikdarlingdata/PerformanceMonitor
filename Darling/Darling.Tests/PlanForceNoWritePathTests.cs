@@ -186,6 +186,8 @@ public sealed class PlanForceNoWritePathTests
             nameof(DarlingMcpPlanUndoTools) + "." + nameof(DarlingMcpPlanUndoTools.UndoPlanChange),
         /* #6269: the server action switch tool writes config.config_server_actions, which only the store owner can write. */
         nameof(DarlingMcpServerActionTools) + "." + nameof(DarlingMcpServerActionTools.SetServerAction),
+        /* #6569: set_alert_threshold_override is a Level 2 agent action, so it takes the owner source and the service, not the mcp login, writes its action rows. */
+        nameof(DarlingMcpThresholdOverrideTools) + "." + nameof(DarlingMcpThresholdOverrideTools.SetAlertThresholdOverride),
         }, takers);
     }
 

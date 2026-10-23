@@ -150,7 +150,7 @@ internal static class DarlingMcpInstructions
             off.Add($"the write tools are off, so the {writeCount + adminCount - agentActionServed} that change monitoring configuration are not served " +
                     $"(`{DarlingMcpWritePolicy.WritesSetting}` with a token adds {writeCount - agentActionServed}, `{DarlingMcpWritePolicy.ServerAdminSetting}` " +
                     $"{adminCount} more)" + (agentActionServed > 0
-                        ? $"; the {agentActionServed} mute, custom-rule, threshold override, signature merge, plan force, plan evict and session kill tools are served only to an agent with an `agent_action` (Level 2; the plan force, plan evict and session kill tools need Level 3 and the server's own switch)"
+                        ? $"; the {agentActionServed} mute, custom-rule, threshold override, signature merge, plan force, plan evict, session kill, recompile and plan guide tools are served only to an agent with an `agent_action` (Level 2; the plan force, plan evict, session kill, recompile and plan guide tools need Level 3 and the server's own switch)"
                         : string.Empty));
         else if (!adminServed)
             off.Add($"`{DarlingMcpWritePolicy.ServerAdminSetting}` is off, so the {adminCount} tools that add, edit and remove " +
@@ -236,7 +236,7 @@ internal static class DarlingMcpInstructions
 
         ## What this server can and cannot do
 
-        This server reads previously collected performance data. It cannot run SQL on a monitored server or run ad-hoc diagnostics; only the plan force, plan evict and session kill tools act on one. With writes on, purge_now deletes history older than the retention given.
+        This server reads previously collected performance data. It cannot run SQL on a monitored server or run ad-hoc diagnostics; only the plan force, plan evict, session kill, recompile and plan guide tools act on one. With writes on, purge_now deletes history older than the retention given.
 
         """ + DarlingMcpWritePolicy.InstructionsLine;
 

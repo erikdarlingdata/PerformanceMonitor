@@ -514,7 +514,7 @@ public sealed partial class DarlingMcpPlanForceTools
         [Description("The plan guide's name: 1 to 128 characters, not starting with #. A name already used in the database is refused.")] string name,
         [Description("The text of the statement the guide applies to, exactly as written in the module or batch (case and spacing included).")] string statement,
         [Description("OBJECT, SQL or TEMPLATE. TEMPLATE: module_or_batch empty, params required, hints OPTION (PARAMETERIZATION SIMPLE|FORCED); statement and params come from sys.sp_get_query_template.")] string type,
-        [Description("The OPTION (...) clause to attach, for example OPTION (RECOMPILE), OPTION (MAXDOP 1), OPTION (OPTIMIZE FOR (@p = 1)) or OPTION (USE PLAN N'<xml>'); or an XML showplan (text that starts with <); or empty to apply no hints (removes the statement's own OPTION hints).")] string? hints = null,
+        [Description("An OPTION (...) clause, for example OPTION (RECOMPILE) or OPTION (MAXDOP 1); or an XML showplan (starts with <); or empty for no hints (removes the statement's own OPTION hints).")] string? hints = null,
         [Description("OBJECT: the two-part schema.name of the procedure, function or trigger. SQL: the batch text, or empty when statement is the whole batch.")] string? module_or_batch = null,
         [Description("SQL: the parameter list of a parameterized batch, for example '@p int'; empty for none. TEMPLATE: required. OBJECT: empty.")] string? @params = null,
         [Description("Server name or display name.")] string? server_name = null,
