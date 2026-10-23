@@ -1795,12 +1795,12 @@ GRANT EXECUTE ON FUNCTION {config}.update_notification_route(integer, text, text
 GRANT EXECUTE ON FUNCTION {config}.set_notification_route_destinations(integer, text, text[], text, text, text, text, text) TO {mcp};
 GRANT EXECUTE ON FUNCTION {config}.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean, jsonb) TO {mcp};
 -- #6394: the MCP generate_webhook_signing_key and remove_webhook_signing_key tools. mcp holds no UPDATE on a signing key column of {config}.config_notification
---     or {config}.config_notification_routes (they are secret columns) and no SELECT on them, and gets none here. read_webhook_signing_target hands the
---     service the stored (sealed) URL and the proxy a new key is sealed for, set_webhook_signing_key stores a key the service sealed (only the shape of one:
+--     or {config}.config_notification_routes (they are secret columns) and no SELECT on them, and gets none here. The service reads the saved (sealed) URL
+--     and proxy a new key is sealed for through its own store connection, so there is no function that returns them to mcp (an earlier build of this
+--     change made read_webhook_signing_target; it is dropped here). set_webhook_signing_key stores a key the service sealed (only the shape of one:
 --     sealed:v1:, the 16 character key id, base64) and moves the current key to the previous slot with the 7 day window the Viewer uses, and
---     clear_webhook_signing_key clears the key, the previous key and the window. None of them returns a key. Granted to mcp only.
+--     clear_webhook_signing_key clears the key, the previous key and the window. Neither returns a key. Granted to mcp only.
 {BuildWebhookSigningKeyFunctionsSql(config)}
-GRANT EXECUTE ON FUNCTION {config}.read_webhook_signing_target(integer) TO {mcp};
 GRANT EXECUTE ON FUNCTION {config}.set_webhook_signing_key(integer, text, text, text) TO {mcp};
 GRANT EXECUTE ON FUNCTION {config}.clear_webhook_signing_key(integer) TO {mcp};
 -- #6230: the MCP incident tools (analyze now, purge now, test a connection, pause, resume) queue their command through
@@ -3068,27 +3068,14 @@ $fn$;
 REVOKE ALL ON FUNCTION {config}.set_notification_route_destinations(integer, text, text[], text, text, text, text, text) FROM PUBLIC;";
 
     /// <summary>
-    /// The SECURITY DEFINER functions (#6394) the MCP webhook signing key tools write through: <c>read_webhook_signing_target</c>,
-    /// <c>set_webhook_signing_key</c> and <c>clear_webhook_signing_key</c>. A <c>NULL</c> route id is the settings row. The rotation
+    /// The SECURITY DEFINER functions (#6394) the MCP webhook signing key tools write through: <c>set_webhook_signing_key</c> and
+    /// <c>clear_webhook_signing_key</c>. The saved URL and proxy a key is sealed for are read by the service on its own store connection, not
+    /// through a function the <c>mcp</c> role could call; <c>read_webhook_signing_target</c>, which an earlier build of this change created,
+    /// is dropped. A <c>NULL</c> route id is the settings row. The rotation
     /// window is the 7 days of <c>WebhookSigning.RotationOverlapDays</c>, as in the Viewer.
     /// </summary>
     internal static string BuildWebhookSigningKeyFunctionsSql(string config) => $@"
-CREATE OR REPLACE FUNCTION {config}.read_webhook_signing_target(p_route_id integer)
-RETURNS TABLE (stored_url text, proxy text, has_key boolean)
-LANGUAGE sql
-STABLE
-SECURITY DEFINER
-SET search_path = pg_catalog, pg_temp
-AS $fn$
-   SELECT r.generic_url, COALESCE((SELECT n.generic_proxy FROM {config}.config_notification AS n WHERE n.id = 1), ''), r.signing_key <> ''
-     FROM {config}.config_notification_routes AS r
-    WHERE p_route_id IS NOT NULL AND r.route_id = p_route_id
-   UNION ALL
-   SELECT n.generic_url, n.generic_proxy, n.signing_key <> ''
-     FROM {config}.config_notification AS n
-    WHERE p_route_id IS NULL AND n.id = 1;
-$fn$;
-REVOKE ALL ON FUNCTION {config}.read_webhook_signing_target(integer) FROM PUBLIC;
+DROP FUNCTION IF EXISTS {config}.read_webhook_signing_target(integer);
 CREATE OR REPLACE FUNCTION {config}.set_webhook_signing_key(p_route_id integer, p_sealed_key text, p_stored_url text, p_proxy text)
 RETURNS timestamptz
 LANGUAGE plpgsql

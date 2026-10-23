@@ -9,9 +9,11 @@
 using System;
 using System.ComponentModel;
 using System.Globalization;
+using System.Net;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -28,7 +30,10 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// destination (Settings > Notifications) or of one route, which the Viewer makes and removes in its key block. A key is made here, in the
 /// service, with <see cref="WebhookSigning.NewKey"/>, sealed for the destination's saved URL and proxy the way the Viewer seals it, and
 /// stored through the store's <c>config.set_webhook_signing_key</c> function: the <c>mcp</c> login holds no read or write on a key column.
-/// The answer to a generate carries the new key once and never a stored key; a remove clears the key, the previous key and the window.
+/// The saved URL and proxy are read through the service's own store connection (<see cref="StoreOwnerSource"/>), as the plan force tools
+/// read a server's login, so the <c>mcp</c> role has no function that returns the destination.
+/// The answer to a generate carries the new key once and never a stored key, and only over TLS or to a local caller; a second generate
+/// inside the 7 day changeover of the first needs <c>replace_pending_rotation</c>. A remove clears the key, the previous key and the window.
 /// Both tools are in <see cref="DarlingMcpWritePolicy.WriteTools"/> (served only with <c>mcp.allowWrites</c> and a token) and in
 /// <see cref="DarlingMcpWritePolicy.NeverAgentTools"/>.
 /// </summary>
@@ -43,15 +48,20 @@ public sealed partial class DarlingMcpAlertTools
         "The destination needs a saved generic webhook URL first (a route with none, or a route_id that does not exist, is refused and nothing is written). " +
         "The key is made by the service, sealed for the saved URL and proxy, and stored: the database role this tool runs as can neither read nor write a key column, the row is changed by the store's own config.set_webhook_signing_key function. " +
         "When a key is already stored this rotates it: the current key moves to the previous slot and keeps signing for 7 days, so the receiver can switch without a gap. " +
-        "The answer shows the new key only this once, so copy it from the answer to the receiver; no tool shows it again, and no answer shows a stored or previous key. A request or answer carrying a key needs TLS or loopback. " +
+        "The answer shows the new key only this once and no tool shows it again, so give it to the person exactly as given, without retyping or shortening it; no answer shows a stored or previous key. " +
+        "Over the network the key is returned only on a TLS connection (mcp.network.tls); a call over plain HTTP from another machine is refused and writes nothing, a local caller is served. " +
+        "While the 7-day changeover of an earlier generate is still running, another generate is refused, because making another now stops the key the receiver holds: pass replace_pending_rotation: true to do it anyway. " +
         "To change the generic URL or proxy of a destination that has a key, remove the key first (remove_webhook_signing_key), save the change, then generate a new key. " +
-        "Returns {status:\"generated\", scope, route_id, key, shown_once:true, previous_key_valid_until (null when there was no key to rotate), message}, or {status:\"invalid\"|\"not_found\"|\"refused\", message}. Repeating the call makes another key and rotates the one just made out.")]
+        "Returns {status:\"generated\", scope, route_id, key, shown_once:true, previous_key_valid_until (null when there was no key to rotate), message}, or {status:\"invalid\"|\"not_found\"|\"refused\", message}. Repeating the call after the changeover (or with replace_pending_rotation: true) makes another key and rotates the one just made out.")]
     public static Task<string> GenerateWebhookSigningKey(
         NpgsqlDataSource postgres,
         [Description(SigningKeyScopeHelp)] int? route_id = null,
+        [Description("Default false: refused while the key made by an earlier generate is still in its 7-day changeover (the receiver still holds the key a new one would stop). Pass true to make another key anyway.")] bool replace_pending_rotation = false,
+        StoreOwnerSource? ownerSource = null,
+        IHttpContextAccessor? httpContextAccessor = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
-        GenerateWebhookSigningKeyAsync(postgres, route_id, DarlingPasswordKey.Current, logger, cancellationToken);
+        GenerateWebhookSigningKeyAsync(postgres, ownerSource?.Read(), route_id, replace_pending_rotation, httpContextAccessor?.HttpContext, DarlingPasswordKey.Current, logger, cancellationToken);
 
     [McpServerTool(Name = "remove_webhook_signing_key"), Description(
         "Removes the signing key of a generic webhook destination, the default one or one route's, with its previous key. Needs mcp.allowWrites and a token. " +
@@ -67,18 +77,45 @@ public sealed partial class DarlingMcpAlertTools
         CancellationToken cancellationToken = default) =>
         RemoveWebhookSigningKeyAsync(postgres, route_id, logger, cancellationToken);
 
-    /// <summary>Reads the stored (sealed) URL and the proxy through the store's read function, makes and seals the key for them, and
-    /// stores it, in one transaction.</summary>
+    /// <summary>The refusal of a generate that would send the key over plain HTTP to a non-local address, or null. A call with no HTTP
+    /// context (an in-process caller) is served; so is a TLS request and a request from a loopback address (a TLS-ending proxy on the same
+    /// machine reaches the service from one).</summary>
+    internal static string? SigningKeyTransportRefusal(HttpContext? context)
+    {
+        if (context is null || context.Request.IsHttps)
+        {
+            return null;
+        }
+
+        var remote = context.Connection.RemoteIpAddress;
+        return remote is not null && IPAddress.IsLoopback(remote)
+            ? null
+            : Outcome("refused", "The new key is returned only over TLS or to a caller on this machine, and this call came over plain HTTP from another address. Set mcp.network.tls in darling.json and connect over https, or call from the machine the service runs on. Nothing was written.");
+    }
+
+    /// <summary>Reads the saved (sealed) URL, the proxy and the changeover window through the service's own store connection, makes and
+    /// seals the key for them, and stores it through the store's set function (which writes only when the URL and proxy are still those).</summary>
     internal static async Task<string> GenerateWebhookSigningKeyAsync(
-        NpgsqlDataSource postgres, int? routeId, IPasswordKeyRing ring, ILogger? logger, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, NpgsqlDataSource? owner, int? routeId, bool replacePendingRotation, HttpContext? httpContext,
+        IPasswordKeyRing ring, ILogger? logger, CancellationToken cancellationToken)
     {
         try
         {
             ArgumentNullException.ThrowIfNull(postgres);
             ArgumentNullException.ThrowIfNull(ring);
+            if (SigningKeyTransportRefusal(httpContext) is { } insecure)
+            {
+                return insecure;
+            }
+
             if (SigningKeyRouteRefusal(routeId) is { } badRoute)
             {
                 return badRoute;
+            }
+
+            if (owner is null)
+            {
+                return Outcome("refused", "The service has not opened its store connection yet. Try again in a moment.");
             }
 
             var (seal, refusal) = RouteSealer(ring);
@@ -91,14 +128,20 @@ public sealed partial class DarlingMcpAlertTools
             DateTime? until;
             try
             {
-                await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-                await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
                 string storedUrl;
                 string proxy;
-                await using (var read = new NpgsqlCommand("SELECT stored_url, proxy FROM config.read_webhook_signing_target($1)", connection) { Transaction = transaction })
+                DateTime? pendingUntil;
+                await using (var read = owner.CreateCommand(routeId is null
+                    ? "SELECT generic_url, generic_proxy, CASE WHEN previous_signing_key_until > now() THEN previous_signing_key_until END FROM config.config_notification WHERE id = 1"
+                    : "SELECT r.generic_url, COALESCE((SELECT n.generic_proxy FROM config.config_notification AS n WHERE n.id = 1), ''), "
+                        + "CASE WHEN r.previous_signing_key_until > now() THEN r.previous_signing_key_until END FROM config.config_notification_routes AS r WHERE r.route_id = $1"))
                 {
                     read.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-                    NotificationRouteWriter.AddNullableInt(read, routeId);
+                    if (routeId is not null)
+                    {
+                        NotificationRouteWriter.AddNullableInt(read, routeId);
+                    }
+
                     await using var reader = await read.ExecuteReaderAsync(cancellationToken);
                     if (!await reader.ReadAsync(cancellationToken))
                     {
@@ -107,6 +150,7 @@ public sealed partial class DarlingMcpAlertTools
 
                     storedUrl = reader.GetString(0);
                     proxy = reader.GetString(1);
+                    pendingUntil = reader.IsDBNull(2) ? null : reader.GetFieldValue<DateTime>(2).ToUniversalTime();
                 }
 
                 if (!PasswordSeal.IsSealed(storedUrl))
@@ -114,10 +158,16 @@ public sealed partial class DarlingMcpAlertTools
                     return Outcome("invalid", SigningKeyNeedsUrlText);
                 }
 
+                if (pendingUntil is { } pending && !replacePendingRotation)
+                {
+                    var madeOn = pending.AddDays(-WebhookSigning.RotationOverlapDays).ToString("yyyy-MM-dd HH:mm 'UTC'", CultureInfo.InvariantCulture);
+                    return Outcome("refused", $"A key made on {madeOn} is still in its {WebhookSigning.RotationOverlapDays}-day changeover. Making another now stops the key the receiver holds. Pass replace_pending_rotation: true to do it anyway.");
+                }
+
                 plain = WebhookSigning.NewKey();
                 var row = routeId is { } id ? PasswordBinding.WebhookRouteRow(id) : PasswordBinding.WebhookSettingsRow;
                 var sealedKey = seal(plain, PasswordBinding.ForWebhook(PasswordBinding.SigningKeySlot, row, proxy, storedUrl));
-                await using (var write = new NpgsqlCommand("SELECT config.set_webhook_signing_key($1, $2, $3, $4)", connection) { Transaction = transaction })
+                await using (var write = postgres.CreateCommand("SELECT config.set_webhook_signing_key($1, $2, $3, $4)"))
                 {
                     write.CommandTimeout = McpCommandDeadlines.ReadSeconds;
                     NotificationRouteWriter.AddNullableInt(write, routeId);
@@ -126,8 +176,6 @@ public sealed partial class DarlingMcpAlertTools
                     write.Parameters.Add(new NpgsqlParameter<string> { TypedValue = proxy });
                     until = await write.ExecuteScalarAsync(cancellationToken) is DateTime window ? DateTime.SpecifyKind(window.ToUniversalTime(), DateTimeKind.Utc) : null;
                 }
-
-                await transaction.CommitAsync(cancellationToken);
             }
             catch (PostgresException ex) when (SigningKeyFunctionOutcome(ex) is { } functionRefusal)
             {
@@ -148,7 +196,7 @@ public sealed partial class DarlingMcpAlertTools
                 key = plain,
                 shown_once = true,
                 previous_key_valid_until = until,
-                message = "This key is shown only this once: copy it now and give it to the receiver, which needs it to check the signature of each post. "
+                message = "This key is shown only this once and no tool shows it again: pass it to the person who sets up the receiver exactly as given, without retyping or shortening it, because the receiver needs it to check the signature of each post. "
                     + "It cannot be read back, and the service signs this destination's posts with it from now on. "
                     + (untilText is null
                         ? "There was no earlier key."

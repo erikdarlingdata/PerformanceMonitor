@@ -142,6 +142,11 @@ public sealed class McpWebhookSigningKeyLiveTests
         return DarlingWebhookSecrets.Open(stored, Array.Empty<NotificationRoute>(), store.Ring).Webhooks.GenericSigning!;
     }
 
+    /// <summary>The tool as the service runs it: the <c>mcp</c> data source writes, the service's own (owner) data source reads the destination, and the
+    /// caller is in process (no HTTP context).</summary>
+    private static Task<string> GenerateAsync(Store store, int? routeId, CancellationToken ct, bool replacePendingRotation = false) =>
+        DarlingMcpAlertTools.GenerateWebhookSigningKeyAsync(store.Mcp, store.Owner, routeId, replacePendingRotation, null, store.Ring, null, ct);
+
     private static void AssertSigns(string key)
     {
         Assert.True(WebhookSigning.TryDecodeKey(key, out _));
@@ -155,7 +160,7 @@ public sealed class McpWebhookSigningKeyLiveTests
         await RunAsync(async (store, ct) =>
         {
             var routeId = await SeedRouteWithUrlAsync(store, ct);
-            var first = Parse(await DarlingMcpAlertTools.GenerateWebhookSigningKeyAsync(store.Mcp, routeId, store.Ring, null, ct));
+            var first = Parse(await GenerateAsync(store, routeId, ct));
             Assert.Equal("generated", first.GetProperty("status").GetString());
             Assert.True(first.GetProperty("shown_once").GetBoolean());
             Assert.Equal(JsonValueKind.Null, first.GetProperty("previous_key_valid_until").ValueKind);
@@ -170,7 +175,7 @@ public sealed class McpWebhookSigningKeyLiveTests
             AssertSigns(opened.Key);
 
             /* A second generate rotates: the first key is the previous one for the window, and no answer carries it. */
-            var secondAnswer = await DarlingMcpAlertTools.GenerateWebhookSigningKeyAsync(store.Mcp, routeId, store.Ring, null, ct);
+            var secondAnswer = await GenerateAsync(store, routeId, ct);
             var second = Parse(secondAnswer);
             var secondKey = second.GetProperty("key").GetString()!;
             Assert.NotEqual(firstKey, secondKey);
@@ -191,13 +196,13 @@ public sealed class McpWebhookSigningKeyLiveTests
         await RunAsync(async (store, ct) =>
         {
             await SeedSettingsUrlAsync(store, ct);
-            var first = Parse(await DarlingMcpAlertTools.GenerateWebhookSigningKeyAsync(store.Mcp, null, store.Ring, null, ct));
+            var first = Parse(await GenerateAsync(store, null, ct));
             Assert.Equal("generated", first.GetProperty("status").GetString());
             Assert.Equal("default", first.GetProperty("scope").GetString());
             var firstKey = first.GetProperty("key").GetString()!;
             Assert.Equal(firstKey, (await OpenedSettingsKeysAsync(store, ct)).Key);
 
-            var second = Parse(await DarlingMcpAlertTools.GenerateWebhookSigningKeyAsync(store.Mcp, null, store.Ring, null, ct));
+            var second = Parse(await GenerateAsync(store, null, ct));
             var secondKey = second.GetProperty("key").GetString()!;
             var opened = await OpenedSettingsKeysAsync(store, ct);
             Assert.Equal(secondKey, opened.Key);
@@ -213,8 +218,8 @@ public sealed class McpWebhookSigningKeyLiveTests
         await RunAsync(async (store, ct) =>
         {
             var routeId = await SeedRouteWithUrlAsync(store, ct);
-            await DarlingMcpAlertTools.GenerateWebhookSigningKeyAsync(store.Mcp, routeId, store.Ring, null, ct);
-            await DarlingMcpAlertTools.GenerateWebhookSigningKeyAsync(store.Mcp, routeId, store.Ring, null, ct);
+            await GenerateAsync(store, routeId, ct);
+            await GenerateAsync(store, routeId, ct);
 
             var removed = Parse(await DarlingMcpAlertTools.RemoveWebhookSigningKeyAsync(store.Mcp, routeId, null, ct));
             Assert.Equal("removed", removed.GetProperty("status").GetString());
@@ -240,16 +245,16 @@ public sealed class McpWebhookSigningKeyLiveTests
     {
         await RunAsync(async (store, ct) =>
         {
-            Assert.Equal("not_found", Parse(await DarlingMcpAlertTools.GenerateWebhookSigningKeyAsync(store.Mcp, 987654, store.Ring, null, ct)).GetProperty("status").GetString());
+            Assert.Equal("not_found", Parse(await GenerateAsync(store, 987654, ct)).GetProperty("status").GetString());
             Assert.Equal("not_found", Parse(await DarlingMcpAlertTools.RemoveWebhookSigningKeyAsync(store.Mcp, 987654, null, ct)).GetProperty("status").GetString());
 
             var bare = Convert.ToInt32(await ScalarAsync(store.Owner, "INSERT INTO config_notification_routes (metric_match) VALUES ('Blocking') RETURNING route_id", ct),
                 System.Globalization.CultureInfo.InvariantCulture);
             await ExecAsync(store.Owner, "INSERT INTO config_notification (id) VALUES (1) ON CONFLICT (id) DO NOTHING", ct);
-            Assert.Equal("invalid", Parse(await DarlingMcpAlertTools.GenerateWebhookSigningKeyAsync(store.Mcp, bare, store.Ring, null, ct)).GetProperty("status").GetString());
-            Assert.Equal("invalid", Parse(await DarlingMcpAlertTools.GenerateWebhookSigningKeyAsync(store.Mcp, null, store.Ring, null, ct)).GetProperty("status").GetString());
+            Assert.Equal("invalid", Parse(await GenerateAsync(store, bare, ct)).GetProperty("status").GetString());
+            Assert.Equal("invalid", Parse(await GenerateAsync(store, null, ct)).GetProperty("status").GetString());
             Assert.Equal("invalid", Parse(await DarlingMcpAlertTools.RemoveWebhookSigningKeyAsync(store.Mcp, bare, null, ct)).GetProperty("status").GetString());
-            Assert.Equal("invalid", Parse(await DarlingMcpAlertTools.GenerateWebhookSigningKeyAsync(store.Mcp, 0, store.Ring, null, ct)).GetProperty("status").GetString());
+            Assert.Equal("invalid", Parse(await GenerateAsync(store, 0, ct)).GetProperty("status").GetString());
 
             Assert.Equal(0L, await ScalarAsync(store.Owner, "SELECT count(*) FROM config_notification_routes WHERE signing_key <> '' OR previous_signing_key <> ''", ct));
             Assert.Equal(0L, await ScalarAsync(store.Owner, "SELECT count(*) FROM config_notification WHERE signing_key <> ''", ct));
@@ -284,6 +289,84 @@ public sealed class McpWebhookSigningKeyLiveTests
             command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = "" });
             var refused = await Assert.ThrowsAsync<PostgresException>(() => command.ExecuteScalarAsync(ct));
             Assert.Equal("DL400", refused.SqlState);
+        });
+    }
+
+    [Fact]
+    public async Task ASecondGenerateInsideTheChangeover_IsRefusedUnlessTheCallerAsksToReplaceIt()
+    {
+        await RunAsync(async (store, ct) =>
+        {
+            var routeId = await SeedRouteWithUrlAsync(store, ct);
+            /* The first generate has no key to rotate and the second starts the 7 day changeover; neither is refused. */
+            var firstKey = Parse(await GenerateAsync(store, routeId, ct)).GetProperty("key").GetString()!;
+            var secondKey = Parse(await GenerateAsync(store, routeId, ct)).GetProperty("key").GetString()!;
+
+            /* A third inside the changeover would stop the first key the receiver may still hold: refused, and nothing moved. */
+            var again = Parse(await GenerateAsync(store, routeId, ct));
+            Assert.Equal("refused", again.GetProperty("status").GetString());
+            Assert.Contains("replace_pending_rotation: true", again.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.False(again.TryGetProperty("key", out _));
+            var kept = await OpenedRouteKeysAsync(store, routeId, ct);
+            Assert.Equal(secondKey, kept.Key);
+            Assert.Equal(firstKey, kept.PreviousKey);
+
+            var replaced = Parse(await GenerateAsync(store, routeId, ct, replacePendingRotation: true));
+            Assert.Equal("generated", replaced.GetProperty("status").GetString());
+            var rotated = await OpenedRouteKeysAsync(store, routeId, ct);
+            Assert.Equal(replaced.GetProperty("key").GetString(), rotated.Key);
+            Assert.Equal(secondKey, rotated.PreviousKey);
+
+            /* The default destination's row gets the same refusal, and an expired window is no longer pending. */
+            await SeedSettingsUrlAsync(store, ct);
+            Assert.Equal("generated", Parse(await GenerateAsync(store, null, ct)).GetProperty("status").GetString());
+            Assert.Equal("generated", Parse(await GenerateAsync(store, null, ct)).GetProperty("status").GetString());
+            Assert.Equal("refused", Parse(await GenerateAsync(store, null, ct)).GetProperty("status").GetString());
+            await ExecAsync(store.Owner, "UPDATE config_notification SET previous_signing_key_until = now() - interval '1 hour' WHERE id = 1", ct);
+            Assert.Equal("generated", Parse(await GenerateAsync(store, null, ct)).GetProperty("status").GetString());
+        });
+    }
+
+    [Fact]
+    public async Task AnUnsealedSavedUrl_IsRefusedWithTheSaveItFirstSentence_AndWritesNothing()
+    {
+        await RunAsync(async (store, ct) =>
+        {
+            /* A URL saved before sealing (v3.10.0 and earlier, never re-saved) is plain text in the column; the service reads it on its own connection and refuses. */
+            var routeId = Convert.ToInt32(await ScalarAsync(store.Owner,
+                "INSERT INTO config_notification_routes (metric_match, generic_url) VALUES ('Blocking', 'https://hooks.example.com/plain') RETURNING route_id", ct),
+                System.Globalization.CultureInfo.InvariantCulture);
+            await ExecAsync(store.Owner, "INSERT INTO config_notification (id, generic_url) VALUES (1, 'https://hooks.example.com/plain') ON CONFLICT (id) DO UPDATE SET generic_url = EXCLUDED.generic_url", ct);
+            foreach (int? target in new int?[] { routeId, null })
+            {
+                var answer = Parse(await GenerateAsync(store, target, ct));
+                Assert.Equal("invalid", answer.GetProperty("status").GetString());
+                Assert.Contains("Save the generic webhook URL first", answer.GetProperty("message").GetString(), StringComparison.Ordinal);
+            }
+
+            Assert.Equal(0L, await ScalarAsync(store.Owner, "SELECT count(*) FROM config_notification_routes WHERE signing_key <> ''", ct));
+            Assert.Equal(0L, await ScalarAsync(store.Owner, "SELECT count(*) FROM config_notification WHERE signing_key <> ''", ct));
+        });
+    }
+
+    [Fact]
+    public async Task TheMcpLoginHasNoFunctionThatReturnsTheDestination_AndAnEarlierBuildsReadFunctionIsDropped()
+    {
+        await RunAsync(async (store, ct) =>
+        {
+            /* A store that ran an earlier build of this change holds the read function; the provisioning batch's function block drops it. */
+            await ExecAsync(store.Owner, "CREATE FUNCTION config.read_webhook_signing_target(p_route_id integer) RETURNS TABLE (stored_url text) LANGUAGE sql AS 'SELECT generic_url FROM config.config_notification'", ct);
+            await ExecAsync(store.Owner, "GRANT EXECUTE ON FUNCTION config.read_webhook_signing_target(integer) TO mcp", ct);
+            await ExecAsync(store.Owner, DarlingManagedRoles.BuildWebhookSigningKeyFunctionsSql("config"), ct);
+            Assert.Equal(true, await ScalarAsync(store.Owner, "SELECT to_regprocedure('config.read_webhook_signing_target(integer)') IS NULL", ct));
+            var ex = await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(store.Mcp, "SELECT * FROM config.read_webhook_signing_target(1)", ct));
+            Assert.Equal("42883", ex.SqlState);
+
+            /* Generate still works on a route and on the default row without it. */
+            var routeId = await SeedRouteWithUrlAsync(store, ct);
+            await SeedSettingsUrlAsync(store, ct);
+            Assert.Equal("generated", Parse(await GenerateAsync(store, routeId, ct)).GetProperty("status").GetString());
+            Assert.Equal("generated", Parse(await GenerateAsync(store, null, ct)).GetProperty("status").GetString());
         });
     }
 }
