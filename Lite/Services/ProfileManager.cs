@@ -263,6 +263,12 @@ public class ProfileManager : IProfileLookup
         {
             foreach (var profile in importedProfiles)
             {
+                // Skip a sign-in type a profile cannot have, as loading profiles.json does.
+                if (profile == null || !IsProfileAuthType(profile.AuthType))
+                {
+                    skipped++;
+                    continue;
+                }
                 // Skip if the same id already exists (keep our local secret association intact).
                 if (_profiles.Any(p => p.Id == profile.Id))
                 {
@@ -301,7 +307,7 @@ public class ProfileManager : IProfileLookup
         {
             string json = File.ReadAllText(_configFilePath);
             var config = JsonSerializer.Deserialize<ProfilesConfig>(json);
-            _profiles = config?.Profiles ?? new List<CredentialProfile>();
+            _profiles = ProfilesWithAValidAuthType(config?.Profiles);
 
             /* Create backup of valid config */
             try { File.Copy(_configFilePath, _configFilePath + ".bak", overwrite: true); }
@@ -320,7 +326,7 @@ public class ProfileManager : IProfileLookup
                 {
                     string bakJson = File.ReadAllText(bakPath);
                     var bakConfig = JsonSerializer.Deserialize<ProfilesConfig>(bakJson);
-                    _profiles = bakConfig?.Profiles ?? new List<CredentialProfile>();
+                    _profiles = ProfilesWithAValidAuthType(bakConfig?.Profiles);
                     _logger?.LogInformation("Restored {Count} credential profiles from backup", _profiles.Count);
                     return;
                 }
@@ -330,6 +336,30 @@ public class ProfileManager : IProfileLookup
             _profiles = new List<CredentialProfile>();
             SaveProfiles();
         }
+    }
+
+    /// <summary>Whether a profile may have this sign-in type: SQL Server login, service principal or managed identity.</summary>
+    internal static bool IsProfileAuthType(string? authType) =>
+        authType is AuthenticationTypes.SqlServer or AuthenticationTypes.ServicePrincipal or AuthenticationTypes.ManagedIdentity;
+
+    /// <summary>
+    /// The profiles read from profiles.json, without any whose sign-in type a profile cannot have (Windows, the interactive
+    /// Entra modes, or an unknown value): the editor never writes one, so it is left out and a server that names it is asked
+    /// about before Lite connects, as for a profile that is not found.
+    /// </summary>
+    private List<CredentialProfile> ProfilesWithAValidAuthType(List<CredentialProfile>? profiles)
+    {
+        var kept = new List<CredentialProfile>();
+        foreach (var profile in profiles ?? new List<CredentialProfile>())
+        {
+            if (profile != null && IsProfileAuthType(profile.AuthType))
+                kept.Add(profile);
+            else
+                _logger?.LogWarning("Skipped credential profile '{Name}': its sign-in type '{AuthType}' is not one a profile can have",
+                    profile?.Name, profile?.AuthType);
+        }
+
+        return kept;
     }
 
     private void SaveProfiles()

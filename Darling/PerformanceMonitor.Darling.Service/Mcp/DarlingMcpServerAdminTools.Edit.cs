@@ -165,7 +165,7 @@ public sealed partial class DarlingMcpServerAdminTools
         "Changes ONLY the fields named in changes_json, a JSON object. Keys: display_name, host, port (PostgreSQL), " +
         "database, read_only_intent, auth (\"Windows\", \"SQL\", \"ServicePrincipal\", \"ManagedIdentity\"), username, " +
         "password, encrypt_mode, trust_server_certificate, multi_subnet_failover, query_store_replica, monthly_cost_usd, " +
-        "aws_role_arn, aws_external_id, expected_modified_at. The values mean what they mean in add_servers (query_store_replica: empty or null removes it). Naming engine, is_enabled, " +
+        "aws_role_arn, aws_external_id, expected_modified_at. The values mean what they mean in add_servers (query_store_replica: empty or null removes it; monthly_cost_usd: null clears it, stored as 0, the unset value). Naming engine, is_enabled, " +
         "excluded_databases or any other key is status \"invalid\". The server keeps its id: tags, history and " +
         "settings stay attached, even when the address changes; the old address then cannot be added as a new " +
         "server under the same spelling. PASSWORD: omit it, or leave it blank, to keep the stored one; a typed one replaces it and is the password itself (a value starting with env: or file: is refused, references are set in the configuration file). The stored secret cannot be " +
@@ -185,7 +185,7 @@ public sealed partial class DarlingMcpServerAdminTools
         "the request equals the stored values, nothing was written. updated returns {status, server, display_name, " +
         "server_id, changed:[field names], reconnects, tested, query_store_replica_test, modified_at, note}; reconnects says whether the " +
         "service drops and re-opens its connection to the server; query_store_replica_test is the replica's own connection result when the " +
-        "server has one and the edit was tested (a replica that does not open is a note, the edit is still saved). server_name is resolved as remove_server resolves it.")]
+        "server has one and the edit was tested (a replica that does not open is a note, the edit is still saved; on an Azure SQL Database it says the setting has no effect, because that engine has no readable-replica Query Store read). server_name is resolved as remove_server resolves it.")]
     public static Task<string> EditServer(
         NpgsqlDataSource postgres,
         [Description("The monitored server to edit: its display name or storage name / address. A partial name is accepted only when it matches exactly one definition.")] string server_name,
@@ -839,9 +839,12 @@ LIMIT 1";
                     changes.EncryptMode = encryptMode;
                     break;
                 case "monthly_cost_usd":
-                    if (!TryEditDecimal(node, out var cost) || cost < 0)
+                    // #6454: null clears the cost. The stored column is NOT NULL and 0 is the unset value every FinOps read
+                    // treats as "no cost", so a clear is stored as 0.
+                    var cost = 0m;
+                    if (node is not null && (!TryEditDecimal(node, out cost) || cost < 0))
                     {
-                        return (null, "monthly_cost_usd must be a number, zero or more.");
+                        return (null, "monthly_cost_usd must be a number, zero or more; null clears it.");
                     }
 
                     changes.MonthlyCostUsd = cost;

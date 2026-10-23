@@ -8,8 +8,10 @@ Run from an ELEVATED PowerShell, from the folder you extracted the Darling zip i
 installs the service pointing at THAT folder - extract to the final location first, e.g.
 C:\Program Files\PerformanceMonitorDarling). What it does, in order:
 
-  1. Verifies elevation, the service exe, and darling.json (offers to copy darling.sample.json
-     and stops so you can edit it - the service is not installed with an unedited sample).
+  1. Verifies elevation, the service exe, and darling.json. When darling.json does not exist it writes a
+     minimal one (the bundled PostgreSQL store, no servers) and carries on: the service starts with no
+     monitored servers and you add the first one afterwards in the Viewer (#6468). darling.sample.json stays
+     beside it as the full reference.
   1a. REFUSES an install tree an ordinary local user can ALREADY write to, before anything - including
      the lock at 1b2 - has run (#4043): the usual case is Authenticated Users: Modify, inherited from
      C:\. A lock closes FURTHER writes; it cannot undo one made before it existed, so this recursively
@@ -24,12 +26,9 @@ C:\Program Files\PerformanceMonitorDarling). What it does, in order:
   1b2. Locks the install folder against ordinary users before anything runs from it (#4034): a folder made
      directly under C:\ otherwise lets any local user replace the service's binaries. Extract into a fresh
      folder and run this straight away; no lock can undo a file swapped before it.
-  1c. REFUSES an install when the base .NET Runtime 10 (Microsoft.NETCore.App) or the ASP.NET Core
-     Runtime 10 is missing, and WARNS when the .NET Desktop Runtime 10 is (#2479, #5407). Both shipped
-     binaries are framework-dependent; a stock Windows Server image has none of these runtimes, and the
-     failure is the .NET host's own "You must install .NET" error with nothing of ours on it. The
-     standalone ASP.NET Core Runtime installer does not include the base runtime; the Hosting Bundle
-     does. Part of the pre-flight, so -SkipPreflight skips it.
+  1c2. REFUSES a first install whose darling.json is an unedited copy of darling.sample.json, because the
+     copy still names the sample's example servers (#6475). Runs before the lock at 1b2, so a refusal leaves
+     the folder's permissions as they were.
   2. Optional pre-flight: runs `--test-connection` and shows the per-server PASS/FAIL lines
      (continue-or-abort prompt on failure; -SkipPreflight to skip). STOPS (exit 5) instead of prompting when
      the exe prints "doesn't fully support CET": Windows needs its updates (#5651).
@@ -43,6 +42,7 @@ C:\Program Files\PerformanceMonitorDarling). What it does, in order:
   4b. Restricts darling.json to SYSTEM / Administrators / the service account, plus read for the
      local group 'PerformanceMonitor Darling Operators' (the Viewer and the CLI, run without
      elevation). The group is created here, empty: you add each person who should have that access.
+     Step 7 offers to add the account signed in to this session (default No), or -AddOperator names one.
      darling.json holds encrypted SQL passwords and the MCP/web access tokens, and an install
      folder under C:\ otherwise inherits read access for BUILTIN\Users.
   4b2. Grants the service account read and execute on the locked install folder, and Modify only on the
@@ -55,15 +55,22 @@ C:\Program Files\PerformanceMonitorDarling). What it does, in order:
      --configure-firewall verb. This requires elevation, which is why it lives here: the service's
      own unprivileged account cannot create them, and only verifies them at runtime.
   5. Starts the service and confirms it reaches Running.
-  6. Creates 'Darling Viewer' shortcuts on the Desktop and in the Start Menu pointing at
+  6. Creates 'Darling Viewer' shortcuts on the public Desktop and in the all-users Start Menu (not the
+     Desktop of whichever account elevated, #6475) pointing at
      viewer\PerformanceMonitor.Darling.Viewer.exe. (Taskbar pinning is deliberately not
      attempted - Windows blocks programmatic pinning by design; pin from the Start Menu entry.)
+  7. Asks once whether to add the account signed in to this session to the operator group (default
+     No; -AddOperator <account> adds one without asking, -NoOperatorPrompt never asks, and a host that
+     cannot take an answer counts as No). A Yes also gives that account a direct grant of the group's
+     access (read on darling.json and the store's admin and viewer credential files, traverse on the
+     store folder) so the Viewer and the CLI work without a sign-out; the service drops that grant when
+     it rewrites those permissions at a start, and uninstall-darling.ps1 removes it.
 
 Uninstall with uninstall-darling.ps1 (same folder).
 
 .PARAMETER SkipPreflight
-Skip BOTH pre-flight gates: the .NET runtime check (1c) and the --test-connection probe (2). The runtime
-check is the escape hatch for a private or xcopy runtime layout this script cannot see.
+Skip the --test-connection probe (2). The service and the viewer\ folder are self-contained, so there is no
+.NET runtime check to skip (#6471).
 
 .PARAMETER NoShortcuts
 Do not create the viewer shortcuts.
@@ -81,13 +88,27 @@ was EVER writable by someone besides SYSTEM, Administrators, TrustedInstaller an
 swapped binary. Passing this accepts that risk. It exists for a dev loop that extracts into a folder you
 know is writable on purpose (a repo working copy, a shared build share) - not for a real install. Extract
 under C:\Program Files\<something>, or another folder only an administrator can write to, instead.
+
+.PARAMETER AddOperator
+Add this account (DOMAIN\user, or a local user's name) to the local group 'PerformanceMonitor Darling Operators' at the end of
+the install without asking (#6478), and give it a direct grant of the same access so the Viewer and the CLI work in the
+session that is already open. For a scripted install. Without this parameter and without -NoOperatorPrompt, an interactive
+install asks "Add <the signed-in account> to the group? [y/N]" and the answer defaults to No. Ignored on a domain controller,
+which has no local groups. Cannot be combined with -NoOperatorPrompt.
+
+.PARAMETER NoOperatorPrompt
+Never ask whether to add the signed-in account to the operator group (#6478). The install prints who to add, and that the
+person signs out and back in, as it did before the question existed. A host that cannot take an answer (input redirected, or
+started with -NonInteractive) is treated the same way without this switch.
 #>
 [CmdletBinding()]
 param(
     [switch]$SkipPreflight,
     [switch]$NoShortcuts,
     [switch]$Network,
-    [switch]$AcceptWritableExtraction
+    [switch]$AcceptWritableExtraction,
+    [string]$AddOperator,
+    [switch]$NoOperatorPrompt
 )
 
 $ErrorActionPreference = 'Stop'
@@ -105,13 +126,9 @@ $samplePath = Join-Path $root 'darling.sample.json'
 # DarlingFileSecurity.OperatorGroupName in the service project.
 $operatorGroupName = 'PerformanceMonitor Darling Operators'
 
-# The .NET major both shipped binaries are built against, and the one page that offers every installer
-# for it. Kept beside the other script-scope facts so a framework bump is one edit, and deliberately the
-# SAME url the UAT onboarding prints - a tester who reads both should not be sent to two places.
-$dotnetMajor = 10
-$dotnetDownloadUrl = 'https://dotnet.microsoft.com/download/dotnet/10.0'
-
 function Fail([string]$message) { Write-Host "ERROR: $message" -ForegroundColor Red; exit 1 }
+
+if ($AddOperator -and $NoOperatorPrompt) { Fail '-AddOperator and -NoOperatorPrompt cannot be used together: one adds the account without asking, the other never asks.' }
 
 # Read-only counterpart to Lock-DarlingInstallTree, for #4043: is $path ALREADY writable by someone outside
 # $trusted, right now, before anything is locked or a service account even exists? #4038's lock only stops
@@ -1219,96 +1236,6 @@ function Get-NetworkPathKind([string]$path) {
     return $null
 }
 
-# Every place the .NET host looks for a shared framework, in the order it looks. Used by the runtime gate
-# at 1c, which has to answer "can these binaries start at all" on a box where dotnet.exe may not exist.
-function Get-DotnetRootCandidates {
-    $roots = New-Object 'System.Collections.Generic.List[string]'
-
-    # DOTNET_ROOT wins here because it wins for the host: an operator who redirected the runtime is not
-    # someone whose install should be refused for looking in the wrong place.
-    foreach ($fromEnv in @($env:DOTNET_ROOT, ${env:DOTNET_ROOT_X64})) {
-        if (-not [string]::IsNullOrWhiteSpace($fromEnv)) { $roots.Add($fromEnv) }
-    }
-
-    # Where the official installers record themselves. The key is HKLM:\SOFTWARE\dotnet - NOT under
-    # Microsoft\ - and reading it is what finds an install that was pointed somewhere other than
-    # Program Files. Its absence proves nothing, so the default location below is checked regardless.
-    try {
-        $recorded = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\dotnet\Setup\InstalledVersions\x64' -Name 'InstallLocation' -ErrorAction Stop).InstallLocation
-        if (-not [string]::IsNullOrWhiteSpace($recorded)) { $roots.Add($recorded) }
-    }
-    catch {
-        # No registry entry, or an unreadable one. Fall through.
-    }
-
-    foreach ($programFiles in @($env:ProgramW6432, $env:ProgramFiles)) {
-        if (-not [string]::IsNullOrWhiteSpace($programFiles)) { $roots.Add((Join-Path $programFiles 'dotnet')) }
-    }
-
-    return $roots
-}
-
-# The version folder names present for one shared framework, e.g. '10.0.11' for Microsoft.AspNetCore.App.
-# Returns an empty list when the framework is not installed anywhere this can see.
-function Get-InstalledFrameworkVersions([string]$frameworkName) {
-    $versions = New-Object 'System.Collections.Generic.List[string]'
-
-    foreach ($dotnetRoot in (Get-DotnetRootCandidates)) {
-        $frameworkDir = Join-Path (Join-Path $dotnetRoot 'shared') $frameworkName
-        if (-not (Test-Path -LiteralPath $frameworkDir)) { continue }
-        foreach ($child in @(Get-ChildItem -LiteralPath $frameworkDir -Directory -ErrorAction SilentlyContinue)) {
-            $versions.Add($child.Name)
-        }
-    }
-
-    # `dotnet --list-runtimes` is the authoritative answer and sees layouts the three guesses above do
-    # not, but it is a SUPPLEMENT rather than the primary check: a box with neither runtime installed
-    # frequently has no dotnet.exe on it at all, and that is precisely the box this gate exists for.
-    $muxer = Get-Command 'dotnet' -CommandType Application -ErrorAction SilentlyContinue
-    if ($muxer) {
-        try {
-            foreach ($line in @(& $muxer.Source --list-runtimes 2>$null)) {
-                if ($line -match ('^' + [Regex]::Escape($frameworkName) + '\s+(\S+)\s')) { $versions.Add($Matches[1]) }
-            }
-        }
-        catch {
-            # A dotnet.exe that cannot list its own runtimes tells us nothing the directory scan did not.
-        }
-    }
-
-    return $versions
-}
-
-# True when at least one of $versions is a build of major version $major.
-#
-# The test is on the PARSED leading integer, never a text prefix. '1.10.0' and '110.0.0' both contain the
-# characters '10.' and neither one is .NET 10, so a -like '10.*' or a bare -match '10\.' waves a box
-# through with no runtime on it and hands the operator back the raw host error this gate exists to
-# replace - the worse of the two failures, because it looks like the check ran.
-#
-# MAJOR is the right granularity because it is the granularity the host rolls forward at: a net10.0 app
-# rolls forward across patch and minor by default but never across major, so any 10.x satisfies these
-# binaries and an 11.x does not.
-function Test-FrameworkMajorPresent([string[]]$versions, [int]$major) {
-    if ($null -eq $versions) { return $false }
-
-    foreach ($version in $versions) {
-        if ([string]::IsNullOrWhiteSpace($version)) { continue }
-        if ($version -match '^\s*(\d+)(?:\.|$)') {
-            if ([int]$Matches[1] -eq $major) { return $true }
-        }
-    }
-
-    return $false
-}
-
-# What the gate says it found. 'nothing' rather than an empty string, because a blank there reads as a
-# formatting bug and sends the operator looking in the wrong place.
-function Format-FrameworkVersionList([string[]]$versions) {
-    if ($null -eq $versions -or $versions.Count -eq 0) { return 'nothing' }
-    return (($versions | Sort-Object -Unique) -join ', ')
-}
-
 # The logon account the Darling service is registered to run as, exactly as Windows reports it (LocalSystem,
 # .\name and NT SERVICE\... spellings included), or $null when neither Win32_Service nor sc.exe qc can say.
 # sc.exe qc is the non-WMI second opinion, so a broken WMI repository alone cannot hide the account; its field
@@ -1871,6 +1798,35 @@ Nothing was installed or changed.
     if ($answer -notmatch '^[Yy]') { exit 4 }
 }
 
+# -- 1c2. Refuse a first install on an unedited sample (#6475) ----------------------------------------
+# darling.sample.json is a reference, and its two example servers would be registered on the first start if the
+# file were copied over unchanged (the sample's own first line tells a person to copy it). Since #6468 a missing
+# darling.json is not a problem, because the installer writes a minimal one with no servers; an UNEDITED COPY of
+# the sample is, because it still names servers that do not exist. Compared as text, ignoring line endings and
+# trailing blanks, so a copy saved by an editor that changed them is still caught. Only a first install is held:
+# an existing service has a store that is authoritative for its servers, and the file only matters to it as a
+# fallback, so an upgrade through this script is never blocked by it. Before the lock, so a refusal leaves the folder's permissions as they were.
+function Test-DarlingConfigIsUnchangedSample([string]$configPath, [string]$samplePath) {
+    if (-not (Test-Path -LiteralPath $configPath)) { return $false }
+    if (-not (Test-Path -LiteralPath $samplePath)) { return $false }
+    $normalize = { param([string]$text) ((($text -replace "`r`n", "`n") -split "`n" | ForEach-Object { $_.TrimEnd() }) -join "`n").Trim() }
+    $config = & $normalize ([System.IO.File]::ReadAllText($configPath))
+    $sample = & $normalize ([System.IO.File]::ReadAllText($samplePath))
+    return ($config -ceq $sample)
+}
+
+if (-not $existing -and (Test-DarlingConfigIsUnchangedSample $configPath $samplePath)) {
+    Fail @"
+darling.json is an unedited copy of darling.sample.json, so it still names the sample's example servers, which do not exist.
+The service would register them on its first start.
+
+  Either delete darling.json and run this script again (it writes a minimal darling.json with no servers, and you
+  add your first server in the Viewer afterwards), or edit darling.json so it names your own servers.
+
+Nothing was installed or changed.
+"@
+}
+
 # -- 1b2. Lock the install tree before anything runs from it (#4034) ---------------------------------------
 # The rest of this script runs the service exe (the pre-flight, --configure-firewall) and registers it to run
 # as the service account, so the tree is closed to ordinary users first: see Lock-DarlingInstallTree. On a
@@ -1891,117 +1847,39 @@ if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
 }
 Invoke-InstallTreeLock $lockAccount -StopOnOpen
 
-# -- 1c. Refuse an install the .NET runtimes on this box cannot run (#2479) ------------------------
-# The first thing a new operator hits and the least self-explanatory. Both shipped binaries are
-# FRAMEWORK-DEPENDENT publishes, so both name a shared framework in their runtimeconfig.json and neither
-# carries one:
-#
-#   PerformanceMonitor.Darling.Service.exe -> Microsoft.NETCore.App + Microsoft.AspNetCore.App
-#   viewer\PerformanceMonitor.Darling.Viewer.exe -> Microsoft.NETCore.App + Microsoft.WindowsDesktop.App
-#
-# Microsoft.NETCore.App is required by both and is NOT part of the standalone ASP.NET Core Runtime
-# installer (the Hosting Bundle and the .NET Runtime installer carry it), so it is checked on its own (#5407).
-#
-# ASP.NET Core is required UNCONDITIONALLY, which is the part nobody expects: the MCP tools reference
-# ModelContextProtocol.AspNetCore, which brings the Microsoft.AspNetCore.App framework reference in
-# transitively, so the framework is named in the runtimeconfig whether or not mcp.enabled and
-# web.enabled are ever turned on. Setting them false does not make the requirement go away.
-#
-# A stock Windows Server image has neither runtime. Without this gate the operator's first signal is the
-# .NET host's own error - "You must install .NET to run this application" - printed BY THE PRE-FLIGHT AT
-# STEP 2, which then reports "the config is invalid or a server is unreachable" and offers to install
-# anyway. That diagnosis is not merely unhelpful, it is wrong, and it points at the config file. So this
-# has to run before step 2 touches the exe at all.
-#
-# Governed by -SkipPreflight rather than a switch of its own, because it is the same kind of gate: a
-# question asked before anything is created, answered from the operator's machine, and worth bypassing
-# only when the operator knows something this script cannot see.
-if (-not $SkipPreflight) {
-    $netCoreVersions = @(Get-InstalledFrameworkVersions 'Microsoft.NETCore.App')
-    $aspNetVersions = @(Get-InstalledFrameworkVersions 'Microsoft.AspNetCore.App')
-    $desktopVersions = @(Get-InstalledFrameworkVersions 'Microsoft.WindowsDesktop.App')
+# A first install needs no hand-edited darling.json (#6468). The service starts with no monitored servers, so a
+# missing darling.json is answered with a minimal one (the bundled store only) and the install carries on. The
+# first server is added afterwards in the Viewer. The full sample is left beside it as the reference.
+function New-DarlingMinimalConfigText {
+    return @'
+{
+  // Written by install-darling.ps1. The service keeps everything else in its own PostgreSQL store.
+  // darling.sample.json beside this file is the full, commented reference for every setting.
+  //
+  // No server is named here on purpose: the service starts with none. Add the first one in the Viewer
+  // (Add Server). Once the service has started, the store is authoritative for the server list, so adding
+  // servers to this file later changes nothing.
+  "postgres": {
+    "managed": true,
+    "port": 5641
+  },
+  "servers": []
+}
+'@
+}
 
-    # The base runtime is checked FIRST, and on its own it is a refusal for a reason that is easy to
-    # miss: the standalone ASP.NET Core Runtime installer does NOT include Microsoft.NETCore.App, so a box
-    # with only that installer passes the ASP.NET Core check below and then dies at service start with the
-    # host's own "You must install .NET" (#5407). Both shipped exes name Microsoft.NETCore.App. The message
-    # shows what was found for BOTH frameworks, so an operator missing both reads one message and fixes
-    # both in one pass (the Hosting Bundle installs both).
-    if (-not (Test-FrameworkMajorPresent $netCoreVersions $dotnetMajor)) {
-        Fail @"
-The .NET Runtime $dotnetMajor.0 is not installed, and the service cannot start without it.
-
-  Need:  The ASP.NET Core Hosting Bundle $dotnetMajor.0 (x64), which installs both runtimes below,
-         OR the .NET Runtime $dotnetMajor.0 (x64) together with the ASP.NET Core Runtime $dotnetMajor.0 (x64).
-  Found: .NET Runtime (Microsoft.NETCore.App):      $(Format-FrameworkVersionList $netCoreVersions)
-         ASP.NET Core (Microsoft.AspNetCore.App):   $(Format-FrameworkVersionList $aspNetVersions)
-  Get:   $dotnetDownloadUrl
-
-The standalone ASP.NET Core Runtime installer does NOT include the base .NET Runtime, so having only that
-one is not enough. The service also needs the ASP.NET Core Runtime whether or not you ever enable MCP or
-the web dashboard.
-
-Install it and run this script again. Nothing was installed or changed.
-
-If this machine DOES have it in a layout this check cannot see, re-run with -SkipPreflight, which skips
-this gate and the --test-connection probe together.
-"@
-    }
-
-    if (-not (Test-FrameworkMajorPresent $aspNetVersions $dotnetMajor)) {
-        Fail @"
-The ASP.NET Core Runtime $dotnetMajor.0 is not installed, and the service cannot start without it.
-
-  Need:  ASP.NET Core Runtime $dotnetMajor.0 (x64). The Hosting Bundle contains it and also works.
-  Found: .NET Runtime (Microsoft.NETCore.App):      $(Format-FrameworkVersionList $netCoreVersions)
-         ASP.NET Core (Microsoft.AspNetCore.App):   $(Format-FrameworkVersionList $aspNetVersions)
-  Get:   $dotnetDownloadUrl
-
-This is required whether or not you ever enable MCP or the web dashboard - the MCP package brings the
-ASP.NET Core framework reference in transitively, so the service names it at startup either way.
-
-Install it and run this script again. Nothing was installed or changed.
-
-If this machine DOES have it in a layout this check cannot see, re-run with -SkipPreflight, which skips
-this gate and the --test-connection probe together.
-"@
-    }
-
-    # A WARNING and not a refusal, and the asymmetry is deliberate. A missing ASP.NET Core runtime means
-    # the thing being installed cannot run; a missing Desktop runtime means only that the viewer cannot,
-    # and a headless collector host that nobody ever opens a window on is a legitimate deployment. What
-    # it must not do is stay quiet, because this script creates Desktop and Start Menu shortcuts a few
-    # steps from here and a tester will double-click one.
-    #
-    # Scoped to the co-located viewer\ folder on purpose: the remote-seat viewer installed from the
-    # Velopack Setup.exe is a SELF-CONTAINED publish and needs no Desktop runtime at all, so this is a
-    # statement about this box, not about every seat.
-    if (-not (Test-FrameworkMajorPresent $desktopVersions $dotnetMajor)) {
-        Write-Host ''
-        Write-Host "WARNING: the .NET Desktop Runtime $dotnetMajor.0 is not installed." -ForegroundColor Yellow
-        Write-Host "  Found: $(Format-FrameworkVersionList $desktopVersions)" -ForegroundColor Yellow
-        Write-Host "  Get:   $dotnetDownloadUrl" -ForegroundColor Yellow
-        Write-Host ''
-        Write-Host 'The SERVICE does not need it and this install continues. The bundled viewer does: the Desktop and' -ForegroundColor Yellow
-        Write-Host 'Start Menu shortcuts this script creates will fail with the .NET host error until it is installed.' -ForegroundColor Yellow
-        Write-Host ''
-    }
-    else {
-        Write-Host "Runtime check passed (.NET Runtime $dotnetMajor, ASP.NET Core $dotnetMajor and .NET Desktop $dotnetMajor present)." -ForegroundColor Green
-    }
+# Writes the minimal file as UTF-8 without a byte-order mark, so every reader (the service's, this script's
+# regexes, Windows PowerShell 5.1) sees the same bytes.
+function Write-DarlingMinimalConfig([string]$path) {
+    [System.IO.File]::WriteAllText($path, (New-DarlingMinimalConfigText), (New-Object System.Text.UTF8Encoding($false)))
 }
 
 if (-not (Test-Path -LiteralPath $configPath)) {
-    if (Test-Path -LiteralPath $samplePath) {
-        Copy-Item -LiteralPath $samplePath -Destination $configPath
-        Write-Host ''
-        Write-Host 'darling.json did not exist, so darling.sample.json was copied to darling.json.' -ForegroundColor Yellow
-        Write-Host 'EDIT IT NOW (servers to monitor, auth) and re-run this script. The sample is heavily commented.' -ForegroundColor Yellow
-        Write-Host "  notepad `"$configPath`"" -ForegroundColor Yellow
-        exit 2
-    }
-
-    Fail 'Neither darling.json nor darling.sample.json found beside this script - the zip looks incomplete.'
+    Write-DarlingMinimalConfig $configPath
+    Write-Host ''
+    Write-Host 'darling.json did not exist, so a minimal one was written: the bundled PostgreSQL store and no servers.' -ForegroundColor Yellow
+    Write-Host 'Nothing needs editing before the install. Add your first server afterwards, in the Viewer (Add Server).' -ForegroundColor Yellow
+    Write-Host 'darling.sample.json beside it is the full reference for every other setting.' -ForegroundColor Yellow
 }
 
 # -- 2. Pre-flight --------------------------------------------------------------------------------
@@ -2033,7 +1911,7 @@ if (-not $SkipPreflight) {
         Write-Host ''
         Write-Host 'ERROR: Windows on this machine is missing updates that .NET 10 needs, so the service cannot start.' -ForegroundColor Red
         Write-Host 'The service exe printed the CET start error (Your Windows doesn''t fully support CET).' -ForegroundColor Red
-        Write-Host 'Install all available Windows updates, restart, and run this script again. Nothing was installed.' -ForegroundColor Yellow
+        Write-Host 'Install all available Windows updates, restart, and run this script again. The service was not installed. The install folder''s permissions were already locked, and stay that way.' -ForegroundColor Yellow
         Write-Host 'If the updates cannot go on yet, the README (Prerequisites) has a workaround. It turns off one' -ForegroundColor Yellow
         Write-Host 'protection (UserShadowStack) for the Darling exes, and shows the command that undoes it.' -ForegroundColor Yellow
         exit 5
@@ -2073,11 +1951,230 @@ function Test-DarlingDomainController {
     return ((Get-DarlingProductType) -eq 2)
 }
 
+# -- Adding the installing person to the operator group (#6478) ------------------------------------------
+# At the end of the install the script offers to add the person who is signed in to the operator group, so the Viewer and the
+# CLI work for them without a sign-out. Who gets the group's access is still the administrator's decision: the answer defaults
+# to No, -NoOperatorPrompt never asks, and -AddOperator names the account for a scripted install. Each function below is small
+# so a test can stand in for the machine.
+
+# True for a PowerShell remoting session (WinRM, Enter-PSSession, Invoke-Command). Such a session can report
+# [Environment]::UserInteractive as true yet has no console to answer on, so a Read-Host there would hang. Its host is
+# named ServerRemoteHost and $PSSenderInfo is set. Takes both as arguments so a test can stand in for the session.
+function Test-DarlingRemoteSession([string]$HostName, $SenderInfo) {
+    return ($HostName -eq 'ServerRemoteHost' -or $null -ne $SenderInfo)
+}
+
+# True only when a person can answer a prompt: an interactive window station, input that is not redirected, a host not
+# started with -NonInteractive, and not a remoting session. Anything else is treated as No by the caller, never waited on.
+function Test-DarlingInteractiveHost {
+    if (-not [Environment]::UserInteractive) { return $false }
+    if (Test-DarlingRemoteSession $Host.Name $PSSenderInfo) { return $false }
+    try { if ([Console]::IsInputRedirected) { return $false } }
+    catch { return $false }
+    foreach ($argument in [Environment]::GetCommandLineArgs()) {
+        if ($argument -match '^[-/]NonI') { return $false }
+    }
+    return $true
+}
+
+# DOMAIN\user of the person signed in to THIS session: the owner of the session's explorer.exe. That is not always the
+# account the script runs as (a person who elevates with another administrator account is signed in as themselves, and the
+# script runs as the administrator). $null when no desktop shell runs in this session (a remote or service session).
+function Get-DarlingInteractiveUser {
+    try {
+        $sessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+        foreach ($shell in @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'explorer.exe' AND SessionId = $sessionId" -ErrorAction Stop)) {
+            $owner = Invoke-CimMethod -InputObject $shell -MethodName GetOwner -ErrorAction Stop
+            if ($owner.ReturnValue -eq 0 -and $owner.User) { return "$($owner.Domain)\$($owner.User)" }
+        }
+    }
+    catch { }
+    return $null
+}
+
+# The SID of an account named by -AddOperator or offered at the prompt. Throws with the reason when the name does not resolve
+# or is not a user or group account (Everyone, Authenticated Users and BUILTIN\Users are not: a name like those would put
+# every user inside the boundary the group exists to draw).
+function Resolve-DarlingOperatorAccount([string]$account) {
+    try { $sid = (New-Object System.Security.Principal.NTAccount($account)).Translate([System.Security.Principal.SecurityIdentifier]) }
+    catch { throw "'$account' is not an account this machine can resolve." }
+    if (-not $sid.IsAccountSid()) { throw "'$account' is a built-in or well-known account, not a user or group account." }
+    return $sid
+}
+
+# Adds the account to the local operator group with net.exe, for the reason Initialize-DarlingOperatorGroup gives. Error 1378
+# (already a member) is success: a re-run leaves the group exactly as it is.
+function Add-DarlingOperatorToGroup([string]$groupName, [string]$account) {
+    $ErrorActionPreference = 'Continue'
+    $output = & net.exe localgroup $groupName $account /add 2>&1
+    if ($LASTEXITCODE -ne 0 -and -not ((Get-DarlingNativeText $output) -match '\b1378\b')) {
+        throw "net localgroup `"$groupName`" $account /add failed with exit code $LASTEXITCODE`: $(Get-DarlingNativeText $output)"
+    }
+}
+
+# What the group itself holds, as a path and an icacls rights string: read on darling.json, Traverse on the store folder (this
+# folder only), and read on the store's admin and viewer credential files. It mirrors DarlingFileSecurity and the grants made
+# at 4b and 4b3 above; a store that is not managed has no store folder and no credential files.
+function Get-DarlingOperatorGrantTargets([string]$configPath, [string]$storeFolder) {
+    $targets = @([pscustomobject]@{ Path = $configPath; Rights = '(R)'; IsFolder = $false })
+    if ($storeFolder) {
+        $targets += [pscustomobject]@{ Path = $storeFolder; Rights = '(S,X)'; IsFolder = $true }
+        foreach ($name in @('pg-admin-credential.dpapi', 'pg-viewer-credential.dpapi')) {
+            $targets += [pscustomobject]@{ Path = (Join-Path $storeFolder $name); Rights = '(R)'; IsFolder = $false }
+        }
+    }
+    return $targets
+}
+
+# True when the target exists and is what it should be: a plain file with one name, or a plain folder, not a link. icacls follows
+# a link, so a target that is one is never granted through.
+function Test-DarlingGrantTargetPlain($target) {
+    $item = Get-Item -LiteralPath $target.Path -Force -ErrorAction SilentlyContinue
+    if ($null -eq $item) { return $false }
+    if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { return $false }
+    if (-not $target.IsFolder -and (Get-DarlingFileNameCount $target.Path) -ne 1) { return $false }
+    return $true
+}
+
+# True when the target carries a direct (not inherited) Allow entry for the account.
+function Test-DarlingDirectGrant([string]$path, $sid) {
+    try {
+        foreach ($rule in (Get-Acl -LiteralPath $path).Access) {
+            if ($rule.IsInherited -or $rule.AccessControlType -ne 'Allow') { continue }
+            try { $ruleSid = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]) } catch { continue }
+            if ($ruleSid -eq $sid) { return $true }
+        }
+    }
+    catch { }
+    return $false
+}
+
+# Gives the account directly the access the group has, so the Viewer and the CLI work in the session that is already open: a
+# group membership only reaches a person at their next sign-in. icacls /grant ADDS one entry and leaves the rest of the
+# protected ACL as it is. The service rewrites these ACLs from scratch at every start, which drops the entry (by then the group
+# covers the account); uninstall-darling.ps1 removes it for an install that is taken off. The credential files are written by the
+# service's first start, so on a fresh install they are waited for (a bounded wait), and the grant is applied again after a
+# settle pause, because the first start can rewrite an ACL after it was granted. Returns the paths that do NOT hold the grant.
+function Grant-DarlingOperatorDirect($sid, [string]$configPath, [string]$storeFolder, [int]$waitSeconds = 180) {
+    $ErrorActionPreference = 'Continue'
+    $targets = @(Get-DarlingOperatorGrantTargets $configPath $storeFolder)
+    $deadline = (Get-Date).AddSeconds($waitSeconds)
+    $announced = $false
+    while ((Get-Date) -lt $deadline -and @($targets | Where-Object { -not (Test-Path -LiteralPath $_.Path) }).Count -gt 0) {
+        if (-not $announced) {
+            Write-Host 'Waiting for the service to write the store credential files (its first start does this) so the grant can include them...'
+            $announced = $true
+        }
+        Start-Sleep -Seconds 5
+    }
+    $apply = {
+        foreach ($target in $targets) {
+            if (-not (Test-DarlingGrantTargetPlain $target)) { continue }
+            if (Test-DarlingDirectGrant $target.Path $sid) { continue }
+            $null = & icacls.exe $target.Path /grant "*$($sid.Value):$($target.Rights)" 2>&1
+        }
+    }
+    & $apply
+    Start-Sleep -Seconds 10
+    & $apply
+    return @($targets | Where-Object { -not ((Test-DarlingGrantTargetPlain $_) -and (Test-DarlingDirectGrant $_.Path $sid)) } | ForEach-Object { $_.Path })
+}
+
+# The closing guidance. For a No it is who to add and that the person has to sign out and back in. After a Yes the person who was
+# added does not need the sign-out sentence, so it is left out; the rest is for everyone else who runs the Viewer or the CLI.
+function Write-DarlingOperatorGuidance([string]$groupName, [bool]$added) {
+    Write-Host ''
+    if ($added) {
+        Write-Host "Add anyone else who runs the Viewer or the CLI without elevation to the local group '$groupName' (Computer Management > Local Users and Groups, or net localgroup `"$groupName`" DOMAIN\user /add); each has to sign out and back in before the membership takes effect."
+    }
+    else {
+        Write-Host "Local group '$groupName' is in place. No one was added to it."
+        Write-Host "Add each person who runs the Viewer or the CLI without elevation to the local group '$groupName' (Computer Management > Local Users and Groups, or net localgroup `"$groupName`" DOMAIN\user /add)."
+        Write-Host "Members can read darling.json and the store's admin and viewer credentials, which decrypt every stored password; give it only to people you would give the passwords to."
+        Write-Host 'A person added to the group has to sign out and back in before the membership takes effect.'
+    }
+    Write-Host ''
+}
+
+# Step 7. Asks once, at the end of the install, whether to add the signed-in person to the operator group; returns $true when
+# the account was added. The answer defaults to No in every case. -AddOperator adds the named account without asking,
+# -NoOperatorPrompt never asks, and a host nobody can answer on (redirected input, -NonInteractive) is treated as No.
+# Anything that goes wrong is a warning and the closing guidance, never a failed install: the install itself is done.
+function Invoke-DarlingOperatorStep([string]$groupName, [string]$addOperator, [bool]$noPrompt, [string]$configPath, [string]$storeFolder) {
+    $account = $null
+    if ($addOperator) {
+        $account = $addOperator
+    }
+    elseif ($noPrompt) {
+        Write-DarlingOperatorGuidance $groupName $false
+        return $false
+    }
+    elseif (-not (Test-DarlingInteractiveHost)) {
+        Write-Host ''
+        Write-Host "Not asking whether to add anyone to '$groupName': this host cannot take an answer, so the answer is No."
+        Write-DarlingOperatorGuidance $groupName $false
+        return $false
+    }
+    else {
+        $runAs = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        $account = Get-DarlingInteractiveUser
+        if (-not $account) { $account = $runAs }
+        Write-Host ''
+        try { $differs = (Resolve-DarlingOperatorAccount $account) -ne (Resolve-DarlingOperatorAccount $runAs) }
+        catch { $differs = $false }
+        if ($differs) {
+            Write-Host "You are signed in as $account, but this script runs as $runAs (you elevated with another account), so adding $account is a separate decision from the one that elevated."
+        }
+        Write-Host "Members can read darling.json and the store's admin and viewer credentials, which decrypt every stored password, and the Viewer connects with the store's admin role; give it only to people you would give the passwords to."
+        try { $answer = Read-Host "Add $account to '$groupName'? [y/N]" }
+        catch { $answer = '' }
+        if ($answer -notmatch '^[Yy]') {
+            Write-DarlingOperatorGuidance $groupName $false
+            return $false
+        }
+    }
+
+    try {
+        $sid = Resolve-DarlingOperatorAccount $account
+        $name = $sid.Translate([System.Security.Principal.NTAccount]).Value
+        Add-DarlingOperatorToGroup $groupName $name
+    }
+    catch {
+        Write-Host "Could not add '$account' to '$groupName': $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-DarlingOperatorGuidance $groupName $false
+        return $false
+    }
+    Write-Host "Added $name to the local group '$groupName'."
+    try { $missing = @(Grant-DarlingOperatorDirect $sid $configPath $storeFolder) }
+    catch { $missing = @($configPath) }
+    if ($missing.Count -eq 0) {
+        Write-Host "$name also has a direct grant of the same access, so the Viewer and the CLI work in the session that is already open. The service drops it the next time it starts; from then on the group covers $name only after $name signs out and back in (a reboot does that, a service restart or an upgrade does not). uninstall-darling.ps1 removes it; to remove it now run icacls <darling.json, the store folder, each credential file> /remove *$($sid.Value)"
+    }
+    else {
+        Write-Host "$name is in the group, but the direct grant could not be confirmed on: $($missing -join ', '). $name has to sign out and back in before the Viewer and the CLI work without elevation." -ForegroundColor Yellow
+    }
+    Write-DarlingOperatorGuidance $groupName $true
+    return $true
+}
+
 # Decided before step 4 stops an existing service, so a refusal here can never leave it stopped. On a domain controller the
 # operator group is skipped (step 4b says so) and the install finishes; the Viewer and the CLI then run elevated.
 $onDomainController = Test-DarlingDomainController
 if ($onDomainController) {
     Write-Host "WARNING: this machine is a domain controller, which has no local groups, so the local group '$operatorGroupName' is NOT created and nothing is granted to it. The install continues. The Viewer and the CLI must be run elevated here: darling.json and the store's credentials are readable by SYSTEM, Administrators and the service account only." -ForegroundColor Yellow
+}
+
+# -AddOperator is checked here, before anything is stopped or changed: a name that does not resolve is an install that would
+# otherwise run to its last step and only then fail to add anyone.
+if ($AddOperator) {
+    if ($onDomainController) {
+        Write-Host "WARNING: -AddOperator is ignored: this machine is a domain controller, which has no local group to add '$AddOperator' to." -ForegroundColor Yellow
+        $AddOperator = ''
+    }
+    else {
+        try { $null = Resolve-DarlingOperatorAccount $AddOperator }
+        catch { Fail "-AddOperator: $($_.Exception.Message) Nothing was installed." }
+    }
 }
 
 # -- 4. Create or upgrade the service -------------------------------------------------------------
@@ -2326,21 +2423,13 @@ if ($failed.Count -gt 0) {
     Write-Host ''
 }
 
-# Who gets the operator group's access is the administrator's decision, so this script never adds a member. It
-# says who to add and what that person is being trusted with. A group that could not be created stops the
-# install, but at the end of step 4b2, not here.
-if ($operatorSid) {
-    Write-Host ''
-    Write-Host "Local group '$operatorGroupName' is in place. This script never adds members to it."
-    Write-Host "Add each person who runs the Viewer or the CLI without elevation to the local group '$operatorGroupName' (Computer Management > Local Users and Groups, or net localgroup `"$operatorGroupName`" DOMAIN\user /add)."
-    Write-Host "Members can read darling.json and the store's admin and viewer credentials, which decrypt every stored password; give it only to people you would give the passwords to."
-    Write-Host 'A person added to the group has to sign out and back in before the membership takes effect.'
-    Write-Host ''
-}
-elseif ($onDomainController) {
+# Who gets the operator group's access is the administrator's decision: the script adds a member only when the administrator
+# says so, at the end of the install (step 7: the answer to the question, or -AddOperator). Who to add, and the sign-out, are
+# printed there. A group that could not be created stops the install, but at the end of step 4b2, not here.
+if ($onDomainController) {
     Write-Host "Domain controller: the local group '$operatorGroupName' was not created and nothing was granted to it (see the warning above). Run the Viewer and the CLI elevated." -ForegroundColor Yellow
 }
-else {
+elseif (-not $operatorSid) {
     Write-Host "The local group '$operatorGroupName' could not be created: $operatorGroupProblem" -ForegroundColor Yellow
 }
 
@@ -2916,17 +3005,29 @@ if ($Network) {
     Invoke-FirewallReconcile
 }
 
+# The 'Darling Viewer' shortcut paths under the named special folders (#6475). A folder that does not resolve (GetFolderPath
+# returns '' when there is no such folder for the account) is left out. The folder lookup is a parameter so a test can stand in
+# for the machine. Kept byte-identical in install-darling.ps1 and uninstall-darling.ps1.
+function Get-DarlingShortcutPaths([string[]]$Folders, [scriptblock]$GetFolder = $null) {
+    if (-not $GetFolder) { $GetFolder = { param($name) [Environment]::GetFolderPath($name) } }
+    $paths = @()
+    foreach ($folder in $Folders) {
+        $base = & $GetFolder $folder
+        if ($base) { $paths += (Join-Path $base 'Darling Viewer.lnk') }
+    }
+    return $paths
+}
+
 # -- 6. Viewer shortcuts --------------------------------------------------------------------------
 if (-not $NoShortcuts) {
     if (Test-Path -LiteralPath $viewerExe) {
         # GetFolderPath returns '' for Desktop/StartMenu whenever there is no loaded user profile - a
         # Windows service, a scheduled task, a CI runner, a remote/SSM session - and Join-Path then
         # throws. Guard it: keep only the targets whose folder resolves, and skip cleanly otherwise.
-        $desktop   = [Environment]::GetFolderPath('Desktop')
-        $startMenu = [Environment]::GetFolderPath('StartMenu')
-        $targets = @()
-        if ($desktop)   { $targets += (Join-Path $desktop 'Darling Viewer.lnk') }
-        if ($startMenu) { $targets += (Join-Path $startMenu 'Programs\Darling Viewer.lnk') }
+        # The all-users folders, not the running account's: this script runs elevated, often as an administrator
+        # account that is not the person who will open the Viewer, and that account's own Desktop is not theirs
+        # (#6475). The public Desktop and the all-users Start Menu show the shortcut to everyone on the machine.
+        $targets = @(Get-DarlingShortcutPaths @('CommonDesktopDirectory', 'CommonPrograms'))
         if ($targets.Count -gt 0) {
             $shell = New-Object -ComObject WScript.Shell
             foreach ($lnkPath in $targets) {
@@ -2945,6 +3046,13 @@ if (-not $NoShortcuts) {
     else {
         Write-Host 'viewer\PerformanceMonitor.Darling.Viewer.exe not found - skipping shortcuts.' -ForegroundColor Yellow
     }
+}
+
+# -- 7. Offer to add the signed-in person to the operator group (#6478) -----------------------------------
+# No group on a domain controller, so no question there. The group exists by now on any other machine: a group that could not
+# be made stopped the install at 4b2.
+if ($operatorSid) {
+    $null = Invoke-DarlingOperatorStep $operatorGroupName $AddOperator ([bool]$NoOperatorPrompt) $configPath $storeFolder
 }
 
 Write-Host ''
