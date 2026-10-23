@@ -65,7 +65,7 @@ public class DarlingInstallLocationTests
             ("& $serviceExe --test-connection", "the --test-connection pre-flight"),
             ("Write-DarlingMinimalConfig $configPath", "writing the minimal darling.json"),
             ("New-EventLog -LogName Application", "registering the Event Log source"),
-            ("& sc.exe create $serviceName", "creating the service"),
+            ("Invoke-ScWithQuotedBinPath 'create'", "creating the service"),
             ("Set-Acl -LiteralPath $secretFile", "hardening the config's ACL"),
             ("Start-Service -Name $serviceName", "starting the service"),
         })
@@ -3708,7 +3708,7 @@ function Get-CimInstance {
                 ("Write-DarlingMinimalConfig $configPath", "writing the minimal darling.json"),
                 ("& $serviceExe --test-connection", "the --test-connection pre-flight"),
                 ("New-EventLog -LogName Application", "registering the Event Log source"),
-                ("& sc.exe create $serviceName", "creating the service"),
+                ("Invoke-ScWithQuotedBinPath 'create'", "creating the service"),
                 ("Set-Acl -LiteralPath $secretFile", "hardening the config's ACL"),
                 ("Start-Service -Name $serviceName", "starting the service"),
             });

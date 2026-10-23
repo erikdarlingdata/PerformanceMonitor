@@ -31,7 +31,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// A person's change to a route's agent level, limits, scope or match writes a <c>route_agent_changed</c> journal row (before and after, the
 /// store's time), the same row the Viewer's save writes; the write is also logged with the seat that made it.
 /// <para>Who may write (#6274): only a signed-in admin (<see cref="Hosting.DarlingWebSeat.IsSignedInAdmin"/>). A dashboard with no sign-in
-/// registers no seat, so a process on the host would otherwise write as the default shared-token seat; it is refused 403 with
+/// registers no seat, and a request with no seat reads as the reads-only seat; it is refused 403 with
 /// <see cref="DarlingWebEndpoints.InvestigationWriteSignInMessage"/> and nothing is written. The routes in <see cref="DarlingWebEndpoints"/> are also born gated by the host's method
 /// gate (a read-only seat is refused every unsafe method), and the store decides the rest: a login with no write grant gets SQLSTATE 42501,
 /// answered 403 with a fixed sentence. The agent's token is the MCP listener's credential and is not a web credential, so it reaches none of

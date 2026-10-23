@@ -979,6 +979,25 @@ Do NOT try to repair this folder's permissions in place.
 "@
 }
 
+# The one-line PowerShell command that extracts the zip this folder came from straight into Program Files (#6469), for the
+# refusal of a folder the service cannot use. The zip is the one beside the extract folder with the folder's name, which is
+# how Explorer's "Extract All" names its folder; with none there, a placeholder says what to put.
+function Get-DarlingExtractCommand([string]$extractedFolder) {
+    $destination = Join-Path $env:ProgramFiles 'PerformanceMonitorDarling'
+    $zipPath = '<path to the Darling zip you downloaded>'
+    try {
+        $trimmed = $extractedFolder.TrimEnd('\')
+        $parent = Split-Path -Parent $trimmed
+        $leaf = Split-Path -Leaf $trimmed
+        if ($parent -and $leaf) {
+            $candidate = Join-Path $parent ($leaf + '.zip')
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) { $zipPath = $candidate }
+        }
+    }
+    catch { $null = $_ }
+    return "Expand-Archive -LiteralPath '" + $zipPath.Replace("'", "''") + "' -DestinationPath '" + $destination.Replace("'", "''") + "'"
+}
+
 # The refusal's advice when the service is NOT registered, or runs from some other folder, so this folder is not
 # an install to keep (#5627): a fresh folder. Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
 function Get-DarlingFreshFolderAdvice([string]$folder) {
@@ -1631,9 +1650,66 @@ function Invoke-InstallTreeLock([string]$account, [switch]$StopOnOpen) {
 }
 
 # -- 1. Environment checks ------------------------------------------------------------------------
+# Can this session answer a question? Not when PowerShell was started -NonInteractive (any abbreviation of it),
+# when its input is redirected, or when the process is not interactive: a Read-Host there throws or hangs, so
+# those runs keep the plain stop below (#6469). The three facts are parameters so a test can stand in for them.
+function Test-DarlingInteractiveSession(
+    [string[]]$commandLine = [Environment]::GetCommandLineArgs(),
+    [bool]$userInteractive = [Environment]::UserInteractive,
+    [bool]$inputRedirected = [Console]::IsInputRedirected) {
+    if (-not $userInteractive -or $inputRedirected) { return $false }
+    foreach ($argument in $commandLine) {
+        if ($argument -match '^[-/]non') { return $false }
+    }
+    return $true
+}
+
+# What to do about elevation: carry on, offer to restart elevated, or stop with the message (#6469).
+function Get-DarlingElevationAction([bool]$isAdministrator, [bool]$interactive) {
+    if ($isAdministrator) { return 'Continue' }
+    if ($interactive) { return 'Offer' }
+    return 'Stop'
+}
+
+# The arguments for the elevated restart: this script, with the execution policy bypassed for that one process
+# (never Set-ExecutionPolicy), and every switch and valued parameter the person passed. -NoExit keeps the new window open so its output
+# can be read once the script ends.
+function Get-DarlingElevatedArguments([string]$scriptPath, [hashtable]$boundParameters) {
+    $list = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-NoExit', '-File', ('"' + $scriptPath + '"'))
+    foreach ($name in @($boundParameters.Keys | Sort-Object)) {
+        $value = $boundParameters[$name]
+        if ($value -is [System.Management.Automation.SwitchParameter]) {
+            if ($value.IsPresent) { $list += "-$name" }
+        }
+        elseif ($null -ne $value) {
+            # A valued parameter (-AddOperator, #6478): without it the elevated run would never add that account.
+            $list += "-$name"
+            $list += ('"' + [string]$value + '"')
+        }
+    }
+    return $list
+}
+
 $identity = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
-if (-not $identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Fail 'Run this script from an ELEVATED PowerShell (service creation and Event Log registration require it).'
+$elevationAction = Get-DarlingElevationAction ($identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) (Test-DarlingInteractiveSession)
+if ($elevationAction -eq 'Stop') {
+    Fail 'Run this script from an ELEVATED PowerShell (service creation and Event Log registration require it). To skip that step, double-click Install-Darling.cmd beside this script instead: it asks Windows for administrator rights and runs this script for you.'
+}
+if ($elevationAction -eq 'Offer') {
+    Write-Host 'This installer needs administrator rights (service creation and Event Log registration), and this PowerShell is not elevated.' -ForegroundColor Yellow
+    $answer = Read-Host 'Restart it elevated now? Windows will ask you to approve. [Y/n]'
+    if ($answer -match '^[Nn]') {
+        Fail 'Not restarted. Run this script from an ELEVATED PowerShell, or double-click Install-Darling.cmd beside it.'
+    }
+    try {
+        $powerShellExe = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        Start-Process -FilePath $powerShellExe -Verb RunAs -ArgumentList (Get-DarlingElevatedArguments $PSCommandPath $PSBoundParameters)
+    }
+    catch {
+        Fail "Could not restart elevated: $($_.Exception.Message) Run this script from an ELEVATED PowerShell, or double-click Install-Darling.cmd beside it."
+    }
+    Write-Host 'The installer is running in the elevated window that just opened. Carry on there; this window has nothing more to do.' -ForegroundColor Green
+    exit 0
 }
 
 # The MSI package (#6480) writes HKLM\SOFTWARE\PerformanceMonitor Darling, value InstalledBy = msi, and removes it at uninstall. A
@@ -1843,6 +1919,7 @@ at all. Either way the service installs cleanly and then cannot read its own pro
 "@
     }
 
+    $extractCommand = Get-DarlingExtractCommand $root
     $fix = @"
 Extract the zip again, from an elevated session, into a machine-scoped local folder that only
 administrators can write, and run this script from there:
@@ -1852,6 +1929,12 @@ administrators can write, and run this script from there:
 That is the documented location. A folder created there inherits read + execute for BUILTIN\Users,
 which the service's virtual account is a member of, and ordinary users can't write to it (#4043).
 Copy your darling.json across if you have one.
+
+To extract the zip straight into place, paste this into an ELEVATED PowerShell:
+
+  $extractCommand
+
+Then run install-darling.ps1 (or double-click Install-Darling.cmd) from that folder.
 "@
 
     if (-not $isUpgrade) {
@@ -2273,6 +2356,17 @@ if ($AddOperator) {
 # $existing was resolved back at 1b, which needs to know fresh-versus-upgrade before it decides whether a
 # bad install location is a refusal or a question. Nothing between there and here creates or removes the
 # service, so it is the same answer.
+# The registered path carries its quotes, as the MSI registers it (#6597). sc.exe strips a plain pair of quotes as it
+# parses its command line, which is why "`"$serviceExe`"" registered the path bare, so the value has to go in as
+# "\"path\"" (the outer pair is stripped, the \" pair is kept). How PowerShell turns a quoted native argument into a
+# command line differs between Windows PowerShell 5.1 and PowerShell 7.x (and by $PSNativeCommandArgumentPassing), so
+# the command line is handed over verbatim as ONE string through Start-Process, which behaves the same in all of them.
+function Invoke-ScWithQuotedBinPath([string]$verb, [string]$restOfLine) {
+    $argLine = "$verb `"$serviceName`" binPath= `"\`"$serviceExe\`"`" $restOfLine".TrimEnd()
+    $p = Start-Process -FilePath "$env:SystemRoot\System32\sc.exe" -ArgumentList $argLine -Wait -PassThru -NoNewWindow
+    return $p.ExitCode
+}
+
 if ($MsiPhase) {
     # The package created the service (its ServiceInstall row) and starts and stops it; this script never touches the service itself (#6480).
     Write-Host "Service '$serviceName' is managed by the MSI package - not created, stopped or started here."
@@ -2284,15 +2378,15 @@ elseif ($existing) {
         (Get-Service -Name $serviceName).WaitForStatus('Stopped', [TimeSpan]::FromSeconds(60))
     }
 
-    & sc.exe config $serviceName binPath= "`"$serviceExe`"" | Out-Null
-    if ($LASTEXITCODE -ne 0) { Fail "sc config failed ($LASTEXITCODE)." }
+    $scExit = Invoke-ScWithQuotedBinPath 'config' ''
+    if ($scExit -ne 0) { Fail "sc config failed ($scExit)." }
 }
 else {
     # The space after binPath=/start=/obj= is sc.exe syntax. The virtual service account is
     # password-less, per-service, unprivileged - and mandatory-in-practice for the bundled
     # PostgreSQL, which refuses to run with administrative privileges (LocalSystem bricks it).
-    & sc.exe create $serviceName binPath= "`"$serviceExe`"" start= auto obj= "NT SERVICE\$serviceName" | Out-Null
-    if ($LASTEXITCODE -ne 0) { Fail "sc create failed ($LASTEXITCODE)." }
+    $scExit = Invoke-ScWithQuotedBinPath 'create' "start= auto obj= `"NT SERVICE\$serviceName`""
+    if ($scExit -ne 0) { Fail "sc create failed ($scExit)." }
     Write-Host "Created service '$serviceName' (NT SERVICE virtual account, automatic start)."
 }
 
@@ -3070,13 +3164,218 @@ if ($MsiPhase -eq 'PreStart') {
     exit 0
 }
 
-# -- 5. Start + confirm ---------------------------------------------------------------------------
-if (-not $MsiPhase) {
+# -- 5. Start + wait until the service is ready (#6470) -------------------------------------------
+# "Running" only means the process is up. The first start still unpacks the bundled Postgres, runs initdb (its own timeout is
+# 180 seconds), migrates the store and provisions the roles before the collection loop starts, and a failure in any of those
+# leaves the service Running with nothing collected. So the install waits for the service's own words: its log, which is the
+# one place every service surface already writes. The service logs "Postgres store ready" when the store is created and
+# migrated, and "collection loop started" when collection begins; a startup it cannot get past logs a CRITICAL line instead.
+# The collection loop starting is the ready signal, not a row in collection_log: a fresh install may list no servers yet, and
+# then no collection would ever be written. The log is read by timestamp, so an upgrade does not mistake the previous run's
+# lines for this one's.
+$readyTimeoutSeconds = 420
+$serviceLogDirectory = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'PerformanceMonitorDarling\logs'
+
+# The service's log entries written at or after $since, oldest first. A line is "yyyy-MM-dd HH:mm:ss.fff [LEVEL] [category]
+# message"; a line that does not start that way continues the entry above it. The files are read with sharing, because the
+# service has today's open for append. Nothing here throws: a log that cannot be read yet is no entries. Callers wrap the call
+# in @() so zero or one entry is still an array.
+function Get-DarlingServiceLogEntries([string]$logDirectory, [datetime]$since) {
+    $entries = New-Object System.Collections.Generic.List[object]
+    if (-not (Test-Path -LiteralPath $logDirectory -PathType Container)) { return @() }
+    $files = @(Get-ChildItem -LiteralPath $logDirectory -Filter 'darling-service_*.log' -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -ge $since } | Sort-Object Name)
+    foreach ($file in $files) {
+        try {
+            $stream = [System.IO.File]::Open($file.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+            try { $text = (New-Object System.IO.StreamReader($stream)).ReadToEnd() } finally { $stream.Dispose() }
+        }
+        catch { continue }
+        $current = $null
+        foreach ($line in ($text -split "`r?`n")) {
+            if ($line -match '^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}) \[([A-Z? ]{5})\] \[[^\]]*\] (.*)$') {
+                $time = [datetime]::ParseExact($Matches[1], 'yyyy-MM-dd HH:mm:ss.fff', [System.Globalization.CultureInfo]::InvariantCulture)
+                if ($time -ge $since) {
+                    $current = [pscustomobject]@{ Time = $time; Level = $Matches[2].Trim(); Text = $Matches[3] }
+                    $entries.Add($current)
+                }
+                else { $current = $null }
+            }
+            elseif ($current -and $line.Trim()) { $current.Text += "`n" + $line.TrimEnd() }
+        }
+    }
+    return $entries.ToArray()
+}
+
+# What the entries say about the start: 'Ready' once the collection loop has started (whatever failed and retried before it),
+# 'Failed' when the service logged a startup failure it will not get past without help, otherwise 'Waiting'. The failure lines
+# are the service's CRITICAL startup lines only: a CRITICAL line about a file's permissions is a warning to read, not a start
+# that failed, so it does not stop the wait. The sustained-retry criticals (#4508: "...within the Ns retry budget ...; this is
+# still a recoverable failure, so it keeps retrying") are logged at ~120 seconds while the service keeps trying every minute, so
+# they are not terminal either: a store that comes up at 180 seconds still reaches the collection loop inside the wait.
+function Get-DarlingStartupVerdict($entries) {
+    $failurePattern = '^(Cannot load configuration|Configuration problem|Managed Postgres bootstrap|Cannot reach or migrate the Postgres store|postgres\.managed = true requires)'
+    foreach ($entry in $entries) {
+        if ($entry.Text -match '^PerformanceMonitor Darling collection loop started') { return [pscustomobject]@{ State = 'Ready'; Lines = @() } }
+    }
+    $failures = @($entries | Where-Object { $_.Level -eq 'CRIT' -and $_.Text -match $failurePattern -and $_.Text -notmatch 'still a recoverable failure' })
+    if ($failures.Count -gt 0) { return [pscustomobject]@{ State = 'Failed'; Lines = $failures } }
+    return [pscustomobject]@{ State = 'Waiting'; Lines = @() }
+}
+
+# The log lines that explain a start that did not finish: the warnings, errors and critical lines since the start, newest last.
+function Get-DarlingStartupProblemLines($entries, [int]$last = 12) {
+    $problems = @($entries | Where-Object { $_.Level -in @('WARN', 'ERROR', 'CRIT') })
+    if ($problems.Count -gt $last) { $problems = @($problems | Select-Object -Last $last) }
+    return @($problems | ForEach-Object {
+        $first = ($_.Text -split "`n")[0]
+        if ($first.Length -gt 400) { $first = $first.Substring(0, 400) + '...' }
+        '{0} [{1}] {2}' -f $_.Time.ToString('HH:mm:ss'), $_.Level, $first
+    })
+}
+
+# The one sentence that says what to do about a start that did not finish, true for the state it ended in: a logged failure and a
+# stopped service are not retrying anything, and a wait that merely ran out of time may be a store that is still being tried.
+function Get-DarlingStartupRemedy([string]$state, [int]$problemLineCount, [string]$serviceName) {
+    $restart = "'Restart-Service -Name `"$serviceName`"'"
+    switch ($state) {
+        'Failed' { return "The service logged a startup failure it will not get past without help. Fix what the lines above say, then restart it ($restart), or re-run this script." }
+        'Stopped' { return "The service is not running. Read the log lines above if there are any, fix what they say, then start it ('Start-Service -Name `"$serviceName`"'), or re-run this script." }
+    }
+    if ($problemLineCount -gt 0) { return "The service may still be retrying a store it cannot reach. Fix what the lines above say, then restart it ($restart), or re-run this script." }
+    return "The service may only be slow. Check the log again in a minute; if it stays quiet, restart it ($restart) or re-run this script."
+}
+
+# What the end of the run says about a start that did not finish, and the exit code it ends with. By hand the install failed, so the
+# exit is 1. Under -MsiPhase a nonzero exit rolls the whole package back, and by PostStart the store may already have migrated: the
+# old binaries would go back on a newer store. So the package keeps its install, the same problem and remedy are written as a warning
+# into the MSI log, and the exit is 0 (#6480).
+function Write-DarlingNotReadyVerdict([string]$startupProblem, [string]$startupRemedy, [string]$msiPhase) {
+    if ($msiPhase) {
+        Write-Host "WARNING: installed, but not ready: $startupProblem" -ForegroundColor Yellow
+        Write-Host $startupRemedy -ForegroundColor Yellow
+        return 0
+    }
+    Write-Host "Installed, but not ready: $startupProblem" -ForegroundColor Red
+    Write-Host $startupRemedy -ForegroundColor Yellow
+    return 1
+}
+
+# Waits until the service is ready, has logged a startup failure, has stopped, or $timeoutSeconds have passed, and says which:
+# State is Ready, Failed, Stopped or TimedOut, with the entries read last. Progress goes to the console: each step the service
+# logs once, and a line every 30 seconds with its latest log line, so a long initdb does not look like a hang. The log, the
+# service state and the sleep are parameters so a test can stand in for the machine; the elapsed time is the sum of the sleeps.
+function Wait-DarlingServiceReady([string]$serviceName, [string]$logDirectory, [datetime]$since, [int]$timeoutSeconds,
+    [int]$pollSeconds = 3, [scriptblock]$getEntries = $null, [scriptblock]$getStatus = $null, [scriptblock]$sleep = $null) {
+    if (-not $getEntries) { $getEntries = { param($dir, $from) Get-DarlingServiceLogEntries $dir $from } }
+    if (-not $getStatus) { $getStatus = { param($name) (Get-Service -Name $name -ErrorAction SilentlyContinue).Status } }
+    if (-not $sleep) { $sleep = { param($seconds) Start-Sleep -Seconds $seconds } }
+    $elapsed = 0
+    $reported = @{}
+    $lastBeat = 0
+    while ($true) {
+        $entries = @(& $getEntries $logDirectory $since)
+        $verdict = Get-DarlingStartupVerdict $entries
+        foreach ($step in @(
+                @{ Pattern = '^Loaded configuration from'; Text = 'darling.json read' },
+                @{ Pattern = '^Postgres store ready'; Text = 'store created and migrated' })) {
+            if (-not $reported.ContainsKey($step.Text) -and @($entries | Where-Object { $_.Text -match $step.Pattern }).Count -gt 0) {
+                $reported[$step.Text] = $true
+                Write-Host ("  [{0,3}s] {1}" -f $elapsed, $step.Text)
+            }
+        }
+        if ($verdict.State -ne 'Waiting') {
+            return [pscustomobject]@{ State = $verdict.State; Seconds = $elapsed; Entries = $entries }
+        }
+        $status = & $getStatus $serviceName
+        if ($status -ne 'Running' -and $status -ne 'StartPending') {
+            return [pscustomobject]@{ State = 'Stopped'; Seconds = $elapsed; Entries = $entries }
+        }
+        if ($elapsed -ge $timeoutSeconds) {
+            return [pscustomobject]@{ State = 'TimedOut'; Seconds = $elapsed; Entries = $entries }
+        }
+        if ($elapsed - $lastBeat -ge 30) {
+            $lastBeat = $elapsed
+            $latest = if ($entries.Count -gt 0) { (($entries[$entries.Count - 1].Text -split "`n")[0]) } else { 'nothing logged yet' }
+            if ($latest.Length -gt 100) { $latest = $latest.Substring(0, 100) + '...' }
+            Write-Host ("  [{0,3}s] still starting - latest log line: {1}" -f $elapsed, $latest)
+        }
+        & $sleep $pollSeconds
+        $elapsed += $pollSeconds
+    }
+}
+
+# The web dashboard address the service logged for this start ("Starting web dashboard on http://localhost:5153 ..."), or $null.
+# A LAN-exposed dashboard logs the address it LISTENS on, and a wildcard listen (0.0.0.0 or ::) is not an address a browser can
+# open, so the machine's name stands in for it.
+function Get-DarlingWebAddress($entries, [string]$machineName = $env:COMPUTERNAME) {
+    $address = $null
+    foreach ($entry in $entries) {
+        if ($entry.Text -match '^Starting web dashboard on (https?://\S+)') { $address = $Matches[1] }
+    }
+    if ($address -and $machineName) {
+        $address = $address -replace '^(https?://)(0\.0\.0\.0|\[::\]|::)(?=:\d+)', ('${1}' + $machineName)
+    }
+    return $address
+}
+
+# How many servers darling.json listed when the service loaded it, or $null when it did not log that yet.
+function Get-DarlingConfiguredServerCount($entries) {
+    $count = $null
+    foreach ($entry in $entries) {
+        if ($entry.Text -match '^Loaded configuration from .*: (\d+) server\(s\)') { $count = [int]$Matches[1] }
+    }
+    return $count
+}
+
+# Under -MsiPhase the package has already started the service (StartServices runs before PostStart), so this script does not start
+# it, and "now" is not when it started: on a warm upgrade the store can be ready within seconds, before this script got here, and a
+# wait that began later would never see the line. The start is the service process's own (#6480). If that cannot be read, two
+# minutes back is close enough, and the verdict only reads this start's lines or the ones just before it.
+function Get-DarlingServiceStartedAt([string]$serviceName) {
+    try {
+        $servicePid = [int](Get-CimInstance -ClassName Win32_Service -Filter "Name='$serviceName'" -ErrorAction Stop).ProcessId
+        if ($servicePid -gt 0) { return (Get-Process -Id $servicePid -ErrorAction Stop).StartTime }
+    }
+    catch { $null = $_ }
+    return (Get-Date).AddMinutes(-2)
+}
+
+if ($MsiPhase) {
+    $startedAt = Get-DarlingServiceStartedAt $serviceName
+}
+else {
+    $startedAt = Get-Date
     Start-Service -Name $serviceName
     (Get-Service -Name $serviceName).WaitForStatus('Running', [TimeSpan]::FromSeconds(60))
-    Write-Host "Service is Running. First start does real work (unpack pg-runtime, initdb, store migration, first collection cycle) - give it ~2 minutes." -ForegroundColor Green
-    Write-Host "Primary log: %ProgramData%\PerformanceMonitorDarling\logs\darling-service_yyyyMMdd.log"
 }
+Write-Host "Service is Running. Its first start unpacks the bundled Postgres, runs initdb (up to 3 minutes), migrates the store and starts collection." -ForegroundColor Green
+Write-Host "Waiting for it to be ready (up to $([int]($readyTimeoutSeconds / 60)) minutes). It has not hung; do not stop it..." -ForegroundColor Cyan
+$ready = Wait-DarlingServiceReady $serviceName $serviceLogDirectory $startedAt $readyTimeoutSeconds
+$startupProblem = $null
+if ($ready.State -eq 'Ready') {
+    Write-Host "Service is ready: the store is created and collection has started ($($ready.Seconds) seconds)." -ForegroundColor Green
+}
+else {
+    $startupProblem = switch ($ready.State) {
+        'Failed' { 'The service logged a startup failure and is not collecting.' }
+        'Stopped' { 'The service stopped while starting.' }
+        default { "The service was not ready after $($ready.Seconds) seconds." }
+    }
+    Write-Host ''
+    Write-Host "WARNING: $startupProblem" -ForegroundColor Red
+    $problemLines = @(Get-DarlingStartupProblemLines $ready.Entries)
+    if ($problemLines.Count -gt 0) {
+        Write-Host 'The log lines that explain it (newest last):' -ForegroundColor Yellow
+        foreach ($problemLine in $problemLines) { Write-Host "  $problemLine" -ForegroundColor Yellow }
+    }
+    else {
+        Write-Host 'The service has logged no warning or error since it started, so it may only be slow. Check again in a minute.' -ForegroundColor Yellow
+    }
+    $startupRemedy = Get-DarlingStartupRemedy $ready.State $problemLines.Count $serviceName
+    Write-Host ''
+}
+Write-Host "Primary log: $serviceLogDirectory\darling-service_yyyyMMdd.log"
 
 # -- 5a. Re-reconcile the firewall on an UPGRADE (#2436) -------------------------------------------
 # The 4c call ran with the service stopped, which on a managed install means the store was down too - it is
@@ -3169,5 +3468,34 @@ if ($operatorSid) {
     $null = Invoke-DarlingOperatorStep $operatorGroupName $AddOperator ([bool]($NoOperatorPrompt -or $MsiPhase)) $configPath $storeFolder
 }
 
+# -- 8. Next steps (#6470) --------------------------------------------------------------------------
+# What the web dashboard's address is comes from the service's own log line for this start. The web host starts a few seconds
+# after the store is ready, so when darling.json turns the dashboard on, wait for that line briefly.
+$entriesNow = @(Get-DarlingServiceLogEntries $serviceLogDirectory $startedAt)
+$webAddress = Get-DarlingWebAddress $entriesNow
+if (-not $startupProblem -and -not $webAddress -and (Test-Path -LiteralPath $configPath -PathType Leaf)) {
+    $configText = Get-Content -LiteralPath $configPath -Raw -ErrorAction SilentlyContinue
+    if ($configText -match '(?s)"web"\s*:\s*\{.*?"enabled"\s*:\s*true') {
+        for ($waited = 0; $waited -lt 15 -and -not $webAddress; $waited += 3) {
+            Start-Sleep -Seconds 3
+            $webAddress = Get-DarlingWebAddress @(Get-DarlingServiceLogEntries $serviceLogDirectory $startedAt)
+        }
+    }
+}
+$serverCount = Get-DarlingConfiguredServerCount $entriesNow
+
 Write-Host ''
-Write-Host 'Done.' -ForegroundColor Green
+if ($startupProblem) {
+    exit (Write-DarlingNotReadyVerdict $startupProblem $startupRemedy $MsiPhase)
+}
+Write-Host 'Done. Next steps:' -ForegroundColor Green
+Write-Host "  1. Open the Viewer: the 'Darling Viewer' shortcut on the Desktop or in the Start Menu, or $viewerExe"
+if ($serverCount -gt 0) {
+    Write-Host "  2. darling.json already lists $serverCount server(s), so collection for them has started and their first data appears within a few minutes. Add more with 'Add Server' in the Viewer."
+}
+else {
+    Write-Host "  2. Add your first SQL Server: click 'Add Server' in the Viewer's sidebar, or run:  & `"$serviceExe`" --add-server --help"
+}
+if ($webAddress) {
+    Write-Host "  3. The web dashboard is on: $webAddress   (sign in with the token from:  & `"$serviceExe`" --print-web-token )"
+}

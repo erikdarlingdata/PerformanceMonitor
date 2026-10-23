@@ -148,6 +148,9 @@ public sealed record SnapshotRequestOutcome(bool Accepted, string Code, string T
     public const string RateLimitedCode = "too_soon";
     public const string UnknownCollectorCode = "unknown_collector";
     public const string UnknownServerCode = "unknown_server";
+
+    /// <summary>The store function refused the request itself (DL400): for example a transaction that is not READ COMMITTED.</summary>
+    public const string BadRequestCode = "bad_request";
 }
 
 /// <summary>
@@ -219,6 +222,10 @@ public sealed class SnapshotNowRequests
             catch (PostgresException ex) when (ex.SqlState == "DL404")
             {
                 return new SnapshotRequestOutcome(false, SnapshotRequestOutcome.UnknownServerCode, "No monitored server has that id.", null, null);
+            }
+            catch (PostgresException ex) when (ex.SqlState == "DL400")
+            {
+                return new SnapshotRequestOutcome(false, SnapshotRequestOutcome.BadRequestCode, ex.MessageText, null, null);
             }
             catch (PostgresException ex) when (ex.SqlState == "DL409")
             {

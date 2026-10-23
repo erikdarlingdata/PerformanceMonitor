@@ -16,11 +16,11 @@ namespace PerformanceMonitor.Common;
 /// Darling's web dashboard (#1576), Darling's MCP host, and Lite's MCP host (both #1648). Authored ONCE here,
 /// in the library both apps already reference, because it had drifted — the web host got the guard, the two MCP
 /// hosts did not, and an MCP surface that is no longer read-only (custom-view CRUD, <c>add_servers</c> /
-/// <c>remove_server</c>, alert-config writes) sat tokenless on loopback behind no Host check at all.
+/// <c>remove_server</c>, alert-config writes) sat on loopback behind no Host check at all.
 ///
-/// <para><b>What it defends:</b> a loopback MCP/web bind is tokenless by design, so a browser running ON the
-/// host that loads attacker content can be DNS-rebound to <c>127.0.0.1:{port}</c> and reach the whole surface
-/// same-origin. The <c>application/json</c> content type would normally force a CORS preflight, but under a
+/// <para><b>What it defends:</b> a loopback MCP/web bind needs a token once one is enabled, but a browser running ON the
+/// host can be DNS-rebound to <c>127.0.0.1:{port}</c> and treat it as same-origin, so
+/// the token-free opt-outs (reads only) need this check in front of them. The <c>application/json</c> content type would normally force a CORS preflight, but under a
 /// rebind the browser considers the request same-origin, so no preflight applies — the Host header is what is
 /// left to check, and per the MCP spec checking it is the application's job (the SDK does not).</para>
 ///

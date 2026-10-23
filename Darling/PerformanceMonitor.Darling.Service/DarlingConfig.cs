@@ -338,15 +338,15 @@ public sealed class DarlingConfig
     /// The embedded MCP server (analysis slice AN4): the same analysis + data-read tool surface Lite
     /// and the Dashboard expose (the analysis class plus the plan-analysis and ~60 STORED data-read
     /// tools), over Streamable HTTP. Default OFF: a headless service should not open a port unless the
-    /// operator asks for it (both apps default their MCP servers off too). Loopback-only and tokenless
-    /// by default; an opt-in <see cref="McpConfig.Network"/> block exposes it on the LAN behind a
+    /// operator asks for it (both apps default their MCP servers off too). Loopback-only by default, and it
+    /// needs a token there too (<see cref="McpConfig.AllowTokenlessLoopback"/> is the opt-out); an opt-in <see cref="McpConfig.Network"/> block exposes it on the LAN behind a
     /// required bearer token + an in-app CIDR check (managed-mode only). Optional — omit the section entirely.
     /// </summary>
     [JsonPropertyName("mcp")]
     public McpConfig Mcp { get; set; } = new();
 
     /// <summary>
-    /// The embedded web dashboard (#1562): a second, independent Kestrel host serving a read-only,
+    /// The embedded web dashboard (#1562): a second, independent Kestrel host serving a
     /// browser-based view of the monitoring store over HTTP — a SEPARATE port + kill switch + exposure block
     /// from the MCP server (they gate different blast radii). Default OFF: a headless service should not open a
     /// port unless the operator asks. Loopback-only by default; an opt-in <see cref="WebConfig.Network"/> block
@@ -1386,8 +1386,8 @@ public sealed class SmtpConfig
 
 /// <summary>
 /// The embedded MCP server's config. Port 5152 keeps the product's local MCP family
-/// non-colliding on one machine (Dashboard 5150, Lite 5151, Darling 5152). Loopback-only and
-/// tokenless by default; the optional <see cref="Network"/> block opts into LAN exposure behind a
+/// non-colliding on one machine (Dashboard 5150, Lite 5151, Darling 5152). Loopback-only by default,
+/// with a bearer token required there too unless <see cref="AllowTokenlessLoopback"/> is on; the optional <see cref="Network"/> block opts into LAN exposure behind a
 /// required bearer token + an in-app CIDR check (darling-network-endpoints, managed-mode only).
 /// </summary>
 public sealed class McpConfig
@@ -1417,21 +1417,37 @@ public sealed class McpConfig
     public bool AllowWrites { get; set; }
 
     /// <summary>
-    /// Default OFF. Additionally offers <c>add_servers</c> and <c>remove_server</c>, which change the servers
-    /// this service connects to as its own account. Has no effect unless <see cref="AllowWrites"/> is on.
+    /// Default OFF. Additionally offers <c>add_servers</c>, <c>edit_server</c>, <c>remove_server</c> and
+    /// <c>set_server_action</c>. The first three change the servers this service connects to as its own
+    /// account; <c>set_server_action</c> turns one server's switch for an agent action (<c>force_plan</c>,
+    /// <c>evict_plan</c>, <c>kill_session</c>) on or off. Has no effect unless <see cref="AllowWrites"/> is on.
     /// </summary>
     [JsonPropertyName("allowServerAdmin")]
     public bool AllowServerAdmin { get; set; }
 
     /// <summary>
     /// Default OFF (#5632 Phase A, ruling R2). Offers <c>claim_investigation_request</c> and
-    /// <c>submit_investigation_report</c>, which write only investigation state. Served only when a bearer token
+    /// <c>submit_investigation_report</c>, which write investigation state, and the 13 Level 2 agent action tools. Every
+    /// action call needs an <c>agent_action</c> argument and a live claim, and the actions also need
+    /// <c>agent_actions_enabled</c> (default on). The 9 store actions need a Level 2 route; the 4 server actions (session
+    /// kill, plan force, unforce and evict) need a Level 3 request, the server's own action switch (default off) and a
+    /// remediation login reference. Served only when a bearer token
     /// resolves AND <see cref="AllowWrites"/> is off: one token cannot tell an agent from a person, so with both on the
     /// investigation tools stay off and the start logs one Critical line. File-only and restart-only, like
     /// <see cref="AllowWrites"/>. The two investigation reads are ordinary reads and need no setting.
     /// </summary>
     [JsonPropertyName("allowInvestigations")]
     public bool AllowInvestigations { get; set; }
+
+    /// <summary>
+    /// Default OFF. A loopback-only MCP server needs a bearer token like an exposed one: with no
+    /// <see cref="McpNetworkConfig.EncryptedToken"/> or <see cref="McpNetworkConfig.Token"/>, an enabled MCP server does not
+    /// start, and the log names the settings to add. On, a loopback-only server with no token serves local clients
+    /// without one, with the write and investigation tools off (they need the token), and every start logs one line
+    /// saying so. A configured token always gates, whatever this says. File-only and restart-only.
+    /// </summary>
+    [JsonPropertyName("allowTokenlessLoopback")]
+    public bool AllowTokenlessLoopback { get; set; }
 
     /// <summary>
     /// Default OFF. <c>add_servers</c> defaults to Windows authentication, where this service presents its own
@@ -1458,8 +1474,8 @@ public sealed class McpConfig
     public string DataDetail { get; set; } = McpDataDetailModes.DefaultValue;
 
     /// <summary>
-    /// Opt-in network exposure for the MCP server (darling-network-endpoints). Omit for the secure
-    /// default = loopback-only, tokenless HTTP (today's behavior). Managed-mode only; ignored in BYO
+    /// Opt-in network exposure for the MCP server (darling-network-endpoints). Omit <c>listen</c> for the
+    /// default = loopback-only HTTP; the block's token gates that listener too. Managed-mode only; ignored in BYO
     /// with a caller warning. Any missing precondition (token / valid allowFrom / managed, and a usable
     /// certificate when <c>tls</c> is set, #5288) keeps MCP loopback-only + LogCritical — enforced in the MCP
     /// host, NEVER in the all-fatal <see cref="DarlingConfig.Validate"/> (D-validate). See
@@ -1514,8 +1530,23 @@ public sealed class McpTokenEntry
 
     /// <summary>The token, preferring <see cref="EncryptedToken"/> over <see cref="Token"/>; null when neither is set. Throws when an
     /// encrypted token cannot be read.</summary>
-    public string? ResolveToken() =>
-        new McpNetworkConfig { EncryptedToken = EncryptedToken, Token = Token }.ResolveToken(out _);
+    public string? ResolveToken()
+    {
+        /* #6542: the error names this entry's own setting, not mcp.network.token, so an operator fixes the right line. */
+        var setting = $"mcp.tokens[{Name}]";
+        if (!string.IsNullOrWhiteSpace(EncryptedToken))
+        {
+            if (!OperatingSystem.IsWindows())
+            {
+                throw new PlatformNotSupportedException(
+                    setting + ".encryptedToken requires Windows (DPAPI); use the plaintext \"token\" on other platforms.");
+            }
+
+            return DarlingSecrets.Unprotect(EncryptedToken);
+        }
+
+        return string.IsNullOrWhiteSpace(Token) ? null : DarlingSecretSource.Resolve(Token, setting + ".token");
+    }
 }
 
 /// <summary>
@@ -1574,7 +1605,7 @@ public sealed class PostgresNetworkConfig
 
 /// <summary>
 /// Opt-in NETWORK exposure for the embedded MCP server (darling-network-endpoints). Omit the whole
-/// <c>network</c> object for the secure default = today's loopback-only, tokenless HTTP. When present
+/// <c>listen</c> for the default = loopback-only HTTP, gated by this block's token. When present
 /// with a non-loopback <see cref="Listen"/> AND managed mode AND a token AND a valid
 /// <see cref="AllowFrom"/>, the MCP host binds the network interface behind a required bearer token +
 /// an in-app CIDR check (D3); any missing precondition keeps MCP loopback-only + LogCritical
@@ -1645,7 +1676,7 @@ public sealed class McpNetworkConfig
     /// In NETWORK mode the Host-header guard admits that one exact name, compared ignoring case, beside the
     /// names it always admits; it never admits a name the operator did not write here. In loopback-only mode,
     /// and in every mode that degrades to it (an unreadable token, a refused certificate), the guard does NOT
-    /// admit it: that surface is tokenless, and the name exists for the network listener's clients. With
+    /// admit it: the name exists for the network listener's clients, and a loopback-only listener has no use for it. With
     /// <see cref="Tls"/> set it is also the name the certificate should carry as a dNSName SAN, and the host
     /// warns (never refuses) when it does not. A value that is set but is not a bare DNS name is ignored with one
     /// Warning at start. A name written in Unicode is admitted as the ASCII (punycode) name a client sends in
@@ -1835,7 +1866,7 @@ public sealed class McpNetworkConfig
 /// required token → HMAC session cookie + an in-app CIDR check (darling-network-endpoints, managed-mode only).
 /// A SEPARATE surface from <see cref="McpConfig"/> — its own enable flag, port, token, and exposure block —
 /// because the two gate different blast radii (MCP's token guards analyze_server's live outbound SQL
-/// connections; the web dashboard is read-only over the store).
+/// connections; the web dashboard works on the collected store and changes only monitoring settings).
 /// </summary>
 public sealed class WebConfig
 {
@@ -1860,8 +1891,18 @@ public sealed class WebConfig
     public string PublicBaseUrl { get; set; } = "";
 
     /// <summary>
-    /// Opt-in network exposure for the web dashboard (darling-network-endpoints). Omit for the secure
-    /// default = loopback-only HTTP. Managed-mode only; ignored in BYO with a caller warning. Any missing
+    /// Default OFF. A loopback-only dashboard needs a token like an exposed one: with no
+    /// <see cref="WebNetworkConfig.EncryptedToken"/> or <see cref="WebNetworkConfig.Token"/>, an enabled dashboard does not
+    /// start, and the log names the settings to add. On, a loopback-only dashboard with no token serves local browsers
+    /// without one, for reads only (a change is refused with a message naming the token setting), and every start logs
+    /// one line saying so. A configured token always gates, whatever this says. File-only and restart-only.
+    /// </summary>
+    [JsonPropertyName("allowTokenlessLoopback")]
+    public bool AllowTokenlessLoopback { get; set; }
+
+    /// <summary>
+    /// Opt-in network exposure for the web dashboard (darling-network-endpoints). Omit <c>listen</c> for the
+    /// default = loopback-only HTTP; the block's token gates that listener too. Managed-mode only; ignored in BYO with a caller warning. Any missing
     /// precondition (token / valid allowFrom / managed) keeps the dashboard loopback-only + LogCritical —
     /// enforced in the web host, NEVER in the all-fatal <see cref="DarlingConfig.Validate"/> (D-validate).
     /// See <see cref="WebNetworkConfig"/>.

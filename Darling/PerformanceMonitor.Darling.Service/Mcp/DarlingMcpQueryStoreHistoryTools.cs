@@ -279,7 +279,7 @@ public sealed class DarlingMcpQueryStoreHistoryTools
         try
         {
             var read = await DarlingForcedPlanStateReader.ReadAsync(
-                postgres, serverId, DatabaseFilter.One(databaseName), queryId, start, end, null, McpCommandDeadlines.ReadSeconds, cancellationToken);
+                postgres, serverId, DatabaseFilter.One(databaseName), queryId, start, end, null, McpCommandDeadlines.ReadSeconds, cancellationToken: cancellationToken);
             var facts = read.Plans.Where(f => f.QueryId == queryId && f.State != ForcedPlanState.Removed).Take(MaxPlans).ToList();
             return (facts, read.Captures.Count == 0 ? "no_capture_in_window" : "ok");
         }
@@ -297,11 +297,12 @@ public sealed class DarlingMcpQueryStoreHistoryTools
         "Reads the raw tier, or the per-interval table (kept 10 days) past raw retention, by get_query_store_top's own rule, so it covers what that grid does; effective_start is where complete history begins. " +
         "points keeps the newest 150 of the listed plans (points_truncated) and plans the 20 longest by total duration (plans_truncated). " +
         "Every plan of the query forced in its database's newest forced-plan capture is listed (forced_state: WORKING, NOT_EXERCISED, IGNORED, FAILING or UNKNOWN_PLAN_NOT_COLLECTED; get_forced_plans explains the states), even with no executions in the window. " +
+        "is_forced_plan true with forced_state null: when forced_plans_status is ok, the force no longer stands (a REMOVED force is left out, get_forced_plans shows it); when it is no_capture_in_window or unavailable, the force state is unknown. " +
         "Each forced_plans entry also lists variant_plans (plans SQL Server compiled to run the force, which count as the forced plan running) and plan_guide (a plan guide that covers the query), as get_forced_plans does.")]
     public static async Task<string> GetQueryStoreQueryHistory(
         NpgsqlDataSource postgres,
         [Description("The database_name from get_query_store_top.")] string database_name,
-        [Description("The query_id from get_query_store_top.")] long query_id,
+        [Description("The query_id (an integer) from get_query_store_top. Not query_hash: get_query_store_top returns both.")] long query_id,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history ending at as_of (default 24).")] int hours_back = 24,
         [Description("Window end, ISO 8601 UTC. Default: now.")] string? as_of = null,

@@ -82,6 +82,33 @@ public sealed class DarlingMsiPhaseScriptTests
     }
 
     /// <summary>
+    /// The ready wait (#6470) ends a start that did not finish with exit 1 by hand, but under -MsiPhase a nonzero exit rolls the package
+    /// back, after the store may already have migrated. There the same problem and remedy are a warning and the exit is 0. Both phases
+    /// are probed; PreStart never reaches the wait (it exits before step 5), so only PostStart matters in practice.
+    /// </summary>
+    [Fact]
+    public void ANotReadyStart_ExitsOneByHand_AndZeroWithAWarningUnderMsiPhase()
+    {
+        var lines = RunWindowsPowerShell(
+            ExtractFunction(Install, "Write-DarlingNotReadyVerdict") + "\n"
+            + "$problem = 'The service logged a startup failure and is not collecting.'\n"
+            + "$remedy = 'Fix what the lines above say, then restart it.'\n"
+            + "$hand = Write-DarlingNotReadyVerdict $problem $remedy '' 6>&1 | Out-String\n"
+            + "$handCode = (Write-DarlingNotReadyVerdict $problem $remedy '' 6>$null)\n"
+            + "$msiCode = (Write-DarlingNotReadyVerdict $problem $remedy 'PostStart' 6>$null)\n"
+            + "$msi = Write-DarlingNotReadyVerdict $problem $remedy 'PostStart' 6>&1 | Out-String\n"
+            + "'hand-exit=' + $handCode\n"
+            + "'hand-says-problem-and-remedy=' + (($hand -match 'startup failure') -and ($hand -match 'restart it'))\n"
+            + "'msi-exit=' + $msiCode\n"
+            + "'msi-warns=' + ($msi -match 'WARNING')\n"
+            + "'msi-says-problem-and-remedy=' + (($msi -match 'startup failure') -and ($msi -match 'restart it'))\n");
+
+        Assert.Equal(
+            ["hand-exit=1", "hand-says-problem-and-remedy=True", "msi-exit=0", "msi-warns=True", "msi-says-problem-and-remedy=True"],
+            lines);
+    }
+
+    /// <summary>
     /// -WebDashboard (the MSI's WEBDASHBOARD=1) seeds web.enabled in the minimal darling.json the installer writes, and the service's own
     /// loader reads it; without the switch the file is the one it always was (no web block).
     /// </summary>

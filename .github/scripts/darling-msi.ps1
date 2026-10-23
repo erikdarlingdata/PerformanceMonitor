@@ -136,10 +136,6 @@ function Get-Snapshot {
     foreach ($verb in 'qc', 'sdshow', 'qdescription', 'qfailure') {
         $snap["sc $verb"] = @(& sc.exe $verb $svc 2>&1 | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
     }
-    # The one known difference: Windows Installer registers the service path quoted ("C:\Program Files\...\x.exe"), while
-    # install-darling.ps1's sc.exe create leaves it unquoted (an unquoted path with a space is the classic unquoted-service-path
-    # finding; the script's is filed as its own issue). The path itself must still be equal, so only the quotes are dropped.
-    $snap['sc qc'] = @($snap['sc qc'] | ForEach-Object { $_ -replace '^(BINARY_PATH_NAME\s*:\s*)"(.*)"$', '$1$2' })
     $shell = New-Object -ComObject WScript.Shell
     $links = foreach ($folder in 'CommonDesktopDirectory', 'CommonPrograms') {
         $lnk = Join-Path ([Environment]::GetFolderPath($folder)) 'Darling Viewer.lnk'

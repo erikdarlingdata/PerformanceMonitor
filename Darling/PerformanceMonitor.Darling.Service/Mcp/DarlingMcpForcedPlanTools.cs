@@ -123,7 +123,7 @@ public sealed class DarlingMcpForcedPlanTools
         try
         {
             var read = await DarlingForcedPlanStateReader.ReadAsync(
-                postgres, resolved.ServerId, databases, queryId, start, windowEnd, null, McpCommandDeadlines.ReadSeconds, cancellationToken, planId);
+                postgres, resolved.ServerId, databases, queryId, start, windowEnd, null, McpCommandDeadlines.ReadSeconds, planId, cancellationToken);
             ReadScope.NoteSource(ReadScope.SourceRaw);
 
             var scope = databases.Describe();

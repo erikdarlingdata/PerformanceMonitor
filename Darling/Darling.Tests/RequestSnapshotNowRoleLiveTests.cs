@@ -196,6 +196,41 @@ public sealed class RequestSnapshotNowRoleLiveTests
         });
     }
 
+    /// <summary>A transaction that keeps one snapshot is refused with DL400 and queues nothing; the same call at READ COMMITTED queues.</summary>
+    [Theory]
+    [InlineData("viewer")]
+    [InlineData("mcp")]
+    public async Task TheFunction_RefusesARepeatableReadTransaction_WithDL400(string managedRole)
+    {
+        await WithRoleAsync(managedRole, async (owner, asRole, ct) =>
+        {
+            await using (var connection = await asRole.OpenConnectionAsync(ct))
+            {
+                await using (var begin = new NpgsqlCommand("BEGIN ISOLATION LEVEL REPEATABLE READ", connection))
+                {
+                    await begin.ExecuteNonQueryAsync(ct);
+                }
+
+                await using (var snapshot = new NpgsqlCommand("SELECT 1", connection))
+                {
+                    await snapshot.ExecuteScalarAsync(ct);
+                }
+
+                await using var call = new NpgsqlCommand($"SELECT config.request_snapshot_now({ServerId}, NULL, 'web')", connection);
+                var refused = await Assert.ThrowsAsync<PostgresException>(async () => await call.ExecuteScalarAsync(ct));
+                Assert.Equal("DL400", refused.SqlState);
+                Assert.Contains("READ COMMITTED", refused.MessageText, StringComparison.Ordinal);
+            }
+
+            await using var count = owner.CreateCommand("SELECT count(*) FROM config.config_command");
+            Assert.Equal(0L, Convert.ToInt64(await count.ExecuteScalarAsync(ct)));
+
+            await using var allowed = asRole.CreateCommand("SELECT config.request_snapshot_now($1, NULL, 'web')");
+            allowed.Parameters.AddWithValue(ServerId);
+            Assert.True(Convert.ToInt64(await allowed.ExecuteScalarAsync(ct)) > 0);
+        });
+    }
+
     private static async Task WithRoleAsync(
         string managedRole, Func<NpgsqlDataSource, NpgsqlDataSource, CancellationToken, Task> body)
     {
