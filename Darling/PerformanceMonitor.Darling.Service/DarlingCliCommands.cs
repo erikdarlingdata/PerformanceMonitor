@@ -3564,10 +3564,7 @@ public static partial class DarlingCliCommands
             return "<a-LAN-IP-of-this-machine>";
         }
 
-        var text = listen.Trim();
-        return address.AddressFamily == AddressFamily.InterNetworkV6 && !text.StartsWith('[')
-            ? $"[{text}]"
-            : listen;
+        return DarlingListenUrl.FormatHost(listen);
     }
 
     /// <summary>
