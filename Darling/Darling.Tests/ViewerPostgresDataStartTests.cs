@@ -150,7 +150,7 @@ public sealed class ViewerPostgresDataStartTests
 
         /* Six reads and three probes in the Activity load; a read and a probe in each of the five loaders that runs both (two more `Of(2)` scopes were there before). */
         Assert.Contains("ViewerReadFanOut.Of(9)", tab);
-        Assert.Equal(11, tab.Split("ViewerReadFanOut.Of(2)").Length - 1);
+        Assert.Equal(12, tab.Split("ViewerReadFanOut.Of(2)").Length - 1);
         Assert.Contains("ViewerReadFanOut.Of(8)", tab);
         Assert.Contains("ViewerReadFanOut.Of(4)", tab);
     }
