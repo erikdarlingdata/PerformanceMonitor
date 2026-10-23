@@ -685,6 +685,70 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
         Assert.False(Assert.Single(sent, a => a.StoryPathHash == "bbbb000000000002").RecurringAtThisHour);
     }
 
+    private static AnalysisFinding MakeAnomalyFinding(string hash, string rootKey, double severity, bool labelled)
+    {
+        var story = new AnalysisStory
+        {
+            RootFactKey = rootKey,
+            StoryPathHash = hash,
+            Severity = severity,
+            Path = [rootKey],
+            StoryText = FactAdvice.SerializeForStoryText(new AdviceBlock("Latency", "Storage ran slower.", "Look at the job.")),
+        };
+        if (labelled)
+        {
+            RecurrenceLabeler.Label([story], facts: null, new PriorOccurrenceRead(0, new DateTime(2026, 10, 23, 1, 30, 0),
+            [
+                new PriorOccurrence(hash, rootKey, new DateTime(2026, 10, 16, 1, 0, 0), null),
+                new PriorOccurrence(hash, rootKey, new DateTime(2026, 10, 9, 1, 0, 0), null),
+            ]));
+            Assert.True(RecurrenceLabeler.TryReadLabel(story.StoryText)?.RecurringAtThisHour);
+        }
+        var finding = MakeFinding(hash, severity: severity, rootFactKey: rootKey, category: "anomaly", incidentId: "incident-1");
+        finding.StoryText = story.StoryText;
+        return finding;
+    }
+
+    /// <summary>#6596 review round: one page goes out per incident, so a labelled lead that shares an incident with an
+    /// unlabelled co-fired member is NOT flagged. The unlabelled member is a new problem and keeps its request.</summary>
+    [Fact]
+    public async Task NotifyAsync_ALabelledLeadWithAnUnlabelledCoFiredMember_DoesNotFlagTheAlert()
+    {
+        App.AnalysisNotifySeverity = 1.5;
+        App.AnalysisNotifyCooldownMinutes = 360;
+        var (notifier, sender) = MakeCapturingNotifier();
+
+        await notifier.NotifyAsync(new[]
+        {
+            MakeAnomalyFinding("aaaa000000000001", "ANOMALY_WRITE_LATENCY", 2.0, labelled: true),
+            MakeAnomalyFinding("bbbb000000000002", "ANOMALY_READ_LATENCY", 1.6, labelled: false),
+        });
+        await notifier.FlushPendingAsync();
+
+        var alert = Assert.Single(sender.Sent.Concat(sender.Summaries.SelectMany(s => s)));
+        Assert.Equal(2.0, alert.Severity);
+        Assert.False(alert.RecurringAtThisHour);
+    }
+
+    /// <summary>#6596 review round: when every member of the incident is labelled, the alert is flagged.</summary>
+    [Fact]
+    public async Task NotifyAsync_ALabelledLeadWithALabelledCoFiredMember_FlagsTheAlert()
+    {
+        App.AnalysisNotifySeverity = 1.5;
+        App.AnalysisNotifyCooldownMinutes = 360;
+        var (notifier, sender) = MakeCapturingNotifier();
+
+        await notifier.NotifyAsync(new[]
+        {
+            MakeAnomalyFinding("aaaa000000000001", "ANOMALY_WRITE_LATENCY", 2.0, labelled: true),
+            MakeAnomalyFinding("bbbb000000000002", "ANOMALY_READ_LATENCY", 1.6, labelled: true),
+        });
+        await notifier.FlushPendingAsync();
+
+        var alert = Assert.Single(sender.Sent.Concat(sender.Summaries.SelectMany(s => s)));
+        Assert.True(alert.RecurringAtThisHour);
+    }
+
     [Fact]
     public async Task NotifyAsync_LoneFinding_HasNoCoFiredItem()
     {
