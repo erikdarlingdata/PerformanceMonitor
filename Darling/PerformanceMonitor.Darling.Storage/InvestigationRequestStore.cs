@@ -151,6 +151,18 @@ WHERE request_id = $1
   AND expires_at > $4
 RETURNING lease_until, claim_count, server_id";
 
+    /* #6576: the agent that already holds the live lease claims again (it lost its claim_id): the live claim_id comes back and the
+       lease renews the way RenewSql renews it. No new claim, so claim_count does not move. $1 request, $2 agent, $3 now. */
+    internal const string ReclaimSql = @"
+UPDATE config.investigation_requests
+SET lease_until = least($3 + make_interval(mins => lease_minutes), expires_at)
+WHERE request_id = $1
+  AND claimed_by = $2
+  AND state = 'claimed'
+  AND lease_until >= $3
+  AND expires_at > $3
+RETURNING claim_id, lease_until, claim_count";
+
     internal const string ClaimWhySql = @"
 SELECT state, lease_until, claim_count, expires_at, server_id
 FROM config.investigation_requests
@@ -705,7 +717,13 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
     /// refused first. The <c>claimed</c> row's reason is null (#5632 review round 2, L4): the claim id is a lease identity,
     /// so it lives only in that row's <c>once_key</c>, which no reader returns.
     /// </summary>
-    public async Task<InvestigationClaimResult> ClaimAsync(Guid requestId, string agentId, CancellationToken cancellationToken = default)
+    public Task<InvestigationClaimResult> ClaimAsync(Guid requestId, string agentId, CancellationToken cancellationToken = default) =>
+        ClaimAsync(requestId, agentId, allowReclaim: false, cancellationToken);
+
+    /// <summary>The claim, with <paramref name="allowReclaim"/> (#6576, #6586 review): true only when <paramref name="agentId"/> is bound to the caller's named agent token (#6542),
+    /// so the same agent id holding the live lease gets its claim id back. An agent id on the legacy token is free text, and claimed_by is
+    /// published by list_investigation_requests, so there the same call answers already_claimed.</summary>
+    public async Task<InvestigationClaimResult> ClaimAsync(Guid requestId, string agentId, bool allowReclaim, CancellationToken cancellationToken = default)
     {
         if (!InvestigationRules.IsValidAgentId(agentId))
         {
@@ -719,6 +737,25 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
 
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        /* #6576: before the journal cap, like a renewal: it writes no journal row. The same agent id that holds the live lease gets
+           its claim id back; any other agent id falls through to the claim below and is refused as before. */
+        if (allowReclaim)
+        {
+            await using (var reclaim = Command(connection, transaction, ReclaimSql, P(requestId), P(agentId), P(now)))
+            await using (var reader = await reclaim.ExecuteReaderAsync(cancellationToken))
+            {
+                if (await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0))
+                {
+                    var heldClaim = reader.GetGuid(0);
+                    var heldLease = DateTime.SpecifyKind(reader.GetFieldValue<DateTime>(1), DateTimeKind.Utc);
+                    var heldCount = reader.GetInt32(2);
+                    await reader.DisposeAsync();
+                    await transaction.CommitAsync(cancellationToken);
+                    return new InvestigationClaimResult(InvestigationClaimOutcome.Reclaimed, heldClaim, heldLease, heldCount, null);
+                }
+            }
+        }
 
         if (await JournalCappedAsync(connection, transaction, now, requestId, actor, "claim", cancellationToken))
         {

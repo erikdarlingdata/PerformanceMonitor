@@ -224,7 +224,12 @@ AND   xet.target_name = N'event_file';", connection))
         Assert.SkipWhen(pass.Rows.Count == 0, "The current system_health file holds none of the six captured events yet.");
         Assert.All(pass.Rows, row => Assert.Equal(server.CurrentFile, row.SourceFile, ignoreCase: true));
         Assert.True(pass.Rows.Count <= SystemHealthEventsCollector.MaxEventsPerPass);
-        Assert.Equal(pass.Rows.Count, Measured(pass.Context, "event_file_events"));
+        /* A pass the cap stopped writes no count (it did not read to the end); one it did not stop counts its rows. */
+        if (Measured(pass.Context, "event_file_events") is { } counted)
+        {
+            Assert.Equal(pass.Rows.Count, counted);
+        }
+
         Assert.Null(Measured(pass.Context, "event_file_fallback"));
         Assert.Null(Measured(pass.Context, "event_file_error"));
 
