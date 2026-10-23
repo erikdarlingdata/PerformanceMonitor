@@ -338,6 +338,8 @@ jobs:
     steps:
       - name: Set CI result
         id: verdict
+        # A cancelled workflow run posts no CI result: a newer run on the same head owns the status, or it stays pending; a test leg that times out still posts failure.
+        if: ${{ !cancelled() }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
