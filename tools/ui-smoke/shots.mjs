@@ -166,7 +166,9 @@ export async function runShots({ config, baseUrl, outDir, only, settle }) {
   let seen = "no answer from /api/fleet";
   for (;;) {
     try {
-      const fleet = await (await fetch(baseUrl + "/api/fleet")).json();
+      /* The signed-in session, like the browser pages: a bare fetch is refused with 401 now that the dashboard asks for its token. */
+      const cookie = process.env.UI_SMOKE_SESSION_COOKIE ? { Cookie: "darling_web_session=" + process.env.UI_SMOKE_SESSION_COOKIE } : {};
+      const fleet = await (await fetch(baseUrl + "/api/fleet", { headers: cookie })).json();
       const cards = fleet.cards || [];
       const stale = cards.filter((c) => c.collection_stale === true).length;
       const offline = cards.filter((c) => c.is_online === false).length;

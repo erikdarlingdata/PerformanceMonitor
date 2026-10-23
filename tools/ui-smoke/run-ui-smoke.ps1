@@ -87,7 +87,8 @@ try {
     $up = $false
     while ((Get-Date) -lt $deadline) {
         if ($serviceProc.HasExited) { throw "the service exited early (code $($serviceProc.ExitCode)); see service.out.log" }
-        try { if ((Invoke-WebRequest -Uri "$base/api/ping" -UseBasicParsing -TimeoutSec 3).StatusCode -eq 200) { $up = $true; break } } catch { }
+        # The dashboard asks for its token on loopback, so a ping with no session answers 401: the service is up either way.
+        try { if ((Invoke-WebRequest -Uri "$base/api/ping" -UseBasicParsing -TimeoutSec 3 -SkipHttpErrorCheck).StatusCode -in 200, 401) { $up = $true; break } } catch { }
         Start-Sleep -Seconds 1
     }
     if (-not $up) { throw "the service did not answer $base/api/ping in 90 s" }

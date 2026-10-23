@@ -161,7 +161,6 @@ public class ComposeClientTimeoutAttributionTests
     }
 
     [Theory]
-    [InlineData("private static async Task<JsonArray> RunComposedQueryAsync(")]
     [InlineData("> ReadServerClocksAsync(")]
     public void EachRunner_OpensTheConnectionBeforeTheStatementTry(string signature)
     {
@@ -175,6 +174,21 @@ public class ComposeClientTimeoutAttributionTests
         Assert.True(statementTry > open, "the open must come before the statement try");
         Assert.True(execute > statementTry, "ExecuteReaderAsync must sit inside the statement try, after the open");
         Assert.DoesNotContain("CreateCommand(", body, StringComparison.Ordinal);
+    }
+
+    /// <summary>The panel runner opens its store connection before the statement try, so a store that cannot be reached is
+    /// answered as an open failure (ComposeStoreOpenException), never as a statement timeout. It runs the real runner against
+    /// a port nothing listens on; this replaces a source-text pin on the runner's signature.</summary>
+    [Fact]
+    public async Task ThePanelRunner_AnUnreachableStore_IsAnOpenFailure_NotAStatementTimeout()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var unreachable = NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Username=darling;Database=none;Timeout=5;Pooling=false");
+        var compiled = new ComposeCompiled(
+            "SELECT 1 AS n", new System.Collections.Generic.List<NpgsqlParameter>(), new ComposeRoute(ComposeSourceTier.Raw, null));
+
+        await Assert.ThrowsAsync<DarlingWebEndpoints.ComposeStoreOpenException>(
+            () => DarlingWebEndpoints.RunComposedQueryAsync(unreachable, compiled, 30, ct));
     }
 
     [Fact]
