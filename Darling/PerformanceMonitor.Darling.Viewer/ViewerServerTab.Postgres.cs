@@ -201,6 +201,7 @@ public partial class ViewerServerTab
         PgCollectionCaveatsExpander.Visibility = caveats.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
 
         await LoadPgExtensionsAsync(startUtc, endUtc);
+        await LoadPgConfigChangesAsync(startUtc, endUtc);
         await LoadPgServerConfigAsync();
         await LoadPgCpuUtilizationAsync(startUtc, endUtc);
     }
@@ -275,6 +276,126 @@ public partial class ViewerServerTab
                       : string.Empty)
                   + "  \u201cInstalled\u201d is scoped to the database this server entry connects to — "
                   + "pg_extension is per-database while the server's offer is cluster-wide.");
+    }
+
+    /// <summary>
+    /// What changed in the window (#6387), above the settings themselves: the parameters whose value differed between
+    /// two consecutive snapshots, old beside new. The same read the web panel and <c>get_pg_server_config_changes</c>
+    /// call, windowed by the toolbar picker. One row past the cap is fetched so a window holding exactly the cap is not
+    /// reported as holding more.
+    /// </summary>
+    private async Task LoadPgConfigChangesAsync(DateTime startUtc, DateTime endUtc)
+    {
+        if (PgCollectorIsGatedOff("pg_server_config"))
+        {
+            PgConfigChangesGrid.ItemsSource = null;
+            PgConfigChangesNote.Text = PanelNote("pg_server_config", 0, string.Empty);
+            return;
+        }
+
+        var fetched = await _dataService.GetPgServerConfigChangesAsync(
+            _server.ServerId, startUtc, endUtc, ViewerDataService.PgConfigChangesRowCap + 1);
+        var truncated = fetched.Count > ViewerDataService.PgConfigChangesRowCap;
+        var rows = truncated ? fetched.Take(ViewerDataService.PgConfigChangesRowCap).ToList() : fetched;
+
+        PgConfigChangesGrid.ItemsSource = rows.Select(PgDisplay.ConfigChange).ToList();
+
+        PgConfigChangesNote.Text = PanelNote("pg_server_config", rows.Count,
+            "No configuration parameter changed value in this window. This compares consecutive snapshots, so an "
+            + "unchanged server is legitimately empty here: it is a finding, not missing data.")
+            + (rows.Count == 0
+                ? string.Empty
+                : "Configuration changes, newest first. The collector runs hourly, so a change happened in the hour "
+                  + "before it was seen."
+                  + (truncated
+                      ? $"  Showing the newest {ViewerDataService.PgConfigChangesRowCap}; narrow the window to see the rest."
+                      : string.Empty));
+    }
+
+    /// <summary>
+    /// The logging-settings audit (#6387), under plan-capture readiness: the rest of the question whether this target is
+    /// telling us everything it could. Judged from the newest stored configuration snapshot, so, like the settings
+    /// grid on the Overview tab, it takes no window. The same snapshot read and judgment as <c>get_pg_logging_audit</c>
+    /// and the web panel.
+    /// </summary>
+    private async Task LoadPgLoggingAuditAsync()
+    {
+        if (PgCollectorIsGatedOff("pg_server_config"))
+        {
+            PgLoggingAuditGrid.ItemsSource = null;
+            PgLoggingAuditNote.Text = PanelNote("pg_server_config", 0, string.Empty);
+            return;
+        }
+
+        var audit = await _dataService.GetPgLoggingAuditAsync(_server.ServerId);
+        if (audit is null)
+        {
+            PgLoggingAuditGrid.ItemsSource = null;
+            PgLoggingAuditNote.Text =
+                "No configuration snapshot to audit. pg_server_config runs hourly, so a server registered in the last "
+                + "hour has not reached its first collection. This is the absence of evidence, not a verdict about "
+                + "the server's logging.";
+            return;
+        }
+
+        PgLoggingAuditGrid.ItemsSource = audit.Facets.Select(PgDisplay.LoggingAudit).ToList();
+
+        var off = audit.Facets.Where(f => f.Verdict == DarlingPgLoggingAudit.Off).Select(f => f.Setting).ToList();
+        var unknown = audit.Facets.Where(f => f.Verdict == DarlingPgLoggingAudit.Unknown).Select(f => f.Setting).ToList();
+        PgLoggingAuditNote.Text =
+            $"From the newest configuration snapshot ({PgDisplay.SnapshotTime(audit.CapturedAt)}), not the live server. "
+            + $"{audit.Facets.Count(f => f.Verdict == DarlingPgLoggingAudit.Instrumented)} setting(s) write every line "
+            + $"they can, {audit.Facets.Count(f => f.Verdict == DarlingPgLoggingAudit.Partial)} are partial (a threshold "
+            + "is filtering, which is the recommended posture for log_min_duration_statement), "
+            + $"{off.Count} are off and {unknown.Count} are not in the snapshot."
+            + (off.Count > 0 ? "  Off: " + string.Join(", ", off) + "." : string.Empty)
+            + (unknown.Count > 0 ? "  Not in the snapshot: " + string.Join(", ", unknown) + "." : string.Empty);
+    }
+
+    /// <summary>
+    /// Double-clicking a deadlock opens its whole wait graph (#6387): the participants, the lock each waited for, who
+    /// blocked whom and each one's statement, as the server wrote them with SQL literals replaced. The same read the web
+    /// "Deadlock Graphs" panel and <c>get_pg_deadlock_detail</c> call, looked up by the identity the clicked row carries.
+    /// </summary>
+    private async void PgDeadlocksGrid_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (PgDeadlocksGrid.SelectedItem is not DarlingPgDeadlockReader.PgDeadlockRow row)
+        {
+            return;
+        }
+
+        try
+        {
+            var detail = await _dataService.GetPgDeadlockDetailAsync(_server.ServerId, row.DeadlockHash);
+            var text = detail.Count == 0
+                ? "No wait graph is stored for this deadlock any more: a report can age out of retention while its row is still on screen."
+                : $"Deadlock at {PgDisplay.SnapshotTime(detail[0].OccurredAtUtc)}, victim PID {detail[0].VictimPid}, "
+                  + $"{detail[0].ParticipantCount} session(s)\n\n{detail[0].GraphText}";
+
+            var window = new Window
+            {
+                Title = "PostgreSQL deadlock graph",
+                Owner = Window.GetWindow(this),
+                Width = 900,
+                Height = 600,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Content = new TextBox
+                {
+                    Text = text,
+                    IsReadOnly = true,
+                    TextWrapping = TextWrapping.Wrap,
+                    FontFamily = new System.Windows.Media.FontFamily("Consolas"),
+                    VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                    HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+                    Margin = new Thickness(8),
+                },
+            };
+            window.Show();
+        }
+        catch (Exception ex)
+        {
+            PgDeadlocksNote.Text = "The deadlock graph could not be read: " + ex.Message;
+        }
     }
 
     /// <summary>
@@ -791,7 +912,7 @@ public partial class ViewerServerTab
                 ? string.Empty
                 : "  Sightings counts how often the collector saw the SAME report while it stayed inside "
                   + "the log tail it re-reads; a deadlock that genuinely recurred is its own row, because "
-                  + "the process IDs differ.");
+                  + "the process IDs differ.  Double-click a row to see its whole wait graph.");
     }
 
     /// <summary>
@@ -905,6 +1026,8 @@ public partial class ViewerServerTab
                       + "the target writes its log messages in English, which every log read here matches, "
                       + "so an unmet one also means the Blocking sub-tab's deadlock grid cannot be trusted "
                       + "to be empty for the healthy reason.";
+
+        await LoadPgLoggingAuditAsync();
     }
 
     /// <summary>
