@@ -270,9 +270,9 @@ AND   xet.target_name = N'event_file';", connection))
         Assert.Equal(Keys(expected), Keys(resumed.Rows));
     }
 
-    /// <summary>#6544: a bookmark in the file the target is writing reads that file by its exact path; any other bookmark file reads every rollover file.</summary>
+    /// <summary>#6544: a bookmark in the file the target is writing reads that file by its exact path; a bookmark in an older file reads every rollover file, and no bookmark reads the current file alone by its exact path.</summary>
     [Fact]
-    public async Task ABookmarkInTheCurrentFile_ReadsItByItsExactPath_AndOneInAnOlderFileOrNoBookmarkDoesNot()
+    public async Task ABookmarkInTheCurrentFile_ReadsItByItsExactPath_AndOneInAnOlderFileReadsEveryRolloverFile()
     {
         var server = await OpenAsync();
         await using var connection = server.Connection;
