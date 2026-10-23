@@ -261,8 +261,10 @@ jobs:
         shell: pwsh
         run: ./.github/scripts/start-test-pg.ps1 -Mode Start
 
-      # Leg 1 also runs the whole-tree guards (run-ci-leg.ps1 does that itself). The step has its own timeout, so a hang
-      # still reaches the upload steps below.
+      # -NoTreeGuards: leg 1's whole-tree guards piece is the whole Darling suite once more with no store. Measured on
+      # run 39996992603 it took 12.7 minutes (36,832 tests), not the half minute the design assumed, and it timed leg 1
+      # out. The legs already run every Darling class (and for a Lite-only change the Guard and Lite-reads classes), with
+      # the store. The step has its own timeout, so a hang still reaches the upload steps below.
       - name: Run test leg ${{ matrix.leg }}
         timeout-minutes: 25
         shell: pwsh
@@ -270,7 +272,7 @@ jobs:
           LEG: ${{ matrix.leg }}
           LEG_COUNT: ${{ needs.plan.outputs.legs }}
           AREAS: ${{ needs.plan.outputs.areas }}
-        run: ./.github/scripts/run-ci-leg.ps1 -Leg $env:LEG -LegCount $env:LEG_COUNT -Areas $env:AREAS
+        run: ./.github/scripts/run-ci-leg.ps1 -Leg $env:LEG -LegCount $env:LEG_COUNT -Areas $env:AREAS -NoTreeGuards
 
       - name: Stop PostgreSQL
         if: always() && needs.plan.outputs.darling_scope == 'full'
@@ -334,7 +336,7 @@ jobs:
             [ "${TEST_RESULT}" = "${want_test}" ]   || { state=failure; failed="${failed} test (${TEST_RESULT})"; }
           fi
           if [ "${state}" = "failure" ] && [ "${PLAN_OUTCOME}" != "train-blocked" ]; then
-            desc="CI failed:${failed}"
+            desc="CI failed: ${failed# }"
             echo "::error title=CI failed::${desc}"
           fi
           echo "state=${state}" >> "${GITHUB_OUTPUT}"
