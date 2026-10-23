@@ -314,9 +314,15 @@ if (args.Length > 0 && DarlingCliCommands.IsDisableWebVerb(args[0]))
    Reads stdin rather than argv so a password never lands in the process list or shell history. */
 if (args.Length > 0 && DarlingCliCommands.IsAddServerVerb(args[0]))
 {
-    var addServerConfigPath = args.Length > 1 ? args[1] : null;
+    /* #6476: the rest of the line is the config path (as before) and/or the flags for one server; a password is never a flag. */
+    if (!DarlingCliCommands.TryParseAddServerArgs(args[1..], out var addServerConfigPath, out var addServerFlags, out var addServerArgError))
+    {
+        Console.Out.WriteLine(addServerArgError);
+        return 1;
+    }
+
     return await DarlingCliCommands.AddServerAsync(
-        addServerConfigPath, Console.In, Console.Out, Console.Error, CancellationToken.None);
+        addServerConfigPath, Console.In, Console.Out, Console.Error, CancellationToken.None, addServerFlags);
 }
 
 /* CLI verbs: --add-alert-source / --rotate-alert-source / --remove-alert-source <name> and --list-alert-sources, each with an
