@@ -145,7 +145,7 @@ public partial class AddServerDialog : Window
             
             // Load username if stored
             var credentialService = new CredentialService();
-            var cred = credentialService.GetCredential(existing.Id);
+            var cred = ServerCredentialIds.Allows(existing.Id, existing.DisplayName) ? credentialService.GetCredential(existing.Id) : null;
             if (cred.HasValue)
             {
                 EntraMfaUsernameBox.Text = cred.Value.Username;
@@ -157,7 +157,7 @@ public partial class AddServerDialog : Window
 
             // Load credentials if stored
             var credentialService = new CredentialService();
-            var cred = credentialService.GetCredential(existing.Id);
+            var cred = ServerCredentialIds.Allows(existing.Id, existing.DisplayName) ? credentialService.GetCredential(existing.Id) : null;
             if (cred.HasValue)
             {
                 UsernameBox.Text = cred.Value.Username;
@@ -174,7 +174,7 @@ public partial class AddServerDialog : Window
 
             // Pre-fill the client id and secret from Credential Manager (mirrors SQL-password pre-fill).
             var credentialService = new CredentialService();
-            var cred = credentialService.GetCredential(existing.Id);
+            var cred = ServerCredentialIds.Allows(existing.Id, existing.DisplayName) ? credentialService.GetCredential(existing.Id) : null;
             if (cred.HasValue)
             {
                 // The stored credential's username is the client id; prefer the model value when present.
@@ -1040,7 +1040,10 @@ public partial class AddServerDialog : Window
                     AddedServer.AzureTenantId = null;
                     AddedServer.ManagedIdentityClientId = null;
                     _serverManager.UpdateServer(AddedServer, null, null);
-                    _serverManager.CredentialService.DeleteCredential(AddedServer.Id);
+                    if (ServerCredentialIds.Allows(AddedServer.Id, AddedServer.DisplayName))
+                    {
+                        _serverManager.CredentialService.DeleteCredential(AddedServer.Id);
+                    }
                 }
                 else
                 {
