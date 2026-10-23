@@ -255,6 +255,10 @@ public sealed class InvestigationBriefComposer
            for byte as before (Lite's golden pin). */
         if (mode != McpDataDetail.Full)
             ((JsonArray)root["read_rules"]!).Add(ParameterValuesHiddenRule);
+        /* #6554: a Change Watch request on a server whose Query Store is not collected (a readable secondary, query_store_replica off)
+           says so, so an empty Query Store read is not taken for "nothing changed". Absent otherwise, so no other brief moves a byte. */
+        if (!string.IsNullOrWhiteSpace(sources.QueryStoreNotCollected))
+            ((JsonArray)root["read_rules"]!).Add("Query Store reads for this server will be empty. " + sources.QueryStoreNotCollected);
         /* #6565: a reported request with the same root fact under another story hash is named in the earlier reports; this rule says why it is
            marked. Absent when none is, so no other brief moves a byte. */
         if (!sources.Practice && sources.EarlierReports.Any(r => r.SameRootCause))

@@ -116,6 +116,7 @@ public partial class MainWindow : Window
     private readonly MuteRuleService _muteRuleService;
     /// <summary>#5750: the scoped notification-route store, for the Settings window (its writes invalidate the route cache).</summary>
     internal DuckDbNotificationRouteStore NotificationRouteStore { get; private set; } = null!;
+    private Func<IReadOnlyList<NotificationRoute>>? _routeLoader;
 
     /// <summary>The Level 1 investigation store (#5820): Lite's DuckDB twin of Darling's, behind the shared interface the
     /// route list (its use counts), the dispatcher and the MCP tools read.</summary>
@@ -192,7 +193,9 @@ public partial class MainWindow : Window
             _serverManager.GetKnownServerIds,
             RouteSecretAccess.CredentialManager());
         var routeStore = NotificationRouteStore;
-        NotificationRouteCache.Configure(() => Task.Run(() => routeStore.ListAsync()).GetAwaiter().GetResult());
+        /* The loader is installed in MainWindow_Loaded, right after the store is initialized: installing it here primed a load
+           against a store that did not have notification_routes yet (#6458). */
+        _routeLoader = () => Task.Run(() => routeStore.ListAsync()).GetAwaiter().GetResult();
         /* The edition comes from _engineEditions, the same as the alert sweep's: the live status when it has read
            one, else the edition seeded from the store in MainWindow_Loaded. */
         PerformanceMonitorLite.Analysis.AnalysisService.SeparatelyMonitoredDatabasesProvider = serverId =>
@@ -311,7 +314,7 @@ public partial class MainWindow : Window
             StatusText.Text = "Initializing database...";
 
             // Initialize the DuckDB database
-            await _databaseInitializer.InitializeAsync();
+            await NotificationRouteCache.InitializeStoreThenConfigureAsync(() => _databaseInitializer.InitializeAsync(), _routeLoader);
 
             /* The first run of the per-user record of confirmed server settings, before anything below connects: a user who
                used an earlier Lite gets bound the servers whose current host has rows in this store; a new user, and a

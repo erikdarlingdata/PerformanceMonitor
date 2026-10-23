@@ -140,6 +140,9 @@ public sealed record InvestigationAlertRecurrence(
 /// <see cref="PriorLinks"/> and <see cref="RequestUrl"/> (#5914) are Darling's: Lite's reader supplies neither, so a Lite
 /// brief carries neither key.
 /// </summary>
+/// <para>#6554: <see cref="QueryStoreNotCollected"/> is the one-line reason this server's Query Store reads will be empty (a readable
+/// secondary with <c>query_store_replica</c> off); set only on a Change Watch request, whose brief says so. Null on every other request,
+/// so no other brief moves a byte.</para>
 public sealed record InvestigationBriefSources(
     InvestigationBriefRequest Request,
     IReadOnlyList<InvestigationBriefAlert> Alerts,
@@ -153,7 +156,8 @@ public sealed record InvestigationBriefSources(
     bool Practice = false,
     IReadOnlyList<InvestigationAlertRecurrence>? Recurrence = null,
     IReadOnlyList<InvestigationBriefEvidence>? Evidence = null,
-    IReadOnlyList<InvestigationKnownPatternMatch>? KnownPatterns = null);
+    IReadOnlyList<InvestigationKnownPatternMatch>? KnownPatterns = null,
+    string? QueryStoreNotCollected = null);
 
 /// <summary>
 /// #6334: one operator-written known-pattern entry that describes one of the request's linked metrics at the request's first alert

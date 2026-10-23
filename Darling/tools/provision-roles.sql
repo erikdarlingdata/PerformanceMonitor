@@ -26,7 +26,7 @@
 --              grants are only the floor beneath that gate. All other write actions degrade gracefully. The
 --              web dashboard's identity, and a locked-down Viewer's (postgres.connectAs = "viewer").
 --   mcp     -- the MCP server's identity: viewer's reads (the same secret-column carve), plus the MCP tools'
---              narrow writes -- analyze_server's findings, finding mutes, custom views, custom alert rules,
+--              narrow writes -- analyze_server's findings, finding mutes, custom views, custom alert rules, database state expectations (#6397),
 --              alert tuning (mute rules, the alert settings row, the delivery cooldown column, a notification
 --              route's enabled flag or its removal) and server onboarding (config_monitored_servers, whose
 --              credential column it can write but never read). Never admin: a network token-holder must not
@@ -869,6 +869,8 @@ BEGIN
       REVOKE INSERT, UPDATE, DELETE ON config.config_collector_schedules FROM mcp;
       GRANT INSERT (server_id, collector_name, enabled, frequency_minutes, retention_days) ON config.config_collector_schedules TO mcp;
       GRANT UPDATE (enabled, frequency_minutes, retention_days) ON config.config_collector_schedules TO mcp;
+      -- #6454: remove_server clears a removed server's override rows, so mcp holds DELETE on this table (managed provisioning grants it too).
+      GRANT DELETE ON config.config_collector_schedules TO mcp;
    ELSE
       RAISE WARNING 'config.config_collector_schedules was not found, so its mcp grant was skipped. Run this script again after the service has upgraded the store.';
    END IF;
@@ -1868,6 +1870,12 @@ CREATE OR REPLACE TRIGGER trg_monitored_server_password_rules
 --     single-table floor as 3b. Created by V116, so re-run this script after upgrading past it.
 GRANT INSERT, UPDATE, DELETE ON config.custom_alert_rules TO viewer;
 GRANT INSERT, UPDATE, DELETE ON config.custom_alert_rules TO mcp;
+
+-- 3e2. Database state expectations (#6397): the MCP set_database_state_expected tool upserts (INSERT, UPDATE) and clears
+--      (DELETE) one config.database_state_expected row, the same narrow single-table floor viewer holds in 3c. Its read,
+--      get_database_state_expectations, runs on mcp's SELECT on all of config (step 2). The table is V49. BRING-YOUR-OWN
+--      STORES: an existing store must RE-RUN this script to add the grant; until then the tool answers a permission error.
+GRANT INSERT, UPDATE, DELETE ON config.database_state_expected TO mcp;
 
 -- 3f. The rest of the MCP tools' writes, mirroring managed provisioning's grants exactly:
 --     analyze_server persists its findings and mute_analysis_finding records a mute (INSERT, and DELETE for

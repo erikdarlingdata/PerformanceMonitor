@@ -581,8 +581,10 @@ public static class HostConfirmationGate
     /// <param name="secretTypedNow">True when the connection sends a password or client secret the user typed in the
     /// dialog, not one read from the saved credentials.</param>
     /// <param name="replica">True for the Query Store replica Test: the question names the replica.</param>
-    public static string? Question(ServerHostChange? change, bool isEdit, string credential, bool secretTypedNow, bool replica = false)
-        => QuestionCore(change, isEdit, credential, secretTypedNow, replica);
+    /// <param name="confirmedInDialog">True when the user already answered Yes to this server's own question in this dialog: the
+    /// replica Test then asks nothing more (#6559). That question names the replica when there is one.</param>
+    public static string? Question(ServerHostChange? change, bool isEdit, string credential, bool secretTypedNow, bool replica = false, bool confirmedInDialog = false)
+        => QuestionCore(change, isEdit, credential, secretTypedNow, replica, confirmedInDialog);
 
     /// <summary>What a connection in the given mode signs in with, in words for <see cref="Question"/>.</summary>
     public static string CredentialWords(string authenticationType, string? profileName)
@@ -601,9 +603,13 @@ public static class HostConfirmationGate
         };
     }
 
-    private static string? QuestionCore(ServerHostChange? change, bool isEdit, string credential, bool secretTypedNow, bool replica)
+    private static string? QuestionCore(ServerHostChange? change, bool isEdit, string credential, bool secretTypedNow, bool replica, bool confirmedInDialog)
     {
         if (change == null || !isEdit)
+            return null;
+
+        /* #6559: no replica typed, nothing to connect to, so nothing to ask; a question built from an empty name would be a blank. */
+        if (replica && change.Replica.Length == 0)
             return null;
 
         /* The replica Test runs after the server's own Test, which already asked about these settings. */
@@ -616,14 +622,18 @@ public static class HostConfirmationGate
 
         if (replica)
         {
-            if (!change.ReplicaChanged && change.ConfirmedHost != null)
+            if (confirmedInDialog || (!change.ReplicaChanged && change.ConfirmedHost != null))
                 return null;
             var wasReplica = change.ConfirmedReplica.Length == 0 ? "none" : ServerHostChange.Shown(change.ConfirmedReplica);
             return $"Connect to the Query Store replica {ServerHostChange.Shown(change.Replica)} (was {wasReplica}) with {credential}?";
         }
 
         var was = change.ConfirmedHost == null ? "not confirmed from this Windows account" : "was " + ServerHostChange.Shown(change.ConfirmedHost);
-        var question = $"Connect to {ServerHostChange.Shown(change.Host)} ({was}) with {credential}?";
+        /* #6559: a server never confirmed here has no "changed" replica to describe, so its one question names the replica too. */
+        var withReplica = change.ConfirmedHost == null && change.Replica.Length > 0
+            ? $" and the Query Store replica {ServerHostChange.Shown(change.Replica)}"
+            : "";
+        var question = $"Connect to {ServerHostChange.Shown(change.Host)}{withReplica} ({was}) with {credential}?";
         return change.ConfirmedHost != null && (!change.HostChanged || change.ReplicaChanged || change.Settings.Count > 0)
             ? question + "\n\n" + change.DescribeChange()
             : question;
