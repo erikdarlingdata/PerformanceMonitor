@@ -108,11 +108,12 @@ public sealed class StallWaitProbeQueryTextPinTests
         Assert.NotNull(tail);
         Assert.Contains("A tail without 'idle K tasks/J types' is from a build that still ranked idle waits.", tail, StringComparison.Ordinal);
 
-        /* The head is byte-identical to dev's: same length (the budget file pins 595 with the schema) and the
-           same text, and it carries nothing about idle waits. */
+        /* The head is dev's with one deliberate change, #6453: "so a not_collected empty answer is EXPECTED"
+           became "so an empty answer is EXPECTED" (13 characters shorter, 564 to 551). The budget tests pin the
+           head in length with the schema, and it carries nothing about idle waits. */
         Assert.StartsWith("Out-of-band DMV samples taken when this service's own collector stalls", head, StringComparison.Ordinal);
         Assert.EndsWith("Unbanded, untrended: one row is evidence about a moment.", head, StringComparison.Ordinal);
-        Assert.Equal(564, head.Length);
+        Assert.Equal(551, head.Length);
         Assert.DoesNotContain("idle", head, StringComparison.OrdinalIgnoreCase);
     }
 

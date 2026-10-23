@@ -3538,6 +3538,18 @@ ORDER BY server_name";
                 }
 
                 var everCollected = await DarlingDataReader.HasAnyWaitingTaskSampleAsync(postgres, resolved.ServerId, cancellationToken);
+
+                /* #6453: no row EVER stored is not "unavailable" when the collector's own newest run completed clean: the
+                   server was sampled and had nothing waiting, which is what get_collection_health calls HEALTHY. */
+                var healthyEmpty = everCollected
+                    ? null
+                    : await DarlingRuntimePrecondition.HealthyEmptyMessageAsync(
+                        postgres, resolved.ServerId, resolved.DisplayName, "waiting_tasks", "waiting-task samples", cancellationToken);
+                if (healthyEmpty != null)
+                {
+                    return McpHelpers.Status("empty", healthyEmpty);
+                }
+
                 return everCollected
                     ? McpHelpers.Status(
                         "empty",
