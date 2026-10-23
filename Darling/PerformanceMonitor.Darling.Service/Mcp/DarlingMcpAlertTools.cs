@@ -766,7 +766,7 @@ public sealed partial class DarlingMcpAlertTools
         "the next level (a family route, then the parent channels) on the next firing — the reversible form of " +
         "'send this family to the parent channels for now'. Returns {status:\"updated\", route:{...}} with the route AS " +
         "STORED, {status:\"unchanged\", route:{...}} when it already holds that value (a retry is safe and costs no " +
-        "write), {status:\"refused\"} for an agent route, or for turning off a route with an Off agent setting (that is done in the Viewer or on the web dashboard; turning it on is allowed), or {status:\"not_found\"}. The running service picks the change up on its next collection sweep, " +
+        "write), {status:\"refused\"} for an agent route, or for turning off a route with an Off agent setting (that is done in the Viewer or on the web dashboard; turning it on is allowed), or {status:\"not_found\"}. An operator token is not refused: its change to a route with an agent setting goes through update_notification_route and is journaled as route_agent_changed. The running service picks the change up on its next collection sweep, " +
         "when the write's config_version bump makes it reload its channel configuration. This tool cannot author or " +
         "re-point a route: destinations are bearer secrets, set with create_notification_route / update_notification_route or in the Viewer's Settings window.")]
     public static async Task<string> SetNotificationRouteEnabled(
@@ -835,7 +835,7 @@ public sealed partial class DarlingMcpAlertTools
         "A route cannot be its own fallback and the fallback must be an existing route: either is refused with " +
         "{status:\"invalid\"}. Returns {status:\"updated\", route:{...}} with the route AS STORED, {status:\"unchanged\", route:{...}} " +
         "when it already holds that value, or {status:\"not_found\"}. An agent route (agent_level 1 or more) is " +
-        "{status:\"refused\"}: it is changed in the Viewer. Deleting the fallback route clears the reference.")]
+        "{status:\"refused\"}: it is changed in the Viewer, or by an operator token, whose call goes through update_notification_route. Deleting the fallback route clears the reference.")]
     public static async Task<string> SetNotificationRouteFallback(
         NpgsqlDataSource postgres,
         [Description("The route to set the fallback on (from get_notification_routes).")] int route_id,
