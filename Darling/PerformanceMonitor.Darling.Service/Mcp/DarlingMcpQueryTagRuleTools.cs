@@ -75,7 +75,7 @@ public sealed class DarlingMcpQueryTagRuleTools
         "(an object is matched as database.schema.name, so start with *. to ignore the database), text matches anywhere in the first 4,000 characters of the query text. " +
         "text_tag reads a /* tag:NAME */ or -- tag:NAME comment in the query text and uses NAME as the tag: it takes no tag_id and no pattern (it is stored as /* tag:NAME */); every other field needs a tag_id " +
         "(from the query tag tools) and a pattern of 1-400 characters. Rules apply by priority (lower first), then id; the first match wins, but a hand assignment beats any rule. " +
-        "server_id limits the rule to one server (omit it for every server). Test a rule first with test_query_tag_rule.")]
+        "server_id limits the rule to one server (omit it for every server). Test a rule first with test_query_tag_rule. The answer carries previous (null) and undo (the delete_query_tag_rule call for the new id).")]
     public static Task<string> CreateQueryTagRule(
         NpgsqlDataSource postgres,
         [Description("What the rule matches on: application, login, host, database, object, text or text_tag.")] string field,
@@ -90,7 +90,7 @@ public sealed class DarlingMcpQueryTagRuleTools
     [McpServerTool(Name = "update_query_tag_rule"), Description(
         "PARTIAL edit of a query tag rule: send only the fields to change in changes_json, from pattern, priority, enabled, tag_id and server_id. An explicit null for server_id " +
         "makes the rule apply to every server. The rule's field cannot change (delete it and create another). The edit is validated like a new rule. " +
-        "Setting enabled to false keeps the rule in list_query_tag_rules with enabled false. The change reaches the tag map on the next collector pass.")]
+        "Setting enabled to false keeps the rule in list_query_tag_rules with enabled false. The change reaches the tag map on the next collector pass. The answer carries previous (the rule's pattern, priority, enabled, tag_id and server_id before) and undo (the update_query_tag_rule call that puts the changed fields back).")]
     public static Task<string> UpdateQueryTagRule(
         NpgsqlDataSource postgres,
         [Description("The rule id (from list_query_tag_rules).")] int rule_id,
@@ -100,7 +100,7 @@ public sealed class DarlingMcpQueryTagRuleTools
 
     [McpServerTool(Name = "delete_query_tag_rule"), Description(
         "Deletes a query tag rule. Permanent; queries it tagged lose that tag at the next collector pass (unless another rule or a hand assignment holds them). " +
-        "To keep the rule but stop it applying, set enabled to false with update_query_tag_rule.")]
+        "To keep the rule but stop it applying, set enabled to false with update_query_tag_rule. The answer carries previous (the deleted rule) and undo (the create_query_tag_rule call, which makes a new id).")]
     public static Task<string> DeleteQueryTagRule(
         NpgsqlDataSource postgres,
         [Description("The rule id (from list_query_tag_rules).")] int rule_id,
@@ -160,6 +160,8 @@ public sealed class DarlingMcpQueryTagRuleTools
             {
                 ["status"] = "created",
                 ["rule"] = RuleNode(row, ById(tags)),
+                ["previous"] = null,
+                ["undo"] = DarlingMcpUndoShape.Call("delete_query_tag_rule", new JsonObject { ["rule_id"] = row.Id }),
                 ["rules_version"] = state.RulesVersion,
                 ["map_refresh"] = TakesEffectNote,
             });
@@ -183,8 +185,10 @@ public sealed class DarlingMcpQueryTagRuleTools
             // The store holds the rule lock, reads the rule under it and runs this check on that read: the validation sees the row it
             // is about to change. A tag or server this edit does not touch is not re-checked, so a rule stays editable (pausable)
             // after its tag was removed elsewhere.
+            QueryTagRuleRow? before = null;
             var result = await store.UpdateRuleAsync<Refused>(ruleId, changes!, async current =>
             {
+                before = current;
                 if (changes!.HasPattern && current.Field == QueryTagRuleField.TextTag)
                 {
                     return new Refused(Refusal("invalid", "text_tag_has_no_pattern", "A text_tag rule reads its tag from the query text and has no pattern to change."));
@@ -204,7 +208,13 @@ public sealed class DarlingMcpQueryTagRuleTools
                 case QueryTagRuleUpdateOutcome.Refused:
                     return result.Refusal!.Json;
                 case QueryTagRuleUpdateOutcome.Unchanged:
-                    return Serialize(new JsonObject { ["status"] = "unchanged", ["rule"] = RuleNode(result.Row!, ById(await store.ReadTagsAsync(ct))) });
+                    return Serialize(new JsonObject
+                    {
+                        ["status"] = "unchanged",
+                        ["rule"] = RuleNode(result.Row!, ById(await store.ReadTagsAsync(ct))),
+                        ["previous"] = before is null ? null : PreviousValues(before),
+                        ["undo"] = before is null ? null : UpdateUndo(before, changes!),
+                    });
             }
 
             var tags = await store.ReadTagsAsync(ct);
@@ -213,6 +223,8 @@ public sealed class DarlingMcpQueryTagRuleTools
             {
                 ["status"] = "updated",
                 ["rule"] = RuleNode(result.Row!, ById(tags)),
+                ["previous"] = before is null ? null : PreviousValues(before),
+                ["undo"] = before is null ? null : UpdateUndo(before, changes!),
                 ["rules_version"] = state.RulesVersion,
                 ["map_refresh"] = TakesEffectNote,
             });
@@ -227,6 +239,7 @@ public sealed class DarlingMcpQueryTagRuleTools
     {
         try
         {
+            var before = await store.GetRuleAsync(ruleId, ct);
             if (!await store.DeleteRuleAsync(ruleId, ct))
             {
                 return NotFound(ruleId);
@@ -237,6 +250,9 @@ public sealed class DarlingMcpQueryTagRuleTools
             {
                 ["status"] = "deleted",
                 ["rule_id"] = ruleId,
+                ["previous"] = before is null ? null : RuleNode(before, ById(await store.ReadTagsAsync(ct))),
+                ["undo"] = before is null ? null : DarlingMcpUndoShape.Call("create_query_tag_rule", CreateArguments(before)),
+                ["undo_note"] = "The undo recreates the rule under a NEW id.",
                 ["rules_version"] = state.RulesVersion,
                 ["map_refresh"] = TakesEffectNote,
             });
@@ -570,6 +586,68 @@ public sealed class DarlingMcpQueryTagRuleTools
     }
 
     // ---------------------------------------------------------------- output
+
+    /// <summary>What a rule held before an update (#6403): every field the update tool can change.</summary>
+    private static JsonObject PreviousValues(QueryTagRuleRow row) => new()
+    {
+        ["pattern"] = row.Pattern,
+        ["priority"] = row.Priority,
+        ["enabled"] = row.Enabled,
+        ["tag_id"] = row.TagId,
+        ["server_id"] = row.ServerId,
+    };
+
+    /// <summary>The update that puts back the fields <paramref name="applied"/> named, as update_query_tag_rule's own changes_json.</summary>
+    private static JsonObject UpdateUndo(QueryTagRuleRow row, QueryTagRuleEdit applied)
+    {
+        var changes = new JsonObject();
+        if (applied.HasPattern)
+        {
+            changes["pattern"] = row.Pattern;
+        }
+
+        if (applied.HasPriority)
+        {
+            changes["priority"] = row.Priority;
+        }
+
+        if (applied.HasEnabled)
+        {
+            changes["enabled"] = row.Enabled;
+        }
+
+        if (applied.HasTagId)
+        {
+            changes["tag_id"] = row.TagId;
+        }
+
+        if (applied.HasServerId)
+        {
+            changes["server_id"] = row.ServerId;
+        }
+
+        return DarlingMcpUndoShape.Call("update_query_tag_rule", new JsonObject { ["rule_id"] = row.Id, ["changes_json"] = changes.ToJsonString() });
+    }
+
+    /// <summary>The create that recreates a deleted rule. A text_tag rule is stored as /* tag:NAME */ and takes no pattern or tag.</summary>
+    private static JsonObject CreateArguments(QueryTagRuleRow row)
+    {
+        var arguments = new JsonObject { ["field"] = QueryTagRuleStore.FieldName(row.Field) };
+        if (row.Field != QueryTagRuleField.TextTag)
+        {
+            arguments["pattern"] = row.Pattern;
+            arguments["tag_id"] = row.TagId;
+        }
+
+        arguments["priority"] = row.Priority;
+        arguments["enabled"] = row.Enabled;
+        if (row.ServerId is int server)
+        {
+            arguments["server_id"] = server;
+        }
+
+        return arguments;
+    }
 
     private static JsonObject RuleNode(QueryTagRuleRow rule, IReadOnlyDictionary<int, QueryTagNameRow> tagById) => new()
     {

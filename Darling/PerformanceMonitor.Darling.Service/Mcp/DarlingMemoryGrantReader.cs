@@ -12,6 +12,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -51,21 +52,6 @@ internal static class DarlingMemoryGrantReader
 {
     /* ─────────────────────────── result rows ─────────────────────────── */
 
-    /// <summary>One resource semaphore at the latest snapshot — the workspace-memory ceiling lens.</summary>
-    /// <param name="SampleIntervalSeconds">#3540 (V128): the measured seconds the two deltas accrued over;
-    /// <c>0</c> is the calculator's "no delta knowable" marker (first sighting, counter reset, a gap past the
-    /// policy — a restart, not a quiet semaphore); <c>null</c> is a pre-V128 row that never recorded one.</param>
-    public sealed record ResourceSemaphoreRow(
-        DateTime CollectionTime, short ResourceSemaphoreId, int PoolId, double TargetMemoryMb, double MaxTargetMemoryMb,
-        double TotalMemoryMb, double AvailableMemoryMb, double GrantedMemoryMb, double UsedMemoryMb,
-        int GranteeCount, int WaiterCount, long TimeoutErrorCount, long ForcedGrantCount,
-        long TimeoutErrorCountDelta, long ForcedGrantCountDelta, int? SampleIntervalSeconds)
-    {
-        /// <summary>True when the row's deltas are the calculator's (0, 0) marker: no delta was knowable, so
-        /// the two <c>*_delta</c> zeros beside it are not "no timeouts this interval".</summary>
-        public bool IsUnknowable => SampleIntervalSeconds == 0;
-    }
-
     /// <summary>One resource pool at the latest snapshot (summed across its semaphores) — Lite's grant lens.</summary>
     public sealed record MemoryGrantRow(
         DateTime CollectionTime, int PoolId, double AvailableMemoryMb, double GrantedMemoryMb, double UsedMemoryMb,
@@ -80,101 +66,7 @@ internal static class DarlingMemoryGrantReader
         double TargetMemoryMb, double MaxTargetMemoryMb, long GranteeCount, long WaiterCount,
         long TimeoutErrorCountDelta, long ForcedGrantCountDelta, long Snapshots);
 
-    /// <summary>
-    /// One (resource_semaphore_id, pool_id) — or, for the pool lens, one pool with <see cref="ResourceSemaphoreId"/>
-    /// null — aggregated over EVERY snapshot in the window (#3541 A10). <see cref="PeakWaiterCount"/> /
-    /// <see cref="PeakWaitersAt"/> is the storm detector: the most sessions ever seen waiting for a grant in the
-    /// window and the snapshot it happened at. <see cref="PeakGrantedAt"/> is the snapshot of the largest
-    /// granted memory (<see cref="PeakGrantedMemoryMb"/>), a different moment when nothing waited then (#5644 W9). The two <c>*InWindow</c> figures are SUMs of the stored per-interval
-    /// deltas — how many grants timed out / were forced across the whole window, not just the last interval.
-    /// </summary>
-    public sealed record MemoryGrantWindowRow(
-        short? ResourceSemaphoreId, int PoolId, long SnapshotsInWindow, DateTime FirstSnapshotAt, DateTime LastSnapshotAt,
-        long PeakWaiterCount, DateTime PeakWaitersAt, double PeakGrantedMemoryMb, double MinAvailableMemoryMb,
-        long TimeoutErrorsInWindow, long ForcedGrantsInWindow, DateTime PeakGrantedAt);
-
     /* ─────────────────────────── resource semaphore (latest snapshot, per semaphore) ─────────────────────────── */
-
-    /// <summary>
-    /// The latest snapshot's per-(semaphore, pool) rows — the Dashboard's <c>get_resource_semaphore</c> shape
-    /// over Darling's store (plus <c>max_target_memory_mb</c> from the store; plus, since V128, the
-    /// Dashboard's <c>sample_interval_seconds</c>, trailing so every existing ordinal is stable). MB columns
-    /// are <c>numeric(18,2)</c> → double precision. $1 server_id, $2 window start, $3 window end (naive UTC).
-    ///
-    /// <para><b>Row order is pool first, then semaphore — the same order Lite's twin read
-    /// (<c>LocalDataService.GetResourceSemaphoreSnapshotAsync</c>) and the pool-lens reads in both SKUs
-    /// already use (#3653 A15/A16).</b> This read and <see cref="ResourceSemaphoreWindowSql"/> ordered semaphore
-    /// first while Lite ordered pool first, so <c>get_resource_semaphore</c> returned the same rows in a
-    /// different order on the two SKUs — the one place the twins disagreed on this tool, and a difference an
-    /// agent reading <c>grants[0]</c> as "the default pool's regular semaphore" would never see. Pool first
-    /// groups a pool's two semaphores (0 regular, 1 small-query) together, which is how the DMV is read.
-    /// Pinned cross-SKU by <c>DarlingMcpMemoryGrantToolsTests</c>.</para>
-    /// </summary>
-    public const string ResourceSemaphoreLatestSql = """
-        WITH latest AS
-        (
-            SELECT MAX(collection_time) AS mx
-            FROM v_memory_grant_stats
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-        )
-        SELECT
-            collection_time,
-            resource_semaphore_id,
-            pool_id,
-            CAST(target_memory_mb AS double precision) AS target_memory_mb,
-            CAST(max_target_memory_mb AS double precision) AS max_target_memory_mb,
-            CAST(total_memory_mb AS double precision) AS total_memory_mb,
-            CAST(available_memory_mb AS double precision) AS available_memory_mb,
-            CAST(granted_memory_mb AS double precision) AS granted_memory_mb,
-            CAST(used_memory_mb AS double precision) AS used_memory_mb,
-            grantee_count,
-            waiter_count,
-            timeout_error_count,
-            forced_grant_count,
-            timeout_error_count_delta,
-            forced_grant_count_delta,
-            sample_interval_seconds
-        FROM v_memory_grant_stats
-        WHERE server_id = $1
-        AND   collection_time = (SELECT mx FROM latest)
-        ORDER BY pool_id, resource_semaphore_id
-        """;
-
-    public static async Task<List<ResourceSemaphoreRow>> GetResourceSemaphoreLatestAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
-    {
-        var rows = new List<ResourceSemaphoreRow>();
-        await using var command = postgres.CreateCommand(ResourceSemaphoreLatestSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            rows.Add(new ResourceSemaphoreRow(
-                reader.GetDateTime(0),
-                reader.IsDBNull(1) ? (short)0 : reader.GetInt16(1),
-                reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
-                reader.IsDBNull(3) ? 0 : reader.GetDouble(3),
-                reader.IsDBNull(4) ? 0 : reader.GetDouble(4),
-                reader.IsDBNull(5) ? 0 : reader.GetDouble(5),
-                reader.IsDBNull(6) ? 0 : reader.GetDouble(6),
-                reader.IsDBNull(7) ? 0 : reader.GetDouble(7),
-                reader.IsDBNull(8) ? 0 : reader.GetDouble(8),
-                reader.IsDBNull(9) ? 0 : reader.GetInt32(9),
-                reader.IsDBNull(10) ? 0 : reader.GetInt32(10),
-                reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
-                reader.IsDBNull(12) ? 0 : reader.GetInt64(12),
-                reader.IsDBNull(13) ? 0 : reader.GetInt64(13),
-                reader.IsDBNull(14) ? 0 : reader.GetInt64(14),
-                /* NULL stays NULL: a pre-V128 row never recorded its interval, and that is a different
-                   statement from the 0 the calculator writes when no delta was knowable. */
-                reader.IsDBNull(15) ? null : reader.GetInt32(15)));
-        }
-
-        return rows;
-    }
 
     /* ─────────────────────────── memory grants (latest snapshot, per pool) ─────────────────────────── */
 
@@ -287,88 +179,6 @@ internal static class DarlingMemoryGrantReader
     /* ─────────────────────────── the window, per semaphore / per pool (#3541 A10) ─────────────────────────── */
 
     /// <summary>
-    /// Every snapshot in the window aggregated per (resource_semaphore_id, pool_id) — the window half of
-    /// get_resource_semaphore. The peak's instant comes from a <c>DISTINCT ON</c> over the same windowed rows
-    /// (highest waiter_count first, newest first on a tie, so a storm that plateaued reports its latest
-    /// snapshot); the two <c>*_in_window</c> figures SUM the stored per-interval deltas. MB aggregates CAST to
-    /// double precision, count aggregates to bigint, like the latest reads. $1 server_id, $2 window start,
-    /// $3 window end (naive UTC).
-    /// </summary>
-    public const string ResourceSemaphoreWindowSql = """
-        WITH windowed AS
-        (
-            SELECT
-                collection_time,
-                resource_semaphore_id,
-                pool_id,
-                waiter_count,
-                granted_memory_mb,
-                available_memory_mb,
-                timeout_error_count_delta,
-                forced_grant_count_delta
-            FROM v_memory_grant_stats
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-        ),
-        agg AS
-        (
-            SELECT
-                resource_semaphore_id,
-                pool_id,
-                COUNT(*) AS snapshots_in_window,
-                MIN(collection_time) AS first_snapshot_at,
-                MAX(collection_time) AS last_snapshot_at,
-                CAST(MAX(waiter_count) AS bigint) AS peak_waiter_count,
-                CAST(MAX(granted_memory_mb) AS double precision) AS peak_granted_memory_mb,
-                CAST(MIN(available_memory_mb) AS double precision) AS min_available_memory_mb,
-                CAST(SUM(timeout_error_count_delta) AS bigint) AS timeout_errors_in_window,
-                CAST(SUM(forced_grant_count_delta) AS bigint) AS forced_grants_in_window
-            FROM windowed
-            GROUP BY resource_semaphore_id, pool_id
-        ),
-        peak AS
-        (
-            SELECT DISTINCT ON (resource_semaphore_id, pool_id)
-                resource_semaphore_id,
-                pool_id,
-                collection_time AS peak_waiters_at
-            FROM windowed
-            ORDER BY resource_semaphore_id, pool_id, waiter_count DESC, collection_time DESC
-        ),
-        peak_grant AS
-        (
-            SELECT DISTINCT ON (resource_semaphore_id, pool_id)
-                resource_semaphore_id,
-                pool_id,
-                collection_time AS peak_granted_at
-            FROM windowed
-            ORDER BY resource_semaphore_id, pool_id, granted_memory_mb DESC NULLS LAST, collection_time DESC
-        )
-        SELECT
-            a.resource_semaphore_id,
-            a.pool_id,
-            a.snapshots_in_window,
-            a.first_snapshot_at,
-            a.last_snapshot_at,
-            a.peak_waiter_count,
-            p.peak_waiters_at,
-            a.peak_granted_memory_mb,
-            a.min_available_memory_mb,
-            a.timeout_errors_in_window,
-            a.forced_grants_in_window,
-            pg.peak_granted_at
-        FROM agg AS a
-        JOIN peak AS p
-          ON p.resource_semaphore_id = a.resource_semaphore_id
-         AND p.pool_id = a.pool_id
-        JOIN peak_grant AS pg
-          ON pg.resource_semaphore_id = a.resource_semaphore_id
-         AND pg.pool_id = a.pool_id
-        ORDER BY a.pool_id, a.resource_semaphore_id
-        """;
-
-    /// <summary>
     /// Every snapshot in the window aggregated per pool — the window half of get_memory_grants. The pool lens
     /// SUMs across a pool's semaphores at each snapshot first (the same per-snapshot SUM
     /// <see cref="MemoryGrantsLatestSql"/> serves), THEN takes the window's peak / floor / total over those
@@ -442,43 +252,27 @@ internal static class DarlingMemoryGrantReader
         ORDER BY a.pool_id
         """;
 
+    /* ─────────────────────────── resource semaphore: moved to Storage (#6388) ─────────────────────────── */
+
+    /// <summary>The latest-snapshot read, now <see cref="DarlingResourceSemaphoreReader.LatestSql"/> in Storage so the Viewer
+    /// reads the same text (#6388).</summary>
+    public const string ResourceSemaphoreLatestSql = DarlingResourceSemaphoreReader.LatestSql;
+
+    /// <summary>The window read, now <see cref="DarlingResourceSemaphoreReader.WindowSql"/> in Storage (#6388).</summary>
+    public const string ResourceSemaphoreWindowSql = DarlingResourceSemaphoreReader.WindowSql;
+
+    public static Task<List<ResourceSemaphoreRow>> GetResourceSemaphoreLatestAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        DarlingResourceSemaphoreReader.GetLatestAsync(postgres, serverId, startUtc, endUtc, McpCommandDeadlines.ReadSeconds, cancellationToken);
+
     public static Task<List<MemoryGrantWindowRow>> GetResourceSemaphoreWindowAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
-        ReadWindowAsync(postgres, ResourceSemaphoreWindowSql, serverId, startUtc, endUtc, cancellationToken);
+        DarlingResourceSemaphoreReader.GetWindowAsync(postgres, serverId, startUtc, endUtc, McpCommandDeadlines.ReadSeconds, cancellationToken);
 
     public static Task<List<MemoryGrantWindowRow>> GetMemoryGrantsWindowAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
-        ReadWindowAsync(postgres, MemoryGrantsWindowSql, serverId, startUtc, endUtc, cancellationToken);
+        DarlingResourceSemaphoreReader.ReadWindowAsync(postgres, MemoryGrantsWindowSql, serverId, startUtc, endUtc, McpCommandDeadlines.ReadSeconds, cancellationToken);
 
-    /// <summary>The two window reads project the SAME twelve columns in the same order (the pool lens fills
-    /// <c>resource_semaphore_id</c> with a typed NULL), so one materialiser serves both.</summary>
-    private static async Task<List<MemoryGrantWindowRow>> ReadWindowAsync(
-        NpgsqlDataSource postgres, string sql, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken)
-    {
-        var rows = new List<MemoryGrantWindowRow>();
-        await using var command = postgres.CreateCommand(sql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            rows.Add(new MemoryGrantWindowRow(
-                reader.IsDBNull(0) ? null : reader.GetInt16(0),
-                reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
-                reader.GetInt64(2),
-                reader.GetDateTime(3),
-                reader.GetDateTime(4),
-                reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
-                reader.GetDateTime(6),
-                reader.IsDBNull(7) ? 0 : reader.GetDouble(7),
-                reader.IsDBNull(8) ? 0 : reader.GetDouble(8),
-                reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
-                reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
-                reader.GetDateTime(11)));
-        }
-
-        return rows;
-    }
 
     /* ─────────────────────────── memory pressure events (RING_BUFFER_RESOURCE_MONITOR) ─────────────────────────── */
 

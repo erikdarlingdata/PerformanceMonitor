@@ -183,7 +183,7 @@ public sealed partial class DarlingMcpServerAdminTools
         "\"collides\": the new address belongs to another monitored server, or the connection lands in a database " +
         "another one covers. \"connection_failed\": the probe could not connect, nothing was saved. \"unchanged\": " +
         "the request equals the stored values, nothing was written. updated returns {status, server, display_name, " +
-        "server_id, changed:[field names], reconnects, tested, query_store_replica_test, modified_at, note}; reconnects says whether the " +
+        "server_id, changed:[field names], reconnects, tested, query_store_replica_test, modified_at, note, previous, undo, undo_note}; previous holds the changed fields as they were and undo is the edit_server call that sets them back (guarded by the new modified_at); the password and AWS external ID cannot be read back, so undo never carries them and undo_note says what to add (undo is null when nothing else changed); reconnects says whether the " +
         "service drops and re-opens its connection to the server; query_store_replica_test is the replica's own connection result when the " +
         "server has one and the edit was tested (a replica that does not open is a note, the edit is still saved; on an Azure SQL Database it says the setting has no effect, because that engine has no readable-replica Query Store read). server_name is resolved as remove_server resolves it.")]
     public static Task<string> EditServer(
@@ -538,6 +538,7 @@ LIMIT 1";
 
         logger?.LogInformation("Server edited through edit_server: id {ServerId}, fields {Fields}", serverId, string.Join(",", plan.ChangedFields));
 
+        var (previous, undo, undoNote) = EditUndoOf(row, plan, ModifiedAtToken(write.ModifiedAt));
         return JsonSerializer.Serialize(new
         {
             status = EditStatus.Updated,
@@ -552,7 +553,96 @@ LIMIT 1";
             query_store_replica_test = replicaTest,
             modified_at = ModifiedAtToken(write.ModifiedAt),
             note = plan.AddressChanged ? EditNoteSweep + " " + EditNoteAddress : EditNoteSweep,
+            previous,
+            undo,
+            undo_note = undoNote,
         }, McpHelpers.JsonOptions);
+    }
+
+    /// <summary>
+    /// What an applied edit hands back (#6403): <c>previous</c> is the fields it changed as they were, and <c>undo</c> is the edit_server call
+    /// that sets them back, guarded by the new <c>modified_at</c> so a later change is not overwritten. The stored password and AWS external ID
+    /// cannot be read, so neither is ever in <c>previous</c> or the undo, and the note says what the caller must add. An edit that changed nothing
+    /// else (a password-only edit) has nothing a call can restore: <c>undo</c> is null and the note says why.
+    /// </summary>
+    private static (JsonObject Previous, JsonObject? Undo, string? Note) EditUndoOf(ServerEditRow row, ServerEditPlan plan, string newModifiedAt)
+    {
+        var previous = new JsonObject();
+        foreach (var field in plan.ChangedFields)
+        {
+            switch (field)
+            {
+                case "display_name": previous[field] = row.Name; break;
+                case "host": previous[field] = row.Host; break;
+                case "port": previous[field] = row.Port; break;
+                case "database": previous[field] = row.Database; break;
+                case "read_only_intent": previous[field] = row.ReadOnlyIntent; break;
+                case "auth": previous[field] = AuthWord(row.Auth); break;
+                case "username": previous[field] = row.Username; break;
+                case "encrypt_mode": previous[field] = row.EncryptMode; break;
+                case "trust_server_certificate": previous[field] = row.TrustServerCertificate; break;
+                case "multi_subnet_failover": previous[field] = row.MultiSubnetFailover; break;
+                case "query_store_replica": previous[field] = row.QueryStoreReplica; break;
+                case "monthly_cost_usd": previous[field] = row.MonthlyCostUsd; break;
+                case "aws_role_arn": previous[field] = row.AwsRoleArn; break;
+            }
+        }
+
+        var secretChanged = plan.ChangedFields.Contains("password") || plan.ChangedFields.Contains("aws_external_id");
+        /* A put-back of how the row connects needs the password again when the row ends up on SQL or service-principal authentication. */
+        var undoAuth = plan.ChangedFields.Contains("auth") ? row.Auth : plan.ProbeConfig.Auth;
+        var needsPasswordAgain = IsSecretAuth(undoAuth)
+            && (plan.ConnectionChanged || plan.ChangedFields.Contains("auth"));
+        var needsExternalIdAgain = plan.ChangedFields.Contains("aws_role_arn");
+
+        string? note = null;
+        if (secretChanged || needsPasswordAgain || needsExternalIdAgain)
+        {
+            note = "The stored password and AWS external ID cannot be read back, so the undo does not restore them" +
+                   (needsPasswordAgain || needsExternalIdAgain
+                       ? "; add password (and aws_external_id, for an AWS role) to its changes_json, which that put-back needs."
+                       : ".");
+        }
+
+        /* A row saved before #6583 (a non-zero port on SQL Server) or #6352 (a named-pipe or admin-style host) holds a value the edit
+           rules now refuse. Putting it back is refused the same way, with nothing written, so the note says so instead of leaving
+           the undo to read as a call that works. */
+        var sqlServerRow = PerformanceMonitor.Collectors.MonitoredEngineKind.ParseConfiguredEngine(row.Engine) != PerformanceMonitor.Collectors.CollectorTargetEngine.PostgreSql;
+        var refusedValues = new List<string>();
+        if (sqlServerRow && plan.ChangedFields.Contains("port") && row.Port > 0)
+        {
+            refusedValues.Add("port " + row.Port.ToString(System.Globalization.CultureInfo.InvariantCulture) + " (a SQL Server port is no longer accepted)");
+        }
+
+        if (sqlServerRow && plan.ChangedFields.Contains("host") && ServerHostSetting.Refusal(row.Host) is not null)
+        {
+            refusedValues.Add("host " + row.Host + " (no longer an accepted host)");
+        }
+
+        if (refusedValues.Count > 0)
+        {
+            note = (note is null ? string.Empty : note + " ")
+                + "The undo will be refused with nothing written, because the previous " + string.Join(" and ", refusedValues)
+                + " would no longer pass the add rules; edit the other fields by hand.";
+        }
+
+        if (previous.Count == 0)
+        {
+            return (previous, null, note);
+        }
+
+        var changes = new JsonObject();
+        foreach (var (name, value) in previous.ToList())
+        {
+            changes[name] = value?.DeepClone();
+        }
+
+        changes["expected_modified_at"] = newModifiedAt;
+        return (previous, DarlingMcpUndoShape.Call("edit_server", new JsonObject
+        {
+            ["server_name"] = plan.NewStorageKey,
+            ["changes_json"] = changes.ToJsonString(),
+        }), note);
     }
 
     /// <summary>The answer for an edit whose connected database another definition already covers: the add refusal's text
