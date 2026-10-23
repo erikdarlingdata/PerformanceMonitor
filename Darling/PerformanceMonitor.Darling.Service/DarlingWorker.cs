@@ -2171,6 +2171,12 @@ LIMIT 1";
             _logger.LogWarning("{Warning}", warning);
         }
 
+        /* #6583: a SQL Server entry's port is ignored (the connection uses the host as written); the store registry's entries are named when it is read. */
+        foreach (var warning in SqlServerPortAdvice.Warnings(config.Servers))
+        {
+            _logger.LogWarning("{Warning}", warning);
+        }
+
         /* #5307: a key under web.network / mcp.network (or their tls blocks, or web.network.oidc) that no config
            class declares is dropped at load; name each one so a mistyped key is visible. Paths only. */
         foreach (var warning in GetUnknownNetworkKeyWarnings(config))

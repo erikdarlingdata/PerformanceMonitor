@@ -2495,7 +2495,9 @@ public sealed class MonitoredServer
     /// TCP port, for PostgreSQL targets on a non-default port. <c>0</c> (the default) means "use the
     /// driver's default", which is 5432.
     /// <para>Unused for SQL Server, which carries a non-default port in the host itself as
-    /// <c>host,1433</c> — that convention is left alone rather than migrated.</para>
+    /// <c>host,1433</c> — that convention is left alone rather than migrated. A SQL Server entry with a non-zero
+    /// <c>port</c> still starts, but <c>--validate-config</c> and the service log warn that it is ignored (#6583), and
+    /// <c>add_servers</c> and <c>edit_server</c> refuse it.</para>
     /// </summary>
     [JsonPropertyName("port")]
     public int Port { get; set; }
