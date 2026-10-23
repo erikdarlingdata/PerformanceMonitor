@@ -558,6 +558,12 @@ public static partial class DarlingCliCommands
 
         await ReportAgentDispatchAsync(config, output, cancellationToken);
 
+        /* #6583: a warning, not an error, so a config that works today still starts: the port is ignored for a SQL Server target. */
+        foreach (var warning in SqlServerPortAdvice.Warnings(targets))
+        {
+            output.WriteLine("WARNING: " + warning);
+        }
+
         /* #6265: a warning, not an error, so a setup that started before still starts; the web refuses that token for sign-in. */
         if (DarlingAgentDispatchChecks.WebTokenFinding(config) is { } webTokenFinding)
         {
@@ -658,7 +664,8 @@ public static partial class DarlingCliCommands
 
     /// <summary>
     /// The agent dispatch checks for <c>--validate-config</c> (#6263): investigations on with MCP off, with no usable token,
-    /// with writes also on, or with no agent route. Nothing is read or printed when <c>mcp.allowInvestigations</c> is off.
+    /// with writes also on, or with no agent route. Nothing is read or printed when <c>mcp.allowInvestigations</c> is off and
+    /// <c>mcp.tokens</c> is not set. With <c>mcp.tokens</c> set, its own findings print too (#6542).
     /// Each finding is a <c>WARNING:</c> or a <c>NOTE:</c> line on <paramref name="output"/>, the same shape as the other
     /// warnings in this verb. None of them changes the exit code: those configs ran before, so an upgrade must not start
     /// failing a validation. The MCP switch and the route count come from the store when it answers, else from the file.
@@ -666,7 +673,7 @@ public static partial class DarlingCliCommands
     internal static async Task ReportAgentDispatchAsync(
         DarlingConfig config, TextWriter output, CancellationToken cancellationToken)
     {
-        if (!config.Mcp.AllowInvestigations)
+        if (!config.Mcp.AllowInvestigations && !config.Mcp.HasNamedTokens)
         {
             return;
         }
@@ -690,6 +697,12 @@ public static partial class DarlingCliCommands
             output.WriteLine(
                 (finding.Severity == DarlingAgentDispatchChecks.AgentDispatchSeverity.Warning ? "WARNING: " : "NOTE: ")
                 + finding.Message);
+        }
+
+        /* #6542: the named tokens' own findings print whenever mcp.tokens is set, whether or not investigations are on. */
+        foreach (var finding in DarlingAgentDispatchChecks.NamedTokenFindings(config.Mcp, token, agentRoutes))
+        {
+            output.WriteLine("WARNING: " + finding);
         }
     }
 
@@ -3263,14 +3276,25 @@ public static partial class DarlingCliCommands
         _ => "the MCP resolver rejected these values.",
     };
 
-    /// <summary>Removes all three network blocks (symmetric with the reconcilers), validating parse + loopback-only before the timestamped write, then offers a restart. Shared by the managed Disable choice and the BYO cleanup.</summary>
+    /// <summary>
+    /// PURE: the darling.json text <see cref="DisableExposureAsync"/> writes, with the text after each step so the caller
+    /// can tell which sections changed. The <c>postgres.network</c> block goes whole. The <c>mcp.network</c> and
+    /// <c>web.network</c> blocks lose only their exposure keys (<see cref="DarlingNetworkConfigEditor.EndpointExposureKeys"/>)
+    /// and keep the token, which still gates the loopback listener.
+    /// </summary>
+    internal static (string AfterPostgres, string AfterMcp, string NewText) DisabledExposureText(string originalText)
+    {
+        var afterPostgres = DarlingNetworkConfigEditor.RemoveNetworkBlock(originalText, "postgres");
+        var afterMcp = DarlingNetworkConfigEditor.RemoveEndpointExposure(afterPostgres, "mcp");
+        return (afterPostgres, afterMcp, DarlingNetworkConfigEditor.RemoveEndpointExposure(afterMcp, "web"));
+    }
+
+    /// <summary>Removes the postgres network block and the mcp/web exposure keys (symmetric with the reconcilers), validating parse + loopback-only before the timestamped write, then offers a restart. Shared by the managed Disable choice and the BYO cleanup.</summary>
     [SupportedOSPlatform("windows")]
     private static async Task<int> DisableExposureAsync(
         string resolvedPath, string originalText, TextReader input, TextWriter output, TextWriter error, CancellationToken cancellationToken)
     {
-        var newText = DarlingNetworkConfigEditor.RemoveNetworkBlock(originalText, "postgres");
-        newText = DarlingNetworkConfigEditor.RemoveNetworkBlock(newText, "mcp");
-        newText = DarlingNetworkConfigEditor.RemoveNetworkBlock(newText, "web");
+        var (afterPostgres, afterMcp, newText) = DisabledExposureText(originalText);
 
         if (string.Equals(newText, originalText, StringComparison.Ordinal))
         {
@@ -3307,6 +3331,32 @@ public static partial class DarlingCliCommands
         }
 
         output.WriteLine("Network exposure removed. The service reconciles the endpoints OFF (pg_hba rule, firewall, ssl) on its next start.");
+
+        /* The mcp and web tokens stay (DisabledExposureText removes only the exposure keys), so each endpoint keeps
+           asking for its token on loopback. An endpoint whose block held no token gets a note naming what to add,
+           because an enabled endpoint needs one on loopback too unless its allowTokenlessLoopback is on. */
+        foreach (var (section, changed, hasToken, optOut) in new[]
+        {
+            ("mcp", !string.Equals(afterMcp, afterPostgres, StringComparison.Ordinal),
+                !string.IsNullOrWhiteSpace(reparsed.Mcp.Network?.EncryptedToken) || !string.IsNullOrWhiteSpace(reparsed.Mcp.Network?.Token),
+                reparsed.Mcp.AllowTokenlessLoopback),
+            ("web", !string.Equals(newText, afterMcp, StringComparison.Ordinal),
+                !string.IsNullOrWhiteSpace(reparsed.Web.Network?.EncryptedToken) || !string.IsNullOrWhiteSpace(reparsed.Web.Network?.Token),
+                reparsed.Web.AllowTokenlessLoopback),
+        })
+        {
+            if (changed && hasToken)
+            {
+                output.WriteLine($"Kept the {section} token: the loopback-only {section} endpoint still asks every client for it.");
+            }
+            else if (changed && !optOut)
+            {
+                output.WriteLine(
+                    $"NOTE: {section} has no token. If {section} is turned on, it needs one on loopback too: " +
+                    $"add \"{section}\": {{ \"network\": {{ \"encryptedToken\": \"...\" }} }} or set {section}.allowTokenlessLoopback " +
+                    "to true, or it will not start.");
+            }
+        }
         await OfferRestartAsync(input, output, error, cancellationToken);
         return 0;
     }
@@ -3732,6 +3782,25 @@ public static partial class DarlingCliCommands
         Handoff,
     }
 
+    /// <summary>
+    /// PURE: the line <c>--enable-mcp</c> / <c>--enable-web</c> prints when darling.json gives that endpoint no token and
+    /// its <c>allowTokenlessLoopback</c> is off, because the service then does not start it; null when a token is set or
+    /// the opt-out is on. Reads only whether a token value is present, never the token.
+    /// </summary>
+    internal static string? EnableTokenNote(bool mcp, DarlingConfig config)
+    {
+        var section = mcp ? "mcp" : "web";
+        var hasToken = mcp
+            ? !string.IsNullOrWhiteSpace(config.Mcp.Network?.EncryptedToken) || !string.IsNullOrWhiteSpace(config.Mcp.Network?.Token)
+            : !string.IsNullOrWhiteSpace(config.Web.Network?.EncryptedToken) || !string.IsNullOrWhiteSpace(config.Web.Network?.Token);
+        var optOut = mcp ? config.Mcp.AllowTokenlessLoopback : config.Web.AllowTokenlessLoopback;
+        return hasToken || optOut
+            ? null
+            : $"NOTE: darling.json gives {section} no token, so the service will not start it. Set {section}.network.encryptedToken " +
+              $"(from --encrypt-password) or {section}.network.token and restart the service, or set {section}.allowTokenlessLoopback " +
+              (mcp ? "to true to serve loopback with no token (the write tools stay off)." : "to true to serve loopback with no token, for reads only.");
+    }
+
     /// <summary>PURE firewall-step decision for a toggle verb (unit-tested): a loopback-only endpoint needs no
     /// rule; an exposed endpoint runs the rule when elevated, otherwise hands the exact command off. Shared by
     /// enable and disable alike (disable just runs/hands-off the removal command instead of the open command).</summary>
@@ -3927,6 +3996,13 @@ public static partial class DarlingCliCommands
         output.WriteLine(
             "The running service applies this LIVE within one collection sweep (the write self-bumps the reload " +
             "beacon) — no restart needed.");
+
+        /* An enabled endpoint with no token and no allowTokenlessLoopback does not start (the host logs why at every
+           service start); say so here too, where the operator has just turned it on. */
+        if (enable && EnableTokenNote(endpoint == EndpointKind.Mcp, config) is { } tokenNote)
+        {
+            output.WriteLine(tokenNote);
+        }
 
         /* #2414: the SAME resolver the two host supervisors bind on, fed the row this verb just wrote. It carries
            the provenance as well as the value, so the firewall step can state on whose authority it picked a port

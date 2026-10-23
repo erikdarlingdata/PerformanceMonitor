@@ -56,7 +56,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// <c>collect</c> + <c>config</c>-minus-the-secret-columns) PLUS a NARROW, enumerated set of writes —
 /// INSERT on <c>collect.analysis_findings</c> and INSERT/DELETE on <c>config.analysis_muted</c> (what <c>analyze_server</c>
 /// persists + the mute and unmute tools need, #6383), INSERT/UPDATE/DELETE on <c>config.custom_views</c> (the
-/// custom-view tools, #1599), the alert-tuning writes (INSERT/UPDATE/DELETE on
+/// custom-view tools, #1599), INSERT/UPDATE/DELETE on <c>config.database_state_expected</c> (the database-state expectation tool, #6397), the alert-tuning writes (INSERT/UPDATE/DELETE on
 /// <c>config.config_mute_rules</c> + UPDATE on the singleton <c>config.config_alert_settings</c> + UPDATE on
 /// the single non-secret <c>email_cooldown_minutes</c> column of <c>config.config_notification</c>, plus the
 /// two beacon columns of <c>config.config_service</c> so the settings write's self-bump trigger can fire),
@@ -1500,7 +1500,10 @@ GRANT INSERT, UPDATE, DELETE ON {config}.custom_alert_rules TO {viewer};
 GRANT INSERT, UPDATE, DELETE ON {config}.custom_alert_rules TO {mcp};
 -- The Viewer's per-database database-state override editor (#1986) writes config.database_state_expected:
 -- the same narrow single-table floor as custom_views. Created by V49, so provisioning runs after migration.
+-- The mcp role gets the same three (#6397): set_database_state_expected upserts (INSERT, UPDATE) and clears (DELETE) one row, and its
+-- read, get_database_state_expectations, already runs on mcp's SELECT on all of config. Nothing wider, and no sibling table.
 GRANT INSERT, UPDATE, DELETE ON {config}.database_state_expected TO {viewer};
+GRANT INSERT, UPDATE, DELETE ON {config}.database_state_expected TO {mcp};
 
 -- 8. Alert tuning (the MCP alert-tuning write tools): the mcp role's alert-config writes, mirroring section 7's
 --    custom_views grant model (EXPLICIT single-table statements, NO ALTER DEFAULT PRIVILEGES). update_alert_settings
@@ -1557,12 +1560,15 @@ GRANT DELETE ON {config}.query_tag_map TO {mcp};
 --    mcp.allowWrites and a token, and are never offered to an investigation agent. Provisioning re-runs every start, so no migration
 --    rung carries this.
 --    The grants are by column, the narrowest the tools' statements need: the override rows take an INSERT of the five columns the tools
---    set and an UPDATE of the three values they change (never the database scope, never a DELETE: no tool removes a row, and the
+--    set and an UPDATE of the three values they change (never the database scope; the DELETE is #6454's, below, and the
 --    Viewer's delete-and-reinsert Save runs as the owner). The run times take their one value column and a DELETE (set_collector_run_at
 --    deletes the row for default). The table-level grants an earlier provisioning gave are revoked first, so a re-run narrows them.
 REVOKE INSERT, UPDATE, DELETE ON {config}.config_collector_schedules FROM {mcp};
 GRANT INSERT (server_id, collector_name, enabled, frequency_minutes, retention_days) ON {config}.config_collector_schedules TO {mcp};
 GRANT UPDATE (enabled, frequency_minutes, retention_days) ON {config}.config_collector_schedules TO {mcp};
+-- #6454: remove_server clears a removed server's override rows (a set-and-cleared row stayed behind all-null, and a set one would come
+--    back when the server is re-added), so mcp holds DELETE on the override table. Only remove_server runs it, by server_id.
+GRANT DELETE ON {config}.config_collector_schedules TO {mcp};
 REVOKE INSERT, UPDATE, DELETE ON {config}.config_collector_run_times FROM {mcp};
 GRANT INSERT (server_id, collector_name, run_at_minute) ON {config}.config_collector_run_times TO {mcp};
 GRANT UPDATE (run_at_minute) ON {config}.config_collector_run_times TO {mcp};

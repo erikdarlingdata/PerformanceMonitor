@@ -895,12 +895,13 @@ WHERE server_id = $1";
     }
 
     /// <summary>Removes a server definition by id (the Remove action), and the server's tag assignments and query-tag rows
-    /// (#5977) in the same transaction, so a re-added server (same id) does not get its old tags back.</summary>
+    /// (#5977) and its collector overrides and run times (#6454) in the same transaction, so a re-added server (same id) does not get
+    /// its old tags or schedule back.</summary>
     public async Task DeleteMonitoredServerAsync(int serverId, CancellationToken cancellationToken = default)
     {
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-        foreach (var sql in new[] { MonitoredServerDeleteSql, ServerTagStore.ClearForServerSql }.Concat(QueryTagSchema.ClearForServerSqls))
+        foreach (var sql in new[] { MonitoredServerDeleteSql, ServerTagStore.ClearForServerSql }.Concat(QueryTagSchema.ClearForServerSqls).Concat(CollectorScheduleSql.ClearForServerSqls))
         {
             await using var command = new NpgsqlCommand(sql, connection, transaction);
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;

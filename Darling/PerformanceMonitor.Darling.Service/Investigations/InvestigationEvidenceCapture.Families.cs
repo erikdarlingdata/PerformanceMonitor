@@ -157,6 +157,13 @@ WHERE b.newest = 1
   AND g.plan_id <> b.plan_id
   AND g.cpu_per_exec_us > 0
   AND b.cpu_per_exec_us >= $5 * g.cpu_per_exec_us
+  -- #6548: SQL Server own housekeeping statements (change tracking cleanup and the like) are not application code. Left
+  -- out BEFORE the row cap, so they cannot use up its rows.
+  AND NOT EXISTS (SELECT 1 FROM query_store_text AS x
+                  WHERE x.server_id = $1
+                    AND x.database_name = b.database_name
+                    AND x.query_id = b.query_id
+                    AND lower(x.query_sql_text) ~ '" + InternalStatements.LowerTextPattern + @"')
 ORDER BY b.cpu_per_exec_us / g.cpu_per_exec_us DESC, b.database_name, b.query_id
 LIMIT $6";
 
