@@ -138,7 +138,7 @@ public sealed class ActiveQueriesDatabaseFilterLiveTests
             var end = await SeedAsync(cs!, ct);
             var asOf = end.ToString("o");
 
-            var json = await DarlingMcpSessionTools.GetActiveQueries(postgres, ServerName, 1, DatabaseFilter.Of([DbA, DbB]), false, null, 25, 400, asOf, null, ct);
+            var json = await DarlingMcpSessionTools.GetActiveQueries(postgres, ServerName, 1, DatabaseFilter.Of([DbA, DbB]), false, null, 25, 400, asOf, cancellationToken: ct);
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
 
@@ -166,7 +166,7 @@ public sealed class ActiveQueriesDatabaseFilterLiveTests
 
             /* Truncation is measured against the set's population: two of five rows, the page says more is held. */
             var cut = JsonDocument.Parse(await DarlingMcpSessionTools.GetActiveQueries(
-                postgres, ServerName, 1, DatabaseFilter.Of([DbA, DbB]), false, null, 2, 400, asOf, null, ct)).RootElement;
+                postgres, ServerName, 1, DatabaseFilter.Of([DbA, DbB]), false, null, 2, 400, asOf, cancellationToken: ct)).RootElement;
             Assert.True(cut.GetProperty("truncated").GetBoolean());
             Assert.Equal(5, cut.GetProperty("total_snapshots").GetInt64());
             Assert.Equal(2, cut.GetProperty("snapshots_returned").GetInt32());
@@ -194,7 +194,7 @@ public sealed class ActiveQueriesDatabaseFilterLiveTests
 
             /* One name: the echo is the name itself, exactly as before the list. */
             var one = JsonDocument.Parse(await DarlingMcpSessionTools.GetActiveQueries(
-                postgres, ServerName, 1, DbC, false, null, 25, 400, asOf, null, ct)).RootElement;
+                postgres, ServerName, 1, DbC, false, null, 25, 400, asOf, cancellationToken: ct)).RootElement;
             Assert.Equal(DbC, one.GetProperty("filters_applied").GetProperty("database_name").GetString());
             Assert.Equal(2, one.GetProperty("total_snapshots").GetInt64());
 
@@ -202,25 +202,25 @@ public sealed class ActiveQueriesDatabaseFilterLiveTests
             foreach (var blank in new string?[] { null, "   " })
             {
                 var all = JsonDocument.Parse(await DarlingMcpSessionTools.GetActiveQueries(
-                    postgres, ServerName, 1, blank, false, null, 25, 400, asOf, null, ct)).RootElement;
+                    postgres, ServerName, 1, blank, false, null, 25, 400, asOf, cancellationToken: ct)).RootElement;
                 Assert.Equal(JsonValueKind.Null, all.GetProperty("filters_applied").GetProperty("database_name").ValueKind);
                 Assert.Equal(7, all.GetProperty("total_snapshots").GetInt64());
             }
 
             /* [M3] The name is no longer trimmed: ' FilterDbA' is a different name from 'FilterDbA' and finds nothing. */
             var padded = JsonDocument.Parse(await DarlingMcpSessionTools.GetActiveQueries(
-                postgres, ServerName, 1, " " + DbA, false, null, 25, 400, asOf, null, ct)).RootElement;
+                postgres, ServerName, 1, " " + DbA, false, null, 25, 400, asOf, cancellationToken: ct)).RootElement;
             Assert.Equal("empty", padded.GetProperty("status").GetString());
             Assert.Contains($"matched database_name ' {DbA}'.", padded.GetProperty("message").GetString(), StringComparison.Ordinal);
 
             /* The empty-window sentence for one name is the one it always was; for a set it names "the chosen databases". */
             var oneMiss = JsonDocument.Parse(await DarlingMcpSessionTools.GetActiveQueries(
-                postgres, ServerName, 1, "NoSuchDb", true, null, 25, 400, asOf, null, ct)).RootElement;
+                postgres, ServerName, 1, "NoSuchDb", true, null, 25, 400, asOf, cancellationToken: ct)).RootElement;
             Assert.Equal("empty", oneMiss.GetProperty("status").GetString());
             Assert.Contains("matched database_name 'NoSuchDb' with blocking_only. The filters were applied in SQL", oneMiss.GetProperty("message").GetString(), StringComparison.Ordinal);
 
             var manyMiss = JsonDocument.Parse(await DarlingMcpSessionTools.GetActiveQueries(
-                postgres, ServerName, 1, DatabaseFilter.Of(["NoSuchDb", "NorThisOne"]), false, null, 25, 400, asOf, null, ct)).RootElement;
+                postgres, ServerName, 1, DatabaseFilter.Of(["NoSuchDb", "NorThisOne"]), false, null, 25, 400, asOf, cancellationToken: ct)).RootElement;
             Assert.Equal("empty", manyMiss.GetProperty("status").GetString());
             var manyMessage = manyMiss.GetProperty("message").GetString()!;
             Assert.Contains("matched the chosen databases. The filters were applied in SQL", manyMessage, StringComparison.Ordinal);

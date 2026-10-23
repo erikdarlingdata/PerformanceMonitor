@@ -86,6 +86,26 @@ public sealed class WebWaitsActivityTrendsBehaviourTests
     }
 
     [Fact]
+    public void TheChartNotes_SayTheWidthAndTheFactForTheirRead_NeverTheMcpCallersAdvice()
+    {
+        // #6359: the read's aggregate_note names peak_* fields and says to pass bucket_minutes, which a browser reader cannot do.
+        // A SUMMED read (latch waits) says what a short bucket holds; a LEVEL read (session counts) says each point is an average.
+        var summed = Strings(Run("latch").GetProperty("notes"));
+        Assert.Contains(
+            "Each point covers 1 hour. A bucket the window cuts short holds smaller counts; rates are true rates over the time the bucket covers.",
+            summed);
+        var level = Strings(Run("session").GetProperty("notes"));
+        Assert.Contains("Each point covers 1 hour and is the average of the samples in it.", level);
+        foreach (var note in summed.Concat(level))
+        {
+            foreach (var mcpWord in new[] { "bucket_minutes", "hours_back", "peak_", "worst_" })
+            {
+                Assert.DoesNotContain(mcpWord, note, System.StringComparison.Ordinal);
+            }
+        }
+    }
+
+    [Fact]
     public void TheSessionStatsTrend_DrawsTheCounts_AndNamesTheTopApplicationAndHost()
     {
         var r = Run("session");

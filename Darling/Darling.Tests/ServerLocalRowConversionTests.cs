@@ -301,6 +301,7 @@ public sealed class ServerLocalRowConversionTests
         new object[] { "parameter-sensitivity drill-down", PgDrillDownCollector.ParameterSensitiveSql },
         new object[] { "regressed-queries drill-down (raw)", PgDrillDownCollector.RegressedQueriesSql },
         new object[] { "regressed-queries drill-down (table)", PgDrillDownCollector.RegressedQueriesTableSql },
+        new object[] { "regressed-queries drill-down (daily)", PgDrillDownCollector.RegressedQueriesDailySql },
         new object[] { "parameter-sensitivity fact", PgFactCollector.ParameterSensitivitySql },
         new object[] { "long-running jobs alert", DarlingAlertReadAdapter.AnomalousJobsSql },
     };

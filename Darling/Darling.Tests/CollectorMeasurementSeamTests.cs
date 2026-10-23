@@ -593,6 +593,20 @@ public class CollectorMeasurementSeamTests
                 CollectorContext.StatementScrubTimeoutsMeasurement,
                 CollectorContext.StatementScrubUnjudgedMeasurement,
                 CollectorContext.StatementScrubMsMeasurement,
+                /* #6441: SQL Server truncated the ring buffer's XML. Measured through RingBufferXml.MeasureTruncation on
+                   behalf of system_health_events, long_query_completions, deadlocks and blocked_process_report, which
+                   is why the consts live in RingBufferXml.cs. Written only on a truncated read. */
+                RingBufferXml.TruncatedMeasurement,
+                RingBufferXml.EventsHiddenMeasurement,
+                RingBufferXml.NewestVisibleAgeMeasurement,
+                /* #6441 part 2: which source system_health_events read this pass. The event count on an event_file read (0 on a
+                   quiet pass), the fallback flag on a ring-buffer read. Declared in SystemHealthEventsCollector.cs beside its
+                   .Measure( calls. */
+                SystemHealthEventsCollector.EventFileEventsMeasurement,
+                SystemHealthEventsCollector.EventFileFallbackMeasurement,
+                SystemHealthEventsCollector.EventFileErrorMeasurement,
+                SystemHealthEventsCollector.EventFileBufferCutMeasurement,
+                SystemHealthEventsCollector.EventFileWildcardMeasurement,
             }.OrderBy(l => l, StringComparer.Ordinal).ToList(),
             resolved.Distinct(StringComparer.Ordinal).OrderBy(l => l, StringComparer.Ordinal).ToList());
     }

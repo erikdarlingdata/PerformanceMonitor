@@ -134,6 +134,7 @@ public partial class AddServerDialog : Window
         TrustCertCheckBox.IsChecked = existing.TrustServerCertificate;
         ReadOnlyIntentCheckBox.IsChecked = existing.ReadOnlyIntent;
         MultiSubnetFailoverCheckBox.IsChecked = existing.MultiSubnetFailover;
+        QueryStoreReplicaBox.Text = existing.QueryStoreReplica ?? "";
         MonthlyCostBox.Text = existing.MonthlyCostUsd.ToString(CultureInfo.InvariantCulture);
         /* #1236: prefill the per-server delivery override (null = "Use global setting"). */
         AlertDeliveryOverrideBox.SelectedIndex = existing.AlertDeliveryModeOverride switch
@@ -285,7 +286,7 @@ public partial class AddServerDialog : Window
         /* XAML parse order: this fires for the default-checked SQL Server radio while the later-declared
            panels are still null. The XAML defaults already ARE the SQL Server arm, so returning is correct. */
         if (PostgresOptionsPanel is null || InlineAuthRadios is null ||
-            ReadOnlyIntentCheckBox is null || MultiSubnetFailoverCheckBox is null)
+            ReadOnlyIntentCheckBox is null || MultiSubnetFailoverCheckBox is null || QueryStoreReplicaPanel is null)
         {
             return;
         }
@@ -298,6 +299,7 @@ public partial class AddServerDialog : Window
            concepts the PostgreSQL connection builder never reads. Hidden, not unchecked — see the summary. */
         ReadOnlyIntentCheckBox.Visibility = postgres ? Visibility.Collapsed : Visibility.Visible;
         MultiSubnetFailoverCheckBox.Visibility = postgres ? Visibility.Collapsed : Visibility.Visible;
+        QueryStoreReplicaPanel.Visibility = postgres ? Visibility.Collapsed : Visibility.Visible; /* #6254: Query Store is a SQL Server feature */
 
         WindowsAuthRadio.Visibility = postgres ? Visibility.Collapsed : Visibility.Visible;
         EntraMfaAuthRadio.Visibility = postgres ? Visibility.Collapsed : Visibility.Visible;
@@ -408,10 +410,15 @@ public partial class AddServerDialog : Window
         var database = string.IsNullOrWhiteSpace(DatabaseNameBox.Text) ? null : DatabaseNameBox.Text.Trim();
         var form = ServerConnectionIdentity.FromStoredColumns(
             ServerNameBox.Text.Trim(), port, _existing.Engine, database, ReadOnlyIntentCheckBox.IsChecked == true, auth, username,
-            GetSelectedEncryptMode(), TrustCertCheckBox.IsChecked == true, MultiSubnetFailoverCheckBox.IsChecked == true);
+            GetSelectedEncryptMode(), TrustCertCheckBox.IsChecked == true, MultiSubnetFailoverCheckBox.IsChecked == true, FormQueryStoreReplica());
         var stored = ViewerPasswordSealer.IdentityOf(_existing);
         return ServerConnectionIdentity.Differ(form, stored);
     }
+
+    /// <summary>The Query Store replica the form holds, in the form it is stored and bound (#6254): trimmed, null when blank or
+    /// when the target is PostgreSQL (the box is hidden there, and a hidden value must not ride along).</summary>
+    private string? FormQueryStoreReplica() =>
+        PostgresEngineRadio.IsChecked == true ? null : QueryStoreReplicaSetting.Normalize(QueryStoreReplicaBox.Text);
 
     /// <summary>
     /// Resolves the chosen credential source into the store's (auth, username, encrypted blob), or a
@@ -640,6 +647,23 @@ public partial class AddServerDialog : Window
 
         var isPostgres = PostgresEngineRadio.IsChecked == true;
 
+        /* #6352: a SQL Server host SqlClient would read as a named pipe or an admin connection is refused before the row is
+           built, so Test and Save both stop here. An edit that keeps its host is not held to it; the same rule the
+           data service's upsert applies under its transaction. */
+        if (!isPostgres && ViewerDataService.HostRefusal(new MonitoredServerRow { Host = host }, _existing?.Host, _existing?.Engine) is { } hostRefusal)
+        {
+            error = hostRefusal;
+            return null;
+        }
+
+        /* #6254: the replica is a host the service connects to with its own credentials; a protocol prefix or a path is refused here
+           and again where the row is written (ViewerDataService), so no other caller can store one. */
+        if (!isPostgres && QueryStoreReplicaSetting.Refusal(QueryStoreReplicaBox.Text) is { } replicaRefusal)
+        {
+            error = replicaRefusal;
+            return null;
+        }
+
         /* #3499: the engine string. An EDIT carries the row's stored spelling VERBATIM — the radios are
            locked, and rewriting "aurora-postgresql" to "postgres" would be the dialog silently re-spelling a
            value it did not author (harmless to TargetEngine, but an edit must not mangle what it was not asked
@@ -739,6 +763,7 @@ public partial class AddServerDialog : Window
             TrustServerCertificate = TrustCertCheckBox.IsChecked == true,
             ReadOnlyIntent = readOnlyIntent,
             MultiSubnetFailover = MultiSubnetFailoverCheckBox.IsChecked == true,
+            QueryStoreReplica = FormQueryStoreReplica(),
             /* Preserve the excluded-databases (edited via the dedicated dialog), not lost on a plain save. */
             ExcludedDatabases = _existing?.ExcludedDatabases ?? new System.Collections.Generic.List<string>(),
             MonthlyCostUsd = monthlyCost,
@@ -910,6 +935,12 @@ public partial class AddServerDialog : Window
             StatusText.Text = ex.Message;
             SaveButton.IsEnabled = true;
         }
+        catch (MonitoredServerHostRefusedException ex)
+        {
+            /* #6352: the upsert refused a named-pipe or admin host; the message says why and nothing was written. */
+            StatusText.Text = ex.Message;
+            SaveButton.IsEnabled = true;
+        }
         catch (MonitoredServerAddressClaimedException ex)
         {
             /* #5240: another writer claimed this address between the check above and the write, so the write
@@ -966,6 +997,7 @@ public partial class AddServerDialog : Window
                 TrustServerCertificate = row.TrustServerCertificate,
                 EncryptMode = row.EncryptMode,
                 MultiSubnetFailover = row.MultiSubnetFailover,
+                QueryStoreReplica = row.QueryStoreReplica,
             };
 
             StatusText.Text = "Testing connection via the Darling service…";
@@ -1054,7 +1086,8 @@ public partial class AddServerDialog : Window
                 parts.Add("no msdb access (SQL Agent job data unavailable)");
             }
 
-            return string.Join(" — ", parts) + ".";
+            /* #6254: the Query Store replica's own result, after the primary's. */
+            return string.Join(" — ", parts) + "." + (ViewerDataService.ProbeReplicaNote(root) is { } replicaNote ? " " + replicaNote : "") + (ViewerDataService.ProbeMissingGrantsNote(root) is { } grantsNote ? " " + grantsNote : "");
         }
         catch (JsonException)
         {
@@ -1082,6 +1115,76 @@ public partial class AddServerDialog : Window
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// #6472: copies the login and grant script for the server in the form. The principal follows the form's authentication: the SQL
+    /// login typed, the Entra identity placeholder, or, for Windows authentication, the service's virtual account when the host is this
+    /// machine (the viewer of a managed install runs beside the service) and the machine account placeholder otherwise. The script is
+    /// built by <see cref="MonitoringGrantScript"/>, the same list the service's <c>--grant-script</c> command and the connection test read.
+    /// </summary>
+    private void CopyGrantScriptButton_Click(object sender, RoutedEventArgs e)
+    {
+        var host = ServerNameBox.Text.Trim();
+        if (PostgresEngineRadio.IsChecked == true)
+        {
+            StatusText.Text = "The grant script is for SQL Server targets. A PostgreSQL target needs pg_monitor; see the Darling operator guide.";
+            return;
+        }
+
+        if (string.IsNullOrEmpty(host))
+        {
+            StatusText.Text = "Enter the server name first; the script depends on where the server is.";
+            return;
+        }
+
+        string? auth;
+        string? username = null;
+        if (UseProfileRadio.IsChecked == true && ProfileComboBox.SelectedItem is ViewerCredentialProfile profile)
+        {
+            /* MapAuth is null for the interactive Entra modes, which an unattended service cannot use; ChoosePrincipal would read the null
+               as Windows authentication and print a machine-account script for them. */
+            auth = ServerStoreCredential.MapAuth(profile.AuthType);
+            if (auth is null)
+            {
+                StatusText.Text = ServerStoreCredential.UnsupportedAuthMessage;
+                return;
+            }
+
+            username = profile.Username;
+        }
+        else if (SqlAuthRadio.IsChecked == true)
+        {
+            auth = ServerStoreCredential.Sql;
+            username = UsernameBox.Text.Trim();
+        }
+        else if (ServicePrincipalAuthRadio.IsChecked == true)
+        {
+            auth = ServerStoreCredential.ServicePrincipal;
+        }
+        else if (ManagedIdentityAuthRadio.IsChecked == true)
+        {
+            auth = ServerStoreCredential.ManagedIdentity;
+        }
+        else if (WindowsAuthRadio.IsChecked == true)
+        {
+            auth = ServerStoreCredential.Integrated;
+        }
+        else
+        {
+            /* Microsoft Entra MFA, or nothing chosen: not an identity the service can connect with, so no script rather than a guessed principal. */
+            StatusText.Text = ServerStoreCredential.UnsupportedAuthMessage;
+            return;
+        }
+
+        var principal = MonitoringGrantScript.ChoosePrincipal(new GrantPrincipalInputs(
+            auth, username, host, ServiceAccount: null, Environment.MachineName, Environment.UserDomainName));
+        var script = MonitoringGrantScript.Build(
+            principal, GrantScriptFinOpsCheck.IsChecked == true, MonitoringGrantScript.IsAzureSqlDatabaseHost(host), host);
+        /* The shared guard: another process can hold the clipboard, and the operator can click again. */
+        StatusText.Text = PerformanceMonitor.Ui.ClipboardText.TrySetText(script)
+            ? $"Copied the grant script for {principal.Name}. Review it, then run it on {host} as a sysadmin."
+            : "Could not reach the clipboard. Try again.";
     }
 
     private void CancelButton_Click(object sender, RoutedEventArgs e)

@@ -204,6 +204,8 @@ public sealed class ViewerGridTimeColumnSortMemberTests
         /* #5913: the report feedback tab's two time columns sort by the row wrapper's UTC DateTime. */
         { "InvestigationsWindow.xaml", "FeedbackReportsGrid", "ReportedDisplay", Name(typeof(InvestigationsWindow.FeedbackReportItem)), "ReportedAtUtc" },
         { "InvestigationsWindow.xaml", "FeedbackGivenGrid", "WhenDisplay", Name(typeof(InvestigationsWindow.FeedbackGivenItem)), "CreatedAtUtc" },
+        { "KnownPatternsWindow.xaml", "PatternsGrid", "TimeDisplay", Name(typeof(KnownPatternRow)), "TimeOfDaySortKey" },
+        { "KnownPatternsWindow.xaml", "PatternsGrid", "ExpiresDisplay", Name(typeof(KnownPatternRow)), "ExpiresSortUtc" },
     };
 
     /// <summary>
@@ -230,6 +232,8 @@ public sealed class ViewerGridTimeColumnSortMemberTests
         [("ViewerServerTab.xaml", "PgPlanCaptureGrid", "Observed")] = "the setting value the readiness check observed, not a time",
         [("ViewerServerTab.xaml", "PgIndexBloatGrid", "EstimatedReclaimableBytes")] = "a byte count",
         [("ViewerServerTab.xaml", "PgIndexBloatGrid", "SkippedReason")] = "the reason a measurement was skipped, text",
+        [("ViewerServerTab.xaml", "PgExtensionCensusGrid", "DatabasesCreated")] = "a count of databases the extension is created in",
+        [("KnownPatternsWindow.xaml", "PatternsGrid", "CreatedBy")] = "the name of whoever created the entry, not when",
     };
 
     /// <summary>

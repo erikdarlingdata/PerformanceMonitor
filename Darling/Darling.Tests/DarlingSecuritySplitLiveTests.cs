@@ -343,11 +343,12 @@ public sealed class DarlingSecuritySplitLiveTests
 
             /* The two narrow analysis INSERTs are granted (has_table_privilege avoids needing the tables'
                column shapes) — and NOTHING wider on them: no config_command write (the service-credential
-               pivot), no analysis_muted DELETE (no MCP unmute tool), no analysis_findings UPDATE. */
+               pivot), no analysis_findings UPDATE; analysis_muted DELETE is granted for the unmute tool (#6383). */
             Assert.True(await HasPrivAsync(mcp, "collect.analysis_findings", "INSERT", ct));
             Assert.True(await HasPrivAsync(mcp, "config.analysis_muted", "INSERT", ct));
             Assert.False(await HasPrivAsync(mcp, "config.config_command", "INSERT", ct));
-            Assert.False(await HasPrivAsync(mcp, "config.analysis_muted", "DELETE", ct));
+            Assert.True(await HasPrivAsync(mcp, "config.analysis_muted", "DELETE", ct));
+            Assert.False(await HasPrivAsync(mcp, "config.analysis_muted", "UPDATE", ct));
             Assert.False(await HasPrivAsync(mcp, "collect.analysis_findings", "UPDATE", ct));
             /* #5633 item 13: the caveat table is the scheduled pass's state; mcp reads it and writes nothing. */
             foreach (var privilege in new[] { "INSERT", "UPDATE", "DELETE", "TRUNCATE", "TRIGGER", "REFERENCES" })
@@ -699,7 +700,7 @@ GRANT SELECT ON ALL TABLES IN SCHEMA collect TO {McpRole};
 GRANT SELECT ON ALL TABLES IN SCHEMA config  TO {McpRole};
 {DarlingManagedRoles.BuildMcpColumnAclSql("config", McpRole)}
 GRANT INSERT ON collect.analysis_findings TO {McpRole};
-GRANT INSERT ON config.analysis_muted TO {McpRole};
+GRANT INSERT, DELETE ON config.analysis_muted TO {McpRole};
 -- The mcp custom_views write (#1599): the MCP custom-view tools CRUD config.custom_views, so mcp gets the SAME
 -- single-table write viewer has (DarlingManagedRoles section 7). Never widens to a schema-wide config write.
 GRANT INSERT, UPDATE, DELETE ON config.custom_views TO {McpRole};

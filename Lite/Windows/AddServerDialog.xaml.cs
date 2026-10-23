@@ -35,6 +35,28 @@ public partial class AddServerDialog : Window
     /// </summary>
     public ServerConnection? AddedServer { get; private set; }
 
+    /// <summary>#6352: the host the edited server had when the dialog opened. Save changes the live list object before it
+    /// calls the manager, so the manager's own stored copy cannot tell a changed host from an unchanged one.</summary>
+    private string? _originalHost;
+
+    /// <summary>Set when this user has not confirmed the host the edited server names now (see
+    /// <see cref="ServerHostBindings"/>): the dialog says so, leaves the saved password or secret out of its box so neither
+    /// a test nor a save sends it to the new host, and saving confirms the host.</summary>
+    private readonly ServerHostChange? _hostChange;
+
+    /// <summary>The sentence saying what changed, shown when the dialog opens and again after each Test.</summary>
+    private readonly string _hostChangeLine = string.Empty;
+
+    /// <summary>The server being edited; null when adding one.</summary>
+    private readonly ServerConnection? _editing;
+
+    /// <summary>The saved password or client secret the dialog put in its box when it opened (null when it put none), so a
+    /// secret the user typed can be told apart from the saved one.</summary>
+    private string? _prefilledSecret;
+    private string? _originalReplica;
+    /* #6559: true after the user answered Yes to this server's own connect question in the current Test. */
+    private bool _hostConfirmedInDialog;
+
     public AddServerDialog(ServerManager serverManager, ProfileManager profileManager)
     {
         InitializeComponent();
@@ -68,6 +90,15 @@ public partial class AddServerDialog : Window
         : this(serverManager, profileManager)
     {
         Title = "Edit SQL Server";
+        _originalHost = existing.ServerName;
+        _editing = existing;
+        _hostChange = serverManager.HostChange(existing);
+        if (_hostChange != null)
+        {
+            _hostChangeLine = _hostChange.Describe(existing);
+            StatusText.Text = _hostChangeLine;
+        }
+        _originalReplica = existing.QueryStoreReplica ?? "";
         ServerNameBox.Text = existing.ServerName;
         DisplayNameBox.Text = existing.DisplayName;
         EnabledCheckBox.IsChecked = existing.IsEnabled;
@@ -84,6 +115,7 @@ public partial class AddServerDialog : Window
         DescriptionTextBox.Text = existing.Description ?? "";
         DatabaseNameBox.Text = existing.DatabaseName ?? "";
         UtilityDatabaseBox.Text = existing.UtilityDatabase ?? "";
+        QueryStoreReplicaBox.Text = existing.QueryStoreReplica ?? "";
         ReadOnlyIntentCheckBox.IsChecked = existing.ReadOnlyIntent;
         MultiSubnetFailoverCheckBox.IsChecked = existing.MultiSubnetFailover;
         MonthlyCostBox.Text = existing.MonthlyCostUsd.ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -115,7 +147,7 @@ public partial class AddServerDialog : Window
             
             // Load username if stored
             var credentialService = new CredentialService();
-            var cred = credentialService.GetCredential(existing.Id);
+            var cred = ServerCredentialIds.Allows(existing.Id, existing.DisplayName) ? credentialService.GetCredential(existing.Id) : null;
             if (cred.HasValue)
             {
                 EntraMfaUsernameBox.Text = cred.Value.Username;
@@ -127,11 +159,13 @@ public partial class AddServerDialog : Window
 
             // Load credentials if stored
             var credentialService = new CredentialService();
-            var cred = credentialService.GetCredential(existing.Id);
+            var cred = ServerCredentialIds.Allows(existing.Id, existing.DisplayName) ? credentialService.GetCredential(existing.Id) : null;
             if (cred.HasValue)
             {
                 UsernameBox.Text = cred.Value.Username;
-                PasswordBox.Password = cred.Value.Password;
+                /* A password saved for another host stays out of the box: it is entered again for this one. */
+                if (_hostChange == null)
+                    PasswordBox.Password = _prefilledSecret = cred.Value.Password;
             }
         }
         else if (existing.AuthenticationType == AuthenticationTypes.ServicePrincipal)
@@ -142,13 +176,15 @@ public partial class AddServerDialog : Window
 
             // Pre-fill the client id and secret from Credential Manager (mirrors SQL-password pre-fill).
             var credentialService = new CredentialService();
-            var cred = credentialService.GetCredential(existing.Id);
+            var cred = ServerCredentialIds.Allows(existing.Id, existing.DisplayName) ? credentialService.GetCredential(existing.Id) : null;
             if (cred.HasValue)
             {
                 // The stored credential's username is the client id; prefer the model value when present.
                 if (string.IsNullOrEmpty(AzureClientIdBox.Text))
                     AzureClientIdBox.Text = cred.Value.Username;
-                AzureClientSecretBox.Password = cred.Value.Password;
+                /* A secret saved for another host stays out of the box: it is entered again for this one. */
+                if (_hostChange == null)
+                    AzureClientSecretBox.Password = _prefilledSecret = cred.Value.Password;
             }
         }
         else if (existing.AuthenticationType == AuthenticationTypes.ManagedIdentity)
@@ -290,22 +326,42 @@ public partial class AddServerDialog : Window
         };
     }
 
-    private SqlConnectionStringBuilder BuildConnectionBuilder()
+    /// <summary>
+    /// The Test Connection builder before authentication is applied. The Data Source goes through
+    /// <see cref="ServerHostSetting.TcpDataSource"/>, as the collectors' own builder does, so the test does not fall back
+    /// to a named pipe over SMB with this process's Windows credentials (#6352).
+    /// </summary>
+    internal static SqlConnectionStringBuilder BuildBaseConnectionBuilder(
+        string serverName,
+        string databaseName,
+        bool trustServerCertificate,
+        SqlConnectionEncryptOption encrypt,
+        bool readOnlyIntent,
+        bool multiSubnetFailover)
     {
-        var dbName = DatabaseNameBox.Text.Trim();
-        var builder = new SqlConnectionStringBuilder
+        var dbName = databaseName.Trim();
+        return new SqlConnectionStringBuilder
         {
-            DataSource = ServerNameBox.Text.Trim(),
+            DataSource = ServerHostSetting.TcpDataSource(serverName.Trim()),
             InitialCatalog = string.IsNullOrEmpty(dbName) ? "master" : dbName,
             ApplicationName = "PerformanceMonitorLite",
             ConnectTimeout = 10,
-            TrustServerCertificate = TrustCertCheckBox.IsChecked == true,
-            Encrypt = ParseEncryptOption(GetSelectedEncryptMode()),
-            ApplicationIntent = ReadOnlyIntentCheckBox.IsChecked == true
-                ? ApplicationIntent.ReadOnly
-                : ApplicationIntent.ReadWrite,
-            MultiSubnetFailover = MultiSubnetFailoverCheckBox.IsChecked == true
+            TrustServerCertificate = trustServerCertificate,
+            Encrypt = encrypt,
+            ApplicationIntent = readOnlyIntent ? ApplicationIntent.ReadOnly : ApplicationIntent.ReadWrite,
+            MultiSubnetFailover = multiSubnetFailover
         };
+    }
+
+    private SqlConnectionStringBuilder BuildConnectionBuilder()
+    {
+        var builder = BuildBaseConnectionBuilder(
+            ServerNameBox.Text,
+            DatabaseNameBox.Text,
+            TrustCertCheckBox.IsChecked == true,
+            ParseEncryptOption(GetSelectedEncryptMode()),
+            ReadOnlyIntentCheckBox.IsChecked == true,
+            MultiSubnetFailoverCheckBox.IsChecked == true);
 
         // Credential-profile mode: apply the profile's auth via the SAME shared helper, sourcing every
         // field from the profile (its auth type + non-secret fields + secret from Credential Manager).
@@ -388,6 +444,9 @@ public partial class AddServerDialog : Window
         return builder;
     }
 
+    /// <summary>#6459: SERVERPROPERTY('EngineEdition') the last connection test read, or 0 before one succeeded.</summary>
+    private int _testedEngineEdition;
+
     private async System.Threading.Tasks.Task<(bool Connected, string? ErrorMessage, bool SignInCancelled, string? ServerVersion, EntraBrokerFailureKind BrokerFailure, EntraAmbientCredentialFailureKind AmbientFailure)> RunConnectionTestAsync()
     {
         TestButton.IsEnabled = false;
@@ -441,8 +500,21 @@ public partial class AddServerDialog : Window
                 }
             }
 
-            using var cmd = new SqlCommand("SELECT @@VERSION", connection);
-            var version = await cmd.ExecuteScalarAsync() as string;
+            /* #6459: the engine edition rides on the same round trip (the shared detection query, read by column name), so the replica test can say an Azure SQL Database never reads one. */
+            using var cmd = new SqlCommand(ServerManager.DetectionQueryText, connection);
+            string? version = null;
+            _testedEngineEdition = 0;
+            using (var reader = await cmd.ExecuteReaderAsync())
+            {
+                if (await reader.ReadAsync())
+                {
+                    var versionOrdinal = reader.GetOrdinal("sql_version");
+                    var editionOrdinal = reader.GetOrdinal("engine_edition");
+                    version = reader.IsDBNull(versionOrdinal) ? null : reader.GetString(versionOrdinal);
+                    _testedEngineEdition = reader.IsDBNull(editionOrdinal) ? 0 : reader.GetInt32(editionOrdinal);
+                }
+            }
+
             serverVersion = version?.Split('\n')[0]?.Trim();
             connected = true;
         }
@@ -500,7 +572,7 @@ public partial class AddServerDialog : Window
         {
             TestButton.IsEnabled = true;
             SaveButton.IsEnabled = true;
-            StatusText.Text = string.Empty;
+            StatusText.Text = _hostChangeLine;
         }
 
         return (connected, errorMessage, signInCancelled, serverVersion, brokerFailure, ambientFailure);
@@ -525,6 +597,81 @@ public partial class AddServerDialog : Window
         return "unknown";
     }
 
+    /// <summary>The authentication type the radios select (the profile's own when a profile is selected).</summary>
+    private string SelectedAuthenticationType()
+    {
+        if (UseProfileRadio.IsChecked == true && ProfileComboBox.SelectedItem is CredentialProfile profile) return profile.AuthType;
+        if (WindowsAuthRadio.IsChecked == true) return AuthenticationTypes.Windows;
+        if (EntraMfaAuthRadio.IsChecked == true) return AuthenticationTypes.EntraMFA;
+        if (EntraDefaultAuthRadio.IsChecked == true) return AuthenticationTypes.EntraDefaultCredential;
+        if (EntraDeviceCodeAuthRadio.IsChecked == true) return AuthenticationTypes.EntraDeviceCode;
+        if (ServicePrincipalAuthRadio.IsChecked == true) return AuthenticationTypes.ServicePrincipal;
+        if (ManagedIdentityAuthRadio.IsChecked == true) return AuthenticationTypes.ManagedIdentity;
+        return AuthenticationTypes.SqlServer;
+    }
+
+    /// <summary>
+    /// Asks before Test, the replica Test or Save connects to an edited server whose settings in the dialog are not the ones
+    /// this user confirmed, unless the user typed the password or secret in the dialog (see <see cref="HostConfirmationGate"/>).
+    /// The answer defaults to No. True when nothing needed asking or the user answered Yes.
+    /// </summary>
+    private bool ConfirmConnectWithUnconfirmedSettings(bool replica)
+    {
+        /* #6559: the replica Test follows the server's own Test; a Yes given there covers the replica, which that question names. */
+        var confirmedInDialog = replica && _hostConfirmedInDialog;
+        if (!replica)
+            _hostConfirmedInDialog = false;
+
+        if (_editing == null)
+            return true;
+
+        var useProfile = UseProfileRadio.IsChecked == true && ProfileComboBox.SelectedItem is CredentialProfile;
+        var profile = useProfile ? (CredentialProfile)ProfileComboBox.SelectedItem : null;
+        var authType = SelectedAuthenticationType();
+        var candidate = new ServerConnection
+        {
+            Id = _editing.Id,
+            ServerName = ServerNameBox.Text,
+            QueryStoreReplica = string.IsNullOrWhiteSpace(QueryStoreReplicaBox.Text) ? null : QueryStoreReplicaBox.Text,
+            AuthenticationType = authType,
+            CredentialProfileId = profile?.Id,
+            DatabaseName = string.IsNullOrWhiteSpace(DatabaseNameBox.Text) ? null : DatabaseNameBox.Text,
+            UtilityDatabase = string.IsNullOrWhiteSpace(UtilityDatabaseBox.Text) ? null : UtilityDatabaseBox.Text,
+            EncryptMode = GetSelectedEncryptMode(),
+            TrustServerCertificate = TrustCertCheckBox.IsChecked == true,
+            /* As Save writes them: kept only for the mode that uses them, and never beside a profile (its own are checked). */
+            AzureClientId = !useProfile && authType == AuthenticationTypes.ServicePrincipal && !string.IsNullOrWhiteSpace(AzureClientIdBox.Text)
+                ? AzureClientIdBox.Text.Trim()
+                : null,
+            ManagedIdentityClientId = !useProfile && authType == AuthenticationTypes.ManagedIdentity && !string.IsNullOrWhiteSpace(ManagedIdentityClientIdBox.Text)
+                ? ManagedIdentityClientIdBox.Text.Trim()
+                : null
+        };
+
+        var typedSecret = !useProfile && authType switch
+        {
+            AuthenticationTypes.SqlServer => PasswordBox.Password,
+            AuthenticationTypes.ServicePrincipal => AzureClientSecretBox.Password,
+            _ => null
+        } is { Length: > 0 } secret && secret != _prefilledSecret;
+
+        var question = HostConfirmationGate.Question(
+            _serverManager.HostChangeIfSaved(candidate),
+            isEdit: true,
+            HostConfirmationGate.CredentialWords(authType, profile?.Name),
+            typedSecret,
+            replica,
+            confirmedInDialog);
+        if (question == null)
+            return true;
+
+        var answeredYes = MessageBox.Show(this, question, "Connect to this server?", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No)
+            == MessageBoxResult.Yes;
+        if (!replica)
+            _hostConfirmedInDialog = answeredYes;
+        return answeredYes;
+    }
+
     /// <summary>
     /// The detail block for a "Connection Failed" dialog, carrying the log location so a report can
     /// include the exception chain rather than a screenshot of its first line.
@@ -539,11 +686,73 @@ public partial class AddServerDialog : Window
             ambientFailure,
             string.IsNullOrEmpty(App.DataDirectory) ? null : System.IO.Path.Combine(App.DataDirectory, "logs"));
 
+    /// <summary>
+    /// #6254: opens the Query Store replica named in the dialog, on the dialog's own connection string with the replica host and
+    /// read-only intent (<see cref="QueryStoreReplicaConnectionTest"/>). Null when the box is empty.
+    /// </summary>
+    private async System.Threading.Tasks.Task<(string Host, string? Error)?> RunReplicaConnectionTestAsync()
+    {
+        if (string.IsNullOrWhiteSpace(QueryStoreReplicaBox.Text))
+        {
+            return null;
+        }
+
+        /* #6459: an Azure SQL Database never reads a replica, so there is nothing to open: the caller shows the note instead. */
+        if (QueryStoreReplicaConnectionTest.IgnoredOnAzureSqlDatabaseNote(_testedEngineEdition, QueryStoreReplicaBox.Text) is not null)
+        {
+            return null;
+        }
+
+        TestButton.IsEnabled = false;
+        SaveButton.IsEnabled = false;
+        StatusText.Text = "Testing the Query Store replica...";
+        try
+        {
+            return await QueryStoreReplicaConnectionTest.RunAsync(BuildConnectionBuilder().ConnectionString, QueryStoreReplicaBox.Text);
+        }
+        finally
+        {
+            TestButton.IsEnabled = true;
+            SaveButton.IsEnabled = true;
+            StatusText.Text = _hostChangeLine;
+        }
+    }
+
+    /// <summary>#6352: the refusal for the host in the box, or null. A server being edited keeps the host it was saved
+    /// with, so only a NEW or CHANGED host is held to the rule (see <see cref="ServerManager.HostRefusal"/>).</summary>
+    private string? HostBoxRefusal() =>
+        ServerManager.HostRefusal(ServerNameBox.Text, Title == "Edit SQL Server" ? _originalHost : null);
+
+    /// <summary>#6254: the refusal for the Query Store replica in the box, or null. A server being edited keeps the replica it was
+    /// saved with, so only a NEW or CHANGED replica is held to the host rule (see <see cref="ServerManager.ReplicaRefusal"/>).</summary>
+    private string? ReplicaBoxRefusal() =>
+        ServerManager.ReplicaRefusal(QueryStoreReplicaBox.Text, Title == "Edit SQL Server" ? _originalReplica : null);
+
     private async void TestButton_Click(object sender, RoutedEventArgs e)
     {
         if (string.IsNullOrEmpty(ServerNameBox.Text.Trim()))
         {
             StatusText.Text = "Enter a server name first.";
+            return;
+        }
+
+        /* #6352: Test connects with the typed host, so a named-pipe or admin host is refused here too. */
+        if (HostBoxRefusal() is { } testHostRefusal)
+        {
+            StatusText.Text = testHostRefusal;
+            return;
+        }
+
+        /* #6254: the replica is a second host Lite connects to with this server's credentials, held to the same rule. */
+        if (ReplicaBoxRefusal() is { } testReplicaRefusal)
+        {
+            StatusText.Text = testReplicaRefusal;
+            return;
+        }
+
+        /* A server whose settings this user has not confirmed: asked before a saved secret or the user's sign-in goes to it. */
+        if (!ConfirmConnectWithUnconfirmedSettings(replica: false))
+        {
             return;
         }
 
@@ -554,7 +763,27 @@ public partial class AddServerDialog : Window
             var message = serverVersion != null
                 ? $"Successfully connected to {ServerNameBox.Text.Trim()}!\n\n{serverVersion}"
                 : $"Successfully connected to {ServerNameBox.Text.Trim()}!";
-            MessageBox.Show(message, "Connection Successful", MessageBoxButton.OK, MessageBoxImage.Information);
+
+            /* #6254: a server that names a Query Store replica is tested on both connections, and the two results are shown apart. A
+               replica that does not open is a warning and not a failed test: collection reads Query Store from the primary. */
+            var replicaTest = !string.IsNullOrWhiteSpace(QueryStoreReplicaBox.Text) && ConfirmConnectWithUnconfirmedSettings(replica: true) ? await RunReplicaConnectionTestAsync() : null;
+            if (replicaTest is { } replicaResult)
+            {
+                MessageBox.Show(
+                    message + "\n\n" + QueryStoreReplicaConnectionTest.Compose(replicaResult),
+                    replicaResult.Error is null ? "Connection Successful" : "Connection Successful, replica not reached",
+                    MessageBoxButton.OK,
+                    replicaResult.Error is null ? MessageBoxImage.Information : MessageBoxImage.Warning);
+            }
+            else if (QueryStoreReplicaConnectionTest.IgnoredOnAzureSqlDatabaseNote(_testedEngineEdition, QueryStoreReplicaBox.Text) is { } azureReplicaNote)
+            {
+                /* #6459: the setting is accepted and has no effect on an Azure SQL Database; say so now, not never. */
+                MessageBox.Show(message + "\n\n" + azureReplicaNote, "Connection Successful, replica setting not used", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+            else
+            {
+                MessageBox.Show(message, "Connection Successful", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
 
             if (AddedServer != null && InteractiveModeSelected)
             {
@@ -594,6 +823,20 @@ public partial class AddServerDialog : Window
         if (string.IsNullOrEmpty(serverName))
         {
             StatusText.Text = "Server name is required.";
+            return;
+        }
+
+        /* #6352: refused before any connect or save: a host that SqlClient would read as a named pipe or an admin
+           connection (np:, lpc:, admin:, \host\pipe, //host). An edit that leaves the host as it was is not held to it. */
+        if (HostBoxRefusal() is { } hostRefusal)
+        {
+            StatusText.Text = hostRefusal;
+            return;
+        }
+
+        if (ReplicaBoxRefusal() is { } replicaRefusal)
+        {
+            StatusText.Text = replicaRefusal;
             return;
         }
 
@@ -680,6 +923,13 @@ public partial class AddServerDialog : Window
                 StatusText.Text = "Username is required for SQL Server authentication.";
                 return;
             }
+
+            /* The host changed since this user saved the password: it is entered again before anything connects. */
+            if (_hostChange != null && !useProfile && string.IsNullOrEmpty(password))
+            {
+                StatusText.Text = _hostChange.Describe(AddedServer!);
+                return;
+            }
         }
 
         /* #4789: the id everything is collected under is a 32-bit hash of the name, database and read-only intent,
@@ -709,10 +959,25 @@ public partial class AddServerDialog : Window
             return;
         }
 
+        /* Saving confirms the settings for this user, and with collection on it connects first: asked before either when the
+           settings are not the confirmed ones and the user did not type the password or secret here. */
+        if (!ConfirmConnectWithUnconfirmedSettings(replica: false))
+        {
+            return;
+        }
+
         // Test connection when data collection is enabled
+        string? azureReplicaNote = null;
         if (EnabledCheckBox.IsChecked == true)
         {
             var (connected, errorMessage, signInCancelled, _, brokerFailure, ambientFailure) = await RunConnectionTestAsync();
+
+            /* #6459: the test just ran on this save; if it found an Azure SQL Database and a replica is typed, the setting is
+               saved but never read, and the note is shown once the save has gone through. */
+            if (connected)
+            {
+                azureReplicaNote = QueryStoreReplicaConnectionTest.IgnoredOnAzureSqlDatabaseNote(_testedEngineEdition, QueryStoreReplicaBox.Text);
+            }
 
             if (!connected)
             {
@@ -768,6 +1033,7 @@ public partial class AddServerDialog : Window
                 AddedServer.Description = DescriptionTextBox.Text.Trim();
                 AddedServer.DatabaseName = string.IsNullOrWhiteSpace(DatabaseNameBox.Text) ? null : DatabaseNameBox.Text.Trim();
                 AddedServer.UtilityDatabase = string.IsNullOrWhiteSpace(UtilityDatabaseBox.Text) ? null : UtilityDatabaseBox.Text.Trim();
+                AddedServer.QueryStoreReplica = string.IsNullOrWhiteSpace(QueryStoreReplicaBox.Text) ? null : QueryStoreReplicaBox.Text.Trim();
                 AddedServer.ReadOnlyIntent = ReadOnlyIntentCheckBox.IsChecked == true;
                 AddedServer.MultiSubnetFailover = MultiSubnetFailoverCheckBox.IsChecked == true;
                 if (decimal.TryParse(MonthlyCostBox.Text, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var editCost) && editCost >= 0)
@@ -785,12 +1051,19 @@ public partial class AddServerDialog : Window
                     AddedServer.AzureTenantId = null;
                     AddedServer.ManagedIdentityClientId = null;
                     _serverManager.UpdateServer(AddedServer, null, null);
-                    _serverManager.CredentialService.DeleteCredential(AddedServer.Id);
+                    if (ServerCredentialIds.Allows(AddedServer.Id, AddedServer.DisplayName))
+                    {
+                        _serverManager.CredentialService.DeleteCredential(AddedServer.Id);
+                    }
                 }
                 else
                 {
                     _serverManager.UpdateServer(AddedServer, username, password);
                 }
+
+                /* Saving the dialog (with the password entered again where the server has one) confirms the host it
+                   names now, for this user. */
+                _serverManager.ConfirmHost(AddedServer);
             }
             else
             {
@@ -820,6 +1093,7 @@ public partial class AddServerDialog : Window
                     Description = DescriptionTextBox.Text.Trim(),
                     DatabaseName = string.IsNullOrWhiteSpace(DatabaseNameBox.Text) ? null : DatabaseNameBox.Text.Trim(),
                     UtilityDatabase = string.IsNullOrWhiteSpace(UtilityDatabaseBox.Text) ? null : UtilityDatabaseBox.Text.Trim(),
+                    QueryStoreReplica = string.IsNullOrWhiteSpace(QueryStoreReplicaBox.Text) ? null : QueryStoreReplicaBox.Text.Trim(),
                     ReadOnlyIntent = ReadOnlyIntentCheckBox.IsChecked == true,
                     MultiSubnetFailover = MultiSubnetFailoverCheckBox.IsChecked == true,
                     MonthlyCostUsd = monthlyCost,
@@ -836,6 +1110,11 @@ public partial class AddServerDialog : Window
                 {
                     _serverManager.AddServer(AddedServer, username, password);
                 }
+            }
+
+            if (azureReplicaNote is not null)
+            {
+                MessageBox.Show(azureReplicaNote, "Server saved, replica setting not used", MessageBoxButton.OK, MessageBoxImage.Warning);
             }
 
             DialogResult = true;

@@ -253,7 +253,7 @@ internal static class DarlingQueryStoreRegressionReader
 
             var wide = await QueryStoreIntervalWide.ResolveReadAsync(
                 connection, serverId, baselineStartUtc, endUtc, endUtc, DarlingDataReader.QueryStoreTopMinWindow,
-                McpCommandDeadlines.ReadSeconds, ReadScope.Current?.Logger, cancellationToken);
+                McpCommandDeadlines.ReadSeconds, ReadScope.Current?.Logger, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow, cancellationToken);
             if (!wide.UseTable)
             {
                 if (wide.DecisionFailed)

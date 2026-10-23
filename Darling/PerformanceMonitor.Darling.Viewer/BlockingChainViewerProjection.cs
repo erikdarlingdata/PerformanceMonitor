@@ -36,7 +36,8 @@ internal static class BlockingChainViewerProjection
     /// </summary>
     public static BlockingChainModel? BuildModelForSession(
         BlockingReconstruction reconstruction,
-        int? monitorLoop, int spid, int ecid)
+        int? monitorLoop, int spid, int ecid,
+        Func<DateTime, DateTime>? tranStampForDisplay = null)
     {
         var chain = BlockingChainReconstructor.FindChainForSession(
             reconstruction, monitorLoop, spid, ecid);
@@ -44,28 +45,34 @@ internal static class BlockingChainViewerProjection
             return null;
 
         return BlockingChainTreeBuilder.Build(
-            new[] { ToInput(chain) },
+            new[] { ToInput(chain, tranStampForDisplay) },
             reconstruction.CycleDetected,
             reconstruction.DepthCapped,
             reconstruction.TraversalTruncated);
     }
 
-    private static BlockingChainInput ToInput(ReconstructedChain c) => new()
+    /// <summary>The window's transaction-start stamps are the monitored server's own wall clock, and the window prints
+    /// them as they are, so it was the one place that ignored the Server / Local / UTC display mode the grids honour (#6292).
+    /// <paramref name="display"/> is the app's server-clock-to-display conversion; null leaves the stamps as stored.</summary>
+    private static DateTime? Shown(DateTime? stamp, Func<DateTime, DateTime>? display) =>
+        stamp.HasValue && display != null ? display(stamp.Value) : stamp;
+
+    private static BlockingChainInput ToInput(ReconstructedChain c, Func<DateTime, DateTime>? display) => new()
     {
         ApexSpid = c.ApexSpid,
         ApexEcid = c.ApexEcid,
-        ApexTranStarted = c.ApexTranStarted,
+        ApexTranStarted = Shown(c.ApexTranStarted, display),
         ApexSleeping = c.ApexSleeping,
         Magnitude = c.Magnitude,
-        Edges = c.Levels.Select(static l => new BlockingEdgeInput
+        Edges = c.Levels.Select(l => new BlockingEdgeInput
         {
             Level = l.Level,
             BlockingSpid = l.BlockingSpid,
             BlockingEcid = l.BlockingEcid,
-            BlockingTranStarted = l.BlockingTranStarted,
+            BlockingTranStarted = Shown(l.BlockingTranStarted, display),
             BlockedSpid = l.BlockedSpid,
             BlockedEcid = l.BlockedEcid,
-            BlockedTranStarted = l.BlockedTranStarted,
+            BlockedTranStarted = Shown(l.BlockedTranStarted, display),
             LockMode = l.LockMode,
             WaitTimeMs = l.WaitTimeMs,
             DatabaseName = l.DatabaseName,

@@ -935,7 +935,53 @@ ORDER BY collection_time DESC
         var applications = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy("attention_events", "client_app_name", bounded: true), serverId, topFloor, topCeiling,
             r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)), cancellationToken);
 
-        return new AttentionWindow(runs, counts, groups, statements, databases, applications, topsFromLookback);
+        var hosts = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy("attention_events", "client_hostname", bounded: true), serverId, topFloor, topCeiling,
+            r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)), cancellationToken);
+
+        return new AttentionWindow(runs, counts, groups, statements, databases, applications, topsFromLookback, hosts);
+    }
+
+    /// <summary>The deadline of the Client Timeouts baseline read (#5736): a 7-day range of one server, run about once a day.</summary>
+    internal const int AttentionBaselineCommandTimeoutSeconds = 30;
+
+    /// <summary>
+    /// The server's Client Timeouts baseline (#5736): the per-minute buckets of the last <see cref="AttentionBaselineMath.LookbackDays"/> days from
+    /// <see cref="AttentionWindowSql.BaselineMinutes"/> (the definition of <c>tools/attention-rate-measure.sql</c>), bounded by server_id and time so
+    /// both reads use their <c>(server_id, collection_time)</c> index, then <see cref="AttentionBaselineMath.Compute"/>.
+    /// </summary>
+    public Task<AttentionBaseline?> GetAttentionBaselineAsync(
+        string serverKey, DateTime nowUtc, CancellationToken cancellationToken = default)
+    {
+        return ExecuteWithOneRetryAsync(
+            ct => GetAttentionBaselineCoreAsync(serverKey, nowUtc, ct),
+            serverKey,
+            "client timeouts",
+            cancellationToken);
+    }
+
+    private async Task<AttentionBaseline?> GetAttentionBaselineCoreAsync(string serverKey, DateTime nowUtc, CancellationToken cancellationToken)
+    {
+        var serverId = ParseServerKey(serverKey);
+        var to = DateTime.SpecifyKind(nowUtc, DateTimeKind.Unspecified);
+        var from = to.AddDays(-AttentionBaselineMath.LookbackDays);
+
+        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var command = new NpgsqlCommand(AttentionWindowSql.BaselineMinutes("collection_log", "attention_events"), connection)
+        {
+            CommandTimeout = AttentionBaselineCommandTimeoutSeconds,
+        };
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, from);
+        command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, to);
+
+        var minutes = new List<AttentionMinute>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            minutes.Add(new AttentionMinute(reader.GetDateTime(0), reader.GetInt64(1)));
+        }
+
+        return AttentionBaselineMath.Compute(minutes);
     }
 
     /// <summary>The bounded twin (final round of #5714, L2): <c>$2</c> the exclusive floor, <c>$3</c> the inclusive ceiling, both typed as

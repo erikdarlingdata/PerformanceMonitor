@@ -633,6 +633,82 @@ VALUES ($1, $2, $3, $4, $2, $5, $6)",
     private Task ExecuteAsync(string sql, params object?[] values) => _seed.ExecuteAsync(sql, values);
 
     /// <summary>The system_health collector's runs in collection_log, every <paramref name="everyMinutes"/> minutes, whether or not it stored anything.</summary>
+    /* #6441: the newest run found the ring buffer truncated. Before the fix every rung below answered as if the read could
+       see everything: "healthy", "genuinely quiet rather than blind", or "the session IS being read". */
+    [Theory]
+    [InlineData(Tool.SystemHealth)]
+    [InlineData(Tool.SignificantWaits)]
+    public async Task ATruncatedRingBuffer_OnTheNewestRun_IsNotCalledQuiet(Tool tool)
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        await SeedEventAsync(tool, WindowStart.AddDays(-1));
+        await SeedLogRunsAsync(WindowStart.AddDays(-2), Anchor.AddMinutes(-30), everyMinutes: 30);
+        await ExecuteAsync(@"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected, error_message)
+VALUES ($1, $2, $3, 'system_health_events', $4, 12, 'SUCCESS', 0, 'ring_buffer_truncated=1 ring_buffer_events_hidden=773 newest_visible_event_age_s=19380')",
+            _nextId++, _serverId, ServerName, Naive(Anchor));
+
+        var root = Root(await CallAsync(tool));
+
+        Assert.Equal("unavailable", root.GetProperty("status").GetString());
+        var message = root.GetProperty("message").GetString()!;
+        Assert.Contains("NOT an all-clear", message, StringComparison.Ordinal);
+        Assert.Contains("773 event(s) are hidden", message, StringComparison.Ordinal);
+        Assert.Contains("5 h 23 min old", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("quiet", message, StringComparison.Ordinal);
+    }
+
+    /* #6441: a clean newest run after a truncated one clears the warning; the read answers as it did before. */
+    [Fact]
+    public async Task ATruncatedOlderRun_ThenACleanNewestRun_KeepsTheQuietAnswer()
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        await ExecuteAsync(@"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected, error_message)
+VALUES ($1, $2, $3, 'system_health_events', $4, 12, 'SUCCESS', 0, 'ring_buffer_truncated=1 ring_buffer_events_hidden=773 newest_visible_event_age_s=19380')",
+            _nextId++, _serverId, ServerName, Naive(WindowStart.AddDays(-3)));
+        await SeedEventAsync(Tool.SignificantWaits, WindowStart.AddDays(-1));
+        await SeedLogRunsAsync(WindowStart.AddDays(-2), Anchor, everyMinutes: 30);
+
+        var root = Root(await CallAsync(Tool.SignificantWaits));
+
+        Assert.Equal("empty", root.GetProperty("status").GetString());
+        Assert.Contains("genuinely quiet", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
+    }
+
+    /* #6453: nothing of any type ever stored. The newest run read the live session through its event_file target and found
+       nothing: a true negative, `empty`. A fallback to the ring buffer, a ring buffer read with no note, and a newest run
+       that was an ERROR keep `unavailable`, because the ring buffer path also records SUCCESS for a dead session. */
+    [Theory]
+    [InlineData(Tool.SystemHealth, "event_file_events=0", "SUCCESS", "empty")]
+    [InlineData(Tool.SignificantWaits, "event_file_events=0", "SUCCESS", "empty")]
+    [InlineData(Tool.SystemHealth, "event_file_fallback=1", "SUCCESS", "unavailable")]
+    [InlineData(Tool.SystemHealth, "event_file_fallback=1 event_file_error=297", "SUCCESS", "unavailable")]
+    [InlineData(Tool.SignificantWaits, "event_file_fallback=1", "SUCCESS", "unavailable")]
+    [InlineData(Tool.SystemHealth, null, "SUCCESS", "unavailable")]
+    [InlineData(Tool.SystemHealth, "event_file_events=0", "ERROR", "unavailable")]
+    public async Task NothingEverStored_IsEmptyOnlyAfterAnEventFileRead(Tool tool, string? note, string status, string expected)
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        await ExecuteAsync(@"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected, error_message)
+VALUES ($1, $2, $3, 'system_health_events', $4, 12, $5, 0, $6)",
+            _nextId++, _serverId, ServerName, Naive(Anchor), status, note);
+
+        var root = Root(await CallAsync(tool));
+
+        Assert.Equal(expected, root.GetProperty("status").GetString());
+        Assert.Equal(expected == "empty", root.GetProperty("source_observed").GetBoolean());
+        if (expected == "empty")
+        {
+            Assert.Contains("true negative", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Contains("NOT an all-clear", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        }
+    }
+
     private async Task SeedLogRunsAsync(DateTime firstUtc, DateTime lastUtc, int everyMinutes)
     {
         await ExecuteAsync($@"

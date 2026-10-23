@@ -149,4 +149,82 @@ public sealed class TopRankingNoticeBehaviourTests
             Assert.True(run.GetProperty("cards").GetProperty(card).GetProperty("textOnly").GetBoolean(), card + ": the notice must hold a text node and no element");
         }
     }
+
+    /// <summary>
+    /// #6303: each of the four grids draws the stored-plan button column and the History column after its data columns, and each
+    /// Top Procedures grid reads with <c>detail: "full"</c> and offers the Times, I/O and spills and Extremes column groups. Whatever way
+    /// the page composes those column lists, a grid that loses one of them fails here.
+    /// </summary>
+    [Fact]
+    public void EveryTopGrid_DrawsThePlanAndHistoryColumns_AndTheProceduresGridsKeepTheirGroupsAndFullRead()
+    {
+        var run = Run("columns");
+        foreach (var card in Cards)
+        {
+            var drawn = run.GetProperty("cards").GetProperty(card);
+            Assert.True(drawn.GetProperty("found").GetBoolean(), card + " must be drawn");
+            var headers = drawn.GetProperty("headers").EnumerateArray().Select(e => e.GetString()!).ToArray();
+            Assert.Contains("Plan", headers);
+            Assert.Equal("History", headers[^1]);
+            Assert.Equal("Plan", headers[^2]);
+        }
+
+        foreach (var card in new[] { "cpuProcedures", "queriesProcedures" })
+        {
+            var toggles = run.GetProperty("cards").GetProperty(card).GetProperty("groupToggles").EnumerateArray().Select(e => e.GetString()!).ToArray();
+            Assert.Equal(new[] { "Times", "I/O and spills", "Extremes" }, toggles);
+        }
+
+        var details = run.GetProperty("details").EnumerateArray().Select(e => e.GetString()!).Where(d => d.StartsWith("get_top_procedures_by_cpu:", StringComparison.Ordinal)).ToList();
+        Assert.True(details.Count >= 2, "both Top Procedures grids read: " + string.Join(", ", details));
+        Assert.All(details, d => Assert.Equal("get_top_procedures_by_cpu:full", d));
+    }
+
+    /// <summary>
+    /// #6353: the Compare delta cells carry the number class and the band the row's own severity names (red for a rise past the
+    /// threshold, green for a fall), as the plain number cells beside them do. They were built with a custom renderer, which the shared
+    /// cell builder gave neither.
+    /// </summary>
+    [Fact]
+    public void CompareDeltaCells_AreRightAlignedAndColouredByTheirSeverity()
+    {
+        var run = Run("compareDelta");
+
+        Assert.Equal(new[] { "Execs Δ", "Duration Δ", "CPU Δ" }, run.GetProperty("deltaHeaders").EnumerateArray().Select(e => e.GetString()!).ToArray());
+        var rows = run.GetProperty("rows").EnumerateArray().Select(r => r.EnumerateArray().Select(c => (Text: c.GetProperty("text").GetString()!, Cls: c.GetProperty("cls").GetString()!)).ToArray()).ToArray();
+        Assert.Equal(2, rows.Length);
+        Assert.All(rows.SelectMany(r => r), c => Assert.Contains("num", c.Cls.Split(' ')));
+        // 0xA: the same executions, twice the duration (+100%), a ninth of the CPU (-90%).
+        Assert.Equal("+100.0%", rows[0][1].Text);
+        Assert.Contains("sev-Critical", rows[0][1].Cls);
+        Assert.Equal("-90.0%", rows[0][2].Text);
+        Assert.Contains("sev-Healthy", rows[0][2].Cls);
+        // 0xG is GONE: -100% on all three is green.
+        Assert.All(rows[1], c => Assert.Contains("sev-Healthy", c.Cls));
+    }
+
+    /// <summary>
+    /// #6353: when this window is the empty one the card already says so, so no "No data for the comparison window" notice is drawn on
+    /// top of it; the sentence blames the earlier window and the earlier window is not the one with nothing in it.
+    /// </summary>
+    [Fact]
+    public void Compare_WhenThisWindowIsEmpty_DrawsNoComparisonNotice()
+    {
+        var run = Run("compareCurrentEmpty");
+
+        Assert.True(run.GetProperty("card").GetBoolean());
+        Assert.Empty(run.GetProperty("notices").EnumerateArray());
+        Assert.Contains("No rows in this window.", run.GetProperty("cardText").GetString());
+    }
+
+    /// <summary>#6353: when the notice applies (this window has rows, the earlier one has none) it sits inside the card, before its body.</summary>
+    [Fact]
+    public void Compare_WhenTheEarlierWindowIsEmpty_PutsTheNoticeInsideTheCard()
+    {
+        var run = Run("compareBaselineEmpty");
+
+        Assert.Equal(new[] { "No data for the comparison window." }, run.GetProperty("notices").EnumerateArray().Select(e => e.GetString()!).ToArray());
+        Assert.True(run.GetProperty("noticeInsideCard").GetBoolean());
+        Assert.True(run.GetProperty("noticeBeforeBody").GetBoolean());
+    }
 }

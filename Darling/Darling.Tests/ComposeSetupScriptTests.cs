@@ -244,6 +244,12 @@ public sealed class ComposeSetupScriptTests : IDisposable
         }
 
         info.Environment.Remove("DARLING_SQL_PASSWORD");
+        /* #6379: RequireSh() may fall back to Git's sh.exe by full path; the script needs that folder's tools (dirname)
+           on PATH, which the parent's PATH may not have. */
+        if (Path.IsPathRooted(sh))
+        {
+            info.Environment["PATH"] = Path.GetDirectoryName(sh) + Path.PathSeparator + info.Environment["PATH"];
+        }
         if (sqlPassword is not null)
         {
             info.Environment["DARLING_SQL_PASSWORD"] = sqlPassword;

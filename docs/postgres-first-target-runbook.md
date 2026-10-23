@@ -24,10 +24,10 @@ each collector does; this is the ordered procedure for getting one collecting an
 
 | | | Check |
 |---|---|---|
-| A target | Aurora PostgreSQL, or self-managed PostgreSQL 13+ (`pg_replication_slots.wal_status`) | `SELECT version();` |
+| A target | Aurora PostgreSQL, or self-managed PostgreSQL 10 or later. An older version stores NULL for a column it lacks, and `pg_io_stats` needs 16 (see [Oldest PostgreSQL version per collector](../Darling/README.md#oldest-postgresql-version-per-collector)) | `SELECT version();` |
 | A login on it | `pg_monitor`, password auth | step 1 |
 | A store | Managed (bundled) or your own PostgreSQL | README [The Store](../Darling/README.md#the-store) |
-| The service | A current build | `dotnet build` |
+| The service | A current release, installed as the README describes ([Install as a Windows Service](../Darling/README.md#install-as-a-windows-service)) | `PerformanceMonitor.Darling.Service.exe --version` |
 | Network | The service host must reach the target's port 5432 | `nc -z <host> 5432` |
 
 On Aurora, "the target" is one **instance**, not the cluster. A writer and a reader are two entries with
@@ -75,7 +75,7 @@ sits on top of `pg_stat_statements`), `pg_predicate_stats` (`pg_qualstats` — p
 `CREATE EXTENSION` per database), and `pg_wait_sampling` (the `pg_wait_sampling` module — preload-only,
 so check it with `SHOW shared_preload_libraries;`, not `pg_extension`). Skipping any of them is fine:
 the collector records a non-fatal skip naming exactly which install is missing (step 10), and the other
-27 collectors are unaffected.
+24 collectors are unaffected.
 
 `pg_wait_sampling` is the one whose absence is no longer a skip (#3604). Without the extension the same
 collector takes its **service-sampler arm**: it polls `pg_stat_activity` once a second for a 30-second
@@ -378,12 +378,12 @@ reasons come from the collectors' own gates in `CollectorCatalog`:
 
 | Target | Applies | Skipped, and why |
 |---|---|---|
-| Aurora writer, PG 16+ | 28 of 28 | — |
-| Aurora reader | 24 of 28 | `pg_autovacuum_stats`, `pg_index_usage_stats`, `pg_table_bloat_stats`, `pg_index_bloat` — all four are writer-only: a standby's per-table statistics are either zeros or its own, and both readings are wrong for the cluster |
-| Self-managed 16+ writer | 26 of 28 | `pg_wait_stats`, `pg_cpu_utilization` — one reads `aurora_stat_system_waits()`, the other AWS Performance Insights; both gate on Aurora detection |
-| Self-managed 15 reader | 21 of 28 | all of the above, plus `pg_io_stats` (needs `pg_stat_io`, PostgreSQL 16+) |
+| Aurora writer, PG 16+ | 29 of 29 | — |
+| Aurora reader | 25 of 29 | `pg_autovacuum_stats`, `pg_index_usage_stats`, `pg_table_bloat_stats`, `pg_index_bloat` — all four are writer-only: a standby's per-table statistics are either zeros or its own, and both readings are wrong for the cluster |
+| Self-managed 16+ writer | 27 of 29 | `pg_wait_stats`, `pg_cpu_utilization` — one reads `aurora_stat_system_waits()`, the other AWS Performance Insights; both gate on Aurora detection |
+| Self-managed 15 reader | 22 of 29 | all of the above, plus `pg_io_stats` (needs `pg_stat_io`, PostgreSQL 16+) |
 
-A PostgreSQL 13 target additionally skips `pg_write_stats`, whose `pg_stat_wal` source is 14+.
+A PostgreSQL 13 target skips no collector for its version, but `pg_write_stats` stores NULL in its WAL columns, because the `pg_stat_wal` source needs PostgreSQL 14.
 
 If the count is lower than the table says it should be, the probe disagrees with you about the target —
 check `writer`/`reader` and `Aurora`/`not Aurora` in the same line before touching anything else.
@@ -408,8 +408,8 @@ against an existing store migrates it** — applied automatically on start, forw
 down-migration. The first PostgreSQL collector tables arrived as rungs V63–V69 and the registry's
 engine/port columns as V70, and the ladder has kept climbing with the collectors since (V71 blocking
 edges, V83–V95, plan capture at v99, the PostgreSQL alert count knobs at V122, ...): a current build
-carries any older store to **v127**. `StorageVersion.SchemaVersion` is the source of truth, and step 5's
-proof line quotes whatever it says at your build.
+carries any older store to the newest version. `StorageVersion.SchemaVersion` is the source of truth (214 at
+3.11.0), and step 5's proof line quotes whatever it says at your build.
 
 **Before starting, if your store is unmanaged and has TimescaleDB**, re-derive the background-worker
 settings. Every collector table becomes a hypertable — all 71 of them, 29 PostgreSQL — so the required
@@ -421,8 +421,11 @@ for an 8 GB host the numbers are 128 and 139 for 72 hypertables (74 and 85 at 4 
 ## 5. First start, in console mode
 
 ```
-Darling\PerformanceMonitor.Darling.Service\bin\Release\net10.0\PerformanceMonitor.Darling.Service.exe
+& "C:\Program Files\PerformanceMonitorDarling\PerformanceMonitor.Darling.Service.exe"
 ```
+
+If you built the service from source, run the exe that the build wrote instead:
+`Darling\PerformanceMonitor.Darling.Service\bin\Release\net10.0\PerformanceMonitor.Darling.Service.exe`.
 
 There is no `--console` flag — the bare executable **is** console mode, and the Windows-service lifetime is a
 no-op when there is no service host. Worth stating because looking for the flag and not finding it reads like
@@ -432,13 +435,13 @@ a missing feature.
 was behind — on a fresh store it is all of them):
 
 ```
-Postgres store ready (schema v127, 9 migration(s) applied)
+Postgres store ready (schema v<N>, <M> migration(s) applied)
 ```
 
 The target was probed as PostgreSQL:
 
 ```
-Connected to PostgreSQL target 'aurora-orders-writer': major 17 (server_version_num 170007), writer, Aurora: True — PostgreSQL 17.7 ...
+Connected to PostgreSQL target 'aurora-orders-writer': major 17 (server_version_num 170007), writer, Aurora: True, pg_wait_sampling: n/a (engine_cumulative tier), pg_stat_statements: extension 1.10 — PostgreSQL 17.7 ...
 ```
 
 If this line says `writer` for something you believe is a reader, or `Aurora: False` for an Aurora

@@ -176,7 +176,7 @@ LEFT JOIN query_plan_dim AS d
         return xml.Contains("UsePlan=\"1\"", StringComparison.Ordinal) ? (PlanKind.Variant, null) : (PlanKind.Plain, null);
     }
 
-    /// <summary>The newest collector capture of each force, read from the window. $1 server, $2 start, $3 end, $4 database filter, $5 query_id or NULL.</summary>
+    /// <summary>The newest collector capture of each force, read from the window. $1 server, $2 start, $3 end, $4 database filter, $5 query_id or NULL, $6 plan_id or NULL (#6560: both narrow the read itself, before the <see cref="MaxForces"/> cap, so a force past the cap is still found).</summary>
     public static string ForcesSql(DatabaseFilter databases) => $@"
 WITH win AS (
     SELECT database_name, collection_time, plan_id, query_id, plan_forcing_type, force_failure_count, last_force_failure_reason,
@@ -184,7 +184,7 @@ WITH win AS (
     FROM collect.query_store_forced_plans
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3{databases.Clause("database_name", 4)}),
 plans AS (
-    SELECT * FROM win WHERE plan_id IS NOT NULL AND ($5::bigint IS NULL OR query_id = $5)),
+    SELECT * FROM win WHERE plan_id IS NOT NULL AND ($5::bigint IS NULL OR query_id = $5) AND ($6::bigint IS NULL OR plan_id = $6)),
 absent AS (
     SELECT p.database_name, p.plan_id, MAX(m.collection_time) AS last_absent
     FROM (SELECT DISTINCT database_name, plan_id FROM plans) AS p
@@ -427,13 +427,14 @@ LIMIT 50";
 
     /// <summary>
     /// Reads the forces of one server in the window <paramref name="start"/> to <paramref name="end"/> (naive UTC), optionally
-    /// narrowed to databases and to one query. <paramref name="forcedAt"/> is the seam for a caller that knows when a force was
+    /// narrowed to databases, to one query and to one plan id (<paramref name="planId"/>, a trailing parameter). <paramref name="forcedAt"/> is the seam for a caller that knows when a force was
     /// placed (key: database and plan_id): the time replaces first seen for that force's IGNORED and WORKING rules.
     /// </summary>
     public static async Task<ForcedPlanRead> ReadAsync(
         NpgsqlDataSource postgres, int serverId, DatabaseFilter databases, long? queryId, DateTime start, DateTime end,
         IReadOnlyDictionary<(string Database, long PlanId), DateTime>? forcedAt = null,
         int commandTimeoutSeconds = StorageCommandDeadlines.McpReadSeconds,
+        long? planId = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(postgres);
@@ -463,6 +464,7 @@ LIMIT 50";
             command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, to);
             command.Parameters.Add(databases.Parameter());
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = queryId.HasValue ? queryId.Value : DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = planId.HasValue ? planId.Value : DBNull.Value });
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {

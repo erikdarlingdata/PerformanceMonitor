@@ -194,6 +194,13 @@
                 <TextBox x:Name="UtilityDatabaseBox" Width="250"
                          ToolTip="Database where community stored procedures (sp_IndexCleanup) are installed. Leave empty to use the connection database.&#10;&#10;Ignored on Azure SQL Database (#2407): it has no cross-database execution, so a procedure can only read the database it runs in. Install sp_IndexCleanup in each database you want to analyse; Index Analysis connects to the named database directly."/>
             </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                <TextBlock Text="QS replica:" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Width="80"/>
+                <TextBox x:Name="QueryStoreReplicaBox" Width="250"
+                         ToolTip="Reads Query Store from this readable replica (host, host,port or listener name) to spare the primary. Leave empty to read the primary. Uses this server's login, so the replica must accept it. Not used for Azure SQL Database."/>
+            </StackPanel>
+            <TextBlock Text="Reads Query Store from this readable replica to spare the primary; leave empty to read the primary."
+                       Foreground="{DynamicResource ForegroundBrush}" Opacity="0.7" FontSize="11" TextWrapping="Wrap" Margin="80,2,0,0" Width="250" HorizontalAlignment="Left"/>
             <CheckBox x:Name="ReadOnlyIntentCheckBox" Content="Read-_only intent (for AG listeners and readable replicas)"
                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,6,0,0"
                       ToolTip="Sets ApplicationIntent=ReadOnly. Required when connecting via an AG listener or Azure failover group endpoint to route to a readable secondary."/>

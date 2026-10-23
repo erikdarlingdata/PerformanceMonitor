@@ -537,7 +537,7 @@ public sealed class McpQueryTools
 
             if (rows.Count == 0)
                 return await McpRuntimePrecondition.WithQueryStoreNotWritingHintAsync(
-                    await EmptyAnswerAsync(), dataService, resolved.ServerId, database_name);
+                    await EmptyAnswerAsync(), dataService, resolved.ServerId, resolved.DisplayName, database_name);
 
             var result = rows.Select(r => new
             {
@@ -1087,7 +1087,7 @@ public sealed class McpQueryTools
             notice.AsHints());
     }
 
-    [McpServerTool(Name = "get_query_duration_trend"), Description("Gets a time-series of query elapsed_ms_per_second and executions_per_second across all queries, points ending at as_of. A collection whose interval was unknowable is excluded, not counted as 0: unrated_collections counts it, and a point left with nothing else carries null rates (unrated_points), never zero. No points: unavailable means query_stats was never collected here; empty means it was (the message says quiet window or rollup coverage gap). window_truncated is the store's retention floor, not a page cut: effective_start / effective_hours_back say where the answer begins. <<GUIDE>> Gets a time-series of average query duration over time. Useful for spotting overall performance degradation or improvement trends across all queries. Points are time buckets (bucket, aggregate_note); rates are over each collection's STORED sample interval, and a collection whose interval was unknowable - a restart or counter reset, or the window's first collection when none was stored - is left out rather than counted as 0 (unrated_collections counts them; a point with nothing else carries null rates, unrated_points). Lite has one tier - nothing is rolled up." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_query_duration_trend"), Description("Gets elapsed_ms_per_second and executions_per_second across ALL queries, points ending at as_of. Not CPU. One query_hash: get_query_trend. A collection whose interval was unknowable is excluded, not counted as 0: unrated_collections counts it, and a point left with nothing else carries null rates (unrated_points), never zero. No points: unavailable means query_stats was never collected here; empty means it was (the message says quiet window or rollup coverage gap). window_truncated is the store's retention floor, not a page cut: effective_start says where the answer begins. <<GUIDE>> Gets a time-series of average query duration over time. Useful for spotting overall performance degradation or improvement trends across all queries. Points are time buckets (bucket, aggregate_note); rates are over each collection's STORED sample interval, and a collection whose interval was unknowable - a restart or counter reset, or the window's first collection when none was stored - is left out rather than counted as 0 (unrated_collections counts them; a point with nothing else carries null rates, unrated_points). Lite has one tier - nothing is rolled up." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetQueryDurationTrend(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -1128,7 +1128,20 @@ public sealed class McpQueryTools
                     return gated;
                 }
 
-                return await dataService.HasAnyQueryStatAsync(resolved.ServerId)
+                var everSampled = await dataService.HasAnyQueryStatAsync(resolved.ServerId);
+
+                /* #6453: no row EVER stored is a true negative, not "unavailable", when the collector's newest run completed
+                   clean. Darling's twin. */
+                var healthyEmpty = everSampled
+                    ? null
+                    : await McpRuntimePrecondition.HealthyEmptyMessageAsync(
+                        dataService, resolved.ServerId, resolved.DisplayName, "query_stats", "query samples");
+                if (healthyEmpty != null)
+                {
+                    return EmptyStatus("empty", healthyEmpty, startUtc, windowEnd, grain, database);
+                }
+
+                return everSampled
                     ? EmptyStatus(
                         "empty",
                         $"No query samples recorded for {ScopedServer(resolved.DisplayName, database)} in the last {hours_back} hour(s). This server HAS collected query stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.",
@@ -1190,7 +1203,9 @@ public sealed class McpQueryTools
                     dataService.HasAnyProcedureStatAsync(resolved.ServerId), resolved.DisplayName, database, hours_back,
                     startUtc, windowEnd, grain,
                     "stored-procedure",
-                    "Check that collection is running and that the server is enabled. A server that genuinely runs no stored procedures also lands here, and that is a real answer rather than a fault.");
+                    "Check that collection is running and that the server is enabled. A server that genuinely runs no stored procedures also lands here, and that is a real answer rather than a fault.",
+                    healthyEmptyProbe: () => McpRuntimePrecondition.HealthyEmptyMessageAsync(
+                        dataService, resolved.ServerId, resolved.DisplayName, "procedure_stats", "stored-procedure samples"));
             }
 
             return SerializeTrend(resolved.DisplayName, hours_back, startUtc, windowEnd, points, grain,
@@ -1551,9 +1566,16 @@ public sealed class McpQueryTools
     /// </summary>
     private static async Task<string> EmptyTrendAsync(
         Task<bool> probe, string serverName, string? database, int hours_back, DateTime startUtc, DateTime windowEndUtc, TrendGrain grain,
-        string what, string checkThis, Func<Task<string?>>? neverSampledOverride = null)
+        string what, string checkThis, Func<Task<string?>>? neverSampledOverride = null, Func<Task<string?>>? healthyEmptyProbe = null)
     {
         var everSampled = await probe;
+
+        /* #6453: no row EVER stored is a true negative, not "unavailable", when the collector's newest run completed clean:
+           it looked and the server had nothing to report, which collection health calls HEALTHY. Darling's twin. */
+        if (!everSampled && healthyEmptyProbe != null && await healthyEmptyProbe() is { } healthyEmpty)
+        {
+            return EmptyStatus("empty", healthyEmpty, startUtc, windowEndUtc, grain, database);
+        }
 
         /* #6181: a caller that can tell "no sample yet, but the source is healthy" supplies the whole answer for the
            never-sampled state; null keeps the standard text. */

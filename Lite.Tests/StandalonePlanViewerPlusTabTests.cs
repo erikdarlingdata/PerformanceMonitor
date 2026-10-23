@@ -259,9 +259,7 @@ public sealed class StandalonePlanViewerPlusTabTests
             Tabs.Arrange(new Rect(0, 0, 900, 600));
             Tabs.UpdateLayout();
 
-            var frame = new DispatcherFrame();
-            Dispatcher.CurrentDispatcher.BeginInvoke(DispatcherPriority.SystemIdle, new Action(() => frame.Continue = false));
-            Dispatcher.PushFrame(frame);
+            StaTestThread.WaitForIdle(Dispatcher.CurrentDispatcher, StaTestThread.IdleLimit, DispatcherPriority.SystemIdle);
         }
 
         /// <summary>The focus half of a UIA select: <c>TabItem.OnPreviewGotKeyboardFocus</c> selects a tab

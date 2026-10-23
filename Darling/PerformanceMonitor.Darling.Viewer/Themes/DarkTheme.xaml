@@ -557,7 +557,7 @@
                                  HorizontalAlignment="Left" VerticalAlignment="Center"
                                  Margin="6,4,23,4" Focusable="True"
                                  Background="Transparent" Foreground="{StaticResource ForegroundBrush}"
-                                 Visibility="Hidden" IsReadOnly="{TemplateBinding IsReadOnly}"/>
+                                 Visibility="Hidden" BorderThickness="0" IsReadOnly="{TemplateBinding IsReadOnly}"/>
                         <Popup x:Name="Popup" Placement="Bottom" IsOpen="{TemplateBinding IsDropDownOpen}"
                                AllowsTransparency="True" Focusable="False" PopupAnimation="Slide">
                             <Grid x:Name="DropDown" SnapsToDevicePixels="True"
@@ -574,6 +574,11 @@
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsEnabled" Value="False">
                             <Setter Property="Foreground" Value="{StaticResource ForegroundMutedBrush}"/>
+                        </Trigger>
+                        <!-- #6452: an IsEditable combo types into PART_EditableTextBox; it was Hidden for good, so the box read blank. -->
+                        <Trigger Property="IsEditable" Value="True">
+                            <Setter TargetName="PART_EditableTextBox" Property="Visibility" Value="Visible"/>
+                            <Setter TargetName="ContentSite" Property="Visibility" Value="Collapsed"/>
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>

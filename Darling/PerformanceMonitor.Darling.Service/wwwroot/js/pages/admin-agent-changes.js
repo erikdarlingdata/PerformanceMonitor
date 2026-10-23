@@ -17,7 +17,7 @@
    Self-contained: admin.js hands this file its helpers, so a change here never touches that file's tab code. */
 
 import { VIZ } from "../panels.js";
-import { el, mount, errorStrip, emptyStrip, noticeStrip, apiGet, apiWrite } from "../util.js";
+import { el, mount, errorStrip, emptyStrip, noticeStrip, listOnlyNote, apiGet, apiWrite } from "../util.js";
 
 export const AGENT_CHANGE_COLUMNS = [
   { key: "when", label: "When", format: "time" },
@@ -31,9 +31,7 @@ export const AGENT_CHANGE_COLUMNS = [
   { key: "review", label: "Review" },
 ];
 
-const LIST_ONLY =
-  "This dashboard signs in to the store as the viewer role (managed and compose stores), so this page lists agent changes only. " +
-  "To undo a change or switch agent changes off, use the Viewer app, or run the web under the admin login.";
+const listOnly = (managed, adminWritesOff) => listOnlyNote(managed, "this page lists agent changes only", "To undo a change or switch agent changes off", adminWritesOff);
 const CAN_DECIDE =
   "Agent changes, newest first. Undo restores what the setting was before the agent's change, but only if nobody has changed it since; " +
   "otherwise it says so and leaves the setting alone. Undo works for 365 days. An evicted plan has no undo. The next run compiles a new plan. A killed session has no undo.";
@@ -126,7 +124,12 @@ export async function buildAgentChanges(body, generation, ctx) {
   if (bad) return mount(body, nodes.concat([bad]));
   const data = res.data || {};
   const canDecide = data.can_decide === true;
-  nodes.push(noticeStrip(canDecide ? CAN_DECIDE : LIST_ONLY));
+  let notice = canDecide ? CAN_DECIDE : null;
+  if (notice === null) {
+    const session = await ctx.getSession();
+    notice = listOnly(session.managed_store === true, session.admin_writes_off === true);
+  }
+  nodes.push(noticeStrip(notice));
   nodes.push(switchBar(data.enabled !== false, canDecide, ctx));
   const rows = agentChangeRows(data);
   const columns = AGENT_CHANGE_COLUMNS.concat(canDecide ? [{

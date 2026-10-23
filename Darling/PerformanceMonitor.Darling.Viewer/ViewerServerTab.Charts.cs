@@ -324,7 +324,7 @@ public partial class ViewerServerTab : IDisposable
         TempDbFileIoChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         TempDbFileIoChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
         ReapplyAxisColors(TempDbFileIoChart);
-        TempDbFileIoChart.Plot.YLabel("tempdb File I/O Latency (ms)");
+        TempDbFileIoChart.Plot.YLabel("tempdb latency ms");
         SetChartYLimitsWithLegendPadding(TempDbFileIoChart, 0, maxLatency > 0 ? maxLatency : 10);
         ShowChartLegend(TempDbFileIoChart);
         TempDbFileIoChart.Refresh();

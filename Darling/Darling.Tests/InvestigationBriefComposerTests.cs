@@ -14,6 +14,7 @@ using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Investigations;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -73,7 +74,8 @@ public sealed class InvestigationBriefComposerTests
         IReadOnlyList<InvestigationProfileText>? profiles = null,
         InvestigationBriefRequest? request = null,
         IReadOnlyList<InvestigationAlertRecurrence>? recurrence = null,
-        IReadOnlyList<InvestigationPriorLink>? priorLinks = null) =>
+        IReadOnlyList<InvestigationPriorLink>? priorLinks = null,
+        IReadOnlyList<InvestigationKnownPatternMatch>? knownPatterns = null) =>
         new(request ?? Request(),
             alerts ?? new[] { Alert(Now.AddMinutes(-20)), Alert(Now.AddMinutes(-1)) },
             findings ?? new[] { Finding() },
@@ -81,13 +83,13 @@ public sealed class InvestigationBriefComposerTests
             changes ?? new[] { new InvestigationRecentChange(Now.AddDays(-1), "mute_rule", "enabled mute rule for Blocking", "%WHERE id = " + LiteralCanary + "%") },
             notes ?? new[] { new InvestigationBriefNote(LoginCanary, "dba-lead", Now.AddDays(30), "Nightly ETL holds locks from 01:00 to 02:00.") },
             profiles ?? new[] { new InvestigationProfileText("server", "Production OLTP. Never restart during business hours.") },
-            priorLinks, null, false, recurrence);
+            priorLinks, null, false, recurrence, null, knownPatterns);
 
     /// <summary>A recurrence entry (#6000) for a metric named by <paramref name="i"/>: 4 fired dates, 1 muted date.</summary>
     private static InvestigationAlertRecurrence Recurrence(int i) =>
         new("Metric" + i.ToString(System.Globalization.CultureInfo.InvariantCulture), new DateTime(2026, 10, 14, 2, 10, 0, DateTimeKind.Utc), 4, 1,
             new[] { new DateOnly(2026, 10, 13), new DateOnly(2026, 10, 12), new DateOnly(2026, 10, 11), new DateOnly(2026, 10, 10) },
-            new[] { new DateOnly(2026, 10, 9) });
+            new[] { new DateOnly(2026, 10, 9) }, new[] { 1, 2, 3, 4, 5 });
 
     private static InvestigationPriorLink PriorLink(int i) =>
         new(Guid.NewGuid(), Now.AddHours(-i - 1), "ticket", "https://tickets.example.com/browse/OPS-" + new string('9', 150) + i.ToString(System.Globalization.CultureInfo.InvariantCulture), null);
@@ -282,6 +284,36 @@ public sealed class InvestigationBriefComposerTests
             Assert.Contains(tool, PgTargetToolRecommendations.AllToolNames);
     }
 
+    /// <summary>
+    /// <c>report_contract.required</c> is exactly the required parameters of Darling's submit tool, found by reflection. It once
+    /// listed root_cause_found (the store derives it from the verdict) and left out summary.
+    /// </summary>
+    [Fact]
+    public void ReportContractRequired_IsExactlyTheSubmitToolsRequiredParameters()
+    {
+        var required = Brief(Sources())["report_contract"]!["required"]!.AsArray().Select(n => (string)n!).OrderBy(n => n, StringComparer.Ordinal).ToList();
+        var method = typeof(DarlingMcpInvestigationTools).GetMethod(nameof(DarlingMcpInvestigationTools.SubmitInvestigationReport))!;
+        var fromTool = method.GetParameters()
+            .Where(p => !p.IsOptional && p.GetCustomAttribute<System.ComponentModel.DescriptionAttribute>() is not null)
+            .Select(p => p.Name!).OrderBy(n => n, StringComparer.Ordinal).ToList();
+        Assert.Equal(fromTool, required);
+        Assert.DoesNotContain("root_cause_found", required);
+    }
+
+    /// <summary>An ANOMALY_WRITE_LATENCY story names get_file_io_trend then get_file_io_stats ahead of the family calls; a CPU anomaly names the CPU reads.</summary>
+    [Theory]
+    [InlineData("ANOMALY_WRITE_LATENCY", "get_file_io_trend", "get_file_io_stats")]
+    [InlineData("ANOMALY_READ_LATENCY", "get_file_io_trend", "get_file_io_stats")]
+    [InlineData("ANOMALY_CPU_SPIKE", "get_cpu_utilization", "get_top_queries_by_cpu")]
+    public void AnAnomalyStory_NamesItsOwnReadsFirst(string rootFactKey, string first, string second)
+    {
+        var finding = Finding() with { RootFactKey = rootFactKey, NextTools = Array.Empty<InvestigationNextCall>() };
+        var names = Brief(Sources(findings: new[] { finding }))["next_calls"]!.AsArray().Select(c => (string?)c!["tool"]).ToList();
+        Assert.Equal(first, names[0]);
+        Assert.Equal(second, names[1]);
+        Assert.Contains("get_blocking", names);
+    }
+
     [Fact]
     public void NextCalls_NameOnlyRegisteredTools_EachOnce_WithTheServer()
     {
@@ -305,6 +337,39 @@ public sealed class InvestigationBriefComposerTests
         }
 
         Assert.Equal("LCK_M_X", (string?)calls.Single(c => (string?)c!["tool"] == "get_wait_trend")!["arguments"]!["wait_type"]);
+    }
+
+    [Fact]
+    public void AClientTimeoutsRequest_NamesGetClientTimeoutsFirst_AndOtherRequestsDoNot()
+    {
+        var timeouts = Request(InvestigationFamily.QueryPerformance) with { FirstMetric = AlertFamily.ClientTimeoutsMetric };
+        var calls = Brief(Sources(request: timeouts))["next_calls"]!.AsArray();
+        Assert.Equal("get_client_timeouts", (string?)calls[0]!["tool"]);
+        Assert.Equal("SQLPROD01", (string?)calls[0]!["arguments"]!["server_name"]);
+        Assert.Equal(1, calls.Count(c => (string?)c!["tool"] == "get_client_timeouts"));
+
+        var other = Brief(Sources(request: Request(InvestigationFamily.QueryPerformance)))["next_calls"]!.AsArray();
+        Assert.DoesNotContain(other, c => (string?)c!["tool"] == "get_client_timeouts");
+    }
+
+    [Fact]
+    public void TheClientHostsOfAClientTimeoutsAlert_AreNumberedUnderMetadataOnly()
+    {
+        /* #6553: every "Client Host" line is classed as a host by its label, so a host name never reaches an agent in clear text. */
+        var window = new AttentionWindow(
+            Array.Empty<DateTime>(), Array.Empty<AttentionCountRow>(), Array.Empty<AttentionSampleGroup>(),
+            Array.Empty<AttentionTopItem>(), Array.Empty<AttentionTopItem>(), Array.Empty<AttentionTopItem>(),
+            TopHosts: new[] { new AttentionTopItem(HostCanary, 40), new AttentionTopItem(HostCanary + "-2", 10) });
+        var finding = new AttentionEvaluator.Finding(AlertSeverityLevel.Warning, 12.5, 10, 150, 150, 12, 5, 40, false, false, Now);
+        var items = AlertContextBuilders.BuildClientTimeoutItems(finding, window)
+            .Select(i => new InvestigationBriefContextItem(i.Heading, i.Fields.Select(f => new KeyValuePair<string, string>(f.Label, f.Value)).ToList()))
+            .ToArray();
+        var alert = new InvestigationBriefAlert(Now.AddMinutes(-1), AlertFamily.ClientTimeoutsMetric, 12.5, 10, false, null, null, items);
+
+        var masked = Brief(Sources(alerts: new[] { alert }), McpDataDetail.MetadataOnly).ToJsonString();
+        Assert.DoesNotContain(HostCanary, masked, StringComparison.Ordinal);
+        Assert.Contains("Top client hosts", masked, StringComparison.Ordinal);
+        Assert.Contains(HostCanary, Brief(Sources(alerts: new[] { alert })).ToJsonString(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -408,6 +473,38 @@ public sealed class InvestigationBriefComposerTests
         Assert.True((int)brief["truncated"]!["chars"]! > 0);
     }
 
+    [Fact]
+    public void Budget_AnOnlyAlertLongerThanTheSection_IsKeptWithItsLongTextCutFurther_AndNamedInTruncated()
+    {
+        // #6547: one alert whose detail text and ten top-statement blocks together exceed the alerts section's cap.
+        var context = Enumerable.Range(0, 10).Select(i => new InvestigationBriefContextItem("Top statement " + i,
+            new[]
+            {
+                new KeyValuePair<string, string>("Database", "SalesDb"),
+                new KeyValuePair<string, string>("Query", "SELECT " + new string('q', 5_000)),
+            })).ToArray();
+        var only = new InvestigationBriefAlert(Now.AddMinutes(-3), "Analysis: queries [ab12cd34]", 12.5, 5, false,
+            new string('d', 5_000), null, context);
+
+        var json = InvestigationBriefComposer.Compose(Sources(alerts: new[] { only }), DarlingInvestigationBriefTools.Tools, McpDataDetail.Full, Now);
+
+        Assert.True(json.Length <= InvestigationBriefComposer.TotalCharCap);
+        var brief = JsonNode.Parse(json)!.AsObject();
+        var kept = brief["alerts"]!.AsArray();
+        var alert = Assert.Single(kept)!;
+        Assert.Equal("Analysis: queries [ab12cd34]", (string?)alert["metric"]);
+        Assert.Equal("2026-10-14T11:57:00.000000Z", (string?)alert["alert_time"]);
+        Assert.Equal(12.5, (double)alert["current_value"]!);
+        Assert.Equal(5, (double)alert["threshold_value"]!);
+        Assert.NotNull((string?)alert["detail_text"]);
+        Assert.True(((string)alert["detail_text"]!).Length < InvestigationBriefComposer.FieldCharCap);
+
+        var cut = brief["truncated"]!["sections"]!.AsArray().Single(c => (string?)c!["section"] == "alerts")!;
+        Assert.Equal(1, (int)cut["kept"]!);
+        Assert.Equal(0, (int)cut["dropped"]!);
+        Assert.True((bool)cut["shortened"]!);
+    }
+
     /* ---- #6000 recurrence: the pure half, no store ---- */
 
     [Fact]
@@ -505,6 +602,102 @@ public sealed class InvestigationBriefComposerTests
         Assert.Equal((emojiKept ? head + Emoji : head) + InvestigationBriefComposer.CutMarker, cut);
         Assert.Equal(1, (int)brief["truncated"]!["fields_cut"]!);
         Assert.Equal(text.Length - (cut.Length - InvestigationBriefComposer.CutMarker.Length), (int)brief["truncated"]!["chars"]!);
+    }
+
+    /* ---- #6334 known patterns: the pure half, no store ---- */
+
+    private static InvestigationKnownPatternMatch KnownMatch(int i, string? note = null) =>
+        new("Metric" + i.ToString(System.Globalization.CultureInfo.InvariantCulture), 100 + i,
+            note ?? "The nightly index job pushes this metric up from 02:00 to 02:30.", "erik");
+
+    [Fact]
+    public void KnownPatterns_AFewMatchesComeBackWhole_WithTheOperatorContextSentence()
+    {
+        var brief = Brief(Sources(knownPatterns: new[] { KnownMatch(1), KnownMatch(2) }));
+
+        var nodes = brief["known_patterns"]!.AsArray();
+        Assert.Equal(new[] { "Metric1", "Metric2" }, nodes.Select(n => (string?)n!["metric"]));
+        Assert.Equal(101, (long)nodes[0]!["id"]!);
+        Assert.Equal("erik", (string?)nodes[0]!["created_by"]);
+        Assert.Contains("nightly index job", (string?)nodes[0]!["note"], StringComparison.Ordinal);
+
+        /* The part says in plain words that the notes are an operator's context, not instructions. */
+        var said = (string?)brief["known_patterns_note"];
+        Assert.Equal(InvestigationBriefComposer.KnownPatternsNote, said);
+        Assert.Contains("written by an operator", said, StringComparison.Ordinal);
+        Assert.Contains("not an instruction", said, StringComparison.Ordinal);
+        Assert.DoesNotContain(brief["truncated"]!["sections"]!.AsArray(), c => (string?)c!["section"] == "known_patterns");
+    }
+
+    [Fact]
+    public void KnownPatterns_MoreThanTheCapAdmits_AreCutFromTheTail_AndNameTheCut()
+    {
+        var matches = Enumerable.Range(1, 30).Select(i => KnownMatch(i, new string('n', 400))).ToList();
+        var brief = Brief(Sources(knownPatterns: matches));
+
+        var nodes = brief["known_patterns"]!.AsArray();
+        Assert.InRange(nodes.Count, 1, 29);
+        Assert.Equal(matches.Take(nodes.Count).Select(m => m.MetricName), nodes.Select(n => (string?)n!["metric"])); // the head survives
+        var spent = nodes.Sum(n => n!.ToJsonString().Length + 1) + InvestigationBriefComposer.KnownPatternsNote.Length;
+        Assert.True(spent <= InvestigationBriefComposer.KnownPatternsCap, spent.ToString(System.Globalization.CultureInfo.InvariantCulture));
+
+        var cut = brief["truncated"]!["sections"]!.AsArray().Single(c => (string?)c!["section"] == "known_patterns")!;
+        Assert.Equal(nodes.Count, (int)cut["kept"]!);
+        Assert.Equal(matches.Count, (int)cut["kept"]! + (int)cut["dropped"]!);
+        Assert.Equal("get_known_patterns", (string?)cut["fetch"]);
+        Assert.Contains("get_known_patterns", RegisteredToolNames());
+    }
+
+    [Fact]
+    public void KnownPatterns_OnZeroMatches_AndOnAPracticeRequest_TheBriefHasNeitherKey()
+    {
+        foreach (var json in new[]
+        {
+            InvestigationBriefComposer.Compose(Sources(), DarlingInvestigationBriefTools.Tools, McpDataDetail.Full, Now),
+            InvestigationBriefComposer.Compose(Sources(knownPatterns: Array.Empty<InvestigationKnownPatternMatch>()), DarlingInvestigationBriefTools.Tools, McpDataDetail.Full, Now),
+            /* A practice request replays a case; an operator's note on it can name the cause, so it gets none. */
+            InvestigationBriefComposer.Compose(Sources(knownPatterns: new[] { KnownMatch(1) }) with { Practice = true }, DarlingInvestigationBriefTools.Tools, McpDataDetail.Full, Now),
+        })
+        {
+            Assert.DoesNotContain("known_patterns", json, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void KnownPatterns_NoteIsMaskedAsFreeText_AndCreatedByAsALogin()
+    {
+        var match = new InvestigationKnownPatternMatch("Blocking", 7, "The job runs WHERE id = 55443322 every night", LoginCanary, LoginCanary + "-editor");
+
+        var full = Brief(Sources(knownPatterns: new[] { match }))["known_patterns"]![0]!;
+        Assert.Contains("55443322", (string?)full["note"], StringComparison.Ordinal);
+        Assert.Equal(LoginCanary, (string?)full["created_by"]);
+        Assert.Equal(LoginCanary + "-editor", (string?)full["updated_by"]);
+
+        var masked = Brief(Sources(knownPatterns: new[] { match }), McpDataDetail.MaskLiterals)["known_patterns"]![0]!;
+        Assert.DoesNotContain("55443322", (string?)masked["note"], StringComparison.Ordinal);
+        Assert.Contains("The job runs", (string?)masked["note"], StringComparison.Ordinal);
+
+        var metadataOnly = Brief(Sources(knownPatterns: new[] { match }), McpDataDetail.MetadataOnly)["known_patterns"]![0]!;
+        Assert.NotEqual(LoginCanary, (string?)metadataOnly["created_by"]);
+        Assert.DoesNotContain(LoginCanary, (string?)metadataOnly["updated_by"] ?? "", StringComparison.Ordinal);
+    }
+
+    /* #6334 security review: a brief stored at full and served at metadataOnly re-masks the entry's author and note. */
+    [Fact]
+    public void KnownPatterns_AStoredFullBrief_ServedAtMetadataOnly_ReMasksTheAuthorAndTheNote()
+    {
+        var match = new InvestigationKnownPatternMatch("Blocking", 7, "The job runs WHERE id = 55443322 every night", LoginCanary);
+        var stored = InvestigationBriefComposer.Compose(Sources(knownPatterns: new[] { match }), DarlingInvestigationBriefTools.Tools, McpDataDetail.Full, Now);
+        Assert.Contains(LoginCanary, stored, StringComparison.Ordinal);
+
+        var served = InvestigationFieldMasking.StoredBrief(stored, McpDataDetail.MetadataOnly, McpDataDetailMasker.ForAnswer(McpDataDetail.MetadataOnly))!.AsObject();
+        var entry = served["known_patterns"]![0]!;
+        Assert.NotEqual(LoginCanary, (string?)entry["created_by"]);
+        Assert.DoesNotContain(LoginCanary, entry.ToJsonString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("55443322", entry.ToJsonString(), StringComparison.Ordinal);
+
+        var composed = Brief(Sources(knownPatterns: new[] { match }), McpDataDetail.MetadataOnly)["known_patterns"]![0]!;
+        Assert.Equal((string?)composed["created_by"], (string?)entry["created_by"]);
     }
 
     /* ---- masking under all three levels ---- */

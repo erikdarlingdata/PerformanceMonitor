@@ -65,6 +65,7 @@ public sealed class AgentLevel2ToolPolicyTests
     [InlineData("set_notification_route_fallback")]
     [InlineData("delete_notification_route")]
     [InlineData("mute_analysis_finding")]
+    [InlineData("unmute_analysis_finding")]
     [InlineData("create_custom_view")]
     [InlineData("edit_server")]
     [InlineData("assign_server_tag")]
@@ -528,7 +529,7 @@ VALUES ('{id}', {(enabled ? "TRUE" : "FALSE")}, now() AT TIME ZONE 'utc', {(serv
 
     private static async Task<long> SeedRuleAsync(Ctx c, string scope, bool enabled = true)
     {
-        var created = await new CustomAlertRuleStore(c.Source).CreateAsync("seed " + Guid.NewGuid().ToString("N"), null, Definition(scope), enabled, "person:erik");
+        var created = await new CustomAlertRuleStore(c.Source, StorageCommandDeadlines.McpReadSeconds).CreateAsync("seed " + Guid.NewGuid().ToString("N"), null, Definition(scope), enabled, "person:erik");
         return ((CustomAlertRuleResult.Ok)created).Rule!.Id;
     }
 

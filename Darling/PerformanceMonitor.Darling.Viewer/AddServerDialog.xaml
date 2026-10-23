@@ -208,6 +208,11 @@
             <CheckBox x:Name="MultiSubnetFailoverCheckBox" Content="Multi-subnet fai_lover (for AG listeners and FCIs)"
                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,6,0,0"
                       ToolTip="Sets MultiSubnetFailover=true. Connects to all IPs in parallel during failover. Recommended for AG listeners and failover cluster instances spanning multiple subnets."/>
+            <StackPanel x:Name="QueryStoreReplicaPanel" Orientation="Horizontal" Margin="0,6,0,0">
+                <TextBlock Text="QS replica:" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Width="110"/>
+                <TextBox x:Name="QueryStoreReplicaBox" Width="250"
+                         ToolTip="Optional. A readable secondary (host or host,port) or an availability group listener to read Query Store statistics from instead of this server. Same login and password. Leave empty to read Query Store from this server. Not used on Azure SQL Database."/>
+            </StackPanel>
             <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
                 <TextBlock Text="Monthly Cost ($):" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Width="110"/>
                 <TextBox x:Name="MonthlyCostBox" Width="100" TextAlignment="Right" Text="0"
@@ -237,6 +242,13 @@
                 <Button x:Name="TestConnectionButton" Content="_Test Connection" Width="130" Height="30"
                         Click="TestConnectionButton_Click" DockPanel.Dock="Left"
                         ToolTip="Asks the Darling service to connect to this server and report the version/edition, before saving."/>
+                <!-- #6472: the login and grant script for this server, on the clipboard, so the SQL Server admin can run it before the first test. -->
+                <Button x:Name="CopyGrantScriptButton" Content="Copy _grant script" Width="130" Height="30" Margin="8,0,0,0"
+                        Click="CopyGrantScriptButton_Click" DockPanel.Dock="Left"
+                        ToolTip="Copies the T-SQL that creates the monitoring login and grants what Darling needs on this server. Safe to run twice."/>
+                <CheckBox x:Name="GrantScriptFinOpsCheck" Content="FinOps" VerticalAlignment="Center" Margin="8,0,0,0" DockPanel.Dock="Left"
+                          Foreground="{DynamicResource ForegroundBrush}"
+                          ToolTip="Also grant what the FinOps Index Analysis tab needs in each user database."/>
                 <Button Content="_Cancel" Width="80" Height="30" Click="CancelButton_Click" DockPanel.Dock="Right" IsCancel="True"/>
                 <Button x:Name="SaveButton" Content="_Save" Width="80" Height="30" Click="SaveButton_Click" Style="{StaticResource AccentButton}" DockPanel.Dock="Right" Margin="0,0,8,0"/>
             </DockPanel>

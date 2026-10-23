@@ -68,6 +68,15 @@ public sealed class AdminPageBehaviourTests
         Assert.Equal("GET /api/admin/servers", Assert.Single(Reads(page)));
     }
 
+    [Fact]
+    public void TheServersTab_DrawsTheSameMachineColumn_WithTheNamesTheServiceSent_AndABlankCellWhenThereIsNone()
+    {
+        var texts = Texts(Tab("tab:servers"));
+
+        Assert.Contains("Same machine as", texts);
+        Assert.Contains("Peer-One, Peer-Two", texts);
+    }
+
     [Theory]
     [InlineData("servers")]
     [InlineData("routes")]

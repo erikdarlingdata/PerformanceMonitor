@@ -29,6 +29,37 @@ internal static class ClientTimeoutsBarsInput
     internal const string CriticalBelowWarningMessage =
         "Client timeouts critical bar must be at least the warning bar.";
 
+    internal const string WarningMultipleInvalidMessage =
+        "Client timeouts warning multiple must be a whole number of at least 1.";
+
+    internal const string CriticalMultipleInvalidMessage =
+        "Client timeouts critical multiple must be a whole number of at least 1.";
+
+    internal const string CriticalMultipleBelowWarningMessage =
+        "Client timeouts critical multiple must be at least the warning multiple.";
+
+    /// <summary>The two multiples of the relative bars (#5736), checked as a pair by the same rules as the floors.</summary>
+    internal static (int Warning, int Critical) ValidateMultiples(string? warningText, string? criticalText, List<string> errors)
+    {
+        var warningOk = int.TryParse(warningText, NumberStyles.Integer, CultureInfo.CurrentCulture, out var warning) && warning >= 1;
+        var criticalOk = int.TryParse(criticalText, NumberStyles.Integer, CultureInfo.CurrentCulture, out var critical) && critical >= 1;
+
+        if (!warningOk)
+        {
+            errors.Add(WarningMultipleInvalidMessage);
+        }
+        if (!criticalOk)
+        {
+            errors.Add(CriticalMultipleInvalidMessage);
+        }
+        if (warningOk && criticalOk && critical < warning)
+        {
+            errors.Add(CriticalMultipleBelowWarningMessage);
+        }
+
+        return (warning, critical);
+    }
+
     /// <summary>
     /// Parses and checks the two boxes. <paramref name="errors"/> receives one message per problem; the returned
     /// bars are meaningful only when it comes back empty.

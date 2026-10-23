@@ -125,15 +125,24 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ServerId, ServerName);
         var bodySucceeded = false;
         try
         {
-            /* A store big enough for the planner to choose: 6 collectors x 2,000 runs. */
+            /* A store big enough for the planner to choose: 6 collectors x 2,000 runs, one minute apart, the newest
+               at 12:00 UTC yesterday (#6370). Under TimescaleDB the raw chunks are one UTC day, so runs ending at
+               the real now() split 2,000 minutes into three chunks whose sizes follow the hour the test runs. In
+               the first ~2.5 hours after midnight UTC the newest chunk holds only 60 to 140 runs per collector, and
+               the planner reads that small chunk through idx_collection_log_time (22 entries for 4 rows, an
+               amount bounded by the chunk) while the large chunks use idx_collection_log_watermark: the statement
+               is fine, the test's seed was the moving part (CI run 39703284604, shard 5, ~01:20Z). 12:00 gives
+               the same two large chunks (720 and 1,280 runs per collector) at any hour, so the plan is the
+               one the statement is written for: every chunk reads through the watermark index. */
+            var newest = LiveClock.Now().Date.AddDays(-1).AddHours(12);
             await DarlingMcpTestData.ExecAsync(connection, ct, @"
 INSERT INTO collection_log
     (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message,
      rows_collected, sql_duration_ms, duckdb_duration_ms)
 SELECT -5666000000 - (c * 100000 + g), $1, $2, 'c' || c,
-       (now() AT TIME ZONE 'UTC') - make_interval(mins => g), 100,
+       $3 - make_interval(mins => g), 100,
        CASE WHEN g % 7 = 0 THEN 'ERROR' ELSE 'SUCCESS' END, NULL, 5, 80, 20
-FROM generate_series(1, 6) c, generate_series(1, 2000) g", ServerId, ServerName);
+FROM generate_series(1, 6) c, generate_series(1, 2000) g", ServerId, ServerName, newest);
             await DarlingMcpTestData.ExecAsync(connection, ct, "ANALYZE collection_log");
 
             var windowStart = DarlingMcpTestData.Naive(DateTime.UtcNow.AddDays(-7));
@@ -153,7 +162,11 @@ FROM generate_series(1, 6) c, generate_series(1, 2000) g", ServerId, ServerName)
 
             Assert.Contains("Index", plan, StringComparison.Ordinal);
             var indexes = System.Text.RegularExpressions.Regex.Matches(plan, "\"Index Name\":\"([^\"]+)\"")
-                .Select(m => m.Groups[1].Value).Distinct().ToList();
+                /* Under TimescaleDB (#6317) the plan reads each chunk's own copy of the index, named
+                   "_hyper_<h>_<c>_chunk_<index>" and ChunkAppend-ed in time order: strip that prefix to
+                   name the index the statement was written for. */
+                .Select(m => System.Text.RegularExpressions.Regex.Replace(m.Groups[1].Value, "^_hyper_[0-9]+_[0-9]+_chunk_", ""))
+                .Distinct().ToList();
             Console.WriteLine("PLAN5666 indexes=" + string.Join(",", indexes));
             Assert.NotEmpty(indexes);
             Assert.All(indexes, i => Assert.StartsWith("idx_collection_log_", i, StringComparison.Ordinal));

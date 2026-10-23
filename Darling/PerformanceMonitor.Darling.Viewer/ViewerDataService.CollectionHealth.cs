@@ -405,7 +405,8 @@ public sealed partial class ViewerDataService
             rows_collected,
             status,
             error_message,
-            server_name
+            server_name,
+            read_source
         FROM v_collection_log
         WHERE server_id = $1
         AND   collection_time >= $2
@@ -459,7 +460,8 @@ public sealed partial class ViewerDataService
             rows_collected,
             status,
             error_message,
-            server_name
+            server_name,
+            read_source
         FROM v_collection_log
         WHERE server_id = $1
         AND   collector_name = $2
@@ -493,7 +495,111 @@ public sealed partial class ViewerDataService
         }
 
         ApplyScheduledFrequencies(items, serverId, scheduleOverrides);
+        await ApplyReadSourceAsync(items, serverId, cancellationToken);
         return items;
+    }
+
+    /// <summary>
+    /// #6384: the Sweep Pressure and Heaviest Collectors panels' data, the same trailing 7 days <c>get_collection_health</c> reads on the web.
+    /// It runs the web's own statement (<see cref="CollectionHealthStatements.ComposedSql"/>, which the service's reader points at too) and
+    /// feeds the average, p95 and max duration it returns (null when the window holds no collection log row), with each collector's cadence on this server (the schedule override, else the
+    /// shipped default, as <see cref="ApplyScheduledFrequencies"/> resolves it), to <see cref="SweepPressureReport"/>, the arithmetic the web's
+    /// tool uses. A failure to read the schedule overrides costs the panels nothing but the overrides (the shipped cadences are used).
+    /// </summary>
+    public async Task<SweepPressureReport?> GetSweepPressureAsync(int serverId, CancellationToken cancellationToken = default)
+    {
+        var scheduleOverrides = await ReadScheduleOverridesForHealthAsync(cancellationToken);
+        var costs = new List<(CollectorHealthRow Row, double Avg, double P95, double Max)>();
+        await using (var command = _dataSource.CreateCommand(CollectionHealthStatements.ComposedSql))
+        {
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            command.Parameters.Add(new NpgsqlParameter<DateTime>
+            {
+                TypedValue = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-7), DateTimeKind.Unspecified),
+            });
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                /* Ordinals 0, 4, 5 and 6 of the statement: collector_name, avg_duration_ms, max_duration_ms, p95_duration_ms. */
+                costs.Add((
+                    new CollectorHealthRow { CollectorName = reader.GetString(0) },
+                    reader.IsDBNull(4) ? 0 : Convert.ToDouble(reader.GetValue(4), System.Globalization.CultureInfo.InvariantCulture),
+                    reader.IsDBNull(6) ? 0 : Convert.ToDouble(reader.GetValue(6), System.Globalization.CultureInfo.InvariantCulture),
+                    reader.IsDBNull(5) ? 0 : Convert.ToDouble(reader.GetValue(5), System.Globalization.CultureInfo.InvariantCulture)));
+            }
+        }
+
+        /* No collection log rows in the window: no report, as the web's get_collection_health answers "unavailable" for the same server. */
+        if (costs.Count == 0)
+        {
+            return null;
+        }
+
+        /* A name the catalog does not know is left unstamped (frequency 0), which the ranking and the roll-up both skip: the service's rule. */
+        ApplyScheduledFrequencies(
+            costs.Select(c => c.Row).Where(r => CollectorScheduleDefaults.All.ContainsKey(r.CollectorName)), serverId, scheduleOverrides);
+
+        /* The statement's p95 is always the upper bound of a duration bucket (P95Bucketed), as the service's reader marks it. */
+        return SweepPressureReport.Build(costs.Select(c =>
+            new SweepCollectorCost(c.Row.CollectorName, c.Avg, c.P95, P95Bucketed: true, c.Max, c.Row.FrequencyMinutes)));
+    }
+
+    /// <summary>
+    /// #6254: the newest Query Store run's <c>read_source</c> on this server in the trailing 7 days. The newest run, not the newest run
+    /// that had one, so a server whose Query Store replica setting was turned off stops showing a source as soon as its runs stop writing
+    /// one. One keyed index walk that stops at the first row.
+    /// </summary>
+    internal const string CollectionHealthReadSourceSql = @"
+SELECT read_source
+FROM v_collection_log
+WHERE server_id = $1
+AND   collector_name = 'query_store'
+AND   collection_time >= $2
+ORDER BY collection_time DESC, log_id DESC
+LIMIT 1";
+
+    /// <summary>
+    /// #6254: stamps the Query Store row with <see cref="CollectionHealthReadSourceSql"/>'s value. Null everywhere with the setting off
+    /// (every server until an operator sets it), and then no row changes and the grid is what it was. A failed read leaves the rows
+    /// unstamped: the health view answers without the extra note. A cancellation is not swallowed.
+    /// </summary>
+    private async Task ApplyReadSourceAsync(List<CollectorHealthRow> rows, int serverId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var command = _dataSource.CreateCommand(CollectionHealthReadSourceSql);
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            command.Parameters.Add(new NpgsqlParameter<DateTime>
+            {
+                TypedValue = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-7), DateTimeKind.Unspecified),
+            });
+            var value = await command.ExecuteScalarAsync(cancellationToken);
+            ApplyReadSource(rows, value as string);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            System.Diagnostics.Trace.TraceWarning($"#6254 collection health could not read the Query Store read source for server {serverId}; it is shown without one: {ex.GetType().Name}");
+        }
+    }
+
+    /// <summary>#6254: puts <paramref name="readSource"/> on the <c>query_store</c> row. Blank or null changes nothing. Pure, so a test needs no store.</summary>
+    internal static void ApplyReadSource(IEnumerable<CollectorHealthRow> rows, string? readSource)
+    {
+        if (string.IsNullOrWhiteSpace(readSource))
+        {
+            return;
+        }
+
+        foreach (var row in rows)
+        {
+            if (string.Equals(row.CollectorName, "query_store", StringComparison.Ordinal))
+            {
+                row.ReadSource = readSource;
+            }
+        }
     }
 
     /// <summary>
@@ -1009,6 +1115,7 @@ public sealed partial class ViewerDataService
                 Status = reader.GetString(6),
                 ErrorMessage = reader.IsDBNull(7) ? null : reader.GetString(7),
                 ServerName = reader.IsDBNull(8) ? null : reader.GetString(8),
+                ReadSource = reader.IsDBNull(9) ? null : reader.GetString(9),
             });
         }
 
@@ -1059,6 +1166,14 @@ public class CollectionLogRow
     public int? RowsCollected { get; set; }
     public string Status { get; set; } = "";
     public string? ErrorMessage { get; set; }
+
+    /// <summary>#6254: where this run's Query Store rows were read from (for example <c>replica 12, primary 2</c>), or null: every run of a server with the
+    /// replica setting off, every collector but Query Store, and every run stored before the column existed.</summary>
+    public string? ReadSource { get; set; }
+
+    /// <summary>#6254: the grids' message cell, <see cref="ErrorMessage"/> with the run's read source after it when it has one. Identical to
+    /// <see cref="ErrorMessage"/> (blank for none) when it has none. Shared wording with the health views' Note column.</summary>
+    public string MessageFormatted => CollectorHealthClassifier.FormatRunMessage(ErrorMessage, ReadSource);
 
     public string CollectionTimeFormatted => ViewerTimeHelper.FormatForDisplay(CollectionTime, "yyyy-MM-dd HH:mm:ss");
 
@@ -1216,7 +1331,7 @@ public class CollectorHealthRow
     /// rule the service's own schedule resolution is built on, so this band, the fleet roll-up's and
     /// get_collection_health's judge a collector against the same interval. A row nothing stamped keeps the
     /// shipped default.</para></summary>
-    private int FrequencyMinutes =>
+    internal int FrequencyMinutes =>
         EffectiveFrequencyMinutes
         ?? (CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule)
             ? CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(schedule.FrequencyMinutes)
@@ -1273,7 +1388,11 @@ public class CollectorHealthRow
     /// identically. Never feeds <see cref="HealthStatus"/>.
     /// </summary>
     public string NoteFormatted =>
-        CollectorHealthClassifier.FormatCollectionNote(LastNote, NoteCount, TotalRuns, CollectorName, TargetHasUserDatabases, RecoveredNote);
+        CollectorHealthClassifier.FormatCollectionNote(LastNote, NoteCount, TotalRuns, CollectorName, TargetHasUserDatabases, RecoveredNote, ReadSource);
+
+    /// <summary>#6254: where the newest Query Store run read its rows from (for example <c>replica 12, primary 2</c>), shown in the Note column.
+    /// Null for every collector but Query Store and for every server with the replica setting off. Informational only: it never feeds <see cref="HealthStatus"/>.</summary>
+    public string? ReadSource { get; set; }
 }
 
 /// <summary>

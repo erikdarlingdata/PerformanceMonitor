@@ -208,7 +208,8 @@ async function loadPanelBody(desc, body, signal) {
     return;
   }
 
-  const render = VIZ[desc.viz];
+  /* #6293: a panel whose picture is its own (the Query Heatmap grid) hands its draw function as `desc.render`. */
+  const render = typeof desc.render === "function" ? desc.render : VIZ[desc.viz];
   if (!render) {
     mount(body, errorStrip("Unknown visualization: " + desc.viz));
     return;
@@ -1278,10 +1279,16 @@ function cell(row, c) {
      query-text expander. It owns its own content; wrap/mono classes still apply if the column asks for them. */
   if (typeof c.render === "function") {
     const rcls = [];
+    /* #6353: a render column keeps the numeric alignment its header already has (`align: "right"` or a numeric format) and the
+       server-computed band its `sevKey` names, as a plain column does. The Compare delta cells set both and were drawn left-aligned and
+       uncoloured. Only the Compare deltas set `sevKey` with `render`; the two FinOps size columns that set `align: "right"` with `render`
+       now align their cells under their right-aligned headers. */
+    if (isNumericCol(c)) rcls.push("num");
     if (c.clamp) rcls.push("clamp");
     else if (c.wrap) rcls.push("wrap");
     if (c.mono) rcls.push("mono");
     if (c.pre) rcls.push("pre");
+    if (c.sevKey) rcls.push(sevClass(getPath(row, c.sevKey)));
     if (typeof c.cellClass === "function") { const k = c.cellClass(row); if (k) rcls.push(k); }
     return el("td", { class: rcls.join(" ") || null }, [c.render(row)]);
   }

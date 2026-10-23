@@ -94,4 +94,92 @@ BEGIN
         END;
     END;
 END;";
+
+    /// <summary>
+    /// #6441. Reads the truncation SQL Server writes on the parsed buffer, right after <see cref="ParseSql"/>, in the same
+    /// batch and from the same <c>@ring_xml</c>, so the target is read once. SQL Server cuts the target's XML at about 4 MB,
+    /// marks <c>RingBufferTarget</c> <c>truncated="1"</c>, and keeps the OLDEST events: a watermarked read of a busy session
+    /// then stores 0 rows and records SUCCESS while new events pile up out of sight. Only a truncated buffer pays for the
+    /// extra pass over its events (a count and the newest timestamp); a whole buffer costs one <c>exist()</c>.
+    /// Holds no brace, like the constants above.
+    /// </summary>
+    public const string TruncationSql = @"DECLARE
+    @ring_truncated bit,
+    @ring_event_count bigint,
+    @ring_events_visible bigint,
+    @ring_newest_visible datetime2(7);
+
+IF @ring_xml.exist('RingBufferTarget[@truncated = 1]') = 1
+BEGIN
+    SELECT
+        @ring_truncated = 1,
+        @ring_event_count = @ring_xml.value('(RingBufferTarget/@eventCount)[1]', 'bigint');
+
+    SELECT
+        @ring_events_visible = COUNT_BIG(*),
+        @ring_newest_visible = MAX(rbe.evt.value('(@timestamp)[1]', 'datetime2(7)'))
+    FROM @ring_xml.nodes('RingBufferTarget/event') AS rbe(evt);
+END;";
+
+    /// <summary>
+    /// The three columns <see cref="MeasureTruncation"/> reads, as a select-list fragment (no leading comma). Safe where
+    /// <see cref="TruncationSql"/> never ran (a gated branch): every value is NULL then and reads as not truncated.
+    /// </summary>
+    public const string TruncationColumnsSql = @"ring_truncated = CONVERT(bit, ISNULL(@ring_truncated, 0)),
+    ring_events_hidden =
+        CASE
+            WHEN @ring_event_count > ISNULL(@ring_events_visible, 0)
+            THEN @ring_event_count - ISNULL(@ring_events_visible, 0)
+            ELSE CONVERT(bigint, 0)
+        END,
+    newest_visible_event_age_s =
+        CASE
+            WHEN @ring_newest_visible IS NULL THEN CONVERT(bigint, NULL)
+            ELSE CONVERT(bigint, DATEDIFF(SECOND, @ring_newest_visible, SYSUTCDATETIME()))
+        END";
+
+    /// <summary>A trailing one-row result carrying <see cref="TruncationColumnsSql"/>, for a collector with no gate row to add them to.</summary>
+    public const string TruncationSelectSql = @"SELECT
+    " + TruncationColumnsSql + ";";
+
+    /* The labels the health reads parse back (PerformanceMonitor.Common.RingBufferTruncationNote holds the same three: Common
+       cannot reference this assembly, and the measurement gate reads label literals from the collector's own file).
+       RingBufferTruncationSignalTests renders a note from these and parses it with the Common reader, so the two agree. */
+    internal const string TruncatedMeasurement = "ring_buffer_truncated";
+    internal const string EventsHiddenMeasurement = "ring_buffer_events_hidden";
+    internal const string NewestVisibleAgeMeasurement = "newest_visible_event_age_s";
+
+    /// <summary>
+    /// Records the truncation columns at <paramref name="firstOrdinal"/> (truncated, hidden, age) through
+    /// <see cref="CollectorContext.Measure"/>. Writes nothing for a whole buffer, so a clean run's note stays as it was;
+    /// the health band reads <see cref="PerformanceMonitor.Common.RingBufferTruncationNote"/>. A reader with fewer columns
+    /// (a test fake, an older batch) is read as not truncated.
+    /// </summary>
+    public static void MeasureTruncation(System.Data.Common.DbDataReader reader, int firstOrdinal, CollectorContext context)
+    {
+        if (reader.FieldCount < firstOrdinal + 3
+            || reader.IsDBNull(firstOrdinal)
+            || !reader.GetBoolean(firstOrdinal))
+        {
+            return;
+        }
+
+        context.Measure(TruncatedMeasurement, 1);
+        context.Measure(
+            EventsHiddenMeasurement,
+            reader.IsDBNull(firstOrdinal + 1) ? 0 : System.Math.Max(0, reader.GetInt64(firstOrdinal + 1)));
+        context.Measure(
+            NewestVisibleAgeMeasurement,
+            reader.IsDBNull(firstOrdinal + 2) ? 0 : System.Math.Max(0, reader.GetInt64(firstOrdinal + 2)));
+    }
+
+    /// <summary>Moves to the trailing <see cref="TruncationSelectSql"/> result and records it. No such result: nothing recorded.</summary>
+    public static async System.Threading.Tasks.ValueTask MeasureTrailingTruncationAsync(
+        System.Data.Common.DbDataReader reader, CollectorContext context, System.Threading.CancellationToken cancellationToken)
+    {
+        if (await reader.NextResultAsync(cancellationToken) && await reader.ReadAsync(cancellationToken))
+        {
+            MeasureTruncation(reader, 0, context);
+        }
+    }
 }

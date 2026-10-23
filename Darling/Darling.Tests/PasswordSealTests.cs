@@ -35,7 +35,7 @@ public sealed class PasswordSealTests
     private static readonly PasswordPrivateKey KeyB = PasswordPrivateKey.Generate();
 
     private static ServerConnectionIdentity Server() =>
-        new("example-sql-01", 1433, "sqlserver", "example_db", false, "sql", "example_login", "Mandatory", false, false);
+        new("example-sql-01", 1433, "sqlserver", "example_db", false, "sql", "example_login", "Mandatory", false, false, null);
 
     private static PasswordBinding ServerBinding() => PasswordBinding.ForServer(Server());
 
@@ -338,7 +338,7 @@ public sealed class PasswordSealTests
             b.GetProperty("database").GetString(), b.GetProperty("readOnlyIntent").GetBoolean(),
             b.GetProperty("auth").GetString()!, b.GetProperty("username").GetString(),
             b.GetProperty("encryptMode").GetString()!, b.GetProperty("trustServerCertificate").GetBoolean(),
-            b.GetProperty("multiSubnetFailover").GetBoolean()));
+            b.GetProperty("multiSubnetFailover").GetBoolean(), null));
         using var key = PasswordPrivateKey.FromPkcs8(Convert.FromBase64String(root.GetProperty("privateKeyPkcs8").GetString()!));
 
         Assert.Equal(PasswordSeal.Algorithm, root.GetProperty("algorithm").GetString());
@@ -469,7 +469,7 @@ public sealed class PasswordSealTests
     [Fact]
     public void A_binding_field_that_is_not_valid_text_is_refused_without_echoing_it()
     {
-        var bad = new ServerConnectionIdentity("example-sql-\uD800", 1433, "sqlserver", "example_db", false, "sql", "example_login", "Mandatory", false, false);
+        var bad = new ServerConnectionIdentity("example-sql-\uD800", 1433, "sqlserver", "example_db", false, "sql", "example_login", "Mandatory", false, false, null);
         var binding = PasswordBinding.ForServer(bad);
 
         var ex = Assert.Throws<ArgumentException>(() => binding.EncodeAad("0123456789abcdef"));

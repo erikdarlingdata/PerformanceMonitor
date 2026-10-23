@@ -292,6 +292,32 @@ WHERE command_id = $1
     }
 
     /// <summary>
+    /// #6254: what a <c>test_connect</c> result says about the server's Query Store replica, or null when the server has none (or the
+    /// service is older than this field). The service tests the replica connection beside the primary and puts the sentence in the
+    /// reply; a replica that would not open is a warning in that sentence and the test still succeeds, because collection reads the
+    /// primary. Both Add-server dialogs append it to their one-line result, so the primary's and the replica's results show apart.
+    /// </summary>
+    public static string? ProbeReplicaNote(JsonElement probeResult) =>
+        probeResult.ValueKind == JsonValueKind.Object
+        && probeResult.TryGetProperty("queryStoreReplicaNote", out var note)
+        && note.ValueKind == JsonValueKind.String
+        && !string.IsNullOrWhiteSpace(note.GetString())
+            ? note.GetString()
+            : null;
+
+    /// <summary>
+    /// #6472: what a <c>test_connect</c> result says about base grants the connecting login lacks, each with the statement that adds
+    /// it, or null when none is missing (or the service is older than this field). A warning: the connection worked.
+    /// </summary>
+    public static string? ProbeMissingGrantsNote(JsonElement probeResult) =>
+        probeResult.ValueKind == JsonValueKind.Object
+        && probeResult.TryGetProperty("missingGrantsNote", out var note)
+        && note.ValueKind == JsonValueKind.String
+        && !string.IsNullOrWhiteSpace(note.GetString())
+            ? note.GetString()
+            : null;
+
+    /// <summary>
     /// The engine-aware version label for a <c>test_connect</c> result payload (#3145) — the ONE reader of
     /// the probe's version facts, shared by both Add-server dialogs, which each formatted this themselves.
     /// Lives beside <see cref="BuildTestConnectArgs"/> because the two are halves of the same contract: that
@@ -410,4 +436,9 @@ public sealed class TestConnectServer
 
     [JsonPropertyName("multiSubnetFailover")]
     public bool MultiSubnetFailover { get; set; }
+
+    /// <summary>The Query Store replica (#6254): a field of the connection settings the password is sealed for, so the service
+    /// must see the same one to open it. Null when none.</summary>
+    [JsonPropertyName("queryStoreReplica")]
+    public string? QueryStoreReplica { get; set; }
 }

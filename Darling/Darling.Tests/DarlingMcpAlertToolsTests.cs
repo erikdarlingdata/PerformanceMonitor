@@ -65,12 +65,14 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         "get_alert_settings",
         "get_mute_rules",
         "get_notification_routes",
+        "purge_expired_mute_rules",
         "restore_alert_history",
         "set_mute_rule_enabled",
         "set_notification_route_enabled",
         "set_notification_route_fallback",
         "update_alert_settings",
         "update_mute_rule",
+        "update_notification_channels",
         "update_notification_route",
     };
 
@@ -104,7 +106,7 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     }
 
     [Theory]
-    [InlineData("get_alert_history", "server_name,hours_back,limit,as_of,include_dismissed,metric_name,family")]
+    [InlineData("get_alert_history", "server_name,hours_back,limit,as_of,include_dismissed,metric_name,family,include_streak")]
     [InlineData("get_mute_rules", "enabled_only")]
     [InlineData("update_alert_settings", "settings_json")]
     /* #5915: each mute write tool also takes the optional agent_action, last (Level 2: ignored under the writes arm). */
@@ -700,8 +702,10 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         /* #5825: the delivery read also carries the per-channel resolution flags, so it returns a DeliveryRead. */
         Assert.Contains("private static async Task<DeliveryRead?> ReadDeliveryAsync", reader, StringComparison.Ordinal);
 
-        /* And both tool paths go through the combined entry point -- get_alert_settings and the post-write
-           re-read, which is the one described to the caller as the authoritative merged state. */
+        /* And every tool path goes through the combined entry point -- get_alert_settings and the post-write re-read, which is the
+           one described to the caller as the authoritative merged state. The pre-write read that names the previous values for
+           the undo (#6403) reads inside the write transaction through the connection-and-transaction overload, after locking the
+           rows, so it is not counted here: it must be in the write's own transaction, not a snapshot of its own. */
         Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(
             tools, @"GetAlertConfigurationAsync\(postgres(, cancellationToken)?\)").Count);
     }
@@ -1197,7 +1201,7 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         Assert.True(ct["enabled"]!.GetValue<bool>());
         Assert.Equal(4, ct["warning_per_minute"]!.GetValue<int>());
         Assert.Equal(25, ct["critical_per_minute"]!.GetValue<int>());
-        Assert.Equal(new[] { "enabled", "warning_per_minute", "critical_per_minute" }, ct.AsObject().Select(p => p.Key).ToArray());
+        Assert.Equal(new[] { "enabled", "warning_per_minute", "critical_per_minute", "warning_multiple", "critical_multiple" }, ct.AsObject().Select(p => p.Key).ToArray());
 
         /* A stored pair the engine would rewrite is reported the way the engine reads it. */
         var crossed = SampleSettingsRow() with { ClientTimeoutsWarningPerMinute = 9, ClientTimeoutsCriticalPerMinute = 3 };
@@ -1322,7 +1326,9 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         /* #5640 (V179): deliberately NOT the shipped false / 10 / 60 -- enabled TRUE against the shipped OFF, and a pair of 4 and 25 -- for
            the same reason: a payload that dropped the columns and fell back to the engine defaults would not match. */
         ClientTimeoutsEnabled: true, ClientTimeoutsWarningPerMinute: 4, ClientTimeoutsCriticalPerMinute: 25,
-        ExcludedVolumes: new[] { "S:\\", "/mnt/scratch" });
+        ExcludedVolumes: new[] { "S:\\", "/mnt/scratch" },
+        /* #5736 (V211): not the shipped 3 / 10, for the same reason as the floors above. */
+        ClientTimeoutsWarningMultiple: 2, ClientTimeoutsCriticalMultiple: 7);
 
     [Fact]
     public void AlertSettingsSql_ReadsSingleGlobalRow()
@@ -1390,6 +1396,7 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     [InlineData("set_mute_rule_enabled", "enabled,rule_id")]
     [InlineData("update_mute_rule", "changes_json,rule_id")]
     [InlineData("get_notification_routes", "")]
+    [InlineData("purge_expired_mute_rules", "")]
     [InlineData("set_notification_route_enabled", "enabled,route_id")]
     [InlineData("set_notification_route_fallback", "route_id")]
     [InlineData("delete_notification_route", "route_id")]
@@ -1633,6 +1640,24 @@ public sealed class SetMuteRuleEnabledTests
             (string)Payload(json)["created_at_utc"]!,
             System.Globalization.CultureInfo.InvariantCulture,
             System.Globalization.DateTimeStyles.RoundtripKind);
+
+    /// <summary>#6403: updated and unchanged both carry the previous value and the call that puts it back; running that call restores the rule.</summary>
+    [Theory]
+    [InlineData(true, false, "updated")]
+    [InlineData(false, false, "unchanged")]
+    public async Task TheAnswer_CarriesThePreviousValue_AndAnUndoThatRestoresIt(bool before, bool sent, string status)
+    {
+        var store = StoreWith(enabled: before);
+
+        var answer = JsonNode.Parse(await DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, RuleId, sent))!;
+        Assert.Equal(status, (string)answer["status"]!);
+        Assert.Equal(before, (bool)answer["previous"]!["enabled"]!);
+        Assert.Equal("set_mute_rule_enabled", (string)answer["undo"]!["tool"]!);
+
+        var arguments = answer["undo"]!["arguments"]!;
+        await DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, (string)arguments["rule_id"]!, (bool)arguments["enabled"]!);
+        Assert.Equal(before, store.Row(RuleId)!.Enabled);
+    }
 
     /* ---------------- the instrument ---------------- */
 
@@ -2669,7 +2694,7 @@ public sealed class RepeatedCreateMuteRuleTests
         Assert.Contains("CreateMuteRuleOver(new PgMuteRuleStore(postgres)", source, StringComparison.Ordinal);
         /* Exactly two callers of the checked insert (the tool's body and the web core), and no unchecked
            InsertAsync left on a create path. */
-        Assert.Equal(2, source.Split("await InsertUnlessDuplicateAsync(store, rule)").Length - 1);
+        Assert.Equal(2, source.Split("await InsertUnlessDuplicateAsync(store, rule").Length - 1);
         Assert.DoesNotContain("new PgMuteRuleStore(postgres).InsertAsync(rule)", source, StringComparison.Ordinal);
     }
 }
@@ -2991,7 +3016,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
                 Assert.Equal("updated", DarlingMcpTestData.StatusOf(cooldown));
                 using var doc = JsonDocument.Parse(cooldown);
                 Assert.Equal(expected, doc.RootElement.GetProperty("settings").GetProperty("delivery").GetProperty("cooldown_minutes").GetInt32());
-                Assert.Contains("email_cooldown_minutes", doc.RootElement.GetProperty("updated_fields").EnumerateArray().Select(e => e.GetString()));
+                Assert.Contains("delivery.cooldown_minutes", doc.RootElement.GetProperty("updated_fields").EnumerateArray().Select(e => e.GetString()));
                 Assert.Equal(expected, Convert.ToInt32(await ScalarAsync(connection, ct, "SELECT email_cooldown_minutes FROM config_notification WHERE id = 1")));
             }
 

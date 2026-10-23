@@ -47,7 +47,7 @@ public sealed class McpAlertTools
     internal static string CpuModeFor(CpuAlertMode mode) =>
         mode == CpuAlertMode.SqlOnly ? CpuModeSql : CpuModeTotal;
 
-    [McpServerTool(Name = "get_alert_history"), Description("Gets alert history, NEWEST FIRST: each row FIRED; notification_type says whether it was DELIVERED, a separate question from DISMISSED (UI-acknowledged), excluded by default. THE PAGE IS BOUNDED BY limit, NOT hours_back: truncated says the window held more, and oldest/newest_returned_alert_time bound how far the page reached. An EMPTY page can mean no alerts fired, or that every alert here was dismissed: dismissed_excluded_count says which; include_dismissed = true returns them, labelled dismissed = true. A null send_error proves nothing about delivery.<<GUIDE>>Gets recent alert history from the alert log, NEWEST FIRST. Shows what alerts fired, when, and whether email was sent successfully. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: alerts_returned is how many rows you got, truncated says the window held more than limit, and oldest_returned_alert_time / newest_returned_alert_time bound the page — under newest-first ordering the oldest stamp IS how far back this read reached. Raise limit or narrow hours_back when truncated is true; widening hours_back cannot help. BY DEFAULT THIS READ EXCLUDES DISMISSED ALERTS — rows an operator acknowledged in the Alerts History tab. Dismissal says nothing about whether the alert fired or mattered, so an incident reconstruction that ignores it can miss the very critical someone already looked at: dismissed_excluded says whether the filter applied and dismissed_excluded_count is how many rows in the window it removed, and include_dismissed = true returns them, each labelled dismissed = true. On this edition an alert that was dismissed AFTER aging into the parquet archive is removed by the archive view itself and can be neither returned nor counted here. notification_type is the delivery disposition and is the ONLY field that says why a row did not deliver: 'email'/'webhook'/'email+webhook' delivered on that channel; 'tray' is this instance's own balloon notification, which every non-muted alert gets, so it is what most rows read here and it does NOT report the email or webhook outcome; 'failed' means a channel was attempted and came back unsuccessful, with send_error carrying the first failing channel's text; 'muted' means a mute rule suppressed it; 'digest' means the analysis finding was UNCORROBORATED (one fact in its chain, no matched co-fire check) and the corroboration gate kept it off email, the webhooks and the tray — it is persisted, shown in Recommendations with a not-paged marker, and routing_reason on the row says which components decided; 'none' is a resolution row, which no channel applies to. Do NOT split the not-delivered rows on send_error: it is null whenever a cooldown or the per-metric repeat budget suppressed a send, on 'digest' rows, and on every row written before those dispositions existed. 'throttled' and 'folded' are recorded by the headless service; on this instance the tray channel answers first, so a cooldown-suppressed or folded send is stored as 'tray'. 'undelivered' is a retained legacy value that means throttled OR folded OR failed with nothing in the row to say which. severity is the row's tier — 'critical', 'warning', 'info' or 'resolution' — and severity_source says where it came from: 'fired' when the row persisted the tier the alert actually fired at (graded alerts such as Poison Wait, Volume Free Space and Database State fire Warning OR Critical by measurement), 'metric_name' when the row carries no tier and the metric's name is the only evidence (rows written before the tier was persisted, alerts whose severity is fixed per metric, and every resolution row). Do not infer a graded alert's tier from its name: a 'Poison Wait' row with severity 'warning' fired as a warning. routing is the corroboration gate's decision for an 'Analysis: …' finding, one step upstream of delivery: 'page' when it earned a channel (two or more facts in its chain, a matched co-fire check, or one of the two by-construction stories), 'digest' when it was a lone uncorroborated fact; routing_reason names the components. Both are null on engine alerts and on analysis rows written before the gate existed. Dismissal is an acknowledgement, not a verdict — a dismissed critical still fired — so set this when reconstructing an incident rather than triaging what is still open. Each row then carries dismissed so the two populations stay distinguishable. Optional metric_name and family narrow the page IN THE QUERY, ahead of limit (#6074): metric_name matches the stored alert name exactly, ignoring case; family is one of self-monitor, reports, agent-jobs, performance, external (get_notification_routes lists them) and covers every alert in that family, a recovery row included. An unknown family or a name with no alerts in the window answers empty and names the filter, so a mistyped filter is distinguishable from a quiet window.")]
+    [McpServerTool(Name = "get_alert_history"), Description("Gets alert history, NEWEST FIRST: each row FIRED; notification_type says whether it was DELIVERED, a separate question from DISMISSED (UI-acknowledged), excluded by default. THE PAGE IS BOUNDED BY limit, NOT hours_back: truncated says the window held more, and oldest/newest_returned_alert_time bound how far the page reached. An EMPTY page can mean no alerts fired, or that every alert here was dismissed: dismissed_excluded_count says which; include_dismissed = true returns them, labelled dismissed = true. A null send_error proves nothing about delivery.<<GUIDE>>Gets recent alert history from the alert log, NEWEST FIRST. Shows what alerts fired, when, and whether email was sent successfully. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: alerts_returned is how many rows you got, truncated says the window held more than limit, and oldest_returned_alert_time / newest_returned_alert_time bound the page — under newest-first ordering the oldest stamp IS how far back this read reached. Raise limit or narrow hours_back when truncated is true; widening hours_back cannot help. BY DEFAULT THIS READ EXCLUDES DISMISSED ALERTS — rows an operator acknowledged in the Alerts History tab. Dismissal says nothing about whether the alert fired or mattered, so an incident reconstruction that ignores it can miss the very critical someone already looked at: dismissed_excluded says whether the filter applied and dismissed_excluded_count is how many rows in the window it removed, and include_dismissed = true returns them, each labelled dismissed = true. On this edition an alert that was dismissed AFTER aging into the parquet archive is removed by the archive view itself and can be neither returned nor counted here. notification_type is the delivery disposition and is the ONLY field that says why a row did not deliver: 'email'/'webhook'/'email+webhook' delivered on that channel; 'tray' is this instance's own balloon notification, which every non-muted alert gets, so it is what most rows read here and it does NOT report the email or webhook outcome; 'failed' means a channel was attempted and came back unsuccessful, with send_error carrying the first failing channel's text; 'muted' means a mute rule suppressed it; 'digest' means the analysis finding was UNCORROBORATED (one fact in its chain, no matched co-fire check) and the corroboration gate kept it off email, the webhooks and the tray — it is persisted, shown in Recommendations with a not-paged marker, and routing_reason on the row says which components decided; 'none' is a resolution row, which no channel applies to. Do NOT split the not-delivered rows on send_error: it is null whenever a cooldown or the per-metric repeat budget suppressed a send, on 'digest' rows, and on every row written before those dispositions existed. 'throttled' and 'folded' are recorded by the headless service; on this instance the tray channel answers first, so a cooldown-suppressed or folded send is stored as 'tray'. 'undelivered' is a retained legacy value that means throttled OR folded OR failed with nothing in the row to say which. severity is the row's tier — 'critical', 'warning', 'info' or 'resolution' — and severity_source says where it came from: 'fired' when the row persisted the tier the alert actually fired at (graded alerts such as Poison Wait, Volume Free Space and Database State fire Warning OR Critical by measurement), 'metric_name' when the row carries no tier and the metric's name is the only evidence (rows written before the tier was persisted, alerts whose severity is fixed per metric, and every resolution row). Do not infer a graded alert's tier from its name: a 'Poison Wait' row with severity 'warning' fired as a warning. routing is the corroboration gate's decision for an 'Analysis: …' finding, one step upstream of delivery: 'page' when it earned a channel (two or more facts in its chain, a matched co-fire check, or one of the two by-construction stories), 'digest' when it was a lone uncorroborated fact; routing_reason names the components. Both are null on engine alerts and on analysis rows written before the gate existed. Dismissal is an acknowledgement, not a verdict — a dismissed critical still fired — so set this when reconstructing an incident rather than triaging what is still open. Each row then carries dismissed so the two populations stay distinguishable. Optional metric_name and family narrow the page IN THE QUERY, ahead of limit (#6074): metric_name matches the stored alert name exactly, ignoring case; family is one of self-monitor, reports, agent-jobs, performance, external (get_notification_routes lists them) and covers every alert in that family, a recovery row included. An unknown family or a name with no alerts in the window answers empty and names the filter, so a mistyped filter is distinguishable from a quiet window. include_streak = true adds streak_days to each row (#6261): how many days in a row, counting back from the day before that alert, the same metric on the same server fired within 30 minutes of its time of day, so 'this is the Nth day in a row' is streak_days + 1. A muted fire counts (it fired); a recovery row has null. streak_days is at most 7 (the look-back), and streak_at_least_days_window true means it filled the look-back, so it is a floor, not an exact count. Rows carry neither field unless include_streak is set.")]
     public static async Task<string> GetAlertHistory(
         LocalDataService dataService,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
@@ -57,7 +57,8 @@ public sealed class McpAlertTools
            positional C# caller can be re-bound by. Same convention as Darling's twin. */
         [Description("Include alerts an operator has dismissed in the Alerts History tab. Default false, which is the tab's own read.")] bool include_dismissed = false,
         [Description("Only alerts with this metric name (e.g. 'High CPU', 'Blocking Detected'), matched exactly, ignoring case. Omit for every metric.")] string? metric_name = null,
-        [Description("Only alerts of this family: self-monitor, reports, agent-jobs, performance or external. Omit for every family.")] string? family = null)
+        [Description("Alert family: self-monitor, reports, agent-jobs, performance or external. Not an investigation family such as blocking or resources: filter those with metric_name. Omit for all.")] string? family = null,
+        [Description("Add streak_days to each row: days in a row (up to 7) this metric fired at this time of day before the alert, muted fires counting. Default false: rows are unchanged.")] bool include_streak = false)
     {
         try
         {
@@ -99,7 +100,7 @@ public sealed class McpAlertTools
                     : McpHelpers.Status("empty", $"No alerts found in the specified time range{filterSentence}.");
             }
 
-            var alerts = page.Select(r =>
+            IEnumerable<object> alerts = page.Select<AlertHistoryRow, object>(r =>
             {
                 var (severity, severitySource) = AlertHistoryRowSeverity.Describe(r.MetricName, r.ContextJson);
                 var routing = AlertContextSerializer.TryReadRouting(r.ContextJson);
@@ -157,6 +158,20 @@ public sealed class McpAlertTools
                 };
             }).ToList();
 
+            /* #6261: opt-in, so a caller who never sends include_streak reads the same rows. One extra read for the whole page
+               (LocalDataService.GetAlertStreaksAsync), the fields added to each serialized row. Darling's twin. */
+            if (include_streak)
+            {
+                var streaks = await dataService.GetAlertStreaksAsync(page);
+                alerts = alerts.Select((row, i) =>
+                {
+                    var node = JsonSerializer.SerializeToNode(row, McpHelpers.JsonOptions)!.AsObject();
+                    node["streak_days"] = streaks[i];
+                    node["streak_at_least_days_window"] = streaks[i] is null ? null : streaks[i] >= InvestigationAlertRecurrence.Days;
+                    return (object)node;
+                }).ToList();
+            }
+
             return JsonSerializer.Serialize(new
             {
                 hours_back,
@@ -182,7 +197,7 @@ public sealed class McpAlertTools
         }
     }
 
-    [McpServerTool(Name = "get_alert_settings"), Description("Gets the alert configuration currently in effect: enabled flags, thresholds, cooldowns, delivery mode, and cadences. cooldown_minutes gates whether an alert FIRES; delivery.cooldown_minutes separately bounds the resulting post, per alert fingerprint and, for a re-notification, per metric across every monitored server. Darling: an unseeded store answers status unavailable and darling.json's defaults still govern until it seeds. Lite always answers its live in-memory settings. An empty knob list (e.g. long_running_query's exclusions) means cleared, not a default in force.<<GUIDE>>Gets the current alert configuration this instance is running on: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, runnable queue, client timeouts, long-running queries and jobs, tempdb space, low disk, PVS, file growth, failed jobs, database state, Availability Group health, connection loss), the cooldown, the excluded databases, the deadlock/blocking delivery mode and cooldown, the scheduled-analysis cadence, and the SMTP email configuration. The two cooldowns govern different stages: top-level cooldown_minutes gates whether an alert FIRES, delivery.cooldown_minutes bounds the resulting email/Teams/Slack/PagerDuty/webhook send both per alert FINGERPRINT and, for a re-notification, per METRIC across every monitored server (the servers it holds back are named on the send that does go out, under an 'Other Servers Affected' section; a first notice is never held back, and delivery.mode PerEvent opts out of the per-metric bound). The file_growth group's rise_mb is megabytes per HOUR, averaged over file_growth.lookback_minutes — a rate, not a total for the window: 10240 means 10 GB/hr whether the lookback is 5 minutes or 24 hours, and the engine scales it to the window. poison_wait.threshold_ms is RETIRED: the Poison Wait alert grades ACCUMULATED wait over a ten-minute window, so this value is stored and reported for compatibility but consulted by nothing — poison_wait.threshold_ms_note says so beside it, and poison_wait.enabled is the live switch. runnable_queue.enabled is the Runnable Queue alert's switch, and runnable_queue.warning_per_scheduler and runnable_queue.critical_per_scheduler are its bars: runnable tasks per scheduler, averaged over the collections of the last 5 minutes when there are at least 3, otherwise over the newest 3 if all fall in the last 10 minutes (or in 4 times the gap between cpu_scheduler_stats collections when that is longer, so the Low-Impact preset's 5-minute collection still evaluates), as the engine applies them (Critical is never below Warning). client_timeouts.enabled is the Client Timeouts alert's switch (OFF by default: no measured normal rate exists yet), and client_timeouts.warning_per_minute and client_timeouts.critical_per_minute are its bars: client attentions (a client cancelled a query or its timeout expired) per minute over the attention collector's last runs (about 3 minutes), as the engine applies them (Warning at least 1, Critical never below Warning). analysis.uncorroborated_route is where a notify-worthy but UNCORROBORATED finding goes — one fact in its chain and no matched co-fire check: 'digest' (the default) keeps it off email, the webhooks and the tray while it is still recorded (Alerts tab status Digest) and shown in Recommendations with a not-paged marker; 'page' restores delivery of every finding at or above notify_severity; a corroborated finding is delivered under either. analysis.uncorroborated_route_note says where it is edited. long_running_query.excluded_program_name_prefixes and long_running_query.excluded_logins are the Long-Running Query alert's OPT-OUT knob: a session whose program_name STARTS WITH an entry of the first list, or whose login_name IS an entry of the second (both case-insensitive, no wildcard grammar), is NOT EVALUATED by that alert at all — not read into the decision, not counted, not fingerprinted — the opposite of a mute rule, which silences a fire already decided. The exclusion is applied in the read ahead of long_running_query.max_results, so an excluded session never consumes a result slot, and the fired alert's card carries Excluded Count / Excluded By Program Prefix / Excluded By Login items saying how many SESSIONS each list removed on that evaluation (a session matching both counts once, under the prefix). The lists ship SEEDED from a 7-day read of one large production store, whose long-running population fell into four classes: (1) SQL Agent job steps — program_name prefix 'SQLAgent - TSQL JobStep', ~460 sessions a week across 11 jobs, medians 35–62 min — the default prefix; (2) the NT AUTHORITY\\SYSTEM and NT AUTHORITY\\NETWORK SERVICE logins — the permanent multi-day CDC-shaped background — the default logins; (3) the application's admin login — deliberately NOT a default, because it runs the job wave but also real ad-hoc long-runners, and the job-step prefix already covers its share; (4) named humans — never excluded, they are what the page is for. The seeds are DEFAULTS: an empty list here means the operator cleared it in the Settings window and that arm excludes nothing. The same nested shape Darling's get_alert_settings returns, minus its self_alerts group (the headless service's own store-volume and collection-health thresholds, which a single-instance Lite install has no equivalent for) and plus smtp, which Lite delivers itself. Read-only: Lite has no update_alert_settings, so these change in the Settings window.")]    public static Task<string> GetAlertSettings()    {
+    [McpServerTool(Name = "get_alert_settings"), Description("Gets the alert configuration currently in effect: enabled flags, thresholds, cooldowns, delivery mode, and cadences. cooldown_minutes gates whether an alert FIRES; delivery.cooldown_minutes separately bounds the resulting post, per alert fingerprint and, for a re-notification, per metric across every monitored server. Darling: an unseeded store answers status unavailable and darling.json's defaults still govern until it seeds. Lite always answers its live in-memory settings. An empty knob list (e.g. long_running_query's exclusions) means cleared, not a default in force.<<GUIDE>>Gets the current alert configuration this instance is running on: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, runnable queue, client timeouts, long-running queries and jobs, tempdb space, low disk, PVS, file growth, failed jobs, database state, Availability Group health, connection loss), the cooldown, the excluded databases, the deadlock/blocking delivery mode and cooldown, the scheduled-analysis cadence, and the SMTP email configuration. The two cooldowns govern different stages: top-level cooldown_minutes gates whether an alert FIRES, delivery.cooldown_minutes bounds the resulting email/Teams/Slack/PagerDuty/webhook send both per alert FINGERPRINT and, for a re-notification, per METRIC across every monitored server (the servers it holds back are named on the send that does go out, under an 'Other Servers Affected' section; a first notice is never held back, and delivery.mode PerEvent opts out of the per-metric bound). The file_growth group's rise_mb is megabytes per HOUR, averaged over file_growth.lookback_minutes — a rate, not a total for the window: 10240 means 10 GB/hr whether the lookback is 5 minutes or 24 hours, and the engine scales it to the window. poison_wait.threshold_ms is RETIRED: the Poison Wait alert grades ACCUMULATED wait over a ten-minute window, so this value is stored and reported for compatibility but consulted by nothing — poison_wait.threshold_ms_note says so beside it, and poison_wait.enabled is the live switch. runnable_queue.enabled is the Runnable Queue alert's switch, and runnable_queue.warning_per_scheduler and runnable_queue.critical_per_scheduler are its bars: runnable tasks per scheduler, averaged over the collections of the last 5 minutes when there are at least 3, otherwise over the newest 3 if all fall in the last 10 minutes (or in 4 times the gap between cpu_scheduler_stats collections when that is longer, so the Low-Impact preset's 5-minute collection still evaluates), as the engine applies them (Critical is never below Warning). client_timeouts.enabled is the Client Timeouts alert's switch (OFF by default), and the alert's bars are RELATIVE to each server's own normal rate: client_timeouts.warning_per_minute and client_timeouts.critical_per_minute are the FLOORS (client attentions, a client cancelled a query or its timeout expired, per minute over the attention collector's last runs, about 3 minutes; Warning at least 1, Critical never below Warning), and client_timeouts.warning_multiple and client_timeouts.critical_multiple (defaults 3 and 10) scale the server's baseline, the p99.9 of its own 3-minute average attention rate over the last 7 days, read about once a day. The Warning bar is the higher of the Warning floor and warning_multiple x baseline, the Critical bar the higher of the Critical floor and critical_multiple x baseline, and a server with under a day of capture, or under 720 minutes with a successful collector run, has no baseline and uses the floors alone. The fired alert names the baseline, the multiple and the bar crossed. analysis.uncorroborated_route is where a notify-worthy but UNCORROBORATED finding goes — one fact in its chain and no matched co-fire check: 'digest' (the default) keeps it off email, the webhooks and the tray while it is still recorded (Alerts tab status Digest) and shown in Recommendations with a not-paged marker; 'page' restores delivery of every finding at or above notify_severity; a corroborated finding is delivered under either. analysis.uncorroborated_route_note says where it is edited. long_running_query.excluded_program_name_prefixes and long_running_query.excluded_logins are the Long-Running Query alert's OPT-OUT knob: a session whose program_name STARTS WITH an entry of the first list, or whose login_name IS an entry of the second (both case-insensitive, no wildcard grammar), is NOT EVALUATED by that alert at all — not read into the decision, not counted, not fingerprinted — the opposite of a mute rule, which silences a fire already decided. The exclusion is applied in the read ahead of long_running_query.max_results, so an excluded session never consumes a result slot, and the fired alert's card carries Excluded Count / Excluded By Program Prefix / Excluded By Login items saying how many SESSIONS each list removed on that evaluation (a session matching both counts once, under the prefix). The lists ship SEEDED from a 7-day read of one large production store, whose long-running population fell into four classes: (1) SQL Agent job steps — program_name prefix 'SQLAgent - TSQL JobStep', ~460 sessions a week across 11 jobs, medians 35–62 min — the default prefix; (2) the NT AUTHORITY\\SYSTEM and NT AUTHORITY\\NETWORK SERVICE logins — the permanent multi-day CDC-shaped background — the default logins; (3) the application's admin login — deliberately NOT a default, because it runs the job wave but also real ad-hoc long-runners, and the job-step prefix already covers its share; (4) named humans — never excluded, they are what the page is for. The seeds are DEFAULTS: an empty list here means the operator cleared it in the Settings window and that arm excludes nothing. The same nested shape Darling's get_alert_settings returns, minus its self_alerts group (the headless service's own store-volume and collection-health thresholds, which a single-instance Lite install has no equivalent for) and plus smtp, which Lite delivers itself. Read-only: Lite has no update_alert_settings, so these change in the Settings window.")]    public static Task<string> GetAlertSettings()    {
         try
         {
             var settings = new
@@ -274,7 +289,12 @@ public sealed class McpAlertTools
                     warning_per_minute = AttentionEvaluator.ClampBars(
                         App.AlertClientTimeoutsWarningPerMinute, App.AlertClientTimeoutsCriticalPerMinute).Warning,
                     critical_per_minute = AttentionEvaluator.ClampBars(
-                        App.AlertClientTimeoutsWarningPerMinute, App.AlertClientTimeoutsCriticalPerMinute).Critical
+                        App.AlertClientTimeoutsWarningPerMinute, App.AlertClientTimeoutsCriticalPerMinute).Critical,
+                    /* #5736: the two bars above are FLOORS; the bar for a server is the higher of its floor and the multiple times its own baseline. */
+                    warning_multiple = AttentionBaselineMath.ClampMultiples(
+                        App.AlertClientTimeoutsWarningMultiple, App.AlertClientTimeoutsCriticalMultiple).Warning,
+                    critical_multiple = AttentionBaselineMath.ClampMultiples(
+                        App.AlertClientTimeoutsWarningMultiple, App.AlertClientTimeoutsCriticalMultiple).Critical
                 },
                 long_running_query = new
                 {
@@ -596,7 +616,7 @@ public sealed class McpAlertTools
         "A disabled route is skipped at resolution exactly as if it did not exist, so the alerts it matched fall to " +
         "the next level (a family route, then the parent channels) on the next firing. Returns {status:\"updated\", " +
         "route:{...}} with the route AS STORED, {status:\"unchanged\", route:{...}} when it already holds that value " +
-        "(a retry is safe), or {status:\"not_found\"}. Lite only: {status:\"unavailable\"} while an earlier database " +
+        "(a retry is safe; both carry previous {enabled} and undo, the call that sets the previous value back), or {status:\"not_found\"}. Lite only: {status:\"unavailable\"} while an earlier database " +
         "reset's saved-settings restore is pending (it finishes at the next Lite start). Served only when " +
         "mcp_allow_writes is true. This tool cannot author or re-point a route: destinations are bearer secrets and " +
         "are set only in Settings > Manage Notification Routes.")]
@@ -643,7 +663,13 @@ public sealed class McpAlertTools
 
             if (existing.Enabled == enabled)
             {
-                return JsonSerializer.Serialize(new { status = "unchanged", route = RoutePayload(existing, ServerNames(servers), tags.ToDictionary(t => t.Id, t => t.Name)) }, McpHelpers.JsonOptions);
+                return JsonSerializer.Serialize(new
+                {
+                    status = "unchanged",
+                    route = RoutePayload(existing, ServerNames(servers), tags.ToDictionary(t => t.Id, t => t.Name)),
+                    previous = new { enabled = existing.Enabled },
+                    undo = UndoCall("set_notification_route_enabled", new { route_id, enabled = existing.Enabled }),
+                }, McpHelpers.JsonOptions);
             }
 
             if (!await store.SetEnabledAsync(route_id, enabled))
@@ -657,6 +683,8 @@ public sealed class McpAlertTools
             {
                 status = "updated",
                 route = stored is null ? null : RoutePayload(stored, ServerNames(servers), tags.ToDictionary(t => t.Id, t => t.Name)),
+                previous = new { enabled = existing.Enabled },
+                undo = UndoCall("set_notification_route_enabled", new { route_id, enabled = existing.Enabled }),
             }, McpHelpers.JsonOptions);
         }
         catch (PendingRestoreException ex)
@@ -667,7 +695,7 @@ public sealed class McpAlertTools
 
     [McpServerTool(Name = "delete_notification_route"), Description(
         "Deletes a notification route by its route_id (from get_notification_routes), and its saved URLs and key from Windows Credential Manager. Permanent: the alerts it matched fall to the next level (a family route, then the parent channels) on the next firing. " +
-        "Returns {status:\"deleted\", route_id}, {status:\"not_found\"}, or {status:\"unavailable\"} while an earlier database reset's saved-settings restore is pending (it finishes at the next Lite start). " +
+        "Returns {status:\"deleted\", route_id, previous (the route as it was), undo: null, undo_note} (Lite has no tool that creates a route, so no call restores it), {status:\"not_found\"}, or {status:\"unavailable\"} while an earlier database reset's saved-settings restore is pending (it finishes at the next Lite start). " +
         "Prefer set_notification_route_enabled for a temporary change - a deleted route's destinations are gone and only Settings > Manage Notification Routes can author them again. Served only when mcp_allow_writes is true.")]
     public static async Task<string> DeleteNotificationRoute(
         LocalDataService dataService,
@@ -676,7 +704,8 @@ public sealed class McpAlertTools
     {
         try
         {
-            return await DeleteRouteAsync(CreateRouteStore(dataService, serverManager), route_id);
+            return await DeleteRouteAsync(
+                CreateRouteStore(dataService, serverManager), route_id, serverManager.GetAllServers(), await dataService.GetServerTagsAsync());
         }
         catch (Exception ex)
         {
@@ -684,24 +713,49 @@ public sealed class McpAlertTools
         }
     }
 
-    internal static async Task<string> DeleteRouteAsync(DuckDbNotificationRouteStore store, int route_id)
+    internal static async Task<string> DeleteRouteAsync(
+        DuckDbNotificationRouteStore store,
+        int route_id,
+        IReadOnlyCollection<ServerConnection>? servers = null,
+        IReadOnlyCollection<ServerTag>? tags = null)
     {
         try
         {
-            if (await store.GetAsync(route_id) is { } existing && AgentRouteRefusal(existing, "delete_notification_route") is { } agentRefusal)
+            var existing = await store.GetAsync(route_id);
+            if (existing is not null && AgentRouteRefusal(existing, "delete_notification_route") is { } agentRefusal)
             {
                 return agentRefusal;
             }
 
-            return await store.DeleteAsync(route_id)
-                ? JsonSerializer.Serialize(new { status = "deleted", route_id }, McpHelpers.JsonOptions)
-                : McpHelpers.Status("not_found", $"No notification route with route_id {route_id}.");
+            if (!await store.DeleteAsync(route_id))
+            {
+                return McpHelpers.Status("not_found", $"No notification route with route_id {route_id}.");
+            }
+
+            /* #6403: the row as it was (no destination is in it; they are secrets). Lite has no tool that creates a route, so no
+               single call restores it: undo is null and the note says where the route is authored again. */
+            return JsonSerializer.Serialize(new
+            {
+                status = "deleted",
+                route_id,
+                previous = existing is null
+                    ? null
+                    : RoutePayload(
+                        existing,
+                        servers is null ? new Dictionary<int, string>() : ServerNames(servers),
+                        tags is null ? new Dictionary<int, string>() : tags.ToDictionary(t => t.Id, t => t.Name)),
+                undo = (object?)null,
+                undo_note = "No tool call restores a deleted route: Lite cannot author a route over MCP because its destinations are secrets that cannot be read back. Author it again in Settings > Manage Notification Routes.",
+            }, McpHelpers.JsonOptions);
         }
         catch (PendingRestoreException ex)
         {
             return McpHelpers.Status("unavailable", ex.Message);
         }
     }
+
+    /// <summary>The one shape of an undo call (#6403): <c>{tool, arguments}</c>, the same as Darling's write tools.</summary>
+    private static object UndoCall(string tool, object arguments) => new { tool, arguments };
 
     /// <summary>A Lite server's id is the hash of its storage name, the id the alert path and the tag map use.</summary>
     private static Dictionary<int, string> ServerNames(IReadOnlyCollection<ServerConnection> servers)

@@ -36,16 +36,16 @@ internal static class DarlingWebThresholdOverrides
 {
     /// <summary>The 403 sentence a refused write answers: the web host runs on whatever login <c>postgres.webConnectionString</c>
     /// names, and writing an override is an <c>admin</c> role write.</summary>
-    internal const string RefusedMessage =
-        "Changing a threshold override needs a store login with the admin role. Managed and compose stores connect the web dashboard as the "
-        + "viewer role, which lists overrides but cannot change them: change them in the desktop Viewer, or (bring-your-own store) set "
-        + "postgres.webConnectionString to an admin login. If this login already is the admin role, the store has not had "
-        + "Darling/tools/provision-roles.sql re-run since the upgrade that added threshold overrides: run it once as a superuser (it is idempotent).";
+    internal static string RefusedMessage(bool managedStore, bool adminWritesOff = false) =>
+        DarlingWebStoreWrites.Refused("change threshold overrides", managedStore, "Change them in the Viewer app",
+            " If this login already is the admin role, the store has not had "
+            + "Darling/tools/provision-roles.sql re-run since the upgrade that added threshold overrides: run it once as a superuser (it is idempotent).",
+            adminWritesOff);
 
     /// <summary>The list body: <c>{overrides: [{server_id, server_name, database, key, value, global_value, set_by, request_id,
     /// updated_at}], keys: [{key, min, max, database_scope}], servers: [{server_id, server_name}], can_edit, note}</c>.
     /// <c>can_edit</c> is whether the store login holds the write grant, so a page can say list-only before anyone tries.</summary>
-    internal static async Task<JsonObject> ListBodyAsync(NpgsqlDataSource postgres, CancellationToken ct)
+    internal static async Task<JsonObject> ListBodyAsync(NpgsqlDataSource postgres, CancellationToken ct, NpgsqlDataSource? accessSource = null)
     {
         var overrides = new JsonArray();
         string? note = null;
@@ -100,7 +100,7 @@ internal static class DarlingWebThresholdOverrides
             ["overrides"] = overrides,
             ["keys"] = keys,
             ["servers"] = servers,
-            ["can_edit"] = await DarlingMcpThresholdOverrideTools.HoldsGrantAsync(postgres, ct),
+            ["can_edit"] = await DarlingMcpThresholdOverrideTools.HoldsGrantAsync(accessSource ?? postgres, ct),
             ["note"] = note,
         };
     }
@@ -111,7 +111,7 @@ internal static class DarlingWebThresholdOverrides
     /// are this route's 403. <c>refused</c> is a key, value, database or <c>set_by</c> the tool will not write: 400.
     /// </summary>
     internal static async Task<(int Status, JsonNode Body)> ChangeAsync(
-        NpgsqlDataSource postgres, ILogger logger, JsonObject body, string editor, CancellationToken ct)
+        NpgsqlDataSource postgres, ILogger logger, JsonObject body, string editor, CancellationToken ct, bool managedStore = false, bool adminWritesOff = false)
     {
         var server = body["server_name"]?.GetValueKind() == JsonValueKind.String ? body["server_name"]!.GetValue<string>() : null;
         var key = body["key"]?.GetValueKind() == JsonValueKind.String ? body["key"]!.GetValue<string>() : null;
@@ -142,7 +142,7 @@ internal static class DarlingWebThresholdOverrides
             case "cleared":
                 return (200, answer);
             case "precondition":
-                return (403, new JsonObject { ["error"] = RefusedMessage });
+                return (403, new JsonObject { ["error"] = RefusedMessage(managedStore, adminWritesOff) });
             case "refused":
             case "invalid":
                 return (400, new JsonObject

@@ -219,7 +219,7 @@ public sealed class ChangeWatchWindowEdgeLiveTests
 
     private static async Task<string[]> ListedAsync(NpgsqlDataSource source, string? state, CancellationToken ct)
     {
-        var json = await DarlingMcpChangeWatchTools.GetChangeWatches(source, PgServerName, state, 50, ct);
+        var json = await DarlingMcpChangeWatchTools.GetChangeWatches(source, PgServerName, state, 50, cancellationToken: ct);
         var parsed = JsonNode.Parse(json)!;
         Assert.Null(parsed["refusal"]);
         return parsed["watches"] is JsonArray watches
@@ -245,6 +245,9 @@ public sealed class ChangeWatchWindowEdgeLiveTests
             Assert.Equal(["closed/flat", "closed/moved_agent_change", "closed/request_opened"], await ListedAsync(h.Source, "closed", ct));
             Assert.Equal(["closed/moved_agent_change"], await ListedAsync(h.Source, ChangeWatchStore.ResultAgentChange, ct));
             Assert.Equal(5, (await ListedAsync(h.Source, null, ct)).Length);
+            /* #6561: the answer echoes "all" for no filter, so "all" (any case) is accepted and lists the same watches as omitting state. */
+            Assert.Equal(await ListedAsync(h.Source, null, ct), await ListedAsync(h.Source, "all", ct));
+            Assert.Equal(5, (await ListedAsync(h.Source, "ALL", ct)).Length);
 
             /* A watch that failed the way the worker fails one: claimed and failed MaxAttempts times, then closed by FailAttemptAsync (state and result both 'failed'). */
             await InsertWatchAsync(h.Connection, t.AddHours(6), "evaluating", null, ct);
@@ -257,8 +260,9 @@ public sealed class ChangeWatchWindowEdgeLiveTests
             Assert.Equal(["closed/flat", "closed/moved_agent_change", "closed/request_opened"], await ListedAsync(h.Source, "closed", ct));
             Assert.Equal(6, (await ListedAsync(h.Source, null, ct)).Length);
             Assert.Contains("the read timed out",
-                await DarlingMcpChangeWatchTools.GetChangeWatches(h.Source, PgServerName, ChangeWatchStore.StateFailed, 50, ct), StringComparison.Ordinal);
-            Assert.Contains("Invalid state", await DarlingMcpChangeWatchTools.GetChangeWatches(h.Source, PgServerName, "stuck", 50, ct), StringComparison.Ordinal);
+                await DarlingMcpChangeWatchTools.GetChangeWatches(h.Source, PgServerName, ChangeWatchStore.StateFailed, 50, cancellationToken: ct), StringComparison.Ordinal);
+            Assert.Contains("Invalid state", await DarlingMcpChangeWatchTools.GetChangeWatches(h.Source, PgServerName, "stuck", 50, cancellationToken: ct), StringComparison.Ordinal);
+            Assert.Contains("Invalid state", await DarlingMcpChangeWatchTools.GetChangeWatches(h.Source, PgServerName, "everything", 50, cancellationToken: ct), StringComparison.Ordinal);
         });
 
         /* Every value the filter accepts is explained in what the tool tells a caller. */
@@ -270,5 +274,87 @@ public sealed class ChangeWatchWindowEdgeLiveTests
             Assert.Contains(value, description, StringComparison.Ordinal);
             Assert.Contains(value, state, StringComparison.Ordinal);
         }
+    }
+
+    /* #6591: a closed watch's stored result holds measures, not_measured and changes, and the watch carries the same three at its top; the answer sends each once. */
+    private static async Task<(string Closed, string Other, string Failed)> SeedClosedOtherAndFailedAsync(Harness h, CancellationToken ct)
+    {
+        await AddServerAsync(h.Connection, ServerId, ServerName, "sqlserver", ct);
+        await AddServerAsync(h.Connection, PgServerId, PgServerName, "postgres", ct);
+        var change = h.Now.AddMinutes(-90);
+        await SeedWaitsAsync(h.Connection, change.AddMinutes(-60), 100, ct);
+        await SeedWaitsAsync(h.Connection, change, 1000, ct);
+        await h.Store.RecordChangesAsync(ServerId, ServerName, await OneChange(change, "max degree of parallelism: Configured value changed from 4 to 1"), ct);
+        await h.NewPass().EvaluateDueAsync(ct);
+        var closed = (await TextAsync(h.Connection, $"SELECT watch_id::text FROM config.change_watches WHERE server_id = {ServerId}", ct))!;
+
+        await InsertWatchAsync(h.Connection, h.Now.AddDays(-2), "open", null, ct);
+        var other = (await TextAsync(h.Connection, $"SELECT watch_id::text FROM config.change_watches WHERE server_id = {PgServerId}", ct))!;
+
+        await InsertWatchAsync(h.Connection, h.Now.AddDays(-3), "evaluating", null, ct);
+        var failing = Guid.Parse((await TextAsync(h.Connection, $"SELECT watch_id::text FROM config.change_watches WHERE server_id = {PgServerId} AND state = 'evaluating'", ct))!);
+        await ExecAsync(h.Connection, "UPDATE config.change_watches SET attempts = $2 WHERE watch_id = $1", ct, failing, (short)ChangeWatchStore.MaxAttempts);
+        Assert.True(await h.Store.FailAttemptAsync(failing, "the read timed out", ct));
+        return (closed, other, failing.ToString());
+    }
+
+    [Fact]
+    public async Task GetChangeWatches_SendsMeasuresNotMeasuredAndChangesOnce_AndKeepsTheRestOfTheStoredResult()
+    {
+        await RunAsync(false, async (h, ct) =>
+        {
+            var (closed, _, failed) = await SeedClosedOtherAndFailedAsync(h, ct);
+
+            var parsed = JsonNode.Parse(await DarlingMcpChangeWatchTools.GetChangeWatches(h.Source, ServerName, "closed", 20, cancellationToken: ct))!;
+            var watch = Assert.Single(parsed["watches"]!.AsArray())!;
+            Assert.Equal(closed, (string)watch["watch_id"]!);
+            Assert.NotEmpty(watch["measures"]!.AsArray());
+            Assert.NotNull(watch["not_measured"]);
+            var change = Assert.Single(watch["changes"]!.AsArray())!;
+            Assert.Contains("max degree of parallelism", (string)change["what"]!, StringComparison.Ordinal);
+
+            var detail = watch["result_detail"]!.AsObject();
+            Assert.False(detail.ContainsKey("measures"));
+            Assert.False(detail.ContainsKey("not_measured"));
+            Assert.False(detail.ContainsKey("changes"));
+            Assert.True((bool)detail["had_data"]!);
+            Assert.NotNull(detail["window"]);
+            Assert.NotNull(detail["notes"]);
+
+            /* What only the stored result holds stays: a failed watch's last error. */
+            var failedWatch = Assert.Single(JsonNode.Parse(await DarlingMcpChangeWatchTools.GetChangeWatches(h.Source, PgServerName, "failed", 20, cancellationToken: ct))!["watches"]!.AsArray())!;
+            Assert.Equal(failed, (string)failedWatch["watch_id"]!);
+            Assert.Contains("the read timed out", failedWatch["result_detail"]!.ToJsonString(), StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public async Task GetChangeWatches_WithAWatchId_ReturnsThatOneWatch_AndNotFoundForAnIdOnAnotherServerOrNoServer()
+    {
+        await RunAsync(false, async (h, ct) =>
+        {
+            var (closed, other, failed) = await SeedClosedOtherAndFailedAsync(h, ct);
+
+            /* Any state, whatever the limit. */
+            var one = JsonNode.Parse(await DarlingMcpChangeWatchTools.GetChangeWatches(h.Source, ServerName, null, 1, closed, ct))!;
+            Assert.Equal(1, (int)one["watch_count"]!);
+            Assert.Equal(closed, (string)Assert.Single(one["watches"]!.AsArray())!["watch_id"]!);
+            var open = JsonNode.Parse(await DarlingMcpChangeWatchTools.GetChangeWatches(h.Source, PgServerName, null, 20, other, ct))!;
+            Assert.Equal("open", (string)Assert.Single(open["watches"]!.AsArray())!["state"]!);
+            var failedOne = JsonNode.Parse(await DarlingMcpChangeWatchTools.GetChangeWatches(h.Source, PgServerName, null, 20, failed, ct))!;
+            Assert.Equal("failed", (string)Assert.Single(failedOne["watches"]!.AsArray())!["state"]!);
+
+            /* The other filters still apply: a closed watch is not an open one. */
+            Assert.Equal("not_found", (string)JsonNode.Parse(await DarlingMcpChangeWatchTools.GetChangeWatches(h.Source, ServerName, "open", 20, closed, ct))!["status"]!);
+            Assert.Single(JsonNode.Parse(await DarlingMcpChangeWatchTools.GetChangeWatches(h.Source, ServerName, "closed", 20, closed, ct))!["watches"]!.AsArray());
+
+            /* An id on another server, an id nobody holds and text that is no id all answer not found. */
+            foreach (var id in new[] { other, Guid.NewGuid().ToString(), "not-a-guid" })
+            {
+                var answer = JsonNode.Parse(await DarlingMcpChangeWatchTools.GetChangeWatches(h.Source, ServerName, null, 20, id, ct))!;
+                Assert.Equal("not_found", (string)answer["status"]!);
+                Assert.Null(answer["watches"]);
+            }
+        });
     }
 }

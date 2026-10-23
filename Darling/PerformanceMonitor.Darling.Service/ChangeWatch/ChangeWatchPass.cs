@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -15,8 +16,10 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitor.Darling.Storage;
@@ -25,18 +28,46 @@ namespace PerformanceMonitor.Darling.Service.ChangeWatch;
 
 /// <summary>
 /// #6234: the change watch's worker pass, run on the investigation sweep's tick. It does two things for SQL Server targets.
-/// <para><b>Detect.</b> It reads the recorded changes of the last hour (the same snapshot readers and diff the
+/// <para><b>Detect, at most once an hour per target.</b> It reads the recorded changes since the target's last detect (the same snapshot readers and diff the
 /// <c>get_server_config_changes</c>, <c>get_database_config_changes</c> and <c>get_trace_flag_changes</c> tools use; the
 /// database-scoped configuration snapshots; plan forcing by an agent, from the plan-force ledger, and by a person, from the forced-plan
-/// snapshots) and records them: each change opens a watch for its server or extends the open one.</para>
-/// <para><b>Evaluate.</b> Every open watch whose window has ended (including one that ended while the service was down: the pass
+/// snapshots) and records them: each change opens a watch for its server or extends the open one. A configuration change is rare and the
+/// read is the costliest statement the service sends to the store (the database-scoped configuration diff), so a target is read once per
+/// <see cref="DetectInterval"/> (#6234), not on every sweep tick. The time of a target's last detect is kept in memory only: a new
+/// instance (a restart) detects every target on its first run, and the marks and the change keys in the store, not that time, are what
+/// keep a change from being missed or recorded twice (see <see cref="DetectLookback"/>).</para>
+/// <para><b>Evaluate, on every run.</b> Every open watch whose window has ended (including one that ended while the service was down: the pass
 /// runs at start) is compared with the hour before and the same hour a week earlier. When a measure moved, ONE request opens through
-/// the dispatcher's own gate and route (<c>change_watch</c> trigger kind); otherwise the watch closes quietly.</para>
+/// the dispatcher's own gate and route (<c>change_watch</c> trigger kind); otherwise the watch closes quietly. Finding the due watches is one
+/// indexed read of the small watch table, and the measure reads happen only for a watch that is due, so this part stays on the sweep's tick and a
+/// watch is still evaluated within a tick of its window's end.</para>
 /// </summary>
 public sealed partial class ChangeWatchPass
 {
-    /// <summary>How far back a pass looks for a change. A change is recorded once under its key, so a longer look only costs reads.</summary>
-    public static readonly TimeSpan DetectLookback = TimeSpan.FromMinutes(70);
+    /// <summary>
+    /// #6234: the least time between two detects of one target. The database-scoped configuration diff was the store's costliest statement at a
+    /// tick of 60 seconds, and a setting changes far less often than that. A target detects at once on a new <see cref="ChangeWatchPass"/> (the
+    /// first run after a start) and then once this long after its last detect finished reading. A watch is evaluated at the end of its window, which
+    /// is <see cref="ChangeWatchStore.Window"/> after the latest change, so a change is recorded up to this long (and one sweep tick) after it
+    /// happened. The watch's window is still measured from the change's own time, so the measures are the same, and the watch is evaluated at the end of that window,
+    /// or on the run after the one that records it when that end is already past.
+    /// </summary>
+    public static readonly TimeSpan DetectInterval = TimeSpan.FromMinutes(60);
+
+    /// <summary>
+    /// How far back a detect looks for a change: twice <see cref="DetectInterval"/>. The marks, not this, decide what is read: a detect reads from each
+    /// source's mark, which sits <see cref="MarkSlack"/> before the end of the target's last detect, so an hourly cadence reads about an hour and five
+    /// minutes. This is only the cap on a stretch with no detect at all (the service paused or down). It is twice the interval, and not the 70 minutes it
+    /// was at a tick of 60 seconds, so that a detect that comes late by a long sweep, a pause or a slow store (more than five minutes at 70, now up to
+    /// about an hour) still reads from its mark and loses nothing. A change is recorded once under its key, so a longer look only costs reads.
+    /// </summary>
+    public static readonly TimeSpan DetectLookback = DetectInterval + DetectInterval;
+
+    /// <summary>
+    /// #6234: how long a target whose detect failed waits before it is tried again. A detect that fails on every run (a read that always throws)
+    /// would otherwise cost a full detect and a warning on every sweep tick, which is the cost <see cref="DetectInterval"/> removes.
+    /// </summary>
+    public static readonly TimeSpan FailedDetectBackoff = TimeSpan.FromMinutes(5);
 
     /* #6234 PostgreSQL pass: every enabled target, with its engine kind: a PostgreSQL target reads its own change sources
        (ChangeWatchPass.Postgres.cs) and is evaluated by its own readers. */
@@ -95,7 +126,7 @@ WITH fresh AS (
                           AND q.collection_time < m.t AND q.collection_time >= m.t - interval '1 day') AS p
     WHERE p.prev_t IS NOT NULL AND m.t - p.prev_t <= $4 * interval '1 minute'
 )
-SELECT 'forced' AS change_kind, n.t, n.database_name, f.query_id, f.plan_id
+SELECT 'forced' AS change_kind, n.t, n.database_name, f.query_id, f.plan_id, f.plan_forcing_type
 FROM fresh AS n
 JOIN collect.query_store_forced_plans AS f
   ON f.server_id = $1 AND f.collection_time = n.t AND f.database_name = n.database_name AND f.plan_id IS NOT NULL AND f.query_id IS NOT NULL
@@ -107,7 +138,7 @@ WHERE before.hit IS NULL
                   WHERE a.server_id = $1 AND a.database_name = f.database_name AND a.query_id = f.query_id AND a.plan_id = f.plan_id
                     AND a.outcome = 'succeeded' AND a.action_time > n.prev_t AND a.action_time <= n.t)
 UNION ALL
-SELECT 'unforced', n.t, n.database_name, p.query_id, p.plan_id
+SELECT 'unforced', n.t, n.database_name, p.query_id, p.plan_id, p.plan_forcing_type
 FROM fresh AS n
 JOIN collect.query_store_forced_plans AS p
   ON p.server_id = $1 AND p.collection_time = n.prev_t AND p.database_name = n.database_name AND p.plan_id IS NOT NULL AND p.query_id IS NOT NULL
@@ -119,6 +150,14 @@ WHERE after.hit IS NULL
                   WHERE a.server_id = $1 AND a.database_name = p.database_name AND a.query_id = p.query_id AND a.plan_id = p.plan_id
                     AND a.outcome = 'succeeded' AND a.action_time > n.prev_t AND a.action_time <= n.t)";
 
+    /// <summary>#6551: the databases of <paramref name="serverId"/> that are readable-secondary copies, whose plan-snapshot changes are the primary's.
+    /// The rule is the shared one every other read of the store uses (<see cref="PgSecondaryReplicaScope"/>): the newest availability-group snapshots at or
+    /// before <paramref name="end"/>, both within <see cref="AgReplicaScope.SnapshotFreshness"/>, and nothing is left out when they are stale or unreadable.
+    /// A snapshot older than that is not trusted to say this node is still a secondary: when the collectors stopped at or before a failover, a day-old
+    /// SECONDARY row would drop this node's real plan changes.</summary>
+    internal async Task<IReadOnlySet<string>> ReadReplicaDatabasesAsync(int serverId, DateTime end, CancellationToken cancellationToken)
+        => await PgSecondaryReplicaScope.ReadAsync(_readSource, serverId, end, _logger, cancellationToken);
+
     private readonly NpgsqlDataSource _readSource;
     private readonly ChangeWatchStore _store;
     private readonly ChangeWatchEvaluator _evaluator;
@@ -126,6 +165,12 @@ WHERE after.hit IS NULL
     private readonly ILogger _logger;
     private readonly Func<DateTime> _utcNow;
     private readonly int _commandTimeoutSeconds;
+
+    /* #6234: when each target's last detect was read (the pass clock at its start), by server id. In memory on purpose: a restart detects every target at once, which costs one read per target and cannot miss a change. */
+    private readonly ConcurrentDictionary<int, DateTime> _lastDetected = new();
+
+    /* #6234: when each target's last detect failed (the pass clock at its start), by server id. A failed target waits FailedDetectBackoff before it is tried again. */
+    private readonly ConcurrentDictionary<int, DateTime> _lastFailed = new();
 
     /// <param name="readSource">The store's read connection (the collected tables and the registry).</param>
     /// <param name="store">The watch tables.</param>
@@ -177,14 +222,55 @@ WHERE after.hit IS NULL
     /// <summary>One detect pass and one evaluate pass. A failure on one server is logged and the others go on.</summary>
     public async Task RunOnceAsync(CancellationToken cancellationToken = default)
     {
+        /* #6234: a target whose open watch is due is detected first, whatever its hourly gate says. A change is recorded up to DetectInterval
+           after it happened, so a second change inside the window may not be recorded yet when the window ends. This read records it and extends
+           the watch, as the detect on every tick did. A change after the window is deferred by RecordAsync and opens a new watch below. */
+        await DetectAsync(await DueOpenWatchServersAsync(cancellationToken), cancellationToken);
+
         /* #6239 round 3, M4: a due watch is evaluated BEFORE detection, so a change found after its window ended opens a new watch and never stretches the old one. */
         await EvaluateDueAsync(cancellationToken);
-        await DetectAsync(cancellationToken);
+        await DetectAsync(null, cancellationToken);
     }
 
-    /// <summary>Records the last hour's changes of every target (SQL Server and PostgreSQL), opening or extending its watch.</summary>
-    public async Task DetectAsync(CancellationToken cancellationToken = default)
+    /* #6234: the servers with an open watch whose window has ended, with that window's end. Only open ones: a watch already claimed for evaluation can no longer be extended. */
+    private async Task<IReadOnlyDictionary<int, DateTime>> DueOpenWatchServersAsync(CancellationToken cancellationToken)
     {
+        try
+        {
+            return (await _store.DueAsync(cancellationToken)).Where(w => w.State == "open")
+                .GroupBy(w => w.ServerId).ToDictionary(g => g.Key, g => g.Max(w => w.WindowEndsUtc));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("Change watch: the due watches could not be read before evaluation: {Message}", ex.Message);
+            return new Dictionary<int, DateTime>();
+        }
+    }
+
+    /// <summary>
+    /// Records the changes of every target (SQL Server and PostgreSQL) that has not been detected for <see cref="DetectInterval"/>, opening or extending its
+    /// watch. A target detected less than that long ago is skipped without a read of its marks or its sources. A target whose detect failed, or whose changes
+    /// were deferred behind an open watch, keeps its marks. A deferred target is not counted as detected and is read again on the next call (the watch that
+    /// held it back is due, so it is evaluated first). A failed target is tried again once <see cref="FailedDetectBackoff"/> has passed.
+    /// </summary>
+    public Task DetectAsync(CancellationToken cancellationToken = default) => DetectAsync(null, cancellationToken);
+
+    /// <summary>
+    /// <see cref="DetectAsync(CancellationToken)"/> for every target, or, when <paramref name="only"/> is set, only for those targets and without the
+    /// <see cref="DetectInterval"/> gate (#6234: a target whose open watch is due, by the end of that watch's window). Such a target is skipped when its last
+    /// detect was at or after that end, as every change up to the end has then been read, so the read happens once per due watch. An empty set reads nothing.
+    /// </summary>
+    private async Task DetectAsync(IReadOnlyDictionary<int, DateTime>? only, CancellationToken cancellationToken)
+    {
+        if (only is { Count: 0 })
+        {
+            return;
+        }
+
         var servers = new List<(int Id, string Name, bool Postgres)>();
         await using (var command = _readSource.CreateCommand(ServersSql))
         {
@@ -198,8 +284,37 @@ WHERE after.hit IS NULL
 
         var end = DateTime.SpecifyKind(_utcNow(), DateTimeKind.Utc);
         var floor = end - DetectLookback;
+        var enabled = servers.Select(s => s.Id).ToHashSet();
+        foreach (var known in _lastDetected.Keys.Where(k => !enabled.Contains(k)).ToList())
+        {
+            _lastDetected.TryRemove(known, out _);
+        }
+
+        foreach (var known in _lastFailed.Keys.Where(k => !enabled.Contains(k)).ToList())
+        {
+            _lastFailed.TryRemove(known, out _);
+        }
+
         foreach (var (id, name, postgres) in servers)
         {
+            var hasLast = _lastDetected.TryGetValue(id, out var last);
+            if (_lastFailed.TryGetValue(id, out var failed) && end - failed < FailedDetectBackoff)
+            {
+                continue;
+            }
+
+            if (only is not null)
+            {
+                if (!only.TryGetValue(id, out var windowEnds) || (hasLast && last >= windowEnds))
+                {
+                    continue;
+                }
+            }
+            else if (hasLast && end - last < DetectInterval)
+            {
+                continue;
+            }
+
             try
             {
                 var marks = await _store.GetMarksAsync(id, cancellationToken);
@@ -242,13 +357,18 @@ WHERE after.hit IS NULL
 
                 if (deferred)
                 {
-                    /* A change after the open watch's window waits for that watch to be evaluated: the marks stay, and the next pass reads it again. */
+                    /* A change after the open watch's window waits for that watch to be evaluated: the marks stay, and a later pass reads it again. */
                     _logger.LogDebug("A change on {Server} is after its open watch's window; it is recorded once that watch has been evaluated", name);
+                    /* #6234: a deferred change is after a window end and at or before now, so the watch holding it back is already due and is evaluated
+                       on this run or the next. The target is not counted as detected, so the next detect reads the change again at once and opens its watch. */
+                    _lastDetected.TryRemove(id, out _);
                     continue;
                 }
 
                 /* Only after the changes are recorded: a failed read or record leaves the marks, and the next pass reads the same rows again. */
                 await _store.SetMarksAsync(id, sources.ToDictionary(s => s, _ => end - MarkSlack, StringComparer.Ordinal), cancellationToken);
+                _lastDetected[id] = end;
+                _lastFailed.TryRemove(id, out _);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -256,7 +376,8 @@ WHERE after.hit IS NULL
             }
             catch (Exception ex)
             {
-                _logger.LogWarning("Change detection failed for {Server}; it is tried again next pass: {Message}", name, ex.Message);
+                _lastFailed[id] = end;
+                _logger.LogWarning("Change detection failed for {Server}; it is tried again in {Minutes} minutes: {Message}", name, (int)FailedDetectBackoff.TotalMinutes, ex.Message);
             }
         }
     }
@@ -291,6 +412,14 @@ WHERE after.hit IS NULL
                      await DarlingConfigHistoryReader.GetDatabaseConfigSnapshotsAsync(_readSource, serverId, DatabaseFilter.All, databaseMark, cancellationToken),
                      databaseMark, naiveEnd).Where(c => c.ChangeTime > databaseMark))
         {
+            /* #6566: log_reuse_wait_desc is the engine's live reason the log cannot be truncated, a status that flips with no operator action. The analysis
+               leaves it out (ConfigChangeAttribution.DatabaseStatusColumns); a watch counted it as a configuration change and opened requests on it. */
+            if (!ConfigChangeAttribution.IsAttributableDatabaseSetting(c.SettingName))
+            {
+                continue;
+            }
+
+
             changes.Add(new ChangeWatchChange($"database_config:{c.DatabaseName}:{c.SettingName}:{Stamp(c.ChangeTime)}", "database_config", Utc(c.ChangeTime),
                 $"database {c.DatabaseName} {c.SettingName}: {c.ChangeDescription}", c.DatabaseName));
         }
@@ -328,10 +457,13 @@ WHERE after.hit IS NULL
             {
                 var database = reader.GetString(2);
                 changes.Add(new ChangeWatchChange($"plan_force:action:{reader.GetInt64(0)}", "plan_force", Utc(reader.GetDateTime(1)),
-                    $"plan {reader.GetInt64(4)} of query {reader.GetInt64(3)} in {database}: {reader.GetString(5)} by the plan-force ledger", database, reader.GetInt64(3), reader.GetInt64(4)));
+                    $"plan {reader.GetInt64(4)} of query {reader.GetInt64(3)} in {database}: {reader.GetString(5)} by the plan-force ledger{ChangeWatchPlanForcing.Suffix(ChangeWatchPlanForcing.Manual)}", database, reader.GetInt64(3), reader.GetInt64(4)));
             }
         }
 
+        /* #6551: a plan change in a database this server holds as a readable secondary was made on the primary, and the primary's watch records it once.
+           The plan-force ledger (above) is this server's own action and is kept. */
+        var replicaDatabases = await ReadReplicaDatabasesAsync(serverId, end, cancellationToken);
         var gapLimit = CaptureGapLimit(await ForcedPlansFrequencyMinutesAsync(serverId, cancellationToken));
         await using (var command = WithGapLimit(Bind(_readSource.CreateCommand(PlanSnapshotChangesSql), serverId, Mark("plan_snapshots"), naiveEnd), gapLimit))
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
@@ -340,12 +472,19 @@ WHERE after.hit IS NULL
             {
                 var forced = string.Equals(reader.GetString(0), "forced", StringComparison.Ordinal);
                 var database = reader.GetString(2);
+                if (replicaDatabases.Contains(database))
+                {
+                    continue;
+                }
+
                 var time = reader.GetDateTime(1);
                 var queryId = reader.GetInt64(3);
                 var planId = reader.GetInt64(4);
+                /* #6550: the forcing type of the capture the plan was seen in (the previous one for an unforce), so the change says whether the server forced it itself. */
+                var forcingType = ChangeWatchPlanForcing.Suffix(reader.IsDBNull(5) ? null : reader.GetString(5));
                 changes.Add(new ChangeWatchChange(
                     $"plan_force:{(forced ? "snapshot" : "unforced")}:{database}:{queryId}:{planId}:{Stamp(time)}", "plan_force", Utc(time),
-                    $"plan {planId} of query {queryId} in {database}: {(forced ? "forced" : "unforced (in the database's previous forced-plan capture, not in this one)")}",
+                    $"plan {planId} of query {queryId} in {database}: {(forced ? "forced" : "unforced (in the database's previous forced-plan capture, not in this one)")}{forcingType}",
                     database, queryId, planId));
             }
         }
@@ -419,6 +558,14 @@ WHERE after.hit IS NULL
                 {
                     /* #6239 round 3, L9: an agent's own plan change under a change-watch request is recorded and measured, and opens no further request. */
                     await _store.CloseAsync(watch.WatchId, ChangeWatchStore.ResultAgentChange, null, evaluation.ResultJson, cancellationToken);
+                    continue;
+                }
+
+                if (watch.Changes.Count > 0 && watch.Changes.All(c => string.Equals(c.PlanForcingType, ChangeWatchPlanForcing.Auto, StringComparison.Ordinal)))
+                {
+                    /* #6550: automatic plan correction forcing and reverting plans is SQL Server doing its job, and the regression that set it off has its own
+                       alerts. The watch is recorded and measured, and opens no request; a watch that mixes AUTO with any other change still does. */
+                    await _store.CloseAsync(watch.WatchId, ChangeWatchStore.ResultAutoPlanCorrection, null, evaluation.ResultJson, cancellationToken);
                     continue;
                 }
 

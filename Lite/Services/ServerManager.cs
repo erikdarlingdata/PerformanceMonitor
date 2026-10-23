@@ -28,9 +28,19 @@ public class ServerManager
     private static readonly JsonSerializerOptions s_jsonOptions = new() { WriteIndented = true };
     private readonly string _configFilePath;
     private readonly CredentialService _credentialService;
+    private readonly ServerHostBindings _hostBindings;
     private readonly ILogger<ServerManager>? _logger;
     private List<ServerConnection> _servers;
     private readonly object _serversLock = new();
+
+    /* #6352: the host each server had when it was last loaded or saved, by id. A copy of the string, not the live
+       object: the edit dialog changes the live list object before it calls UpdateServer, so the live object's host cannot
+       say what the saved one was. Guarded by _serversLock. */
+    private readonly Dictionary<string, string> _savedHosts = new();
+
+    /* #6254: the Query Store replica each server had when it was last loaded or saved, as _savedHosts does for the host: an edit that
+       keeps its replica is not held to the replica rule, so a server saved before the rule stays editable. */
+    private readonly Dictionary<string, string> _savedReplicas = new();
     private readonly ConcurrentDictionary<string, ServerConnectionStatus> _connectionStatuses;
 
     /// <summary>
@@ -65,15 +75,83 @@ public class ServerManager
     internal const string ServerStartTimeQueryText =
         "SELECT /* PerformanceMonitorLite */ sqlserver_start_time FROM sys.dm_os_sys_info";
 
-    public ServerManager(string configDirectory, ILogger<ServerManager>? logger = null)
+    /// <param name="configDirectory">The folder holding servers.json (the shared one in the app).</param>
+    /// <param name="logger">Optional logger.</param>
+    /// <param name="hostBindingsPath">This user's record of confirmed hosts (<see cref="ServerHostBindings"/>). Null takes
+    /// <see cref="ServerHostBindings.FileName"/> in the app's per-user config folder; with no per-user folder (tests) the
+    /// record is kept in memory only.</param>
+    /// <param name="credentialService">The credential store; null takes Lite's own (tests pass one under a key prefix of
+    /// their own).</param>
+    public ServerManager(string configDirectory, ILogger<ServerManager>? logger = null, string? hostBindingsPath = null, CredentialService? credentialService = null)
     {
         _configFilePath = Path.Combine(configDirectory, "servers.json");
-        _credentialService = new CredentialService();
+        _credentialService = credentialService ?? new CredentialService();
         _logger = logger;
         _servers = new List<ServerConnection>();
         _connectionStatuses = new ConcurrentDictionary<string, ServerConnectionStatus>();
 
         LoadServers();
+
+        /* The per-user record of the settings each server was confirmed with. Never beside servers.json: that folder is
+           shared by every user of the computer. Nothing is bound here: until BindHostsOnFirstRun runs (the main window, once
+           the local store is open) a user with no record has every server unconfirmed, and a changed setting is confirmed
+           before Lite connects to it. */
+        _hostBindings = new ServerHostBindings(
+            hostBindingsPath
+                ?? (string.IsNullOrEmpty(App.ConfigDirectory) ? null : Path.Combine(App.ConfigDirectory, ServerHostBindings.FileName)),
+            () => ProfileLookup);
+        _hostBindings.SaveFailed += message => HostRecordSaveFailed?.Invoke(message);
+    }
+
+    /// <summary>Raised with the sentence to show when this user's record of confirmed settings could not be written.</summary>
+    public event Action<string>? HostRecordSaveFailed;
+
+    /// <summary>The sentence for the last failed write of this user's record of confirmed settings; null once one succeeds.</summary>
+    public string? HostRecordSaveProblem => _hostBindings.SaveProblem;
+
+    /// <summary>
+    /// The first-run step for a user with no record of confirmed settings (see <see cref="ServerHostBindings.BindOnFirstRun"/>).
+    /// <paramref name="hadLiteData"/> is whether this is the first start of this build with a data folder an earlier Lite used
+    /// (<see cref="ServerHostBindings.IsFirstStartInUsedFolder"/>); otherwise nothing is bound. An upgrading user gets bound
+    /// only the servers they collected from: one whose storage name (host, database and read-only intent, as
+    /// <see cref="RemoteCollectorService.GetServerNameForStorage"/> writes it) is in <paramref name="storedServerNames"/>, the
+    /// server_name values in this user's collector tables, compared case-insensitively. A saved password alone does not
+    /// count: it is kept by server id and says nothing about the host. Returns how many servers were bound.
+    /// </summary>
+    public int BindHostsOnFirstRun(bool hadLiteData, IReadOnlyCollection<string> storedServerNames)
+    {
+        List<ServerConnection> servers;
+        lock (_serversLock)
+        {
+            servers = _servers.ToList();
+        }
+
+        var stored = new HashSet<string>(storedServerNames, StringComparer.OrdinalIgnoreCase);
+        return _hostBindings.BindOnFirstRun(servers, hadLiteData,
+            server => stored.Contains(RemoteCollectorService.GetServerNameForStorage(server)));
+    }
+
+    /// <summary>
+    /// Null when this user confirmed the settings the server names now (host, Query Store replica, sign-in, databases,
+    /// encryption); otherwise what changed. Lite does not connect to the server until <see cref="ConfirmHost"/> runs for it.
+    /// </summary>
+    public ServerHostChange? HostChange(ServerConnection server) => _hostBindings.Check(server);
+
+    /// <summary>
+    /// <see cref="HostChange"/> for settings not saved yet (the Edit dialog's boxes): a stricter encryption setting there is
+    /// not recorded, since the user may still cancel.
+    /// </summary>
+    public ServerHostChange? HostChangeIfSaved(ServerConnection candidate) => _hostBindings.Check(candidate, recordStricter: false);
+
+    /// <summary>
+    /// Records that this user confirmed the host the server names now: the Edit dialog's save, after the password was
+    /// entered again where the server has one.
+    /// </summary>
+    public void ConfirmHost(ServerConnection server)
+    {
+        _hostBindings.Confirm(server);
+        if (_connectionStatuses.TryGetValue(server.Id, out var status) && status.IsOnline == null)
+            _connectionStatuses[server.Id] = new ServerConnectionStatus { ServerId = server.Id };
     }
 
     /// <summary>
@@ -102,7 +180,7 @@ public class ServerManager
     /// connection-string consumers (ServerTab, FinOpsTab, the collector, the MCP path, etc.) so they
     /// all resolve through the same profile-or-self/fail-closed path.
     /// </summary>
-    public CredentialResolver CredentialResolver => new(_credentialService, ProfileLookup);
+    public CredentialResolver CredentialResolver => new(_credentialService, ProfileLookup, _hostBindings);
 
     /// <summary>
     /// The hash ids (the ids the alert path and server_tag_map use) of every configured server, enabled or not. What the
@@ -287,10 +365,55 @@ public class ServerManager
     }
 
     /// <summary>
+    /// #6352: null when <paramref name="newHost"/> may be saved, otherwise the sentence to refuse with. A host that
+    /// SqlClient would read as a named pipe or an admin connection is refused for a NEW server
+    /// (<paramref name="existingHost"/> null) and for an edit that CHANGES the host; an edit that keeps the host it has
+    /// is not held to it, so a server saved before the rule stays editable and collected. Lite's add and edit dialogs
+    /// call this for the same answer <see cref="AddServer"/> and <see cref="UpdateServer"/> give.
+    /// </summary>
+    public static string? HostRefusal(string? newHost, string? existingHost) =>
+        /* Ordinal, no trim: a stored "<U+00A0>np:x" is not a pipe and "np:x" is, so they are not the same host. */
+        existingHost is not null && string.Equals(newHost, existingHost, StringComparison.Ordinal)
+            ? null
+            : ServerHostSetting.Refusal(newHost);
+
+    /// <summary>
+    /// #6254: null when <paramref name="newReplica"/> may be saved as a server's Query Store replica, otherwise the sentence to
+    /// refuse with. The replica becomes the Data Source of a connection Lite opens with the server's own credentials, so it is held
+    /// to the host rule (<see cref="HostRefusal"/>): a new server's replica and a changed one are, an edit that keeps the replica it
+    /// has is not (<paramref name="existingReplica"/> null means there is none to keep). A blank replica means none and is not refused.
+    /// </summary>
+    public static string? ReplicaRefusal(string? newReplica, string? existingReplica)
+    {
+        var replica = newReplica?.Trim();
+        if (string.IsNullOrEmpty(replica))
+        {
+            return null;
+        }
+
+        if (existingReplica is not null && string.Equals(replica, existingReplica.Trim(), StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        return ServerHostSetting.Refusal(replica) is { } why ? "Query Store replica: " + why : null;
+    }
+
+    /// <summary>
     /// Adds a new server to the list.
     /// </summary>
     public void AddServer(ServerConnection server, string? username = null, string? password = null)
     {
+        if (HostRefusal(server.ServerName, null) is { } hostRefusal)
+        {
+            throw new InvalidOperationException(hostRefusal);
+        }
+
+        if (ReplicaRefusal(server.QueryStoreReplica, null) is { } replicaRefusal)
+        {
+            throw new InvalidOperationException(replicaRefusal);
+        }
+
         lock (_serversLock)
         {
             if (_servers.Any(s => s.Id == server.Id))
@@ -308,11 +431,20 @@ public class ServerManager
 
             _servers.Add(server);
             SaveServers();
+            _savedHosts[server.Id] = server.ServerName;
+            _savedReplicas[server.Id] = server.QueryStoreReplica ?? "";
             NotificationRouteCache.Invalidate();
         }
 
+        /* The user adding the server names its host, so it is confirmed for them. */
+        _hostBindings.Confirm(server);
+
         // Save credentials based on authentication type
-        if (server.AuthenticationType == AuthenticationTypes.SqlServer && !string.IsNullOrEmpty(username) && password != null)
+        if (!ServerCredentialIds.Allows(server.Id, server.DisplayName))
+        {
+            // A saved password is written only for a server whose Id is a GUID (ServerCredentialIds).
+        }
+        else if (server.AuthenticationType == AuthenticationTypes.SqlServer && !string.IsNullOrEmpty(username) && password != null)
         {
             // For SQL Server auth, save both username and password
             if (!_credentialService.SaveCredential(server.Id, username, password))
@@ -348,6 +480,8 @@ public class ServerManager
     /// <summary>
     /// Updates an existing server.
     /// </summary>
+    /// <remarks>#6352: the host check compares against the manager's own copy of the last saved host, never against the
+    /// live list object, which the edit dialog changes before it calls this. No caller has to remember an argument.</remarks>
     public void UpdateServer(ServerConnection server, string? username = null, string? password = null)
     {
         lock (_serversLock)
@@ -356,6 +490,18 @@ public class ServerManager
             if (existing == null)
             {
                 throw new InvalidOperationException($"Server with ID {server.Id} not found");
+            }
+
+            /* #6352: a changed host is held to the add rule; an unchanged one is not (existing rows keep working). */
+            if (HostRefusal(server.ServerName, _savedHosts.GetValueOrDefault(server.Id)) is { } hostRefusal)
+            {
+                throw new InvalidOperationException(hostRefusal);
+            }
+
+            /* #6254: the same for the Query Store replica: a changed one is held to the rule, a kept one is not. */
+            if (ReplicaRefusal(server.QueryStoreReplica, _savedReplicas.GetValueOrDefault(server.Id)) is { } replicaRefusal)
+            {
+                throw new InvalidOperationException(replicaRefusal);
             }
 
             /* #4789: an edit that changes the derived id (the name, database or read-only intent) is refused when
@@ -370,11 +516,17 @@ public class ServerManager
             var index = _servers.IndexOf(existing);
             _servers[index] = server;
             SaveServers();
+            _savedHosts[server.Id] = server.ServerName;
+            _savedReplicas[server.Id] = server.QueryStoreReplica ?? "";
             NotificationRouteCache.Invalidate();
         }
 
         // Update credentials based on authentication type
-        if (server.AuthenticationType == AuthenticationTypes.SqlServer && !string.IsNullOrEmpty(username) && password != null)
+        if (!ServerCredentialIds.Allows(server.Id, server.DisplayName))
+        {
+            // A saved password is written or deleted only for a server whose Id is a GUID (ServerCredentialIds).
+        }
+        else if (server.AuthenticationType == AuthenticationTypes.SqlServer && !string.IsNullOrEmpty(username) && password != null)
         {
             // For SQL Server auth, update both username and password
             if (!_credentialService.UpdateCredential(server.Id, username, password))
@@ -456,6 +608,8 @@ public class ServerManager
             if (server != null)
             {
                 _servers.Remove(server);
+                _savedHosts.Remove(id);
+                _savedReplicas.Remove(id);
                 SaveServers();
                 NotificationRouteCache.Invalidate();
             }
@@ -463,7 +617,12 @@ public class ServerManager
 
         if (server != null)
         {
-            _credentialService.DeleteCredential(id);
+            if (ServerCredentialIds.Allows(id, server.DisplayName))
+            {
+                _credentialService.DeleteCredential(id);
+            }
+
+            _hostBindings.Forget(id);
             _connectionStatuses.TryRemove(id, out _);
             _logger?.LogInformation("Deleted server '{DisplayName}' ({ServerName})", server.DisplayName, server.ServerName);
         }
@@ -540,6 +699,24 @@ public class ServerManager
         // Get previous status to detect status changes
         var previousStatus = GetConnectionStatus(serverId);
 
+        /* A host this user has not confirmed is not connected to, not even for this check. The status carries the
+           sentence the sidebar and the connect prompt show. IsOnline stays unknown rather than false: nothing was
+           tried, so nothing is down, and a "Server Unreachable" alert would be wrong. */
+        if (HostChange(server) is { } hostChange)
+        {
+            var unconfirmed = new ServerConnectionStatus
+            {
+                ServerId = serverId,
+                IsOnline = null,
+                LastChecked = DateTime.Now,
+                StatusChangedAt = previousStatus.StatusChangedAt,
+                ErrorMessage = hostChange.Describe(server),
+                PreviousIsOnline = previousStatus.IsOnline
+            };
+            _connectionStatuses[serverId] = unconfirmed;
+            return unconfirmed;
+        }
+
         // Skip interactive authentication methods during background checks.
         //
         // Asked as a question about the MODE rather than as an equality test against EntraMFA, so
@@ -602,7 +779,7 @@ public class ServerManager
             // Resolve through the same fail-closed atomic-tuple logic as the external consumers
             // (§3.1). A profile-backed server with a dangling/missing profile throws here rather than
             // silently connecting under the server's own stale inline auth.
-            var connectionString = ServerConnection.ResolveConnectionString(server, _credentialService, ProfileLookup);
+            var connectionString = CredentialResolver.GetConnectionString(server);
 
             // Modify connection string to use short timeout for connectivity check
             var builder = new SqlConnectionStringBuilder(connectionString)
@@ -822,6 +999,8 @@ public class ServerManager
             foreach (var server in _servers)
             {
                 _connectionStatuses[server.Id] = new ServerConnectionStatus { ServerId = server.Id };
+                _savedHosts[server.Id] = server.ServerName;
+                _savedReplicas[server.Id] = server.QueryStoreReplica ?? "";
             }
 
             _logger?.LogInformation("Loaded {Count} servers from configuration", _servers.Count);
@@ -843,6 +1022,8 @@ public class ServerManager
                     foreach (var server in _servers)
                     {
                         _connectionStatuses[server.Id] = new ServerConnectionStatus { ServerId = server.Id };
+                        _savedHosts[server.Id] = server.ServerName;
+                        _savedReplicas[server.Id] = server.QueryStoreReplica ?? "";
                     }
                     _logger?.LogInformation("Restored {Count} servers from backup file", _servers.Count);
                     return;
@@ -892,6 +1073,24 @@ public class ServerManager
                    intent), in any letter case. The database is part of the identity. Several monitored
                    databases on one Azure SQL Database server share an address, and each of them is its own
                    server, so comparing the address alone dropped every sibling after the first. */
+                /* #6352: an imported entry is a new registration here, so a host SqlClient would read as a named pipe or
+                   an admin connection is not imported. It counts as skipped, and the log says which. */
+                if (HostRefusal(server.ServerName, null) is { } hostRefusal)
+                {
+                    skipped++;
+                    _logger?.LogWarning("Import Settings did not import server '{DisplayName}': {Refusal}", NameForMessage(server), hostRefusal);
+                    continue;
+                }
+
+                /* #6254: the same for the Query Store replica, which the import would otherwise take from any servers.json: a Windows
+                   login would then be sent to the replica the file names. */
+                if (ReplicaRefusal(server.QueryStoreReplica, null) is { } replicaRefusalOnImport)
+                {
+                    skipped++;
+                    _logger?.LogWarning("Import Settings did not import server '{DisplayName}': {Refusal}", NameForMessage(server), replicaRefusalOnImport);
+                    continue;
+                }
+
                 var existing = _servers.FirstOrDefault(s => IsSameServerIgnoringCase(s, server));
 
                 if (existing != null)
@@ -930,6 +1129,10 @@ public class ServerManager
 
                 // Add with original GUID so Credential Manager entries still work
                 _servers.Add(server);
+                /* Import Settings is this user's own choice of file, so its hosts are confirmed for them. */
+                _hostBindings.Confirm(server);
+                _savedHosts[server.Id] = server.ServerName;
+                _savedReplicas[server.Id] = server.QueryStoreReplica ?? "";
                 _connectionStatuses[server.Id] = new ServerConnectionStatus { ServerId = server.Id };
                 imported++;
             }

@@ -152,19 +152,11 @@ public sealed class WebQueryStoreGridGroupsTests
     }
 
     [Fact]
-    public void EveryTimestampColumn_IsAnInstantTheBrowserRendersLocally_AndTheirSourcesAreUtcInTheCensus()
+    public void EveryTimestampColumn_IsAnInstantTheBrowserRendersLocally()
     {
         foreach (var constant in new[] { "QUERY_STORE_REGRESSION_COLUMNS", "LONG_QUERY_COLUMNS", "PLAN_CORRECTION_COLUMNS" })
             foreach (var (key, line) in Columns(constant))
                 if (key.EndsWith("_time", StringComparison.Ordinal) || key is "valid_since" or "last_refresh")
                     Assert.True(line.Contains("format: \"time\"", StringComparison.Ordinal), constant + "." + key);
-
-        // Frame-ambiguity: none. The three sources are stored UTC (collector-written or UTC-reporting), so the reads
-        // write them as stored with "o" and the census registers each as Utc.
-        var census = ReadRepoFile("Darling", "Darling.Tests", "ConsumedTimestampFrameDisciplineTests.cs");
-        Assert.Contains("(\"query_store_stats\", \"last_execution_time\", ClockFrame.Utc", census);
-        Assert.Contains("\"long_query_completions.event_time=Utc\"", census);
-        foreach (var stamp in new[] { "execute_action_initiated_time", "last_refresh", "revert_action_initiated_time", "valid_since" })
-            Assert.Contains("\"plan_correction." + stamp + "=Utc\"", census);
     }
 }

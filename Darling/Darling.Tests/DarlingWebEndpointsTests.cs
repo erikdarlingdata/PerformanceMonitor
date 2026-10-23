@@ -21,6 +21,7 @@ using ModelContextProtocol.Server;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -177,7 +178,7 @@ public sealed class DarlingWebEndpointsTests
     {
         var read = DarlingWebEndpoints.CatalogDescriptors["get_active_queries"];
         Assert.Equal(
-            new[] { "server", "hours", "database_name", "blocking_only", "wait_type", "limit", "as_of", "tag" },
+            new[] { "server", "hours", "database_name", "blocking_only", "wait_type", "limit", "as_of", "tag", "collection_time", "snapshots_only" },
             read.Params.Select(p => p.Name).ToArray());
         var waitType = Assert.Single(read.Params, p => p.Name == "wait_type");
         Assert.Equal("text", waitType.Type);

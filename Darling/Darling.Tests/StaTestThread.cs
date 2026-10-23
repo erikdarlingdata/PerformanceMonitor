@@ -72,6 +72,83 @@ internal static class StaTestThread
     /// </summary>
     internal static void Step(string what) => s_host.Step(what);
 
+    /// <summary>How long <see cref="Settle"/> waits for application idle. Half the hang guard, so a settle that never ends fails its own test before the guard strands the shared thread.</summary>
+    internal static readonly TimeSpan IdleLimit = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// #6333: shows the window and lets the dispatcher reach application idle, with the wait bounded. Replaces the unbounded
+    /// <c>PushFrame</c> each WPF test class copied: a frame that is never woken left the body, and with it the shared thread, waiting
+    /// until the 60 s hang guard stranded every later WPF test in the process (a Lite shard lost a whole class that way).
+    /// </summary>
+    internal static void Settle(Window window)
+    {
+        Step("Settle: Show() on the window");
+        window.Show();
+        WaitForIdle(window.Dispatcher, IdleLimit);
+    }
+
+    /// <summary>
+    /// Runs a dispatcher frame until an application-idle operation runs, for at most <paramref name="limit"/>. When the limit passes
+    /// the test fails alone, saying what it waited for and how many dispatcher operations ran meanwhile, and the shared thread stays usable.
+    /// </summary>
+    internal static void WaitForIdle(Dispatcher dispatcher, TimeSpan limit) => WaitForIdle(dispatcher, limit, DispatcherPriority.ApplicationIdle);
+
+    /// <summary>
+    /// <see cref="WaitForIdle(Dispatcher, TimeSpan)"/> at a chosen <paramref name="idlePriority"/>. An overload, not an optional
+    /// parameter: an optional <see cref="DispatcherPriority"/> stores a constant of a WindowsBase type in this method's metadata, and
+    /// the nightly test map's AltCover (Mono.Cecil) cannot resolve WindowsBase when it rewrites the assembly. It failed every test-map
+    /// shard from nightly 569 on with "Failed to resolve System.Windows.Threading.DispatcherPriority".
+    /// </summary>
+    internal static void WaitForIdle(Dispatcher dispatcher, TimeSpan limit, DispatcherPriority idlePriority)
+    {
+        var frame = new DispatcherFrame();
+        var idle = false;
+        var operations = 0;
+        var lastPriority = DispatcherPriority.Invalid;
+        var priorToLast = DispatcherPriority.Invalid;
+        DispatcherHookEventHandler counter = (_, e) =>
+        {
+            operations++;
+            priorToLast = lastPriority;
+            lastPriority = e.Operation.Priority;
+        };
+        dispatcher.Hooks.OperationStarted += counter;
+
+        /* Send priority and promoted by the dispatcher on every pass, so it fires even when the queue is never empty. */
+        var expiry = new DispatcherTimer(DispatcherPriority.Send, dispatcher) { Interval = limit };
+        expiry.Tick += (_, _) =>
+        {
+            /* The tick is itself an operation the counter saw; the message counts the dispatcher's work, not the guard's. */
+            operations--;
+            lastPriority = priorToLast;
+            frame.Continue = false;
+        };
+        try
+        {
+            dispatcher.BeginInvoke(idlePriority, new Action(() =>
+            {
+                idle = true;
+                frame.Continue = false;
+            }));
+            expiry.Start();
+            Step("Settle: waiting in a dispatcher frame for application idle");
+            Dispatcher.PushFrame(frame);
+        }
+        finally
+        {
+            expiry.Stop();
+            dispatcher.Hooks.OperationStarted -= counter;
+        }
+
+        if (!idle)
+        {
+            throw new TimeoutException(
+                $"The dispatcher did not reach {(idlePriority == DispatcherPriority.ApplicationIdle ? "application idle" : idlePriority.ToString())} within {limit.TotalMilliseconds:0} ms: it ran {operations} operations meanwhile"
+                + (operations == 0 ? " (none: the frame was not woken to run what the window queued)" : $", the last at priority {lastPriority}")
+                + ". Work queued ahead of idle without end looks like the second; a pump that never wakes looks like the first (#6216, #6333).");
+        }
+    }
+
     /// <summary>
     /// For a test that must own its thread: waits for the gate and returns the token that releases it. Not re-entrant, and not to
     /// be called from a body already running in <see cref="Run(Action)"/>.
@@ -94,6 +171,10 @@ internal sealed class StaHost
     private readonly List<Exception> _strays = new();
     private Dispatcher? _dispatcher;
     private volatile string? _stuckTest;
+
+    /* #6632: how long after it started the body the guard gave up on did return, or 0 while it has not. A body that returns late was
+       slow (a cold first WPF start under load); one that never returns is blocked for good. The later tests' refusals say which. */
+    private long _stuckReturnedAfterMs;
 
     /* #6216: what the hang guard reports about a body that did not return. The host thread writes the dispatcher counters (the hooks run
        on it); the body writes the step; the caller reads them all once the guard expires. */
@@ -180,6 +261,9 @@ internal sealed class StaHost
             {
                 var name = CurrentTestName();
                 _stuckTest = name;
+                _ = finished.ContinueWith(
+                    _ => Interlocked.Exchange(ref _stuckReturnedAfterMs, Math.Max(1, Environment.TickCount64 - began)),
+                    CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
                 throw new TimeoutException(
                     $"WPF test body did not return within {HangGuard.TotalSeconds:0} s: {name}. The shared STA test thread is stuck inside it, "
                     + "so every later WPF test in this process fails at once naming this test (#5602). "
@@ -217,6 +301,9 @@ internal sealed class StaHost
 
         try
         {
+            /* #6632: the drain runs in the body's own dispatcher operation, so without its own step a drain that stuck would be
+               reported under the body's last step. */
+            Step("the host's drain after the body: closing leftover windows, then waiting for application idle");
             CloseLeftoverWindows();
             await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
         }
@@ -243,8 +330,12 @@ internal sealed class StaHost
         var stuck = _stuckTest;
         if (stuck is not null)
         {
+            var returnedAfter = Interlocked.Read(ref _stuckReturnedAfterMs);
+            var since = returnedAfter > 0
+                ? $" That body did return, {returnedAfter} ms after it started, so it was slow, not blocked for good (#6632)."
+                : " That body has not returned yet (#6632).";
             throw new InvalidOperationException(
-                $"The shared WPF STA test thread is stuck inside a body that never returned: {stuck}. This test did not run (#5602).");
+                $"The shared WPF STA test thread was stranded by a body that did not return within its hang guard: {stuck}. This test did not run (#5602)." + since);
         }
     }
 

@@ -186,7 +186,7 @@ public class McpStatusEnvelopeTests : IClassFixture<SharedDuckDbFixture>, IDispo
     {
         await SeedWaitStatsAsync("CXPACKET", "PAGEIOLATCH_SH");
 
-        var json = await McpWaitTools.GetWaitTrend(_dataService, _serverManager, "SOS_SCHEDULER_YIELD");
+        var json = await McpWaitTools.GetWaitTrend(_dataService, _serverManager, "SLEEP_TASK");
         var root = Parse(json);
 
         Assert.Equal("not_collected", root.GetProperty("status").GetString());
@@ -341,6 +341,32 @@ public class McpStatusEnvelopeTests : IClassFixture<SharedDuckDbFixture>, IDispo
     }
 
     /// <summary>
+    /// #6554: a server whose every Query Store database is a readable secondary (readonly_reason bit 8) collects no Query Store, so
+    /// the read says not_collected and names the secondary, not "Query Store is READ_ONLY". A storage-cap READ_ONLY (65536) is a
+    /// different state with its own remedy and keeps the precondition answer.
+    /// </summary>
+    [Fact]
+    public async Task GetQueryStoreTop_OnAReadableSecondary_AnswersNotCollected_NotReadOnly()
+    {
+        await SeedQueryStoreHealthAsync("SalesDb", "READ_ONLY", readonlyReason: 8);
+
+        var root = Parse(await McpQueryTools.GetQueryStoreTop(_dataService, _serverManager));
+
+        Assert.Equal("not_collected", root.GetProperty("status").GetString());
+        Assert.Contains("readable secondary", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GetQueryStoreTop_WithAStorageCapReadOnly_KeepsThePreconditionAnswer()
+    {
+        await SeedQueryStoreHealthAsync("SalesDb", "READ_ONLY", readonlyReason: 65536);
+
+        var root = Parse(await McpQueryTools.GetQueryStoreTop(_dataService, _serverManager));
+
+        Assert.Equal("precondition", root.GetProperty("status").GetString());
+    }
+
+    /// <summary>
     /// #6181: a newly added server stores no Query Store row until its first interval closes. With Query Store READ_WRITE in the
     /// health snapshot and a successful query_store run, the three reads say Query Store is on and when its data arrives,
     /// not "may be OFF" or "may not be enabled".
@@ -408,7 +434,7 @@ public class McpStatusEnvelopeTests : IClassFixture<SharedDuckDbFixture>, IDispo
         await cmd.ExecuteNonQueryAsync();
     }
 
-    private async Task SeedQueryStoreHealthAsync(string databaseName, string actualState)
+    private async Task SeedQueryStoreHealthAsync(string databaseName, string actualState, int readonlyReason = 0)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var conn = await SeedConnectionAsync();
@@ -418,13 +444,14 @@ public class McpStatusEnvelopeTests : IClassFixture<SharedDuckDbFixture>, IDispo
             (config_id, capture_time, server_id, server_name, database_name, actual_state, desired_state,
              readonly_reason, current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode,
              stale_query_threshold_days, max_plans_per_query, interval_length_minutes)
-            VALUES ($1, $2, $3, 'TestServer', $4, $5, 'READ_WRITE', 0, 0, 1000, 'AUTO', 30, 200, 60)";
+            VALUES ($1, $2, $3, 'TestServer', $4, $5, 'READ_WRITE', $6, 0, 1000, 'AUTO', 30, 200, 60)";
         void P(object v) => cmd.Parameters.Add(new DuckDBParameter { Value = v });
         P(_nextId--);
         P(DateTime.UtcNow.AddMinutes(-5));
         P(_serverId);
         P(databaseName);
         P(actualState);
+        P(readonlyReason);
         await cmd.ExecuteNonQueryAsync();
     }
 }

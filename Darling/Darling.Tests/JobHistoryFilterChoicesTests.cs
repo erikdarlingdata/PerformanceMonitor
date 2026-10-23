@@ -108,15 +108,17 @@ public sealed class JobHistoryFilterChoicesTests
     }
 
     [Fact]
-    public void TheViewersKnownServers_AreExactlyTheServersTheJobHistoryCollectorRunsOn_ByDisplayName()
+    public void TheViewersKnownServers_AreTheServersAJobHistoryCanBeAskedOf_ByDisplayName()
     {
         var choices = ViewerDataService.ServerChoicesOf(
         [
             new DarlingServer(1, "sql-a", "Alias A", true, 16),
             new DarlingServer(2, "sql-b", "", true, 16),
             new DarlingServer(3, "pg-a", "pg-a", true, null, engineKind: "postgres"),
-            /* No SQL Agent, so no job history: a disabled server (never collected), Azure SQL Database (edition 5). */
+            /* A disabled server is never collected, so it is not offered. */
             new DarlingServer(4, "sql-off", "Disabled", false, 16),
+            new DarlingServer(9, "azure-off", "Azure Off", false, 12, engineEdition: CollectorEngineCapability.AzureSqlDatabaseEngineEdition),
+            /* #6391: an Azure SQL Database has no SQL Agent and never any rows, but it is a registered server and is offered, so it can be picked. */
             new DarlingServer(5, "azure-db", "Azure DB", true, 12, engineEdition: CollectorEngineCapability.AzureSqlDatabaseEngineEdition),
             /* SQL Agent runs: Azure SQL Managed Instance (edition 8), a box SQL Server (edition 3), and a server that has not connected yet. */
             new DarlingServer(6, "mi", "Managed Instance", true, 16, engineEdition: 8),
@@ -125,7 +127,7 @@ public sealed class JobHistoryFilterChoicesTests
         ]);
 
         Assert.Equal(
-            new[] { new Choice(1, "Alias A"), new Choice(2, "sql-b"), new Choice(6, "Managed Instance"), new Choice(7, "Box"), new Choice(8, "Not connected") },
+            new[] { new Choice(1, "Alias A"), new Choice(2, "sql-b"), new Choice(5, "Azure DB"), new Choice(6, "Managed Instance"), new Choice(7, "Box"), new Choice(8, "Not connected") },
             choices.ToArray());
     }
 

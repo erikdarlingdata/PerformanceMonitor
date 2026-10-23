@@ -18,6 +18,13 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- #6365: SqlClient follows a mirroring partner the SERVER names, and that name gets no tcp: prefix (named pipe over SMB
+         with the process's Windows credentials). This writes the switch into runtimeconfig.json so it is set before any code
+         runs; ServerHostSetting also sets it in a static constructor as a backup. -->
+    <RuntimeHostConfigurationOption Include="Switch.Microsoft.Data.SqlClient.IgnoreServerProvidedFailoverPartner" Value="true" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="AWSSDK.PI" />
     <PackageReference Include="AWSSDK.RDS" />
     <PackageReference Include="AWSSDK.SecurityToken" />
@@ -94,6 +101,9 @@
     <None Include="..\tools\install-darling.ps1" Link="install-darling.ps1" CopyToOutputDirectory="PreserveNewest" Condition="$(DarlingShipsWindowsScripts)" />
     <None Include="..\tools\uninstall-darling.ps1" Link="uninstall-darling.ps1" CopyToOutputDirectory="PreserveNewest" Condition="$(DarlingShipsWindowsScripts)" />
     <None Include="..\tools\upgrade-darling.ps1" Link="upgrade-darling.ps1" CopyToOutputDirectory="PreserveNewest" Condition="$(DarlingShipsWindowsScripts)" />
+    <!-- #6469: the double-click launcher for install-darling.ps1. A .cmd is not Authenticode-signed with the scripts; it only
+         starts PowerShell elevated with the execution policy bypassed for that one process. -->
+    <None Include="..\tools\Install-Darling.cmd" Link="Install-Darling.cmd" CopyToOutputDirectory="PreserveNewest" Condition="$(DarlingShipsWindowsScripts)" />
   </ItemGroup>
 
   <ItemGroup>

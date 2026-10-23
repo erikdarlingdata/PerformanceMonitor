@@ -203,6 +203,70 @@ public sealed class DiagnosticsBundleSeedFailureLiveTests
         }
     }
 
+    /* #6254 security round 1, L4: a Query Store replica set through the store (the Viewer, the web dashboard, MCP) is aliased like the host. */
+    [Fact]
+    public async Task AStoreOnlyQueryStoreReplica_IsAliased()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the live seed-failure test.");
+        var ct = TestContext.Current.CancellationToken;
+        var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        var ok = false;
+        try
+        {
+            await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+            {
+                await connection.OpenAsync(ct);
+                await PgMigrations.MigrateAsync(connection, ct);
+                await ExecAsync(connection,
+                    "INSERT INTO config.config_monitored_servers (server_id, name, host, database, auth, query_store_replica) "
+                    + "VALUES (9102, 'replica-owner', 'primary-6254.example.test', 'orders', 'windows', '  AGL6254LISTENER,14331 ')", ct);
+            }
+
+            await using var source = NpgsqlDataSource.Create(scratch.ConnectionString);
+            var aliaser = new BundleAliaser();
+            var result = await DiagnosticsBundleRunner.SeedFromStoreAsync(aliaser, source, ct);
+            Assert.Null(result.FailedNameSource);
+
+            var text = aliaser.Alias("Query Store read failed on AGL6254LISTENER,14331: timeout.");
+            Assert.DoesNotContain("AGL6254LISTENER", text, StringComparison.Ordinal);
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, ok, async (_, _) => await Task.CompletedTask);
+            await scratch.DisposeAsync();
+        }
+    }
+
+    /* A store older than 211 has no replica column: the bundle still builds, with nothing to alias from that read. */
+    [Fact]
+    public async Task AStoreWithoutTheQueryStoreReplicaColumn_StillSeeds()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the live seed-failure test.");
+        var ct = TestContext.Current.CancellationToken;
+        var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        var ok = false;
+        try
+        {
+            await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+            {
+                await connection.OpenAsync(ct);
+                await PgMigrations.MigrateAsync(connection, ct);
+                await ExecAsync(connection, "ALTER TABLE config.config_monitored_servers DROP COLUMN query_store_replica", ct);
+            }
+
+            await using var source = NpgsqlDataSource.Create(scratch.ConnectionString);
+            var result = await DiagnosticsBundleRunner.SeedFromStoreAsync(new BundleAliaser(), source, ct);
+            Assert.Null(result.FailedNameSource);
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, ok, async (_, _) => await Task.CompletedTask);
+            await scratch.DisposeAsync();
+        }
+    }
+
     /* A store older than 168 has no role columns: the bundle still builds, with nothing to alias from that read. */
     [Fact]
     public async Task AStoreWithoutTheAwsRoleColumns_StillSeeds()

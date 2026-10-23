@@ -641,9 +641,10 @@ public static class CollectorEngineCapability
                        CoveredInsteadSuffix(collectorName);
             }
 
-            /* Deliberately the edition axis's own wording, verbatim past the engine name: the two are the
-               same finding — the collector's own gate excludes every target of this shape — and two
-               spellings of it would eventually disagree about whether it is worth chasing. */
+            /* Not the edition axis's wording any more (#6457): that one leads with what the engine lacks,
+               which is true of a SQL Server edition and not of stock PostgreSQL, where the surface exists
+               and only this collector's own gate says it is not read here. The closing epilogue is still
+               the one shared sentence, so the two never disagree about whether the gap is worth chasing. */
             return engine +
                    $"The {collectorName} collector does not run on that engine — its own AppliesTo gate " +
                    $"excludes it — so this server does not collect {CapturePathOf(collectorName)}, and never " +
@@ -659,10 +660,16 @@ public static class CollectorEngineCapability
            whether the capture path is singular ("the system_health extended-events ring buffer") or plural
            ("the Always On availability replica states"). Number agreement belongs in the template, not in a
            per-entry special case that the next entry would get wrong. */
-        return $"{serverName} runs on {DescribeEngineEdition(engineEdition)} (EngineEdition {engineEdition}). " +
-               $"The {collectorName} collector does not run on that engine — its own AppliesTo gate excludes it — " +
-               $"so this server does not collect {CapturePathOf(collectorName)}, and never will. " +
-               PermanentGapEpilogue + CoveredInsteadSuffix(collectorName);
+        /* Leads with what the ENGINE lacks, not with the collector or its gate (#6457): an operator on an
+           Azure SQL Database who opens Running Jobs wants "this engine has no SQL Agent", the way the web says
+           it, and not a tour of the collector catalog. The collector's name still closes the message, so a
+           script matching on it keeps working, and "and never will." keeps its place. This is the edition
+           axis only: a SQL Server edition's gap is a feature the engine does not ship. The PostgreSQL kind
+           axis above keeps its own wording, because its gaps are Aurora-only surfaces and extensions, not an
+           engine that lacks the feature outright. */
+        return $"{serverName} runs on {DescribeEngineEdition(engineEdition)} (EngineEdition {engineEdition}), " +
+               $"which does not have {CapturePathOf(collectorName)} that this server can read, so this server does not collect {CapturePathOf(collectorName)}, and never will. " +
+               PermanentGapEpilogue + $" (The collector for it is {collectorName}.)" + CoveredInsteadSuffix(collectorName);
     }
 
     /// <summary>What a gated-off collector would have captured. No entry is a vaguer sentence, never a wrong

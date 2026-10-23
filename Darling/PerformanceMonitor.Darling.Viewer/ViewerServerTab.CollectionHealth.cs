@@ -90,6 +90,53 @@ public partial class ViewerServerTab
             _collectionHealthFilterMgr!.UpdateData, _collectionLogFilterMgr!.UpdateData, RenderCollectorDurationChart, ShowCollectionCaveats);
 
         await ShowSkippedCyclesAsync();
+        await ShowSweepPressureAsync();
+    }
+
+    /// <summary>
+    /// #6384: the Sweep Pressure and Heaviest Collectors panels. Its own read after the tab has drawn, as the skipped-slot line is, so it is
+    /// not one of the reads the tab's declared width counts and its failure costs these two panels alone (they say "could not be completed",
+    /// which is not the all-clear); a cancellation still throws.
+    /// </summary>
+    private async Task ShowSweepPressureAsync()
+    {
+        try
+        {
+            ShowSweepPressure(await _dataService.GetSweepPressureAsync(_server.ServerId));
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            ViewerLogger.Warn("Collection Health", $"Sweep pressure read failed: {ex.Message}");
+            ShowSweepPressure(null, SweepPressurePanel.Unreadable);
+        }
+    }
+
+    /// <summary>
+    /// Draws both panels from the report: the roll-up lines and the heaviest-collector rows, or, when there is no report (the server has no
+    /// collection log rows in the window, which the web answers as unavailable) or the read failed, the one sentence in place of the grids' rows.
+    /// </summary>
+    /// <param name="report">The report, or null.</param>
+    /// <param name="emptyText">What to say when there is no report.</param>
+    internal void ShowSweepPressure(SweepPressureReport? report, string emptyText = SweepPressurePanel.NoLogRows)
+    {
+        if (report is null)
+        {
+            SweepPressureStatsGrid.ItemsSource = null;
+            HeaviestCollectorsGrid.ItemsSource = null;
+            SweepPressureNoDataMessage.Text = emptyText;
+            SweepPressureNoDataMessage.Visibility = Visibility.Visible;
+            return;
+        }
+
+        SweepPressureStatsGrid.ItemsSource = SweepPressurePanel.StatRows(report.Pressure);
+        var rows = SweepPressurePanel.GridRows(report);
+        HeaviestCollectorsGrid.ItemsSource = rows;
+        SweepPressureNoDataMessage.Text = SweepPressurePanel.NoTimings;
+        SweepPressureNoDataMessage.Visibility = rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     /// <summary>
@@ -414,12 +461,89 @@ public partial class ViewerServerTab
         }
     }
 
+    /// <summary>True while a Collection Health run is going: one at a time on this tab, so the buttons and a second click ignore each other.</summary>
+    private bool _collectorRunActive;
+
+    /// <summary>"Run all collectors now" (#6382): every enabled collector for this server, once, now. The web's #5941 button.</summary>
+    private async void RunAllCollectors_Click(object sender, RoutedEventArgs e) => await RunCollectorsNowAsync(null);
+
+    /// <summary>The Health Summary row's "Run now" (#6382): that one collector, once, now, even when it is disabled.</summary>
+    private async void RunCollectorNow_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button { DataContext: CollectorHealthRow row } && !string.IsNullOrEmpty(row.CollectorName))
+        {
+            await RunCollectorsNowAsync(new[] { row.CollectorName });
+        }
+    }
+
+    /// <summary>
+    /// Sends the <c>snapshot_now</c> command for this server (<see cref="ViewerDataService.RequestCollectorRunAsync"/>), the command
+    /// the Active Queries "Latest Snapshot" button and the web's run route send, and says the web's words about the result
+    /// (<see cref="ViewerCollectorRun"/>). A finished run reloads the tab so its grids show the new rows. A read-only seat cannot send
+    /// commands (the same rule as Purge Now and Latest Snapshot) and is told so on the status line.
+    /// </summary>
+    private async Task RunCollectorsNowAsync(IReadOnlyList<string>? collectors)
+    {
+        if (_collectorRunActive)
+        {
+            return;
+        }
+
+        if (_dataService.IsReadOnly)
+        {
+            ShowCollectorRunStatus(ViewerCollectorRun.ReadOnlyText);
+            return;
+        }
+
+        _collectorRunActive = true;
+        RunAllCollectorsButton.IsEnabled = false;
+        ShowCollectorRunStatus(ViewerCollectorRun.RunningText(collectors));
+        try
+        {
+            var result = await _dataService.RequestCollectorRunAsync(_server.ServerId, collectors);
+            ShowCollectorRunStatus(ViewerCollectorRun.Describe(result, out var succeeded));
+            if (succeeded)
+            {
+                await LoadHealthAsync();
+            }
+        }
+        catch (ViewerReadOnlyException)
+        {
+            /* Grants changed under us (the enqueue already threw). */
+            ShowCollectorRunStatus(ViewerCollectorRun.ReadOnlyText);
+        }
+        catch (Exception ex)
+        {
+            ShowCollectorRunStatus("Not run: " + ex.Message);
+        }
+        finally
+        {
+            _collectorRunActive = false;
+            RunAllCollectorsButton.IsEnabled = true;
+        }
+    }
+
+    private void ShowCollectorRunStatus(string text)
+    {
+        CollectorRunIndicator.Text = text;
+        CollectorRunIndicator.Visibility = text.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+    }
+
     /// <summary>
     /// Double-click a Health Summary row to open that collector's full collection history. Copied from
     /// Lite's <c>CollectionHealthGrid_MouseDoubleClick</c>, repointed to the viewer's CollectionLogWindow.
+    /// A double-click that lands on the row's "Run now" button (#6382) is two clicks on that button, not a drill.
     /// </summary>
     private void CollectionHealthGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
+        for (var node = e.OriginalSource as DependencyObject; node is not null && node != CollectionHealthGrid; node = System.Windows.Media.VisualTreeHelper.GetParent(node))
+        {
+            if (node is Button)
+            {
+                return;
+            }
+        }
+
         if (CollectionHealthGrid.SelectedItem is not CollectorHealthRow item) return;
 
         var window = new CollectionLogWindow(_dataService, _server.ServerId, item.CollectorName)

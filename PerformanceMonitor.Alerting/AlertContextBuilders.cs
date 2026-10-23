@@ -773,6 +773,17 @@ public static class AlertContextBuilders
                 $"estimated from {finding.SampledEvents:N0} sampled events: {finding.JudgedCount / finding.CoveredMinutes:N1} per minute is not muted")));
         }
 
+        if (finding.ExcludedSamples > 0)
+        {
+            reading.Fields.Add(("Excluded", string.Create(CultureInfo.InvariantCulture,
+                $"{finding.ExcludedSamples:N0} of {finding.SampledEvents:N0} sampled events came from SSMS IntelliSense cancelling its own metadata queries; they are left out of the rate judged")));
+        }
+
+        if (finding.Bars is not null)
+        {
+            reading.Fields.Add(("Bar", AttentionEvaluator.BarSentence(finding)));
+        }
+
         items.Add(reading);
 
         /* 2. The top statements (the statement filter judges each sample text before it is cut), the sampled events a statement
@@ -803,11 +814,33 @@ public static class AlertContextBuilders
             lookback ? "Recent Database" : "Database", window.TopDatabases);
         AddTopList(items, lookback ? $"Top client applications (sampled events{lookbackNote})" : "Top client applications (sampled events)",
             lookback ? "Recent Client Application" : "Client Application", window.TopApplications);
+
+        /* 4. #6553: the client hosts, so the card says WHO was timing out without a second read. Every line wears the same label,
+           "Client Host": the dataDetail masker classes a field by its label, and a numbered label ("Client Host 2") is not a host
+           to it. The mute dialogs read no host, so this list pre-fills nothing. */
+        AddTopHostList(items, lookback ? $"Top client hosts (sampled events{lookbackNote})" : "Top client hosts (sampled events)", window.Hosts);
         return items;
     }
 
     /// <summary>How many statements, databases and applications the Client Timeouts card lists.</summary>
     public const int AttentionTopListCap = 5;
+
+    private static void AddTopHostList(List<AlertDetailItem> items, string heading, IReadOnlyList<AttentionTopItem> hosts)
+    {
+        if (hosts.Count == 0)
+        {
+            return;
+        }
+
+        var item = new AlertDetailItem { Heading = heading, Fields = new() };
+        for (var i = 0; i < Math.Min(hosts.Count, AttentionTopListCap); i++)
+        {
+            item.Fields.Add(("Client Host", hosts[i].Name));
+            item.Fields.Add(("Sampled Events", hosts[i].Samples.ToString("N0", CultureInfo.InvariantCulture)));
+        }
+
+        items.Add(item);
+    }
 
     private static void AddTopList(List<AlertDetailItem> items, string heading, string label, IReadOnlyList<AttentionTopItem> top)
     {

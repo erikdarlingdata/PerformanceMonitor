@@ -22,6 +22,7 @@ internal static class InvestigationFieldMasking
         ["earlier_reports"] = ["root_cause", "summary"],
         ["recent_changes"] = ["text"],
         ["prior_links"] = ["url", "key"],
+        ["known_patterns"] = ["note"],
     };
 
     /// <summary>

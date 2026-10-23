@@ -54,12 +54,15 @@ public sealed partial class ViewerDataService
         "server_id, name, host, database, auth, username, encrypted_password, encrypt_mode, " +
         "trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases, " +
         "monthly_cost_usd, capture_plans, is_enabled, alert_delivery_mode_override, engine, port, " +
-        "aws_role_arn, aws_external_id";
+        "aws_role_arn, aws_external_id, query_store_replica";
 
-    /* #5452: aws_role_arn and aws_external_id ($19, $20) are the per-server AWS role. aws_external_id_set is NOT a
+    /* #6254: query_store_replica ($21) is the host (or listener) a Query Store read may use instead of the primary. The viewer
+       reads it into every row and writes it back normalized (QueryStoreReplicaSetting), because the password it seals is bound
+       to it: a viewer that dropped or changed it would seal a password the service cannot open.
+       #5452: aws_role_arn and aws_external_id ($19, $20) are the per-server AWS role. aws_external_id_set is NOT a
        column a write names: the store computes it (a stored generated column), so an INSERT that listed it would fail. */
     private const string MonitoredServerValues =
-        "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, " +
+        "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, " +
         "(now() AT TIME ZONE 'UTC'), (now() AT TIME ZONE 'UTC')";
 
     /// <summary>Upsert by <c>server_id</c> — the Edit save. ON CONFLICT rewrites every field but
@@ -88,12 +91,13 @@ ON CONFLICT (server_id) DO UPDATE SET
     engine = EXCLUDED.engine,
     port = EXCLUDED.port,
     aws_role_arn = EXCLUDED.aws_role_arn,
-    /* The stored external ID is never read back to this seat: it is replaced only when $21 says one was typed or the
+    query_store_replica = EXCLUDED.query_store_replica,
+    /* The stored external ID is never read back to this seat: it is replaced only when $22 says one was typed or the
        box was cleared, and a cleared role takes it along (the table's check needs a role for an ID). A role that
        changes with nothing typed clears it too, because an external ID belongs to the role it was set for. */
     aws_external_id = CASE
         WHEN EXCLUDED.aws_role_arn IS NULL THEN NULL
-        WHEN $21 THEN EXCLUDED.aws_external_id
+        WHEN $22 THEN EXCLUDED.aws_external_id
         WHEN EXCLUDED.aws_role_arn IS DISTINCT FROM config_monitored_servers.aws_role_arn THEN NULL
         ELSE config_monitored_servers.aws_external_id END,
     modified_at = (now() AT TIME ZONE 'UTC')";
@@ -140,7 +144,7 @@ ON CONFLICT (server_id) DO NOTHING";
 SELECT server_id, name, host, database, auth, username, encrypt_mode,
        trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases,
        monthly_cost_usd, capture_plans, is_enabled, created_at, alert_delivery_mode_override, engine, port,
-       aws_role_arn, aws_external_id_set
+       aws_role_arn, aws_external_id_set, query_store_replica
 FROM config_monitored_servers
 ORDER BY name";
 
@@ -152,7 +156,7 @@ ORDER BY name";
 SELECT server_id, name, host, database, auth, username, encrypted_password, encrypt_mode,
        trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases,
        monthly_cost_usd, capture_plans, is_enabled, created_at, alert_delivery_mode_override, engine, port,
-       aws_role_arn, aws_external_id_set
+       aws_role_arn, aws_external_id_set, query_store_replica
 FROM config_monitored_servers
 WHERE server_id = $1";
 
@@ -165,7 +169,7 @@ WHERE server_id = $1";
 SELECT server_id, name, host, database, auth, username, encrypt_mode,
        trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases,
        monthly_cost_usd, capture_plans, is_enabled, created_at, alert_delivery_mode_override, engine, port,
-       aws_role_arn, aws_external_id_set
+       aws_role_arn, aws_external_id_set, query_store_replica
 FROM config_monitored_servers
 WHERE server_id = $1";
 
@@ -205,7 +209,7 @@ WHERE server_id = $1";
 SELECT server_id, name, host, database, auth, username, encrypt_mode,
        trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases,
        monthly_cost_usd, capture_plans, is_enabled, created_at, alert_delivery_mode_override, engine, port,
-       aws_role_arn, aws_external_id_set
+       aws_role_arn, aws_external_id_set, query_store_replica
 FROM config_monitored_servers
 WHERE host = $1
 AND   database IS NOT DISTINCT FROM $2
@@ -271,6 +275,59 @@ FROM config_monitored_servers c
 LEFT JOIN servers s ON s.server_id = c.server_id
 ORDER BY COALESCE(s.display_name, c.name)";
 
+    /// <summary>The store version that added <c>collect.servers.machine_identity</c> (V212, #6285). A store older than this has no
+    /// column to compare, so the sidebar shows no same-machine flag rather than failing the list.</summary>
+    internal const int MachineIdentityStoreSchemaVersion = 212;
+
+    /// <summary>
+    /// The enabled registrations that last reported the same machine identity as another enabled one (#6351), one row per registration
+    /// with the OTHER registrations' names. Worked out at read, never stored, so the flag is gone when an address moves back. NULL never
+    /// matches. An agent-scoped notification route on one of them does not cover the other.
+    /// </summary>
+    internal const string SameMachineSql = @"
+SELECT s.server_id, array_agg(COALESCE(NULLIF(m.display_name, ''), m.server_name) ORDER BY m.server_name)
+FROM servers s
+JOIN servers m ON m.machine_identity = s.machine_identity AND m.server_id <> s.server_id AND m.is_enabled
+WHERE s.is_enabled
+GROUP BY s.server_id";
+
+    /// <summary>
+    /// Fills <see cref="DarlingServer.SameMachineAs"/> on the listed servers (#6351). A store older than V212 has no column, so nothing
+    /// is read and no flag shows; a failed read leaves the list as it was, because a flag is never worth losing the sidebar over.
+    /// </summary>
+    private async Task AttachSameMachineAsync(List<DarlingServer> servers, CancellationToken cancellationToken)
+    {
+        if (servers.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            var version = _cachedStoreSchemaVersion ??= await GetStoreSchemaVersionAsync(cancellationToken);
+            if (version is not int known || known < MachineIdentityStoreSchemaVersion)
+            {
+                return;
+            }
+
+            var byId = servers.GroupBy(x => x.ServerId).ToDictionary(g => g.Key, g => g.First());
+            await using var command = _dataSource.CreateCommand(SameMachineSql);
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (byId.TryGetValue(reader.GetInt32(0), out var server))
+                {
+                    server.SameMachineAs = reader.GetFieldValue<string[]>(1);
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            ViewerLogger.Warn("App", $"Same-machine flag read failed: {ex.Message}");
+        }
+    }
+
     /// <summary>
     /// The managed server set for the sidebar. Config-authoritative once the service has seeded the store
     /// (added servers appear, removed ones disappear); on a pre-seed store (<c>config_service</c> absent) it
@@ -318,6 +375,7 @@ ORDER BY COALESCE(s.display_name, c.name)";
                 reader.IsDBNull(9) ? null : reader.GetDateTime(9)));
         }
 
+        await AttachSameMachineAsync(servers, cancellationToken);
         return servers;
     }
 
@@ -470,7 +528,7 @@ ORDER BY COALESCE(s.display_name, c.name)";
         await using var command = new NpgsqlCommand(MonitoredServerUpsertSql, connection, transaction);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         BindMonitoredServer(command, row);
-        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = row.AwsExternalIdSent });       // $21
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = row.AwsExternalIdSent });       // $22
         try
         {
             await ExecuteWriteAsync(command, cancellationToken);
@@ -524,7 +582,8 @@ ORDER BY COALESCE(s.display_name, c.name)";
     public const string MonitoredServerStoredReachSql = @"
 SELECT host, COALESCE(port, 0), engine, database, read_only_intent, auth, username, encrypt_mode, trust_server_certificate,
        multi_subnet_failover, COALESCE(encrypted_password = $2, false),
-       (COALESCE(remediation_encrypted_password, '') <> '' OR COALESCE(hypothetical_index_encrypted_password, '') <> '')
+       (COALESCE(remediation_encrypted_password, '') <> '' OR COALESCE(hypothetical_index_encrypted_password, '') <> ''),
+       query_store_replica
 FROM config_monitored_servers
 WHERE server_id = $1";
 
@@ -563,6 +622,8 @@ WHERE server_id = $1";
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (!await reader.ReadAsync(cancellationToken))
             {
+                /* No stored row: the upsert inserts, which is a new registration. */
+                ThrowIfHostRefused(row, null);
                 return;
             }
 
@@ -571,7 +632,7 @@ WHERE server_id = $1";
                 reader.IsDBNull(3) ? null : reader.GetString(3), !reader.IsDBNull(4) && reader.GetBoolean(4),
                 reader.IsDBNull(5) ? null : reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6),
                 reader.IsDBNull(7) ? null : reader.GetString(7), !reader.IsDBNull(8) && reader.GetBoolean(8),
-                !reader.IsDBNull(9) && reader.GetBoolean(9));
+                !reader.IsDBNull(9) && reader.GetBoolean(9), reader.IsDBNull(12) ? null : reader.GetString(12));
             carriesStoredBlob = reader.GetBoolean(10);
             holdsRemediationSecret = reader.GetBoolean(11);
         }
@@ -583,6 +644,9 @@ WHERE server_id = $1";
         {
             throw new ViewerSchemaSkewException(ex);
         }
+
+        /* #6352: a changed host is held to the add rule; a row saved before it keeps its host and stays editable. */
+        ThrowIfHostRefused(row, stored.Host, stored.Engine);
 
         var incoming = ViewerPasswordSealer.IdentityOf(row);
         var connectionChanged = ServerConnectionIdentity.Differ(incoming, stored);
@@ -614,6 +678,43 @@ WHERE server_id = $1";
         if (connectionChanged)
         {
             throw new MonitoredServerPasswordNeededException();
+        }
+    }
+
+    /// <summary>
+    /// #6352: null when <paramref name="row"/>'s host may be saved, otherwise the sentence to refuse with. A SQL Server
+    /// host SqlClient would read as a named pipe or an admin connection is refused for a NEW row
+    /// (<paramref name="storedHost"/> null) and for an edit that CHANGES the host; an edit that keeps the host it has is not
+    /// held to it, so a registration saved before the rule stays editable. A PostgreSQL host is not read that way (a
+    /// leading slash is a Unix socket directory there), so it is not held to the rule. The Add/Edit dialog calls this
+    /// before it tests or saves, and the upsert calls it again under its transaction. The add (<see cref="AddMonitoredServerAsync"/>)
+    /// is not checked here: the import of an older registry goes through it, and an existing registration is not blocked.
+    /// </summary>
+    public static string? HostRefusal(MonitoredServerRow row, string? storedHost, string? storedEngine = null)
+    {
+        ArgumentNullException.ThrowIfNull(row);
+        /* A stored PostgreSQL row was never held to the SQL Server host rule, so it has no stored SQL Server host to keep:
+           when the save turns it into a SQL Server row (the upsert writes engine = EXCLUDED.engine) its host is checked. */
+        if (storedHost is not null && new MonitoredServerRow { Engine = storedEngine ?? "" }.IsPostgres)
+        {
+            storedHost = null;
+        }
+
+        /* Ordinal, no trim: a stored "<U+00A0>np:x" is not a pipe and "np:x" is, so they are not the same host. */
+        if (row.IsPostgres
+            || (storedHost is not null && string.Equals(row.Host, storedHost, StringComparison.Ordinal)))
+        {
+            return null;
+        }
+
+        return ServerHostSetting.Refusal(row.Host);
+    }
+
+    private static void ThrowIfHostRefused(MonitoredServerRow row, string? storedHost, string? storedEngine = null)
+    {
+        if (HostRefusal(row, storedHost, storedEngine) is { } refusal)
+        {
+            throw new MonitoredServerHostRefusedException(refusal);
         }
     }
 
@@ -794,12 +895,13 @@ WHERE server_id = $1";
     }
 
     /// <summary>Removes a server definition by id (the Remove action), and the server's tag assignments and query-tag rows
-    /// (#5977) in the same transaction, so a re-added server (same id) does not get its old tags back.</summary>
+    /// (#5977) and its collector overrides and run times (#6454) in the same transaction, so a re-added server (same id) does not get
+    /// its old tags or schedule back.</summary>
     public async Task DeleteMonitoredServerAsync(int serverId, CancellationToken cancellationToken = default)
     {
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-        foreach (var sql in new[] { MonitoredServerDeleteSql, ServerTagStore.ClearForServerSql }.Concat(QueryTagSchema.ClearForServerSqls))
+        foreach (var sql in new[] { MonitoredServerDeleteSql, ServerTagStore.ClearForServerSql }.Concat(QueryTagSchema.ClearForServerSqls).Concat(CollectorScheduleSql.ClearForServerSqls))
         {
             await using var command = new NpgsqlCommand(sql, connection, transaction);
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
@@ -834,9 +936,16 @@ WHERE server_id = $1";
         await ExecuteWriteAsync(command, cancellationToken);
     }
 
-    /// <summary>Binds the 20 upsert/insert parameters ($1..$20) from a row (created_at/modified_at are server-side).</summary>
+    /// <summary>Binds the 21 upsert/insert parameters ($1..$21) from a row (created_at/modified_at are server-side).</summary>
     private static void BindMonitoredServer(NpgsqlCommand command, MonitoredServerRow row)
     {
+        /* #6254: every write of a row binds here. A replica with a protocol prefix or a path is a connection the service would open with
+           its own credentials to a machine the writer names, so it is never stored, whatever surface the row came from. */
+        if (QueryStoreReplicaSetting.Refusal(row.QueryStoreReplica) is { } replicaRefusal)
+        {
+            throw new ArgumentException(replicaRefusal, nameof(row));
+        }
+
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = row.ServerId });                 // $1
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = row.Name });                  // $2
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = row.Host });                  // $3
@@ -861,6 +970,8 @@ WHERE server_id = $1";
         /* #5452: the per-server AWS role and its optional external ID; null = "use the service's own credentials". */
         AddNullableText(command, row.AwsRoleArn);                                                        // $19
         AddNullableText(command, row.AwsExternalId);                                                     // $20
+        /* #6254: written normalized (trimmed, blank = NULL), the form the service binds the password under. */
+        AddNullableText(command, QueryStoreReplicaSetting.Normalize(row.QueryStoreReplica));            // $21
     }
 
     private static MonitoredServerRow ReadMonitoredServerRow(NpgsqlDataReader reader) => new()
@@ -886,6 +997,7 @@ WHERE server_id = $1";
         Port = reader.GetInt32(18),
         AwsRoleArn = reader.IsDBNull(19) ? null : reader.GetString(19),
         AwsExternalIdSet = reader.GetBoolean(20),
+        QueryStoreReplica = reader.IsDBNull(21) ? null : reader.GetString(21),
     };
 
     /// <summary>
@@ -920,6 +1032,7 @@ WHERE server_id = $1";
         /* #5452: the role and whether an external ID is stored; never the ID itself, which the read-only roles cannot select. */
         AwsRoleArn = reader.IsDBNull(18) ? null : reader.GetString(18),
         AwsExternalIdSet = reader.GetBoolean(19),
+        QueryStoreReplica = reader.IsDBNull(20) ? null : reader.GetString(20),
     };
 
     private static void AddTextArray(NpgsqlCommand command, IEnumerable<string>? values) =>
@@ -1029,6 +1142,10 @@ public sealed class MonitoredServerRow
     /// written.</summary>
     public bool AwsExternalIdSet { get; set; }
 
+    /// <summary>The host (or listener), optionally with a port, a Query Store read may use instead of the primary (#6254); null
+    /// or blank = off. Stored in <c>query_store_replica</c> and a field of the connection identity: the password is sealed for it.</summary>
+    public string? QueryStoreReplica { get; set; }
+
     /// <summary>Server-set creation time (read-only, from the store's <c>created_at</c>); null when not read.</summary>
     public DateTime? CreatedAt { get; set; }
 }
@@ -1081,6 +1198,13 @@ public sealed class MonitoredServerPasswordNeededException : InvalidOperationExc
     {
     }
 }
+
+/// <summary>
+/// <see cref="ViewerDataService.UpsertMonitoredServerAsync"/> refused a host (#6352): a new or changed SQL Server host
+/// that SqlClient would read as a named pipe or an admin connection (<see cref="ServerHostSetting.Refusal"/>). The dialog's
+/// save handler shows the message as it is. Nothing was written.
+/// </summary>
+public sealed class MonitoredServerHostRefusedException(string message) : InvalidOperationException(message);
 
 /// <summary>
 /// <see cref="ViewerDataService.UpsertMonitoredServerAsync"/> refused an edit (#5240): under the identity lock,

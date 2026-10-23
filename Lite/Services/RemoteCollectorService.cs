@@ -230,6 +230,9 @@ public partial class RemoteCollectorService
         /// </summary>
         public string? HostNote { get; set; }
 
+        /// <summary>#6254: this run's <c>collection_log.read_source</c> (where Query Store was read); null when the server has no replica set.</summary>
+        public string? ReadSource { get; set; }
+
         /// <summary>
         /// The labelled counts the DEFINITION measured on the target this cycle (#3161), copied off
         /// <see cref="CollectorContext.Measurements"/> when the run reaches its storage phase. Empty for
@@ -256,6 +259,7 @@ public partial class RemoteCollectorService
         public void ResetNote()
         {
             HostNote = null;
+            ReadSource = null;
             Measurements.Clear();
         }
 
@@ -618,6 +622,16 @@ public partial class RemoteCollectorService
                 skippedOffline++;
                 NoteServerOffline(server);
                 AppLogger.Debug("Scheduler", $"Skipping offline server '{server.DisplayName}'");
+                continue;
+            }
+
+            /* A server whose host this user has not confirmed is not connected to at all: its status and the Edit dialog
+               say why. Every connection string is refused for it anyway; skipping here keeps the cycle from logging one
+               refusal per collector. */
+            if (_serverManager.HostChange(server) != null)
+            {
+                skippedOffline++;
+                AppLogger.Debug("Scheduler", $"Skipping server '{server.DisplayName}': its host is not confirmed");
                 continue;
             }
 
@@ -1084,7 +1098,7 @@ public partial class RemoteCollectorService
         }
 
         // Log the collection attempt
-        await LogCollectionAsync(GetServerId(server), server.DisplayName, collectorName, startTime, status, errorMessage, rowsCollected, telemetry.SqlMs, telemetry.StorageMs, telemetry.Fanout);
+        await LogCollectionAsync(GetServerId(server), server.DisplayName, collectorName, startTime, status, errorMessage, rowsCollected, telemetry.SqlMs, telemetry.StorageMs, telemetry.Fanout, telemetry.ReadSource);
     }
 
     /// <summary>
@@ -1120,10 +1134,10 @@ public partial class RemoteCollectorService
     /// <summary>
     /// Logs a collection attempt to the collection_log table.
     /// </summary>
-    private Task LogCollectionAsync(int serverId, string serverName, string collectorName, DateTime startTime, string status, string? errorMessage, int rowsCollected, long sqlMs = 0, long duckDbMs = 0, FanoutCost? fanout = null)
+    private Task LogCollectionAsync(int serverId, string serverName, string collectorName, DateTime startTime, string status, string? errorMessage, int rowsCollected, long sqlMs = 0, long duckDbMs = 0, FanoutCost? fanout = null, string? readSource = null)
         => WriteCollectionLogRowAsync(serverId, serverName, collectorName, startTime,
             (int)(DateTime.UtcNow - startTime).TotalMilliseconds, status, errorMessage, rowsCollected,
-            (int)sqlMs, (int)duckDbMs, fanout);
+            (int)sqlMs, (int)duckDbMs, fanout, readSource);
 
     /// <summary>
     /// #5643: records that the collection loop skipped slots, one <c>collection_log</c> row per enabled server, through
@@ -1164,7 +1178,7 @@ public partial class RemoteCollectorService
         }
     }
 
-    private async Task WriteCollectionLogRowAsync(int serverId, string serverName, string collectorName, DateTime startTime, int durationMs, string status, string? errorMessage, int rowsCollected, int? sqlMs, int? duckDbMs, FanoutCost? fanout)
+    private async Task WriteCollectionLogRowAsync(int serverId, string serverName, string collectorName, DateTime startTime, int durationMs, string status, string? errorMessage, int rowsCollected, int? sqlMs, int? duckDbMs, FanoutCost? fanout, string? readSource = null)
     {
         try
         {
@@ -1178,8 +1192,8 @@ public partial class RemoteCollectorService
 
             using var command = connection.CreateCommand();
             command.CommandText = @"
-                INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms, fanout_item_count, slowest_item, slowest_item_ms)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)";
+                INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms, fanout_item_count, slowest_item, slowest_item_ms, read_source)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)";
 
             command.Parameters.Add(new DuckDBParameter { Value = GenerateCollectionId() });
             command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -1200,6 +1214,8 @@ public partial class RemoteCollectorService
             command.Parameters.Add(new DuckDBParameter { Value = fanout.HasValue ? fanout.Value.ItemCount : (object)DBNull.Value });
             command.Parameters.Add(new DuckDBParameter { Value = fanout.HasValue ? fanout.Value.SlowestItem : (object)DBNull.Value });
             command.Parameters.Add(new DuckDBParameter { Value = fanout.HasValue ? fanout.Value.SlowestItemMs : (object)DBNull.Value });
+
+            command.Parameters.Add(new DuckDBParameter { Value = readSource ?? (object)DBNull.Value });
 
             await command.ExecuteNonQueryAsync();
 
@@ -1663,7 +1679,7 @@ public partial class RemoteCollectorService
     /// Creates a SQL connection to a remote server.
     /// Throws InvalidOperationException if an interactive sign-in was cancelled by the user.
     /// </summary>
-    protected async Task<SqlConnection> CreateConnectionAsync(ServerConnection server, CancellationToken cancellationToken)
+    protected async Task<SqlConnection> CreateConnectionAsync(ServerConnection server, CancellationToken cancellationToken, bool replica = false)
     {
         /* Serialize authentication for any mode that can put a window in front of the user, so two
            collectors starting together cannot raise two prompts. Asked about the mode, not tested
@@ -1689,7 +1705,11 @@ public partial class RemoteCollectorService
                 }
             }
 
-            var connectionString = _serverManager.CredentialResolver.GetConnectionString(server);
+            /* #6254: the Query Store replica connection is this same open with the replica host and read-only intent. */
+            var connectionString = replica
+                ? _serverManager.CredentialResolver.GetQueryStoreReplicaConnectionString(server)
+                    ?? throw new InvalidOperationException("No Query Store replica is set for this server.")
+                : _serverManager.CredentialResolver.GetConnectionString(server);
 
             var builder = new SqlConnectionStringBuilder(connectionString)
             {

@@ -77,8 +77,45 @@ WHERE server_id = $1";
             return null;
         }
 
-        return Envelope(serverName, engineEdition, engineKind, collectorName);
+        var engineEnvelope = Envelope(serverName, engineEdition, engineKind, collectorName);
+        if (engineEnvelope is not null || !IsReadableSecondaryGated(collectorName))
+        {
+            return engineEnvelope;
+        }
+
+        /* #6554: the collectors skip every readable-secondary database, so on a secondary these reads are empty by design. */
+        return await DarlingRuntimePrecondition.QueryStoreReadableSecondaryStatusAsync(postgres, serverId, serverName, cancellationToken);
     }
+
+    /// <summary>The collectors that skip a readable secondary's databases (bit 8 of readonly_reason), so a read of what they store can be empty by design there (#6554).</summary>
+    internal static bool IsReadableSecondaryGated(string collectorName) =>
+        collectorName is "query_store" or "query_store_forced_plans" or "plan_correction";
+
+    /// <summary>
+    /// #6439: the <c>not_collected</c> envelope for the tempdb file I/O read on an Azure SQL Database, or <c>null</c> on any other
+    /// engine. <c>file_io_stats</c> runs there, but the database sees only its own files, so a tempdb row never exists and no
+    /// collector setting can make one. The sentence carries the same engine-gate mark and engine name as
+    /// <see cref="NotCollectedStatusAsync"/>'s, so the web page shows the same plain "Azure SQL Database does not have this
+    /// data." line as its other Azure panels instead of sending the reader to check collection.
+    /// </summary>
+    public static async Task<string?> TempDbFileIoNotCollectedStatusAsync(
+        NpgsqlDataSource postgres,
+        int serverId,
+        string serverName,
+        CancellationToken cancellationToken = default) =>
+        TempDbFileIoNotCollectedStatus(serverName, await EngineEditionAsync(postgres, serverId, cancellationToken));
+
+    /// <summary>The pure half of <see cref="TempDbFileIoNotCollectedStatusAsync"/>: the envelope for this engine edition, or <c>null</c>.</summary>
+    internal static string? TempDbFileIoNotCollectedStatus(string serverName, int engineEdition) =>
+        engineEdition == CollectorEngineCapability.AzureSqlDatabaseEngineEdition
+            ? McpHelpers.Status(
+                "not_collected",
+                $"{serverName} runs on {CollectorEngineCapability.DescribeEngineEdition(engineEdition)} (EngineEdition {engineEdition}). " +
+                "The file I/O collector runs there, but an Azure SQL Database sees only its own database's files, so this server " +
+                "has no tempdb file I/O rows, and never will. " +
+                "This is a permanent engine capability gap, not a collection outage: checking collection health, " +
+                "enabling a collector or starting a capture cannot change it.")
+            : null;
 
     /// <summary>The <c>not_collected</c> envelope for this engine and collector, or <c>null</c> when the collector can run there.</summary>
     private static string? Envelope(string serverName, int engineEdition, string? engineKind, string collectorName)

@@ -191,6 +191,15 @@ public sealed class CollectorEngineCapabilityTests
 
         /* The words the OLD message used are the ones that sent an Azure operator hunting. */
         Assert.DoesNotContain("check that collection is running", message, StringComparison.OrdinalIgnoreCase);
+
+        /* #6457 review: the closing clause repeats the capture path instead of saying "it", so the sentence
+           agrees in number for a plural path ("the sys.configurations instance settings") too. */
+        var plural = CollectorEngineCapability.NotCollectedMessage("azure-db-01", AzureSqlDb, MonitoredEngineKind.SqlServer, "server_config");
+        Assert.NotNull(plural);
+        Assert.Contains(
+            "which does not have the sys.configurations instance settings that this server can read, so this server does not collect the sys.configurations instance settings, and never will. ",
+            plural, StringComparison.Ordinal);
+        Assert.DoesNotContain("does not collect it", plural, StringComparison.Ordinal);
     }
 
     /// <summary>

@@ -178,23 +178,23 @@ public sealed class QueryStoreTopMcpLiveTests
            different, earlier-firing one. ---- */
 
         Assert.False((await QueryStoreIntervalWide.ReadsTableAsync(
-            connection, ServerId, queryEnd.AddHours(-1), queryEnd, queryEnd, DarlingDataReader.QueryStoreTopMinWindow, 30, null, ct)).UseTable,
+            connection, ServerId, queryEnd.AddHours(-1), queryEnd, queryEnd, DarlingDataReader.QueryStoreTopMinWindow, 30, null, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow, ct)).UseTable,
             "a window under 12 hours must read raw");
 
         Assert.False((await QueryStoreIntervalWide.ReadsTableAsync(
-            connection, ServerId, WindowStart, queryEnd, appliedThrough.AddMinutes(-1), DarlingDataReader.QueryStoreTopMinWindow, 30, null, ct)).UseTable,
+            connection, ServerId, WindowStart, queryEnd, appliedThrough.AddMinutes(-1), DarlingDataReader.QueryStoreTopMinWindow, 30, null, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow, ct)).UseTable,
             "a literal end (an MCP as_of) before applied_through must read raw");
 
         await ExecAsync(connection,
             "INSERT INTO collect.query_store_interval_wide_pending (server_id, collection_time, database_name, recorded_at) VALUES (@server_id, @cutoff, 'qsA', @cutoff)",
             WindowStart, ct);
         Assert.False((await QueryStoreIntervalWide.ReadsTableAsync(
-            connection, ServerId, WindowStart, queryEnd, queryEnd, DarlingDataReader.QueryStoreTopMinWindow, 30, null, ct)).UseTable,
+            connection, ServerId, WindowStart, queryEnd, queryEnd, DarlingDataReader.QueryStoreTopMinWindow, 30, null, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow, ct)).UseTable,
             "a pending batch must read raw regardless of coverage");
         await ExecAsync(connection, "DELETE FROM collect.query_store_interval_wide_pending WHERE server_id = @server_id", ct);
 
         var passingResult = await QueryStoreIntervalWide.ReadsTableAsync(
-            connection, ServerId, WindowStart, queryEnd, queryEnd, DarlingDataReader.QueryStoreTopMinWindow, 30, null, ct);
+            connection, ServerId, WindowStart, queryEnd, queryEnd, DarlingDataReader.QueryStoreTopMinWindow, 30, null, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow, ct);
         if (!passingResult.UseTable)
         {
             var hasLegacyRow = await HasLegacyRowAsync(connection, passingResult.ClampedStart, queryEnd, ct);

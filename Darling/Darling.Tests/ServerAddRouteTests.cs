@@ -181,6 +181,26 @@ public sealed class ServerAddRouteTests
         AssertNoSecret(rig, body);
     }
 
+    /// <summary>#6352: the route hands the body to the real add core, which refuses a named-pipe or path host as an
+    /// invalid entry before any store access or probe (the store here is one that does not exist).</summary>
+    [Theory]
+    [InlineData("np:sql01")]
+    [InlineData("admin:sql01")]
+    [InlineData("\\\\sql01\\pipe\\sql\\query")]
+    public async Task APipeOrAdminOrPathHost_IsRefusedByTheRealCore_AsAnInvalidEntry(string host)
+    {
+        await using var dead = NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Database=none;Username=none;Timeout=1;Command Timeout=1");
+        await using var rig = await StartAsync(body => DarlingMcpServerAdminTools.AddServersAsync(
+            dead, body, (_, _) => throw new InvalidOperationException("the probe must not run for a refused host"), CancellationToken.None));
+
+        var (status, body) = await PostAsync(rig, JsonSerializer.Serialize(new[] { new { host } }));
+
+        Assert.Equal(HttpStatusCode.OK, status);
+        var entry = JsonNode.Parse(body)!["results"]![0]!;
+        Assert.Equal("invalid", entry["status"]!.GetValue<string>());
+        Assert.Contains("is not accepted", entry["detail"]!.GetValue<string>(), StringComparison.Ordinal);
+    }
+
     /* ═══════════════════════════ limits ═══════════════════════════ */
 
     [Fact]

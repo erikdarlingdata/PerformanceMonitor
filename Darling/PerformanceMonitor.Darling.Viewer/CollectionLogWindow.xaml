@@ -105,7 +105,7 @@
                         <TextBlock Text="Store Duration" FontWeight="Bold"/>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
-                <DataGridTextColumn Binding="{Binding ErrorMessage}" Width="*">
+                <DataGridTextColumn Binding="{Binding MessageFormatted}" Width="*">
                     <DataGridTextColumn.Header>
                         <TextBlock Text="Error Message" FontWeight="Bold"/>
                     </DataGridTextColumn.Header>

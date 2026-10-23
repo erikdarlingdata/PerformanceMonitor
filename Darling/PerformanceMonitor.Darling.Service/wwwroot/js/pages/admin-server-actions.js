@@ -15,7 +15,7 @@
    Self-contained: admin.js hands this file its helpers, so a change here never touches that file's tab code. */
 
 import { VIZ } from "../panels.js";
-import { el, mount, errorStrip, noticeStrip, apiGet, apiWrite } from "../util.js";
+import { el, mount, errorStrip, noticeStrip, listOnlyNote, apiGet, apiWrite } from "../util.js";
 
 export const SERVER_ACTION_COLUMNS = [
   { key: "server", label: "Server" },
@@ -35,9 +35,7 @@ export function serverActionChangedBy(setBy) {
 const ENGINE_CANNOT_RUN =
   "This server's engine can't run this action. Turn it off to clear it.";
 
-const LIST_ONLY =
-  "This dashboard signs in to the store as the viewer role (managed and compose stores), so this page lists the switches only. " +
-  "To turn one on or off, use the Viewer app, or run the web under the admin login.";
+const listOnly = (managed, adminWritesOff) => listOnlyNote(managed, "this page lists the switches only", "To turn one on or off", adminWritesOff);
 const NOT_SIGNED_IN =
   "Sign in to the dashboard as an admin to turn a switch on or off; this page lists the switches only. A dashboard with no sign-in configured " +
   "never changes them. Or use the Viewer app.";
@@ -143,7 +141,12 @@ export async function buildServerActions(body, generation, ctx) {
   if (bad) return mount(body, nodes.concat([bad]));
   const data = res.data || {};
   const canDecide = data.can_decide === true;
-  nodes.push(noticeStrip(canDecide ? CAN_DECIDE : data.signed_in_admin === false ? NOT_SIGNED_IN : LIST_ONLY));
+  let notice = canDecide ? CAN_DECIDE : data.signed_in_admin === false ? NOT_SIGNED_IN : null;
+  if (notice === null) {
+    const session = await ctx.getSession();
+    notice = listOnly(session.managed_store === true, session.admin_writes_off === true);
+  }
+  nodes.push(noticeStrip(notice));
   /* The on/off control sits before Note, so it stays on screen at 1280 px beside a long note. */
   const changeColumn = {
     key: "change", label: "Change", csv: false, copy: false,

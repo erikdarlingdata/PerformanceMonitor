@@ -98,6 +98,10 @@ async function settle(page) {
 async function checkPage(browser, spec) {
   const problems = [];
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  /* The dashboard asks for its token on loopback too: run-ui-smoke.ps1 signs in once and passes the session cookie. */
+  if (process.env.UI_SMOKE_SESSION_COOKIE) {
+    await context.addCookies([{ name: "darling_web_session", value: process.env.UI_SMOKE_SESSION_COOKIE, url: baseUrl }]);
+  }
   /* A trace of every page load; kept only for a page that fails (out/<page>.trace.zip, open with `npx playwright show-trace`). */
   await context.tracing.start({ screenshots: true, snapshots: true });
   const page = await context.newPage();
@@ -158,6 +162,15 @@ async function checkPage(browser, spec) {
       }
       if (want.state && hit.state !== want.state) problems.push(`panel ${label} is ${hit.state}, wanted ${want.state} ${hit.text}`.trim());
       if (want.minRows != null && (hit.rows ?? 0) < want.minRows) problems.push(`panel ${label} has ${hit.rows ?? 0} rows, wanted >= ${want.minRows}`);
+    }
+    /* #6291: the Overview's strips share one SVG in one panel card, so the card's state cannot say a strip has data. A strip the
+       seed fills (CPU, Buffer pool) must draw something: a strip with no samples prints its reason in a .strip-none text. */
+    for (const want of spec.expect?.strips || []) {
+      const got = await page.locator(`#main svg.overview-strips g.strip[data-strip="${want.key}"]`).evaluateAll((els) =>
+        els.map((e) => (e.querySelector(".strip-none") ? "empty" : "data")),
+      );
+      if (!got.length) problems.push(`strip ${want.key} not found`);
+      else if (want.state && got[0] !== want.state) problems.push(`strip ${want.key} is ${got[0]}, wanted ${want.state}`);
     }
     if (spec.expect?.grids?.length) {
       const counts = await page.locator("#main [data-grid]").evaluateAll((els) => els.map((e) => e.querySelectorAll("tbody tr").length));

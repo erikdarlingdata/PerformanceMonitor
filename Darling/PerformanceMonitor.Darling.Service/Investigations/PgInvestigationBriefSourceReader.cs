@@ -9,6 +9,7 @@ using Npgsql;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Common.KnownPatterns;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -109,6 +110,60 @@ WHERE rp.server_id = $1
 ORDER BY rp.submitted_at DESC
 LIMIT $4";
 
+    /* #6565: the reports of other requests on the same server and family, reported in the last SameRootCauseHours hours, whose analysis
+       story has the same root fact (key and database) as this request's story. The story hash is a pure hash of the
+       story's path, so one chain gives one hash; what differs between two requests is the 30-minute join window (FindJoinSql), and a
+       later request on the same fault opens its own request. The root fact (for example the regressed query's hash and database) is what
+       the reports share. Computed here, when the brief is composed, from analysis_findings: a request stores only its story hash. The
+       root is the newest finding for this request's hash at or before the request's open time: the brief composes at claim time, up
+       to the lease after open, and a later analysis run (another database_name, another offender list) must not re-point the match. $1 server, $2 family, $3 this request, $4 limit,
+       $5 now (the live-practice filter), $6 this request's story hash (null: no rows), $7 reported since. Same practice exclusions as
+       EarlierReportsSql. The key and database do not name a plan regression's query (PLAN_REGRESSION is server-wide), so a row also
+       carries this finding's and the candidate's newest remediation_action_json and the reader compares their force targets
+       (InvestigationRootFactMatch). $4 is therefore a candidate cap, not the count a brief names. */
+    internal static readonly string SameRootCauseReportsSql = @"
+WITH root AS (
+    SELECT f.root_fact_key, f.database_name, f.remediation_action_json
+    FROM analysis_findings AS f
+    WHERE f.server_id = $1 AND f.story_path_hash = $6
+      AND f.analysis_time <= (SELECT r0.opened_at AT TIME ZONE 'UTC' FROM config.investigation_requests AS r0 WHERE r0.request_id = $3)
+    ORDER BY f.analysis_time DESC
+    LIMIT 1
+)
+SELECT rp.request_id, rp.submitted_at, rp.agent_id, rp.verdict, rp.root_cause, rp.root_cause_found, rp.summary,
+       root.root_fact_key, root.remediation_action_json,
+       (SELECT f3.remediation_action_json FROM analysis_findings AS f3
+        WHERE f3.server_id = rq.server_id
+          AND f3.story_path_hash = rq.story_path_hash
+          AND f3.root_fact_key = root.root_fact_key
+          AND f3.database_name IS NOT DISTINCT FROM root.database_name
+        ORDER BY f3.analysis_time DESC
+        LIMIT 1) AS candidate_remediation_action_json
+FROM root
+JOIN config.investigation_requests AS rq ON true
+JOIN config.investigation_reports AS rp ON rp.request_id = rq.request_id
+WHERE rq.server_id = $1
+  AND rq.family = $2
+  AND rq.request_id <> $3
+  AND rq.practice_of IS NULL
+  AND rp.submitted_at > $7
+  AND NOT EXISTS (SELECT 1 FROM (" + InvestigationRequestStore.LivePracticeRequestsSql("$5") + @") AS lp WHERE lp.practice_of = rp.request_id)
+  AND EXISTS (
+        SELECT 1 FROM analysis_findings AS f2
+        WHERE f2.server_id = rq.server_id
+          AND f2.story_path_hash = rq.story_path_hash
+          AND f2.root_fact_key = root.root_fact_key
+          AND f2.database_name IS NOT DISTINCT FROM root.database_name)
+ORDER BY rp.submitted_at DESC
+LIMIT $4";
+
+    /// <summary>#6565: how many same-root-cause reports a brief names at most (the newest first).</summary>
+    public const int MaxSameRootCauseReports = 3;
+
+    /// <summary>#6565: how many candidate reports the SQL returns before the reader drops a plan regression on another query, so a
+    /// run of other-query regressions cannot crowd the real match out of <see cref="MaxSameRootCauseReports"/>.</summary>
+    public const int SameRootCauseCandidateCap = 50;
+
     /* #6001: the evidence the capture froze for the request, in the order the sections were written. */
     internal const string EvidenceSql = @"
 SELECT section, state, content::text, captured_at
@@ -206,6 +261,10 @@ LIMIT $5";
        earlier fires of the same rise sit just before the anchor); a fire about 24 hours earlier still counts. One index seek per
        metric (idx_config_alert_log_time on server_id, metric_name, alert_time); the clock test filters inside the Days days. A
        metric with no rows still comes back (day NULL), so the brief says zero.
+       #6261: k is the whole day number the fire counts toward (1 = 24 hours before the anchor), the streak's unit
+       (InvestigationAlertStreak.DaysAgo is the same rule in C#). It is not the date: a 23:50 anchor's window holds a 00:10 fire
+       of the anchor's own date, and a 00:10 anchor's holds a 23:50 fire of the day before the one it counts toward. A date can
+       so hold two k values, and a (day, muted) two rows; the reader adds a date once.
        Types: config.investigation_request_alerts.alert_time is timestamptz and config_alert_log.alert_time is naive UTC, so the
        anchor is taken AT TIME ZONE 'UTC' (as AlertsSql does for the same pair): every comparison and the ::date are then naive
        UTC and none rides the session TimeZone. Past rows do not change, so this is read at compose time. $1 request, $2 server. */
@@ -215,11 +274,11 @@ WITH anchor AS (
 ), m AS (
     SELECT DISTINCT metric_name FROM config.investigation_request_alerts WHERE request_id = $1
 )
-SELECT m.metric_name, a.t, f.day, f.muted, f.n
+SELECT m.metric_name, a.t, f.day, f.muted, f.n, f.k
 FROM m
 CROSS JOIN anchor AS a
 LEFT JOIN LATERAL (
-    SELECT cal.alert_time::date AS day, cal.muted, count(*) AS n
+    SELECT cal.alert_time::date AS day, cal.muted, round(extract(epoch FROM a.t - cal.alert_time) / 86400)::int AS k, count(*) AS n
     FROM config_alert_log AS cal
     CROSS JOIN LATERAL (SELECT mod(mod(extract(epoch FROM cal.alert_time - a.t)::numeric, 86400) + 86400, 86400) AS d) AS o
     WHERE cal.server_id = $2
@@ -227,7 +286,7 @@ LEFT JOIN LATERAL (
       AND cal.alert_time >= a.t - interval '" + InvestigationAlertRecurrence.Days + @" days'
       AND cal.alert_time < a.t - interval '" + InvestigationAlertRecurrence.WindowMinutes + @" minutes'
       AND least(o.d, 86400 - o.d) <= " + (InvestigationAlertRecurrence.WindowMinutes * 60) + @"
-    GROUP BY cal.alert_time::date, cal.muted
+    GROUP BY cal.alert_time::date, cal.muted, 3
 ) AS f ON true
 ORDER BY m.metric_name, f.day DESC";
 
@@ -360,6 +419,43 @@ ORDER BY m.metric_name, f.day DESC";
             }
         }
 
+        /* #6565: a reported request with the same root fact under another story hash comes first, marked, so the brief names it even when
+           ten newer reports crowd it out of the list. A practice request reads none (above). */
+        if (practiceOf is null && request.StoryPathHash is { } storyHash)
+        {
+            var sameRoot = new List<InvestigationEarlierReport>();
+            await using (var command = Command(connection, SameRootCauseReportsSql, request.ServerId, request.Family, requestId,
+                SameRootCauseCandidateCap, now, storyHash, now.AddHours(-InvestigationBriefComposer.SameRootCauseHours)))
+            await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+            {
+                while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    if (sameRoot.Count >= MaxSameRootCauseReports ||
+                        !InvestigationRootFactMatch.IsSameRootCause(
+                            reader.GetString(7),
+                            reader.IsDBNull(8) ? null : reader.GetString(8),
+                            reader.IsDBNull(9) ? null : reader.GetString(9)))
+                        continue;
+
+                    sameRoot.Add(new InvestigationEarlierReport(
+                        reader.GetGuid(0),
+                        reader.GetFieldValue<DateTime>(1),
+                        reader.GetString(2),
+                        reader.GetString(3),
+                        reader.GetString(4),
+                        reader.GetBoolean(5),
+                        reader.IsDBNull(6) ? null : reader.GetString(6),
+                        SameRootCause: true));
+                }
+            }
+
+            if (sameRoot.Count > 0)
+            {
+                var ids = sameRoot.Select(r => r.RequestId).ToHashSet();
+                earlier = sameRoot.Concat(earlier.Where(r => !ids.Contains(r.RequestId))).Take(Math.Max(MaxEarlierReports, sameRoot.Count)).ToList();
+            }
+        }
+
         var notes = new List<InvestigationBriefNote>();
         await using (var command = Command(connection, NotesSql, request.ServerId, now, (object?)practiceOf ?? DBNull.Value))
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
@@ -421,12 +517,14 @@ ORDER BY m.metric_name, f.day DESC";
             int fired = 0, muted = 0;
             var firedDates = new List<DateOnly>();
             var mutedDates = new List<DateOnly>();
+            var daysAgo = new List<int>();
             void Flush()
             {
                 if (metric is not null)
-                    recurrence.Add(new InvestigationAlertRecurrence(metric, around, fired, muted, firedDates, mutedDates));
+                    recurrence.Add(new InvestigationAlertRecurrence(metric, around, fired, muted, firedDates, mutedDates, daysAgo));
                 firedDates = new List<DateOnly>();
                 mutedDates = new List<DateOnly>();
+                daysAgo = new List<int>();
                 fired = 0;
                 muted = 0;
             }
@@ -444,8 +542,20 @@ ORDER BY m.metric_name, f.day DESC";
                 if (reader.IsDBNull(2)) continue;
                 var count = (int)reader.GetInt64(4);
                 var date = DateOnly.FromDateTime(reader.GetFieldValue<DateTime>(2));
-                /* Rows come newest day first, one per (day, muted), so each list is newest first with no repeat. */
-                if (reader.GetBoolean(3)) { muted += count; mutedDates.Add(date); } else { fired += count; firedDates.Add(date); }
+                /* Rows come newest day first, so each list is newest first. A date can come on two rows (#6261: one per day
+                   number k), so it is added once. */
+                if (reader.GetBoolean(3))
+                {
+                    muted += count;
+                    if (!mutedDates.Contains(date)) mutedDates.Add(date);
+                }
+                else
+                {
+                    fired += count;
+                    if (!firedDates.Contains(date)) firedDates.Add(date);
+                }
+
+                daysAgo.Add(reader.GetInt32(5));
             }
 
             Flush();
@@ -464,10 +574,43 @@ ORDER BY m.metric_name, f.day DESC";
             }
         }
 
+        /* #6334: the operator's known-pattern entries, loaded once for the brief and matched in memory for each linked metric at the
+           first alert's time. `recurrence` has one row per linked metric (a metric with no history still comes back) and every row
+           carries the shared first-alert time, so it is the metric list and the anchor, with no query of its own. The load is the
+           alert history's (LoadForAlertsAsync): a store older than V214 has no table and gives no entries and no error. Entries
+           expired at the alert's time are judged by the matcher, not here. A practice request reads none (the composer drops the
+           section for it too): a note can name the cause of the replayed case. */
+        var knownPatterns = new List<InvestigationKnownPatternMatch>();
+        if (practiceOf is null && recurrence.Count > 0)
+        {
+            var entries = await DarlingMcpKnownPatternTools.LoadForAlertsAsync(_postgres, cancellationToken).ConfigureAwait(false);
+            if (entries.Count > 0)
+            {
+                foreach (var item in recurrence)
+                {
+                    foreach (var entry in KnownPatternMatcher.Match(entries, request.ServerId, item.MetricName, item.AroundUtc,
+                        message => _logger?.LogWarning("{Message}", message)))
+                    {
+                        knownPatterns.Add(new InvestigationKnownPatternMatch(item.MetricName, entry.Id, entry.Note, entry.CreatedBy, entry.UpdatedBy));
+                    }
+                }
+            }
+        }
+
         return new InvestigationBriefSources(request, alerts, findings, earlier, changes, notes, profiles,
             priorLinks.Count > 0 ? priorLinks : null, requestUrl, practiceOf is not null,
-            recurrence.Count > 0 ? recurrence : null, evidence.Count > 0 ? evidence : null);
+            recurrence.Count > 0 ? recurrence : null, evidence.Count > 0 ? evidence : null,
+            knownPatterns.Count > 0 ? knownPatterns : null,
+            await QueryStoreNotCollectedAsync(request, cancellationToken).ConfigureAwait(false));
     }
+
+    /// <summary>#6554: the reason a Change Watch request's Query Store reads will be empty, or null (every other request, and a server whose
+    /// Query Store is collected). The wording is <see cref="DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync"/>'s, the same
+    /// text the Query Store reads answer with.</summary>
+    private Task<string?> QueryStoreNotCollectedAsync(InvestigationBriefRequest request, CancellationToken cancellationToken) =>
+        string.Equals(request.FirstMetric, InvestigationTriggerKinds.ChangeWatchMetric, StringComparison.Ordinal)
+            ? DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(_postgres, request.ServerId, request.ServerName, cancellationToken)
+            : Task.FromResult<string?>(null);
 
     /// <summary>The latest findings for the server over 24 hours, collapsed per chain, the request's own story first, each
     /// remediation reduced to its verdict and blockers (the store's forcing state read as <c>get_analysis_findings</c> does).</summary>

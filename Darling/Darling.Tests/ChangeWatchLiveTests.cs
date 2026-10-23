@@ -36,7 +36,7 @@ public sealed class ChangeWatchLiveTests
 
     internal sealed record Harness(
         NpgsqlConnection Connection, NpgsqlDataSource Source, ChangeWatchStore Store, DateTime Now, Func<ChangeWatchPass> NewPass,
-        Func<Func<DateTime>, ChangeWatchPass> NewPassAt);
+        Func<Func<DateTime>, ChangeWatchPass> NewPassAt, Action<DateTime> SetStoreNow);
 
     private static DateTime Minute(DateTime t) => new(t.Year, t.Month, t.Day, t.Hour, t.Minute, 0, DateTimeKind.Utc);
 
@@ -67,7 +67,9 @@ public sealed class ChangeWatchLiveTests
         /* A new pass over the same store and the same data source holds no state, as a restarted service would. */
         ChangeWatchPass NewPass() => new(source, store, dispatcher.Core, NullLogger.Instance, 30, () => now);
         ChangeWatchPass NewPassAt(Func<DateTime> clock) => new(source, store, dispatcher.Core, NullLogger.Instance, 30, clock);
-        await body(new Harness(connection, source, store, now, NewPass, NewPassAt), ct);
+        /* The store's clock and the passes' clock are one value unless a fact moves the store's: a fact that runs a pass at several times sets it, so a watch is due by the store's clock when it is due by the pass's. */
+        void SetStoreNow(DateTime time) => now = time;
+        await body(new Harness(connection, source, store, now, NewPass, NewPassAt, SetStoreNow), ct);
     }
 
     internal static async Task SeedAsync(NpgsqlConnection connection, string table, IReadOnlyDictionary<string, object> values, CancellationToken ct)

@@ -151,6 +151,18 @@ WHERE request_id = $1
   AND expires_at > $4
 RETURNING lease_until, claim_count, server_id";
 
+    /* #6576: the agent that already holds the live lease claims again (it lost its claim_id): the live claim_id comes back and the
+       lease renews the way RenewSql renews it. No new claim, so claim_count does not move. $1 request, $2 agent, $3 now. */
+    internal const string ReclaimSql = @"
+UPDATE config.investigation_requests
+SET lease_until = least($3 + make_interval(mins => lease_minutes), expires_at)
+WHERE request_id = $1
+  AND claimed_by = $2
+  AND state = 'claimed'
+  AND lease_until >= $3
+  AND expires_at > $3
+RETURNING claim_id, lease_until, claim_count";
+
     internal const string ClaimWhySql = @"
 SELECT state, lease_until, claim_count, expires_at, server_id
 FROM config.investigation_requests
@@ -295,13 +307,22 @@ WHERE request_id = $1 AND claim_id = $2 AND state = 'claimed'";
         $"COALESCE({registry}.display_name, {registry}.server_name, {requests}.server_name) AS registry_display_name, "
         + $"{registry}.server_name AS registry_instance_name";
 
+    /* #6551: a change-watch request's alert detail (the text its first alert row carries), NULL for every other request. A
+       change-watch request has no row in the alert history, so this is what lets the list and the wait answer triage it before a
+       claim. <paramref name="requests"/> is the alias of config.investigation_requests. */
+    internal static string ChangeWatchDetailSelect(string requests) =>
+        $"CASE WHEN {requests}.trigger_kind = '{InvestigationTriggerKinds.ChangeWatch}' THEN "
+        + $"(SELECT a.detail_text FROM config.investigation_request_alerts AS a WHERE a.request_id = {requests}.request_id "
+        + "ORDER BY a.alert_time, a.dedup_key LIMIT 1) END AS change_watch_detail";
+
     /* #5822, #6003: the long-poll's catch-up read. Every request event (InvestigationEvents.Kinds, $4) journaled after $1 on the
        routes in $2 (all routes when NULL), oldest first, whatever the request's state now: it answers what happened, and the
        claim decides what is still claimable. An open is its request's "opened" row. */
     internal static readonly string OpenedSinceSql = $@"
 SELECT r.request_id, r.route_id, r.server_name, r.family, r.opened_at,
        {RegistryNamesSelect("r", "sv")},
-       j.event_id, j.event, j.event_time, j.detail::text, r.practice_of
+       j.event_id, j.event, j.event_time, j.detail::text, r.practice_of,
+       {ChangeWatchDetailSelect("r")}
 FROM config.investigation_journal AS j
 JOIN config.investigation_requests AS r ON r.request_id = j.request_id
 LEFT JOIN collect.servers AS sv ON sv.server_id = r.server_id
@@ -377,7 +398,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
     internal static readonly string ListSql = $@"
 SELECT request_id, route_id, server_id, server_name, family, first_metric, first_alert_at, last_alert_at, alert_count,
        effective_state, opened_at, expires_at, claimed_by, lease_until, claim_count, reported_at, practice_of,
-       registry_display_name, registry_instance_name
+       registry_display_name, registry_instance_name, change_watch_detail
 FROM (
     SELECT r.*,
            CASE
@@ -387,7 +408,8 @@ FROM (
                WHEN r.state = 'claimed' AND r.lease_until < $1 THEN 'open'
                ELSE r.state
            END AS effective_state,
-           {RegistryNamesSelect("r", "sv")}
+           {RegistryNamesSelect("r", "sv")},
+           {ChangeWatchDetailSelect("r")}
     FROM config.investigation_requests AS r
     LEFT JOIN collect.servers AS sv ON sv.server_id = r.server_id
     WHERE ($3::integer IS NULL OR r.server_id = $3)
@@ -695,7 +717,13 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
     /// refused first. The <c>claimed</c> row's reason is null (#5632 review round 2, L4): the claim id is a lease identity,
     /// so it lives only in that row's <c>once_key</c>, which no reader returns.
     /// </summary>
-    public async Task<InvestigationClaimResult> ClaimAsync(Guid requestId, string agentId, CancellationToken cancellationToken = default)
+    public Task<InvestigationClaimResult> ClaimAsync(Guid requestId, string agentId, CancellationToken cancellationToken = default) =>
+        ClaimAsync(requestId, agentId, allowReclaim: false, cancellationToken);
+
+    /// <summary>The claim, with <paramref name="allowReclaim"/> (#6576, #6586 review): true only when <paramref name="agentId"/> is bound to the caller's named agent token (#6542),
+    /// so the same agent id holding the live lease gets its claim id back. An agent id on the legacy token is free text, and claimed_by is
+    /// published by list_investigation_requests, so there the same call answers already_claimed.</summary>
+    public async Task<InvestigationClaimResult> ClaimAsync(Guid requestId, string agentId, bool allowReclaim, CancellationToken cancellationToken = default)
     {
         if (!InvestigationRules.IsValidAgentId(agentId))
         {
@@ -709,6 +737,25 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
 
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        /* #6576: before the journal cap, like a renewal: it writes no journal row. The same agent id that holds the live lease gets
+           its claim id back; any other agent id falls through to the claim below and is refused as before. */
+        if (allowReclaim)
+        {
+            await using (var reclaim = Command(connection, transaction, ReclaimSql, P(requestId), P(agentId), P(now)))
+            await using (var reader = await reclaim.ExecuteReaderAsync(cancellationToken))
+            {
+                if (await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0))
+                {
+                    var heldClaim = reader.GetGuid(0);
+                    var heldLease = DateTime.SpecifyKind(reader.GetFieldValue<DateTime>(1), DateTimeKind.Utc);
+                    var heldCount = reader.GetInt32(2);
+                    await reader.DisposeAsync();
+                    await transaction.CommitAsync(cancellationToken);
+                    return new InvestigationClaimResult(InvestigationClaimOutcome.Reclaimed, heldClaim, heldLease, heldCount, null);
+                }
+            }
+        }
 
         if (await JournalCappedAsync(connection, transaction, now, requestId, actor, "claim", cancellationToken))
         {
@@ -1221,7 +1268,8 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
                 reader.IsDBNull(15) ? null : reader.GetFieldValue<DateTime>(15),
                 reader.IsDBNull(16) ? null : reader.GetGuid(16),
                 reader.GetString(17),
-                reader.IsDBNull(18) ? null : reader.GetString(18)));
+                reader.IsDBNull(18) ? null : reader.GetString(18),
+                reader.IsDBNull(19) ? null : reader.GetString(19)));
         }
 
         return rows;
@@ -1264,6 +1312,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
                 /* #6003 review: only the members the event's kind lists leave the store. */
                 DetailJson = InvestigationEvents.PublicDetail(reader.GetString(8), reader.IsDBNull(10) ? null : reader.GetString(10),
                     reader.IsDBNull(11) ? null : reader.GetGuid(11)),
+                DetailText = reader.IsDBNull(12) ? null : reader.GetString(12),
             });
         }
 

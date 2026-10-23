@@ -58,6 +58,7 @@ import { renderAlertEditor } from "./alert-editor.js";
 import { getSession, listViews, onViewsChanged } from "./views-api.js";
 import { paintViewList } from "./view-sidebar.js";
 import { renderMuteRules } from "./pages/mute-rules.js";
+import { renderKnownPatterns } from "./pages/known-patterns.js";
 import { renderManageTags } from "./pages/manage-tags.js";
 import { renderManageQueryTags } from "./pages/manage-query-tags.js";
 import { renderQueryTagUsage } from "./pages/query-tag-usage.js";
@@ -128,6 +129,7 @@ function currentRoute() {
     const q = h.indexOf("?");
     return { name: "muteRules", query: q >= 0 ? h.slice(q + 1) : "" };
   }
+  if (h === "#/known-patterns") return { name: "knownPatterns" };
   if (h === "#/manage-tags") return { name: "manageTags" };
   if (h === "#/manage-query-tags") return { name: "manageQueryTags" };
   if (h === "#/query-tag-usage") return { name: "queryTagUsage" };
@@ -208,6 +210,7 @@ function route(opts) {
   else if (r.name === "notebook") renderView(main, r.id); // renderView kind-detects -> notebook document
   else if (r.name === "notebookEditor") renderNotebookEditor(main, r.id, r.template);
   else if (r.name === "muteRules") renderMuteRules(main, r.query);
+  else if (r.name === "knownPatterns") renderKnownPatterns(main);
   else if (r.name === "manageTags") renderManageTags(main);
   else if (r.name === "manageQueryTags") renderManageQueryTags(main);
   else if (r.name === "queryTagUsage") renderQueryTagUsage(main);
@@ -227,6 +230,7 @@ function navKeyFor(r) {
   if (r.name === "views" || isViewItemRoute(r.name)) return "views";
   if (r.name === "alertRules" || r.name === "alertEditor") return "alert-rules";
   if (r.name === "muteRules") return "mute-rules";
+  if (r.name === "knownPatterns") return "known-patterns";
   if (r.name === "manageTags") return "manage-tags";
   if (r.name === "manageQueryTags") return "manage-query-tags";
   if (r.name === "queryTagUsage") return "query-tag-usage";

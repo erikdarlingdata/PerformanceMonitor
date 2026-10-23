@@ -31,7 +31,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// A person's change to a route's agent level, limits, scope or match writes a <c>route_agent_changed</c> journal row (before and after, the
 /// store's time), the same row the Viewer's save writes; the write is also logged with the seat that made it.
 /// <para>Who may write (#6274): only a signed-in admin (<see cref="Hosting.DarlingWebSeat.IsSignedInAdmin"/>). A dashboard with no sign-in
-/// registers no seat, so a process on the host would otherwise write as the default shared-token seat; it is refused 403 with
+/// registers no seat, and a request with no seat reads as the reads-only seat; it is refused 403 with
 /// <see cref="DarlingWebEndpoints.InvestigationWriteSignInMessage"/> and nothing is written. The routes in <see cref="DarlingWebEndpoints"/> are also born gated by the host's method
 /// gate (a read-only seat is refused every unsafe method), and the store decides the rest: a login with no write grant gets SQLSTATE 42501,
 /// answered 403 with a fixed sentence. The agent's token is the MCP listener's credential and is not a web credential, so it reaches none of
@@ -49,9 +49,8 @@ internal static class DarlingWebAgentSetup
 {
     /// <summary>The 403 sentence a refused route or profile write answers: the web host runs on whatever login <c>postgres.webConnectionString</c>
     /// names, and a managed or compose store connects it as the <c>viewer</c> role.</summary>
-    internal const string RefusedMessage =
-        "This dashboard signs in to the store as the viewer role, so it cannot change agent routes or environment profiles. "
-        + "Use the Viewer app, or run the web under the admin login.";
+    internal static string RefusedMessage(bool managedStore, bool adminWritesOff = false) =>
+        DarlingWebStoreWrites.Refused("change agent routes or environment profiles", managedStore, adminWritesOff: adminWritesOff);
 
     /// <summary>The body keys a route write accepts. Anything else is refused by name (never its value).</summary>
     private static readonly string[] s_routeKeys =
@@ -111,7 +110,8 @@ SELECT has_table_privilege(current_user, 'config_notification_routes', 'INSERT')
     /// <summary>Creates a route (<paramref name="routeId"/> null) or edits one. A body key left out keeps the saved value on an edit and
     /// takes the Viewer's default on a create.</summary>
     internal static async Task<(int Status, JsonNode Body)> SaveRouteAsync(
-        NpgsqlDataSource postgres, ILogger logger, int? routeId, JsonObject body, string editor, IPasswordKeyRing ring, CancellationToken ct)
+        NpgsqlDataSource postgres, ILogger logger, int? routeId, JsonObject body, string editor, IPasswordKeyRing ring, CancellationToken ct,
+        bool managedStore = false, bool adminWritesOff = false)
     {
         if (body.Select(p => p.Key).FirstOrDefault(k => !s_routeKeys.Contains(k, StringComparer.Ordinal)) is { } unknown)
         {
@@ -165,7 +165,7 @@ SELECT has_table_privilege(current_user, 'config_notification_routes', 'INSERT')
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.InsufficientPrivilege)
         {
-            return Error(403, RefusedMessage);
+            return Error(403, RefusedMessage(managedStore, adminWritesOff));
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.ForeignKeyViolation)
         {
@@ -178,7 +178,7 @@ SELECT has_table_privilege(current_user, 'config_notification_routes', 'INSERT')
     }
 
     internal static async Task<(int Status, JsonNode Body)> DeleteRouteAsync(
-        NpgsqlDataSource postgres, ILogger logger, int routeId, string editor, CancellationToken ct)
+        NpgsqlDataSource postgres, ILogger logger, int routeId, string editor, CancellationToken ct, bool managedStore = false, bool adminWritesOff = false)
     {
         try
         {
@@ -197,12 +197,12 @@ SELECT has_table_privilege(current_user, 'config_notification_routes', 'INSERT')
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.InsufficientPrivilege)
         {
-            return Error(403, RefusedMessage);
+            return Error(403, RefusedMessage(managedStore, adminWritesOff));
         }
     }
 
     /// <summary>The profiles, fleet first, with whether this login can change them.</summary>
-    internal static async Task<JsonObject> ProfilesBodyAsync(NpgsqlDataSource postgres, CancellationToken ct)
+    internal static async Task<JsonObject> ProfilesBodyAsync(NpgsqlDataSource postgres, CancellationToken ct, NpgsqlDataSource? accessSource = null)
     {
         var rows = await new InvestigationRequestStore(postgres, McpCommandDeadlines.ReadSeconds).ListProfilesAsync(ct);
         var profiles = new JsonArray();
@@ -223,14 +223,14 @@ SELECT has_table_privilege(current_user, 'config_notification_routes', 'INSERT')
         {
             ["profiles"] = profiles,
             ["max_length"] = InvestigationProfiles.MaxLength,
-            ["can_edit"] = (await AccessAsync(postgres, ct))["can_edit_profiles"]!.GetValue<bool>(),
+            ["can_edit"] = (await AccessAsync(accessSource ?? postgres, ct))["can_edit_profiles"]!.GetValue<bool>(),
         };
     }
 
     /// <summary>Saves (or, blank, removes) the profile of one scope: <c>{scope_server_id?, scope_tag_id?, profile_text}</c>, both scopes
     /// absent for the fleet's. Stamped <c>person:&lt;editor&gt;</c>, with the Viewer's journal row.</summary>
     internal static async Task<(int Status, JsonNode Body)> SaveProfileAsync(
-        NpgsqlDataSource postgres, JsonObject body, string editor, CancellationToken ct)
+        NpgsqlDataSource postgres, JsonObject body, string editor, CancellationToken ct, bool managedStore = false, bool adminWritesOff = false)
     {
         if (!TryInt(body, "scope_server_id", out _, out var server, out var error)
             || !TryInt(body, "scope_tag_id", out _, out var tag, out error))
@@ -282,7 +282,7 @@ SELECT has_table_privilege(current_user, 'config_notification_routes', 'INSERT')
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.InsufficientPrivilege)
         {
-            return Error(403, RefusedMessage);
+            return Error(403, RefusedMessage(managedStore, adminWritesOff));
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.ForeignKeyViolation)
         {

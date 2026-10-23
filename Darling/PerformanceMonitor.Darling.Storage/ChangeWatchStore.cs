@@ -25,7 +25,70 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <param name="DatabaseName">The database a plan change belongs to, or null.</param>
 /// <param name="QueryId">The Query Store query a plan change belongs to, or null; a watch of plan changes alone measures these queries.</param>
 /// <param name="PlanId">The Query Store plan a plan change forced or unforced, or null: the agent-only test (#6239 round 3, M1) matches an agent's action to a change by server, database and this plan id.</param>
-public sealed record ChangeWatchChange(string Key, string Kind, DateTime ChangeTimeUtc, string Description, string? DatabaseName = null, long? QueryId = null, long? PlanId = null);
+public sealed record ChangeWatchChange(string Key, string Kind, DateTime ChangeTimeUtc, string Description, string? DatabaseName = null, long? QueryId = null, long? PlanId = null)
+{
+    /// <summary>
+    /// #6550: how a <c>plan_force</c> change's plan was forced: <c>MANUAL</c>, <c>AUTO</c> (automatic plan correction), <c>NONE</c> or <c>unknown</c> (before
+    /// SQL Server 2017 or not captured); null for any other kind. It rides in <see cref="Description"/> (see <see cref="ChangeWatchPlanForcing"/>), so a stored
+    /// change carries it with no column of its own, and a change recorded before this existed reads as <c>unknown</c>.
+    /// </summary>
+    public string? PlanForcingType => string.Equals(Kind, "plan_force", StringComparison.Ordinal) ? ChangeWatchPlanForcing.Parse(Description) : null;
+}
+
+/// <summary>#6550: writes and reads the forcing type a <c>plan_force</c> change's description carries, as a trailing <c>[forcing type X]</c>.</summary>
+public static class ChangeWatchPlanForcing
+{
+    /// <summary>A plan forced by automatic plan correction (<c>FORCE_LAST_GOOD_PLAN</c>).</summary>
+    public const string Auto = "AUTO";
+
+    /// <summary>A plan forced by a person or tool.</summary>
+    public const string Manual = "MANUAL";
+
+    /// <summary>The server did not say (an older SQL Server, or the capture holds no value).</summary>
+    public const string Unknown = "unknown";
+
+    /* The one spelling both Suffix (the writer) and Parse (the reader) use, so rewording it here keeps the two in step. Rows already stored carry the old
+       text, though, and read as unknown after a reword: keep the spelling, or read the old one too. */
+    private const string Prefix = " [forcing type ";
+
+    /// <summary>The collector's <c>plan_forcing_type</c> as one of <c>MANUAL</c>, <c>AUTO</c>, <c>NONE</c> or <c>unknown</c>.</summary>
+    public static string Normalize(string? raw)
+    {
+        var value = raw?.Trim().ToUpperInvariant();
+        return value is Auto or Manual or "NONE" ? value : Unknown;
+    }
+
+    /// <summary>The suffix a change description ends with.</summary>
+    public static string Suffix(string? raw)
+    {
+        var type = Normalize(raw);
+        return type == Auto ? $"{Prefix}{Auto}: automatic plan correction]" : $"{Prefix}{type}]";
+    }
+
+    /// <summary>The forcing type a description names; <c>unknown</c> when it names none.</summary>
+    public static string Parse(string? description)
+    {
+        if (description is null)
+        {
+            return Unknown;
+        }
+
+        var start = description.LastIndexOf(Prefix, StringComparison.Ordinal);
+        if (start < 0)
+        {
+            return Unknown;
+        }
+
+        start += Prefix.Length;
+        var end = start;
+        while (end < description.Length && char.IsLetter(description[end]))
+        {
+            end++;
+        }
+
+        return Normalize(description[start..end]);
+    }
+}
 
 /// <summary>A watch window and what it saw (#6234).</summary>
 public sealed record ChangeWatchRow(
@@ -56,6 +119,9 @@ public sealed class ChangeWatchStore
 
     /// <summary>The <c>result</c> of a watch that saw something move but whose every change was an agent's own plan change made while it handled a change-watch request: it is recorded and measured, and opens no further request (no loop, #6234).</summary>
     public const string ResultAgentChange = "moved_agent_change";
+
+    /// <summary>The <c>result</c> of a watch that saw something move but whose every change was a plan forced or unforced by automatic plan correction (#6550): SQL Server doing its job, so it is recorded and measured and opens no request.</summary>
+    public const string ResultAutoPlanCorrection = "moved_auto_plan_correction";
 
     /// <summary>The <c>state</c> and <c>result</c> of a watch whose evaluation, or whose request open, failed <see cref="MaxAttempts"/> times (#6239 round 3, M2): it is closed for good with the last error in its <c>result_json</c>, and pruned like a closed one.</summary>
     public const string StateFailed = "failed";
@@ -230,20 +296,28 @@ CREATE INDEX IF NOT EXISTS idx_query_store_forced_plans_markers
 
         var watchId = Guid.Empty;
         DateTime windowEnds = default;
+        DateTime firstChangeAt = default;
         await using (var command = Command(connection, transaction,
-            "SELECT watch_id, window_ends_at FROM config.change_watches WHERE server_id = $1 AND state = 'open' FOR UPDATE", serverId))
+            "SELECT watch_id, window_ends_at, first_change_at FROM config.change_watches WHERE server_id = $1 AND state = 'open' FOR UPDATE", serverId))
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
             if (await reader.ReadAsync(cancellationToken))
             {
                 watchId = reader.GetGuid(0);
                 windowEnds = Utc(reader.GetDateTime(1));
+                firstChangeAt = Utc(reader.GetDateTime(2));
             }
         }
 
         var deferred = false;
         if (watchId == Guid.Empty)
         {
+            /* #6234: one read can now hold an hour of changes. Only the ones a watch opened by the first would have taken in, one at a time, open it; the rest
+               are deferred and open their own watch once this one is evaluated, as they did when every change was read within a tick. */
+            var firstChange = Utc(fresh.Min(c => c.ChangeTimeUtc));
+            var opening = Joining(fresh, firstChange + Window, firstChange);
+            deferred = opening.Count < fresh.Count;
+            fresh = opening;
             var first = Utc(fresh.Min(c => c.ChangeTimeUtc));
             var last = Utc(fresh.Max(c => c.ChangeTimeUtc));
             watchId = Guid.NewGuid();
@@ -254,7 +328,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)", watchId, serverId, serverName, now, first,
         }
         else
         {
-            var joining = fresh.Where(c => Utc(c.ChangeTimeUtc) <= windowEnds).ToList();
+            var joining = Joining(fresh, windowEnds, firstChangeAt);
             deferred = joining.Count < fresh.Count;
             fresh = joining;
             if (fresh.Count == 0)
@@ -285,6 +359,33 @@ ON CONFLICT (server_id, change_key) DO NOTHING",
 
         await transaction.CommitAsync(cancellationToken);
         return new ChangeWatchRecordResult(watchId, deferred);
+    }
+
+    /// <summary>
+    /// #6234: the changes, oldest first, that a watch ending at <paramref name="windowEnds"/> takes in when they are recorded one at a time: a change joins
+    /// when it is at or before the window's end, and each one that joins moves the end to <see cref="Window"/> after it, never past <see cref="MaxSpan"/>
+    /// from the watch's first change. The first change that does not join, and every later one, is deferred.
+    /// </summary>
+    internal static List<ChangeWatchChange> Joining(IEnumerable<ChangeWatchChange> changes, DateTime windowEnds, DateTime firstChange)
+    {
+        var joined = new List<ChangeWatchChange>();
+        var end = Utc(windowEnds);
+        var first = Utc(firstChange);
+        foreach (var change in changes.OrderBy(c => c.ChangeTimeUtc))
+        {
+            var at = Utc(change.ChangeTimeUtc);
+            if (at > end)
+            {
+                break;
+            }
+
+            joined.Add(change);
+            first = at < first ? at : first;
+            var grown = at + Window > end ? at + Window : end;
+            end = grown < first + MaxSpan ? grown : first + MaxSpan;
+        }
+
+        return joined;
     }
 
     /// <summary>The detection sources a server has a high-water mark for.</summary>
@@ -418,9 +519,9 @@ SELECT EXISTS (SELECT 1 FROM config.change_watch_changes WHERE watch_id = $1)
         return await command.ExecuteScalarAsync(cancellationToken) is true;
     }
 
-    /// <summary>Watches for <c>get_change_watches</c>: open and closed, newest first, optionally one server and one state or result (<paramref name="state"/> matches a watch's <c>state</c> or its <c>result</c>).</summary>
-    public Task<IReadOnlyList<ChangeWatchRow>> ListAsync(int? serverId, string? state, int limit, CancellationToken cancellationToken = default) =>
-        ReadAsync("($1::int IS NULL OR w.server_id = $1) AND ($2::text IS NULL OR w.state = $2 OR w.result = $2)", new object?[] { serverId, state }, Math.Clamp(limit, 1, 1000), cancellationToken);
+    /// <summary>Watches for <c>get_change_watches</c>: open and closed, newest first, optionally one server, one state or result (<paramref name="state"/> matches a watch's <c>state</c> or its <c>result</c>) and one <paramref name="watchId"/> (#6591).</summary>
+    public Task<IReadOnlyList<ChangeWatchRow>> ListAsync(int? serverId, string? state, int limit, Guid? watchId = null, CancellationToken cancellationToken = default) =>
+        ReadAsync("($1::int IS NULL OR w.server_id = $1) AND ($2::text IS NULL OR w.state = $2 OR w.result = $2) AND ($3::uuid IS NULL OR w.watch_id = $3)", new object?[] { serverId, state, watchId }, Math.Clamp(limit, 1, 1000), cancellationToken);
 
     private async Task<IReadOnlyList<ChangeWatchRow>> ReadAsync(string where, object?[] parameters, int limit, CancellationToken cancellationToken)
     {

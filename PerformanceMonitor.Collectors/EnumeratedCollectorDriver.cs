@@ -729,7 +729,7 @@ public static class EnumeratedCollectorDriver
     /// #1851 — returns an empty list. The single implementation behind BOTH channels: the enumeration
     /// read above and <see cref="ReadPayloadProbeFailuresAsync"/>.
     /// </summary>
-    private static async Task<IReadOnlyList<EnumerationProbeFailure>> ReadProbeFailuresAsync(
+    internal static async Task<IReadOnlyList<EnumerationProbeFailure>> ReadProbeFailuresAsync(
         DbDataReader reader,
         CancellationToken cancellationToken)
     {

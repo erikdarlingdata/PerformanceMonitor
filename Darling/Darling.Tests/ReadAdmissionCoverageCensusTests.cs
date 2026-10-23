@@ -42,7 +42,7 @@ public sealed class ReadAdmissionCoverageCensusTests
     /// admission call beside it.</summary>
     private static readonly Dictionary<string, int> ScopeSites = new(StringComparer.Ordinal)
     {
-        ["DarlingWebEndpoints.cs"] = 9, // /api/investigation-export (#6236), /api/query-tag-rules/test (#5986), the /api/read/{name} loop, the composed panel (its run and its cache), /api/fleet, /api/alerts/test, /api/ag and /api/catalog (round 2, L5)
+        ["DarlingWebEndpoints.cs"] = 10, // /api/active-queries/live/{commandId} (#6386), /api/investigation-export (#6236), /api/query-tag-rules/test (#5986), the /api/read/{name} loop, the composed panel (its run and its cache), /api/fleet, /api/alerts/test, /api/ag and /api/catalog (round 2, L5)
         ["DarlingTriageEndpoint.cs"] = 1, // /api/triage (the dedicated routes record their own samples, #5506 part 3)
         ["AlertNotebookEndpoint.cs"] = 1, // /api/alert-notebook (round 1, M3)
         ["DarlingFleetSweepEndpoints.cs"] = 4, // /api/sweeps, /latest, /{id} and /watch-items (round 1, M3)
@@ -191,6 +191,9 @@ public sealed class ReadAdmissionCoverageCensusTests
         [SweepsFile + "GET \"/api/sweeps/{id:long}\""] = null,
         [SweepsFile + "GET \"/api/sweeps/watch-items\""] = null,
         ["DarlingServerDatabasesEndpoint.cs: GET Route"] = null, // the database picker, /api/server-databases
+        ["DarlingKnownPatternRoutes.cs: POST \"/api/known-patterns\""] = "write (#6334)",
+        ["DarlingKnownPatternRoutes.cs: PUT \"/api/known-patterns/{id:long}\""] = "write (#6334)",
+        ["DarlingKnownPatternRoutes.cs: DELETE \"/api/known-patterns/{id:long}\""] = "write (#6334)",
         [WebFile + "POST \"/api/compose/run\""] = null,
         [WebFile + "POST \"/api/alerts/test\""] = null,
         [WebFile + "GET \"/api/investigation-export\""] = null, // #6236: admitted like the other heavy reads; up to 2000 cases, read a page at a time
@@ -245,6 +248,9 @@ public sealed class ReadAdmissionCoverageCensusTests
         [WebFile + "DELETE \"/api/notification-routes/{id:int}\""] = "write",
         [WebFile + "POST \"/api/collectors/run\""] = "write",
         [WebFile + "GET \"/api/collectors/run/{commandId:long}\""] = "definition read: one command row's status and result (a single indexed row, #5941)",
+        [WebFile + "GET \"/api/active-queries/live/available\""] = "definition read: whether this seat and store login can queue a live read (one catalog lookup, #6386)",
+        [WebFile + "POST \"/api/active-queries/live\""] = "write",
+        [WebFile + "GET \"/api/active-queries/live/{commandId:long}\""] = null, // #6386: the result read returns the stored plan XML of a live read, so it is admitted
         [WebFile + "POST \"/api/server-tags\""] = "write",
         [WebFile + "PATCH \"/api/server-tags/{id:int}\""] = "write",
         [WebFile + "DELETE \"/api/server-tags/{id:int}\""] = "write",

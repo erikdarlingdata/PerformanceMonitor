@@ -101,7 +101,9 @@ public sealed partial class DarlingMcpServerAdminTools
     internal static string ConnectFailureReply(
         MonitoredServer server, ConnectionProbeResult probe, ILogger? logger, bool revealConnectError, params string?[] secrets)
     {
-        var target = server.Port > 0 ? $"{server.Host},{server.Port}" : server.Host;
+        /* #6583: the target that was tried. A SQL Server connection uses the host alone (its port rides in the host as host,port), so a
+           stored SQL Server port was never dialled and is not named; only a PostgreSQL target connects on its port. */
+        var target = server.IsPostgres && server.Port > 0 ? $"{server.Host},{server.Port}" : server.Host;
         var driverText = string.IsNullOrWhiteSpace(probe.Error) ? "(no driver text)" : RedactEditSecret(probe.Error, secrets);
         /* The logged copy is one line of bounded length: the driver text and the target both come from the server the
            caller named, so each goes through the refusal log's sanitizer. The --add-server reply below keeps the
@@ -144,7 +146,9 @@ public sealed partial class DarlingMcpServerAdminTools
         "read_only_intent (bool, default false); multi_subnet_failover (bool, default false); aws_role_arn (optional, " +
         "PostgreSQL on Amazon RDS or Aurora only: the IAM role ARN to assume, such as " +
         "arn:aws:iam::123456789012:role/darling-monitor; accepted only if darling.json's allowedAwsRoles lists it) and " +
-        "aws_external_id (optional, write-only, needs aws_role_arn). Servers are processed " +
+        "aws_external_id (optional, write-only, needs aws_role_arn); query_store_replica (optional, SQL Server only: a " +
+        "readable secondary as host or host,port, or an availability group listener, to read Query Store from instead of " +
+        "the server; same login; empty = off; not used on Azure SQL Database). Servers are processed " +
         "IN ORDER, one at a time. A case-variant or exact duplicate of an already-monitored server (or an earlier " +
         "entry in the same array) is skipped as status \"duplicate\". A server that fails to connect is recorded as " +
         "status \"connection_failed\" and does NOT stop the rest of the batch. If saving an entry fails, that entry " +
@@ -159,11 +163,12 @@ public sealed partial class DarlingMcpServerAdminTools
         "A new database or read_only_intent on a machine (engine, host and port) another registration already holds is added as usual, " +
         "unless a route with an agent setting is scoped to that registration (its id, one of its tags or a tag above one; a route with no scope does not count) " +
         "- a removed registration included. Then the entry is refused as status \"collides\" and names that registration, because the route is tied to it. Register the other database in the Viewer or on the web dashboard. " +
+        "The machine is also recognised by the name its server reports for itself (a SQL Server's own name, a PostgreSQL cluster's identifier and port), so one machine reached under another host name is held the same way, and two machines that report the same name (cloned images, containers sharing a hostname, a PostgreSQL replica and its primary) are treated as one machine: register those in the Viewer or on the web dashboard. " +
         "A SQL password or service-principal client secret is sealed with the service's password key before it is " +
         "stored, and is never returned. password is the password itself: a value that starts with env: or file: is " +
         "rejected as \"invalid\", because references are set in the configuration file. " +
         "Returns {requested:N, added:N, skipped:N, collided:N, failed:N, results:[{server, " +
-        "status:\"added\"|\"duplicate\"|\"collides\"|\"connection_failed\"|\"not_saved\"|\"invalid\", detail}]}. requested is " +
+        "status:\"added\"|\"duplicate\"|\"collides\"|\"connection_failed\"|\"not_saved\"|\"invalid\", detail, undo}]}. An added entry's undo is the remove_server call for it; every other entry has undo null. requested is " +
         "the number of entries you sent and the four counters SUM to it — every entry lands in exactly one: " +
         "\"added\" → added, \"duplicate\" → skipped, \"collides\" → collided, \"connection_failed\", " +
         "\"not_saved\" and \"invalid\" → failed. Only added servers are monitored; read the other three counters before treating " +
@@ -204,8 +209,13 @@ public sealed partial class DarlingMcpServerAdminTools
     /// the only way to register a server whose password cannot be encrypted. A reference to Darling's own configuration
     /// or secrets is still refused (<see cref="ValidateSecret"/>).
     /// </summary>
-    internal static Task<string> AddServersFromHostCommandLineAsync(NpgsqlDataSource postgres, string servers_json, IPasswordKeyRing? ring = null) =>
-        AddServersAsync(new PostgresServerDefinitions(postgres), servers_json, DefaultProbeAsync, CancellationToken.None, allowSecretReferences: true, ring: ring, revealConnectError: true);
+    internal static Task<string> AddServersFromHostCommandLineAsync(
+        NpgsqlDataSource postgres, string servers_json, IPasswordKeyRing? ring = null, ServerProbe? probe = null) =>
+        AddServersAsync(new PostgresServerDefinitions(postgres), servers_json, probe ?? DefaultProbeAsync, CancellationToken.None, allowSecretReferences: true, ring: ring, revealConnectError: true);
+
+    /// <summary>The in-process connection probe, for the command line to wrap (#6476): it runs as the person at the console.</summary>
+    internal static Task<ConnectionProbeResult> ProbeAsConsoleUserAsync(MonitoredServer server, CancellationToken cancellationToken) =>
+        DefaultProbeAsync(server, cancellationToken);
 
     /// <summary>The same flow over an injected <see cref="IServerDefinitions"/>, so a test can stand in a
     /// definitions table that faults on a chosen write or swallows one without a live database.</summary>
@@ -246,9 +256,10 @@ public sealed partial class DarlingMcpServerAdminTools
                setting is scoped to that registration (its id, a tag of it or a tag above): the new id would sit outside
                that route. Entries of this batch have no routes yet, so they never hold each other back. The operator's
                own command and the web route pass no policy and are not held to this. */
+            List<RegisteredTarget>? held = null;
             if (policy is not null && ready.Count > 0)
             {
-                var held = await definitions.LoadTargetsAsync(cancellationToken);
+                held = await definitions.LoadTargetsAsync(cancellationToken);
                 var kept = new List<ParsedServerEntry>();
                 foreach (var entry in ready)
                 {
@@ -300,6 +311,18 @@ public sealed partial class DarlingMcpServerAdminTools
                     continue;
                 }
 
+                /* #6285: the same rule again, now the server has said what it calls itself: a short name and its full domain
+                   name, or a name and its address, reach one machine that the host text above could not tell apart. A server
+                   that reported no identity (or a registration with none collected) is held to the text match already made. */
+                var probedIdentity = MachineIdentityOf(probeResult.MachineIdentity, probeResult.EngineEdition);
+                var identityUnread = PostgresIdentityUnread(probeResult, probedIdentity);
+                if (policy is not null && held is not null && (probedIdentity is not null || identityUnread)
+                    && await TargetHeldRefusalAsync(held, entry, definitions.ScopedAgentRouteAsync, cancellationToken, probedIdentity: probedIdentity, postgresIdentityUnread: identityUnread) is { } identityRefusal)
+                {
+                    results.Add(new ServerResult(entry.Order, entry.DisplayName, AddStatus.Collides, identityRefusal));
+                    continue;
+                }
+
                 /* #2280: the probe just asked the server which database it actually reached. If that is a
                    DIFFERENT database from the one this entry names, and some other registration already claims
                    that one, then adding this would give one real database two identities and two full copies of
@@ -330,11 +353,13 @@ public sealed partial class DarlingMcpServerAdminTools
                     var actualStorageKey = ActualStorageKeyOf(entry, probeResult.ConnectedDatabase);
                     string? heldInWrite = null;
                     HeldCheck? heldCheck = policy is null ? null : async (connection, transaction, token) =>
-                        heldInWrite = await TargetHeldRefusalInTransactionAsync(connection, transaction, entry, null, token);
+                        heldInWrite = await TargetHeldRefusalInTransactionAsync(connection, transaction, entry, null, token, probedIdentity: probedIdentity, postgresIdentityUnread: identityUnread);
                     var rowsWritten = await definitions.InsertAsync(entry, encryptedPassword, actualStorageKey, heldCheck, cancellationToken);
                     if (rowsWritten > 0)
                     {
-                        results.Add(new ServerResult(entry.Order, entry.DisplayName, AddStatus.Added, DescribeProbe(probeResult)));
+                        results.Add(new ServerResult(entry.Order, entry.DisplayName, AddStatus.Added,
+                            DescribeProbe(probeResult, QueryStoreReplicaReply(entry.ProbeConfig, probeResult, logger, revealConnectError,
+                                entry.PlaintextPassword, entry.ProbeConfig.AwsExternalId)), entry.StorageKey));
                     }
                     else if (rowsWritten == InsertKeyClaimed)
                     {
@@ -401,7 +426,7 @@ public sealed partial class DarlingMcpServerAdminTools
         "definition from the central monitoring store; the running service drops it from its collection set within " +
         "one sweep and drops this install's own Extended Events sessions on the server, leaving the shared ones and " +
         "any session another registration of this install keeps. Already-collected historical data is NOT deleted. Returns {status:\"removed\", server, " +
-        "display_name, matched_by:\"exact\"|\"partial\", matched_in:\"config_monitored_servers\", ever_connected} on " +
+        "display_name, matched_by:\"exact\"|\"partial\", matched_in:\"config_monitored_servers\", ever_connected, previous (the removed definition in the keys add_servers takes; the stored password cannot be read back, so a SQL or service-principal row carries the placeholder <password> in its place, and the AWS external ID is left out), undo (the add_servers call that re-adds it, with that same password placeholder), undo_note (what a re-add does not bring back)} on " +
         "success — ever_connected says whether the connected-servers registry (populated on a server's first " +
         "successful connection) also had a row for it, i.e. whether any history exists under its id; " +
         "{status:\"ambiguous\", ...} as above; or {status:\"not_found\", ...} when no definition matches the name. A " +
@@ -498,6 +523,9 @@ public sealed partial class DarlingMcpServerAdminTools
             var resolved = target.Candidates[0];
             var resolvedDefinition = definitions.First(d => d.Server.ServerId == resolved.ServerId);
 
+            /* #6403: the definition as it stood, read before the delete, for the answer's previous and undo. */
+            var removedRow = await new PostgresServerEditStore(postgres).ReadRowAsync(resolved.ServerId, CancellationToken.None);
+
             /* The server's tag assignments go in the same transaction as its definition: server_id is a fixed hash
                of the connection, so a re-added server would otherwise get its old tags back and rejoin
                tag-scoped alert rules. */
@@ -550,6 +578,17 @@ public sealed partial class DarlingMcpServerAdminTools
                         await queryTagClear.ExecuteNonQueryAsync();
                     }
 
+                    /* #6454: the server's collector overrides and run times go too, same transaction and same reason: set-and-clear
+                       left an all-null override row behind, and a set one would come back when the server is re-added. Only this
+                       server's rows; the fleet-wide rows (server_id NULL) stay. */
+                    foreach (var scheduleSql in CollectorScheduleSql.ClearForServerSqls)
+                    {
+                        await using var scheduleClear = new NpgsqlCommand(scheduleSql, connection) { Transaction = transaction };
+                        scheduleClear.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                        scheduleClear.Parameters.Add(new NpgsqlParameter<int> { TypedValue = resolved.ServerId });
+                        await scheduleClear.ExecuteNonQueryAsync();
+                    }
+
                     await transaction.CommitAsync();
                 }
             }
@@ -560,7 +599,7 @@ public sealed partial class DarlingMcpServerAdminTools
             }
 
             return affected > 0
-                ? RemovedAnswer(resolvedDefinition, target.MatchedBy)
+                ? RemovedAnswer(resolvedDefinition, target.MatchedBy, removedRow)
                 : Outcome("not_found",
                     $"'{resolved.DisplayName}' was defined when this call resolved it but its definition was gone by the time the delete ran (a concurrent remove); nothing was changed.");
         }
@@ -583,7 +622,7 @@ public sealed partial class DarlingMcpServerAdminTools
 
     /// <summary>One per-server outcome (a <see cref="AddStatus"/> value) with a human-readable <see cref="Detail"/>;
     /// <see cref="Order"/> restores input order in the aggregate.</summary>
-    internal sealed record ServerResult(int Order, string Server, string Status, string Detail);
+    internal sealed record ServerResult(int Order, string Server, string Status, string Detail, string? UndoServer = null);
 
     /// <summary>
     /// The per-row <c>status</c> vocabulary of <c>add_servers</c> — the five outcomes an entry can have, as
@@ -677,7 +716,7 @@ public sealed partial class DarlingMcpServerAdminTools
     /// storage name and <c>kind</c> says which of a machine's registrations it was (plain, read-only, per-database), so
     /// a wrong pick shows at once (#4734). Pure, so the shape unit-tests without a store.
     /// </summary>
-    internal static string RemovedAnswer(ServerDefinition resolved, string matchedBy) =>
+    internal static string RemovedAnswer(ServerDefinition resolved, string matchedBy, ServerEditRow? row = null) =>
         JsonSerializer.Serialize(new
         {
             status = "removed",
@@ -694,7 +733,69 @@ public sealed partial class DarlingMcpServerAdminTools
                     + "For a server nothing else monitors, an operator runs PerformanceMonitor.Darling.Service.exe --drop-xe-sessions --print-sql, which prints the DROP statements, and runs them on that server. "
                     + "The named form (--drop-xe-sessions <server>) works only for a server this service still monitors, so it had to run before this removal."
                 : "The definition is deleted. This server had never connected (no connected-servers registry row), so no history exists under its id and nothing else references it.",
+            previous = row is null ? null : RemovedPreviousOf(row),
+            undo = row is null ? null : DarlingMcpUndoShape.Call("add_servers", new JsonObject
+            {
+                ["servers_json"] = new JsonArray(RemovedPreviousOf(row)).ToJsonString(),
+            }),
+            undo_note = row is null ? null : RemoveUndoNote,
         }, McpHelpers.JsonOptions);
+
+    /// <summary>The password placeholder the undo's add_servers entry carries: the stored password cannot be read back.</summary>
+    internal const string PasswordPlaceholder = "<password>";
+
+    internal const string RemoveUndoNote =
+        "The undo re-adds the definition, but its password is a placeholder (the stored one cannot be read back) and the add probes the connection first, so replace the placeholder before running it. " +
+        "A re-add does not bring back this server's tag assignments, query-tag assignments and rules, collector schedule overrides and run times, " +
+        "monthly cost, excluded databases, plan-capture and alert-delivery settings, or an AWS external ID; the server comes back enabled. " +
+        "Collected history and the connected-servers registry row were never deleted and reattach by the server id.";
+
+    /// <summary>The removed definition without its password and AWS external ID, in the keys add_servers takes, so it is also the undo's one entry.</summary>
+    private static JsonObject RemovedPreviousOf(ServerEditRow row)
+    {
+        var entry = new JsonObject
+        {
+            ["host"] = row.Host,
+            ["display_name"] = row.Name,
+            ["engine"] = row.Engine,
+            ["auth"] = AuthWord(row.Auth),
+        };
+        if (row.Database is not null)
+        {
+            entry["database"] = row.Database;
+        }
+
+        if (row.Username is not null)
+        {
+            entry["username"] = row.Username;
+        }
+
+        if (IsSecretAuth(row.Auth))
+        {
+            entry["password"] = PasswordPlaceholder;
+        }
+
+        if (PerformanceMonitor.Collectors.MonitoredEngineKind.ParseConfiguredEngine(row.Engine) == PerformanceMonitor.Collectors.CollectorTargetEngine.PostgreSql)
+        {
+            entry["port"] = row.Port;
+        }
+
+        entry["encrypt_mode"] = row.EncryptMode;
+        entry["trust_server_certificate"] = row.TrustServerCertificate;
+        entry["read_only_intent"] = row.ReadOnlyIntent;
+        entry["multi_subnet_failover"] = row.MultiSubnetFailover;
+        if (!string.IsNullOrEmpty(row.QueryStoreReplica))
+        {
+            entry["query_store_replica"] = row.QueryStoreReplica;
+        }
+
+        if (row.AwsRoleArn is not null)
+        {
+            entry["aws_role_arn"] = row.AwsRoleArn;
+        }
+
+        return entry;
+    }
 
     /// <summary>
     /// The definitions read behind <c>remove_server</c>: every row of the table the DELETE targets, with its
@@ -1014,6 +1115,14 @@ ORDER BY d.host, d.database";
             return (null, Invalid(engineError));
         }
 
+        /* #6352: a SQL Server host that SqlClient would read as a named pipe or an admin connection is refused before any
+           probe. The web add route and the command-line add run this same entry check. A PostgreSQL host is not read
+           that way (a leading slash there is a Unix socket directory), so it is not held to the rule. */
+        if (engine == EngineSqlServer && ServerHostSetting.Refusal(host) is { } hostRefusal)
+        {
+            return (null, Invalid(hostRefusal));
+        }
+
         /* The same rule DarlingConfig.Validate enforces for a file entry, enforced here so the two onboarding
            paths cannot disagree: PostgreSQL has no integrated-auth path, and defaulting auth to Windows means
            an entry that just says {"host": ..., "engine": "postgres"} would otherwise be accepted and then
@@ -1029,6 +1138,13 @@ ORDER BY d.host, d.database";
         if (portError != null)
         {
             return (null, Invalid(portError));
+        }
+
+        /* #6583: a SQL Server connection never uses the port (it rides in the host as host,port), so a non-zero one is refused
+           rather than stored and silently ignored. Zero is the omitted value and stays accepted. */
+        if (engine == EngineSqlServer && port != 0)
+        {
+            return (null, Invalid(SqlServerPortAdvice.Refusal));
         }
 
         /* #5452: the AWS role for an RDS or Aurora target, and its external ID. Blank is "not set"; the formats and the
@@ -1060,8 +1176,20 @@ ORDER BY d.host, d.database";
             return (null, Invalid(awsListRefusal));
         }
 
+        if (obj["query_store_replica"] is not null && TryGetString(obj, "query_store_replica") is null)
+        {
+            return (null, Invalid("query_store_replica must be text."));
+        }
+
+        var queryStoreReplica = QueryStoreReplicaSetting.Normalize(TryGetString(obj, "query_store_replica"));
+        if (QueryStoreReplicaRefusal(queryStoreReplica, engine) is { } replicaError)
+        {
+            return (null, Invalid(replicaError));
+        }
+
         var probeConfig = new MonitoredServer
         {
+            QueryStoreReplica = queryStoreReplica,
             AwsRoleArn = awsRole,
             AwsExternalId = awsExternalId,
             Name = displayName,
@@ -1257,8 +1385,8 @@ INSERT INTO config_monitored_servers (
     server_id, name, host, database, auth, username, encrypted_password, encrypt_mode,
     trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases,
     monthly_cost_usd, capture_plans, alert_delivery_mode_override, engine, port, is_enabled, created_at, modified_at,
-    aws_role_arn, aws_external_id)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL, NULL, $15, $16, TRUE, $14, $14, $17, $18)
+    aws_role_arn, aws_external_id, query_store_replica)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL, NULL, $15, $16, TRUE, $14, $14, $17, $18, $19)
 ON CONFLICT (server_id) DO NOTHING";
 
     /// <summary>
@@ -1413,9 +1541,35 @@ ON CONFLICT (server_id) DO NOTHING";
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = config.Port });                                                // $16
         AddNullableText(command, config.AwsRoleArn);                                                                                  // $17
         AddNullableText(command, config.AwsRoleArn is null ? null : config.AwsExternalId);                                            // $18
+        AddNullableText(command, QueryStoreReplicaSetting.Normalize(config.QueryStoreReplica));                                       // $19 (#6254)
         var written = await command.ExecuteNonQueryAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         return written;
+    }
+
+    /// <summary>Why a Query Store replica is refused, or null when it may be set (#6254, shared by add_servers and edit_server): it
+    /// is for a SQL Server target, a name of at most 255 characters with no control character (it becomes a host in a
+    /// connection string).</summary>
+    internal static string? QueryStoreReplicaRefusal(string? replica, string engine)
+    {
+        if (replica is null)
+        {
+            return null;
+        }
+
+        if (!string.Equals(engine, EngineSqlServer, StringComparison.Ordinal))
+        {
+            return "query_store_replica is for SQL Server servers only.";
+        }
+
+        if (replica.Length > 255 || replica.Any(c => char.IsControl(c) || char.IsSurrogate(c)))
+        {
+            return "query_store_replica must be a host name, host,port or listener name of at most 255 characters.";
+        }
+
+        /* A protocol prefix (np:, lpc:, admin:) or a UNC-looking value is a connection the service would open with its own
+           credentials to a machine the caller names (a named pipe over SMB): refused for every auth mode. */
+        return QueryStoreReplicaSetting.Refusal(replica);
     }
 
     /// <summary>The <c>server_id</c> an entry is stored under: the deterministic hash of its storage key, the same
@@ -1670,15 +1824,47 @@ ON CONFLICT (server_id) DO NOTHING";
             skipped = counters["skipped"],
             collided = counters["collided"],
             failed = counters["failed"],
-            results = ordered.Select(r => new { server = r.Server, status = r.Status, detail = r.Detail }),
+            /* #6403: an added server's undo is the remove_server call for its storage name; a skipped, refused or failed entry changed nothing and has none. */
+            results = ordered.Select(r => new
+            {
+                server = r.Server,
+                status = r.Status,
+                detail = r.Detail,
+                undo = r.UndoServer is null ? null : DarlingMcpUndoShape.Call("remove_server", new JsonObject { ["server_name"] = r.UndoServer }),
+            }),
         }, McpHelpers.JsonOptions);
     }
 
     /// <summary>The probed facts for an <c>added</c> server, from the same describer the
     /// <c>--test-connection</c> CLI line uses (<see cref="DarlingServerConnector.DescribeProbeFacts"/>), so the
     /// two cannot drift and a PostgreSQL target reads as one here too.</summary>
-    private static string DescribeProbe(ConnectionProbeResult probe) =>
-        $"Connected — {DarlingServerConnector.DescribeProbeFacts(probe)}.";
+    private static string DescribeProbe(ConnectionProbeResult probe, string? replicaLine = null) =>
+        $"Connected — {DarlingServerConnector.DescribeProbeFacts(probe)}." + (replicaLine is null ? "" : " " + replicaLine)
+        /* #6472: the base grants the connecting login lacks, each with the statement that adds it. A note, never a refusal. */
+        + (string.IsNullOrEmpty(probe.MissingGrantsNote) ? "" : " " + probe.MissingGrantsNote);
+
+    /// <summary>
+    /// #6254: what an add or an edit says about the Query Store replica its connection test also opened, or null when the server has
+    /// none. A replica that would not open is a note and never a refusal: the primary answered, the server is saved, and collection reads
+    /// Query Store from the primary. The reply carries a fixed sentence (the driver's text goes to the service log, redacted and bounded,
+    /// as <see cref="ConnectFailureReply"/> does); only the <c>--add-server</c> verb (<paramref name="revealError"/>) shows the driver's text.
+    /// </summary>
+    internal static string? QueryStoreReplicaReply(
+        MonitoredServer server, ConnectionProbeResult probe, ILogger? logger, bool revealError, params string?[] secrets)
+    {
+        var line = DarlingServerConnector.DescribeQueryStoreReplica(probe, revealError: false);
+        if (line is null || string.IsNullOrEmpty(probe.QueryStoreReplicaError))
+        {
+            return line;
+        }
+
+        var driverText = RedactEditSecret(probe.QueryStoreReplicaError, secrets);
+        logger?.LogWarning("Query Store replica test for {Target} failed: {DriverText}",
+            Hosting.DarlingHttpRefusalLog.Sanitize(probe.QueryStoreReplica, 512), Hosting.DarlingHttpRefusalLog.Sanitize(driverText, 512));
+        return revealError
+            ? DarlingServerConnector.DescribeQueryStoreReplica(probe with { QueryStoreReplicaError = driverText }, revealError: true)
+            : line;
+    }
 
     /// <summary>The canonical <c>engine</c> values, as written to the store.</summary>
     internal const string EngineSqlServer = "sqlserver";
@@ -1713,7 +1899,7 @@ ON CONFLICT (server_id) DO NOTHING";
 
     /// <summary>
     /// Validates the optional <c>port</c>; absent or 0 → the driver's default. Consumed only by the PostgreSQL
-    /// connection builder (a SQL Server target carries its port in the host string), and range-checked here to
+    /// connection builder (a SQL Server target carries its port in the host string, and a non-zero one is refused, #6583), and range-checked here to
     /// match <c>DarlingConfig.Validate</c> rather than failing later inside Npgsql.
     /// </summary>
     internal static (int Port, string? Error) ResolvePort(JsonObject obj)

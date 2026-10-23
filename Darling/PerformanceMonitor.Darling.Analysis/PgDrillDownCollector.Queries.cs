@@ -987,8 +987,258 @@ SELECT
 FROM scored
 WHERE regression_factor >= 2
 AND   latest_total_cpu_us >= 10000000
+-- #6548: SQL Server own housekeeping statements are not application code; left out before the LIMIT, as the PLAN_REGRESSION fact does.
+AND   NOT EXISTS (SELECT 1 FROM query_store_text AS x
+                      WHERE x.server_id = $1
+                        AND x.database_name = scored.database_name
+                        AND x.query_id = scored.query_id
+                        AND lower(x.query_sql_text) ~ '" + PerformanceMonitor.Common.InternalStatements.LowerTextPattern + @"')
 ORDER BY regression_factor DESC
 LIMIT 5";
+
+    /// <summary>
+    /// The regressed-queries read over the per-day totals for the closed days and the interval table for the rest (#5794):
+    /// <see cref="RegressedQueriesTableSql"/> with its <c>plan_dedup</c> split the way <c>PgFactCollector.PlanRegressionDailySql</c>
+    /// splits the fact's read (#5448, #5812). $1 to $7 as in <see cref="RegressedQueriesTableSql"/>, then $8 the built days
+    /// (<see cref="PlanRegressionDaily.BuiltDaysSql"/>, date[]), $9 the live floor
+    /// (<c>PgFactCollector.PlanRegressionLiveFloorWithWatermarks</c>) and $10 each built day's watermark (timestamp[], aligned
+    /// with $8). $8 to $10 come from the same REPEATABLE READ snapshot as this read (see <see cref="CollectRegressedQueries"/>).
+    ///
+    /// <para><b>Why.</b> The table twin's <c>plan_dedup</c> reads every row of every offender from every daily partition of
+    /// <c>query_store_interval_latest</c> in the 14-day window, plus the legacy partition: about 5,300 rows for 20 offenders on
+    /// one production server, each one a random heap read. When those pages are cold (the statement runs once per pass per
+    /// server, 30 minutes apart, so it mostly is) that read took 0.8 s to 1.8 s on its own, and its hourly mean ran 1.5 s at the
+    /// median server and 5.8 s at p90. A built day holds about one row per plan per day instead of about 24 interval rows, and
+    /// its unique key leads (server_id, day, database_name, query_id), so the closed days cost about 700 rows by key and only
+    /// the open part of the window is read from the interval table. Measured on the same server: 807 ms to 68 ms cold, and
+    /// about equal warm (58 ms to 68 ms, mostly planning).</para>
+    ///
+    /// <para><b>The same rows.</b> Sums recombine exactly (the totals are exact integer sums, numeric), so the per-exec
+    /// averages, MAX(plan_id) and MAX(last_exec) of each plan-hash group are the table twin's. The two routes can part only for
+    /// a snapshot collected more than a day before its interval's last execution, the case the fact's daily read already
+    /// accepts. <c>query_hash</c> and the fallback <c>query_text</c> are not in the totals, so they are looked up for the five
+    /// output rows only, in the latest plan's group over the table twin's bounds: the hash from that group's newest row, the
+    /// text from any row of it. The table twin takes <c>any_value()</c> of each over the group. They can differ only where one
+    /// group's rows carry two hashes or two texts, and a Query Store query_id has one statement and one hash, so within
+    /// one (query_id, plan hash) group they agree; a NULL on some rows is skipped by both.</para>
+    ///
+    /// <para><b>One real difference: pairs, not two lists.</b> The table twin matches an offender as
+    /// <c>database_name = ANY($5) AND query_id = ANY($6)</c>, two lists tested separately, so with (dbA, 7) and (dbB, 9) on the
+    /// list it also admits the cross pairs (dbA, 9) and (dbB, 7). Query ids are numbered per database, so on a server with
+    /// many similar databases those collisions are real. This read matches exact (database, query_id) pairs, so it returns
+    /// the offenders and never a cross pair, and it can return fewer rows than the table twin for the same list. The pairs
+    /// are the right set: an offender the fact excluded must not reach a force (#5630), and a cross pair would bypass that
+    /// rule. The table twin keeps its old match (it is the fallback, and its plan depends on it, #5957), so a pass that falls
+    /// back can still show a cross pair. <c>PlanRegressionDrillDownDailyParityLiveTests</c> seeds one and pins both.</para>
+    ///
+    /// <para><b>The offender pairs.</b> The live half drives the interval table per (database, query_id) pair through an
+    /// explicit LATERAL, so each pair is one seek of <see cref="QueryStoreBackgroundIndexes.LatestDatabaseQueryFirstExec"/>.
+    /// Do not write it as <c>(database_name, query_id) IN (SELECT ... FROM unnest(...))</c>: over the partitioned table
+    /// that semi-join lost the seek and timed out at 60 s on a production store. The same IN form is fine against the per-day
+    /// table, where it drives a nested loop into <c>ux_plan_regression_daily</c>. NULL offenders are not supported (an empty
+    /// list would read nothing): the caller runs <see cref="RegressedQueriesTableSql"/> then.</para>
+    /// </summary>
+    public const string RegressedQueriesDailySql = RegressedQueriesHead + RegressedQueriesDailyMiddle + RegressedQueriesDailyTail;
+
+    /// <summary>The daily twin's offender pairs and <c>plan_dedup</c> (#5794).</summary>
+    private const string RegressedQueriesDailyMiddle = @"offender AS
+(
+    -- #5794: the fact's offenders as (database, query_id) PAIRS, not two arrays matched independently. DISTINCT, because the
+    -- fact can list one pair once per replica role, and the LATERAL below would read its rows once per copy.
+    SELECT DISTINCT o.database_name, o.query_id
+    FROM unnest($5::text[], $6::bigint[]) AS o (database_name, query_id)
+),
+plan_dedup AS
+(
+    -- #5794: built days from collect.plan_regression_daily, every other row from the interval table, split exactly as
+    -- PlanRegressionDailySql splits the fact's read: a row is in exactly one half by its day (last_execution_time::date). A
+    -- day not built is all live, and a built day keeps only its rows at or above its watermark ($10) live. Grouped straight
+    -- to the plan-hash grain: sums recombine exactly, and MAX(plan_id) and MAX(last_exec) are unchanged.
+    SELECT
+        u.database_name,
+        u.query_id,
+        u.replica_role,
+        u.query_plan_hash,
+        MAX(u.plan_id) AS plan_id,
+        SUM(u.execs) AS execs,
+        SUM(u.cpu_us_sum)::DOUBLE PRECISION / NULLIF(SUM(u.execs), 0) AS cpu_per_exec,
+        SUM(u.dur_us_sum)::DOUBLE PRECISION / NULLIF(SUM(u.execs), 0) AS dur_per_exec,
+        MAX(u.last_exec) AS last_exec
+    FROM
+    (
+        SELECT
+            d.database_name, d.query_id, d.replica_role, d.query_plan_hash, d.plan_id,
+            d.execs, d.cpu_us_sum, d.dur_us_sum, d.last_exec
+        FROM plan_regression_daily AS d
+        WHERE d.server_id = $1::integer
+        AND   d.day = ANY($8::date[])
+        AND   (d.database_name, d.query_id) IN (SELECT database_name, query_id FROM offender)
+
+        UNION ALL
+
+        SELECT
+            l.database_name, l.query_id, l.replica_role, l.query_plan_hash, l.plan_id,
+            l.execution_count::numeric,
+            l.avg_cpu_time_us::numeric * l.execution_count,
+            l.avg_duration_us::numeric * l.execution_count,
+            l.last_execution_time
+        FROM offender AS o
+        CROSS JOIN LATERAL
+        (
+            -- One seek per pair. $9 bounds first_execution_time to the open part of the window, which also prunes the
+            -- partitions below it; the table twin's bounds stay, so a live row is one the table twin reads.
+            SELECT q.*
+            FROM query_store_interval_latest AS q
+            WHERE q.server_id = $1::integer
+            AND   q.database_name = o.database_name
+            AND   q.query_id = o.query_id
+            AND   q.last_execution_time >= $2::timestamp
+            AND   q.collection_time >= $7::timestamp
+            AND   q.first_execution_time >= $9::timestamp
+        ) AS l
+        -- #5812: a row is in the totals when its day is built and its first execution is below that day's watermark, so the
+        -- live half is the rest. A scalar lookup ($10 is aligned with $8; a day not built finds no watermark and keeps
+        -- every row), as in the fact's read.
+        WHERE l.first_execution_time >= COALESCE(($10::timestamp[])[array_position($8::date[], l.last_execution_time::date)], '-infinity'::timestamp)
+    ) AS u
+    WHERE TRUE
+    /*SEC*/
+    GROUP BY u.database_name, u.query_id, u.replica_role, u.query_plan_hash
+    HAVING SUM(u.execs) >= 25
+),
+";
+
+    /// <summary>The daily twin from <c>latest</c> down (#5794): the shared tail's ranking, with the hash and the fallback
+    /// text looked up for the five output rows, since the totals carry neither.</summary>
+    private const string RegressedQueriesDailyTail = @"latest AS
+(
+    -- As in the shared tail: the most recently executed plan per query and replica.
+    SELECT DISTINCT ON (database_name, query_id, replica_role) *
+    FROM plan_dedup
+    ORDER BY database_name, query_id, replica_role, last_exec DESC
+),
+cheapest AS
+(
+    -- The cheapest (best) plan per query by cpu-per-exec, on the same replica.
+    SELECT DISTINCT ON (database_name, query_id, replica_role) *
+    FROM plan_dedup
+    ORDER BY database_name, query_id, replica_role, cpu_per_exec ASC
+),
+scored AS
+(
+    -- The shared tail's scoring (#2138, the PLAN_REGRESSION fact's CPU-primary rule) and join, NULL-safe on replica_role.
+    SELECT
+        l.database_name,
+        l.query_id,
+        l.query_plan_hash AS latest_plan_hash,
+        l.cpu_per_exec AS latest_cpu,
+        l.dur_per_exec AS latest_dur,
+        b.query_plan_hash AS best_plan_hash,
+        b.plan_id AS best_plan_id,
+        b.cpu_per_exec AS best_cpu,
+        b.dur_per_exec AS best_dur,
+        b.last_exec AS best_plan_last_seen,
+        CASE
+            WHEN l.cpu_per_exec / NULLIF(b.cpu_per_exec, 0) >= 2
+                THEN l.cpu_per_exec / NULLIF(b.cpu_per_exec, 0)
+            WHEN l.dur_per_exec / NULLIF(b.dur_per_exec, 0) >= 4
+             AND l.cpu_per_exec / NULLIF(b.cpu_per_exec, 0) >= 1.25
+                THEN l.dur_per_exec / NULLIF(b.dur_per_exec, 0) / 2
+        END AS regression_factor,
+        l.replica_role,
+        l.execs * l.cpu_per_exec AS latest_total_cpu_us
+    FROM latest AS l
+    JOIN cheapest AS b
+      ON  b.database_name = l.database_name
+      AND b.query_id = l.query_id
+      AND b.replica_role IS NOT DISTINCT FROM l.replica_role
+    WHERE l.query_plan_hash <> b.query_plan_hash
+),
+top_five AS
+(
+    SELECT *
+    FROM scored
+    WHERE regression_factor >= 2
+    AND   latest_total_cpu_us >= 10000000
+    -- #6548: as in the table read above.
+    AND   NOT EXISTS (SELECT 1 FROM query_store_text AS x
+                          WHERE x.server_id = $1
+                            AND x.database_name = scored.database_name
+                            AND x.query_id = scored.query_id
+                            AND lower(x.query_sql_text) ~ '" + PerformanceMonitor.Common.InternalStatements.LowerTextPattern + @"')
+    ORDER BY regression_factor DESC
+    LIMIT 5
+)
+SELECT
+    t.database_name,
+    t.query_id,
+    t.latest_plan_hash,
+    t.latest_cpu,
+    t.latest_dur,
+    t.best_plan_hash,
+    t.best_plan_id,
+    t.best_cpu,
+    t.best_dur,
+    t.regression_factor,
+    -- Text: query_store_text first (#2150), then any non-NULL text of the latest plan's group over the table twin's bounds,
+    -- the text the table read took from that group. COALESCE runs the subquery only for a row with no query_store_text row.
+    COALESCE
+    (
+        x.query_sql_text,
+        (
+            SELECT q.query_text
+            FROM query_store_interval_latest AS q
+            WHERE q.server_id = $1::integer
+            AND   q.database_name = t.database_name
+            AND   q.query_id = t.query_id
+            AND   q.first_execution_time >= $7::timestamp
+            AND   q.collection_time >= $7::timestamp
+            AND   q.last_execution_time >= $2::timestamp
+            AND   q.query_plan_hash = t.latest_plan_hash
+            AND   q.replica_role IS NOT DISTINCT FROM t.replica_role
+            AND   q.query_text IS NOT NULL
+            -- Newest first, so the row is the same on every run (and the hash lookup below picks the same way). The group
+            -- is one plan's rows for one query, a few dozen at most, and only the output rows without a text row get here.
+            ORDER BY q.first_execution_time DESC
+            LIMIT 1
+        )
+    ) AS query_text,
+    t.replica_role,
+    -- #2138 gap 3 and #4821, as in the shared tail, keyed on the hash looked up below.
+    (
+        SELECT p.creation_time_local
+        FROM psp_signature AS p
+        WHERE p.database_name = t.database_name
+        AND   p.query_hash = h.query_hash
+    ) AS parameter_sensitivity_creation_time_local,
+    t.best_plan_last_seen,
+    (SELECT offset_minutes FROM svr) AS offset_minutes,
+    (SELECT time_zone_id FROM svr) AS time_zone_id
+FROM top_five AS t
+-- query_hash for the five output rows only: the newest row of the latest plan's group over the table twin's bounds, one
+-- seek of the (server_id, database_name, query_id, first_execution_time) index per row.
+LEFT JOIN LATERAL
+(
+    SELECT q.query_hash
+    FROM query_store_interval_latest AS q
+    WHERE q.server_id = $1::integer
+    AND   q.database_name = t.database_name
+    AND   q.query_id = t.query_id
+    AND   q.first_execution_time >= $7::timestamp
+    AND   q.collection_time >= $7::timestamp
+    AND   q.last_execution_time >= $2::timestamp
+    AND   q.query_plan_hash = t.latest_plan_hash
+    AND   q.replica_role IS NOT DISTINCT FROM t.replica_role
+    AND   q.query_hash IS NOT NULL
+    ORDER BY q.first_execution_time DESC
+    LIMIT 1
+) AS h ON TRUE
+-- #2150 text resolution, one row per key by primary key.
+LEFT JOIN query_store_text AS x
+  ON  x.server_id = $1
+  AND x.database_name = t.database_name
+  AND x.query_id = t.query_id
+ORDER BY t.regression_factor DESC";
 
     /// <summary>
     /// Top regressed queries behind a PLAN_REGRESSION finding.
@@ -997,6 +1247,16 @@ LIMIT 5";
     /// window — so the days-old "best plan" baseline is present. Since #3902 it re-runs it over
     /// the queries the fact reported this pass (<see cref="AnalysisContext.PlanRegressionOffenders"/>),
     /// and over every query only when the fact did not run.
+    ///
+    /// <para><b>#5794: the closed days come from the per-day totals.</b> When the fact read per-day totals this pass
+    /// (<see cref="AnalysisContext.PlanRegressionWindowStart"/> is set) and listed offenders, the drill-down runs
+    /// <see cref="RegressedQueriesDailySql"/>: the table read's per-partition offender rows were random heap reads, cold on
+    /// almost every pass, and they were most of its cost. The built days and their watermarks are read again here, with
+    /// <see cref="PlanRegressionDaily.BuiltDaysSql"/>, in one REPEATABLE READ READ ONLY transaction with the read, exactly as
+    /// the fact does. They are not taken from the fact: the builder can rebuild a day (a partial day with a later watermark)
+    /// and the trigger can mark one late between the fact's snapshot and this one, and a built set from another snapshot
+    /// would then count a day's rows twice or not at all. With no offenders, no built day, or a failed built-days read, the
+    /// table read runs as before.</para>
     /// </summary>
     private async Task CollectRegressedQueries(AnalysisFinding finding, AnalysisContext context)
     {
@@ -1011,8 +1271,40 @@ LIMIT 5";
             ?? await QueryStoreIntervalLatest.ReadsTableAsync(
                 connection, context.ServerId, windowStart.AddDays(-1), DrillDownCommandTimeoutSeconds, null, context.CancellationToken);
 
-        using var cmd = new NpgsqlCommand(readsTable ? RegressedQueriesTableSql : RegressedQueriesSql, connection);
-        cmd.CommandTimeout = DrillDownCommandTimeoutSeconds;
+        /* #5794: the per-day route needs the fact's offenders (an empty list would read nothing) and a day-aligned edge, which
+           PlanRegressionWindowStart is only when the fact read per-day totals. The built days are read in this read's own
+           REPEATABLE READ snapshot (see the summary); no built day, or a failed read, leaves the table read, outside it. */
+        var offenders = context.PlanRegressionOffenders is { Count: > 0 } reported ? reported : null;
+        await using var snapshot = readsTable && offenders is not null && context.PlanRegressionWindowStart is not null
+            ? await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, context.CancellationToken)
+            : null;
+        var builtDays = new List<PlanRegressionDaily.BuiltDay>();
+        if (snapshot is not null)
+        {
+            await using (var readOnly = new NpgsqlCommand("SET TRANSACTION READ ONLY", connection, snapshot) { CommandTimeout = DrillDownCommandTimeoutSeconds })
+            {
+                await readOnly.ExecuteNonQueryAsync(context.CancellationToken);
+            }
+
+            builtDays = await QueryStoreIntervalLatest.ReadBuiltDaysAsync(
+                connection, snapshot, context.ServerId, windowStart, DrillDownCommandTimeoutSeconds, _logger,
+                ex => AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken), context.CancellationToken);
+        }
+
+        var readsDays = builtDays.Count > 0;
+        using var cmd = new NpgsqlCommand(
+            readsDays ? RegressedQueriesDailySql : readsTable ? RegressedQueriesTableSql : RegressedQueriesSql,
+            connection,
+            /* A failed built-days read leaves the snapshot aborted, so the table read runs without it. */
+            readsDays ? snapshot : null) { CommandTimeout = DrillDownCommandTimeoutSeconds };
+        if (!readsDays && snapshot is not null)
+        {
+            /* Disposed, as the fact does at the same point, rather than rolled back: disposing rolls back an active
+               transaction and swallows the error when the connection is already broken, so a dead connection cannot lose the
+               drill-down here (the table read below would then fail on its own, and be reported as its own failure). The
+               `await using` above disposes it again, which is a no-op. */
+            await snapshot.DisposeAsync();
+        }
         cmd.Parameters.AddWithValue(context.ServerId);
         cmd.Parameters.AddWithValue(windowStart);
         /* $3/$4: the STANDARD analysis window for the psp_signature CTE — deliberately not the 14-day
@@ -1031,7 +1323,6 @@ LIMIT 5";
            QueryStoreBackgroundIndexes.LatestDatabaseQueryFirstExec seeks on, so the read takes the offenders' rows only
            rather than every row the server has in the window. The command is not prepared, so each run gets a custom plan
            with these values known and the "$5 IS NULL OR" arm folded away; a store without that index keeps its old plan. */
-        var offenders = context.PlanRegressionOffenders is { Count: > 0 } reported ? reported : null;
         cmd.Parameters.Add(new NpgsqlParameter
         {
             NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text,
@@ -1047,6 +1338,23 @@ LIMIT 5";
             /* $7 (#3953): the raw twin's "$2 - interval '1 day'", bound bare so both the collection_time bound and
                the table's partitioning column are compared against a parameter (#2387). */
             cmd.Parameters.AddWithValue(windowStart.AddDays(-1));
+        }
+
+        if (readsDays)
+        {
+            /* #5794: $8 the built days, $9 the live floor worked out from them (bound, so the planner prunes the partitions
+               below it), $10 each built day's watermark, aligned with $8: the fact's own binding of the same three. */
+            cmd.Parameters.Add(new NpgsqlParameter
+            {
+                NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Date,
+                Value = builtDays.Select(b => b.Day).ToArray()
+            });
+            cmd.Parameters.AddWithValue(NpgsqlDbType.Timestamp, PgFactCollector.PlanRegressionLiveFloorWithWatermarks(windowStart, builtDays));
+            cmd.Parameters.Add(new NpgsqlParameter
+            {
+                NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp,
+                Value = builtDays.Select(b => b.ThroughOrDayEnd).ToArray()
+            });
         }
 
         /* #5558: the same databases the PLAN_REGRESSION fact skipped, for the pass where the fact did not run and the

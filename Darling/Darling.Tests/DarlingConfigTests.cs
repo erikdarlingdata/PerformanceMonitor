@@ -166,8 +166,8 @@ public sealed class DarlingConfigTests
 
         Assert.Contains(ValidConfig(c => c.Postgres.ConnectionString = "").Validate(),
             p => p.Contains("postgres.connectionString", StringComparison.Ordinal));
-        Assert.Contains(ValidConfig(c => c.Servers.Clear()).Validate(),
-            p => p.Contains("at least one", StringComparison.Ordinal));
+        /* #6468: an empty server list is a valid start (the first server is added after install), not a problem. */
+        Assert.Empty(ValidConfig(c => c.Servers.Clear()).Validate());
         Assert.Contains(ValidConfig(c => c.Servers[0].Host = "").Validate(),
             p => p.Contains("host is required", StringComparison.Ordinal));
         Assert.Contains(ValidConfig(c => c.Servers[0].Auth = "kerberos").Validate(),
@@ -218,7 +218,7 @@ public sealed class DarlingConfigTests
         var connectionString = MonitoredServerConnection.BuildConnectionString(Server());
         var parsed = new SqlConnectionStringBuilder(connectionString);
 
-        Assert.Equal("SQL2022", parsed.DataSource);
+        Assert.Equal("tcp:SQL2022", parsed.DataSource);
         Assert.Equal("master", parsed.InitialCatalog);
         Assert.Equal("PerformanceMonitorDarling", parsed.ApplicationName);
         Assert.Equal(15, parsed.ConnectTimeout);
@@ -705,7 +705,7 @@ public sealed class DarlingConfigTests
     {
         var ring = TestKeyRings.Healthy;
         var binding = PasswordBinding.ForServer(
-            ServerConnectionIdentity.FromStoredColumns("sql-example", 0, "sqlserver", null, false, "sql", "monitor", "Mandatory", false, false));
+            ServerConnectionIdentity.FromStoredColumns("sql-example", 0, "sqlserver", null, false, "sql", "monitor", "Mandatory", false, false, null));
 
         Assert.Equal(
             "file:/run/secrets/sql_password",
@@ -721,7 +721,7 @@ public sealed class DarlingConfigTests
         Assert.Equal("literal-pw", ring.Open(stored!, binding));
 
         var other = PasswordBinding.ForServer(
-            ServerConnectionIdentity.FromStoredColumns("sql-other", 0, "sqlserver", null, false, "sql", "monitor", "Mandatory", false, false));
+            ServerConnectionIdentity.FromStoredColumns("sql-other", 0, "sqlserver", null, false, "sql", "monitor", "Mandatory", false, false, null));
         Assert.Throws<PasswordSealException>(() => { _ = ring.Open(stored!, other); });
     }
 
@@ -729,7 +729,7 @@ public sealed class DarlingConfigTests
     public void ProtectPasswordForStorage_ALiteralWhileTheKeyIsNotReady_Throws_WithTheKeysReason()
     {
         var binding = PasswordBinding.ForServer(
-            ServerConnectionIdentity.FromStoredColumns("sql-example", 0, "sqlserver", null, false, "sql", "monitor", "Mandatory", false, false));
+            ServerConnectionIdentity.FromStoredColumns("sql-example", 0, "sqlserver", null, false, "sql", "monitor", "Mandatory", false, false, null));
 
         var ex = Assert.Throws<InvalidOperationException>(
             () => { _ = DarlingMcpServerAdminTools.ProtectPasswordForStorage("literal-pw", binding, TestKeyRings.NotReady); });

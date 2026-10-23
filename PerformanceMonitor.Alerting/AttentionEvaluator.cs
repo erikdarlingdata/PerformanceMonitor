@@ -51,6 +51,8 @@ public sealed record AttentionTopItem(string Name, long Samples, string? SampleT
 /// <param name="TopsFromLookback">False (the default): the three top lists cover the samples inside the covered span
 /// (<see cref="AttentionEvaluator.SpanBoundary"/> onward), the alert card's reading. True: the span kept no samples, so the lists
 /// cover the whole lookback and the card says so in its headings (round 2 of #5714, L6).</param>
+/// <param name="TopHosts">The top 5 client hosts by sampled events (#6553), over the same range as the other top lists. Null on a window
+/// built without them; read it through <see cref="AttentionWindow.Hosts"/>.</param>
 public sealed record AttentionWindow(
     IReadOnlyList<DateTime> RunTimes,
     IReadOnlyList<AttentionCountRow> Counts,
@@ -58,8 +60,12 @@ public sealed record AttentionWindow(
     IReadOnlyList<AttentionTopItem> TopStatements,
     IReadOnlyList<AttentionTopItem> TopDatabases,
     IReadOnlyList<AttentionTopItem> TopApplications,
-    bool TopsFromLookback = false)
+    bool TopsFromLookback = false,
+    IReadOnlyList<AttentionTopItem>? TopHosts = null)
 {
+    /// <summary>The top client hosts (#6553), empty when the window carries none.</summary>
+    public IReadOnlyList<AttentionTopItem> Hosts => TopHosts ?? Array.Empty<AttentionTopItem>();
+
     /// <summary>No runs, no rows: what a read of a server that never ran the collector returns.</summary>
     public static AttentionWindow Empty { get; } = new(
         Array.Empty<DateTime>(), Array.Empty<AttentionCountRow>(), Array.Empty<AttentionSampleGroup>(),
@@ -87,6 +93,9 @@ public sealed record AttentionReading(
 {
     /// <summary>All sampled events in the span.</summary>
     public long SampleTotal => Groups.Sum(g => g.Samples);
+
+    /// <summary>Sampled events in the span from the application <see cref="AttentionEvaluator.IsExcludedApp"/> leaves out (#6552).</summary>
+    public long ExcludedSamples => Groups.Where(g => AttentionEvaluator.IsExcludedApp(g.ClientAppName)).Sum(g => g.Samples);
 }
 
 /// <summary>
@@ -120,9 +129,13 @@ public sealed record AttentionReading(
 /// fire is recorded Muted. When the proportion changed the count, the detail says it is an estimate from N sampled
 /// events.</para>
 ///
-/// <para><b>The bars.</b> Warning at 10 per minute, Critical at 60 per minute, OFF by default. These are a guess from "a
-/// healthy application times out rarely", not a measured normal rate: none exists yet. The alert stays off until the bars are
-/// checked against captured data.</para>
+/// <para><b>The bars (#5736).</b> A field read of two stores found no fixed bar that fits: each server's own normal rate (the p99.9 of
+/// its 3-minute average over a week) ran from 0 to over 900 attentions a minute. So the bars are relative. Warning is
+/// max(WarningFloor, WarningMultiple x baseline) and Critical is max(CriticalFloor, CriticalMultiple x baseline), the baseline being
+/// the server's own p99.9 of its 3-minute average attention rate over the trailing <see cref="AttentionBaselineMath.LookbackDays"/> days
+/// (<see cref="AttentionBaselineMath"/>). The floors are the settings the alert shipped with, Warning 10 and Critical 60 per minute, and
+/// the multiples default to 3 and 10. A server with under a day of capture has no baseline and is graded on the floors alone, and the alert
+/// says so. OFF by default.</para>
 /// </summary>
 public static class AttentionEvaluator
 {
@@ -132,6 +145,21 @@ public static class AttentionEvaluator
 
     /// <summary>The span the rate is averaged over, in minutes.</summary>
     public const int WindowMinutes = 3;
+
+    /// <summary>The client application SSMS IntelliSense runs its metadata queries under (#6552). It cancels them itself when the user keeps
+    /// typing, so each one is a cancel the client asked for, not a timeout an application user saw.</summary>
+    public const string IntelliSenseClientApp = "Microsoft SQL Server Management Studio - Transact-SQL IntelliSense";
+
+    /// <summary>
+    /// True for a sampled event whose client application is SSMS IntelliSense (#6552): the alert judges the count without it, and
+    /// <c>get_client_timeouts</c> marks it excluded. The filter lives at READ time (here and in <see cref="ClientTimeoutsRead"/>); the
+    /// collector still stores every event, so a mute rule, the sampled-event list and the history keep seeing them. Matches
+    /// "Microsoft SQL Server Management Studio" followed by anything and ending in "IntelliSense", so a renamed SSMS build still matches.
+    /// </summary>
+    public static bool IsExcludedApp(string? clientAppName) =>
+        clientAppName is not null
+        && clientAppName.StartsWith("Microsoft SQL Server Management Studio", StringComparison.OrdinalIgnoreCase)
+        && clientAppName.TrimEnd().EndsWith("IntelliSense", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>How far back the read looks, in minutes. Equal to <see cref="RunnableQueueEvaluator.ReadLookbackMinutes"/>
     /// (a test pins it): the shared freshness rule caps its window there.</summary>
@@ -147,11 +175,31 @@ public static class AttentionEvaluator
     /// runs"), so a collector that was disabled, slowed or broken mid-incident cannot hold it open forever.</summary>
     public const int StaleIncidentMinutes = 30;
 
-    /// <summary>Shipped Warning bar: attentions per minute.</summary>
+    /// <summary>Shipped Warning floor (#5736): attentions per minute. The relative Warning bar never sits below it.</summary>
     public const int DefaultWarningPerMinute = 10;
 
-    /// <summary>Shipped Critical bar: attentions per minute.</summary>
+    /// <summary>Shipped Critical floor (#5736): attentions per minute. The relative Critical bar never sits below it.</summary>
     public const int DefaultCriticalPerMinute = 60;
+
+    /// <summary>The effective bar for one tier (#5736): the floor, or the multiple times the baseline rounded up to a whole attention a minute
+    /// when that is higher. With no baseline it is the floor.</summary>
+    public static int EffectiveBar(int floor, int multiple, double? baseline) =>
+        baseline is { } b && b > 0 && !double.IsNaN(b) && !double.IsInfinity(b)
+            ? (int)Math.Min(int.MaxValue, Math.Max(floor, Math.Ceiling(multiple * b)))
+            : floor;
+
+    /// <summary>True when the exact rate of <paramref name="reading"/> reaches the Warning floor, the cheapest test of whether any bar
+    /// can be crossed: a relative bar is never below its floor, so a rate under the floor fires nothing and the baseline need not be read.</summary>
+    public static bool ReachesFloor(AttentionReading? reading, int warningFloor)
+    {
+        if (reading is null)
+        {
+            return false;
+        }
+
+        var (warning, _) = ClampBars(warningFloor, warningFloor);
+        return Math.Round(reading.TotalCount / reading.CoveredMinutes, 2, MidpointRounding.AwayFromZero) >= warning;
+    }
 
     /// <summary>The clamp both stores apply on read: the Warning bar is at least 1 and the Critical bar is never below it.
     /// The same rule as the Runnable Queue pair.</summary>
@@ -326,14 +374,21 @@ public static class AttentionEvaluator
     /// rate crossed a bar.
     /// </summary>
     public static Finding? Evaluate(
-        AttentionReading? reading, int warningPerMinute, int criticalPerMinute, Func<string?, string?, bool>? isGroupMuted = null)
+        AttentionReading? reading, int warningPerMinute, int criticalPerMinute, Func<string?, string?, bool>? isGroupMuted = null,
+        AttentionRelativeBars? relative = null)
     {
         if (reading is null)
         {
             return null;
         }
 
-        var (warning, critical) = ClampBars(warningPerMinute, criticalPerMinute);
+        var (warningFloor, criticalFloor) = ClampBars(warningPerMinute, criticalPerMinute);
+        var (warningMultiple, criticalMultiple) = relative is null
+            ? (0, 0)
+            : AttentionBaselineMath.ClampMultiples(relative.WarningMultiple, relative.CriticalMultiple);
+        var warning = relative is null ? warningFloor : EffectiveBar(warningFloor, warningMultiple, relative.Baseline);
+        var critical = relative is null ? criticalFloor : Math.Max(warning, EffectiveBar(criticalFloor, criticalMultiple, relative.Baseline));
+        var bars = relative is null ? null : new BarBasis(relative.Baseline, warningFloor, criticalFloor, warningMultiple, criticalMultiple);
         var fullRate = Math.Round(reading.TotalCount / reading.CoveredMinutes, 2, MidpointRounding.AwayFromZero);
         if (!Grade(fullRate, warning, critical, out var fullSeverity, out var fullBar))
         {
@@ -341,6 +396,7 @@ public static class AttentionEvaluator
         }
 
         var sampleTotal = reading.SampleTotal;
+        var excludedSamples = reading.ExcludedSamples;
         var judgedCount = (double)reading.TotalCount;
         var estimated = false;
         if (sampleTotal == 0 && isGroupMuted is not null && isGroupMuted(null, null))
@@ -349,12 +405,15 @@ public static class AttentionEvaluator
                applies. A rule with a database or app pattern never matches a null database and app, so only a rule on the
                server and metric alone is asked here and can mute. The finding is Muted at the full count's grade. */
             return new Finding(fullSeverity, fullRate, fullBar, reading.TotalCount, judgedCount, reading.CoveredMinutes,
-                reading.RunCount, sampleTotal, estimated, Muted: true, reading.NewestRunTime);
+                reading.RunCount, sampleTotal, estimated, Muted: true, reading.NewestRunTime, bars, excludedSamples);
         }
 
-        if (sampleTotal > 0 && isGroupMuted is not null)
+        if (sampleTotal > 0 && (isGroupMuted is not null || excludedSamples > 0))
         {
-            var unmuted = reading.Groups.Where(g => !isGroupMuted(g.DatabaseName, g.ClientAppName)).Sum(g => g.Samples);
+            /* #6552: SSMS IntelliSense's own cancels are left out the way a muted group is, by the same proportion of the sampled events. */
+            var unmuted = reading.Groups
+                .Where(g => !IsExcludedApp(g.ClientAppName) && (isGroupMuted is null || !isGroupMuted(g.DatabaseName, g.ClientAppName)))
+                .Sum(g => g.Samples);
             if (unmuted < sampleTotal)
             {
                 judgedCount = reading.TotalCount * (double)unmuted / sampleTotal;
@@ -366,12 +425,12 @@ public static class AttentionEvaluator
         if (Grade(judgedRate, warning, critical, out var judgedSeverity, out var judgedBar))
         {
             return new Finding(judgedSeverity, judgedRate, judgedBar, reading.TotalCount, judgedCount, reading.CoveredMinutes,
-                reading.RunCount, sampleTotal, estimated, Muted: false, reading.NewestRunTime);
+                reading.RunCount, sampleTotal, estimated, Muted: false, reading.NewestRunTime, bars, excludedSamples);
         }
 
         /* The exact count crossed a bar, the unmuted share did not: the fire is recorded Muted at the exact count's grade. */
         return new Finding(fullSeverity, fullRate, fullBar, reading.TotalCount, judgedCount, reading.CoveredMinutes,
-            reading.RunCount, sampleTotal, estimated, Muted: true, reading.NewestRunTime);
+            reading.RunCount, sampleTotal, estimated, Muted: true, reading.NewestRunTime, bars, excludedSamples);
     }
 
     private static bool Grade(double rate, int warning, int critical, out AlertSeverityLevel severity, out int bar)
@@ -410,8 +469,63 @@ public static class AttentionEvaluator
                 $" Estimated from {finding.SampledEvents:N0} sampled events: {finding.JudgedCount / finding.CoveredMinutes:N1} per minute is not muted.");
         }
 
+        if (finding.ExcludedSamples > 0)
+        {
+            text += string.Create(CultureInfo.InvariantCulture,
+                $" {finding.ExcludedSamples:N0} of the {finding.SampledEvents:N0} sampled events came from SSMS IntelliSense cancelling its own queries and are left out of the rate judged.");
+        }
+
+        if (finding.Bars is not null)
+        {
+            text += " " + BarSentence(finding);
+        }
+
         return text;
     }
+
+    /// <summary>
+    /// The sentence that names the baseline, the multiple and the bar that was crossed (#5736): "Baseline for this server: 150.0 per minute (p99.9 of
+    /// its 3-minute average over the last 7 days). Warning is 3 x baseline = 450 per minute." When the multiple of the baseline is under the floor,
+    /// it says the floor applies; with no baseline it says the server has under a day of capture and the floor alone is the bar.
+    /// </summary>
+    public static string BarSentence(Finding finding)
+    {
+        if (finding.Bars is not { } bars)
+        {
+            return "";
+        }
+
+        var tier = finding.Severity == AlertSeverityLevel.Critical ? "Critical" : "Warning";
+        var floor = finding.Severity == AlertSeverityLevel.Critical ? bars.CriticalFloor : bars.WarningFloor;
+        var multiple = finding.Severity == AlertSeverityLevel.Critical ? bars.CriticalMultiple : bars.WarningMultiple;
+        if (bars.Baseline is null)
+        {
+            return string.Create(CultureInfo.InvariantCulture,
+                $"This server has under {AttentionBaselineMath.MinimumCaptureDays} day of capture and no baseline yet, so the {tier} bar is the floor, {floor} per minute.");
+        }
+
+        var baseline = bars.Baseline.Value;
+        if (baseline <= 0)
+        {
+            return string.Create(CultureInfo.InvariantCulture,
+                $"Baseline for this server: 0.0 per minute (p99.9 of its 3-minute average over the last {AttentionBaselineMath.LookbackDays} days), so the {tier} bar is the floor, {floor} per minute.");
+        }
+
+        var scaled = multiple * baseline;
+        var lead = string.Create(CultureInfo.InvariantCulture,
+            $"Baseline for this server: {baseline:N1} per minute (p99.9 of its 3-minute average over the last {AttentionBaselineMath.LookbackDays} days).");
+        return scaled >= floor
+            ? string.Create(CultureInfo.InvariantCulture, $"{lead} {tier} is {multiple} x baseline = {finding.BarCrossed} per minute.")
+            : string.Create(CultureInfo.InvariantCulture, $"{lead} {multiple} x baseline is {scaled:N1}, under the floor, so the {tier} bar is the floor, {floor} per minute.");
+    }
+
+    /// <summary>The numbers the bars of one grading came from (#5736).</summary>
+    /// <param name="Baseline">The server's baseline, or null when it has under a day of capture.</param>
+    /// <param name="WarningFloor">The Warning floor setting.</param>
+    /// <param name="CriticalFloor">The Critical floor setting.</param>
+    /// <param name="WarningMultiple">The Warning multiple.</param>
+    /// <param name="CriticalMultiple">The Critical multiple.</param>
+    public sealed record BarBasis(double? Baseline, int WarningFloor, int CriticalFloor, int WarningMultiple, int CriticalMultiple);
 
     /// <summary>One reading over a bar.</summary>
     /// <param name="Severity">Warning, or Critical when the rate reached the Critical bar.</param>
@@ -425,6 +539,8 @@ public static class AttentionEvaluator
     /// <param name="Estimated">True when the mute proportion changed the count: the judged count is an estimate from the samples.</param>
     /// <param name="Muted">True when the exact count crossed a bar and the judged count did not: record the fire as Muted.</param>
     /// <param name="NewestRunTime">The newest run's time (naive UTC).</param>
+    /// <param name="Bars">Where the bars came from (#5736), null when the grading used fixed bars only.</param>
+    /// <param name="ExcludedSamples">Sampled events in the span from SSMS IntelliSense (<see cref="IsExcludedApp"/>), left out of the judged count (#6552).</param>
     public sealed record Finding(
         AlertSeverityLevel Severity,
         double RatePerMinute,
@@ -436,7 +552,9 @@ public static class AttentionEvaluator
         long SampledEvents,
         bool Estimated,
         bool Muted,
-        DateTime NewestRunTime)
+        DateTime NewestRunTime,
+        BarBasis? Bars = null,
+        long ExcludedSamples = 0)
     {
         /// <summary>The summary sentence for the alert.</summary>
         public string Summary => AttentionEvaluator.Summary(this);

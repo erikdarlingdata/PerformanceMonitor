@@ -506,7 +506,7 @@ public partial class ViewerServerTab
             LockWaitTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             LockWaitTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(LockWaitTrendChart);
-            LockWaitTrendChart.Plot.YLabel("Lock Wait Time (ms/sec)");
+            LockWaitTrendChart.Plot.YLabel("Lock wait ms/s");
             SetChartYLimitsWithLegendPadding(LockWaitTrendChart, 0, 1);
             ShowChartLegend(LockWaitTrendChart);
             LockWaitTrendChart.Refresh();
@@ -534,7 +534,7 @@ public partial class ViewerServerTab
         LockWaitTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         LockWaitTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(LockWaitTrendChart);
-        LockWaitTrendChart.Plot.YLabel("Lock Wait Time (ms/sec)");
+        LockWaitTrendChart.Plot.YLabel("Lock wait ms/s");
         SetChartYLimitsWithLegendPadding(LockWaitTrendChart, 0, globalMax > 0 ? globalMax : 1);
         ShowChartLegend(LockWaitTrendChart);
         LockWaitTrendChart.Refresh();
@@ -563,7 +563,7 @@ public partial class ViewerServerTab
             BlockingTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             BlockingTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(BlockingTrendChart);
-            BlockingTrendChart.Plot.YLabel("Blocking Incidents");
+            BlockingTrendChart.Plot.YLabel("Blocking events");
             SetChartYLimitsWithLegendPadding(BlockingTrendChart, 0, 1);
             ShowChartLegend(BlockingTrendChart);
             BlockingTrendChart.Refresh();
@@ -605,7 +605,7 @@ public partial class ViewerServerTab
         BlockingTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         BlockingTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(BlockingTrendChart);
-        BlockingTrendChart.Plot.YLabel(PerformanceMonitor.Ui.BlockingSourceLabel.For("Blocking Incidents", data.Select(d => d.Source)));
+        BlockingTrendChart.Plot.YLabel(PerformanceMonitor.Ui.BlockingSourceLabel.For("Blocking events", data.Select(d => d.Source)));
         SetChartYLimitsWithLegendPadding(BlockingTrendChart, 0, data.Max(d => d.Count));
         ShowChartLegend(BlockingTrendChart);
         BlockingTrendChart.Refresh();

@@ -407,6 +407,7 @@ public static partial class DarlingCliCommands
         || IsSetCollectorFrequencyVerb(arg)
         || IsSetCollectorRetentionVerb(arg)
         || IsDropXeSessionsVerb(arg)
+        || IsGrantScriptVerb(arg)
         || IsResetPasswordKeyVerb(arg)
         || IsSelfCheckPasswordKeyVerb(arg);
 
@@ -470,7 +471,7 @@ public static partial class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe                     Run the service (also how the Windows Service Control Manager starts it)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --version, -v       Print the product version and exit." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --help, -h          Print this help and exit." + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --test-connection   Validate darling.json and probe every configured server (the store's registry when it is reachable, otherwise the file's list)." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --test-connection   Validate darling.json and probe every configured server (the store's registry when it is reachable, otherwise the file's list). A Windows-authentication server is tested by the running service, as its own account; if the service is not running the test runs as you and says so." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --check-settings [--json]   Print the store host profile and a verdict per sizing-relevant setting; exits non-zero if any is stale-after-hardware-change." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --diagnostics-bundle <path> [--hours N] [--server <name>] [--log-dir <dir>] [--config <path>] [--alias-map <path>] [--include-log-text] [--force]   Write one aliased diagnostics file to attach to a bug report (run elevated on the store host; --diag-bundle is the short form)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --encrypt-password  Encrypt a SQL-auth password for darling.json (reads stdin)." + Environment.NewLine +
@@ -488,7 +489,7 @@ public static partial class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --backfill-rollups  Materialize the retention rollups back over existing history, after a disk preflight. Runs on Linux against a bring-your-own store; only a managed store needs Windows." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --collapse-legacy-slices  Repair Query Store rows collected before the split-slice fix, then re-materialize the rollups they fed. Same platform rule as --backfill-rollups." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --recompress-plan-dim  Convert the plan dimension's pre-V54 text rows to gzip in batches while the service runs, then VACUUM FULL to return the space to the volume (--no-vacuum-full to skip; --vacuum-full to compact an already-converted store)." + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --add-server, --add-servers   Register monitored server(s) from a JSON array on stdin (the add_servers shape); the running service picks them up without a restart." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --add-server, --add-servers   Register monitored server(s) from a JSON array on stdin (the add_servers shape) or one server from flags (--host, --name, --auth, --username, --engine, --database; a SQL login is asked for its password, hidden); the running service picks them up without a restart." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --add-alert-source <name> [--config <path>]      Make a source for external alerts: a login that can send alerts and do nothing else. Prints its connection string ONCE; Darling keeps no copy. <name> is 2-31 characters: a letter, then lower-case letters, digits or underscores." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --rotate-alert-source <name> [--config <path>]   Give a source a new password and print its connection string once. The old password stops working." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --remove-alert-source <name> [--config <path>]   Drop a source's login and remove it, along with any alerts of its that are still queued. Alerts it already sent stay in the history." + Environment.NewLine +
@@ -501,6 +502,8 @@ public static partial class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --set-collector-retention <collector> <days|default> [--server <server>] [--config <path>]   Set how many days a collector's data is kept (1 to " + CollectorScheduleDefaults.MaxRetentionDays + "); default clears the row's value so the next level applies. Fleet-wide by default; --server scopes it to one server. Only the retention is written." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --drop-xe-sessions <server-name> [--dry-run] [--config <path>]   Drop the Extended Events sessions Darling created on a server this service still monitors (" + DarlingXeSessionCleanup.SessionNamesPhrase() + ", and this install's own, whichever exist). Removing a server drops only this install's own sessions, so run this just before you remove the server to drop the shared ones too. It also lists the sessions of other installs and never drops them. --dry-run lists them and drops nothing." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --drop-xe-sessions --print-sql   Print guarded DROP statements for the shared sessions, and a query that lists every install's sessions with their DROP statements, in both scopes. It connects to nothing, so use it for a server that is no longer configured or that a removal could not reach." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --grant-script <server-name> [--finops] [--azure] [--config <path>]   Print the T-SQL that creates the monitoring login and grants what Darling needs on a monitored server (the SQL login the entry uses, or the service account for Windows authentication). Safe to run twice. Connects to no monitored server." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --grant-script --host <host> [--auth sql|integrated|serviceprincipal|managedidentity] [--username <login>] [--finops] [--azure]   The same for a host not yet added." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --backfill-rollups --dry-run   Show the plan, the disk estimate and the time budget, and change nothing.";
 
     /// <summary>
@@ -558,20 +561,80 @@ public static partial class DarlingCliCommands
 
         await ReportAgentDispatchAsync(config, output, cancellationToken);
 
+        /* #6583: a warning, not an error, so a config that works today still starts: the port is ignored for a SQL Server target. */
+        foreach (var warning in SqlServerPortAdvice.Warnings(targets))
+        {
+            output.WriteLine("WARNING: " + warning);
+        }
+
         /* #6265: a warning, not an error, so a setup that started before still starts; the web refuses that token for sign-in. */
         if (DarlingAgentDispatchChecks.WebTokenFinding(config) is { } webTokenFinding)
         {
             output.WriteLine("WARNING: " + webTokenFinding);
         }
 
+        /* #6468: no servers yet is a valid start. Say so plainly rather than print "All servers reachable." over an empty list. */
+        if (targets.Count == 0)
+        {
+            output.WriteLine("No monitored servers are configured yet, so there is nothing to test. Add one in the Viewer (Add Server) or with --add-server.");
+            return 0;
+        }
+
         output.WriteLine($"Validating connectivity to {targets.Count} server(s)...");
 
+        /* #6476: a Windows-authentication server is tested BY THE RUNNING SERVICE when it can be asked, because this process runs as the
+           person at the console and the service runs as another account. The store is opened only when such a server is first tested. */
+        DarlingServiceConnectionTest.LazyStoreServiceConnectionTester? serviceTester = null;
+        if (OperatingSystem.IsWindows()
+            && TryBuildStoreConnectionString(config.Postgres, out var testerConnectionString, out _)
+            && !string.IsNullOrWhiteSpace(testerConnectionString))
+        {
+            serviceTester = new DarlingServiceConnectionTest.LazyStoreServiceConnectionTester(testerConnectionString);
+        }
+
+        bool allReachable;
+        try
+        {
+            allReachable = await ProbeTargetsAsync(
+                targets, output, serviceTester,
+                (server, token) => DarlingServerConnector.ProbeAsync(server, null, token, runsAsConsoleUser: true),
+                OperatingSystem.IsWindows(), DarlingServiceConnectionTest.ConsoleIdentity(), cancellationToken);
+        }
+        finally
+        {
+            if (serviceTester is not null)
+            {
+                await serviceTester.DisposeAsync();
+            }
+        }
+
+        output.WriteLine(allReachable
+            ? "All servers reachable."
+            : "One or more servers failed the connection pre-flight (see above).");
+        return allReachable ? 0 : 1;
+    }
+
+    /// <summary>
+    /// Probes each target and prints its PASS/FAIL line; true only when every one is reachable. A Windows-authentication target goes through
+    /// <see cref="DarlingServiceConnectionTest.TestAsync"/>, so the line says whose identity was tested (#6476). The seams are the service
+    /// tester and the in-process probe, so the loop runs under test without a SQL Server or a store.
+    /// </summary>
+    internal static async Task<bool> ProbeTargetsAsync(
+        IReadOnlyList<MonitoredServer> targets,
+        TextWriter output,
+        DarlingServiceConnectionTest.IServiceConnectionTester? serviceTester,
+        Func<MonitoredServer, CancellationToken, Task<ConnectionProbeResult>> probeAsConsole,
+        bool windowsHost,
+        string consoleIdentity,
+        CancellationToken cancellationToken)
+    {
         var allReachable = true;
         var nativeLoadFailureSaid = false;
         foreach (var server in targets)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var probe = await DarlingServerConnector.ProbeAsync(server, null, cancellationToken);
+            var (probe, notes) = await DarlingServiceConnectionTest.TestAsync(
+                server, serviceTester, probeAsConsole, consoleIdentity, windowsHost, cancellationToken);
             if (probe.SqlClientNativeLoadFailed)
             {
                 /* #6183: SqlClient's native library did not load, so no SQL Server connection can work from this
@@ -588,21 +651,24 @@ public static partial class DarlingCliCommands
             }
 
             output.WriteLine(FormatProbeLine(server.DisplayName, probe));
+            foreach (var note in notes)
+            {
+                output.WriteLine(note);
+            }
+
             if (!probe.Success)
             {
                 allReachable = false;
             }
         }
 
-        output.WriteLine(allReachable
-            ? "All servers reachable."
-            : "One or more servers failed the connection pre-flight (see above).");
-        return allReachable ? 0 : 1;
+        return allReachable;
     }
 
     /// <summary>
     /// The agent dispatch checks for <c>--validate-config</c> (#6263): investigations on with MCP off, with no usable token,
-    /// with writes also on, or with no agent route. Nothing is read or printed when <c>mcp.allowInvestigations</c> is off.
+    /// with writes also on, or with no agent route. Nothing is read or printed when <c>mcp.allowInvestigations</c> is off and
+    /// <c>mcp.tokens</c> is not set. With <c>mcp.tokens</c> set, its own findings print too (#6542).
     /// Each finding is a <c>WARNING:</c> or a <c>NOTE:</c> line on <paramref name="output"/>, the same shape as the other
     /// warnings in this verb. None of them changes the exit code: those configs ran before, so an upgrade must not start
     /// failing a validation. The MCP switch and the route count come from the store when it answers, else from the file.
@@ -610,7 +676,7 @@ public static partial class DarlingCliCommands
     internal static async Task ReportAgentDispatchAsync(
         DarlingConfig config, TextWriter output, CancellationToken cancellationToken)
     {
-        if (!config.Mcp.AllowInvestigations)
+        if (!config.Mcp.AllowInvestigations && !config.Mcp.HasNamedTokens)
         {
             return;
         }
@@ -634,6 +700,12 @@ public static partial class DarlingCliCommands
             output.WriteLine(
                 (finding.Severity == DarlingAgentDispatchChecks.AgentDispatchSeverity.Warning ? "WARNING: " : "NOTE: ")
                 + finding.Message);
+        }
+
+        /* #6542: the named tokens' own findings print whenever mcp.tokens is set, whether or not investigations are on. */
+        foreach (var finding in DarlingAgentDispatchChecks.NamedTokenFindings(config.Mcp, token, agentRoutes))
+        {
+            output.WriteLine("WARNING: " + finding);
         }
     }
 
@@ -1202,6 +1274,10 @@ public static partial class DarlingCliCommands
             : CheckSettingsExitCode.Ok;
     }
 
+    /// <summary>#6472: <c>--grant-script</c>'s configuration load. It sits here with the other verbs' loads: this is a CLI process, so the
+    /// owned set <see cref="DarlingConfig.Load"/> publishes is that of the file the verb was pointed at.</summary>
+    internal static DarlingConfig LoadConfigForGrantScript(string? configPath) => DarlingConfig.Load(configPath);
+
     /// <summary>Formats one server's probe outcome as a PASS/FAIL line (pure — unit-testable).</summary>
     public static string FormatProbeLine(string serverName, ConnectionProbeResult probe)
     {
@@ -1210,7 +1286,22 @@ public static partial class DarlingCliCommands
             return $"  [FAIL] {serverName}: {probe.Error}";
         }
 
-        return $"  [PASS] {serverName}: {DarlingServerConnector.DescribeProbeFacts(probe)}";
+        var passLine = $"  [PASS] {serverName}: {DarlingServerConnector.DescribeProbeFacts(probe)}";
+        /* #6254: a server with a Query Store replica is tested on both connections, and each is named. A replica that could not be
+           opened is a [WARN], not a [FAIL]: the primary answered, and collection reads Query Store from it. */
+        /* #6472: a missing base grant is a [WARN] line too: the connection worked. */
+        if (!string.IsNullOrEmpty(probe.MissingGrantsNote))
+        {
+            passLine += Environment.NewLine + $"  [WARN] {serverName}: {probe.MissingGrantsNote}";
+        }
+
+        if (DarlingServerConnector.DescribeQueryStoreReplica(probe) is not { } replicaLine)
+        {
+            return passLine;
+        }
+
+        var replicaPrefix = string.IsNullOrEmpty(probe.QueryStoreReplicaError) && !probe.QueryStoreReplicaIgnoredOnAzureSqlDb ? "         " : "  [WARN] ";
+        return passLine + Environment.NewLine + $"{replicaPrefix}{serverName}: Primary: connected. {replicaLine}";
     }
 
     /// <summary>
@@ -2831,7 +2922,7 @@ public static partial class DarlingCliCommands
 
     /// <summary>Best-effort Windows-service status line via Get-Service; never throws (falls back to a plain note).</summary>
     [SupportedOSPlatform("windows")]
-    private static async Task<string> DescribeServiceStateAsync(CancellationToken cancellationToken)
+    internal static async Task<string> DescribeServiceStateAsync(CancellationToken cancellationToken)
     {
         try
         {
@@ -3198,14 +3289,25 @@ public static partial class DarlingCliCommands
         _ => "the MCP resolver rejected these values.",
     };
 
-    /// <summary>Removes all three network blocks (symmetric with the reconcilers), validating parse + loopback-only before the timestamped write, then offers a restart. Shared by the managed Disable choice and the BYO cleanup.</summary>
+    /// <summary>
+    /// PURE: the darling.json text <see cref="DisableExposureAsync"/> writes, with the text after each step so the caller
+    /// can tell which sections changed. The <c>postgres.network</c> block goes whole. The <c>mcp.network</c> and
+    /// <c>web.network</c> blocks lose only their exposure keys (<see cref="DarlingNetworkConfigEditor.EndpointExposureKeys"/>)
+    /// and keep the token, which still gates the loopback listener.
+    /// </summary>
+    internal static (string AfterPostgres, string AfterMcp, string NewText) DisabledExposureText(string originalText)
+    {
+        var afterPostgres = DarlingNetworkConfigEditor.RemoveNetworkBlock(originalText, "postgres");
+        var afterMcp = DarlingNetworkConfigEditor.RemoveEndpointExposure(afterPostgres, "mcp");
+        return (afterPostgres, afterMcp, DarlingNetworkConfigEditor.RemoveEndpointExposure(afterMcp, "web"));
+    }
+
+    /// <summary>Removes the postgres network block and the mcp/web exposure keys (symmetric with the reconcilers), validating parse + loopback-only before the timestamped write, then offers a restart. Shared by the managed Disable choice and the BYO cleanup.</summary>
     [SupportedOSPlatform("windows")]
     private static async Task<int> DisableExposureAsync(
         string resolvedPath, string originalText, TextReader input, TextWriter output, TextWriter error, CancellationToken cancellationToken)
     {
-        var newText = DarlingNetworkConfigEditor.RemoveNetworkBlock(originalText, "postgres");
-        newText = DarlingNetworkConfigEditor.RemoveNetworkBlock(newText, "mcp");
-        newText = DarlingNetworkConfigEditor.RemoveNetworkBlock(newText, "web");
+        var (afterPostgres, afterMcp, newText) = DisabledExposureText(originalText);
 
         if (string.Equals(newText, originalText, StringComparison.Ordinal))
         {
@@ -3242,6 +3344,32 @@ public static partial class DarlingCliCommands
         }
 
         output.WriteLine("Network exposure removed. The service reconciles the endpoints OFF (pg_hba rule, firewall, ssl) on its next start.");
+
+        /* The mcp and web tokens stay (DisabledExposureText removes only the exposure keys), so each endpoint keeps
+           asking for its token on loopback. An endpoint whose block held no token gets a note naming what to add,
+           because an enabled endpoint needs one on loopback too unless its allowTokenlessLoopback is on. */
+        foreach (var (section, changed, hasToken, optOut) in new[]
+        {
+            ("mcp", !string.Equals(afterMcp, afterPostgres, StringComparison.Ordinal),
+                !string.IsNullOrWhiteSpace(reparsed.Mcp.Network?.EncryptedToken) || !string.IsNullOrWhiteSpace(reparsed.Mcp.Network?.Token),
+                reparsed.Mcp.AllowTokenlessLoopback),
+            ("web", !string.Equals(newText, afterMcp, StringComparison.Ordinal),
+                !string.IsNullOrWhiteSpace(reparsed.Web.Network?.EncryptedToken) || !string.IsNullOrWhiteSpace(reparsed.Web.Network?.Token),
+                reparsed.Web.AllowTokenlessLoopback),
+        })
+        {
+            if (changed && hasToken)
+            {
+                output.WriteLine($"Kept the {section} token: the loopback-only {section} endpoint still asks every client for it.");
+            }
+            else if (changed && !optOut)
+            {
+                output.WriteLine(
+                    $"NOTE: {section} has no token. If {section} is turned on, it needs one on loopback too: " +
+                    $"add \"{section}\": {{ \"network\": {{ \"encryptedToken\": \"...\" }} }} or set {section}.allowTokenlessLoopback " +
+                    "to true, or it will not start.");
+            }
+        }
         await OfferRestartAsync(input, output, error, cancellationToken);
         return 0;
     }
@@ -3436,10 +3564,7 @@ public static partial class DarlingCliCommands
             return "<a-LAN-IP-of-this-machine>";
         }
 
-        var text = listen.Trim();
-        return address.AddressFamily == AddressFamily.InterNetworkV6 && !text.StartsWith('[')
-            ? $"[{text}]"
-            : listen;
+        return DarlingListenUrl.FormatHost(listen);
     }
 
     /// <summary>
@@ -3667,6 +3792,92 @@ public static partial class DarlingCliCommands
         Handoff,
     }
 
+    /// <summary>
+    /// PURE: the line <c>--enable-mcp</c> / <c>--enable-web</c> prints when darling.json gives that endpoint no token and
+    /// its <c>allowTokenlessLoopback</c> is off, because the service then does not start it; null when a token is set, the
+    /// opt-out is on, or (MCP only) <c>mcp.tokens</c> names tokens, which the host honors without a legacy token (#6542).
+    /// Reads only whether a token value is present, never the token.
+    /// </summary>
+    internal static string? EnableTokenNote(bool mcp, DarlingConfig config)
+    {
+        var section = mcp ? "mcp" : "web";
+        var optOut = mcp ? config.Mcp.AllowTokenlessLoopback : config.Web.AllowTokenlessLoopback;
+        return HasEndpointToken(mcp, config) || (mcp && config.Mcp.HasNamedTokens) || optOut
+            ? null
+            : $"NOTE: darling.json gives {section} no token, so the service will not start it. Set {section}.network.encryptedToken " +
+              $"(from --encrypt-password) or {section}.network.token and restart the service, or set {section}.allowTokenlessLoopback " +
+              (mcp ? "to true to serve loopback with no token (the write tools stay off)." : "to true to serve loopback with no token, for reads only.");
+    }
+
+    /// <summary>Whether darling.json gives the endpoint a token value (presence only; the value is never read here).</summary>
+    private static bool HasEndpointToken(bool mcp, DarlingConfig config) => mcp
+        ? !string.IsNullOrWhiteSpace(config.Mcp.Network?.EncryptedToken) || !string.IsNullOrWhiteSpace(config.Mcp.Network?.Token)
+        : !string.IsNullOrWhiteSpace(config.Web.Network?.EncryptedToken) || !string.IsNullOrWhiteSpace(config.Web.Network?.Token);
+
+    /// <summary>
+    /// The scheme a loopback client uses to reach the endpoint. Plain <c>http</c>, except when the network listener is
+    /// TLS and its listen is a wildcard or loopback address: then there is ONE listener, HTTPS for loopback too (#5288
+    /// review F11), so the loopback address must be opened over <c>https</c>. Mirrors the host's own decision
+    /// (<see cref="DarlingListenerTls.DescribeLoopbackListener"/>); a certificate that fails to load is not known here.
+    /// </summary>
+    private static string LoopbackScheme(bool mcp, DarlingConfig config)
+    {
+        var managed = config.Postgres.Managed;
+        var exposed = mcp
+            ? DarlingMcpHostService.ResolveMcpBind(config.Mcp, managed).Mode == DarlingMcpHostService.McpBindMode.NetworkAndLoopback
+            : DarlingWebHostService.ResolveWebBind(config.Web, managed).Mode == DarlingHostBinding.BindMode.NetworkAndLoopback;
+        var listen = mcp ? config.Mcp.Network?.Listen : config.Web.Network?.Listen;
+        var tls = mcp ? config.Mcp.Network?.Tls : config.Web.Network?.Tls;
+        return exposed && tls is not null
+            && IPAddress.TryParse(listen?.Trim(), out var listenIp)
+            && !DarlingHostBinding.ShouldAddLoopbackListeners(listenIp)
+            ? "https"
+            : "http";
+    }
+
+    /// <summary>
+    /// What <c>--enable-mcp</c> / <c>--enable-web</c> print after "now on" (#6474): the web address to open, or the
+    /// <c>claude mcp add</c> command the Viewer's Settings copies (built by the same <see cref="DarlingEndpointClientText"/>
+    /// call, so they match except when the scheme is <c>https</c> on loopback: the <c>tls</c> block lives only in darling.json
+    /// on the service host, which the Viewer cannot see, so its copy stays <c>http</c> and its status line says to change it), and, when darling.json sets a token, the verb that shows it. The token value is never
+    /// printed: the command carries the <c>&lt;token&gt;</c> placeholder. <paramref name="port"/> is the port the endpoint
+    /// binds, as the store row the verb just wrote reports it. Prints nothing when the service will not start the
+    /// endpoint (no token and no <c>allowTokenlessLoopback</c>): <see cref="EnableTokenNote"/> has said so, and an address
+    /// that refuses the connection is no next step.
+    /// </summary>
+    internal static void WriteEnableNextSteps(bool mcp, DarlingConfig config, int port, TextWriter output)
+    {
+        var optOut = mcp ? config.Mcp.AllowTokenlessLoopback : config.Web.AllowTokenlessLoopback;
+        var hasToken = HasEndpointToken(mcp, config);
+        var namedTokens = mcp && config.Mcp.HasNamedTokens;
+        if (!hasToken && !namedTokens && !optOut)
+        {
+            return;
+        }
+
+        var portText = port.ToString(CultureInfo.InvariantCulture);
+        var scheme = LoopbackScheme(mcp, config);
+        output.WriteLine();
+        if (mcp)
+        {
+            output.WriteLine("To connect Claude Code, run:");
+            output.WriteLine("    " + DarlingEndpointClientText.ClaudeMcpAddCommand(portText, scheme));
+            output.WriteLine(hasToken
+                ? $"Replace {DarlingEndpointClientText.TokenPlaceholder} with the MCP token. Show it with: PerformanceMonitor.Darling.Service.exe --print-mcp-token (run elevated)."
+                : namedTokens
+                    ? $"Replace {DarlingEndpointClientText.TokenPlaceholder} with the token of one of the mcp.tokens entries in darling.json."
+                    : "darling.json sets no MCP token and mcp.allowTokenlessLoopback is on, so leave the --header part off the command.");
+        }
+        else
+        {
+            output.WriteLine("Open the web dashboard at: " + DarlingEndpointClientText.WebDashboardAddress(portText, scheme));
+            if (hasToken)
+            {
+                output.WriteLine("It asks for the web token. Show it with: PerformanceMonitor.Darling.Service.exe --print-web-token (run elevated).");
+            }
+        }
+    }
+
     /// <summary>PURE firewall-step decision for a toggle verb (unit-tested): a loopback-only endpoint needs no
     /// rule; an exposed endpoint runs the rule when elevated, otherwise hands the exact command off. Shared by
     /// enable and disable alike (disable just runs/hands-off the removal command instead of the open command).</summary>
@@ -3862,6 +4073,18 @@ public static partial class DarlingCliCommands
         output.WriteLine(
             "The running service applies this LIVE within one collection sweep (the write self-bumps the reload " +
             "beacon) — no restart needed.");
+
+        /* An enabled endpoint with no token and no allowTokenlessLoopback does not start (the host logs why at every
+           service start); say so here too, where the operator has just turned it on. */
+        if (enable && EnableTokenNote(endpoint == EndpointKind.Mcp, config) is { } tokenNote)
+        {
+            output.WriteLine(tokenNote);
+        }
+
+        if (enable)
+        {
+            WriteEnableNextSteps(endpoint == EndpointKind.Mcp, config, storePort, output);
+        }
 
         /* #2414: the SAME resolver the two host supervisors bind on, fed the row this verb just wrote. It carries
            the provenance as well as the value, so the firewall step can state on whose authority it picked a port
@@ -6298,6 +6521,200 @@ public static partial class DarlingCliCommands
     }
 
     /// <summary>
+    /// The non-secret fields <c>--add-server</c> takes as flags (#6476) so one server needs no JSON file. There is deliberately NO password
+    /// flag: an argument is visible in the process list and in shell history, which is why the JSON path reads stdin. A login that has a
+    /// password is asked for it, hidden.
+    /// </summary>
+    public sealed record AddServerFlags(
+        string? Host = null, string? DisplayName = null, string? Auth = null, string? Username = null,
+        string? Engine = null, string? Database = null)
+    {
+        /// <summary>True when any flag was given, so the verb builds the one entry itself instead of reading JSON from stdin.</summary>
+        public bool Any => Host is not null || DisplayName is not null || Auth is not null || Username is not null
+            || Engine is not null || Database is not null;
+    }
+
+    /// <summary>
+    /// Parses the arguments after <c>--add-server</c> (#6476): at most one bare argument, the config path (as before), or
+    /// <c>--config &lt;path&gt;</c>, and the flags <c>--host</c>, <c>--name</c>, <c>--auth</c>, <c>--username</c> (or <c>--login</c>),
+    /// <c>--engine</c> and <c>--database</c>, each as <c>--flag value</c> or <c>--flag=value</c>. A password flag is refused with the reason.
+    /// Anything else starting with '-' is refused rather than taken as a path. Pure so the grammar pins.
+    /// </summary>
+    public static bool TryParseAddServerArgs(string[] rest, out string? configPath, out AddServerFlags flags, out string? errorMessage)
+    {
+        configPath = null;
+        errorMessage = null;
+        string? host = null, displayName = null, auth = null, username = null, engine = null, database = null;
+
+        for (var i = 0; i < rest.Length; i++)
+        {
+            var arg = rest[i];
+            if (!arg.StartsWith('-'))
+            {
+                if (configPath is not null)
+                {
+                    errorMessage = $"Unexpected argument '{arg}': --add-server takes one config path.";
+                    break;
+                }
+
+                configPath = arg;
+                continue;
+            }
+
+            string name = arg;
+            string? value = null;
+            var equals = arg.IndexOf('=');
+            if (equals > 0)
+            {
+                name = arg[..equals];
+                value = arg[(equals + 1)..];
+            }
+
+            if (name.Equals("--password", StringComparison.OrdinalIgnoreCase) || name.Equals("--pwd", StringComparison.OrdinalIgnoreCase))
+            {
+                errorMessage = "There is no password flag: an argument shows in the process list and in shell history. "
+                    + "Leave it out and you are asked for the password with nothing echoed, or pipe a JSON array on stdin.";
+                break;
+            }
+
+            if (name.Equals("--config", StringComparison.OrdinalIgnoreCase) || name.Equals("--host", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("--name", StringComparison.OrdinalIgnoreCase) || name.Equals("--auth", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("--username", StringComparison.OrdinalIgnoreCase) || name.Equals("--login", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("--engine", StringComparison.OrdinalIgnoreCase) || name.Equals("--database", StringComparison.OrdinalIgnoreCase))
+            {
+                if (value is null)
+                {
+                    if (i + 1 >= rest.Length || rest[i + 1].StartsWith('-'))
+                    {
+                        errorMessage = $"{name} needs a value: {name} <value>";
+                        break;
+                    }
+
+                    value = rest[++i];
+                }
+
+                switch (name.ToLowerInvariant())
+                {
+                    case "--config": configPath = value; break;
+                    case "--host": host = value; break;
+                    case "--name": displayName = value; break;
+                    case "--auth": auth = value; break;
+                    case "--username":
+                    case "--login": username = value; break;
+                    case "--engine": engine = value; break;
+                    default: database = value; break;
+                }
+
+                continue;
+            }
+
+            errorMessage = $"Unknown option '{name}'. --add-server takes --host, --name, --auth, --username (--login), --engine, --database and --config.";
+            break;
+        }
+
+        flags = new AddServerFlags(host, displayName, auth, username, engine, database);
+        return errorMessage is null;
+    }
+
+    /// <summary>
+    /// Builds the one-entry JSON array the add core reads from the flags (#6476), asking <paramref name="readPassword"/> for the password
+    /// of a login that has one (SQL authentication and service principal). Returns the JSON, or a ready-to-print problem. The password goes
+    /// into the returned text and nowhere else.
+    /// </summary>
+    internal static (string? Json, string? Problem) BuildAddServerJson(AddServerFlags flags, Func<string, string?> readPassword)
+    {
+        var entry = new System.Text.Json.Nodes.JsonObject { ["host"] = flags.Host!.Trim() };
+        if (!string.IsNullOrWhiteSpace(flags.DisplayName))
+        {
+            entry["display_name"] = flags.DisplayName.Trim();
+        }
+
+        if (!string.IsNullOrWhiteSpace(flags.Engine))
+        {
+            entry["engine"] = flags.Engine.Trim();
+        }
+
+        if (!string.IsNullOrWhiteSpace(flags.Database))
+        {
+            entry["database"] = flags.Database.Trim();
+        }
+
+        var auth = flags.Auth?.Trim();
+        if (!string.IsNullOrEmpty(auth))
+        {
+            entry["auth"] = auth;
+        }
+
+        if (!string.IsNullOrWhiteSpace(flags.Username))
+        {
+            entry["username"] = flags.Username.Trim();
+        }
+
+        var hasPassword = string.Equals(auth, "sql", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(auth, "serviceprincipal", StringComparison.OrdinalIgnoreCase);
+        if (hasPassword)
+        {
+            if (string.IsNullOrWhiteSpace(flags.Username))
+            {
+                return (null, $"--username is required with --auth {auth}.");
+            }
+
+            var password = readPassword($"Password for {flags.Username.Trim()}: ");
+            if (string.IsNullOrEmpty(password))
+            {
+                return (null, "No password was entered, so no server was added.");
+            }
+
+            entry["password"] = password;
+        }
+
+        return (new System.Text.Json.Nodes.JsonArray(entry).ToJsonString(), null);
+    }
+
+    /// <summary>
+    /// Reads a password without echoing it (#6476). At a keyboard it reads keys with the echo off and ends on Enter; when stdin is a pipe or
+    /// a file there is no screen to hide it from, so it reads one line from <paramref name="input"/>. The prompt goes to
+    /// <paramref name="output"/>, never the typed text.
+    /// </summary>
+    internal static string? ReadPasswordFromConsole(string prompt, TextReader input, TextWriter output)
+    {
+        if (Console.IsInputRedirected)
+        {
+            return input.ReadLine();
+        }
+
+        output.Write(prompt);
+        output.Flush();
+        var typed = new System.Text.StringBuilder();
+        while (true)
+        {
+            var key = Console.ReadKey(intercept: true);
+            if (key.Key == ConsoleKey.Enter)
+            {
+                break;
+            }
+
+            if (key.Key == ConsoleKey.Backspace)
+            {
+                if (typed.Length > 0)
+                {
+                    typed.Length--;
+                }
+
+                continue;
+            }
+
+            if (!char.IsControl(key.KeyChar))
+            {
+                typed.Append(key.KeyChar);
+            }
+        }
+
+        output.WriteLine();
+        return typed.ToString();
+    }
+
+    /// <summary>
     /// What <c>--add-server</c> prints when stdin carries nothing — to STDOUT, per the [#2097] lesson that a
     /// prompt or error on STDERR is invisible in the ISE and some integrated terminals, so a verb that writes
     /// only there reads as hung.
@@ -6313,9 +6730,14 @@ public static partial class DarlingCliCommands
         "  PowerShell:  Get-Content servers.json | .\\PerformanceMonitor.Darling.Service.exe --add-server" + Environment.NewLine +
         "  cmd:         type servers.json | PerformanceMonitor.Darling.Service.exe --add-server" + Environment.NewLine +
         Environment.NewLine +
+        "For ONE server, no JSON is needed; give the non-secret fields as flags and a SQL login is asked for its password with nothing echoed:" + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --add-server --host sql01 --auth windows" + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --add-server --host sql01 --auth sql --username darling_monitor [--name <display name>] [--database <db>] [--engine postgres]" + Environment.NewLine +
+        "There is no password flag. A Windows-authentication server is tested by the running service, as the account it runs under." + Environment.NewLine +
+        Environment.NewLine +
         "servers.json, SQL Server and PostgreSQL:" + Environment.NewLine +
         "  [" + Environment.NewLine +
-        "    {\"host\":\"sql01\",\"auth\":\"integrated\"}," + Environment.NewLine +
+        "    {\"host\":\"sql01\",\"auth\":\"Windows\"}," + Environment.NewLine +
         "    {\"host\":\"aurora.cluster-abc.us-east-1.rds.amazonaws.com\",\"engine\":\"postgres\"," + Environment.NewLine +
         "     \"auth\":\"SQL\",\"username\":\"darling_monitor\",\"password\":\"...\"}" + Environment.NewLine +
         "  ]";
@@ -6424,12 +6846,22 @@ public static partial class DarlingCliCommands
     /// Server 2012, which cannot run the Viewer at all — had no supported path.</para>
     /// </summary>
     public static async Task<int> AddServerAsync(
-        string? configPath, TextReader input, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+        string? configPath, TextReader input, TextWriter output, TextWriter error, CancellationToken cancellationToken,
+        AddServerFlags? flags = null, Func<string, string?>? readPassword = null,
+        DarlingServiceConnectionTest.IServiceConnectionTester? serviceTester = null)
     {
-        var json = input is null ? null : await input.ReadToEndAsync(cancellationToken);
-        if (string.IsNullOrWhiteSpace(json))
+        /* #6476: flags name ONE server instead of a JSON array; stdin is then not read as JSON (a password it carries is read as a line). */
+        var fromFlags = flags is { Any: true };
+        var json = fromFlags || input is null ? null : await input.ReadToEndAsync(cancellationToken);
+        if (!fromFlags && string.IsNullOrWhiteSpace(json))
         {
             output.WriteLine(AddServerUsageText());
+            return 1;
+        }
+
+        if (fromFlags && string.IsNullOrWhiteSpace(flags!.Host))
+        {
+            error.WriteLine("--host is required when a server is given as flags: --add-server --host <host> [--name <name>] [--auth windows|sql] [--username <login>]");
             return 1;
         }
 
@@ -6483,6 +6915,42 @@ public static partial class DarlingCliCommands
         output.WriteLine("PerformanceMonitor Darling — register monitored server(s) (--add-server)");
         output.WriteLine();
 
+        if (fromFlags)
+        {
+            /* The password is asked for here, after the store is known usable, and only for a login that has one. It is read hidden and goes
+               into the request text and nowhere else: never to the output, the error stream or a log. */
+            var (built, problem) = BuildAddServerJson(flags!, readPassword ?? (label => ReadPasswordFromConsole(label, input ?? TextReader.Null, output)));
+            if (problem is not null)
+            {
+                error.WriteLine(problem);
+                return 1;
+            }
+
+            json = built;
+        }
+
+        /* #6476: this process runs as the person at the console. A Windows-authentication server is also tested by the running service,
+           as the account it runs under, when the service can be asked; otherwise the test says whose identity it used. */
+        var identityNotes = new List<(string Server, string[] Notes)>();
+        await using var lazyTester = serviceTester is null && OperatingSystem.IsWindows()
+            ? new DarlingServiceConnectionTest.LazyStoreServiceConnectionTester(connectionString)
+            : null;
+        var tester = serviceTester ?? lazyTester;
+        var windowsHost = OperatingSystem.IsWindows();
+        var consoleIdentity = DarlingServiceConnectionTest.ConsoleIdentity();
+
+        async Task<ConnectionProbeResult> ProbeAsync(MonitoredServer server, CancellationToken token)
+        {
+            var (probe, notes) = await DarlingServiceConnectionTest.TestAsync(
+                server, tester, DarlingMcpServerAdminTools.ProbeAsConsoleUserAsync, consoleIdentity, windowsHost, token);
+            if (notes.Length > 0)
+            {
+                identityNotes.Add((server.DisplayName, notes));
+            }
+
+            return probe;
+        }
+
         string resultJson;
         string? sealNotice = null;
         try
@@ -6495,7 +6963,7 @@ public static partial class DarlingCliCommands
                here may be an env:/file: reference, the way the configuration file's is
                (DarlingMcpServerAdminTools.AddServersFromHostCommandLineAsync). */
             var sealKey = await DarlingCliSealKey.ResolveAsync(config, DarlingConfig.ResolveConfigPath(configPath), dataSource, null, cancellationToken);
-            resultJson = await DarlingMcpServerAdminTools.AddServersFromHostCommandLineAsync(dataSource, json, sealKey.Ring);
+            resultJson = await DarlingMcpServerAdminTools.AddServersFromHostCommandLineAsync(dataSource, json!, sealKey.Ring, ProbeAsync);
             if (sealKey.Ring is DarlingCliSealKey.PublishedKeyRing { SealedCount: > 0 } && sealKey.Notice is not null)
             {
                 sealNotice = sealKey.Notice;
@@ -6511,6 +6979,16 @@ public static partial class DarlingCliCommands
         foreach (var line in lines)
         {
             output.WriteLine(line);
+        }
+
+        foreach (var (server, notes) in identityNotes)
+        {
+            output.WriteLine();
+            output.WriteLine($"  Connection test for {server}, which uses Windows authentication:");
+            foreach (var note in notes)
+            {
+                output.WriteLine(note);
+            }
         }
 
         if (sealNotice is not null)

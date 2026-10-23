@@ -59,13 +59,16 @@ public sealed class UnpooledDropConnectionCensusTests
     internal static readonly IReadOnlyDictionary<string, string> Exceptions = new Dictionary<string, string>(StringComparer.Ordinal)
     {
         ["DarlingCollectorRunnerTests.cs"] = "T-SQL against SQL Server (DROP DATABASE [name]); SQL Server has no backend pool shared with a TimescaleDB job.",
+        ["MonitoringGrantScriptLiveSqlTests.cs"] = "T-SQL against the local test SQL Server (SINGLE_USER, then DROP DATABASE [name]); SQL Server has no backend pool shared with a TimescaleDB job.",
         ["ProcedureStatsDeferredPlanFetchLiveTests.cs"] = "T-SQL against SQL Server (SINGLE_USER, then DROP DATABASE [name]).",
         ["QueryStatsDeferredPlanFetchLiveTests.cs"] = "T-SQL against SQL Server (SINGLE_USER, then DROP DATABASE [name]).",
         ["RemediationLiveSqlTests.cs"] = "T-SQL against the local test SQL Server (SINGLE_USER, then DROP DATABASE [name]); SQL Server has no backend pool shared with a TimescaleDB job.",
         ["PlanForceToolLiveTests.cs"] = "T-SQL against the local test SQL Server (SINGLE_USER, then DROP DATABASE [name]); the scratch store it also makes is dropped by ScratchPostgres.",
+        ["QueryStoreReplicaReadsLiveSqlTests.cs"] = "T-SQL against the local test SQL Server (SINGLE_USER, then DROP DATABASE [name]); SQL Server has no backend pool shared with a TimescaleDB job.",
         ["ForcedPlanCollectorNoXmlLiveTests.cs"] = "T-SQL against the local test SQL Server (SINGLE_USER, then DROP DATABASE [name]); SQL Server has no backend pool shared with a TimescaleDB job.",
         ["ReadableSecondaryQueryStoreGateLiveTests.cs"] = "T-SQL against the local test SQL Server (SINGLE_USER, then DROP DATABASE [name]); SQL Server has no backend pool shared with a TimescaleDB job.",
         ["ForcedPlanVariantLiveTests.cs"] = "T-SQL against the local test SQL Server (SINGLE_USER, then DROP DATABASE [name]); the scratch store it also makes is dropped by ScratchPostgres.",
+        ["QueryStoreSplitJoinsLiveTests.cs"] = "T-SQL against the local test SQL Server (SINGLE_USER, then DROP DATABASE [name]); no PostgreSQL store at all.",
         ["QueryStoreTopNFetchLiveTests.cs"] = "T-SQL against the local test SQL Server (SINGLE_USER, then DROP DATABASE [name]); the scratch store it also makes is dropped by ScratchPostgres.",
         ["DropXeSessionsLiveTests.cs"] = "A SQL-injection session-name fixture: the text is data a validator must refuse, never run as a statement.",
         ["DropXeSessionsPerInstallTests.cs"] = "A SQL-injection session-name fixture: the text is data a validator must refuse, never run as a statement.",

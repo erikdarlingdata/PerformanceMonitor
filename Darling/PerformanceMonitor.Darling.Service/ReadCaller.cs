@@ -69,6 +69,11 @@ internal static class ReadCaller
             ? "no token"
             : "token " + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(bearerToken)))[..8].ToLowerInvariant();
 
+    /// <summary>The server-side identity of a call (#6542): <c>named token NAME</c> when a named token was presented, else the fingerprint
+    /// of the legacy token (<see cref="OfMcpToken"/>). A name is a label the operator chose, never a secret.</summary>
+    internal static string OfMcpIdentity(string? namedTokenName, string? bearerToken) =>
+        string.IsNullOrEmpty(namedTokenName) ? OfMcpToken(bearerToken) : "named token " + namedTokenName;
+
     /// <summary>
     /// The text a write log line carries for who made the call: the token identity the service worked out, then the name the client
     /// gave itself, labelled as the client's own claim (any client can send any name).

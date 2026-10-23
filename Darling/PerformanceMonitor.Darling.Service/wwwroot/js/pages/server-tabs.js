@@ -39,22 +39,32 @@
  * touches innerHTML.
  */
 
-import { el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, metricNote, getPath, fmtMs, fmtInt, fmtRate, localTime, parseUtc, windowFromHours, daysText, dbScopeChip, dbFilteredEmptyText, sourceStrip, clampText, getActiveDatabaseFilter, queryWaitFilter, setQueryWaitFilter, waitIsLinked } from "../util.js";
+import { el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, chartNote, chartNoteText, getPath, fmtMs, fmtInt, fmtRate, localTime, parseUtc, windowFromHours, daysText, dbScopeChip, dbFilteredEmptyText, sourceStrip, clampText, getActiveDatabaseFilter, queryWaitFilter, setQueryWaitFilter, waitIsLinked } from "../util.js";
 import { renderPanel, emptyHeadline, setPanelSignal, getPanelSignal, VIZ, worstFirst, newestFirst } from "../panels.js";
+import { memoryGrantChartPanels } from "./memory-grant-charts.js";
+import { activeQueriesSnapshotSlot, SNAPSHOT_ROW_CAP, SNAPSHOT_LIST_CAP, snapshotTruncatedNote } from "./active-snapshots.js";
+import { activeQueriesLiveBar } from "./active-live.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../charts.js";
+import { statsHistoryColumn, historyTarget, procedurePoints } from "./stats-history.js";
 import { multiPicker, mergeSeriesRows } from "../multi-picker.js";
 import { pgPlanColumn } from "./pg-plan-viewer.js";
 import { READ_FIELDS } from "../read-fields.js";
 import { analysisFindingsTab } from "./analysis-findings.js";
 import { findingTitle, severityLabel } from "./analysis-findings.js";
 import { collectorRunBar, runNowColumns } from "./collector-run.js";
+import { timeSlicer, windowOf, rangeKeyOf, getSlice, setSlice, onSliceChange, effectiveContext, windowParams } from "../time-slicer.js";
 import { downloadText } from "../grid-tools.js";
+import { blockChainColumn } from "./block-chain.js";
 import { deadlockGraphCell, processRowsInDatabases } from "./deadlock-graph.js";
 import { activePlanColumns, blockingPlanColumns, deadlockPlanColumn, planColumn, procedurePlanColumn, queryStorePlanColumn } from "./plan-viewer.js";
 import { queryStoreHistoryColumn } from "./query-store-history.js";
+import { queryHeatmapCard } from "./query-heatmap.js";
+import { dailyHealthCalendar } from "./daily-calendar.js";
+import { systemEventsChartSpecs, COUNTERS_INTRO, counterChartsDrawn } from "./system-events-charts.js";
 import { comparePick, compareControl, compareCard, COMPARE_TOP } from "./top-compare.js";
 import { SQL_TAB_REACH, POSTGRES_TAB_REACH, withTabReach } from "./server-tab-reach.js";
 import { bloatVerdict, droppabilityVerdict, costFigure, lastScanNoteWord, fillfactorNoteWord, toastNoteWord, indexSkipWord } from "../pg-grid-text.js";
+import { fillOverviewStrips } from "./overview-strips.js";
 
 /* ─────────────────────────── shared cell renderers ─────────────────────────── */
 
@@ -205,7 +215,9 @@ function hidesPanel(spec, res, shell, key) {
   return true;
 }
 
-function fanout(read, params, specs) {
+/* `intro` (#6439): an optional `{ text, when }`. An empty full-width slot is put before the panels and gets the notice only once the
+   read's data passes `when(data)`, so a sentence about what the cards below draw is shown only when they draw it. */
+function fanout(read, params, specs, intro = null) {
   for (const spec of specs) {
     if ((spec.viz === "table" || spec.viz === "line") && !spec.emptyText) {
       throw new Error("fanout(" + spec.title + "): a data panel must explain its own empty state.");
@@ -216,8 +228,12 @@ function fanout(read, params, specs) {
   specs.forEach((s, i) => {
     if (s.hideWhenNoRows && !panelHadRows.get(keys[i])) shells[i].panel.style.display = "none";
   });
+  const introNode = intro ? el("div", { class: "panel-intro" }, []) : null;
   (async () => {
     const res = await readToolWithinKeptHistory(read, params);
+    if (introNode && res.kind === "data" && intro.when(res.data)) {
+      mount(introNode, [noticeStrip(intro.text)]);
+    }
     specs.forEach((spec, i) => {
       const body = shells[i].body;
       if (hidesPanel(spec, res, shells[i], keys[i])) return;
@@ -245,7 +261,7 @@ function fanout(read, params, specs) {
       }
     });
   })();
-  return shells.map((s) => s.panel);
+  return introNode ? [introNode, ...shells.map((s) => s.panel)] : shells.map((s) => s.panel);
 }
 
 /** The most waits the Wait Stats chart draws at once: one read each, and the palette has ten colors. */
@@ -591,14 +607,16 @@ function perfmonRows(counters) {
  * null reads as the blank it is instead of flattening a chart to a zero nobody measured.
  */
 export function topQueriesPanel(server, ctx) {
-  return rankedCard("queries", (ranking, picker) => topQueriesCard(server, ctx, ranking, picker), { server, ctx });
+  return rankedCard("queries", (ranking, picker, w, onRow) => topQueriesCard(server, ctx, ranking, picker, w, onRow), { server, ctx });
 }
 
 /* One draw of the card for one ranking (#5226): rankedCard draws it again on a pick, so the title and the rows follow the choice. */
-function topQueriesCard(server, ctx, ranking, picker) {
+/* `ctx` is the page range (the per-query trend below reads it whole); `w` is the window the grid reads, the page range or, while the time slicer
+   holds a selection (#6301), that selection; `onRow` is the slicer's overlay-on-select. */
+function topQueriesCard(server, ctx, ranking, picker, w = ctx, onRow = null) {
   const { panel, body } = panelShell(
     "Top Queries by " + topRankingLabel(ranking),
-    ctx.label + ", with a per-collection trend for the query you pick",
+    w.label + ", with a per-collection trend for the query you pick",
     2,
     "get_top_queries_by_cpu",
     null,
@@ -607,7 +625,7 @@ function topQueriesCard(server, ctx, ranking, picker) {
   (async () => {
     const res = await readToolWithinKeptHistory(
       "get_top_queries_by_cpu",
-      rankedParams({ server, hours: ctx.hours, top: 20, detail: "full" }, ranking, "queries")
+      rankedParams(windowParams({ server, hours: w.hours, top: 20, detail: "full" }, w), ranking, "queries")
     );
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message)]);
@@ -616,9 +634,10 @@ function topQueriesCard(server, ctx, ranking, picker) {
     const parts = [
       VIZ.table(res.data, {
         rowsKey: "queries",
-        columns: [...TOP_QUERY_COLUMNS, planColumn(server)],
+        columns: [...TOP_QUERY_COLUMNS, planColumn(server), statsHistoryColumn("queries", server, w)],
         groups: TOP_QUERY_GROUPS.groups,
         defaultGroups: TOP_QUERY_GROUPS.defaultGroups,
+        ...(onRow ? { onRow } : {}),
         emptyText:
           "No query stats in this window. Delta-based collection needs at least two cycles (~30 minutes) " +
           "before it reports non-zero values.",
@@ -685,7 +704,9 @@ async function drawQueryTrend(slot, server, ctx, query) {
      plan-hash columns simply go blank, and a blank column reads as "nothing to see" rather than "not measured
      here". */
   const notes = [];
-  if (trend.data.aggregate_note) notes.push(trend.data.aggregate_note);
+  /* #6359: what a point covers, from the read's own width fields: its `aggregate_note` is written for an MCP caller. */
+  const pointNote = chartNoteText(trend.data, "summed");
+  if (pointNote) notes.push(pointNote);
   /* #3653 item 17: the window floor is `window_truncated` — the page dialect's `truncated` (a limit biting,
      which this read has none of) is a different fact with the opposite remedy, and the two used to share a
      spelling. Reading the old key here would silently drop this notice: undefined is falsy. */
@@ -883,10 +904,11 @@ function tagColumn() {
 /* #6300: the Compare picker's delta card for a grid (top-compare.js). `cmp` is { server, ctx }; the read is the grid's own, asked for
    the top COMPARE_TOP rows, once for the page's window and once with `as_of` shifted. `plain()` draws the grid as it is with Compare off. */
 function compareDrawn(kind, cmp, ranking, title, picker, signal, plain) {
-  const base = { server: cmp.server, hours: cmp.ctx.hours, top: COMPARE_TOP };
+  const base = windowParams({ server: cmp.server, hours: cmp.ctx.hours, top: COMPARE_TOP }, cmp.ctx);
   return compareCard({
     kind,
     server: cmp.server,
+    endMs: cmp.ctx.narrowed ? cmp.ctx.endMs : undefined,
     pick: comparePick.value,
     title,
     subtitle: cmp.ctx.label,
@@ -909,13 +931,20 @@ function compareDrawn(kind, cmp, ranking, title, picker, signal, plain) {
 }
 
 /**
- * A Top Queries or Top Procedures card (`kind` "queries" or "procedures") with its ranking selector. `build(ranking, picker)` draws the card
- * for the current pick and puts `picker` under its title; a pick stores the choice at module scope and draws the card again, so the title
- * ("Top Queries by Duration") and the rows follow it. Each draw aborts the one before it, as the Collection Log slot does.
+ * A Top Queries or Top Procedures card (`kind` "queries" or "procedures") with its ranking selector, under a time slicer (#6301).
+ * `build(ranking, picker, w, onRow)` draws the card for the current pick and puts `picker` under its title; `w` is the window the grid reads
+ * (the page range, or the slicer's selection while one is held) and `onRow` the row pick that overlays that row's timeline on the slicer
+ * (queries, procedures and Query Store). A pick stores the choice at module
+ * scope and draws the card again, so the title ("Top Queries by Duration") and the rows follow it. Each draw aborts the one before it, as the
+ * Collection Log slot does. A slicer release stores the narrowed window at page scope (time-slicer.js) and every card on screen for the
+ * server draws its grid again for it; the strip itself is not redrawn, so a sort pick or a slice never reads the strip's activity again.
  */
-function rankedCard(kind, build, cmp = null) {
+function rankedCard(kind, build, cmp) {
   const slot = el("div", {}, []);
   slot.style.display = "contents";
+  const gridSlot = el("div", {}, []);
+  gridSlot.style.display = "contents";
+  const slicer = rankedSlicer(kind, cmp);
   let drawing = null;
   const draw = () => {
     if (drawing) drawing.abort();
@@ -924,6 +953,7 @@ function rankedCard(kind, build, cmp = null) {
     const outer = getPanelSignal();
     if (outer) outer.addEventListener("abort", () => mine.abort(), { once: true });
     const ranking = topRankingPick[kind];
+    const w = effectiveContext(cmp.server, cmp.ctx);
     const picker = el("div", { class: "picker-row" }, [
       pickerControl(
         "Rank by",
@@ -935,18 +965,305 @@ function rankedCard(kind, build, cmp = null) {
         ranking
       ),
       tagFilterPicker(kind, draw),
-      ...(cmp ? [compareControl(draw, slot)] : []),
+      compareControl(draw, slot),
     ]);
     setPanelSignal(mine.signal);
+    const onRow = slicer ? slicer.onRow(ranking) : null;
     const card =
-      cmp && comparePick.value !== "off"
-        ? compareDrawn(kind, cmp, ranking, (kind === "queries" ? "Top Queries by " : "Top Procedures by ") + topRankingLabel(ranking), picker, mine.signal, () => build(ranking, picker))
-        : build(ranking, picker);
+      comparePick.value !== "off"
+        ? compareDrawn(kind, { server: cmp.server, ctx: w }, ranking, (kind === "queries" ? "Top Queries by " : "Top Procedures by ") + topRankingLabel(ranking), picker, mine.signal, () => build(ranking, picker, w, onRow))
+        : build(ranking, picker, w, onRow);
     setPanelSignal(outer);
-    mount(slot, [card]);
+    mount(gridSlot, [card]);
   };
+  mountSliced(slot, gridSlot, slicer, cmp, draw);
   draw();
   return slot;
+}
+
+/* The slicer panel over a card's grid slot, and the card drawing again when ANY card narrows the page for this server (#6301). */
+function mountSliced(slot, gridSlot, slicer, cmp, draw, follow = false) {
+  /* `follow`: a grid with no strip of its own (a slicer for another grid narrows it too) still draws again when the page narrows. */
+  if ((slicer && slicer.node) || (follow && cmp)) {
+    const off = onSliceChange((server) => {
+      if (slot.isConnected === false) return off();
+      if (server !== cmp.server) return;
+      if (slicer) slicer.follow();
+      draw();
+    });
+    /* The page redraws (the 60 s poll, a range or tab change) abort this signal, and a card that dies with it must not stay subscribed: a rebuilt
+       grid used to add its listener every time and keep the dead card tree alive until some later slice found it detached (#6301 review). */
+    const outer = getPanelSignal();
+    if (outer) {
+      if (outer.aborted) off();
+      else outer.addEventListener("abort", off, { once: true });
+    }
+  }
+  mount(slot, slicer && slicer.node ? [el("div", { class: "panel card span-2 slicer-panel" }, [slicer.node]), gridSlot] : [gridSlot]);
+}
+
+/**
+ * The Active Queries and Query Store cards under a time slicer (#6301 slice 2a): `tagFilteredCard` with the slicer over it. `build(picker, w,
+ * onRow)` draws the grid for `w`, the page range or the slicer's selection, and `onRow` is the Query Store row pick that overlays that query's
+ * history on the strip (null for Active Queries). `compare` hands the Compare picker the narrowed window, as the ranked cards do.
+ */
+function slicedTagCard(kind, cmp, build, compare = false) {
+  return slicedSlot(kind, cmp, true, (w, slicer) =>
+    tagFilteredCard(kind, (picker) => build(picker, w, slicer ? slicer.onRow(null) : null), compare ? { server: cmp.server, ctx: w } : null)
+  );
+}
+
+/**
+ * A plain grid under a time slicer, or following one (#6301 slice 2b): the Blocking page's Blocking and Deadlocks tables. `kind` picks the strip
+ * ("blocking" or "deadlocks"); `strip` false draws the grid with no strip of its own, narrowed all the same by a selection made on another
+ * strip of the page for this server. `build(w)` returns the panel for `w`, the page range or the selection.
+ */
+function slicedPanel(kind, cmp, build, strip = true) {
+  return slicedSlot(kind, cmp, strip, (w) => build(w));
+}
+
+/* The slot every sliced grid shares: the strip (when `strip`) over a grid slot that draws again, aborting the draw before it, whenever the page narrows. */
+function slicedSlot(kind, cmp, strip, drawCard) {
+  const slot = el("div", {}, []);
+  slot.style.display = "contents";
+  const gridSlot = el("div", {}, []);
+  gridSlot.style.display = "contents";
+  const slicer = strip ? rankedSlicer(kind, cmp) : null;
+  let drawing = null;
+  const draw = () => {
+    if (drawing) drawing.abort();
+    const mine = new AbortController();
+    drawing = mine;
+    const outer = getPanelSignal();
+    if (outer) outer.addEventListener("abort", () => mine.abort(), { once: true });
+    const w = effectiveContext(cmp.server, cmp.ctx);
+    setPanelSignal(mine.signal);
+    const card = drawCard(w, slicer);
+    setPanelSignal(outer);
+    mount(gridSlot, [card]);
+  };
+  mountSliced(slot, gridSlot, slicer, cmp, draw, true);
+  draw();
+  return slot;
+}
+
+/* ─────────── #6301: the time slicer over the Top Queries and Top Procedures cards ─────────── */
+
+/* The slicer's pick of a query row, one per server and list at MODULE scope so the 60 s rebuild (a new card every time) keeps the overlay on the same row. */
+const overlayPicks = new Map();
+
+/* The get_query_trend column the overlay plots for a ranking: the metric the grid is ranked by where the trend carries it. The trend has no
+   reads column, so a Reads ranking plots the average CPU, and the note on the strip names the column. */
+const OVERLAY_METRICS = {
+  cpu: { key: "avg_cpu_ms", label: "avg CPU ms" },
+  duration: { key: "avg_elapsed_ms", label: "avg elapsed ms" },
+  executions: { key: "execution_count", label: "executions" },
+  reads: { key: "avg_cpu_ms", label: "avg CPU ms" },
+};
+/* The same, for get_procedure_duration_trend (#6301 slice 2b), through procedurePoints (stats-history.js): average elapsed is derived there from the two rates. */
+const PROCEDURE_OVERLAY_METRICS = {
+  cpu: { key: "avg_cpu_ms", label: "avg CPU ms" },
+  duration: { key: "avg_elapsed_ms", label: "avg elapsed ms" },
+  executions: { key: "executions_per_second", label: "executions/s" },
+  reads: { key: "avg_cpu_ms", label: "avg CPU ms" },
+};
+
+/**
+ * What each slicer charts on its strip, and what a row pick overlays on it (#6301). The strip reads once over the PAGE range, whatever the
+ * grid below holds:
+ *   queries     get_query_duration_trend; a row overlays get_query_trend for that query.
+ *   procedures  get_procedure_duration_trend; a row overlays the same read limited to that procedure (the History button's read).
+ *   blocking    get_blocking_trend, reports per bucket; no row overlay.
+ *   deadlocks   get_deadlock_trend, deadlocks per bucket; no row overlay.
+ *   active      the snapshot list of get_active_queries (snapshots_only), sessions per snapshot; no row overlay.
+ *   querystore  get_query_store_duration_trend; a row overlays get_query_store_query_history for that query's plan, the read the grid's
+ *               own History button opens.
+ */
+function stripOf(kind, server, ctx) {
+  if (kind === "active") {
+    return { title: "Active queries", tool: "get_active_queries", params: { server, hours: ctx.hours, limit: SNAPSHOT_LIST_CAP, snapshots_only: true }, rows: (d) => d.snapshots, time: "collection_time", value: "row_count", note: (d) => snapshotTruncatedNote(d.truncated === true, Array.isArray(d.snapshots) ? d.snapshots.length : 0, d.total_snapshot_times) };
+  }
+  if (kind === "blocking" || kind === "deadlocks") {
+    const blocking = kind === "blocking";
+    return { title: blocking ? "Blocked process reports" : "Deadlocks", tool: blocking ? "get_blocking_trend" : "get_deadlock_trend", params: { server, hours: ctx.hours }, rows: (d) => d.trend, time: "time", value: "count" };
+  }
+  if (kind === "querystore") {
+    return { title: "Query Store duration", tool: "get_query_store_duration_trend", params: { server, hours: ctx.hours }, rows: (d) => d.trend, time: "time", value: "value" };
+  }
+  const queries = kind === "queries";
+  return { title: queries ? "Query duration" : "Procedure duration", tool: queries ? "get_query_duration_trend" : "get_procedure_duration_trend", params: { server, hours: ctx.hours }, rows: (d) => d.trend, time: "time", value: "value" };
+}
+
+const timeOf = (v) => (parseUtc(v) || { getTime: () => NaN }).getTime();
+
+/* The row overlay of a kind: { eligible(row), key(row), read(row, ranking, signal) -> { points, label } | null }, or null when the kind has none. */
+function overlayOf(kind, server, ctx) {
+  if (kind === "queries") {
+    return {
+      /* get_query_trend keys on both values, so a row carrying neither is not offered, as in the per-query picker. */
+      eligible: (row) => !!(row && row.query_hash && row.database_name),
+      key: (row) => row.database_name + "|" + row.query_hash,
+      read: async (row, ranking, signal) => {
+        const metric = OVERLAY_METRICS[ranking] || OVERLAY_METRICS.cpu;
+        const trend = await readToolWithinKeptHistory("get_query_trend", { server, query_hash: row.query_hash, database_name: row.database_name, hours: ctx.hours }, signal);
+        if (trend.kind !== "data" || !trend.data) return null;
+        const points = (Array.isArray(trend.data.trend) ? trend.data.trend : []).map((r) => ({ t: timeOf(r.collection_time), v: Number(r[metric.key]) }));
+        return { points, label: row.database_name + " · " + truncate(row.query_text || "(no statement text captured)", 40) + " (" + metric.label + ")" };
+      },
+    };
+  }
+  if (kind === "procedures") {
+    return {
+      /* get_procedure_duration_trend limited to one procedure keys on the database and the grid's own full_name, as the History button does. */
+      eligible: (row) => !!historyTarget("procedures", row),
+      key: (row) => row.database_name + "|" + row.full_name,
+      read: async (row, ranking, signal) => {
+        const metric = PROCEDURE_OVERLAY_METRICS[ranking] || PROCEDURE_OVERLAY_METRICS.cpu;
+        const trend = await readToolWithinKeptHistory("get_procedure_duration_trend", { server, hours: ctx.hours, ...historyTarget("procedures", row) }, signal);
+        if (trend.kind !== "data" || !trend.data) return null;
+        const points = procedurePoints(trend.data.trend).map((p) => ({ t: timeOf(p.time), v: p[metric.key] == null ? NaN : Number(p[metric.key]) }));
+        return { points, label: row.database_name + " · " + truncate(row.full_name, 40) + " (" + metric.label + ")" };
+      },
+    };
+  }
+  if (kind === "querystore") {
+    return {
+      /* The history read keys on the database and the query id; the grid's row is one plan of that query. */
+      eligible: (row) => !!(row && row.database_name != null && row.query_id != null),
+      key: (row) => row.database_name + "|" + row.query_id + "|" + row.plan_id,
+      read: async (row, ranking, signal) => {
+        const res = await readToolWithinKeptHistory("get_query_store_query_history", { server, database_name: row.database_name, query_id: row.query_id, hours: ctx.hours }, signal);
+        if (res.kind !== "data" || !res.data) return null;
+        const all = Array.isArray(res.data.points) ? res.data.points : [];
+        const mine = row.plan_id == null ? all : all.filter((p) => p.plan_id === row.plan_id);
+        const points = mine.map((p) => ({ t: timeOf(p.collection_time), v: Number(p.avg_duration_ms) }));
+        return { points, label: row.database_name + " · query " + row.query_id + (row.plan_id == null ? "" : " plan " + row.plan_id) + " (avg duration ms)" };
+      },
+    };
+  }
+  return null;
+}
+
+/**
+ * The slicer for one card (`kind`: queries, procedures, active or querystore): the strip charts the kind's activity over the page range
+ * (stripOf), a release narrows the page's window, and selecting a row of a kind with a row overlay (overlayOf) draws that row's own timeline over
+ * the strip.
+ */
+function rankedSlicer(kind, cmp) {
+  const { server, ctx } = cmp;
+  const win = windowOf(ctx);
+  const rangeKey = rangeKeyOf(ctx);
+  const strip = stripOf(kind, server, ctx);
+  const overlay = overlayOf(kind, server, ctx);
+  const slicer = timeSlicer({
+    win,
+    selection: getSlice(server, rangeKey),
+    title: strip.title,
+    onCommit: (sel) => setSlice(server, rangeKey, sel),
+  });
+  if (!slicer.node) return null;
+  const signal = getPanelSignal();
+  readToolWithinKeptHistory(strip.tool, strip.params, signal).then((res) => {
+    if (res.kind !== "data" || !res.data) return;
+    const rows = strip.rows(res.data);
+    slicer.setPoints((Array.isArray(rows) ? rows : []).map((r) => ({ t: timeOf(r[strip.time]), v: Number(r[strip.value]) })));
+    /* The Active strip reads the newest snapshots only: say so when the list was cut, so a blank stretch of a long range is not read as quiet. */
+    if (strip.note) slicer.setNote(strip.note(res.data));
+  });
+
+  const pickKey = server + "|" + kind;
+  let ranking = topRankingPick[kind];
+  let loading = 0;
+  /* The page range does not change within one slicer, so a row's overlay read is made once per row and ranking: a sort, a narrowing or any other
+     grid redraw that puts the pick back on its row draws from here instead of reading again. A failed or empty read is not kept. */
+  const drawnReads = new Map();
+  const readOverlay = (row) => {
+    const cacheKey = overlay.key(row) + "|" + ranking;
+    let pending = drawnReads.get(cacheKey);
+    if (!pending) {
+      pending = overlay.read(row, ranking, signal).then(
+        (drawn) => {
+          if (!drawn) drawnReads.delete(cacheKey);
+          return drawn;
+        },
+        (e) => {
+          drawnReads.delete(cacheKey);
+          throw e;
+        }
+      );
+      drawnReads.set(cacheKey, pending);
+    }
+    return pending;
+  };
+  const show = async (row) => {
+    const mine = ++loading;
+    const drawn = await readOverlay(row);
+    if (mine !== loading || !drawn) return;
+    slicer.setOverlay(drawn.points, drawn.label);
+  };
+  const mark = (tr, on) => {
+    tr.className = on ? (tr.className + " row-selected").trim() : tr.className.split(" ").filter((c) => c !== "row-selected").join(" ");
+    tr.setAttribute("aria-pressed", on ? "true" : "false");
+  };
+  /* A row is picked by a click or Enter or Space ON THE ROW: a button inside it (the plan and History buttons) keeps its own click and its own keys. */
+  const pickable = (tr, handler) => {
+    tr.setAttribute("role", "button");
+    tr.setAttribute("tabindex", "0");
+    tr.addEventListener("click", (e) => {
+      if (e && e.target && e.target.closest && e.target.closest("button")) return;
+      handler(e);
+    });
+    tr.addEventListener("keydown", (e) => {
+      if (e.target !== tr || (e.key !== "Enter" && e.key !== " ")) return;
+      e.preventDefault();
+      handler(e);
+    });
+  };
+  return {
+    node: slicer.node,
+    /* Another card narrowed the page: take its selection without committing it again. */
+    follow: () => slicer.setSelection(getSlice(server, rangeKey)),
+    onRow: (rankedBy) => {
+      ranking = rankedBy;
+      if (!overlay) return null;
+      /* A draw starts with no overlay: it comes back below for the picked row when that row is still among the rows. */
+      loading++;
+      slicer.clearOverlay();
+      return (row, tr) => {
+        if (!overlay.eligible(row)) return;
+        const key = overlay.key(row);
+        tr.style.cursor = "pointer";
+        tr.setAttribute("title", kind === "procedures" ? "Overlay this procedure's timeline on the time slicer" : "Overlay this query's timeline on the time slicer");
+        pickable(tr, (e) => {
+          if (e && e.type === "click" && selectionInside(tr)) return;
+          if (overlayPicks.get(pickKey) === key) {
+            overlayPicks.delete(pickKey);
+            mark(tr, false);
+            loading++;
+            slicer.clearOverlay();
+            return;
+          }
+          overlayPicks.set(pickKey, key);
+          for (const other of tr.parentNode ? tr.parentNode.children : []) if (other !== tr) mark(other, false);
+          mark(tr, true);
+          show(row);
+        });
+        tr.setAttribute("aria-pressed", "false");
+        /* A redraw (a sort, a narrowing, the 60 s rebuild) puts the pick back on the same row when it is still in the grid. */
+        if (overlayPicks.get(pickKey) === key) {
+          mark(tr, true);
+          show(row);
+        }
+      };
+    },
+  };
+}
+
+/** #6291: the Overview's five stacked strips (CPU, waits, blocking and deadlocks, buffer pool, file I/O latency): see overview-strips.js. */
+function overviewStripsPanel(server, ctx) {
+  const { panel, body } = panelShell("Overview timeline", ctx.label, 2, "get_file_io_trend");
+  fillOverviewStrips(body, server, ctx);
+  return panel;
 }
 
 /**
@@ -1022,15 +1339,17 @@ export function fileIoPanel(server, ctx) {
  * but one blank in one column of a thirty-row grid is easy to read past, so the read's list is rendered as ONE
  * notice line above the rows. A composite rather than a table() descriptor because table()'s `noteKey` carries
  * a server-authored STRING (#3278) and this disclosure is a server-authored LIST: the dates are the server's,
- * the sentence around them is the page's, and no figure here is one the page derived (R1). The span is a fixed
- * 30 days and says so, deliberately not ctx.hours — the page's range tops out well short of a month, and a
- * calendar drawn over six hours is not a calendar.
+ * the sentence around them is the page's, and no figure here is one the page derived (R1). The span is the
+ * calendar's month (the fetch reaches 31 days so the current month is whole), deliberately not ctx.hours — the page's
+ * range tops out well short of a month, and a calendar drawn over six hours is not a calendar. #6294: the calendar
+ * panel is a month calendar (daily-calendar.js) whose "Show as table" is this grid over the shown month.
  */
 export function dailySummaryPanels(server) {
   const tile = panelShell("Daily Summary", "today (UTC)", 2, "get_daily_summary_range");
-  const calendar = panelShell("Daily Health Calendar", "last 30 days (UTC)", 2, "get_daily_summary_range");
+  const calendar = panelShell("Daily Health Calendar", "month (UTC)", 2, "get_daily_summary_range");
   (async () => {
-    const res = await readTool("get_daily_summary_range", { server, days_back: 30 });
+    /* 31 days, not 30 (#6294): the month calendar's current month starts on the 1st, which is up to 30 days before today. */
+    const res = await readTool("get_daily_summary_range", { server, days_back: 31 });
     if (res.kind === "error") {
       mount(tile.body, readErrorStrip(res.message));
       return mount(calendar.body, readErrorStrip(res.message));
@@ -1040,7 +1359,10 @@ export function dailySummaryPanels(server) {
          as_of); for today's tile the fact is simpler. "unavailable" (nothing ever collected) says the same thing
          to both panels, so it is the server's sentence on both. */
       mount(tile.body, emptyStrip(res.status === "empty" ? "Nothing has been collected for this server today (UTC)." : res.message));
-      return mount(calendar.body, emptyStrip(res.message));
+      /* "empty" is a span with no day while the server has history elsewhere, so the calendar still opens, every day "no data", and an
+         earlier month can be stepped to (#6294); "unavailable" is a server nothing was ever collected for, which has no month to show. */
+      if (res.status !== "empty") return mount(calendar.body, emptyStrip(res.message));
+      return renderInto(calendar.body, () => dailyHealthCalendar({ server, initial: null, read: readTool, renderTable: (month) => dailyRangeGrid(month.rows, month.missing) }));
     }
 
     /* Each panel renders on its own, the way fanout() guards its specs: a render fault in one says so in that
@@ -1054,30 +1376,36 @@ export function dailySummaryPanels(server) {
         : emptyStrip("Nothing has been collected for this server yet " + (data.to_date ? "on " + data.to_date : "today") + " (UTC).");
     });
 
-    renderInto(calendar.body, () => {
-      const grid = VIZ.table(data, {
-        rowsKey: "days",
-        columns: DAILY_RANGE_COLUMNS,
-        /* Click-through 10: newest day first, as the other grids open. */
-        orderRows: newestFirst("summary_date"),
-        emptyText:
-          "No collected days in this range. A day with any collection appears here, so a missing day is a gap in collection.",
-      });
-
-      const missing = Array.isArray(data.days_missing) ? data.days_missing : [];
-      if (!missing.length) return grid;
-      const plural = missing.length === 1 ? "" : "s";
-      return [
-        noticeStrip(
-          "Unique queries not materialized for " + missing.length + " day" + plural + " (" + missing.join(", ") + "): " +
-            "the rollup tier that answers this range never carried " + (plural ? "those days" : "that day") +
-            " for this server, so the cell says so rather than 0. The service's start-up repair closes such days the next time it runs."
-        ),
-        grid,
-      ];
-    });
+    /* The month calendar (#6294, daily-calendar.js) over the same fetch; "Show as table" is the grid this panel was, over the shown month. */
+    renderInto(calendar.body, () => dailyHealthCalendar({ server, initial: data, read: readTool, renderTable: (month) => dailyRangeGrid(month.rows, month.missing) }));
   })();
   return [tile.panel, calendar.panel];
+}
+
+/** The Daily Health Calendar's table: one row per collected day, newest first, with the #3653 A6 notice above it for the days whose
+ *  unique_queries the rollup tier never carried (a server-authored LIST, so a composite rather than table()'s string `noteKey`). */
+function dailyRangeGrid(rows, missing) {
+  const grid = VIZ.table(
+    { days: rows },
+    {
+      rowsKey: "days",
+      columns: DAILY_RANGE_COLUMNS,
+      /* Click-through 10: newest day first, as the other grids open. */
+      orderRows: newestFirst("summary_date"),
+      emptyText:
+        "No collected days in this month. A day with any collection appears here, so a missing day is a gap in collection.",
+    }
+  );
+  if (!missing.length) return grid;
+  const plural = missing.length === 1 ? "" : "s";
+  return [
+    noticeStrip(
+      "Unique queries not materialized for " + missing.length + " day" + plural + " (" + missing.join(", ") + "): " +
+        "the rollup tier that answers this range never carried " + (plural ? "those days" : "that day") +
+        " for this server, so the cell says so rather than 0. The service's start-up repair closes such days the next time it runs."
+    ),
+    grid,
+  ];
 }
 
 /** Mount what `render` returns into `body`, or an error strip naming the fault if it throws. */
@@ -1138,11 +1466,12 @@ function pivot(rows, { xKey, seriesKey, valueKey }, maxSeries = 8) {
  * and its process rows follow the database filter.
  * `control` (#5226) is a node drawn under the title, before the rows: the ranking selector on the Top Queries and Top Procedures cards.
  */
-function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, noteKey = null, moreNoteKeys = null, columnGroups = null, control = null, dbScope = null, extensionMissingLine = null, emptyWins = false) {
+function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, noteKey = null, moreNoteKeys = null, columnGroups = null, control = null, dbScope = null, extensionMissingLine = null, emptyWins = false, onRow = null) {
   if (!emptyText) throw new Error("table(" + title + "): a table panel must explain its own empty state.");
   const desc = { title, subtitle, read, params, viz: "table", rowsKey, columns, emptyText, moreNoteKeys, span, noteKey, dbScope, extensionMissingLine, emptyWins };
   if (columnGroups) Object.assign(desc, { groups: columnGroups.groups, defaultGroups: columnGroups.defaultGroups });
   if (control) desc.control = control;
+  if (onRow) desc.onRow = onRow;
   return renderPanel(desc);
 }
 
@@ -1226,34 +1555,10 @@ export const SERVER_TABS = [
     build: (server, ctx) => [
       stat("Overview", "get_server_summary", { server }, OVERVIEW_STATS, SNAPSHOT, 2),
       stat("Server Properties", "get_server_properties", { server }, PROPERTY_STATS, SNAPSHOT, 2),
-      line("CPU Utilization", "get_cpu_utilization", { server, hours: ctx.hours }, "samples", "sample_time", CPU_SERIES, {
-        subtitle: ctx.label,
-        format: "pct",
-        unit: "%",
-        emptyText: "No CPU samples in this window.",
-      }),
-      line("Memory", "get_memory_trend", { server, hours: ctx.hours }, "trend", "time", MEMORY_SERIES, {
-        subtitle: ctx.label,
-        format: "mb",
-        emptyText: "No memory samples in this window.",
-      }),
-      line("Blocked process report trend", "get_blocking_trend", { server, hours: ctx.hours }, "trend", "time", BLOCKING_REPORT_SERIES, {
-        subtitle: ctx.label,
-        format: "int",
-        unit: "reports",
-        atTimeItem: "blocking",
-        sourceKey: "source",
-        bySource: BLOCKING_BY_SOURCE,
-        emptyText: "No blocked process reports in this window — an empty trend here means none were captured, not that nothing was collected.",
-      }),
-      line("Deadlocks", "get_deadlock_trend", { server, hours: ctx.hours }, "trend", "time", COUNT_SERIES, {
-        subtitle: ctx.label,
-        format: "int",
-        atTimeItem: "deadlocks",
-        emptyText: DEADLOCKS_EMPTY_TEXT,
-        emptyWins: true,
-      }),
-      fileIoPanel(server, ctx),
+      /* #6291: the desktop Overview's five stacked strips on one time axis and one crosshair. The CPU, Memory, Blocked process
+         report and Deadlocks charts that sat here live on the CPU, Memory, Blocking and Deadlocks tabs (and the File I/O tab
+         keeps both latency charts), so nothing is unreachable; the strips replace the four separate Overview charts and the File I/O panel. */
+      overviewStripsPanel(server, ctx),
       table(
         "Analysis Findings",
         "get_analysis_findings",
@@ -1324,37 +1629,45 @@ export const SERVER_TABS = [
       /* #4231: `noteKey` (#3278) carries `truncation_note` — raw query_stats/procedure_stats are dropped at
          4 days once the rollups are armed, and a window asking further back than that silently served less
          than it asked for. Null when the floor did not bite, the same as every other noteKey panel. */
-      rankedCard("queries", (ranking, picker) =>
+      rankedCard("queries", (ranking, picker, w, onRow) =>
         table(
           "Top Queries by " + topRankingLabel(ranking),
           "get_top_queries_by_cpu",
-          rankedParams({ server, hours: ctx.hours, top: 20, detail: "full" }, ranking, "queries"),
+          rankedParams(windowParams({ server, hours: w.hours, top: 20, detail: "full" }, w), ranking, "queries"),
           "queries",
-          [...TOP_QUERY_COLUMNS, planColumn(server)],
-          ctx.label,
+          [...TOP_QUERY_COLUMNS, planColumn(server), statsHistoryColumn("queries", server, w)],
+          w.label,
           "No query stats in this window. Delta-based collection needs at least two cycles (~30 minutes) before it reports non-zero values.",
           2,
           "truncation_note",
           null,
           TOP_QUERY_GROUPS,
-          picker
+          picker,
+          null,
+          null,
+          false,
+          onRow
         ),
         { server, ctx }
       ),
-      rankedCard("procedures", (ranking, picker) =>
+      rankedCard("procedures", (ranking, picker, w, onRow) =>
         table(
           "Top Procedures by " + topRankingLabel(ranking),
           "get_top_procedures_by_cpu",
-          rankedParams({ server, hours: ctx.hours, top: 20, detail: "full" }, ranking, "procedures"),
+          rankedParams(windowParams({ server, hours: w.hours, top: 20, detail: "full" }, w), ranking, "procedures"),
           "procedures",
-          [...TOP_PROC_COLUMNS, procedurePlanColumn(server)],
-          ctx.label,
+          [...TOP_PROC_COLUMNS, procedurePlanColumn(server), statsHistoryColumn("procedures", server, w)],
+          w.label,
           "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes).",
           2,
           "truncation_note",
           null,
           TOP_PROC_GROUPS,
-          picker
+          picker,
+          null,
+          null,
+          false,
+          onRow
         ),
         { server, ctx }
       ),
@@ -1397,8 +1710,15 @@ export const SERVER_TABS = [
          beside it told the same lie more quietly: `grants[]` rows under a window subtitle. `window[]` is not a
          series either - it is the window's aggregates per pool, which is what the read chose to store the
          deltas for - so the honest rendering is two TABLES per read, window first: "was there pressure",
-         then "is there pressure now", the reading order the read's own description gives. A per-collection
-         trend would need a read this service does not serve; drawing one instant as one is not it. */
+         then "is there pressure now", the reading order the read's own description gives.
+
+         #6299 added the per-collection trend that comment said this service did not serve: get_memory_grants
+         with `chart: true` answers one point per bucket per pool across the WHOLE window, and the two charts
+         below draw that (memory-grant-charts.js). That does not repeat #3653's mistake: the removed chart
+         drew `grants[]`, one snapshot's rows all stamped with the same instant, as a window trend; these
+         points each carry their own collection time, and a window with no snapshot draws the empty text,
+         never a line of zeros. The two tables below are unchanged. */
+      ...memoryGrantChartPanels(server, ctx),
       ...fanout("get_memory_grants", { server, hours: ctx.hours }, [
         {
           title: "Memory Grant Pressure",
@@ -1458,8 +1778,8 @@ export const SERVER_TABS = [
        more than this page's widest Range. The note names that Range from the presets (tabNote), so narrowing them
        cannot leave it wrong. */
     note: (widestHours) =>
-      "Blocked-process reports are shown here as their captured XML. The block-chain view " +
-      "is one of the desktop-viewer features this page does not have. A deadlock graph can be drawn from its row. This page shows at most " +
+      "Blocked-process reports are shown here as their captured XML. A Blocking row's Block chain button shows its lead-blocker tree, " +
+      "as the desktop viewer does. A deadlock graph can be drawn from its row. This page shows at most " +
       daysText(widestHours) +
       ". A Custom View can show more blocking and deadlock history.",
     build: (server, ctx) => [
@@ -1479,35 +1799,41 @@ export const SERVER_TABS = [
         emptyText: DEADLOCKS_EMPTY_TEXT,
         emptyWins: true,
       }),
-      table(
-        "Blocking",
-        "get_blocking",
-        { server, hours: ctx.hours, limit: 30 },
-        "events",
-        [...BLOCKING_COLUMNS, ...blockingPlanColumns(server)],
-        ctx.label,
-        "No blocking events in this window.",
-        2,
-        "separately_monitored_note",
-        null,
-        BLOCKING_GROUPS
+      /* #6301 slice 2b: the Blocking and Deadlocks grids sit under a time slicer each (the strips are the two trends' own counts, read once over the
+         page range), and a drag on either narrows both grids, the graphs and the report XML for this server together. */
+      slicedPanel("blocking", { server, ctx }, (w) =>
+        table(
+          "Blocking",
+          "get_blocking",
+          windowParams({ server, hours: w.hours, limit: 30 }, w, true),
+          "events",
+          [...BLOCKING_COLUMNS, ...blockingPlanColumns(server), blockChainColumn(server)],
+          w.label,
+          "No blocking events in this window.",
+          2,
+          "separately_monitored_note",
+          null,
+          BLOCKING_GROUPS
+        )
       ),
-      table(
-        "Deadlocks",
-        "get_deadlocks",
-        { server, hours: ctx.hours, limit: 20 },
-        "deadlocks",
-        [...DEADLOCK_COLUMNS, deadlockPlanColumn(server)],
-        ctx.label,
-        DEADLOCKS_EMPTY_TEXT,
-        2,
-        "separately_monitored_note",
-        null,
-        null,
-        null,
-        null,
-        null,
-        true
+      slicedPanel("deadlocks", { server, ctx }, (w) =>
+        table(
+          "Deadlocks",
+          "get_deadlocks",
+          windowParams({ server, hours: w.hours, limit: 20 }, w, true),
+          "deadlocks",
+          [...DEADLOCK_COLUMNS, deadlockPlanColumn(server)],
+          w.label,
+          DEADLOCKS_EMPTY_TEXT,
+          2,
+          "separately_monitored_note",
+          null,
+          null,
+          null,
+          null,
+          null,
+          true
+        )
       ),
       /* #2484: the Current Waits tab the viewer has and the browser did not. ONE read, two panels --
          via fanout, not two line() calls, because the tab must not fetch the same read twice (there is
@@ -1578,15 +1904,21 @@ export const SERVER_TABS = [
           emptyWins: true,
         },
       ]),
-      deadlockGraphsPanel(server, ctx),
-      table(
-        "Blocked Process Reports",
-        "get_blocked_process_xml",
-        { server, hours: ctx.hours, limit: 5 },
-        "reports",
-        BPR_COLUMNS,
-        ctx.label,
-        "No blocked-process report XML in this window. The report is only written when the blocked process threshold is configured on the target."
+      slicedPanel("deadlocks", { server, ctx }, (w) => deadlockGraphsPanel(server, w), false),
+      slicedPanel(
+        "blocking",
+        { server, ctx },
+        (w) =>
+          table(
+            "Blocked Process Reports",
+            "get_blocked_process_xml",
+            windowParams({ server, hours: w.hours, limit: 5 }, w, true),
+            "reports",
+            BPR_COLUMNS,
+            w.label,
+            "No blocked-process report XML in this window. The report is only written when the blocked process threshold is configured on the target."
+          ),
+        false
       ),
       table(
         "Object Contention",
@@ -1673,8 +2005,8 @@ export const SERVER_TABS = [
   {
     id: "queries",
     label: "Queries",
-    note: "Plan analysis, the query heatmap, cached-plan retrieval and actual-plan re-execution are in the desktop viewer, not on this page.",
-    noteInfo: "They need a plan renderer and a connection back to the monitored server. This page only shows collected data.",
+    note: "Plan analysis, cached-plan retrieval and actual-plan re-execution are in the desktop viewer, not on this page. The Active Queries panel can read the running requests live with Run live now (accounts that can edit; otherwise use the viewer's Current Active Queries).",
+    noteInfo: "They need a plan renderer and a connection back to the monitored server. Apart from the Active Queries live read, this page only shows collected data.",
     build: (server, ctx) => [
       activeQueriesPanel(server, ctx),
       /* #2484: the viewer's Performance Trends tab is four charts over three reads. Duration and the
@@ -1741,41 +2073,54 @@ export const SERVER_TABS = [
          mean two fetches of get_top_queries_by_cpu for one page's worth of the same twenty rows. */
       topQueriesPanel(server, ctx),
       /* #4231: same `truncation_note` disclosure as the CPU tab's plain tables. */
-      rankedCard("procedures", (ranking, picker) =>
+      rankedCard("procedures", (ranking, picker, w, onRow) =>
         table(
           "Top Procedures by " + topRankingLabel(ranking),
           "get_top_procedures_by_cpu",
-          rankedParams({ server, hours: ctx.hours, top: 20, detail: "full" }, ranking, "procedures"),
+          rankedParams(windowParams({ server, hours: w.hours, top: 20, detail: "full" }, w), ranking, "procedures"),
           "procedures",
-          [...TOP_PROC_COLUMNS, procedurePlanColumn(server)],
-          ctx.label,
+          [...TOP_PROC_COLUMNS, procedurePlanColumn(server), statsHistoryColumn("procedures", server, w)],
+          w.label,
           "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes).",
           2,
           "truncation_note",
           null,
           TOP_PROC_GROUPS,
-          picker
+          picker,
+          null,
+          null,
+          false,
+          onRow
         ),
         { server, ctx }
       ),
-      tagFilteredCard("querystore", (picker) =>
-        table(
-          "Query Store",
-          "get_query_store_top",
-          withTagPick({ server, hours: ctx.hours, top: 20 }, "querystore"),
-          "queries",
-          [...QUERY_STORE_COLUMNS, queryStorePlanColumn(server), queryStoreHistoryColumn(server, ctx.hours)],
-          ctx.label,
-          "No Query Store rows in this window.",
-          2,
-          "truncation_note",
-          /* #5094: when whole days came from the daily summary the answer says so (`approximate`), and its note is
-             drawn above the grid as text, so the totals are not read as exact. Null (no line) on an exact answer. */
-          ["approximation_note"],
-          null,
-          picker
-        ),
-        { server, ctx }
+      /* #6301: under the time slicer. The grid reads the slicer's window (`w`), the History button on a row reads that same window, and a row pick
+         overlays that query's history on the strip. */
+      slicedTagCard(
+        "querystore",
+        { server, ctx },
+        (picker, w, onRow) =>
+          table(
+            "Query Store",
+            "get_query_store_top",
+            withTagPick(windowParams({ server, hours: w.hours, top: 20 }, w), "querystore"),
+            "queries",
+            [...QUERY_STORE_COLUMNS, queryStorePlanColumn(server), queryStoreHistoryColumn(server, w)],
+            w.label,
+            "No Query Store rows in this window.",
+            2,
+            "truncation_note",
+            /* #5094: when whole days came from the daily summary the answer says so (`approximate`), and its note is
+               drawn above the grid as text, so the totals are not read as exact. Null (no line) on an exact answer. */
+            ["approximation_note"],
+            null,
+            picker,
+            null,
+            null,
+            false,
+            onRow
+          ),
+        true
       ),
       /* #2484: the Query Store Regressions tab -- the only tab in the per-server page that was entirely
          unreachable from a browser rather than merely reduced. Built with table(), not an object literal:
@@ -1846,23 +2191,18 @@ export const SERVER_TABS = [
             "The Query Store memory clerk was not among the top 25 clerks over 1 MB in any capture in this window, so this is a rank, not a zero.",
         },
       ]),
-      /* #2484: the Query Heatmap tab. The interactive plot stays desktop-only by design -- there is no
-         heatmap viz in this page's vocabulary and inventing a fifth one is not what the issue asked for --
-         but the READ is portable, and a bucketed table is the same answer: one row per (time bin x
-         magnitude bucket) cell. Bins are the viewer's own 5 minutes (the read's default, left unset here on
-         purpose) so this table and the desktop draw the same picture for the same server and window.
-         Built with table(), not an object literal: mount() stringifies anything it cannot consume, so a
-         literal renders as [object Object] and never fetches the read at all. */
-      table(
-        "Query Heatmap",
-        "get_query_heatmap",
-        { server, hours: ctx.hours, limit: 500 },
-        "cells",
-        QUERY_HEATMAP_COLUMNS,
-        ctx.label,
-        "No query executed in this window. Query stats are collected every cycle whether or not anything " +
-          "ran, so the read distinguishes a server nobody collected from one that was simply idle."
-      ),
+      /* #2484, #6293: the Query Heatmap, drawn as the Viewer draws it: a colour grid of query counts by time and
+         magnitude bucket, with a metric picker and a "Show as table" switch to the table of the same cells (the
+         earlier #2484 design kept the plot desktop-only; that is overruled). The card is in pages/query-heatmap.js. */
+      queryHeatmapCard({
+        server,
+        hours: ctx.hours,
+        label: ctx.label,
+        columns: QUERY_HEATMAP_COLUMNS,
+        emptyText:
+          "No query executed in this window. Query stats are collected every cycle whether or not anything " +
+          "ran, so the read distinguishes a server nobody collected from one that was simply idle.",
+      }),
       tagFilteredCard("longqueries", (picker) =>
         table(
           "Long Query Completions",
@@ -2047,8 +2387,7 @@ export const SERVER_TABS = [
     id: "events",
     label: "System Events",
     note:
-      "These are the system_health session and default trace, parsed on read. The desktop viewer additionally " +
-      "charts the corruption and contention counters hour-by-hour; here they are the raw parsed rows.",
+      "These are the system_health session and default trace, parsed on read.",
     build: (server, ctx) => [
       /* The CPU chart reads the whole window as time buckets (chart: true, #6158); a limit of 50 drew only the newest
          few hours of a day. The entries table below keeps the newest-rows read. */
@@ -2064,7 +2403,9 @@ export const SERVER_TABS = [
           unit: "%",
           emptyText: "No system_health entries in this window.",
         },
-      ]),
+        /* The Corruption and Contention Events charts (#6295), off the same fetch. */
+        ...systemEventsChartSpecs(ctx.label),
+      ], { text: COUNTERS_INTRO, when: counterChartsDrawn }),
       ...fanout("get_health_parser_system_health", { server, hours: ctx.hours, limit: 50 }, [
         {
           title: "system_health Entries",
@@ -3459,24 +3800,41 @@ function waitLinkCell(server, row, timeKey) {
    grid names the wait as text and clears the filter. The heading stays "Active Queries" (the scroll finder matches it).
    Unfiltered, the read is the 50-row page it always was. */
 function activeQueriesPanel(server, ctx) {
-  return tagFilteredCard("active", (picker) => activeQueriesCard(server, ctx, picker));
+  const wait = queryWaitFilter(server);
+  /* #6302: the snapshot picker (active-snapshots.js) reads the window's snapshot times, under the tag pick and the wait filter the grid
+     uses, and draws the grid for the latest one, or the one picked; "All snapshots in window" draws it as it was. */
+  /* #6301: under the time slicer. `w` is the page range or the slicer's selection; the snapshot list and the grid both read it. */
+  const card = slicedTagCard("active", { server, ctx }, (tagPicker, w) =>
+    activeQueriesSnapshotSlot(server, w, wait, withTagPick({}, "active"), (snapshotTime, snapPicker) =>
+      activeQueriesGrid(server, w, wait, snapshotTime, snapPicker ? el("div", {}, [tagPicker, snapPicker]) : tagPicker)
+    )
+  );
+  /* #6386: the live read ("Run live now") sits above the stored snapshots, in the stored grid's columns. */
+  const wrap = el("div", {}, [activeQueriesLiveBar(server, ACTIVE_COLUMNS), card]);
+  wrap.style.display = "contents";
+  return wrap;
 }
 
-function activeQueriesCard(server, ctx, picker) {
-  const wait = queryWaitFilter(server);
+function activeQueriesGrid(server, ctx, wait, snapshotTime, control) {
+  /* The "All snapshots" grid is an event list, cut to the selection; a picked snapshot is one instant and is read as it is. */
+  const base = windowParams(wait ? { server, hours: ctx.hours, limit: 500, wait_type: wait } : { server, hours: ctx.hours, limit: 50 }, ctx, !snapshotTime);
   const panel = table(
     "Active Queries",
     "get_active_queries",
-    withTagPick(wait ? { server, hours: ctx.hours, limit: 500, wait_type: wait } : { server, hours: ctx.hours, limit: 50 }, "active"),
+    snapshotTime
+      ? withTagPick({ ...base, limit: SNAPSHOT_ROW_CAP, collection_time: snapshotTime }, "active")
+      : withTagPick(base, "active"),
     "queries",
     [...ACTIVE_COLUMNS, ...activePlanColumns(server)],
-    wait ? ctx.label + ", waiting on " + wait : ctx.label,
-    wait ? "No active queries waiting on " + wait + " were captured in this window." : "No active-query snapshots in this window.",
+    snapshotTime ? "snapshot at " + localTime(snapshotTime) : wait ? ctx.label + ", waiting on " + wait : ctx.label,
+    snapshotTime
+      ? "No active queries" + (wait ? " waiting on " + wait : "") + " in this snapshot."
+      : wait ? "No active queries waiting on " + wait + " were captured in this window." : "No active-query snapshots in this window.",
     2,
     null,
     null,
     null,
-    picker
+    control
   );
   if (wait) {
     const strip = el("div", { class: "strip notice wait-filter-strip" }, [
@@ -4053,7 +4411,7 @@ function deadlockGraphsPanel(server, ctx) {
   const panel = table(
     "Deadlock Graphs",
     "get_deadlock_detail",
-    { server, hours: ctx.hours, limit: 5 },
+    windowParams({ server, hours: ctx.hours, limit: 5 }, ctx, true),
     "deadlocks",
     deadlockXmlColumns(server, scope),
     ctx.label,
@@ -4315,7 +4673,7 @@ export function serverTrendPanel(server, ctx, kind) {
         unit: spec.unit,
         ...windowFromHours(res.keptHours || ctx.hours),
       }, "server-trend|" + server + "|" + spec.metric, chartZoomScope(ctx.hours)),
-      typeof res.data.aggregate_note === "string" && res.data.aggregate_note ? metricNote(res.data.aggregate_note) : null,
+      chartNote(res.data, "level"),
     ]);
   })();
   return panel;
@@ -4333,6 +4691,9 @@ const SERIES_TRENDS = {
     title: "File I/O Throughput",
     subtitle: "read and write MB/s per file",
     seriesKey: "file_label",
+    /* #6359: what chartNote says besides the width: "summed" for a rate over summed bytes. The latency and longest-run
+       specs below are ratios and extremes, where the smaller-counts fact does not apply, so they say the width only. */
+    noteKind: "summed",
     emptyText: "No file I/O samples in this window.",
     emptyWins: true,
     note: "One line per file, the five that moved the most bytes in the window.",
@@ -4410,7 +4771,7 @@ export function seriesTrendPanel(server, ctx, kind) {
       notes.length ? noticeStrip(notes.join(" ")) : null,
       ...spec.charts.flatMap(draw),
       el("div", { class: "mp-metric-note", text: spec.note }),
-      typeof res.data.aggregate_note === "string" && res.data.aggregate_note ? metricNote(res.data.aggregate_note) : null,
+      chartNote(res.data, spec.noteKind),
     ]);
   })();
   return panel;
@@ -4514,7 +4875,7 @@ export async function drawClerkTrends(slot, server, ctx, checked) {
       unit: "MB",
       ...windowFromHours(trend.keptHours || ctx.hours),
     }, "clerk-trend|" + server, chartZoomScope(ctx.hours)),
-    typeof trend.data.aggregate_note === "string" && trend.data.aggregate_note ? metricNote(trend.data.aggregate_note) : null,
+    chartNote(trend.data, "level"),
   ]);
 }
 
@@ -4639,7 +5000,7 @@ export async function drawNamedTrends(slot, server, ctx, kind, checked) {
       ...windowFromHours(trend.keptHours || ctx.hours),
     }, kind + "-trend|" + server, chartZoomScope(ctx.hours)),
     el("div", { class: "mp-metric-note", text: spec.note }),
-    typeof trend.data.aggregate_note === "string" && trend.data.aggregate_note ? metricNote(trend.data.aggregate_note) : null,
+    chartNote(trend.data, "summed"),
   ]);
 }
 
@@ -4682,7 +5043,7 @@ export function sessionStatsTrendPanel(server, ctx) {
         ...windowFromHours(res.keptHours || ctx.hours),
       }, "server-trend|" + server + "|session_stats", chartZoomScope(ctx.hours)),
       top.length ? el("div", { class: "mp-metric-note", text: "Top in the newest bucket: " + top.join("; ") + "." }) : null,
-      typeof res.data.aggregate_note === "string" && res.data.aggregate_note ? metricNote(res.data.aggregate_note) : null,
+      chartNote(res.data, "level"),
     ]);
   })();
   return panel;
@@ -5258,6 +5619,9 @@ const COLLECTOR_COLUMNS = [
   /* #5646: a collector that recovered (its newest 3 runs succeeded after failures) is HEALTHY, and this says so with the
      time of the last failure. Partial rows carry no note_summary, so the sentence rides in its own field. */
   { key: "recovered_note", label: "Recovered", clamp: true, localizeText: true, plain: true, hideWhenEmpty: true },
+  /* #6254: where the Query Store collector's newest run read its rows from ("replica 12, primary 2"). Only a server with the Query
+     Store replica setting on has one, so the column is left out unless a row has it and every other server's table is as it was. */
+  { key: "read_source", label: "Read source", clamp: true, hideWhenEmpty: true },
   /* #3017: which of the two zero-output readings a collector that spent and stored nothing is — read and
      found nothing, or could not read. Blank whenever Rows is positive, for the same reason the Note
      column is blank on a plainly healthy collector. Composed server-side from the shared formatter, so

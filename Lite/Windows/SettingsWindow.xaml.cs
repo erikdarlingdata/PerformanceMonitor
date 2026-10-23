@@ -292,6 +292,43 @@ public partial class SettingsWindow : Window
         _mcpSettingsProblem = settings.Problem;
         McpEnabledCheckBox.IsChecked = settings.Enabled;
         McpPortTextBox.Text = settings.Port.ToString();
+        _mcpTokenless = settings.AllowTokenlessLoopback;
+        LoadMcpToken();
+    }
+
+    /* The MCP token lives in Windows Credential Manager for this Windows user (McpTokenStore). This window reads it:
+       the token is made when the server first starts with none, or when Copy is used before then. New token replaces it. */
+    private readonly McpTokenStore _mcpTokens = McpTokenStore.ForApp();
+    private bool _mcpTokenless;
+
+    private void LoadMcpToken()
+    {
+        if (_mcpTokenless)
+        {
+            McpTokenTextBox.Text = "No token is required (mcp_allow_tokenless_loopback is on in settings.json)";
+            CopyMcpTokenButton.IsEnabled = false;
+            NewMcpTokenButton.IsEnabled = false;
+            return;
+        }
+
+        var token = _mcpTokens.Read(out var failure);
+        McpTokenTextBox.Text = token ?? (failure is null
+            ? "Made the first time the MCP server starts, or when you copy it"
+            : "Could not be read: " + failure);
+    }
+
+    /// <summary>The token to copy: the stored one, made first when there is none. Null with the status line set when it cannot be had.</summary>
+    private string? TokenForCopy()
+    {
+        var token = _mcpTokens.GetOrCreate(out var failure, out _);
+        if (token is null)
+        {
+            McpStatusText.Text = "Couldn't get the MCP token: " + failure;
+            return null;
+        }
+
+        McpTokenTextBox.Text = token;
+        return token;
     }
 
     private void UpdateMcpStatus()
@@ -653,11 +690,68 @@ public partial class SettingsWindow : Window
     private void CopyMcpCommandButton_Click(object sender, RoutedEventArgs e)
     {
         var port = McpPortTextBox.Text;
-        var command = $"claude mcp add --transport http --scope user sql-monitor http://localhost:{port}/";
-        /* Use SetDataObject with copy=false to avoid WPF's problematic Clipboard.Flush() */
-        McpStatusText.Text = ClipboardText.TrySetDataObject(command)
+        string command;
+        if (_mcpTokenless)
+        {
+            command = $"claude mcp add --transport http --scope user sql-monitor http://localhost:{port}/";
+        }
+        else
+        {
+            var token = TokenForCopy();
+            if (token is null) return;
+            command = McpTokenStore.ClientCommand(int.TryParse(port, out var p) ? p : McpSettings.DefaultPort, token);
+        }
+
+        /* Use SetDataObject with copy=false to avoid WPF's problematic Clipboard.Flush(). The command carries the token, so it is
+           kept out of Clipboard History and the cloud clipboard (SecretClipboard); without a token it is plain text. */
+        McpStatusText.Text = ClipboardText.TrySetDataObject(_mcpTokenless ? command : SecretClipboard.Build(command))
             ? "Copied to clipboard!"
             : "Couldn't copy: the clipboard is in use.";
+    }
+
+    /// <summary>Ctrl+C and the context-menu Copy in the token box: the same clipboard path as Copy Token (kept out of history and cloud sync).</summary>
+    private void McpTokenTextBox_Copy(object sender, ExecutedRoutedEventArgs e)
+    {
+        var text = McpTokenTextBox.SelectedText.Length > 0 ? McpTokenTextBox.SelectedText : McpTokenTextBox.Text;
+        if (!_mcpTokenless && text.Length > 0)
+        {
+            McpStatusText.Text = ClipboardText.TrySetDataObject(SecretClipboard.Build(text))
+                ? "Copied to clipboard!"
+                : "Couldn't copy: the clipboard is in use.";
+        }
+
+        e.Handled = true;
+    }
+
+    private void CopyMcpTokenButton_Click(object sender, RoutedEventArgs e)
+    {
+        var token = TokenForCopy();
+        if (token is null) return;
+        McpStatusText.Text = ClipboardText.TrySetDataObject(SecretClipboard.Build(token))
+            ? "Token copied to clipboard! Send it as the header \"Authorization: Bearer <token>\"."
+            : "Couldn't copy: the clipboard is in use.";
+    }
+
+    /// <summary>Makes a new token and stores it over the old one. The running server uses it at once (the old token stops
+    /// working), so the MCP client needs the new config.</summary>
+    private void NewMcpTokenButton_Click(object sender, RoutedEventArgs e)
+    {
+        var token = _mcpTokens.Replace(out var failure);
+        if (token is null)
+        {
+            McpStatusText.Text = "Couldn't make a new token: " + failure;
+            return;
+        }
+
+        McpTokenTextBox.Text = token;
+
+        /* The window may hold no host reference (it was opened while the server was still starting) or the swap may be refused;
+           closing Settings then restarts the host from the stored token, so the old token never outlives this click. */
+        var swapped = _mcpService?.ReplaceToken(token) ?? false;
+        McpSettingsChanged = true;
+        McpStatusText.Text = swapped
+            ? "New token made. The old one no longer works: your MCP client needs the new config (use Copy MCP config)."
+            : "New token made. The old one stops working when you close Settings: your MCP client needs the new config (use Copy MCP config).";
     }
 
     private async void AutoPortButton_Click(object sender, RoutedEventArgs e)
@@ -843,6 +937,8 @@ public partial class SettingsWindow : Window
         AlertClientTimeoutsCheckBox.IsChecked = App.AlertClientTimeoutsEnabled;
         AlertClientTimeoutsWarningBox.Text = App.AlertClientTimeoutsWarningPerMinute.ToString();
         AlertClientTimeoutsCriticalBox.Text = App.AlertClientTimeoutsCriticalPerMinute.ToString();
+        AlertClientTimeoutsWarningMultipleBox.Text = App.AlertClientTimeoutsWarningMultiple.ToString();
+        AlertClientTimeoutsCriticalMultipleBox.Text = App.AlertClientTimeoutsCriticalMultiple.ToString();
         AlertLongRunningQueryCheckBox.IsChecked = App.AlertLongRunningQueryEnabled;
         AlertLongRunningQueryThresholdBox.Text = App.AlertLongRunningQueryThresholdMinutes.ToString();
         AlertLongRunningQueryMaxResultsBox.Text = App.AlertLongRunningQueryMaxResults.ToString();
@@ -989,6 +1085,19 @@ public partial class SettingsWindow : Window
         {
             validationErrors.AddRange(timeoutErrors, AlertClientTimeoutsWarningBox);
         }
+        /* #5736: the two multiples, the same both-or-neither rule (each a whole number of at least 1, Critical never below Warning). */
+        var multipleErrors = new List<string>();
+        var (multipleWarning, multipleCritical) = ClientTimeoutsBarsInput.ValidateMultiples(
+            AlertClientTimeoutsWarningMultipleBox.Text, AlertClientTimeoutsCriticalMultipleBox.Text, multipleErrors);
+        if (multipleErrors.Count == 0)
+        {
+            App.AlertClientTimeoutsWarningMultiple = multipleWarning;
+            App.AlertClientTimeoutsCriticalMultiple = multipleCritical;
+        }
+        else
+        {
+            validationErrors.AddRange(multipleErrors, AlertClientTimeoutsWarningMultipleBox);
+        }
         App.AlertLongRunningQueryEnabled = AlertLongRunningQueryCheckBox.IsChecked == true;
         if (int.TryParse(AlertLongRunningQueryThresholdBox.Text, out var lrq) && lrq > 0)
             App.AlertLongRunningQueryThresholdMinutes = lrq;
@@ -1106,6 +1215,8 @@ public partial class SettingsWindow : Window
         root["alert_client_timeouts_enabled"] = App.AlertClientTimeoutsEnabled;
         root["alert_client_timeouts_warning_per_minute"] = App.AlertClientTimeoutsWarningPerMinute;
         root["alert_client_timeouts_critical_per_minute"] = App.AlertClientTimeoutsCriticalPerMinute;
+        root["alert_client_timeouts_warning_multiple"] = App.AlertClientTimeoutsWarningMultiple;
+        root["alert_client_timeouts_critical_multiple"] = App.AlertClientTimeoutsCriticalMultiple;
         root["alert_long_running_query_enabled"] = App.AlertLongRunningQueryEnabled;
         root["alert_long_running_query_threshold_minutes"] = App.AlertLongRunningQueryThresholdMinutes;
         root["alert_long_running_query_max_results"] = App.AlertLongRunningQueryMaxResults;
@@ -1176,6 +1287,8 @@ public partial class SettingsWindow : Window
         AlertRunnableQueueCriticalBox.Text = RunnableQueueEvaluator.DefaultCriticalPerScheduler.ToString(CultureInfo.InvariantCulture);
         AlertClientTimeoutsWarningBox.Text = AttentionEvaluator.DefaultWarningPerMinute.ToString(CultureInfo.InvariantCulture);
         AlertClientTimeoutsCriticalBox.Text = AttentionEvaluator.DefaultCriticalPerMinute.ToString(CultureInfo.InvariantCulture);
+        AlertClientTimeoutsWarningMultipleBox.Text = AttentionBaselineMath.DefaultWarningMultiple.ToString(CultureInfo.InvariantCulture);
+        AlertClientTimeoutsCriticalMultipleBox.Text = AttentionBaselineMath.DefaultCriticalMultiple.ToString(CultureInfo.InvariantCulture);
         AlertLongRunningQueryThresholdBox.Text = "30";
         AlertLongRunningQueryMaxResultsBox.Text = "5";
         AlertTempDbSpaceThresholdBox.Text = "80";
@@ -1257,7 +1370,7 @@ public partial class SettingsWindow : Window
         if (AlertRunnableQueueCheckBox.IsChecked == true)
             parts.Add($"runnable tasks per scheduler >= {AlertRunnableQueueWarningBox.Text} (critical {AlertRunnableQueueCriticalBox.Text}) over {RunnableQueueEvaluator.WindowMinutes}min");
         if (AlertClientTimeoutsCheckBox.IsChecked == true)
-            parts.Add($"client timeouts >= {AlertClientTimeoutsWarningBox.Text} per minute (critical {AlertClientTimeoutsCriticalBox.Text}) over {AttentionEvaluator.WindowMinutes}min");
+            parts.Add($"client timeouts >= max({AlertClientTimeoutsWarningBox.Text} per minute (critical {AlertClientTimeoutsCriticalBox.Text}), {AlertClientTimeoutsWarningMultipleBox.Text}x (critical {AlertClientTimeoutsCriticalMultipleBox.Text}x) the server's own baseline) over {AttentionEvaluator.WindowMinutes}min");
         if (AlertLongRunningQueryCheckBox.IsChecked == true)
             parts.Add($"queries > {AlertLongRunningQueryThresholdBox.Text}min");
         if (AlertTempDbSpaceCheckBox.IsChecked == true)
@@ -1300,6 +1413,8 @@ public partial class SettingsWindow : Window
         AlertClientTimeoutsCheckBox.IsEnabled = enabled;
         AlertClientTimeoutsWarningBox.IsEnabled = enabled;
         AlertClientTimeoutsCriticalBox.IsEnabled = enabled;
+        AlertClientTimeoutsWarningMultipleBox.IsEnabled = enabled;
+        AlertClientTimeoutsCriticalMultipleBox.IsEnabled = enabled;
         AlertLongRunningQueryCheckBox.IsEnabled = enabled;
         AlertLongRunningQueryThresholdBox.IsEnabled = enabled;
         AlertLongRunningQueryMaxResultsBox.IsEnabled = enabled;

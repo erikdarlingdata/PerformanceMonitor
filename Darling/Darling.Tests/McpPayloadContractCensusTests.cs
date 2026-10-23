@@ -1330,6 +1330,10 @@ public sealed class McpPayloadContractCensusTests
     /// top five, the store log's newest capture in a summary) and the rows it feeds are not a snapshot. The
     /// anchor's owning <c>SELECT</c> list is the last depth-zero <c>SELECT</c> before it up to the next
     /// depth-zero <c>FROM</c>. 15 anchored constants at the time of writing; the floor is 10.</para>
+    ///
+    /// <para>A write (<c>INSERT</c>, <c>UPDATE</c> or <c>DELETE</c>, after an optional leading <c>WITH</c> list) is out
+    /// of scope: the rule is about reads, where the tool stamps the snapshot time from a projected row, and a write
+    /// returns no snapshot row to stamp. Such a constant is skipped before it counts toward the floor.</para>
     /// </summary>
     [Fact]
     public void EveryLatestAnchoredRead_ProjectsItsAnchorColumn_OrIsRostered()
@@ -1340,6 +1344,11 @@ public sealed class McpPayloadContractCensusTests
         foreach (var (file, name, sql) in ReaderSqlConstants())
         {
             var clean = Regex.Replace(Regex.Replace(sql, @"/\*.*?\*/", string.Empty, RegexOptions.Singleline), @"--[^\n]*", string.Empty);
+            if (IsWriteStatement(clean))
+            {
+                continue;
+            }
+
             var anchor = LatestAnchor.Match(clean);
             if (!anchor.Success || Depth(clean, anchor.Index) != 0)
             {
@@ -1547,6 +1556,8 @@ public sealed class McpPayloadContractCensusTests
             "#5234: get_query_store_query_history's per-interval points[] is capped at MaxPoints (150) and a byte budget, keeping the NEWEST points, observed off the fetched row count; plans[] is capped separately (plans_truncated) — two bounds in one payload, the second spelled <bound>_truncated"),
         ("plans_truncated", ["DarlingMcpQueryStoreHistoryTools.cs"],
             "#5234: get_query_store_query_history's per-plan plans[] roll-up is capped at MaxPlans (20), the longest by total duration, beside the per-interval points[] bound (points_truncated) — two bounds in one payload, the second spelled <bound>_truncated"),
+        ("known_patterns_truncated", ["DarlingMcpAlertTools.cs"],
+            "#6334: get_alert_history's per-row known_patterns[] (the operator's known-pattern entries matching that alert) is capped at MaxPerAlertRow (5), the rest left off; observed off the matched count, per row, beside the page's own truncated — two bounds in one payload, the second spelled <bound>_truncated"),
         ("scan_truncated", ["DarlingMcpBlockingTools.cs", "DarlingMcpQueryTagRollupTools.cs"],
             "the dedup_key fingerprint scan's ceiling (FingerprintScanCeiling) and #5983's get_resource_use_by_tag deadlock-graph scan ceiling (DeadlockScanCeiling), observed off a ceiling + 1 fetch, beside the page's own truncated — two bounds in one payload, the second spelled <bound>_truncated"),
         ("processes_truncated", ["DarlingMcpBlockingTools.cs"],
@@ -2241,11 +2252,11 @@ public sealed class McpPayloadContractCensusTests
     }
 
     /// <summary>Every named string constant holding SQL in the reader sources: raw (<c>"""</c>) or verbatim
-    /// (<c>@"</c>) literals declared <c>const string</c> or <c>static readonly string</c>.</summary>
+    /// (<c>@"</c>, <c>$@"</c>, <c>@$"</c>) literals declared <c>const string</c> or <c>static readonly string</c>.</summary>
     private static IEnumerable<(string File, string Name, string Sql)> ReaderSqlConstants()
     {
         var declaration = new Regex(
-            @"(?:public|internal|private)\s+(?:static\s+readonly\s+string|const\s+string)\s+(\w+)\s*=\s*(?:\$?""""""(.*?)""""""|@""((?:[^""]|"""")*)"")\s*;",
+            @"(?:public|internal|private)\s+(?:static\s+readonly\s+string|const\s+string)\s+(\w+)\s*=\s*(?:\$?""""""(.*?)""""""|(?:\$@|@\$|@)""((?:[^""]|"""")*)"")\s*;",
             RegexOptions.Singleline);
         foreach (var (file, source) in ReaderSources())
         {
@@ -2254,6 +2265,22 @@ public sealed class McpPayloadContractCensusTests
                 yield return (file, m.Groups[1].Value, m.Groups[2].Success ? m.Groups[2].Value : m.Groups[3].Value);
             }
         }
+    }
+
+    /// <summary>True when the statement's first depth-zero <c>SELECT</c> / <c>INSERT</c> / <c>UPDATE</c> /
+    /// <c>DELETE</c> keyword is a write verb. A leading <c>WITH</c> list is skipped because its CTE bodies sit at
+    /// depth one. <paramref name="clean"/> has its comments already stripped.</summary>
+    private static bool IsWriteStatement(string clean)
+    {
+        var depth = 0;
+        foreach (Match t in Regex.Matches(clean, @"\(|\)|\b(?:SELECT|INSERT|UPDATE|DELETE)\b", RegexOptions.IgnoreCase))
+        {
+            if (t.Value == "(") depth++;
+            else if (t.Value == ")") depth--;
+            else if (depth == 0) return !t.Value.Equals("SELECT", StringComparison.OrdinalIgnoreCase);
+        }
+
+        return false;
     }
 
     /// <summary>Parenthesis depth of <paramref name="position"/> within <paramref name="sql"/>.</summary>

@@ -2,7 +2,7 @@
 
 Part of the [Performance Monitor documentation](../README.md#documentation).
 
-1. Download **[`PerformanceMonitorLite-win-Setup.exe`](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest)** — a self-contained build, so there is **no .NET runtime to install first**.
+1. Download **[`PerformanceMonitorLite-lite-Setup.exe`](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest)** — a self-contained build, so there is **no .NET runtime to install first**.
 2. Run the installer — it installs to `%LocalAppData%\PerformanceMonitorLite`, adds **Start Menu** and **Desktop** shortcuts, and registers the app under **Apps & Features** so it shows up in Windows search and can be uninstalled normally. Auto-update is wired in. Your data goes in `%LocalAppData%\PerformanceMonitorLite-Data`, a separate folder the installer never touches.
 3. Launch from the Start Menu or Desktop shortcut.
 4. Click **+ Add Server**, enter connection details, test, save.
@@ -14,11 +14,17 @@ Data starts flowing within 1–5 minutes. That's it. No installation on your ser
 
 That was not always true: through 3.5.0 the ZIP was a portable build with no runtime of its own, and on a machine without .NET it died on the host’s own `You must install .NET to run this application` before a line of Lite’s code ran. Pinning the ZIP to win-x64 removed the requirement **and halved the download** — the old build shipped ~537&nbsp;MB of `runtimes\` for macOS, Linux, ARM and musl targets Windows can never load, which cost far more than bundling the runtime does. See [`Lite/README.md`](../Lite/README.md#prerequisites) for the detail.
 
-**Upgrading from zip?** Click **Import Settings** then **Import Data** in the sidebar and point both at your old Lite folder. Settings imports server connections, alert thresholds, SMTP config, and schedules. Data imports historical DuckDB + Parquet archives. **Auto-update users** (installed via Setup.exe) get updates automatically — no manual import needed.
+**Upgrading from zip?** Click **Import Settings** then **Import Data** in the sidebar. Settings imports server connections, alert thresholds, SMTP config, and schedules. Data imports historical DuckDB + Parquet archives. **Auto-update users** (installed via Setup.exe) get updates automatically — no manual import needed.
 
-> **Warning — upgrading an install older than the data-relocation fix:** on those versions Lite kept its data *inside* the install directory, and re-running `Setup.exe` over an existing install deletes that directory before the new build ever runs. It takes the DuckDB store, the Parquet archive, the logs, and `settings.json` with it. Upgrade **in place** instead: the **About** button in the left sidebar downloads and applies the update without touching your data, or extract the portable ZIP over your existing copy. From this release on, data lives outside the install directory and is moved there automatically on first start, so `Setup.exe` is safe again. (Your monitored-server list is unaffected either way — it lives in `%ProgramData%\PerformanceMonitorLite\config` — and so are the passwords in Windows Credential Manager.)
+**Import Settings** needs the folder that holds `config\servers.json`. **Import Data** needs the folder that holds `monitor.duckdb`. For a Lite older than 3.4.0, both are the same folder: the one you unzipped, or `%LOCALAPPDATA%\PerformanceMonitorLite`. From 3.4.0 on, `monitor.duckdb` is in `%LOCALAPPDATA%\PerformanceMonitorLite-Data`, so Import Data accepts that folder. The server list is in `%ProgramData%\PerformanceMonitorLite\config`, so Import Settings finds no `servers.json` in that data folder unless an older copy is left there. To move a current install to another PC, copy the folders instead, as in [Back up Lite and move it to another PC](../Lite/README.md#back-up-lite-and-move-it-to-another-pc).
+
+> **Warning — upgrading an install older than 3.4.0:** on those versions Lite kept its data *inside* the install directory, and re-running `Setup.exe` over an existing install deletes that directory before the new build ever runs. It takes the DuckDB store, the Parquet archive, the logs, and `settings.json` with it. Upgrade **in place** instead: the **About** button in the left sidebar downloads and applies the update without touching your data, or extract the portable ZIP over your existing copy. From 3.4.0 on, data lives outside the install directory and is moved there automatically on first start, so `Setup.exe` is safe again. (Your monitored-server list is unaffected either way — it lives in `%ProgramData%\PerformanceMonitorLite\config` — and so are the passwords in Windows Credential Manager.)
+>
+> To find your version, click **About** in the left sidebar. The window shows `Version 3.x.y`. If the version is older than 3.4.0, you have two safe options. Update from the **About** window. Or close Lite, copy `%LOCALAPPDATA%\PerformanceMonitorLite` to a safe place, and then run `Setup.exe`. That deletes the original, so after Lite starts, use **Import Settings** and **Import Data** and point both at your copy. See [Upgrading an install older than 3.4.0](../Lite/README.md#upgrading-an-install-older-than-340).
 
 **Always On AG?** Enable **ReadOnlyIntent** in the connection settings to route Lite's monitoring queries to a readable secondary, keeping the primary clear. Enable **MultiSubnetFailover** for multi-subnet failover scenarios.
+
+**Query Store from a replica.** Set **QS replica** (a host, `host,port` or listener name) on a SQL Server registration to read Query Store from a readable secondary instead of the primary. Empty, the default, reads the primary and changes nothing. Azure SQL Database never reads a replica. The replica host gets the same login and password as the server, so it must accept them. Collection health shows the newest Query Store run's `read_source` (for example `replica 12, primary 2`) in the Note column and the MCP `get_collection_health` row, only when a run has one.
 
 ### Lite Collectors
 
@@ -53,13 +59,13 @@ That was not always true: through 3.5.0 the ZIP was a portable build with no run
 | memory_clerks | 5 min | `sys.dm_os_memory_clerks` |
 | memory_pressure_events | 5 min | `sys.dm_os_ring_buffers` RING_BUFFER_RESOURCE_MONITOR |
 | query_store | 5 min | Query Store DMVs (per database) |
-| plan_correction | 5 min | `sys.dm_db_tuning_recommendations` + `sys.database_automatic_tuning_options` (automatic plan correction: FORCE_LAST_GOOD_PLAN enablement plus the engine's live regression recommendations, with the regressed query's text resolved through Query Store) |
+| plan_correction | 5 min | `sys.dm_db_tuning_recommendations` + `sys.database_automatic_tuning_options` (automatic plan correction: FORCE_LAST_GOOD_PLAN enablement plus the engine's live regression recommendations, with the regressed query's text resolved through Query Store; SQL Server 2017+, Azure SQL DB and Azure SQL Managed Instance) |
 | plan_cache_stats | 5 min | `sys.dm_exec_cached_plans` (single-use vs reused plan-cache bloat) |
 | system_health_events | 5 min | `system_health` XE ring buffer (not Azure SQL DB) |
-| default_trace_events | 5 min | default trace via `sys.fn_trace_gettable` |
+| default_trace_events | 5 min | default trace via `sys.fn_trace_gettable` (not Azure SQL DB) |
 | job_history | 5 min | `msdb.dbo.sysjobhistory` retained job-run history (not Azure SQL DB) |
 | agent_status | 5 min | `sys.dm_server_services` + `msdb.dbo.sysjobschedules` (not Azure SQL DB / RDS) |
-| running_jobs | 5 min | `msdb` job history with duration vs avg/p95 |
+| running_jobs | 5 min | `msdb` job history with duration vs avg/p95 (not Azure SQL DB / AWS RDS) |
 | database_size_stats | 1 hour | `sys.master_files` + `FILEPROPERTY` + `dm_os_volume_stats` |
 | pvs_stats | 1 hour | `sys.dm_tran_persistent_version_store_stats` + `sys.databases` (ADR persistent version store size and cleanup state per database; SQL Server 2019+ only, always collected on Azure SQL DB) |
 | query_store_health | 1 hour | `sys.database_query_store_options` per database (actual vs desired state, readonly_reason, storage used vs cap, cleanup thresholds, runtime-stats interval length; SQL Server 2016+, one row per database with OFF recorded explicitly) |
@@ -70,7 +76,7 @@ That was not always true: through 3.5.0 the ZIP was a portable build with no run
 | database_scoped_config | On connect | Database-scoped configurations |
 | trace_flags | On connect | `DBCC TRACESTATUS` |
 
-Darling runs this same shared collector set across a fleet of servers (latch stats, spinlock stats, CPU scheduler, plan cache, and system_health parsing are now part of the shared catalog above, collected by Lite too) — see the [Darling collector reference](../Darling/README.md).
+Darling runs these same 43 collectors across a fleet of servers, plus a 44th, `query_store_forced_plans`, which reads each database's forced plans. Lite does not have it. Darling also runs 29 PostgreSQL collectors. See the [Darling collector reference](../Darling/README.md).
 
 ### The Extended Events Sessions Lite Creates
 
@@ -82,7 +88,8 @@ If Lite cannot read `install-id.json` (another program holds it open, or the rea
 
 - `PerformanceMonitor_Lite_<id>_LongQueryCompletions` is this install's long-query trace. Lite creates it while the opt-in `long_query_completions` collector is on. It is created with `STARTUP_STATE = OFF`, so it stays stopped after a server restart. Each check starts it again when it finds it stopped.
 - `PerformanceMonitor_Deadlock` and `PerformanceMonitor_BlockedProcess` keep their shared names, because Darling and other installs read them too. Lite never drops them. It checks each one whenever its collector runs. It creates a missing one and starts a stopped one, so a deliberate stop does not last.
-- On Azure SQL Database, a shared session can stay unusable after a start. Lite then creates `PerformanceMonitor_Lite_<id>_Deadlock` or `PerformanceMonitor_Lite_<id>_BlockedProcess` in that database, with `STARTUP_STATE = OFF`, and reads that one. When the shared session works again, Lite switches back and drops its own fallback.
+- `PerformanceMonitor_Attention` is the client-timeout session that the `attention` collector reads. It also keeps its shared name, and Lite never drops it. Lite checks it while the `attention` collector is on. It creates a missing one with `STARTUP_STATE = ON` and starts a stopped one. On Azure SQL Database, Lite creates one in every monitored database. If a session of that name has an older definition, Lite drops it and creates it again once for each run of the app.
+- On Azure SQL Database, a shared session can stay unusable after a start. Lite then creates `PerformanceMonitor_Lite_<id>_Deadlock`, `PerformanceMonitor_Lite_<id>_BlockedProcess` or `PerformanceMonitor_Lite_<id>_Attention` in that database, with `STARTUP_STATE = OFF`, and reads that one. When the shared session works again, Lite switches back and drops its own fallback.
 
 #### The old shared session
 
@@ -90,9 +97,9 @@ Earlier versions shared one session, `PerformanceMonitor_LongQueryCompletions`, 
 
 #### Removing a server
 
-Removing a server drops this install's sessions on it. These are the long-query session and its own deadlock and blocked-process fallbacks. Lite makes one attempt, within 15 seconds. A failed drop is logged and never stops the removal.
+Removing a server drops this install's sessions on it. These are the long-query session and its own deadlock, blocked-process and client-timeout fallbacks. Lite makes one attempt, within 15 seconds. A failed drop is logged and never stops the removal.
 
-Lite leaves a session that another registration of this install keeps. On premises, it also leaves the session when it cannot tell whether another registration of this install shares the instance. That happens when the instance name of this server is not known. Lite logs the reason. The two shared sessions stay on the server.
+Lite leaves a session that another registration of this install keeps. On premises, it also leaves the session when it cannot tell whether another registration of this install shares the instance. That happens when the instance name of this server is not known. Lite logs the reason. The three shared sessions stay on the server.
 
 #### Registrations that share an instance
 
@@ -108,7 +115,7 @@ A Managed Instance registration with read-only intent needs the trace started on
 
 Microsoft Learn lists these caps under "Resource governance" on [Extended Events in Azure SQL](https://learn.microsoft.com/en-us/azure/azure-sql/database/xevent-db-diff-from-svr). A database holds at most 100 started sessions. An elastic pool holds at most 100 database-scoped sessions. Session memory is capped at 128 MB per database and 512 MB per pool. In a dense pool, a start can fail below 100 sessions.
 
-Each install uses one long-query session per database while the trace is on. It adds up to two fallbacks while a shared session is unusable. A failed create or start on Azure SQL Database carries a sentence that names these caps.
+Each install uses one long-query session per database while the trace is on. It adds up to three fallbacks while a shared session is unusable. A failed create or start on Azure SQL Database carries a sentence that names these caps.
 
 #### Known limits
 
@@ -132,7 +139,7 @@ Lite has no command that drops sessions, so run the statements below yourself. R
 
 The login needs the permission that [Microsoft Learn's `DROP EVENT SESSION` page](https://learn.microsoft.com/en-us/sql/t-sql/statements/drop-event-session-transact-sql) requires. On SQL Server and Azure SQL Managed Instance that is `DROP ANY EVENT SESSION` (SQL Server 2022 and later) or `ALTER ANY EVENT SESSION`. On Azure SQL Database it is `DROP ANY DATABASE EVENT SESSION`, in each database.
 
-Server scope (SQL Server, Azure SQL Managed Instance and AWS RDS). The first statement drops the old shared session. The second drops this install's own session. Lite makes the deadlock and blocked-process fallbacks in Azure SQL Database only, so a server has none to drop.
+Server scope (SQL Server, Azure SQL Managed Instance and AWS RDS). The first statement drops the old shared session. The second drops this install's own session. Lite makes the deadlock, blocked-process and client-timeout fallbacks in Azure SQL Database only, so a server has none to drop.
 
 ```sql
 IF EXISTS (SELECT 1/0 FROM sys.server_event_sessions AS ses WHERE ses.name = N'PerformanceMonitor_LongQueryCompletions')
@@ -142,7 +149,7 @@ IF EXISTS (SELECT 1/0 FROM sys.server_event_sessions AS ses WHERE ses.name = N'P
     DROP EVENT SESSION [PerformanceMonitor_Lite_<id>_LongQueryCompletions] ON SERVER;
 ```
 
-Database scope (Azure SQL Database). Run these four statements in each monitored database.
+Database scope (Azure SQL Database). Run these five statements in each monitored database.
 
 ```sql
 IF EXISTS (SELECT 1/0 FROM sys.database_event_sessions AS des WHERE des.name = N'PerformanceMonitor_LongQueryCompletions')
@@ -156,28 +163,33 @@ IF EXISTS (SELECT 1/0 FROM sys.database_event_sessions AS des WHERE des.name = N
 
 IF EXISTS (SELECT 1/0 FROM sys.database_event_sessions AS des WHERE des.name = N'PerformanceMonitor_Lite_<id>_BlockedProcess')
     DROP EVENT SESSION [PerformanceMonitor_Lite_<id>_BlockedProcess] ON DATABASE;
+
+IF EXISTS (SELECT 1/0 FROM sys.database_event_sessions AS des WHERE des.name = N'PerformanceMonitor_Lite_<id>_Attention')
+    DROP EVENT SESSION [PerformanceMonitor_Lite_<id>_Attention] ON DATABASE;
 ```
 
 If the registration used read-only intent, first stop the session over a read-only connection with `ALTER EVENT SESSION [name] ON DATABASE STATE = STOP;`. Then run the drop over a connection without the intent, which reaches the primary. On Hyperscale with several high-availability replicas, the stop reaches only the replica that a read-only connection lands on. A copy of the session that runs on another replica is not stopped. Microsoft Learn describes no way to address one high-availability replica: [Connect to an HA replica](https://learn.microsoft.com/en-us/azure/azure-sql/database/service-tier-hyperscale-replicas#connect-to-an-ha-replica).
 
-The shared `PerformanceMonitor_Deadlock` and `PerformanceMonitor_BlockedProcess` sessions need the same statements with those names. Run them only when no other install monitors the server, because every install that monitors it uses them.
+The shared `PerformanceMonitor_Deadlock`, `PerformanceMonitor_BlockedProcess` and `PerformanceMonitor_Attention` sessions need the same statements with those names. Run them only when no other install monitors the server, because every install that monitors it uses them.
 
 ### Lite Data Storage
 
 All data is stored in `%LOCALAPPDATA%\PerformanceMonitorLite-Data\` — a different folder from the install directory (`%LOCALAPPDATA%\PerformanceMonitorLite\`), so neither an in-app update nor re-running `Setup.exe` can disturb it. Data from an older install is moved into the new folder automatically the first time this version starts.
 
-- **Hot data** in DuckDB 1.5.2 — non-blocking checkpoints, free block reuse, stable file size without periodic resets
+- **Hot data** in DuckDB 1.5.5 — non-blocking checkpoints, free block reuse, stable file size without periodic resets
 - **Archive** to Parquet with ZSTD compression (~10x reduction) — automatic monthly compaction keeps file count low (~75 files vs thousands)
-- **Retention**: 3-month calendar-month rolling window
+- **Retention**: 3-month calendar-month rolling window. Retention is fixed at 3 months and cannot be changed.
 - **Memory limit**: DuckDB's memory limit is a setting (Settings, Dashboard Defaults, "DuckDB memory limit"). The default is 2 GB, and it can go from 1 GB up to 80% of memory. A change applies after a restart.
 - Typical size: ~50–200 MB per server per week
+
+For the full list of folders, see [Where Lite keeps its files](../Lite/README.md#where-lite-keeps-its-files). To remove a server or uninstall, see [Remove a server, uninstall, and delete the data](../Lite/README.md#remove-a-server-uninstall-and-delete-the-data). To back up Lite or move it to another PC, see [Back up Lite and move it to another PC](../Lite/README.md#back-up-lite-and-move-it-to-another-pc).
 
 ### Lite Configuration
 
 | File | Location | Purpose |
 |---|---|---|
 | `servers.json` | `%ProgramData%\PerformanceMonitorLite\config\` (machine-wide) | Server connections, shared across all Windows users on the machine. Passwords stay per-user in Windows Credential Manager. Optional **Utility Database** per server for community procs installed outside master. |
-| `settings.json` | `%LOCALAPPDATA%\PerformanceMonitorLite-Data\config\` (per-user) | Retention, MCP server, startup behavior, alert thresholds, SMTP configuration |
+| `settings.json` | `%LOCALAPPDATA%\PerformanceMonitorLite-Data\config\` (per-user) | MCP server, startup behavior, alert thresholds, SMTP configuration |
 | `collection_schedule.json` | `%LOCALAPPDATA%\PerformanceMonitorLite-Data\config\` (per-user) | Per-collector enable/disable and frequency. A collector that runs once a day or less often can also have a `run_at` time, so it runs in a quiet hour. That time is 24-hour `HH:MM` on the monitored server's clock, and you set it in the schedule editor. Each server starts at that time plus its own spread of under 60 minutes, and a run can start up to 60 minutes after that slot, so a run can start nearly 2 hours after `run_at`. It runs only while Lite is open. A day is skipped only when Lite was closed from the slot until 60 minutes after it. |
 | `ignored_wait_types.json` | `%LOCALAPPDATA%\PerformanceMonitorLite-Data\config\` (per-user) | 126 benign wait types excluded by default |
 

@@ -145,6 +145,15 @@ function New-Base([string]$version, [string]$root, [bool]$acceptWritable, [bool]
         $owner = (Get-Acl -LiteralPath $backup).GetOwner([System.Security.Principal.SecurityIdentifier])
         $ownerName = try { $owner.Translate([System.Security.Principal.NTAccount]).Value } catch { '(untranslatable)' }
         Write-Host "owner of ${backup}: $ownerName"
+        # A 3.10.0 base hardens only the darling.json.bak-yyyyMMdd-HHmmss names (the gap #5649 closes), so it leaves a
+        # hand-named backup as it found it. In the field that file is already the service's from an earlier 3.9.0 or
+        # older start, so the leg gives it to the service the same way and checks again.
+        if ($ownerName -notlike "NT SERVICE\$svc") {
+            icacls $backup /setowner "NT SERVICE\$svc" | Out-Host
+            $owner = (Get-Acl -LiteralPath $backup).GetOwner([System.Security.Principal.SecurityIdentifier])
+            $ownerName = try { $owner.Translate([System.Security.Principal.NTAccount]).Value } catch { '(untranslatable)' }
+            Write-Host "owner of ${backup} after setowner: $ownerName"
+        }
         if ($ownerName -notlike "NT SERVICE\$svc") { Fail-Leg "the hand-named backup is owned by $ownerName after the base install, not by the service, so the leg would not exercise the check" }
     }
     Write-Host "BASE: $version installed in $root, pg-runtime extracted by its service, service stopped"
@@ -189,6 +198,15 @@ function Show-State([string]$root) {
 function Expect-Success($r, [string]$what) {
     if ($r.Code -ne 0) { Fail-Leg "$what exited with $($r.Code), expected 0" }
     if ($r.Text -match 'Ordinary users can already write|already writable by ordinary users') { Fail-Leg "$what reported an ordinary-user write grant on a folder only administrators can write" }
+}
+
+# #6597: both scripts register the service path in quotes, as the MSI does. This reads the real service back
+# with sc qc, so it is a check of what Windows holds, not of the script's text.
+function Expect-QuotedServicePath([string]$what) {
+    $qc = (sc.exe qc $svc | Out-String)
+    $line = [regex]::Match($qc, '(?m)^\s*BINARY_PATH_NAME\s*:.*$').Value.Trim()
+    Write-Host "after ${what}: $line"
+    if ($line -notmatch '^BINARY_PATH_NAME\s*:\s*"') { Fail-Leg "$what left the service path unquoted: $line" }
 }
 
 Say "LEG $Leg on $([Environment]::OSVersion.VersionString) (current $CurrentVersion, older $OldVersion)"
@@ -253,6 +271,8 @@ else {
 switch ($Leg) {
     { $_ -in 'U1-install', 'U1-upgrade', 'U2-install', 'U2-upgrade' } {
         Expect-Success $r "$which-darling.ps1"
+        # The upgrade legs start from a service a released install script registered bare, so this also proves the upgrade fixes it.
+        Expect-QuotedServicePath "$which-darling.ps1"
         if ($shape -eq 'U1') {
             # #5649: the service-owned hand-named backup does not refuse the run (Expect-Success above) and stays where it was.
             if (-not (Test-Path -LiteralPath (Join-Path $root $HandNamedBackupName))) { Fail-Leg "$which-darling.ps1 removed the hand-named backup $HandNamedBackupName" }
@@ -261,6 +281,7 @@ switch ($Leg) {
     'U3-install' {
         Expect-Success $r 'install-darling.ps1'
         if (-not (Get-Service -Name $svc -ErrorAction SilentlyContinue)) { Fail-Leg 'install-darling.ps1 exited 0 but left no service registered' }
+        Expect-QuotedServicePath 'install-darling.ps1'
     }
     'U3-upgrade' {
         # With no service there is nothing to stop and start around the copy: the script says so and exits non-zero.

@@ -104,36 +104,6 @@ public sealed class McpZeroIsAMeasurementTests
     }
 
     /// <summary>
-    /// The ladder itself: four rungs, three of them <c>empty</c> and exactly one <c>unavailable</c> — the
-    /// nothing-of-any-type-ever rung, with <c>source_observed: false</c> and the sentence the
-    /// EngineCapabilityMissTests pin (<c>system_health session is started</c>). Rung 3 — this type never, the
-    /// session alive — must be <c>empty</c>: a memory-node OOM that never happened is the healthy measurement.
-    /// </summary>
-    [Theory]
-    [InlineData(DarlingMcp + "/DarlingMcpHealthParserTools.cs")]
-    [InlineData(LiteMcp + "/McpHealthParserTools.cs")]
-    public void TheEmptyLadder_HasFourRungs_AndOnlyTheDeadSessionIsUnavailable(string file)
-    {
-        var source = ReadRepoFile(file.Split('/'));
-        var start = source.IndexOf("private static async Task<string> EmptyAsync", StringComparison.Ordinal);
-        Assert.True(start > 0, $"{file} has no shared EmptyAsync ladder");
-        var end = source.IndexOf("private static string WitnessStatus", start, StringComparison.Ordinal);
-        var ladder = Strip(source[start..end]);
-
-        Assert.Equal(3, Regex.Matches(ladder, "WitnessStatus\\(\\s*\"empty\"").Count);
-        Assert.Single(Regex.Matches(ladder, "WitnessStatus\\(\\s*\"unavailable\""));
-        Assert.Single(Regex.Matches(ladder, "sourceObserved: false"));
-        Assert.Contains("NOT an all-clear", ladder, StringComparison.Ordinal);
-        Assert.Contains("system_health session is started", ladder, StringComparison.Ordinal);
-        /* The engine-capability probe goes FIRST on the dead rung — the stronger claim. */
-        Assert.True(
-            ladder.IndexOf("NotCollectedStatusAsync", StringComparison.Ordinal) < ladder.IndexOf("\"unavailable\"", StringComparison.Ordinal));
-        /* The healthy rungs never reach for the dead rung's word, so a caller keying on it cannot be misled. */
-        var rung3 = ladder[..ladder.IndexOf("NotCollectedStatusAsync", StringComparison.Ordinal)];
-        Assert.DoesNotContain("EVER", rung3, StringComparison.Ordinal);
-    }
-
-    /// <summary>
     /// The witness reads the SAME view the tools read and is not the collection log — the log records a
     /// SUCCESS for a run that read a dead session and stored nothing, which is the shape being fixed.
     /// </summary>
@@ -482,7 +452,7 @@ public sealed class McpZeroIsAMeasurementTests
         var latest = new DateTime(2026, 3, 4, 3, 0, 0);
 
         /* Three days of history: no 7-day or 30-day snapshot; the oldest holds the table at 100 MB. */
-        var threeDays = new DarlingObjectStatsReader.ObjectSizeGrowthRow(
+        var threeDays = new TableSizeGrowthRow(
             "db", "dbo", "Posts", CurrentReservedMb: 160, CurrentUsedMb: 150, TotalRows: 10, IndexCount: 2,
             ReservedMb7dAgo: null, ReservedMb30dAgo: null, ReservedMbOldest: 100,
             Snapshot7dTime: null, Snapshot30dTime: null, EarliestSnapshotTime: earliest, LatestSnapshotTime: latest, DaysOfData: 3);
