@@ -1073,16 +1073,18 @@ public sealed class ServerEditLiveTests : IDisposable
                 "[{\"host\":\"alpha-s1.example.test,1433\",\"database\":\"d4\"}]",
                 "[{\"host\":\"tcp:alpha-s1.example.test,1433\",\"database\":\"d5\"}]",
                 "[{\"host\":\"alpha-s1.example.test\\\\MSSQLSERVER\",\"database\":\"d6\"}]",
-                "[{\"host\":\"alpha-s1.example.test\",\"port\":1433,\"database\":\"d7\"}]",
             })
             {
                 Assert.Equal("collides", await AddAsync(json));
             }
 
+            /* #6583: the port field on a SQL Server entry is refused, not folded into the machine's identity; the port goes in host, as the cases above spell it. */
+            Assert.Equal("invalid", await AddAsync("[{\"host\":\"alpha-s1.example.test\",\"port\":1433,\"database\":\"d7\"}]"));
+
             Assert.Equal(1, await ScalarAsync<int>(rig.Owner, "SELECT count(*)::int FROM config_monitored_servers", ct));
 
             /* Another port, and a named instance, are other engine instances. */
-            Assert.Equal("added", await AddAsync("[{\"host\":\"alpha-s1.example.test\",\"port\":1444,\"database\":\"d8\"}]"));
+            Assert.Equal("added", await AddAsync("[{\"host\":\"alpha-s1.example.test,1444\",\"database\":\"d8\"}]"));
             Assert.Equal("added", await AddAsync("[{\"host\":\"alpha-s1.example.test\\\\REPORTS\",\"database\":\"d9\"}]"));
             ok = true;
         }

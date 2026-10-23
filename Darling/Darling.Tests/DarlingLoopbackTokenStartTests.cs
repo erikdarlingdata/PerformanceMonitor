@@ -277,6 +277,31 @@ public sealed class DarlingLoopbackTokenStartTests
         }
     }
 
+    /// <summary>#6542 with the loopback token rule: named tokens (<c>mcp.tokens</c>) and no legacy token are tokens. The start
+    /// must not stop with the "no token" refusal, and every request, loopback included, must present one of them.</summary>
+    [Fact]
+    public async Task Mcp_WithOnlyNamedTokens_Starts_AndGatesOnThem()
+    {
+        var port = ClosedPort();
+        var log = new CapturingTestLogger();
+        var host = NewMcpHost(log);
+        try
+        {
+            Assert.True(await TryStartAsync(
+                host, Config("mcp", port, ", 'tokens': [ { 'name': 'ops-lead', 'token': '" + Token + "', 'role': 'operator' } ]"), port), log.Joined);
+            using var client = Client(port);
+
+            Assert.Equal(HttpStatusCode.Unauthorized, await McpToolsListAsync(client, bearer: null));
+            Assert.Equal(HttpStatusCode.Unauthorized, await McpToolsListAsync(client, "not-the-token"));
+            Assert.Equal(HttpStatusCode.OK, await McpToolsListAsync(client, Token));
+            Assert.DoesNotContain(log.Lines, l => l.Contains(DarlingMcpHostService.MissingTokenMessage, StringComparison.Ordinal));
+        }
+        finally
+        {
+            await host.DisposeFailedStartAsync();
+        }
+    }
+
     [Fact]
     public async Task Mcp_OptOut_ServesWithNoToken_AndSaysSo()
     {

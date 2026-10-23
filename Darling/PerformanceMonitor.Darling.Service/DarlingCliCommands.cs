@@ -558,6 +558,12 @@ public static partial class DarlingCliCommands
 
         await ReportAgentDispatchAsync(config, output, cancellationToken);
 
+        /* #6583: a warning, not an error, so a config that works today still starts: the port is ignored for a SQL Server target. */
+        foreach (var warning in SqlServerPortAdvice.Warnings(targets))
+        {
+            output.WriteLine("WARNING: " + warning);
+        }
+
         /* #6265: a warning, not an error, so a setup that started before still starts; the web refuses that token for sign-in. */
         if (DarlingAgentDispatchChecks.WebTokenFinding(config) is { } webTokenFinding)
         {
@@ -658,7 +664,8 @@ public static partial class DarlingCliCommands
 
     /// <summary>
     /// The agent dispatch checks for <c>--validate-config</c> (#6263): investigations on with MCP off, with no usable token,
-    /// with writes also on, or with no agent route. Nothing is read or printed when <c>mcp.allowInvestigations</c> is off.
+    /// with writes also on, or with no agent route. Nothing is read or printed when <c>mcp.allowInvestigations</c> is off and
+    /// <c>mcp.tokens</c> is not set. With <c>mcp.tokens</c> set, its own findings print too (#6542).
     /// Each finding is a <c>WARNING:</c> or a <c>NOTE:</c> line on <paramref name="output"/>, the same shape as the other
     /// warnings in this verb. None of them changes the exit code: those configs ran before, so an upgrade must not start
     /// failing a validation. The MCP switch and the route count come from the store when it answers, else from the file.
@@ -666,7 +673,7 @@ public static partial class DarlingCliCommands
     internal static async Task ReportAgentDispatchAsync(
         DarlingConfig config, TextWriter output, CancellationToken cancellationToken)
     {
-        if (!config.Mcp.AllowInvestigations)
+        if (!config.Mcp.AllowInvestigations && !config.Mcp.HasNamedTokens)
         {
             return;
         }
@@ -690,6 +697,12 @@ public static partial class DarlingCliCommands
             output.WriteLine(
                 (finding.Severity == DarlingAgentDispatchChecks.AgentDispatchSeverity.Warning ? "WARNING: " : "NOTE: ")
                 + finding.Message);
+        }
+
+        /* #6542: the named tokens' own findings print whenever mcp.tokens is set, whether or not investigations are on. */
+        foreach (var finding in DarlingAgentDispatchChecks.NamedTokenFindings(config.Mcp, token, agentRoutes))
+        {
+            output.WriteLine("WARNING: " + finding);
         }
     }
 

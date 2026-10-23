@@ -203,6 +203,40 @@ public sealed class ChangeWatchDetectionLiveTests
         });
     }
 
+    /// <summary>
+    /// #6566: log_reuse_wait_desc is a runtime status, not a configuration. A database whose only change after the mark is that column
+    /// reports nothing; recovery_model changing on another database in the same window is still reported.
+    /// </summary>
+    [Fact]
+    public async Task DatabaseConfig_IgnoresLogReuseWaitStatus_ButStillReportsARealOption()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            var mark = h.Now.AddMinutes(-30);
+            var before = mark.AddMinutes(-10);
+            var statusOnly = mark.AddMinutes(5);
+            var real = mark.AddMinutes(10);
+
+            static Task Seed(NpgsqlConnection c, DateTime at, string database, string recovery, string logReuse, CancellationToken ct) =>
+                SeedAsync(c, "database_config", new Dictionary<string, object>
+                {
+                    ["server_id"] = ServerId, ["server_name"] = ServerName, ["capture_time"] = Naive(at), ["database_name"] = database,
+                    ["compatibility_level"] = 150, ["recovery_model"] = recovery, ["log_reuse_wait_desc"] = logReuse,
+                }, ct);
+
+            await Seed(h.Connection, before, "Status", "FULL", "ACTIVE_TRANSACTION", ct);
+            await Seed(h.Connection, statusOnly, "Status", "FULL", "NOTHING", ct);
+            await Seed(h.Connection, real, "Status", "FULL", "NOTHING", ct);
+            await Seed(h.Connection, before, "Real", "FULL", "NOTHING", ct);
+            await Seed(h.Connection, statusOnly, "Real", "FULL", "LOG_BACKUP", ct);
+            await Seed(h.Connection, real, "Real", "SIMPLE", "LOG_BACKUP", ct);
+
+            var found = await h.NewPass().ReadChangesAsync(ServerId, mark, h.Now, ct);
+
+            Assert.Equal(new[] { "database_config:Real:recovery_model:" + Stamp(real) }, Keys(found));
+        });
+    }
+
     internal static string Stamp(DateTime time) => time.ToString("yyyyMMddTHHmmssfff", System.Globalization.CultureInfo.InvariantCulture);
 
     [Fact]

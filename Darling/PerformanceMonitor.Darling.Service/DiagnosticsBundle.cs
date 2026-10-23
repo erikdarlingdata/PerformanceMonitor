@@ -108,6 +108,8 @@ internal static class DiagnosticsBundle
         "PostgresConfig.DataDirectory",
         "PostgresConfig.ConnectAs",
         "McpConfig.Port",
+        /* #6542: named MCP tokens hold token names and secrets; the bundle shows only whether the legacy network block exists. */
+        "McpConfig.Tokens",
         "WebConfig.Port",
         "WebConfig.PublicBaseUrl",
         "MonitoredServer.Name",

@@ -167,6 +167,105 @@ public sealed class AttentionAlertTests
         Assert.Equal(100.0, finding.RatePerMinute);
     }
 
+    /* ---------------- #6552: SSMS IntelliSense cancelling its own metadata queries ---------------- */
+
+    private static AttentionWindow IntelliSenseWindow(long exactCount, long intelliSense, long web)
+    {
+        var runs = Runs(T0.AddSeconds(-5), 6);
+        return Window(runs, new[] { Count(runs[0], exactCount) }, new[]
+        {
+            Sample(runs[0], "master", AttentionEvaluator.IntelliSenseClientApp, intelliSense),
+            Sample(runs[0], "sales", "web", web),
+        });
+    }
+
+    [Fact]
+    public void IntelliSenseCancels_AreLeftOutOfTheJudgedRate_NoMuteRuleNeeded()
+    {
+        /* 540 over 3 minutes = 180 per minute exact; 150 of 180 sampled events are IntelliSense, so 540 x 30/180 = 90 judged = 30 per minute. */
+        var finding = AttentionEvaluator.Evaluate(AttentionEvaluator.Read(IntelliSenseWindow(540, 150, 30), T0), 10, 60);
+
+        Assert.NotNull(finding);
+        Assert.False(finding!.Muted);
+        Assert.True(finding.Estimated);
+        Assert.Equal(AlertSeverityLevel.Warning, finding.Severity);
+        Assert.Equal(30.0, finding.RatePerMinute);
+        Assert.Equal(150, finding.ExcludedSamples);
+        Assert.Contains("150 of the 180 sampled events came from SSMS IntelliSense", finding.Summary, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void IntelliSenseCancels_Alone_PushTheServerOverTheBar_ButTheFireIsRecordedMuted()
+    {
+        /* 150 IntelliSense cancels and 5 application timeouts: the exact 155 x 3 = 465 is 155 per minute (Critical), the judged count is 465 x 5/155 = 15 = 5 per minute. */
+        var finding = AttentionEvaluator.Evaluate(AttentionEvaluator.Read(IntelliSenseWindow(465, 150, 5), T0), 10, 60);
+
+        Assert.NotNull(finding);
+        Assert.True(finding!.Muted);
+        Assert.Equal(15.0, finding.JudgedCount, 3);
+        Assert.Equal(150, finding.ExcludedSamples);
+    }
+
+    [Fact]
+    public void ApplicationTimeouts_StillFire_WhenNoIntelliSenseIsInTheSpan()
+    {
+        var finding = AttentionEvaluator.Evaluate(AttentionEvaluator.Read(IntelliSenseWindow(540, 0, 30), T0), 10, 60);
+
+        Assert.NotNull(finding);
+        Assert.False(finding!.Muted);
+        Assert.False(finding.Estimated);
+        Assert.Equal(180.0, finding.RatePerMinute);
+        Assert.Equal(0, finding.ExcludedSamples);
+        Assert.DoesNotContain("IntelliSense", finding.Summary, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void GetClientTimeouts_StillShowsTheIntelliSenseEvents_MarkedExcluded()
+    {
+        var window = IntelliSenseWindow(465, 150, 5) with
+        {
+            TopApplications = new[]
+            {
+                new AttentionTopItem(AttentionEvaluator.IntelliSenseClientApp, 150),
+                new AttentionTopItem("web", 5),
+            },
+        };
+        var (kind, reading) = ClientTimeoutsRead.Classify(window, T0);
+        Assert.Equal(ClientTimeoutsKind.Data, kind);
+        var samples = new[]
+        {
+            new ClientTimeoutSample(null, T0, "master", AttentionEvaluator.IntelliSenseClientApp, "WS1", 51, 1000, "fp1", "SELECT 1"),
+            new ClientTimeoutSample(null, T0, "sales", "web", "WEB1", 52, 1000, "fp2", "SELECT 2"),
+        };
+
+        using var doc = System.Text.Json.JsonDocument.Parse(
+            System.Text.Json.JsonSerializer.Serialize(ClientTimeoutsRead.Payload(reading!, window, samples, 20, 2000)));
+        var root = doc.RootElement;
+
+        Assert.Equal(465, root.GetProperty("count").GetInt64());
+        var excluded = root.GetProperty("excluded_from_alert");
+        Assert.Equal(150, excluded.GetProperty("sampled_events").GetInt64());
+        Assert.Equal(15.0, excluded.GetProperty("count_judged").GetDouble(), 1);
+        /* The read surface spans all six runs (5 minutes), so 15 judged is 3 per minute. */
+        Assert.Equal(3.0, excluded.GetProperty("rate_per_minute_judged").GetDouble(), 1);
+        var apps = root.GetProperty("top_client_apps");
+        Assert.True(apps[0].GetProperty("excluded").GetBoolean());
+        Assert.False(apps[1].GetProperty("excluded").GetBoolean());
+        var events = root.GetProperty("sampled_events");
+        Assert.True(events[0].GetProperty("excluded").GetBoolean());
+        Assert.False(events[1].GetProperty("excluded").GetBoolean());
+    }
+
+    [Theory]
+    [InlineData("Microsoft SQL Server Management Studio - Transact-SQL IntelliSense", true)]
+    [InlineData("microsoft sql server management studio - transact-sql intellisense", true)]
+    [InlineData("Microsoft SQL Server Management Studio - Query", false)]
+    [InlineData("Microsoft SQL Server Management Studio", false)]
+    [InlineData("web", false)]
+    [InlineData(null, false)]
+    public void IsExcludedApp_MatchesOnlyIntelliSense(string? app, bool expected) =>
+        Assert.Equal(expected, AttentionEvaluator.IsExcludedApp(app));
+
     [Fact]
     public void Mute_PartlyMuted_JudgesTheUnmutedShareOfTheExactCount()
     {
