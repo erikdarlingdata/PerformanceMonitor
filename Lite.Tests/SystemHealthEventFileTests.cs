@@ -139,6 +139,40 @@ public sealed class SystemHealthEventFileTests
         Assert.False(SystemHealthSourceNote.ReadThroughEventFile("some host note"));
     }
 
+    /// <summary>
+    /// #6453 review: a file pass the per-pass cap stopped has read only the oldest events past the watermark. On a first connect its
+    /// 3,000 events can all be older than the cutoff, so it stores 0 rows with events unread behind it. Its note must not carry
+    /// <c>event_file_events=</c>, or the health-parser reads would take it for "read to the end, found nothing" and answer empty.
+    /// </summary>
+    [Fact]
+    public async Task ACappedFilePass_WritesNoEventFileEvents_SoTheHealthParserReadsDoNotTakeItForAnEmptySession()
+    {
+        async Task<(string Note, long? Counted)> RunAsync(object[][] events, object[] trailer)
+        {
+            var context = MakeContext();
+            using var reader = FakeCollectorDataReader.WithResultSets(events, new[] { trailer });
+            await SystemHealthEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+            return (CollectorMeasurementNote.Render(context.Measurements) ?? "", Measured(context, "event_file_events"));
+        }
+
+        /* The cap bound (scan position set) and every scanned event was older than the cutoff: no rows stored. */
+        var cappedEmpty = await RunAsync(Array.Empty<object[]>(), Trailer(false, 0, DBNull.Value, true, scanFile: FileB, scanOffset: 4_096));
+        Assert.Null(cappedEmpty.Counted);
+        Assert.False(SystemHealthSourceNote.ReadThroughEventFile(cappedEmpty.Note), cappedEmpty.Note);
+
+        /* The cap bound and some rows were stored: still not a read to the end. */
+        var cappedWithRows = await RunAsync(
+            new[] { FileRow(s_watermark.AddMinutes(1), "error_reported", FileA, 6_000_000) },
+            Trailer(false, 0, DBNull.Value, true, scanFile: FileB, scanOffset: 4_096));
+        Assert.Null(cappedWithRows.Counted);
+        Assert.False(SystemHealthSourceNote.ReadThroughEventFile(cappedWithRows.Note), cappedWithRows.Note);
+
+        /* The same quiet pass with no cap bound is the clear negative it always was. */
+        var uncapped = await RunAsync(Array.Empty<object[]>(), Trailer(false, 0, DBNull.Value, true));
+        Assert.Equal(0, uncapped.Counted);
+        Assert.True(SystemHealthSourceNote.ReadThroughEventFile(uncapped.Note), uncapped.Note);
+    }
+
     [Fact]
     public async Task TheRingBufferFallback_RecordsTheFallback_KeepsTheTruncationCounts_AndLeavesNoBookmark()
     {

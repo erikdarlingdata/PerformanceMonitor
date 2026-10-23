@@ -14,7 +14,7 @@ namespace PerformanceMonitor.Common;
 /// <summary>
 /// Which source the system_health collector's newest run read, as that run left it in its collection_log note (#6453).
 /// The collector writes <c>event_file_events=N</c> when it read the live session through its event_file target (N is
-/// the rows it stored, 0 included) and <c>event_file_fallback=1</c> instead when it fell back to the ring buffer
+/// the rows it stored, 0 included) when that read reached the end of what the file holds, and <c>event_file_fallback=1</c> instead when it fell back to the ring buffer
 /// (<c>PerformanceMonitor.Collectors.SystemHealthEventsCollector</c>, #6441); a pass writes one or the other. Only the
 /// file read is proof that a running session was read to the end: the ring buffer path also records SUCCESS for a
 /// session that is dead or whose buffer was cut, so a SUCCESS run with no rows is not a clear negative on its own.
@@ -25,7 +25,7 @@ namespace PerformanceMonitor.Common;
 /// </summary>
 public static class SystemHealthSourceNote
 {
-    /// <summary>The rows stored by a pass that read the event_file target. Written only on a file read.</summary>
+    /// <summary>The rows stored by a pass that read the event_file target to the end. Written only then: a pass the per-pass cap stopped writes nothing here, so it is never taken for a clear negative.</summary>
     public const string EventFileEventsLabel = "event_file_events";
 
     /// <summary>
