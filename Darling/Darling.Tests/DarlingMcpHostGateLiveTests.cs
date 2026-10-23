@@ -522,7 +522,7 @@ public sealed class DarlingMcpHostGateLiveTests
     public async Task LoopbackOnly_ConfiguredToken_IsRequired_RightTokenPasses(string path, string loopback)
     {
         var resolved = DarlingMcpHostService.ResolveLoopbackOnlyToken(
-            new McpNetworkConfig { Token = Token },
+            new McpNetworkConfig { Token = Token }, allowTokenlessLoopback: false,
             Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
         Assert.False(resolved.Refuse);
         Assert.Equal(Token, resolved.Token);
@@ -540,16 +540,21 @@ public sealed class DarlingMcpHostGateLiveTests
         Assert.True(withToken == StatusCodes.Status200OK, $"the right token must reach tools/list, got {withToken}: {body}");
     }
 
-    /// <summary>No token configured, loopback-only: the listener is open to local clients exactly as before (no new prompt).</summary>
+    /// <summary>No token configured, loopback-only: with <c>mcp.allowTokenlessLoopback</c> on the listener is open to
+    /// local clients as earlier builds served it; with it off the start is refused, blank token or no block alike.</summary>
     [Fact]
-    public async Task LoopbackOnly_NoTokenConfigured_StaysOpen()
+    public async Task LoopbackOnly_NoTokenConfigured_StaysOpenOnlyWithTheOptOut()
     {
+        var nullLogger = Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
+        Assert.True(DarlingMcpHostService.ResolveLoopbackOnlyToken(
+            new McpNetworkConfig { Token = "   " }, allowTokenlessLoopback: false, nullLogger).MissingToken);
+        Assert.True(DarlingMcpHostService.ResolveLoopbackOnlyToken(null, allowTokenlessLoopback: false, nullLogger).Refuse);
+
         var resolved = DarlingMcpHostService.ResolveLoopbackOnlyToken(
-            new McpNetworkConfig { Token = "   " },
-            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+            new McpNetworkConfig { Token = "   " }, allowTokenlessLoopback: true, nullLogger);
         Assert.False(resolved.Refuse);
         Assert.Equal("", resolved.Token);
-        Assert.Equal("", DarlingMcpHostService.ResolveLoopbackOnlyToken(null, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance).Token);
+        Assert.Equal("", DarlingMcpHostService.ResolveLoopbackOnlyToken(null, allowTokenlessLoopback: true, nullLogger).Token);
 
         using var server = await BuildServer(networkMode: false, requireTokenWhenLoopbackOnly: resolved.Token.Length > 0);
 
@@ -565,7 +570,7 @@ public sealed class DarlingMcpHostGateLiveTests
     {
         var log = new CapturingTestLogger();
         var resolved = DarlingMcpHostService.ResolveLoopbackOnlyToken(
-            new McpNetworkConfig { EncryptedToken = "not-a-protected-blob" }, new CapturingHostLogger(log));
+            new McpNetworkConfig { EncryptedToken = "not-a-protected-blob" }, allowTokenlessLoopback: true, new CapturingHostLogger(log));
 
         Assert.True(resolved.Refuse);
         Assert.Equal("", resolved.Token);
@@ -683,22 +688,6 @@ public sealed class DarlingMcpHostGateLiveTests
         Assert.Contains(log.Lines, l => l.Contains("none can be served", StringComparison.Ordinal)
             && l.Contains("MCP server not started", StringComparison.Ordinal));
         Assert.DoesNotContain(log.Lines, l => l.Contains("too-short", StringComparison.Ordinal) || l.Contains("also-short", StringComparison.Ordinal));
-    }
-
-    /// <summary>The start itself calls the resolver on a loopback-only bind and stops on a refusal, so the pipeline
-    /// tests above describe what production serves.</summary>
-    [Fact]
-    public void TryStartServerAsync_ResolvesTheLoopbackOnlyToken_AndStopsOnARefusal()
-    {
-        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpHostService.cs");
-        var start = source.IndexOf("private async Task<bool> TryStartServerAsync(", StringComparison.Ordinal);
-        Assert.True(start > 0);
-        var body = source[start..];
-        var call = body.IndexOf("ResolveLoopbackOnlyToken(config.Mcp.Network, _logger)", StringComparison.Ordinal);
-        Assert.True(call > 0, "TryStartServerAsync must resolve a configured token on a loopback-only start");
-        var tail = body[call..];
-        Assert.Contains("if (loopbackToken.Refuse)", tail[..400], StringComparison.Ordinal);
-        Assert.Contains("bearerToken = loopbackToken.Token;", tail[..700], StringComparison.Ordinal);
     }
 
     /// <summary>

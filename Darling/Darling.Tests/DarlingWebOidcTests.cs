@@ -537,14 +537,13 @@ public sealed class DarlingWebOidcTests
     /// <summary>
     /// The read half of the middleware's seam. The auth middleware WRITES the seat into HttpContext.Items;
     /// this is what every consumer reads it back with, and the absent-item default is load-bearing: a
-    /// loopback-only dashboard registers no auth middleware at all, so "no item" has to mean the
-    /// shared-token seat with today's full reach, never a denied one.
+    /// request nobody stored a seat for reads as the reads-only seat: it may read and may not write.
     /// </summary>
     [Fact]
-    public void Seat_FromContext_ReadsWhatTheMiddlewareWrote_AndDefaultsToSharedToken()
+    public void Seat_FromContext_ReadsWhatTheMiddlewareWrote_AndDefaultsToReadsOnly()
     {
         var empty = new DefaultHttpContext();
-        Assert.Same(DarlingWebSeat.SharedToken, DarlingWebSeat.FromContext(empty));
+        Assert.Same(DarlingWebSeat.ReadsOnly, DarlingWebSeat.FromContext(empty));
 
         var viewer = new DarlingWebSeat("rita@example.com", CanEdit: false);
         var carrying = new DefaultHttpContext();
@@ -555,7 +554,20 @@ public sealed class DarlingWebOidcTests
            throwing inside the request pipeline. */
         var junk = new DefaultHttpContext();
         junk.Items[DarlingWebSeat.HttpContextItemKey] = "not-a-seat";
-        Assert.Same(DarlingWebSeat.SharedToken, DarlingWebSeat.FromContext(junk));
+        Assert.Same(DarlingWebSeat.ReadsOnly, DarlingWebSeat.FromContext(junk));
+    }
+
+    /// <summary>A request with no stored seat (routes mapped without the host's pipeline) cannot write: the seat it reads as
+    /// is not an editing seat and is refused every change by the write gate, while a read is still allowed.</summary>
+    [Fact]
+    public void Seat_FromContext_WithNoStoredSeat_CannotWrite()
+    {
+        var seat = DarlingWebSeat.FromContext(new DefaultHttpContext());
+
+        Assert.False(seat.CanEdit);
+        Assert.False(DarlingWebSeat.IsRequestAllowed(seat, "POST", "/api/custom-views"));
+        Assert.False(DarlingWebSeat.IsRequestAllowed(seat, "DELETE", "/api/custom-views/1"));
+        Assert.True(DarlingWebSeat.IsRequestAllowed(seat, "GET", "/api/fleet"));
     }
 
     [Fact]
