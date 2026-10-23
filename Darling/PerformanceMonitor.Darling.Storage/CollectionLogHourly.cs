@@ -14,9 +14,8 @@ using Microsoft.Extensions.Logging;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
-using PerformanceMonitor.Darling.Storage;
 
-namespace PerformanceMonitor.Darling.Service;
+namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
 /// The hourly rollup of <c>collect.collection_log</c> (V186, #5810): one row per (server, collector, closed hour) holding every
@@ -62,7 +61,7 @@ public static class CollectionLogHourly
     public const int PassTimeoutSeconds = 120;
 
     /// <summary>The pass's own slice of the sweep budget, so a slow backfill cannot cancel what runs after it.</summary>
-    internal static readonly TimeSpan PassSliceBudget = TimeSpan.FromSeconds(PassTimeoutSeconds);
+    public static readonly TimeSpan PassSliceBudget = TimeSpan.FromSeconds(PassTimeoutSeconds);
 
     /// <summary>Number of log-spaced bounds in <see cref="DurationBucketBounds"/>.</summary>
     public const int BoundCount = 40;

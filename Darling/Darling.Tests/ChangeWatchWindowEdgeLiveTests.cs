@@ -245,6 +245,9 @@ public sealed class ChangeWatchWindowEdgeLiveTests
             Assert.Equal(["closed/flat", "closed/moved_agent_change", "closed/request_opened"], await ListedAsync(h.Source, "closed", ct));
             Assert.Equal(["closed/moved_agent_change"], await ListedAsync(h.Source, ChangeWatchStore.ResultAgentChange, ct));
             Assert.Equal(5, (await ListedAsync(h.Source, null, ct)).Length);
+            /* #6561: the answer echoes "all" for no filter, so "all" (any case) is accepted and lists the same watches as omitting state. */
+            Assert.Equal(await ListedAsync(h.Source, null, ct), await ListedAsync(h.Source, "all", ct));
+            Assert.Equal(5, (await ListedAsync(h.Source, "ALL", ct)).Length);
 
             /* A watch that failed the way the worker fails one: claimed and failed MaxAttempts times, then closed by FailAttemptAsync (state and result both 'failed'). */
             await InsertWatchAsync(h.Connection, t.AddHours(6), "evaluating", null, ct);
@@ -259,6 +262,7 @@ public sealed class ChangeWatchWindowEdgeLiveTests
             Assert.Contains("the read timed out",
                 await DarlingMcpChangeWatchTools.GetChangeWatches(h.Source, PgServerName, ChangeWatchStore.StateFailed, 50, ct), StringComparison.Ordinal);
             Assert.Contains("Invalid state", await DarlingMcpChangeWatchTools.GetChangeWatches(h.Source, PgServerName, "stuck", 50, ct), StringComparison.Ordinal);
+            Assert.Contains("Invalid state", await DarlingMcpChangeWatchTools.GetChangeWatches(h.Source, PgServerName, "everything", 50, ct), StringComparison.Ordinal);
         });
 
         /* Every value the filter accepts is explained in what the tool tells a caller. */

@@ -234,7 +234,11 @@ public sealed class InvestigationBriefComposer
             {
                 ["tool"] = ReportTool,
                 ["report_format"] = InvestigationFormats.ReportFormat,
-                ["required"] = new JsonArray("request_id", "claim_id", "report_format", "verdict", "root_cause", "evidence", "summary"),
+                /* #6462: exactly the parameters the tool requires. root_cause_found is not one of them: the service sets it from the
+                   verdict (false only for needs_person), so it is named under service_sets and never asked of the agent. summary is
+                   required by the tool and was missing here. */
+                ["required"] = new JsonArray(InvestigationToolCore.SubmitReportRequired.Select(name => (JsonNode?)name).ToArray()),
+                ["service_sets"] = new JsonArray("root_cause_found: false for a needs_person verdict, true otherwise; do not send it"),
             },
         };
         /* #5632: under maskLiterals and metadataOnly the compiled parameter values are hidden, and they explain most plan flips, so
