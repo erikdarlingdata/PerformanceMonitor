@@ -1332,9 +1332,9 @@ SELECT
     /* V214 (#6334) adds the known-pattern entries. Found by catalog so the answer does not depend on the connecting role's
        privileges. Named only in this probe line, never in prose, per the V71 finding. */
     to_regclass('config.config_known_patterns') IS NOT NULL,
-    /* V215 (#6569) widens the server action switch list with the module recompile. Found by catalog (the stored CHECK names it) so the
+    /* V215 (#6569) widens the server action switch list with the module recompile and the plan guides. Found by catalog (the stored CHECK names it) so the
        answer does not depend on the connecting role's privileges. Named only in this probe line, never in prose, per the V71 finding. */
-    EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_config_server_actions_action' AND conrelid = to_regclass('config.config_server_actions') AND pg_get_constraintdef(oid) ~ 'recompile_module')";
+    EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_config_server_actions_action' AND conrelid = to_regclass('config.config_server_actions') AND pg_get_constraintdef(oid) ~ 'drop_plan_guide')";
 
     /// <summary>The store schema version this viewer build requires — the highest migration it knows
     /// (<see cref="StorageVersion.SchemaVersion"/>). The connect-time gate blocks a store below this.</summary>

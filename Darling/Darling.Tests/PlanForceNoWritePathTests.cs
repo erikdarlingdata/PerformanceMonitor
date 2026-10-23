@@ -175,6 +175,7 @@ public sealed class PlanForceNoWritePathTests
 
         Assert.Equal(new[]
         {
+            nameof(DarlingMcpPlanForceTools) + "." + nameof(DarlingMcpPlanForceTools.CreatePlanGuide),
             nameof(DarlingMcpPlanForceTools) + "." + nameof(DarlingMcpPlanForceTools.EvictCachedPlan),
             nameof(DarlingMcpPlanForceTools) + "." + nameof(DarlingMcpPlanForceTools.ForceQueryStorePlan),
             nameof(DarlingMcpPlanForceTools) + "." + nameof(DarlingMcpPlanForceTools.KillSession),
@@ -261,7 +262,7 @@ public sealed class PlanForceNoWritePathTests
             })
             .Select(Path.GetFileName)
             .ToArray();
-        Assert.Equal(new[] { "DarlingMcpPlanForceTools.cs", "DarlingMcpPlanForceTools.RecompileModule.cs" }, naming);
+        Assert.Equal(new[] { "DarlingMcpPlanForceTools.cs", "DarlingMcpPlanForceTools.PlanGuide.cs", "DarlingMcpPlanForceTools.RecompileModule.cs" }, naming);
         Assert.DoesNotContain("PlanForceBot.cs", naming);
     }
 

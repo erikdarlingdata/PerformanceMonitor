@@ -45,6 +45,12 @@ public sealed record RemediationResult(
     /// <summary>A module recompile's resolved object name (<c>OBJECT_NAME</c> of the resolved id), not the input text. Null for every other action, and when the name did not resolve.</summary>
     public string? ObjectName { get; init; }
 
+    /// <summary>A plan guide create's count of cached batches whose text equals a SQL guide's batch (#6569). Null for every other action, for an OBJECT guide, and when the login cannot read the plan cache.</summary>
+    public long? CachedMatches { get; init; }
+
+    /// <summary>The message <c>sys.fn_validate_plan_guide</c> returned for a plan guide the create dropped again (#6569). Null for every other result.</summary>
+    public string? Validation { get; init; }
+
     /// <summary>A kill's facts about the session it named, read in the batch that decided (#5632, step 12). Null for every other action, and when no such session was found.</summary>
     public KillSessionFacts? Session { get; init; }
 
@@ -72,6 +78,15 @@ public sealed record RemediationResult(
         public const string ModuleNotFound = "module_not_found";
         public const string NotAModule = "not_a_module";
         public const string RecompilePermissionDenied = "recompile_permission_denied";
+        public const string BadGuideName = "bad_guide_name";
+        public const string BadGuideType = "bad_guide_type";
+        public const string BadGuideArgument = "bad_guide_argument";
+        public const string StatementNotInModule = "statement_not_in_module";
+        public const string GuideExists = "guide_exists";
+        public const string GuideNotFound = "guide_not_found";
+        public const string GuideChanged = "guide_changed";
+        public const string GuideInvalid = "guide_invalid";
+        public const string GuidePermissionDenied = "guide_permission_denied";
         public const string SessionGone = "session_gone";
         public const string SessionReused = "session_reused";
         public const string OwnSession = "own_session";

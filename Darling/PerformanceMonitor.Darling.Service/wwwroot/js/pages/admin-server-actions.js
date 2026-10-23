@@ -50,6 +50,8 @@ export function serverActionLabel(action) {
   if (action === "evict_plan") return "Evict plans from the plan cache";
   if (action === "kill_session") return "Kill sessions";
   if (action === "recompile_module") return "Recompile procedures, functions and triggers";
+  if (action === "create_plan_guide") return "Create plan guides";
+  if (action === "drop_plan_guide") return "Drop plan guides";
   return action;
 }
 
@@ -58,6 +60,8 @@ function serverActionLets(action) {
   if (action === "evict_plan") return "evict a plan from the plan cache";
   if (action === "kill_session") return "kill a session";
   if (action === "recompile_module") return "recompile a procedure, function or trigger";
+  if (action === "create_plan_guide") return "create a plan guide";
+  if (action === "drop_plan_guide") return "drop a plan guide";
   return action;
 }
 

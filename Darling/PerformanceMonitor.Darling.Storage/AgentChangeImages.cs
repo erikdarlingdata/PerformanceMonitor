@@ -55,6 +55,9 @@ public static class AgentChangeKinds
     /// <summary>One procedure, function or trigger recompiled on a monitored SQL Server with <c>sys.sp_recompile</c> (#6569). It has no undo: the next run compiles a new plan, so the kind is not in <see cref="AgentChangeUndo.UndoableKinds"/>.</summary>
     public const string ModuleRecompile = "module_recompile";
 
+    /// <summary>One plan guide created on a monitored SQL Server with <c>sys.sp_create_plan_guide</c> (#6569, slice 2a). A person undoes it from the Agent changes list: the undo drops the guide by name, so the kind is read by the plan undo (<see cref="AgentChangeUndo.PlanUndoTool"/>), not by <see cref="AgentChangeUndo.UndoableKinds"/>.</summary>
+    public const string PlanGuideCreate = "plan_guide_create";
+
     /// <summary>A person's attempt to undo a plan change whose write was sent and whose reply was lost (#5632). Journaled as an <c>action_called</c> row with no result, so the list reads it as "result unknown". It has no undo.</summary>
     public const string PlanUndo = "plan_undo";
 }

@@ -129,6 +129,7 @@ public sealed class AgentChangeViewRow
         AgentChangeKinds.PlanEvict => "evict plan",
         AgentChangeKinds.SessionKill => "kill session",
         AgentChangeKinds.ModuleRecompile => "recompile module",
+        AgentChangeKinds.PlanGuideCreate => "create plan guide",
         var other => other ?? "",
     };
 

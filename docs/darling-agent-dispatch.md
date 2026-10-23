@@ -202,6 +202,7 @@ At Level 3, an agent can also change the monitored server. These tools exist:
 - `evict_cached_plan` (SQL Server, not Azure SQL Database).
 - `kill_session` (SQL Server, Azure SQL Database and PostgreSQL).
 - `recompile_module` (SQL Server and Azure SQL Database): runs `sys.sp_recompile` on one procedure, function or trigger, so its next run compiles a new plan. The agent names the database and the two-part `schema.name`; Darling resolves the name in that database first and refuses a name that does not resolve or that is a table, a view or another kind of object. The name goes to the server as a parameter. There is no undo.
+- `create_plan_guide` (SQL Server, Azure SQL Database and Azure SQL Managed Instance): runs `sys.sp_create_plan_guide` to attach an `OPTION (...)` clause (`OPTIMIZE FOR`, `RECOMPILE`, `MAXDOP`, `USE PLAN`) to one statement without a change to the application. The agent names the database, the guide name, the statement, the type (`OBJECT` or `SQL`; `TEMPLATE` is refused) and the hints. Darling matches before it creates (an `OBJECT` guide's module must resolve and hold the statement exactly; a `SQL` guide reports how many cached batches equal its text, and zero is allowed), refuses a name already in use, validates the new guide with `sys.fn_validate_plan_guide` in the same batch, and drops a guide that fails validation again. Every value goes to the server as a parameter. The change is journaled with the whole definition and a person can undo it from Agent changes: the undo drops the guide by name, and only while it still holds the statement and hints it was created with. `drop_plan_guide` has a switch now and no tool yet.
 
 Each tool runs as a dry run unless the agent passes `dry_run` as `false`. A dry run returns the exact statement and writes nothing. A dry run still signs in with the remediation login.
 
@@ -253,6 +254,7 @@ Grants for the remediation login:
 |---|---|
 | Force or unforce a plan (SQL Server) | `ALTER` on each database where it forces a plan. |
 | Evict a plan (SQL Server) | `ALTER SERVER STATE`. Without it, an eviction is refused as `evict_permission_denied`. |
+| Create a plan guide (SQL Server, Azure SQL Database, Azure SQL Managed Instance) | `ALTER` on the database; an `OBJECT` guide also needs `ALTER` on the module. Without it, the create is refused as `guide_permission_denied`. The same grant lets a person's undo drop the guide. |
 | Recompile a module (SQL Server, Azure SQL Database) | A procedure or function needs `ALTER` on the module. A DML trigger needs `ALTER` on its table, and that grant also allows changing and emptying that table (`ALTER TABLE`, `TRUNCATE`), so grant it only where that is acceptable. Without the grant, a recompile is refused as `recompile_permission_denied`. |
 | Kill a session (SQL Server) | `ALTER ANY CONNECTION`. This grant lets the login kill any session on that server. Grant it only where you want an agent to kill. |
 | Kill a session (Azure SQL Database) | A user in each database, with `VIEW DATABASE STATE` and `KILL DATABASE CONNECTION`. |
@@ -274,7 +276,7 @@ A switch cannot be turned on for an action the server's engine cannot run, but i
 
 As a fallback, the store owner can write the table directly.
 
-The actions are `force_plan` (it covers force and unforce), `evict_plan`, `kill_session` and `recompile_module`. To write the table directly, connect as the store owner and run this statement for each action and server:
+The actions are `force_plan` (it covers force and unforce), `evict_plan`, `kill_session`, `recompile_module`, `create_plan_guide` and `drop_plan_guide`. To write the table directly, connect as the store owner and run this statement for each action and server:
 
 ```sql
 INSERT INTO config.config_server_actions (server_id, action, enabled, set_by)

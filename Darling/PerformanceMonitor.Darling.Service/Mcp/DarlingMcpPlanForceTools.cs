@@ -961,6 +961,9 @@ public sealed partial class DarlingMcpPlanForceTools
         if (owner is null)
             return PlanUndoAnswer.Refused(NoOwnerSource, "The service has not published its store owner connection yet, so this server's remediation login cannot be read. Try again shortly.");
 
+        if (facts.IsGuide)
+            return await DecideAndRunGuideUndoAsync(session, owner, logger, confirm, shownStatement, ct);
+
         /* The permit for the plan the change named: it reads the state, and it is the plan an unforce or a no-prior-force undo writes on. */
         var decision = await session.AuthorizeAsync(facts.PlanId, owner, ct);
         if (decision.Refusal is { } gateRefusal)

@@ -88,6 +88,7 @@ internal static class DarlingMcpWritePolicy
         "evict_cached_plan",
         "kill_session",
         "recompile_module",
+        "create_plan_guide",
         "delete_notification_route",
         "set_notification_route_enabled",
         "set_notification_route_fallback",

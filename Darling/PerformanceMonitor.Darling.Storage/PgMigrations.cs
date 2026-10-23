@@ -2286,9 +2286,9 @@ CREATE TRIGGER trg_bump_known_patterns
     FOR EACH STATEMENT EXECUTE FUNCTION config.config_bump_version();";
 
     /// <summary>
-    /// V215 (#6569): <c>ck_config_server_actions_action</c> also allows <c>recompile_module</c>, the switch of the Level 3 action that
-    /// runs <c>sys.sp_recompile</c> on a procedure, function or trigger. The CHECK is replaced in place under its own name, only when
-    /// the stored definition does not already name the action (V196's guard shape), so a second run replaces nothing. It inserts no row:
+    /// V215 (#6569): <c>ck_config_server_actions_action</c> also allows <c>recompile_module</c> (the switch of the Level 3 action that
+    /// runs <c>sys.sp_recompile</c> on a procedure, function or trigger), <c>create_plan_guide</c> and <c>drop_plan_guide</c> (the plan guide actions). The CHECK is replaced in place under its own name, only when
+    /// the stored definition does not already name the newest action (V196's guard shape), so a second run replaces nothing. It inserts no row:
     /// the action starts off on every server. An older build never writes the new word and never reads it as anything else.
     /// </summary>
     private const string V215Sql = @"
@@ -2297,10 +2297,10 @@ BEGIN
     IF EXISTS (SELECT 1 FROM pg_constraint
                WHERE conname = 'ck_config_server_actions_action'
                  AND conrelid = 'config.config_server_actions'::regclass
-                 AND pg_get_constraintdef(oid) !~ 'recompile_module') THEN
+                 AND pg_get_constraintdef(oid) !~ 'drop_plan_guide') THEN
         ALTER TABLE config.config_server_actions DROP CONSTRAINT ck_config_server_actions_action;
         ALTER TABLE config.config_server_actions
-            ADD CONSTRAINT ck_config_server_actions_action CHECK (action IN ('force_plan', 'evict_plan', 'kill_session', 'recompile_module'));
+            ADD CONSTRAINT ck_config_server_actions_action CHECK (action IN ('force_plan', 'evict_plan', 'kill_session', 'recompile_module', 'create_plan_guide', 'drop_plan_guide'));
     END IF;
 END $do$;";
 

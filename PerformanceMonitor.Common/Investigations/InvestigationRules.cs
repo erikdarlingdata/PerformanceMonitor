@@ -75,6 +75,7 @@ public static class InvestigationRules
         "evict_cached_plan",
         "kill_session",
         "recompile_module",
+        "create_plan_guide",
     };
 
     /// <summary>What a valid agent id is (#5632 review round 2, L4).</summary>

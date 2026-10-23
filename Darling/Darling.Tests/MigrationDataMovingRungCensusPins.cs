@@ -291,7 +291,7 @@ public sealed class MigrationDataMovingRungCensusPins
         new(
             215,
             SetsTheFloor: false,
-            "ADD CONSTRAINT ... CHECK on config.config_server_actions (#6569, created V196): the action CHECK is replaced by one that also allows recompile_module and validated against every stored row. The table holds at most one row per server and action, so the scan is microseconds, and the replacement runs only when the stored definition does not already name the action. It does not move the lock-wait floor."),
+            "ADD CONSTRAINT ... CHECK on config.config_server_actions (#6569, created V196): the action CHECK is replaced by one that also allows recompile_module, create_plan_guide and drop_plan_guide and validated against every stored row. The table holds at most one row per server and action, so the scan is microseconds, and the replacement runs only when the stored definition does not already name the action. It does not move the lock-wait floor."),
         new(
             197,
             SetsTheFloor: false,

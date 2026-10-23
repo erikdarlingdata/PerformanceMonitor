@@ -152,6 +152,8 @@ public sealed class ServerActionViewRow
         ServerActionNames.EvictPlan => "evict a plan from the plan cache",
         ServerActionNames.KillSession => "kill a session",
         ServerActionNames.RecompileModule => "recompile a procedure, function or trigger",
+        ServerActionNames.CreatePlanGuide => "create a plan guide",
+        ServerActionNames.DropPlanGuide => "drop a plan guide",
         var other => other,
     };
 
