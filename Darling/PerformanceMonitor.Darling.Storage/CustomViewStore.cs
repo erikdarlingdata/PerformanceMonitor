@@ -32,7 +32,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <see cref="CustomViewResult.NotFound"/> (the id is gone) vs <see cref="CustomViewResult.Conflict"/> (a stale
 /// version — someone else wrote first). A duplicate <c>name</c> (unique violation, 23505) is also a
 /// <see cref="CustomViewResult.Conflict"/>. The route layer validates the definition STRUCTURE first
-/// (DarlingWebEndpoints.ValidateDefinition, the authority); this store adds only light argument guards
+/// (CustomViewValidation.ValidateDefinition, the authority); this store adds only light argument guards
 /// (<see cref="CustomViewResult.Invalid"/>) so it is safe to call independently.</para>
 /// </summary>
 public sealed class CustomViewStore

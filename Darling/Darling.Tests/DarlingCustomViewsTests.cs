@@ -64,6 +64,15 @@ public sealed class DarlingCustomViewsTests
 
     /* ── ValidateDefinition: the authority ── */
 
+    /// <summary>#6390 S2b-B: the Storage list of read names a v1 read panel may name IS the read dispatch's key set, so a read added to the
+    /// dispatch cannot be missed by the shared validator.</summary>
+    [Fact]
+    public void KnownReadNames_EqualTheReadDispatchKeys() =>
+        Assert.True(
+            new HashSet<string>(DarlingWebEndpoints.BuildReadDispatch().Keys, StringComparer.Ordinal)
+                .SetEquals(CustomViewValidation.KnownReadNames),
+            "CustomViewValidation.KnownReadNames differs from BuildReadDispatch().Keys");
+
     [Fact]
     public void ValidateDefinition_AcceptsAWellFormedDefinition()
     {

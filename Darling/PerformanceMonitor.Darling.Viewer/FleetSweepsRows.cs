@@ -44,6 +44,14 @@ internal static class FleetSweepsRows
         _ => state,
     };
 
+    /// <summary>The cadence line the web's sweeps page shows (its <c>renderCadence</c>): "sweeps every N min", or the disabled
+    /// wording, from the alert settings' fleet_sweep group; blank when the store holds no settings row yet (as the page leaves it).</summary>
+    internal static string CadenceText(AlertSettingsRow? settings) =>
+        settings is null ? ""
+        : settings.FleetSweepEnabled
+            ? "sweeps every " + settings.FleetSweepIntervalMinutes.ToString("N0", CultureInfo.CurrentCulture) + " min"
+            : "sweeps disabled (fleet_sweep.enabled: false)";
+
     private static JsonObject Obj(JsonNode? node) => node as JsonObject ?? new JsonObject();
 
     private static IEnumerable<JsonObject> Objects(JsonNode? node) =>

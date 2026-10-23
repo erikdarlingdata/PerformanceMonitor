@@ -137,6 +137,23 @@ public sealed class ViewerFleetSweepsReadTests
         Assert.Equal("−1 watch", runs[0].WatchText);
         Assert.Equal("1 Critical  1 Healthy", runs[1].BandsText);
         Assert.Equal("2 / 2 servers reported", FleetSweepsRows.DetailSummary(muted!).Split("   |   ")[1]);
+
+        /* The cadence line (#6390 S2b-B): no settings row yet reads blank, as the web page leaves it; then the Viewer's line and the
+           fleet_sweep group the web page reads (get_alert_settings) agree on the same stored knob, enabled and disabled. */
+        Assert.Equal("", FleetSweepsRows.CadenceText(await viewer.GetAlertSettingsAsync(ct)));
+        foreach (var (enabled, interval, expected) in new[]
+                 {
+                     (true, 30, "sweeps every 30 min"),
+                     (false, 45, "sweeps disabled (fleet_sweep.enabled: false)"),
+                 })
+        {
+            await viewer.UpsertAlertSettingsAsync(new AlertSettingsRow { FleetSweepEnabled = enabled, FleetSweepIntervalMinutes = interval }, ct);
+            /* The row get_alert_settings builds its fleet_sweep group from (enabled and interval_minutes, unchanged). */
+            var (webRow, _) = await DarlingAlertReader.GetAlertConfigurationAsync(postgres, ct);
+            Assert.Equal(enabled, webRow!.FleetSweepEnabled);
+            Assert.Equal(interval, webRow.FleetSweepIntervalMinutes);
+            Assert.Equal(expected, FleetSweepsRows.CadenceText(await viewer.GetAlertSettingsAsync(ct)));
+        }
     }
 
     [Fact]
