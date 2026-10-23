@@ -64,11 +64,12 @@ public sealed class QueryStoreRegressionsFailureGroupsLiveTests
     /// minutes after its first, so its day and its side of the window start are those of <c>first + 30 minutes</c>.</summary>
     private static async Task WriteAsync(
         DarlingCollectorRunner runner, ServerRuntime server, CollectorContext context, string type, long intervalId,
-        DateTime first, long queryId, long executions, long cpuUs, long durationUs, CancellationToken ct)
+        DateTime first, long queryId, long executions, long cpuUs, long durationUs, CancellationToken ct,
+        string? databaseName = null, string? queryText = null)
     {
         var row = new QueryStoreCollector.Row
         {
-            DatabaseName = Db,
+            DatabaseName = databaseName ?? Db,
             QueryId = queryId,
             PlanId = queryId * 10,
             ExecutionTypeDesc = type,
@@ -76,7 +77,7 @@ public sealed class QueryStoreRegressionsFailureGroupsLiveTests
             LastExecutionTime = first.AddMinutes(30),
             QueryHash = "0x" + queryId.ToString("X8", CultureInfo.InvariantCulture),
             QueryPlanHash = "0x" + queryId.ToString("X8", CultureInfo.InvariantCulture),
-            QueryText = "SELECT " + queryId.ToString(CultureInfo.InvariantCulture),
+            QueryText = queryText ?? "SELECT " + queryId.ToString(CultureInfo.InvariantCulture),
             ExecutionCount = executions,
             AvgCpuTimeUs = cpuUs,
             AvgDurationUs = durationUs,
@@ -208,6 +209,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Date, Value = plan.RunDays });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = plan.LowEnd });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = plan.HighStart });
+        command.Parameters.Add(DatabaseFilter.All.ExcludeParameter());
         await using var reader = await command.ExecuteReaderAsync(ct);
         return await DarlingQueryStoreRegressionReader.ReadRowsAsync(reader, ct);
     }
@@ -220,6 +222,82 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
 
     private static DarlingQueryStoreRegressionReader.RegressionRow Row(IEnumerable<DarlingQueryStoreRegressionReader.RegressionRow> rows, long queryId) =>
         rows.Single(r => r.QueryId == queryId);
+
+    /// <summary>
+    /// #6654: the monitor's own statement and a dropped database's queries are not regressions. Three queries each triple their CPU:
+    /// 20 (a normal statement), 21 (its text carries the collector's self-query marker, which lives in query_store_text) and 30 in a
+    /// database an earlier database_states snapshot lists and the newest does not. With no database chosen only 20 is listed and the
+    /// dropped database is named in <c>databases_left_out</c>; naming the dropped database reads it as asked, and the marker stays out.
+    /// </summary>
+    [Fact]
+    public async Task TheMonitorsOwnStatementAndADroppedDatabase_AreNotListed_AndTheDroppedOneIsNamed()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #6654 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+        const string Gone = "qsGone";
+        var now = LiveClock.Now();
+        await using var rig = await OpenAsync(async (runner, server, context, today, start) =>
+        {
+            long id = 9500;
+            async Task W(DateTime first, long q, long cpu, string database, string text)
+            {
+                id++;
+                await WriteAsync(runner, server, context, "Regular", id, first, q, 100, cpu, cpu * 2, ct, database, text);
+            }
+
+            foreach (var (q, database, text) in new[]
+            {
+                (20L, Db, "SELECT normal"),
+                (21L, Db, "/* " + QueryStoreCollector.SelfQueryMarker + " */ SELECT own"),
+                (30L, Gone, "SELECT in_dropped"),
+            })
+            {
+                await W(now.AddDays(-5), q, 1_000, database, text);
+                await W(now.AddHours(-3), q, 3_000, database, text);
+            }
+
+            await W(start.AddDays(-12), 90, 1_000, Db, "SELECT floor");
+        }, ct);
+
+        foreach (var (age, names) in new[] { (TimeSpan.FromHours(1), new[] { Db, Gone }), (TimeSpan.FromMinutes(5), new[] { Db }) })
+        {
+            var at = DateTime.SpecifyKind(DateTime.UtcNow - age, DateTimeKind.Unspecified);
+            var n = 1;
+            foreach (var name in names)
+            {
+                await using var insert = new NpgsqlCommand(
+                    "INSERT INTO database_states (collection_id, collection_time, server_id, server_name, database_name, database_id, state_desc, is_in_standby) VALUES ($1,$2,$3,'qsfail-host',$4,$5,'ONLINE',FALSE)",
+                    rig.Connection);
+                insert.Parameters.Add(new NpgsqlParameter<long> { TypedValue = CollectionIdGenerator.Next() });
+                insert.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = at });
+                insert.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ServerId });
+                insert.Parameters.Add(new NpgsqlParameter<string> { TypedValue = name });
+                insert.Parameters.Add(new NpgsqlParameter<int> { TypedValue = n++ });
+                await insert.ExecuteNonQueryAsync(ct);
+            }
+        }
+
+        static (List<long> Ids, List<string> LeftOut) Parse(string json)
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            var ids = doc.RootElement.GetProperty("regressions").EnumerateArray().Select(r => r.GetProperty("query_id").GetInt64()).OrderBy(x => x).ToList();
+            var left = doc.RootElement.TryGetProperty("databases_left_out", out var l) && l.ValueKind == System.Text.Json.JsonValueKind.Array
+                ? l.EnumerateArray().Select(x => x.GetString()!).ToList()
+                : [];
+            return (ids, left);
+        }
+
+        var all = Parse(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(rig.Postgres, "qsfail", 24, DatabaseFilter.All, 30, false, null, NullLogger.Instance, ct));
+        Assert.Equal([20L], all.Ids);
+        Assert.Equal([Gone], all.LeftOut);
+
+        var named = Parse(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(rig.Postgres, "qsfail", 24, DatabaseFilter.One(Gone), 30, false, null, NullLogger.Instance, ct));
+        Assert.Equal([30L], named.Ids);
+        Assert.Empty(named.LeftOut);
+
+        var db = Parse(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(rig.Postgres, "qsfail", 24, DatabaseFilter.One(Db), 30, false, null, NullLogger.Instance, ct));
+        Assert.Equal([20L], db.Ids);
+    }
 
     [Fact]
     public async Task EachGroupsCountAndPerExecutionFigures_AreTheHandWorkedOnes_OnTheWideArmAndTheRawArm()

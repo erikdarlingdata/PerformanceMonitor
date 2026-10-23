@@ -154,6 +154,7 @@ public sealed class QueryStoreRegressionsIntervalTableLiveTests
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Date, Value = plan.RunDays });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = plan.LowEnd });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = plan.HighStart });
+        command.Parameters.Add(DatabaseFilter.All.ExcludeParameter());
     }
 
     /// <summary>
@@ -178,6 +179,7 @@ public sealed class QueryStoreRegressionsIntervalTableLiveTests
                 command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Date, Value = plan.RunDays });
                 command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = plan.LowEnd });
                 command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = plan.HighStart });
+                command.Parameters.Add(DatabaseFilter.All.ExcludeParameter());
             }
             else
             {

@@ -113,13 +113,13 @@ public sealed partial class ViewerDataService
     /// <see cref="QueryStoreRegressionBaseline.WideArmsSql"/>), the aggregates, and <see cref="QueryStoreRegressionBaseline.SuffixSql"/>,
     /// bound to this read's parameters: $1 server_id, $2 window start (baseline is &lt; $2), $3 window end, $4 database filter
     /// (text[]), $5 baseline start (window start minus <see cref="BaselineLookbackDays"/>), $6 the baseline days read from the
-    /// daily totals (date[]), $7 and $8 the live half's <c>first_execution_time</c> bounds.
+    /// daily totals (date[]), $7 and $8 the live half's <c>first_execution_time</c> bounds, $9 the databases left out (#6654, text[] or NULL).
     /// </summary>
     internal static string BuildQueryStoreRegressionsSql(bool wide, bool useDailyTotals) =>
         QueryStoreRegressionBaseline.Bind(
             (wide ? QueryStoreRegressionBaseline.WideArmsSql : QueryStoreRegressionBaseline.RawArmsSql)
             + "\n" + QueryStoreRegressionBaseline.AggregatesSql(useDailyTotals) + "\n" + QueryStoreRegressionBaseline.SuffixSql,
-            "$5", "$6", "$7", "$8", "50");
+            "$5", "$6", "$7", "$8", "50", "$9");
 
     /// <summary>
     /// The Query-Store regressions read — the Dashboard's <c>report.query_store_regressions(@start,@end)</c> inline TVF
@@ -206,12 +206,19 @@ public sealed partial class ViewerDataService
         // plan-time chunk exclusion).
         var baselineStartUtc = QueryStoreRegressionsBaselineStart(startUtc);
 
+        /* #6654: with no database chosen the grid leaves out the databases the server DROPPED (named by an earlier database_states
+           snapshot, absent from the newest), as get_query_store_regressions and the top-procedures ranking do (#5633 item 4): their
+           queries would otherwise fill the 50-row cap. A database the user picked is read as asked; an unknown set leaves out nothing. */
+        var excludedDatabases = databaseNames is { Count: > 0 }
+            ? null
+            : (await CurrentDatabaseScope.NarrowAsync(_dataSource, serverId, DatabaseFilter.All, windowStartUtc: baselineStartUtc, cancellationToken: cancellationToken)).ExcludedNames;
+
         /* #5809: the interval table where the Queries grid's own gate allows, raw otherwise. */
         var schemaVersion = _cachedStoreSchemaVersion ??= await GetStoreSchemaVersionAsync(cancellationToken);
         if (schemaVersion is int version && version >= QueryStoreIntervalWideMinSchemaVersion)
         {
             var tableRows = await TryGetQueryStoreRegressionsFromTableAsync(
-                serverId, startUtc, endUtc, literalEndUtc, databaseNames, baselineStartUtc, cancellationToken);
+                serverId, startUtc, endUtc, literalEndUtc, databaseNames, baselineStartUtc, cancellationToken, excludedDatabases);
             if (tableRows is not null)
             {
                 return tableRows;
@@ -231,7 +238,7 @@ public sealed partial class ViewerDataService
             connection, transaction, serverId, baselineStartUtc, startUtc, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, null, cancellationToken,
             clampToRawFloor: true);
         await using var command = new NpgsqlCommand(plan.BuiltDayCount > 0 ? QueryStoreRegressionsSql : s_rawLiveSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
-        AddQueryStoreRegressionsParameters(command, serverId, startUtc, endUtc, databaseNames, baselineStartUtc, plan);
+        AddQueryStoreRegressionsParameters(command, serverId, startUtc, endUtc, databaseNames, baselineStartUtc, plan, excludedDatabases);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         return await ReadQueryStoreRegressionRowsAsync(reader, cancellationToken);
     }
@@ -246,7 +253,8 @@ public sealed partial class ViewerDataService
     /// the span <see cref="GetQueryStoreRegressionsDataStartAsync"/>'s notice describes.
     /// </summary>
     internal async Task<List<ViewerQueryStoreRegressionRow>?> TryGetQueryStoreRegressionsFromTableAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, DateTime? literalEndUtc, IReadOnlyList<string>? databaseNames, DateTime baselineStartUtc, CancellationToken cancellationToken)
+        int serverId, DateTime startUtc, DateTime endUtc, DateTime? literalEndUtc, IReadOnlyList<string>? databaseNames, DateTime baselineStartUtc, CancellationToken cancellationToken,
+        IReadOnlyList<string>? excludedDatabases = null)
     {
         try
         {
@@ -268,7 +276,7 @@ public sealed partial class ViewerDataService
             var baselinePlan = await QueryStoreRegressionBaseline.ResolveAsync(
                 connection, transaction, serverId, plan.ClampedStart, startUtc, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, null, cancellationToken);
             await using var command = new NpgsqlCommand(baselinePlan.BuiltDayCount > 0 ? QueryStoreRegressionsTableSql : s_wideLiveSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
-            AddQueryStoreRegressionsParameters(command, serverId, startUtc, endUtc, databaseNames, plan.ClampedStart, baselinePlan);
+            AddQueryStoreRegressionsParameters(command, serverId, startUtc, endUtc, databaseNames, plan.ClampedStart, baselinePlan, excludedDatabases);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             return await ReadQueryStoreRegressionRowsAsync(reader, cancellationToken);
         }
@@ -279,12 +287,12 @@ public sealed partial class ViewerDataService
         }
     }
 
-    /// <summary>The eight parameters both forms of the read take: $1 server_id, $2 window start, $3 window end, $4 database
+    /// <summary>The nine parameters both forms of the read take: $1 server_id, $2 window start, $3 window end, $4 database
     /// filter, $5 baseline start, $6 the baseline days read from the daily totals (#5506), $7 the end of the live half's low
-    /// <c>first_execution_time</c> range, $8 the start of its high range.</summary>
+    /// <c>first_execution_time</c> range, $8 the start of its high range, $9 the databases left out (#6654).</summary>
     private static void AddQueryStoreRegressionsParameters(
         NpgsqlCommand command, int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames, DateTime baselineStartUtc,
-        QueryStoreRegressionBaseline.Plan plan)
+        QueryStoreRegressionBaseline.Plan plan, IReadOnlyList<string>? excludedDatabases)
     {
         AddServerWindowParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
@@ -292,6 +300,7 @@ public sealed partial class ViewerDataService
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Date, Value = plan.RunDays });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.LowEnd, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.HighStart, DateTimeKind.Unspecified) });
+        command.Parameters.Add(DatabaseFilter.Excluding(excludedDatabases).ExcludeParameter());
     }
 
     private static double? NullableMs(NpgsqlDataReader reader, int ordinal) =>
