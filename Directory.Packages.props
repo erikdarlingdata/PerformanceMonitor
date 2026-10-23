@@ -42,6 +42,8 @@
     <PackageVersion Include="System.Security.Cryptography.Pkcs" Version="10.0.13" />
     <PackageVersion Include="System.Security.Cryptography.ProtectedData" Version="10.0.13" />
     <PackageVersion Include="Velopack" Version="1.2.161" />
+    <!-- #6480: the Darling MSI (Darling/msi). The WixToolset.Sdk version is in the wixproj's Sdk attribute and moves with this one. -->
+    <PackageVersion Include="WixToolset.Util.wixext" Version="5.0.2" />
     <PackageVersion Include="xunit.v3" Version="4.0.2" />
   </ItemGroup>
 </Project>

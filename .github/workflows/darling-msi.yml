@@ -1,0 +1,117 @@
+name: Darling MSI
+
+# #6480: builds the Darling Windows Installer package from THIS commit's service and viewer publishes and runs it on
+# the two hosted Windows images, one leg per job:
+#   M1  a silent install ('msiexec /i ... /qn') leaves the machine as install-darling.ps1 does: the service Running,
+#       the store up, and the service record, the install root's, darling.json's and the store folder's security
+#       descriptors, the operator group, the firewall rules and the shortcuts equal to a snapshot taken after the
+#       script installed the same payload on the same runner (the script is the oracle)
+# More legs (upgrade, uninstall, purge, rollback) are added to the same script as they land.
+#
+# Only logs are uploaded, never the MSI: nothing here publishes anything. The release job does not build or sign the
+# package yet.
+#
+# Triggers: a pull request touching the package, the scripts it runs, or this check; the nightly (as a reusable
+# workflow); and a manual dispatch. `pull_request`, never `pull_request_target`: the legs run the pull request's own
+# scripts and package, so they must run with the pull request's read-only token and no secrets.
+on:
+  pull_request:
+    paths:
+      - 'Darling/msi/**'
+      - 'Darling/tools/*.ps1'
+      - '.github/workflows/darling-msi.yml'
+      - '.github/scripts/darling-msi.ps1'
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: darling-msi-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  msi:
+    name: ${{ matrix.os }} / ${{ matrix.leg }}
+    runs-on: ${{ matrix.os }}
+    # Two publishes, the package build (compression of about 450 MB), the script install, the MSI install and a cold
+    # pg-runtime fetch (about 340 MB). The legs' own waits add up to well under this.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ windows-2022, windows-2025 ]
+        leg: [ M1 ]
+    steps:
+      # The commit under test, not a branch name that can move while the run is queued.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Setup .NET 10.0
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      # The same cache key build.yml uses, so a warm cache from there is reused.
+      - name: Cache Darling pg-runtime.zip
+        id: cache-pg-runtime
+        uses: actions/cache@v6
+        with:
+          path: Darling/artifacts/pg-runtime.zip
+          key: pg-runtime-${{ runner.os }}-${{ hashFiles('Darling/tools/fetch-pg-runtime.ps1') }}
+
+      - name: Build Darling pg-runtime.zip (cache miss only)
+        if: steps.cache-pg-runtime.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./Darling/tools/fetch-pg-runtime.ps1
+
+      # The release zip's layout (build.yml 'Stage Darling for signing' and 'Copy-Item pg-runtime.zip'): the service
+      # publish at the root, the viewer publish in viewer\, pg-runtime.zip beside the service exe. Both are
+      # self-contained, as in the release.
+      - name: Publish the payload
+        shell: pwsh
+        run: |
+          dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release -r win-x64 --self-contained -o publish/DarlingService
+          if ($LASTEXITCODE -ne 0) { throw "service publish failed ($LASTEXITCODE)" }
+          dotnet publish Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj -c Release -r win-x64 --self-contained -o publish/DarlingViewer
+          if ($LASTEXITCODE -ne 0) { throw "viewer publish failed ($LASTEXITCODE)" }
+          $payload = 'publish/DarlingMsiPayload'
+          New-Item -ItemType Directory -Force -Path "$payload/viewer" | Out-Null
+          Copy-Item 'publish/DarlingService/*' $payload -Recurse
+          Copy-Item 'publish/DarlingViewer/*' "$payload/viewer" -Recurse
+          Copy-Item 'Darling/artifacts/pg-runtime.zip' $payload
+
+      # WiX's ICE validation runs as part of the build, and any ICE error fails it.
+      - name: Build the MSI
+        shell: pwsh
+        run: |
+          dotnet build Darling/msi/PerformanceMonitor.Darling.Msi.wixproj -c Release -m:1 -p:UseSharedCompilation=false "-p:PayloadDir=${{ github.workspace }}\publish\DarlingMsiPayload"
+          if ($LASTEXITCODE -ne 0) { throw "MSI build failed ($LASTEXITCODE)" }
+          Get-ChildItem Darling/msi/bin/Release -Filter *.msi | ForEach-Object { "{0}  {1:N1} MB" -f $_.Name, ($_.Length / 1MB) }
+
+      - name: Run the leg
+        shell: pwsh
+        timeout-minutes: 40
+        run: |
+          $msi = (Get-ChildItem '${{ github.workspace }}\Darling\msi\bin\Release' -Filter *.msi | Select-Object -First 1).FullName
+          ./.github/scripts/darling-msi.ps1 -Leg '${{ matrix.leg }}' -Workspace '${{ github.workspace }}' -Payload '${{ github.workspace }}\publish\DarlingMsiPayload' -Msi $msi
+
+      - name: Service log tail
+        if: always()
+        shell: pwsh
+        run: |
+          Get-ChildItem 'C:\ProgramData\PerformanceMonitorDarling\logs' -ErrorAction SilentlyContinue | Select-Object -Last 2 | ForEach-Object { "log $($_.FullName)"; Get-Content $_.FullName -Tail 30 }
+
+      # Logs and snapshots only, never the MSI.
+      - name: Upload the logs
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: darling-msi-${{ matrix.os }}-${{ matrix.leg }}
+          path: |
+            C:\darling-msi-work\*.txt
+            C:\darling-msi-work\*.log
+          retention-days: 7
+          if-no-files-found: ignore
