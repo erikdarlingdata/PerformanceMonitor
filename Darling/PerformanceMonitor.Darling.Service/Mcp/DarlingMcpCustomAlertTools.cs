@@ -155,7 +155,9 @@ public sealed class DarlingMcpCustomAlertTools
         "being evaluated on the next sweep; pass enabled=false to stage it paused. With 100 rules already enabled " +
         "fleet-wide, an enabled create is refused as {status:\"invalid\", ...}; paused rules do not count, so " +
         "enabled=false still saves. Optional expires_at_utc (a future ISO-8601 UTC instant) makes it a short-term watch that stops " +
-        "evaluating on its own; the answer says when it expires, and a past expiry is refused.")]
+        "evaluating on its own; the answer says when it expires, and a past expiry is refused. " +
+        "Server scope is part of the definition, not a separate argument (#6455): with no 'scope' the rule applies to EVERY monitored server; " +
+        "to limit it, put {\"scope\":{\"mode\":\"servers\",\"servers\":[\"<server name>\"]}} (or mode 'tag' with a fleet-tag 'tagId') in the definition.")]
     public static async Task<string> CreateCustomAlertRule(
         NpgsqlDataSource postgres,
         [Description("The rule name - unique across all rules, max 200 characters.")] string name,

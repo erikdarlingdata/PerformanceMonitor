@@ -234,7 +234,7 @@ public sealed class InvestigationBriefComposer
             {
                 ["tool"] = ReportTool,
                 ["report_format"] = InvestigationFormats.ReportFormat,
-                ["required"] = new JsonArray("request_id", "claim_id", "report_format", "verdict", "root_cause", "root_cause_found", "evidence"),
+                ["required"] = new JsonArray("request_id", "claim_id", "report_format", "verdict", "root_cause", "evidence", "summary"),
             },
         };
         /* #5632: under maskLiterals and metadataOnly the compiled parameter values are hidden, and they explain most plan flips, so
@@ -490,6 +490,17 @@ public sealed class InvestigationBriefComposer
         foreach (var hint in PlanHints(request, evidence))
             Add(hint.Tool(request.IsPostgres), hint.Arguments, hint.Why);
 
+        /* The request's own anomaly story names its reads first, ahead of the family calls. */
+        if (!request.IsPostgres)
+        {
+            var own = findings.FirstOrDefault(f => string.Equals(f.StoryPathHash, request.StoryPathHash, StringComparison.Ordinal));
+            if (own is not null)
+            {
+                foreach (var (tool, why) in AnomalyCalls(own.RootFactKey))
+                    Add(tool, null, why);
+            }
+        }
+
         if (table.TryGetValue(request.Family, out var familyTools))
         {
             foreach (var tool in familyTools)
@@ -503,6 +514,34 @@ public sealed class InvestigationBriefComposer
         }
 
         return calls;
+    }
+
+    /// <summary>The reads that fit a SQL Server anomaly story, by its root fact key, most specific first. A name a product does not
+    /// serve is dropped by the nameable-tools gate. Other anomaly stories keep their recommendation-table calls.</summary>
+    internal static IReadOnlyList<(string Tool, string Why)> AnomalyCalls(string? rootFactKey)
+    {
+        if (string.IsNullOrEmpty(rootFactKey))
+            return Array.Empty<(string, string)>();
+        if (rootFactKey.StartsWith("ANOMALY_READ", StringComparison.OrdinalIgnoreCase) || rootFactKey.StartsWith("ANOMALY_WRITE", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(rootFactKey, "ANOMALY_IO", StringComparison.OrdinalIgnoreCase))
+        {
+            return new[]
+            {
+                ("get_file_io_trend", "Chart read and write latency over the alert window to see when the anomaly began."),
+                ("get_file_io_stats", "Check which database files carry the latency."),
+            };
+        }
+
+        if (rootFactKey.StartsWith("ANOMALY_CPU", StringComparison.OrdinalIgnoreCase))
+        {
+            return new[]
+            {
+                ("get_cpu_utilization", "See when the CPU anomaly occurred."),
+                ("get_top_queries_by_cpu", "Find the most CPU-expensive queries in the period."),
+            };
+        }
+
+        return Array.Empty<(string, string)>();
     }
 
     /// <summary>The CPU-per-execution ratio at which a plan change is called out (#6007): the PLAN_REGRESSION detector's 2x would
