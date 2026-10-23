@@ -8,8 +8,10 @@ Run from an ELEVATED PowerShell, from the folder you extracted the Darling zip i
 installs the service pointing at THAT folder - extract to the final location first, e.g.
 C:\Program Files\PerformanceMonitorDarling). What it does, in order:
 
-  1. Verifies elevation, the service exe, and darling.json (offers to copy darling.sample.json
-     and stops so you can edit it - the service is not installed with an unedited sample).
+  1. Verifies elevation, the service exe, and darling.json. When darling.json does not exist it writes a
+     minimal one (the bundled PostgreSQL store, no servers) and carries on: the service starts with no
+     monitored servers and you add the first one afterwards in the Viewer (#6468). darling.sample.json stays
+     beside it as the full reference.
   1a. REFUSES an install tree an ordinary local user can ALREADY write to, before anything - including
      the lock at 1b2 - has run (#4043): the usual case is Authenticated Users: Modify, inherited from
      C:\. A lock closes FURTHER writes; it cannot undo one made before it existed, so this recursively
@@ -24,6 +26,9 @@ C:\Program Files\PerformanceMonitorDarling). What it does, in order:
   1b2. Locks the install folder against ordinary users before anything runs from it (#4034): a folder made
      directly under C:\ otherwise lets any local user replace the service's binaries. Extract into a fresh
      folder and run this straight away; no lock can undo a file swapped before it.
+  1c2. REFUSES a first install whose darling.json is an unedited copy of darling.sample.json, because the
+     copy still names the sample's example servers (#6475). Runs before the lock at 1b2, so a refusal leaves
+     the folder's permissions as they were.
   2. Optional pre-flight: runs `--test-connection` and shows the per-server PASS/FAIL lines
      (continue-or-abort prompt on failure; -SkipPreflight to skip). STOPS (exit 5) instead of prompting when
      the exe prints "doesn't fully support CET": Windows needs its updates (#5651).
@@ -49,7 +54,8 @@ C:\Program Files\PerformanceMonitorDarling). What it does, in order:
      --configure-firewall verb. This requires elevation, which is why it lives here: the service's
      own unprivileged account cannot create them, and only verifies them at runtime.
   5. Starts the service and confirms it reaches Running.
-  6. Creates 'Darling Viewer' shortcuts on the Desktop and in the Start Menu pointing at
+  6. Creates 'Darling Viewer' shortcuts on the public Desktop and in the all-users Start Menu (not the
+     Desktop of whichever account elevated, #6475) pointing at
      viewer\PerformanceMonitor.Darling.Viewer.exe. (Taskbar pinning is deliberately not
      attempted - Windows blocks programmatic pinning by design; pin from the Start Menu entry.)
 
@@ -1769,6 +1775,35 @@ Nothing was installed or changed.
     if ($answer -notmatch '^[Yy]') { exit 4 }
 }
 
+# -- 1c2. Refuse a first install on an unedited sample (#6475) ----------------------------------------
+# darling.sample.json is a reference, and its two example servers would be registered on the first start if the
+# file were copied over unchanged (the sample's own first line tells a person to copy it). Since #6468 a missing
+# darling.json is not a problem, because the installer writes a minimal one with no servers; an UNEDITED COPY of
+# the sample is, because it still names servers that do not exist. Compared as text, ignoring line endings and
+# trailing blanks, so a copy saved by an editor that changed them is still caught. Only a first install is held:
+# an existing service has a store that is authoritative for its servers, and the file only matters to it as a
+# fallback, so an upgrade through this script is never blocked by it. Before the lock, so a refusal leaves the folder's permissions as they were.
+function Test-DarlingConfigIsUnchangedSample([string]$configPath, [string]$samplePath) {
+    if (-not (Test-Path -LiteralPath $configPath)) { return $false }
+    if (-not (Test-Path -LiteralPath $samplePath)) { return $false }
+    $normalize = { param([string]$text) ((($text -replace "`r`n", "`n") -split "`n" | ForEach-Object { $_.TrimEnd() }) -join "`n").Trim() }
+    $config = & $normalize ([System.IO.File]::ReadAllText($configPath))
+    $sample = & $normalize ([System.IO.File]::ReadAllText($samplePath))
+    return ($config -ceq $sample)
+}
+
+if (-not $existing -and (Test-DarlingConfigIsUnchangedSample $configPath $samplePath)) {
+    Fail @"
+darling.json is an unedited copy of darling.sample.json, so it still names the sample's example servers, which do not exist.
+The service would register them on its first start.
+
+  Either delete darling.json and run this script again (it writes a minimal darling.json with no servers, and you
+  add your first server in the Viewer afterwards), or edit darling.json so it names your own servers.
+
+Nothing was installed or changed.
+"@
+}
+
 # -- 1b2. Lock the install tree before anything runs from it (#4034) ---------------------------------------
 # The rest of this script runs the service exe (the pre-flight, --configure-firewall) and registers it to run
 # as the service account, so the tree is closed to ordinary users first: see Lock-DarlingInstallTree. On a
@@ -1789,17 +1824,39 @@ if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
 }
 Invoke-InstallTreeLock $lockAccount -StopOnOpen
 
-if (-not (Test-Path -LiteralPath $configPath)) {
-    if (Test-Path -LiteralPath $samplePath) {
-        Copy-Item -LiteralPath $samplePath -Destination $configPath
-        Write-Host ''
-        Write-Host 'darling.json did not exist, so darling.sample.json was copied to darling.json.' -ForegroundColor Yellow
-        Write-Host 'EDIT IT NOW (servers to monitor, auth) and re-run this script. The sample is heavily commented.' -ForegroundColor Yellow
-        Write-Host "  notepad `"$configPath`"" -ForegroundColor Yellow
-        exit 2
-    }
+# A first install needs no hand-edited darling.json (#6468). The service starts with no monitored servers, so a
+# missing darling.json is answered with a minimal one (the bundled store only) and the install carries on. The
+# first server is added afterwards in the Viewer. The full sample is left beside it as the reference.
+function New-DarlingMinimalConfigText {
+    return @'
+{
+  // Written by install-darling.ps1. The service keeps everything else in its own PostgreSQL store.
+  // darling.sample.json beside this file is the full, commented reference for every setting.
+  //
+  // No server is named here on purpose: the service starts with none. Add the first one in the Viewer
+  // (Add Server). Once the service has started, the store is authoritative for the server list, so adding
+  // servers to this file later changes nothing.
+  "postgres": {
+    "managed": true,
+    "port": 5641
+  },
+  "servers": []
+}
+'@
+}
 
-    Fail 'Neither darling.json nor darling.sample.json found beside this script - the zip looks incomplete.'
+# Writes the minimal file as UTF-8 without a byte-order mark, so every reader (the service's, this script's
+# regexes, Windows PowerShell 5.1) sees the same bytes.
+function Write-DarlingMinimalConfig([string]$path) {
+    [System.IO.File]::WriteAllText($path, (New-DarlingMinimalConfigText), (New-Object System.Text.UTF8Encoding($false)))
+}
+
+if (-not (Test-Path -LiteralPath $configPath)) {
+    Write-DarlingMinimalConfig $configPath
+    Write-Host ''
+    Write-Host 'darling.json did not exist, so a minimal one was written: the bundled PostgreSQL store and no servers.' -ForegroundColor Yellow
+    Write-Host 'Nothing needs editing before the install. Add your first server afterwards, in the Viewer (Add Server).' -ForegroundColor Yellow
+    Write-Host 'darling.sample.json beside it is the full reference for every other setting.' -ForegroundColor Yellow
 }
 
 # -- 2. Pre-flight --------------------------------------------------------------------------------
@@ -1831,7 +1888,7 @@ if (-not $SkipPreflight) {
         Write-Host ''
         Write-Host 'ERROR: Windows on this machine is missing updates that .NET 10 needs, so the service cannot start.' -ForegroundColor Red
         Write-Host 'The service exe printed the CET start error (Your Windows doesn''t fully support CET).' -ForegroundColor Red
-        Write-Host 'Install all available Windows updates, restart, and run this script again. Nothing was installed.' -ForegroundColor Yellow
+        Write-Host 'Install all available Windows updates, restart, and run this script again. The service was not installed. The install folder''s permissions were already locked, and stay that way.' -ForegroundColor Yellow
         Write-Host 'If the updates cannot go on yet, the README (Prerequisites) has a workaround. It turns off one' -ForegroundColor Yellow
         Write-Host 'protection (UserShadowStack) for the Darling exes, and shows the command that undoes it.' -ForegroundColor Yellow
         exit 5
@@ -2714,17 +2771,29 @@ if ($Network) {
     Invoke-FirewallReconcile
 }
 
+# The 'Darling Viewer' shortcut paths under the named special folders (#6475). A folder that does not resolve (GetFolderPath
+# returns '' when there is no such folder for the account) is left out. The folder lookup is a parameter so a test can stand in
+# for the machine. Kept byte-identical in install-darling.ps1 and uninstall-darling.ps1.
+function Get-DarlingShortcutPaths([string[]]$Folders, [scriptblock]$GetFolder = $null) {
+    if (-not $GetFolder) { $GetFolder = { param($name) [Environment]::GetFolderPath($name) } }
+    $paths = @()
+    foreach ($folder in $Folders) {
+        $base = & $GetFolder $folder
+        if ($base) { $paths += (Join-Path $base 'Darling Viewer.lnk') }
+    }
+    return $paths
+}
+
 # -- 6. Viewer shortcuts --------------------------------------------------------------------------
 if (-not $NoShortcuts) {
     if (Test-Path -LiteralPath $viewerExe) {
         # GetFolderPath returns '' for Desktop/StartMenu whenever there is no loaded user profile - a
         # Windows service, a scheduled task, a CI runner, a remote/SSM session - and Join-Path then
         # throws. Guard it: keep only the targets whose folder resolves, and skip cleanly otherwise.
-        $desktop   = [Environment]::GetFolderPath('Desktop')
-        $startMenu = [Environment]::GetFolderPath('StartMenu')
-        $targets = @()
-        if ($desktop)   { $targets += (Join-Path $desktop 'Darling Viewer.lnk') }
-        if ($startMenu) { $targets += (Join-Path $startMenu 'Programs\Darling Viewer.lnk') }
+        # The all-users folders, not the running account's: this script runs elevated, often as an administrator
+        # account that is not the person who will open the Viewer, and that account's own Desktop is not theirs
+        # (#6475). The public Desktop and the all-users Start Menu show the shortcut to everyone on the machine.
+        $targets = @(Get-DarlingShortcutPaths @('CommonDesktopDirectory', 'CommonPrograms'))
         if ($targets.Count -gt 0) {
             $shell = New-Object -ComObject WScript.Shell
             foreach ($lnkPath in $targets) {
