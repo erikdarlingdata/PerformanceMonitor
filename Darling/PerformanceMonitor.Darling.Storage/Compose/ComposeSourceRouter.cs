@@ -11,7 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using PerformanceMonitor.Darling.Storage;
 
-namespace PerformanceMonitor.Darling.Service;
+namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>Which physical relation a composed panel reads: the raw collector table, or one of its
 /// continuous-aggregate rollups.</summary>

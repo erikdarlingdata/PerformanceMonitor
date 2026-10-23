@@ -19,7 +19,7 @@ using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
 
-namespace PerformanceMonitor.Darling.Service;
+namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
 /// The service's cached answer to "which retention rollups does this store have, and how far back has each
