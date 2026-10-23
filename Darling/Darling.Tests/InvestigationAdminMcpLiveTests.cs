@@ -208,6 +208,8 @@ public sealed class InvestigationAdminMcpLiveTests
             {
                 "DELETE FROM config.investigation_notes",
                 "UPDATE config.investigation_notes SET note_text = 'rewritten'",
+                /* No mcp code path changes a note's expiry by UPDATE (the decision sets state, decided_by and decided_at; the expiry is set at INSERT). */
+                "UPDATE config.investigation_notes SET expires_at = now() + interval '10 years'",
                 "UPDATE config.investigation_requests SET server_name = 'x'",
                 "DELETE FROM config.agent_environment_profiles",
             })
@@ -219,6 +221,18 @@ public sealed class InvestigationAdminMcpLiveTests
                 });
                 Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, refused.SqlState);
             }
+
+            /* The endpoint's one legacy token: the store rows name it "legacy token", never the 8-hex fingerprint the service log carries. */
+            ReadCaller.SetAmbientMcpToken(ReadCaller.OfMcpToken("a-legacy-bearer-token"));
+            var legacy = Parse(await DarlingMcpInvestigationAdminTools.WriteInvestigationNote(mcp, "Legacy-token note.", days: 30, cancellationToken: ct));
+            Assert.Equal("written", (string)legacy["status"]!);
+            const string legacyActor = "person:mcp legacy token";
+            Assert.Equal(legacyActor, (string)legacy["author"]!);
+            var legacyId = (long)legacy["note_id"]!;
+            Assert.Equal(legacyActor, await ScalarAsync(ownerSource, $"SELECT author FROM config.investigation_notes WHERE note_id = {legacyId}", ct));
+            var legacyJournal = await ScalarAsync(ownerSource, $"SELECT actor FROM config.investigation_journal WHERE event = 'note_written' AND reason = 'note {legacyId}'", ct);
+            Assert.Equal(legacyActor, legacyJournal);
+            Assert.DoesNotMatch("[0-9a-f]{8}", legacyJournal);
 
             bodySucceeded = true;
         }

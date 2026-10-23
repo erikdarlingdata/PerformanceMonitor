@@ -32,7 +32,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// investigates an alert proposes a note through <c>submit_investigation_report</c>, and can never approve its own note, write one
 /// as approved or close a request. They run as the <c>mcp</c> role, which holds only the columns these statements set.
 /// <para>The decision and the close are recorded as every person write is (<c>person:&lt;name&gt;</c>), the name being the MCP caller:
-/// <c>person:mcp</c> and the token identity the service worked out (<see cref="ReadCaller.AmbientMcpToken"/>), which an
+/// <c>person:mcp</c> and the token by name (<c>named token NAME</c>) or as <c>legacy token</c> (<see cref="ReadCaller.StoreTokenIdentity"/>), which an
 /// operator can trace to the token in the log line each write also leaves with the client's own name
 /// (<see cref="ReadCaller.WriteIdentity"/>).</para>
 /// <para>None of the four has an undo: the web and the Viewer have no way to reopen a request, return a decided note to pending or
@@ -247,12 +247,11 @@ public sealed class DarlingMcpInvestigationAdminTools
     private static InvestigationRequestStore Store(NpgsqlDataSource postgres) =>
         new(postgres, McpCommandDeadlines.ReadSeconds, () => DateTime.UtcNow);
 
-    /// <summary>The person actor the store records: <c>person:mcp</c> and the token identity the service worked out, or <c>person:mcp</c>
+    /// <summary>The person actor the store records: <c>person:mcp</c> and the token by name or as <c>legacy token</c>, or <c>person:mcp</c>
     /// alone when that identity is not a name the person rule accepts. Never the client's own claimed name, which any client can send.</summary>
     internal static string Actor()
     {
-        var token = ReadCaller.AmbientMcpToken;
-        var named = InvestigationPersonWrites.PersonActor(string.IsNullOrWhiteSpace(token) ? "mcp" : "mcp " + token);
+        var named = InvestigationPersonWrites.PersonActor("mcp " + ReadCaller.StoreTokenIdentity());
         return InvestigationPersonWrites.ValidateActor(named) is null ? named : InvestigationPersonWrites.PersonActor("mcp");
     }
 

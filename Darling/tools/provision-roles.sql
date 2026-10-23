@@ -2484,8 +2484,10 @@ END $do$;
 -- 3i. Investigation tables (V184, #5632), mirroring managed provisioning's section 10d grant for grant. Step 3 and the
 --     default privileges gave admin INSERT/UPDATE/DELETE on all six, so REVOKE ALL ... CASCADE takes every privilege
 --     from PUBLIC and the three roles, and SELECT goes back to all three. mcp (the claim and submit tools) updates only
---     the claim and report columns of a request, inserts a report and a journal row, and proposes a note without its
---     state column, so an agent's note stays pending until a person decides it. admin (the desktop Viewer) closes a
+--     the claim and report columns of a request, inserts a report and a journal row, and proposes a note. The agent
+--     tools (claim, submit) leave the note's state column to its default, pending, but the database does not hold mcp to
+--     that: since #6400 mcp also holds INSERT on state, so the keeping of a note pending rests on those tools' code, and
+--     the investigation admin tools run as mcp to write a note approved and to decide one. admin (the desktop Viewer) closes a
 --     request, writes the environment profiles, writes, decides or deletes a note, and journals what it did. The
 --     service writes the rest as the owner. On a store below V184 the block warns and skips, as the agent route column
 --     grants in steps 2b and 2c do, so the whole script runs clean on a V181-V183 store; re-run it once the service has
@@ -2544,7 +2546,7 @@ $v193c$;
    --     statements set and nothing more. BRING-YOUR-OWN STORES: re-run this script to add them.
    GRANT UPDATE (closed_at, closed_by, closed_reason) ON config.investigation_requests TO mcp;
    GRANT INSERT (state, created_at, expires_at, decided_at, decided_by) ON config.investigation_notes TO mcp;
-   GRANT UPDATE (state, decided_at, decided_by, expires_at) ON config.investigation_notes TO mcp;
+   GRANT UPDATE (state, decided_at, decided_by) ON config.investigation_notes TO mcp;
    GRANT INSERT, UPDATE, DELETE ON config.agent_environment_profiles TO admin;
 END $do$;
 
