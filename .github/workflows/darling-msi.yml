@@ -20,8 +20,8 @@ name: Darling MSI
 # Only logs are uploaded, never the MSI: nothing here publishes anything. The release job does not build or sign the
 # package yet.
 #
-# Triggers: a pull request touching the package, the scripts it runs, or this check; the nightly (as a reusable
-# workflow); and a manual dispatch. `pull_request`, never `pull_request_target`: the legs run the pull request's own
+# Triggers: a pull request touching the package, the scripts it runs, or this check; a manual dispatch; and a call from
+# another workflow (`workflow_call`), which no workflow makes yet - the nightly does not run these legs. `pull_request`, never `pull_request_target`: the legs run the pull request's own
 # scripts and package, so they must run with the pull request's read-only token and no secrets.
 on:
   pull_request:

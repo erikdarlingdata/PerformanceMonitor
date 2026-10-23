@@ -1716,7 +1716,7 @@ if ($elevationAction -eq 'Offer') {
 # machine that holds it belongs to Windows Installer: a script install over it would leave two owners for one service. Returns the
 # refusal text, or $null when the marker is absent. The registry read is a parameter so a test can stand in for the machine; the
 # default reads the 64-bit view, so a 32-bit PowerShell is not sent to WOW6432Node and does not miss the marker. Kept byte-identical
-# in install-darling.ps1 and upgrade-darling.ps1.
+# in install-darling.ps1, upgrade-darling.ps1 and uninstall-darling.ps1.
 function Get-DarlingMsiInstallRefusal([string]$ScriptName, [scriptblock]$ReadMarker = $null) {
     if (-not $ReadMarker) {
         $ReadMarker = {

@@ -28,15 +28,16 @@ public sealed class DarlingMsiPhaseScriptTests
     private static string Upgrade => ReadRepoFile("Darling", "tools", "upgrade-darling.ps1");
 
     /// <summary>
-    /// A machine the MSI installed (marker value <c>msi</c>) is refused by both the installer and the upgrade script, with next steps that
+    /// A machine the MSI installed (marker value <c>msi</c>) is refused by the installer, the upgrade script and a plain uninstall, with next steps that
     /// name the script; no marker, or any other value, is not refused. The registry read is a stand-in scriptblock.
     /// </summary>
     [Theory]
     [InlineData("install-darling.ps1")]
     [InlineData("upgrade-darling.ps1")]
+    [InlineData("uninstall-darling.ps1")]
     public void TheMarkerRefusal_FiresOnMsi_AndOnNothingElse(string scriptName)
     {
-        var script = scriptName == "install-darling.ps1" ? Install : Upgrade;
+        var script = scriptName switch { "install-darling.ps1" => Install, "upgrade-darling.ps1" => Upgrade, _ => Uninstall };
         var lines = RunWindowsPowerShell(
             ExtractFunction(script, "Get-DarlingMsiInstallRefusal") + "\n"
             + $"$refusal = Get-DarlingMsiInstallRefusal '{scriptName}' {{ 'msi' }}\n"
