@@ -30,9 +30,11 @@ public static partial class McpToolGuideTopics
         "one was stored, so move as_of or widen hours_back to reach it. (3) Never recorded, session alive: other " +
         "categories are stored, so the ring buffer is being read and the engine has never recorded one of these; for a " +
         "memory-node OOM or a severe error that is the healthy measurement. Those three answer status empty. (4) Nothing " +
-        "of any type, ever: a dead system_health session or a collector that never ran; status unavailable with " +
-        "source_observed false. That is not a clean bill of health; it is no evidence either way. An engine with no " +
-        "system_health session to read (Azure SQL Database) says so instead.";
+        "of any type, ever: when the collector's newest run read the live session through its event_file target and found " +
+        "no events, that is a true negative and the status is empty (source_observed true). Otherwise it is a dead " +
+        "system_health session or a collector that never ran, or a ring buffer read that cannot tell the two apart; " +
+        "status unavailable with source_observed false. That is not a clean bill of health; it is no evidence either " +
+        "way. An engine with no system_health session to read (Azure SQL Database) says so instead.";
 
     private static readonly McpToolGuideTopic[] s_healthParser =
     [

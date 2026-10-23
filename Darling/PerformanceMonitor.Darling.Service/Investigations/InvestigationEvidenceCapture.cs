@@ -121,6 +121,9 @@ public sealed partial class InvestigationEvidenceCapture
     /// <summary>The deadlock alert's metric (#6002).</summary>
     public const string DeadlockMetric = AlertEngine.DeadlockWatermarkMetric;
 
+    /// <summary>The Client Timeouts alert's metric (#6553): a request opened on it gets the <c>client_timeouts</c> section.</summary>
+    public const string ClientTimeoutsMetric = AttentionEvaluator.MetricName;
+
     /// <summary>The two blocking alerts' metrics (#6002): the blocked-process report alert and the blocking wait alert.</summary>
     public static readonly IReadOnlyList<string> BlockingMetrics = new[] { AlertEngine.BlockingWatermarkMetric, AlertEngine.BlockingWaitPersistenceMetric };
 
@@ -140,6 +143,7 @@ public sealed partial class InvestigationEvidenceCapture
         {
             [HighCpuMetric] = Sections,
             [DeadlockMetric] = new[] { "deadlocks" },
+            [ClientTimeoutsMetric] = new[] { "client_timeouts" },
             [InvestigationEvidenceScope.FamilyKey(InvestigationFamily.QueryPerformance)] = new[] { "regression_targets" },
         };
         foreach (var metric in BlockingMetrics)
@@ -160,6 +164,7 @@ public sealed partial class InvestigationEvidenceCapture
         ["blocking_chains"] = "blocked_process_report",
         ["head_blocker"] = "blocked_process_report",
         ["regression_targets"] = "query_store",
+        ["client_timeouts"] = AttentionWindowSql.CollectorName,
     };
 
     /// <summary>The collectors that have a successful run at or after <c>$3</c> for server <c>$1</c> ($2 the collector names).
@@ -590,6 +595,7 @@ GROUP BY database_name";
             "deadlocks" => new SectionRead(await ReadDeadlocksAsync(request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
             "blocking_chains" => await ReadBlockingChainsAsync(request.ServerId, from, to, cancellationToken).ConfigureAwait(false),
             "head_blocker" => new SectionRead(await ReadHeadBlockersAsync(request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
+            "client_timeouts" => new SectionRead(await ReadClientTimeoutsAsync(request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
             "regression_targets" => new SectionRead(await ReadRegressionTargetsAsync(request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
             _ => new SectionRead(new List<JsonObject>()),
         };

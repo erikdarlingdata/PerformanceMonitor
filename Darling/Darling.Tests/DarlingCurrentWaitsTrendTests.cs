@@ -118,6 +118,68 @@ public sealed class DarlingCurrentWaitsTrendTests
         }
     }
 
+    /// <summary>
+    /// #6453: a collector whose newest run completed clean and stored no rows is HEALTHY in get_collection_health, so the
+    /// read must say <c>empty</c> (a true negative), not <c>unavailable</c>. A faulting collector keeps <c>unavailable</c>:
+    /// the "check collection" pointer is right for it. An empty stall-probe window is <c>empty</c> too, never
+    /// <c>not_collected</c>.
+    /// </summary>
+    [Fact]
+    public async Task ACleanRunWithNoRows_IsEmpty_AndAFaultingRun_StaysUnavailable_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live current-waits trend test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var dataSource = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+
+            await SeedCollectionLogAsync(connection, ct, MinutesAgo(30), "SUCCESS", null);
+            await SeedCollectionLogAsync(connection, ct, MinutesAgo(5), "SUCCESS", null);
+
+            var healthy = JsonDocument.Parse(await DarlingMcpDataTools.GetCurrentWaitsTrend(dataSource, ServerName, 4, null));
+            Assert.Equal("empty", healthy.RootElement.GetProperty("status").GetString());
+            var healthyText = healthy.RootElement.GetProperty("message").GetString()!;
+            Assert.Contains("true negative", healthyText, StringComparison.Ordinal);
+            Assert.DoesNotContain("NOT an all-clear", healthyText, StringComparison.Ordinal);
+
+            /* The newest run faulted: the collector is not healthy, and the read goes back to pointing at collection health. */
+            await SeedCollectionLogAsync(connection, ct, MinutesAgo(1), "ERROR", "login failed");
+            var faulted = JsonDocument.Parse(await DarlingMcpDataTools.GetCurrentWaitsTrend(dataSource, ServerName, 4, null));
+            Assert.Equal("unavailable", faulted.RootElement.GetProperty("status").GetString());
+
+            /* A server with no probes in the window: empty, and the window statement is not a not_collected claim. */
+            var probes = JsonDocument.Parse(await DarlingMcpStallProbeTools.GetCollectorStallProbes(dataSource, ServerName, 7));
+            Assert.Equal("empty", probes.RootElement.GetProperty("status").GetString());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    private static async Task SeedCollectionLogAsync(
+        NpgsqlConnection connection, CancellationToken ct, DateTime collectionTimeUtc, string status, string? errorMessage) =>
+        await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collection_log
+    (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            CollectionIdGenerator.Next(), ServerId, ServerName, "waiting_tasks",
+            DarlingMcpTestData.Naive(collectionTimeUtc), 100, status, errorMessage, 0);
+
     private static DateTime MinutesAgo(int minutes) =>
         DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow.AddMinutes(-minutes));
 
@@ -138,6 +200,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM waiting_tasks WHERE server_id = $1", ServerId);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM collection_log WHERE server_id = $1", ServerId);
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM servers WHERE server_id = $1", ServerId);
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM config_monitored_servers WHERE server_id = $1", ServerId);
     }

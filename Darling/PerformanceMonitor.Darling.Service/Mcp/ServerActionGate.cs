@@ -22,8 +22,11 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <c>agent_actions_enabled</c>, a Level 3 request, that server's switch for that action, and that server's remediation login given
 /// as an <c>env:</c> or <c>file:</c> reference. A call that lacks one is refused with its own reason, and the refusal is journaled.
 /// <para><b>It takes no <c>DarlingMcpWritePolicy</c>.</b> <c>mcp.allowWrites</c> never bypasses it, and there is no flag that skips a
-/// check. <b>Step 7 calls it</b> (force and unforce); step 10 (evict a plan handle) and step 12 (kill) will. No tool, web
-/// route or <c>darling.json</c> key writes <c>config.config_server_actions</c>, so every switch reads off until a person turns one on.</para>
+/// check. Force, unforce, evict and kill call it. Every switch in <c>config.config_server_actions</c> reads off until it is turned on: by a
+/// person in the Viewer, or over MCP by <c>set_server_action</c> for an operator-class token when <c>mcp.allowWrites</c> and
+/// <c>mcp.allowServerAdmin</c> are both on (it is in NeverAgentTools, so no agent token reaches it). The remediation login is the
+/// person-only condition: it must be an <c>env:</c> or <c>file:</c> reference, which only the configuration file sets (the store's
+/// trigger refuses a reference from any role but the owner, and <c>edit_server</c> refuses every <c>remediation_*</c> key).</para>
 /// </summary>
 internal static class ServerActionGate
 {
@@ -55,7 +58,8 @@ internal static class ServerActionGate
         string serverAction,
         string? agentAction,
         AgentActionTarget target,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? agentTokenName = null)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(ownerSource);
@@ -67,6 +71,15 @@ internal static class ServerActionGate
         {
             await store.RecordAgentActionRefusalAsync(null, null, tool, problem.Reason, cancellationToken);
             return new ServerActionDecision(null, problem);
+        }
+
+        /* #6542: a named agent token is the agent's identity, so a server action acts only as that name. */
+        if (agentTokenName is not null && !string.Equals(action!.AgentId, agentTokenName, StringComparison.Ordinal))
+        {
+            await store.RecordAgentActionRefusalAsync(action.RequestId, agentTokenName, tool, DarlingMcpInvestigationTools.AgentIdNotToken,
+                cancellationToken);
+            return new ServerActionDecision(null, new AgentActionRefusal(DarlingMcpInvestigationTools.AgentIdNotToken,
+                DarlingMcpInvestigationTools.AgentIdNotTokenMessage(agentTokenName)));
         }
 
         var hooks = new ServerActionHooks

@@ -1,5 +1,7 @@
 # Upgrade Scripts
 
+> **The Full Edition is deprecated.** This whole folder belongs to it. No release since v3.3.0 includes the Full Edition, but it is still supported for existing users. New deployments use [Lite](../Lite/README.md) or [Darling](../Darling/README.md).
+
 This folder contains version-specific upgrade scripts for the Performance Monitor system.
 
 ## Structure
@@ -27,7 +29,7 @@ Each upgrade folder must contain an `upgrade.txt` file listing the SQL files to 
 
 ## How Upgrades Work
 
-The installer:
+The installer (`deprecated/Installer/`, or the Add Server dialog of the Full Dashboard in `deprecated/Dashboard/`):
 1. Detects current installed version from `config.installation_history`
 2. Determines which upgrade folders to apply
 3. Executes upgrade folders in sequence
@@ -94,4 +96,4 @@ GO
 
 - **2.0.0**: Add server_start_time and delta columns to memory_grant_stats for delta framework; drop unused warning columns; new Memory Grants charts
 
-Future upgrade folders will be added here as new versions are released.
+The list above stops at 2.0.0. For later versions, read the scripts in each folder and the [CHANGELOG](../CHANGELOG.md). The newest folder is `3.0.0-to-3.1.0`.

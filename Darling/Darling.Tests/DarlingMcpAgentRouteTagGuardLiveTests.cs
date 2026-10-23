@@ -136,7 +136,7 @@ public sealed class DarlingMcpAgentRouteTagGuardLiveTests
         }
 
         var owner = NpgsqlDataSource.Create(connectionString);
-        /* The grants the real roles hold on the tag tables, plus read on the rest of what the store's snapshot reads. The
+        /* The grants the real roles hold on the tag tables (and the DELETE remove_server needs to clear a server's collector schedule rows, #6454), plus read on the rest of what the store's snapshot reads. The
            route table is NOT granted to mcp: the guard reads it as the owner. */
         await ExecAsync(owner, @"
 GRANT USAGE ON SCHEMA config, collect TO mcp, viewer;
@@ -145,6 +145,7 @@ GRANT SELECT ON ALL TABLES IN SCHEMA collect TO mcp, viewer;
 REVOKE SELECT ON config.config_notification_routes FROM mcp;
 GRANT INSERT, UPDATE, DELETE ON config.server_tags, config.server_tag_map TO mcp, viewer;
 GRANT DELETE ON config.config_monitored_servers, config.query_tag_assignments, config.query_tag_rules, config.query_tag_map TO mcp;
+GRANT DELETE ON config.config_collector_schedules, config.config_collector_run_times TO mcp;
 GRANT UPDATE (config_version, updated_at) ON config.config_service TO mcp, viewer;");
 
         await ExecAsync(owner, @"

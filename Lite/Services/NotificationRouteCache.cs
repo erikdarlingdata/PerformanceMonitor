@@ -54,6 +54,11 @@ public static class NotificationRouteCache
     /// <summary>Installs the loader (null removes it, and the cache serves no routes). Resets the held routes.</summary>
     public static void Configure(Func<IReadOnlyList<NotificationRoute>>? loader) => s_core.Configure(loader);
 
+    /// <summary>Runs <paramref name="initializeStore"/> (the one that creates <c>notification_routes</c>), then installs the loader
+    /// and primes the first load. See <see cref="NotificationRouteCacheCore.InitializeStoreThenConfigureAsync"/> (#6458).</summary>
+    public static Task InitializeStoreThenConfigureAsync(Func<Task> initializeStore, Func<IReadOnlyList<NotificationRoute>>? loader) =>
+        s_core.InitializeStoreThenConfigureAsync(initializeStore, loader);
+
     /// <summary>Marks the held routes stale and starts one background reload (none when one is already running: that one
     /// loads again when it finishes). No I/O on the calling thread and no lock of ours.</summary>
     public static void Invalidate() => s_core.Invalidate();
@@ -117,6 +122,24 @@ internal sealed class NotificationRouteCacheCore
 
         /* Prime the first load now, so the first status tick and the first alert find it done or in flight. */
         StartBackgroundReload();
+    }
+
+    /// <summary>Creates the store's tables, and only then installs the loader. <see cref="Configure"/> primes the first load at once, so
+    /// calling it before the store exists made a first start on an empty data root read a <c>notification_routes</c> table that was
+    /// not there yet, and log a WARN that read like a fault (#6458). Until this returns no loader is installed: the cache serves no
+    /// routes and nothing waits on a first load. A table that is missing AFTER this returns is a real fault, and the loader's own
+    /// failure path still logs it.</summary>
+    public async Task InitializeStoreThenConfigureAsync(Func<Task> initializeStore, Func<IReadOnlyList<NotificationRoute>>? loader)
+    {
+        try
+        {
+            await initializeStore().ConfigureAwait(false);
+        }
+        finally
+        {
+            /* Installed even when the store failed to initialize: that is a real fault, and the loader's failure path logs it. */
+            Configure(loader);
+        }
     }
 
     /// <summary>Completes once the first load attempt since <see cref="Configure"/> has finished, or after the timeout; at once when no

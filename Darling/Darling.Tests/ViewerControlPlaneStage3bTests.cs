@@ -264,9 +264,9 @@ public sealed class ViewerCollectorSchedulesSqlTests
     [Fact]
     public void DeleteScopeSql_KeyOnTheScope()
     {
-        Assert.Contains("DELETE FROM config_collector_schedules WHERE server_id IS NULL",
+        Assert.Contains("DELETE FROM config.config_collector_schedules WHERE server_id IS NULL",
             ViewerDataService.CollectorScheduleDeleteFleetScopeSql, StringComparison.Ordinal);
-        Assert.Contains("DELETE FROM config_collector_schedules WHERE server_id = $1",
+        Assert.Contains("DELETE FROM config.config_collector_schedules WHERE server_id = $1",
             ViewerDataService.CollectorScheduleDeleteServerScopeSql, StringComparison.Ordinal);
     }
 

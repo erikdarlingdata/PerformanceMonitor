@@ -33,7 +33,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <c>mcp.dataDetail</c> filter; the brief is composed masked at that level before it is stored.
 /// </summary>
 [McpServerToolType]
-public sealed class DarlingMcpInvestigationTools
+public sealed partial class DarlingMcpInvestigationTools
 {
     /// <summary>The long-poll tool's name (#5822).</summary>
     internal const string WaitToolName = "wait_for_investigation_requests";
@@ -70,7 +70,8 @@ public sealed class DarlingMcpInvestigationTools
     [McpServerTool(Name = "list_investigation_requests"), Description(
         "Lists the investigation requests alerts opened for your agent, newest first, with state, lease and expiry. Writes " +
         "nothing. status ok or empty. Claim one with claim_investigation_request. <<GUIDE>> " +
-        "Each row: id, server, family, first metric, alert count, state, lease and expiry. The state is computed from the " +
+        "Each row: id, server, family, first metric, alert count, state, lease and expiry; a Change Watch request also carries detail_text, " +
+        "its changes and the measures that moved, each query measure with its database. The state is computed from the " +
         "lease and expiry at read time (a lapsed lease reads open), and the read writes nothing. " +
         "A request is opened when an alert matches a notification route whose agent_level is 1 (get_notification_routes), " +
         "within the route's hourly and daily limits; alerts of one server and family join one request while they keep firing (each within 30 minutes of the request's latest alert, up to 4 hours after its first). " +
@@ -133,7 +134,7 @@ public sealed class DarlingMcpInvestigationTools
         "event was journaled on route_ids after the cursor; otherwise it waits up to timeout_seconds (0-25, default 20; capped " +
         "at 25 so a proxy or a client's request timeout never cuts the call) for one, and at the timeout answers empty with the " +
         "same cursor. Each row: request_id, route_id, server_name, family, opened_at, event, event_id, event_time and the " +
-        "event's detail; no lease and no brief. joined comes only for a new metric or a higher severity. evidence_ready's " +
+        "event's detail, and detail_text for a Change Watch request; no lease and no brief. joined comes only for a new metric or a higher severity. evidence_ready's " +
         "detail names the evidence sections ready, not_collected and pending: the brief is composed at claim, so evidence that " +
         "lands later reaches a claimed agent only through this detail. The claim stays pull: " +
         "the first claim_investigation_request call wins, exactly as for a request found by listing, so one request can wake " +
@@ -224,6 +225,8 @@ public sealed class DarlingMcpInvestigationTools
         if (r.DisplayName is not null) node["display_name"] = r.DisplayName;
         if (r.InstanceName is not null) node["instance_name"] = r.InstanceName;
         node["family"] = r.Family;
+        /* #6551: a change-watch request's detail, as list_investigation_requests answers it. */
+        if (r.DetailText is not null) node["detail_text"] = r.DetailText;
         node["opened_at"] = r.OpenedAtUtc;
         /* #6003: the event this row answers. An evidence_ready detail names the sections that are ready, not collected and
            still pending: the agent re-reads the request's evidence by its id. */
@@ -360,9 +363,12 @@ public sealed class DarlingMcpInvestigationTools
         "Pass your claim_id again to renew. status claimed, renewed, already_claimed, not_open, not_found or " +
         "unsupported_format. <<GUIDE>> " +
         "The brief says what fired, what changed, earlier reports and the next calls to make. " +
-        "A claim is one conditional update, so two agents claiming at once cannot both win; a request takes at most three " +
+        "A claim is one conditional update, so two agents with different agent_ids claiming at once cannot both win (agents that share one agent_id on a named token are one agent); a request takes at most three " +
         "claims. The lease is the route's agent_lease_minutes; a renewal moves it on by that much, never past the request's " +
         "expiry, and only while your claim still holds a live lease (otherwise the call claims afresh, with a new claim_id). " +
+        "On a named agent token, if you lost your claim_id, claim again while your lease is live: status renewed, reclaimed true, " +
+        "your existing claim_id and a renewed lease (the token's name is your agent_id; any other agent still gets already_claimed). " +
+        "On the legacy token a second claim while a lease is live answers already_claimed, even for the same agent_id. " +
         "The brief is composed at claim time, masked at mcp.dataDetail, and stored; if it cannot be composed the claim is " +
         "released (it stays counted) and the answer is status error. brief_format: omit, or 1. agent_id names your agent " +
         "in the journal: 1-64 letters, digits, '.', '_', ':' or '-'. Return your findings with submit_investigation_report under this claim_id.")]
@@ -373,18 +379,32 @@ public sealed class DarlingMcpInvestigationTools
         [Description("Your agent name: 1-64 of A-Za-z0-9._:-")] string agent_id,
         [Description("Your claim_id, to renew. Omit to claim.")] string? claim_id = null,
         [Description("Omit, or 1.")] int? brief_format = null,
+        DarlingMcpServedPolicy? served = null,
         CancellationToken cancellationToken = default) =>
-        ClaimAsync(Store(postgres), composer, request_id, agent_id, claim_id, brief_format, cancellationToken);
+        ClaimAsync(Store(postgres), composer, request_id, agent_id, claim_id, brief_format, cancellationToken, served?.Policy.AgentTokenName);
 
-    /// <summary>The claim over a given store and composer, so a test can drive a composer that fails.</summary>
+    /// <summary>The claim over a given store and composer, so a test can drive a composer that fails. <paramref name="tokenName"/> is
+    /// the name of the named agent token the call came with (#6542), or null for the legacy token: with a name, the agent is that
+    /// name, and an <paramref name="agent_id"/> that differs from it is refused.</summary>
     internal static async Task<string> ClaimAsync(InvestigationRequestStore store, InvestigationBriefComposer composer,
-        string request_id, string agent_id, string? claim_id, int? brief_format, CancellationToken cancellationToken)
+        string request_id, string agent_id, string? claim_id, int? brief_format, CancellationToken cancellationToken, string? tokenName = null)
     {
         if (!Guid.TryParse(request_id, out var requestId))
             return InvestigationToolCore.Status("not_found", $"request_id '{request_id}' is not a request id.");
 
         try
         {
+            /* #6542: a named agent token is the agent's identity. An agent_id that names another agent is refused and journaled
+               under the token's name, so one token cannot claim as another agent. */
+            if (tokenName is not null)
+            {
+                if (!string.Equals(agent_id, tokenName, StringComparison.Ordinal))
+                {
+                    await store.RecordRefusalAsync(requestId, tokenName, "claim", AgentIdNotToken, null, cancellationToken);
+                    return McpHelpers.Refusal("agent_id", AgentIdNotTokenMessage(tokenName));
+                }
+            }
+
             /* #5632 review round 2, L4: an agent id is a name, not text, so it cannot pose as another journal line. */
             if (!InvestigationRules.IsValidAgentId(agent_id))
             {
@@ -415,7 +435,21 @@ public sealed class DarlingMcpInvestigationTools
                 }
             }
 
-            var claim = await store.ClaimAsync(requestId, agent_id, cancellationToken);
+            /* #6586: only a named token proves who agent_id is; on the legacy token it is free text, so no reclaim. */
+            var claim = await store.ClaimAsync(requestId, agent_id, allowReclaim: tokenName is not null, cancellationToken);
+            if (claim.Outcome == InvestigationClaimOutcome.Reclaimed)
+            {
+                /* #6576: the same agent_id already holds the live lease. Its claim_id comes back and the lease is renewed. */
+                return JsonSerializer.Serialize(new
+                {
+                    status = "renewed",
+                    reclaimed = true,
+                    request_id = requestId,
+                    claim_id = claim.ClaimId,
+                    lease_until = claim.LeaseUntilUtc,
+                }, McpHelpers.JsonOptions);
+            }
+
             if (claim.Outcome != InvestigationClaimOutcome.Claimed)
                 return InvestigationToolCore.Status(InvestigationToolCore.ClaimStatus(claim.Outcome), InvestigationToolCore.ClaimMessage(claim));
 
@@ -460,7 +494,7 @@ public sealed class DarlingMcpInvestigationTools
     }
 
     [McpServerTool(Name = "get_investigation_evidence"), Description(
-        "Reads the frozen evidence sections of one investigation request. Writes nothing. status ok, empty, not_found or " +
+        "Reads the frozen evidence sections of one investigation request, reported ones too. Writes nothing. status ok, empty, not_found or " +
         "already_claimed. <<GUIDE>> " +
         "The brief is composed once, at claim time; evidence that freezes later reaches you only as an evidence_ready event " +
         "from wait_for_investigation_requests. Call this with that event's request_id to read it. Each section carries its " +
@@ -536,7 +570,7 @@ public sealed class DarlingMcpInvestigationTools
         "pull request, bug report, commit or release you opened or found. A url must be https with no user name or password; http, file and UNC " +
         "(\\\\server\\share, //server/share) links are refused (invalid). Each URL is journaled once per request as link_recorded, and " +
         "later briefs for the same server and family list it under prior_links. Darling stores the link and never calls Jira or git. " +
-        "family_of (optional) is the request_id of the first report in this family; it must name a request (else invalid). " +
+        "family_of (optional) is the request_id of an earlier request on this store, which need not have a report yet; it must name a request (else invalid). " +
         "queries_run (optional) is a JSON array of the statements you ran, " + InvestigationReportFields.QueriesRunRule + " (over a cap: refused, never cut); " +
         "it is masked as statement text. " +
         "follow_up_at (optional) asks Darling to open a new request for this case later: " + InvestigationReportFields.FollowUpRule + ". " +
@@ -554,7 +588,7 @@ public sealed class DarlingMcpInvestigationTools
         [Description("Optional note for a person to approve, at most 2,000 characters.")] string? proposed_note = null,
         [Description("Refused at Level 1. Omit.")] string? action_proposals = null,
         [Description("Optional JSON array of at most 10 {kind, url, key}; https only. See the guide.")] string? links = null,
-        [Description("Optional. The request_id of the first report in this family; it must exist.")] string? family_of = null,
+        [Description("Optional. The request_id of an earlier request on this store; it need not have a report yet.")] string? family_of = null,
         [Description("Optional JSON array of statements you ran, " + InvestigationReportFields.QueriesRunRule + ".")] string? queries_run = null,
         [Description("Optional. When to open a follow-up request: " + InvestigationReportFields.FollowUpRule + ".")] string? follow_up_at = null,
         [Description("Optional. Open the follow-up when a module is deployed: " + InvestigationReportFields.FollowUpConditionRule + ".")] string? follow_up_condition = null,
@@ -638,7 +672,7 @@ public sealed class DarlingMcpInvestigationTools
             }
 
             if (familyOf is { } family && !await store.RequestExistsAsync(family, cancellationToken))
-                problems.Add($"family_of: no investigation request has id {family}; give the request_id of the first report in this family.");
+                problems.Add($"family_of: no investigation request has id {family}; give the request_id of an earlier request on this store.");
 
             if (problems.Count > 0)
             {
@@ -796,3 +830,13 @@ public sealed class DarlingMcpInvestigationTools
 /// a host serving neither arm see everything. Registered by <c>ConfigureMcpServices</c> from the effective policy.
 /// </summary>
 public sealed record InvestigationReadPolicy(bool HideLivePracticeAnswers);
+
+public sealed partial class DarlingMcpInvestigationTools
+{
+    /// <summary>The refusal reason for an agent_id that is not the named token's name (#6542).</summary>
+    internal const string AgentIdNotToken = "agent_id_not_token";
+
+    /// <summary>The sentence for <see cref="AgentIdNotToken"/>. Names the token's name, never its value.</summary>
+    internal static string AgentIdNotTokenMessage(string tokenName) =>
+        $"This token is the agent {tokenName}: pass agent_id {tokenName}. An agent token claims and acts only as its own name.";
+}

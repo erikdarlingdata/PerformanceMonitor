@@ -79,7 +79,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,'Regular',$8,$9,$9,$10,$11,5000,7000,1,FALSE,0)",
     private static async Task<Dictionary<(string Db, long Plan), ForcedPlanFact>> ReadAsync(
         Rig rig, CancellationToken ct, DatabaseFilter? databases = null, IReadOnlyDictionary<(string, long), DateTime>? forcedAt = null)
     {
-        var read = await DarlingForcedPlanStateReader.ReadAsync(rig.Postgres, ServerId, databases ?? DatabaseFilter.All, null, T0.AddHours(-1), AsOf, forcedAt, 30, ct);
+        var read = await DarlingForcedPlanStateReader.ReadAsync(rig.Postgres, ServerId, databases ?? DatabaseFilter.All, null, T0.AddHours(-1), AsOf, forcedAt, 30, cancellationToken: ct);
         return read.Plans.ToDictionary(p => (p.DatabaseName, p.PlanId));
     }
 

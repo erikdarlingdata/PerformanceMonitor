@@ -89,7 +89,7 @@ public sealed partial class DarlingMcpAlertTools
            positional C# caller can be re-bound by. */
         [Description("Include alerts an operator has dismissed in the Viewer. Default false, which is the Alert History grid's own read.")] bool include_dismissed = false,
         [Description("Only alerts with this metric name (e.g. 'High CPU', 'Blocking Detected'), matched exactly, ignoring case. Omit for every metric.")] string? metric_name = null,
-        [Description("Only alerts of this family: self-monitor, reports, agent-jobs, performance or external. Omit for every family.")] string? family = null,
+        [Description("Alert family: self-monitor, reports, agent-jobs, performance or external. Not an investigation family such as blocking or resources: filter those with metric_name. Omit for all.")] string? family = null,
         [Description("Add streak_days to each row: days in a row (up to 7) this metric fired at this time of day before the alert, muted fires counting. Default false: rows are unchanged.")] bool include_streak = false,
         McpDataDetailSetting? maskSetting = null,
         CancellationToken cancellationToken = default)
@@ -766,13 +766,15 @@ public sealed partial class DarlingMcpAlertTools
         "the next level (a family route, then the parent channels) on the next firing — the reversible form of " +
         "'send this family to the parent channels for now'. Returns {status:\"updated\", route:{...}} with the route AS " +
         "STORED, {status:\"unchanged\", route:{...}} when it already holds that value (a retry is safe and costs no " +
-        "write), {status:\"refused\"} for an agent route, or for turning off a route with an Off agent setting (that is done in the Viewer or on the web dashboard; turning it on is allowed), or {status:\"not_found\"}. The running service picks the change up on its next collection sweep, " +
+        "write); both carry previous {enabled} and undo (the call that sets the previous value back), {status:\"refused\"} for an agent route, or for turning off a route with an Off agent setting (that is done in the Viewer or on the web dashboard; turning it on is allowed), or {status:\"not_found\"}. An operator token is not refused: its change to a route with an agent setting goes through update_notification_route and is journaled as route_agent_changed, and it answers as update_notification_route does. The running service picks the change up on its next collection sweep, " +
         "when the write's config_version bump makes it reload its channel configuration. This tool cannot author or " +
         "re-point a route: destinations are bearer secrets, set with create_notification_route / update_notification_route or in the Viewer's Settings window.")]
     public static async Task<string> SetNotificationRouteEnabled(
         NpgsqlDataSource postgres,
         [Description("The route_id to enable or disable (from get_notification_routes).")] int route_id,
-        [Description("true to put the route back in force, false to skip it at resolution while keeping it.")] bool enabled)
+        [Description("true to put the route back in force, false to skip it at resolution while keeping it.")] bool enabled,
+        DarlingMcpServedPolicy? served = null,
+        CancellationToken cancellationToken = default)
     {
         try
         {
@@ -781,6 +783,14 @@ public sealed partial class DarlingMcpAlertTools
             if (existing is null)
             {
                 return Outcome("not_found", $"No notification route with route_id {route_id}.");
+            }
+
+            /* #6542 part 2 (MCP is full admin): an operator-class token changes a route with an agent setting through update_notification_route's
+               store function, which journals it as route_agent_changed, as the Viewer's toggle does. */
+            if (existing.AgentLevel is not null && served?.Policy.OperatorActor is { } operatorActor)
+            {
+                return await UpdateNotificationRouteAsync(postgres, route_id, null, enabled, null, null, null, null, null, null,
+                    RouteDestinationRequest.None, DarlingPasswordKey.Current, null, cancellationToken, null, operatorActor);
             }
 
             if (AgentRouteRefusal(existing, "set_notification_route_enabled") is { } agentRefusal)
@@ -795,7 +805,13 @@ public sealed partial class DarlingMcpAlertTools
 
             if (existing.Enabled == enabled)
             {
-                return JsonSerializer.Serialize(new { status = "unchanged", route = RoutePayload(existing) }, McpHelpers.JsonOptions);
+                return JsonSerializer.Serialize(new
+                {
+                    status = "unchanged",
+                    route = RoutePayload(existing),
+                    previous = new { enabled = existing.Enabled },
+                    undo = UndoCall("set_notification_route_enabled", new { route_id, enabled = existing.Enabled }),
+                }, McpHelpers.JsonOptions);
             }
 
             if (await store.SetEnabledAsync(route_id, enabled) == 0)
@@ -807,7 +823,13 @@ public sealed partial class DarlingMcpAlertTools
 
             /* Re-read AFTER the write, so the reported row is the stored one (set_mute_rule_enabled's rule). */
             var stored = (await store.LoadSummariesAsync()).FirstOrDefault(r => r.RouteId == route_id);
-            return JsonSerializer.Serialize(new { status = "updated", route = stored is null ? null : RoutePayload(stored) }, McpHelpers.JsonOptions);
+            return JsonSerializer.Serialize(new
+            {
+                status = "updated",
+                route = stored is null ? null : RoutePayload(stored),
+                previous = new { enabled = existing.Enabled },
+                undo = UndoCall("set_notification_route_enabled", new { route_id, enabled = existing.Enabled }),
+            }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
         {
@@ -824,12 +846,14 @@ public sealed partial class DarlingMcpAlertTools
         "of those to the 'Investigation Not Picked Up' self-alert. Pass a fallback_route_id to set it, or omit it to clear. " +
         "A route cannot be its own fallback and the fallback must be an existing route: either is refused with " +
         "{status:\"invalid\"}. Returns {status:\"updated\", route:{...}} with the route AS STORED, {status:\"unchanged\", route:{...}} " +
-        "when it already holds that value, or {status:\"not_found\"}. An agent route (agent_level 1 or more) is " +
-        "{status:\"refused\"}: it is changed in the Viewer. Deleting the fallback route clears the reference.")]
+        "when it already holds that value (both carry previous {fallback_route_id} and undo, the call that sets the previous fallback back), or {status:\"not_found\"}. An agent route (agent_level 1 or more) is " +
+        "{status:\"refused\"}: it is changed in the Viewer, or by an operator token, whose call goes through update_notification_route. Deleting the fallback route clears the reference.")]
     public static async Task<string> SetNotificationRouteFallback(
         NpgsqlDataSource postgres,
         [Description("The route to set the fallback on (from get_notification_routes).")] int route_id,
-        [Description("The route_id of the fallback route, from get_notification_routes. Omit to clear the fallback.")] int? fallback_route_id = null)
+        [Description("The route_id of the fallback route, from get_notification_routes. Omit to clear the fallback.")] int? fallback_route_id = null,
+        DarlingMcpServedPolicy? served = null,
+        CancellationToken cancellationToken = default)
     {
         try
         {
@@ -839,6 +863,14 @@ public sealed partial class DarlingMcpAlertTools
             if (existing is null)
             {
                 return Outcome("not_found", $"No notification route with route_id {route_id}.");
+            }
+
+            /* #6542 part 2: an operator-class token sets an agent route's fallback through update_notification_route's store function. */
+            if (existing.AgentLevel is >= 1 && served?.Policy.OperatorActor is { } operatorActor)
+            {
+                return await UpdateNotificationRouteAsync(postgres, route_id, null, null, null, null, null, null,
+                    fallback_route_id, fallback_route_id is null ? true : (bool?)null, RouteDestinationRequest.None, DarlingPasswordKey.Current, null,
+                    cancellationToken, null, operatorActor);
             }
 
             if (AgentRouteRefusal(existing, "set_notification_route_fallback") is { } agentRefusal)
@@ -853,12 +885,24 @@ public sealed partial class DarlingMcpAlertTools
 
             if (existing.FallbackRouteId == fallback_route_id)
             {
-                return JsonSerializer.Serialize(new { status = "unchanged", route = RoutePayload(existing) }, McpHelpers.JsonOptions);
+                return JsonSerializer.Serialize(new
+                {
+                    status = "unchanged",
+                    route = RoutePayload(existing),
+                    previous = new { fallback_route_id = existing.FallbackRouteId },
+                    undo = FallbackUndo(route_id, existing.FallbackRouteId),
+                }, McpHelpers.JsonOptions);
             }
 
             await store.SetFallbackAsync(route_id, fallback_route_id);
             var stored = (await store.LoadSummariesAsync()).FirstOrDefault(r => r.RouteId == route_id);
-            return JsonSerializer.Serialize(new { status = "updated", route = stored is null ? null : RoutePayload(stored) }, McpHelpers.JsonOptions);
+            return JsonSerializer.Serialize(new
+            {
+                status = "updated",
+                route = stored is null ? null : RoutePayload(stored),
+                previous = new { fallback_route_id = existing.FallbackRouteId },
+                undo = FallbackUndo(route_id, existing.FallbackRouteId),
+            }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
         {
@@ -869,7 +913,7 @@ public sealed partial class DarlingMcpAlertTools
     [McpServerTool(Name = "delete_notification_route"), Description(
         "Deletes a notification route by its route_id (from get_notification_routes). Permanent: the alerts it " +
         "matched fall to the next level (a family route, then the parent channels) on the next firing. Returns " +
-        "{status:\"deleted\", route_id}, {status:\"refused\"} for an agent route or a route with an Off agent setting (deleted in the Viewer or on the web dashboard), or {status:\"not_found\"}. Prefer set_notification_route_enabled for a " +
+        "{status:\"deleted\", route_id, previous (the route as it was), undo (the create_notification_route call that makes it again, under a new route_id; sealed webhook URLs and keys are not in it)}, {status:\"refused\"} for an agent route or a route with an Off agent setting (deleted in the Viewer or on the web dashboard), or {status:\"not_found\"}. Prefer set_notification_route_enabled for a " +
         "temporary change — a deleted route's destinations are gone and are secrets that cannot be read back, so a new route " +
         "(create_notification_route, or the Viewer's Settings window) needs them typed again. The running service stops honoring the route on its next collection sweep.")]
     public static async Task<string> DeleteNotificationRoute(
@@ -893,12 +937,58 @@ public sealed partial class DarlingMcpAlertTools
             var deleted = await store.DeleteAsync(route_id);
             return deleted == 0
                 ? await RefusedOrMissingAsync(store, route_id, "delete_notification_route", true)
-                : JsonSerializer.Serialize(new { status = "deleted", route_id }, McpHelpers.JsonOptions);
+                : JsonSerializer.Serialize(new
+                {
+                    status = "deleted",
+                    route_id,
+                    previous = existing is null ? null : RouteWritePayload(existing),
+                    undo = existing is null ? null : RouteRecreateUndo(existing),
+                }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
         {
             return McpHelpers.FormatError("delete_notification_route", ex);
         }
+    }
+
+    /// <summary>
+    /// The undo of delete_notification_route (#6403): the create_notification_route call carrying the deleted route's match, scope,
+    /// enabled flag, resolution override, fallback and recipients. A webhook URL or key is sealed and was never readable, so it is not
+    /// in the arguments; the answer says so and the caller passes them again. The route comes back under a new route_id.
+    /// </summary>
+    private static object RouteRecreateUndo(PgNotificationRouteStore.RouteSummary route)
+    {
+        var args = new Dictionary<string, object?>
+        {
+            ["metric_match"] = route.MetricMatch,
+            ["enabled"] = route.Enabled,
+            ["send_resolutions"] = route.SendResolutions switch { true => "always", false => "never", _ => "inherit" },
+        };
+        if (route.ScopeServerId.HasValue)
+        {
+            args["scope_server_id"] = route.ScopeServerId.Value;
+        }
+        else if (route.ScopeTagId.HasValue)
+        {
+            args["scope_tag_id"] = route.ScopeTagId.Value;
+        }
+
+        if (route.FallbackRouteId.HasValue)
+        {
+            args["fallback_route_id"] = route.FallbackRouteId.Value;
+        }
+
+        if (!string.IsNullOrWhiteSpace(route.EmailRecipients))
+        {
+            args["email_recipients"] = route.EmailRecipients;
+        }
+
+        return new
+        {
+            tool = "create_notification_route",
+            arguments = args,
+            destinations = "The route comes back with a new route_id. A webhook URL or key is sealed and never shown, so it is not in the arguments: pass each one again in its own field.",
+        };
     }
 
     /// <summary>The ONE Darling route projection (#5750): <c>get_notification_routes</c> lists it and
@@ -966,9 +1056,14 @@ public sealed partial class DarlingMcpAlertTools
     /// Viewer's Settings window or the web dashboard's admin notification routes page. Null for any other route,
     /// including agent_level 0: that is the route's explicit Off (null inherits, 0 is off, 1 investigates), so it opens
     /// no investigation. It can be turned on over MCP; turning it off or deleting it is <see cref="OffRouteRefusal"/>'s (#6281).
+    /// <para>#6542 part 2 (MCP is full admin): an operator-class caller (<paramref name="operatorActor"/>: a named operator token, or the legacy token
+    /// with writes) passes, so update_notification_route changes every field of an agent route: match, scope, enabled flag, send_resolutions,
+    /// fallback, destinations and agent fields. The store functions take the same actor and refuse any other. set_notification_route_enabled and
+    /// set_notification_route_fallback hand an operator's change to an agent route to update_notification_route. delete_notification_route
+    /// still refuses an agent route for every caller.</para>
     /// </summary>
-    internal static string? AgentRouteRefusal(PgNotificationRouteStore.RouteSummary route, string tool) =>
-        route.AgentLevel is null or < 1
+    internal static string? AgentRouteRefusal(PgNotificationRouteStore.RouteSummary route, string tool, string? operatorActor = null) =>
+        route.AgentLevel is null or < 1 || operatorActor is not null
             ? null
             : Outcome("refused",
                 $"Route {route.RouteId} is an agent route (agent_level {route.AgentLevel}): {tool} does not change it over MCP. " +
@@ -1150,7 +1245,7 @@ public sealed partial class DarlingMcpAlertTools
         "the whole mount point, any case, a trailing \\ or / on either side ignored, never a prefix match. Excluded volumes are dropped before " +
         "the breach test, so the worst volume, the severity and the card come from the volumes that remain, and a server whose only low volumes " +
         "are excluded resolves. Pass the FULL list each time; an EMPTY array clears it. " +
-        "Returns {status:\"updated\", updated_fields:[...], warnings:[...], settings:{...}} with the full new settings (warnings is " +
+        "Returns {status:\"updated\", updated_fields:[...] (the delivery cooldown is named delivery.cooldown_minutes, as in the call and get_alert_settings), warnings:[...], settings:{...}, previous:{...}, undo} with the full new settings (previous holds the sent fields as they were, in the same nested shape, and undo is the update_alert_settings call that sets them back; an analysis.uncorroborated_route the file or the default was deciding comes back as null, which clears the store column again; warnings is " +
         "empty unless a stored-but-unconsulted field was sent, or a round-trip moved the route knob's source from the file to the store), or " +
         "{status:\"unavailable\"} when the settings row has not been seeded yet.")]
     public static async Task<string> UpdateAlertSettings(
@@ -1204,6 +1299,30 @@ public sealed partial class DarlingMcpAlertTools
                bearer secrets, to maintain a value with no reader. */
             await using var connection = await postgres.OpenConnectionAsync();
             await using var transaction = await connection.BeginTransactionAsync();
+
+            /* #6403: the settings as they stand before the write, read INSIDE this transaction after the rows it updates are locked
+               (fixed table order, the same as the writes below), so `previous` is exactly what the write replaced: a concurrent
+               update_alert_settings waits on the lock rather than landing between this read and the UPDATE. A read in its own
+               transaction before this one would not hold that. */
+            foreach (var table in WritableTables)
+            {
+                if (!updates.Any(u => string.Equals(u.Table, table, StringComparison.Ordinal)))
+                {
+                    continue;
+                }
+
+                var lockSql = $"SELECT id FROM {table} WHERE id = 1 FOR UPDATE";
+                await using var lockCommand = new NpgsqlCommand(lockSql, connection) { Transaction = transaction };
+                lockCommand.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                await lockCommand.ExecuteScalarAsync();
+            }
+
+            var (settingsBefore, cooldownBefore) = await DarlingAlertReader.GetAlertConfigurationAsync(connection, transaction);
+            var previous = settingsBefore is null || cooldownBefore is null
+                ? new JsonObject()
+                : AlertSettingsPreviousFields(
+                    JsonSerializer.SerializeToNode(BuildAlertSettingsPayload(settingsBefore, cooldownBefore), McpHelpers.JsonOptions),
+                    updates);
 
             foreach (var table in WritableTables)
             {
@@ -1297,13 +1416,18 @@ public sealed partial class DarlingMcpAlertTools
                 /* Bare column names, unqualified, even though two tables are now in play: this array is a
                    consumer API and qualifying the existing entries would redefine every one of them. No
                    writable column name appears on both tables, so a bare name is still unambiguous --
-                   asserted, not assumed, by WritableColumnNames_DoNotCollideAcrossTheTwoTables. */
-                updated_fields = updates.Select(u => u.Column).ToArray(),
+                   asserted, not assumed, by WritableColumnNames_DoNotCollideAcrossTheTwoTables. The one
+                   exception is the cooldown, reported as delivery.cooldown_minutes (#6455): that is the name
+                   DeliveryCooldownColumn's doc and Darling/README.md already gave it, so the code was the part
+                   that was wrong. */
+                updated_fields = updates.Select(u => UpdatedFieldName(u.Column)).ToArray(),
                 /* #3653: always present, usually empty — a caller branching on it should not have to probe
                    for the key. Non-empty only when a field was written that nothing consults (today:
                    poison_wait.threshold_ms); the field IS in updated_fields, because it was updated. */
                 warnings = warnings.ToArray(),
-                settings = reread is null || rereadCooldown is null ? null : BuildAlertSettingsPayload(reread, rereadCooldown)
+                settings = reread is null || rereadCooldown is null ? null : BuildAlertSettingsPayload(reread, rereadCooldown),
+                previous,
+                undo = UndoCall("update_alert_settings", new { settings_json = previous.ToJsonString() }),
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
@@ -1325,7 +1449,7 @@ public sealed partial class DarlingMcpAlertTools
         "built-in alert or another source's alert, and a rule without it still mutes an external alert whose other " +
         "fields match; a name that is not a valid source name is refused. starts_at is an optional ISO-8601 UTC timestamp before which the rule is stored but mutes nothing (a window set ahead of planned work; it must be before expires_at, and for a window with no other scope use set_quiet_window); expires_at is an optional ISO-8601 UTC timestamp after " +
         "which the rule stops applying; omit it for a permanent rule. Returns the stored rule, including its " +
-        "generated id (for delete_mute_rule). Repeating a call is safe: when an enabled, unexpired rule already " +
+        "generated id (for delete_mute_rule), with previous null and undo (the delete_mute_rule call that removes it). Repeating a call is safe: when an enabled, unexpired rule already " +
         "holds the same seven scope and pattern fields, the same external_source and the same expires_at, nothing is created and the answer is " +
         "status already_exists with that rule's id (a disabled or expired rule does not count; a different " +
         "expires_at is a different rule). The running service applies the rule on its next collection " +
@@ -1496,7 +1620,13 @@ public sealed partial class DarlingMcpAlertTools
                 return AlreadyExists(existing);
             }
 
-            return JsonSerializer.Serialize(new { status = "created", mute_rule = BuildMuteRulePayload(rule) }, McpHelpers.JsonOptions);
+            return JsonSerializer.Serialize(new
+            {
+                status = "created",
+                mute_rule = BuildMuteRulePayload(rule),
+                previous = (object?)null,
+                undo = UndoCall("delete_mute_rule", new { rule_id = rule.Id }),
+            }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
         {
@@ -1612,7 +1742,7 @@ public sealed partial class DarlingMcpAlertTools
 
     [McpServerTool(Name = "delete_mute_rule"), Description(
         "Agent arm: needs agent_action, request's server only. Deletes an alert mute rule by its id (from get_mute_rules or create_mute_rule). Returns " +
-        "{status:\"deleted\", rule_id} on success, or {status:\"not_found\"} when no rule has that id. Permanent. " +
+        "{status:\"deleted\", rule_id, previous {mute_rule}, undo} on success (undo is the create_mute_rule call carrying the deleted rule's fields; the re-created rule is a NEW rule with a new id and creation date, and is enabled), or {status:\"not_found\"} when no rule has that id. " +
         "The running service stops honoring the rule on its next collection sweep, when the delete's " +
         "config_version bump makes it reload its mute cache.")]
     public static Task<string> DeleteMuteRule(
@@ -1647,12 +1777,75 @@ public sealed partial class DarlingMcpAlertTools
                 return Outcome("not_found", $"No mute rule with id '{ruleId}'.");
             }
 
+            var deleted = rules.First(r => string.Equals(r.Id, ruleId, StringComparison.Ordinal));
             await store.DeleteAsync(ruleId);
-            return JsonSerializer.Serialize(new { status = "deleted", rule_id = ruleId }, McpHelpers.JsonOptions);
+            return JsonSerializer.Serialize(new
+            {
+                status = "deleted",
+                rule_id = ruleId,
+                previous = new { mute_rule = BuildMuteRulePayload(deleted) },
+                undo = UndoCall("create_mute_rule", MuteRuleCreateArguments(deleted)),
+            }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
         {
             return McpHelpers.FormatError("delete_mute_rule", ex);
+        }
+    }
+
+    [McpServerTool(Name = "purge_expired_mute_rules"), Description(
+        "Deletes every EXPIRED alert mute rule (an end time at or before now), the Viewer's Purge Expired button. Expired rules already suppress nothing, so this only tidies the list; active, upcoming, disabled-but-unexpired and no-end-time rules are left alone. Permanent. Returns each rule it deleted as it was, a count, and undo null.<<GUIDE>>" +
+        "Takes no arguments. Expired means the rule's expires_at is at or before now, the same test the Viewer's Purge Expired uses; " +
+        "every other rule is untouched. Answer: {status:\"purged\", count, previous:[each deleted rule as get_mute_rules shows it], " +
+        "undo:null, undo_note}, or {status:\"none_expired\", count:0} when nothing had expired. There is no undo because an expired rule " +
+        "had no effect; call create_mute_rule with a fresh expiry if one is wanted again. Needs mcp.allowWrites; an agent " +
+        "investigation arm can never call it.")]
+    public static async Task<string> PurgeExpiredMuteRules(
+        NpgsqlDataSource postgres,
+        ILogger? logger = null)
+    {
+        var answer = await PurgeExpiredMuteRulesCore(new PgMuteRuleStore(postgres), DateTime.UtcNow);
+        if (logger is not null && logger.IsEnabled(LogLevel.Information))
+        {
+            logger.LogInformation("MCP write purge_expired_mute_rules: {Answer}", answer.Length > 200 ? answer[..200] : answer);
+        }
+
+        return answer;
+    }
+
+    /// <summary>
+    /// purge_expired_mute_rules' body over the <see cref="IMuteRuleStore"/> seam (#6399). The rules to delete come from
+    /// <see cref="MuteRulePurge.SelectExpired"/> and the delete is the store's own (<see cref="MuteRulePurge.DeleteByIdSql"/>), the
+    /// same pair the Viewer's Purge Expired runs, so this is not a second copy of either.
+    /// </summary>
+    internal static async Task<string> PurgeExpiredMuteRulesCore(IMuteRuleStore store, DateTime nowUtc)
+    {
+        try
+        {
+            var expired = MuteRulePurge.SelectExpired(await store.LoadAllAsync(), nowUtc);
+            if (expired.Count == 0)
+            {
+                return JsonSerializer.Serialize(new
+                {
+                    status = "none_expired",
+                    count = 0,
+                    message = "No mute rule has expired, so nothing was deleted.",
+                }, McpHelpers.JsonOptions);
+            }
+
+            await store.DeleteExpiredAsync(expired.Select(r => r.Id).ToList());
+            return JsonSerializer.Serialize(new
+            {
+                status = "purged",
+                count = expired.Count,
+                previous = expired.Select(r => BuildMuteRuleWithState(r, nowUtc)).ToList(),
+                undo = (object?)null,
+                undo_note = "None needed: an expired rule had no effect, so deleting it changes nothing the service delivers; create_mute_rule makes a new rule with a fresh expiry if one is wanted again.",
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return McpHelpers.FormatError("purge_expired_mute_rules", ex);
         }
     }
 
@@ -1670,7 +1863,7 @@ public sealed partial class DarlingMcpAlertTools
         "actually has. And between the delete taking effect and the create taking effect, every alert the " +
         "rule was suppressing is delivered. NEITHER direction changes created_at_utc. Returns " +
         "{status:\"updated\", mute_rule:{...}} with the rule AS STORED, {status:\"unchanged\", mute_rule:{...}} " +
-        "when the rule already holds that value (so a retry is safe and costs no write), or " +
+        "when the rule already holds that value (so a retry is safe and costs no write); both carry previous {enabled} and undo (the call that sets the previous value back), or " +
         "{status:\"not_found\"} when no rule has that id. The running service applies the change on its next " +
         "collection sweep, when the write's config_version bump makes it reload its mute cache — so a " +
         "matching alert already mid-flight can still be delivered once after a disable, and one can still be " +
@@ -1728,7 +1921,13 @@ public sealed partial class DarlingMcpAlertTools
             if (existing.Enabled == enabled)
             {
                 return JsonSerializer.Serialize(
-                    new { status = "unchanged", mute_rule = BuildMuteRulePayload(existing) },
+                    new
+                    {
+                        status = "unchanged",
+                        mute_rule = BuildMuteRulePayload(existing),
+                        previous = new { enabled = existing.Enabled },
+                        undo = UndoCall("set_mute_rule_enabled", new { rule_id = ruleId, enabled = existing.Enabled }),
+                    },
                     McpHelpers.JsonOptions);
             }
 
@@ -1745,7 +1944,13 @@ public sealed partial class DarlingMcpAlertTools
             }
 
             return JsonSerializer.Serialize(
-                new { status = "updated", mute_rule = BuildMuteRulePayload(stored) },
+                new
+                {
+                    status = "updated",
+                    mute_rule = BuildMuteRulePayload(stored),
+                    previous = new { enabled = existing.Enabled },
+                    undo = UndoCall("set_mute_rule_enabled", new { rule_id = ruleId, enabled = existing.Enabled }),
+                },
                 McpHelpers.JsonOptions);
         }
         catch (Exception ex)
@@ -1786,7 +1991,7 @@ public sealed partial class DarlingMcpAlertTools
         "rule stays in force while matching nothing. Returns {status:\"updated\", updated_fields:[...], " +
         "mute_rule:{...}} with the rule AS STORED (re-read after the write), {status:\"unchanged\", " +
         "mute_rule:{...}} when every provided field already holds that value (so a retry is safe and costs no " +
-        "write), {status:\"not_found\"} when no rule has that id, or {status:\"invalid\", ...} on a bad field " +
+        "write); both carry previous (the sent fields as they were; an empty one is null) and undo (the update_mute_rule call that sets them back), {status:\"not_found\"} when no rule has that id, or {status:\"invalid\", ...} on a bad field " +
         "or value with NOTHING written. The running service applies the edit on its next collection sweep, when " +
         "the write's config_version bump makes it reload its mute cache.")]
     public static Task<string> UpdateMuteRule(
@@ -1897,7 +2102,13 @@ public sealed partial class DarlingMcpAlertTools
             if (SameEditableFields(existing, merged))
             {
                 return JsonSerializer.Serialize(
-                    new { status = "unchanged", mute_rule = BuildMuteRulePayload(existing) },
+                    new
+                    {
+                        status = "unchanged",
+                        mute_rule = BuildMuteRulePayload(existing),
+                        previous = MuteRulePreviousFields(existing, changes),
+                        undo = MuteRuleUpdateUndo(existing, changes),
+                    },
                     McpHelpers.JsonOptions);
             }
 
@@ -1920,7 +2131,9 @@ public sealed partial class DarlingMcpAlertTools
                    expires_at_utc) — what was SENT, not what differed: the write restates the whole editable
                    row either way, and 'unchanged' above is the no-difference answer. */
                 updated_fields = changes.Select(c => c.Field).ToArray(),
-                mute_rule = BuildMuteRulePayload(stored)
+                mute_rule = BuildMuteRulePayload(stored),
+                previous = MuteRulePreviousFields(existing, changes),
+                undo = MuteRuleUpdateUndo(existing, changes),
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
@@ -1933,6 +2146,106 @@ public sealed partial class DarlingMcpAlertTools
     /// (the expires_at alias normalizes to expires_at_utc, which is also what makes sending both spellings
     /// detectable as a duplicate) and the applier that writes it onto the merged rule.</summary>
     private sealed record MuteRuleFieldChange(string Field, Action<MuteRule> Apply);
+
+    /// <summary>
+    /// The fields an update_alert_settings call sent, as the settings held them BEFORE it (#6403), in the nested shape
+    /// get_alert_settings returns, so the object is the whole of what the undo sends. A field with no place in the read shape is left
+    /// out. The uncorroborated route reads as the store's own value only when the store decided it: when the file or the default
+    /// did, the previous is null, which clears the store column again so the file governs as before.
+    /// </summary>
+    private static JsonObject AlertSettingsPreviousFields(JsonNode? beforePayload, IEnumerable<UpdateTarget> updates)
+    {
+        var previous = new JsonObject();
+        if (beforePayload is not JsonObject root)
+        {
+            return previous;
+        }
+
+        foreach (var update in updates)
+        {
+            var path = (update.Field == DeliveryCooldownColumn ? "delivery.cooldown_minutes" : update.Field).Split('.');
+            JsonNode? value = root;
+            foreach (var segment in path)
+            {
+                if (value is not JsonObject obj || !obj.TryGetPropertyValue(segment, out value))
+                {
+                    value = null;
+                    goto next;
+                }
+            }
+
+            if (update.Field == "analysis.uncorroborated_route"
+                && !string.Equals((root["analysis"] as JsonObject)?["uncorroborated_route_source"]?.GetValue<string>(), DarlingAlertSettings.RouteSourceStore, StringComparison.Ordinal))
+            {
+                value = null;
+            }
+
+            var target = previous;
+            for (var i = 0; i < path.Length - 1; i++)
+            {
+                if (target[path[i]] is not JsonObject child)
+                {
+                    child = new JsonObject();
+                    target[path[i]] = child;
+                }
+
+                target = child;
+            }
+
+            target[path[^1]] = value?.DeepClone();
+            next:;
+        }
+
+        return previous;
+    }
+
+    /// <summary>The fields an update_mute_rule call took charge of, as the rule held them BEFORE it (#6403): the wire spelling of
+    /// get_mute_rules, a field that was empty as an explicit JSON null (which clears it again), so the object is the whole of what
+    /// the undo has to send.</summary>
+    private static JsonObject MuteRulePreviousFields(MuteRule before, IEnumerable<MuteRuleFieldChange> changes)
+    {
+        var image = (JsonObject)JsonSerializer.SerializeToNode(BuildMuteRulePayload(before), McpHelpers.JsonOptions)!;
+        var previous = new JsonObject();
+        foreach (var change in changes)
+        {
+            previous[change.Field] = image[change.Field]?.DeepClone();
+        }
+
+        return previous;
+    }
+
+    /// <summary>The undo of update_mute_rule: the same tool with the previous values of the fields it changed.</summary>
+    private static object MuteRuleUpdateUndo(MuteRule before, IEnumerable<MuteRuleFieldChange> changes) =>
+        UndoCall("update_mute_rule", new { rule_id = before.Id, changes_json = MuteRulePreviousFields(before, changes).ToJsonString() });
+
+    /// <summary>The arguments that create a rule like <paramref name="rule"/> (#6403): the undo of delete_mute_rule. Empty fields are
+    /// left out, since an omitted field is what create reads as "any". The re-created rule is a new rule (a new id and creation date,
+    /// and enabled), which the tool description says.</summary>
+    private static Dictionary<string, object> MuteRuleCreateArguments(MuteRule rule)
+    {
+        var arguments = new Dictionary<string, object>();
+        void Add(string name, object? value)
+        {
+            if (value is not null)
+            {
+                arguments[name] = value;
+            }
+        }
+
+        Add("server_name", rule.ServerName);
+        Add("server_id", rule.ServerId);
+        Add("metric_name", rule.MetricName);
+        Add("database_pattern", rule.DatabasePattern);
+        Add("query_text_pattern", rule.QueryTextPattern);
+        Add("wait_type_pattern", rule.WaitTypePattern);
+        Add("job_name_pattern", rule.JobNamePattern);
+        Add("client_app_pattern", rule.ClientAppPattern);
+        Add("external_source", rule.ExternalSource);
+        Add("reason", rule.Reason);
+        Add("starts_at", rule.StartsAtUtc?.ToString("o"));
+        Add("expires_at", rule.ExpiresAtUtc?.ToString("o"));
+        return arguments;
+    }
 
     /// <summary>
     /// The mute rule an <c>update_mute_rule</c> body would leave stored: <paramref name="before"/> cloned with the body's
@@ -2274,6 +2587,26 @@ public sealed partial class DarlingMcpAlertTools
     /// the whole point of keeping it: <c>delivery.cooldown_minutes</c> is what the tool reports, and this is
     /// what every existing config file, Settings window and hand-written UPDATE already calls it.</summary>
     internal const string DeliveryCooldownColumn = "email_cooldown_minutes";
+
+    /// <summary>
+    /// The undo a write answer carries (#6403): the tool and arguments that put the change back, the same <c>{tool, arguments}</c>
+    /// shape the collection-state, schedule and plan tools answer with.
+    /// </summary>
+    internal static object UndoCall(string tool, object arguments) => new { tool, arguments };
+
+    /// <summary>The undo of set_notification_route_fallback: the same tool with the previous fallback, or with none when there was none (omitting it clears).</summary>
+    private static object FallbackUndo(int routeId, int? previousFallback) =>
+        previousFallback is { } id
+            ? UndoCall("set_notification_route_fallback", new { route_id = routeId, fallback_route_id = id })
+            : UndoCall("set_notification_route_fallback", new { route_id = routeId });
+
+    /// <summary>
+    /// The name update_alert_settings reports a written column under (#6455). The delivery cooldown is stored as
+    /// <c>email_cooldown_minutes</c> but called and read as <c>delivery.cooldown_minutes</c>, so the answer uses that name, whichever
+    /// of the two the caller sent. Every other column keeps its bare name.
+    /// </summary>
+    internal static string UpdatedFieldName(string column) =>
+        column == DeliveryCooldownColumn ? "delivery.cooldown_minutes" : column;
 
     private static string? Trimmed(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 

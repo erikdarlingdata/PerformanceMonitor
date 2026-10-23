@@ -40,11 +40,11 @@ Not sure which one? Start with Lite. It is one download, nothing is installed on
 
 Data starts to flow within 1 to 5 minutes. The monitoring login needs `VIEW SERVER STATE` ([Permissions](docs/permissions.md)).
 
-Before you upgrade an older install with `Setup.exe`, read the warning in the [Lite guide](docs/lite-guide.md). On versions older than the data-relocation fix, `Setup.exe` deletes the data in the install directory. The Lite guide also covers the portable ZIP, collectors, storage, and configuration.
+Before you upgrade an older install with `Setup.exe`, read the warning in the [Lite guide](docs/lite-guide.md). On versions older than 3.4.0, `Setup.exe` deletes the data in the install directory (see [Upgrading an install older than 3.4.0](Lite/README.md#upgrading-an-install-older-than-340)). The Lite guide also covers the portable ZIP, collectors, storage, and configuration.
 
 ## Quick start: Darling
 
-1. Download `PerformanceMonitorDarling-<version>.zip` from the [latest release](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest). The machine needs the .NET Runtime 10 and the ASP.NET Core Runtime 10. The ASP.NET Core Hosting Bundle 10 installs both.
+1. Download `PerformanceMonitorDarling-<version>.zip` from the [latest release](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest). It carries its own .NET runtime, so there is nothing to install first.
 2. Copy `darling.sample.json` to `darling.json` and add your servers.
 3. Run the service, in a console for a trial or as a Windows service.
 4. Start the **Darling Viewer** from the `viewer\` folder in the same zip.

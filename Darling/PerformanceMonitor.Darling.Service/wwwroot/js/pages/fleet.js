@@ -270,7 +270,7 @@ export async function renderFleet(main) {
 
   if (!d.total_servers) {
     nodes.push(
-      emptyStrip("No servers are enabled yet. Add servers to darling.json and cards appear here as collection begins.")
+      emptyStrip("No servers are enabled yet. Add one in the desktop Viewer (Add Server) or with --add-server, and cards appear here as collection begins.")
     );
     mount(main, nodes);
     return;

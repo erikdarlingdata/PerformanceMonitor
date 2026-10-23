@@ -63,8 +63,10 @@ public sealed class QueryStoreComposeStampWriterGuardLiveTests
             await using var builder = await source.OpenConnectionAsync(ct);
             await using var open = await writer.BeginTransactionAsync(ct);
             await ExecAsync(writer, "CREATE TEMP TABLE scratch_5582 (i int); INSERT INTO scratch_5582 VALUES (1); UPDATE collect.servers SET is_enabled = is_enabled WHERE server_id = 1", ct);
-            /* It holds an xid, the whole of what the round-1 guard asked for. */
-            Assert.Equal(1, await CountAsync(connection, "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND backend_xid IS NOT NULL AND pid <> pg_backend_pid()", ct));
+            /* It holds an xid, the whole of what the round-1 guard asked for. Counted for this writer's own backend: a count of every
+               backend in the database also picks up a TimescaleDB job worker or autovacuum that holds an xid at that moment, and CI
+               read 2 here. */
+            Assert.Equal(1, await CountAsync(connection, $"SELECT count(*) FROM pg_stat_activity WHERE pid = {writer.ProcessID} AND backend_xid IS NOT NULL", ct));
 
             Assert.NotNull(await QueryStoreComposeStamp.BuildHourAsync(builder, hour, DateTime.UtcNow, ct));
             Assert.Equal(1, await HoursBuiltAsync(connection, hour, ct));

@@ -77,6 +77,9 @@ public sealed record InvestigationBriefFinding(
     IReadOnlyList<InvestigationNextCall> NextTools);
 
 /// <summary>An earlier report for the same server and family: what an agent said, not reviewed by a person.</summary>
+/// <param name="SameRootCause">#6565: the earlier request was reported within <see cref="InvestigationBriefComposer.SameRootCauseHours"/> hours
+/// and its analysis story has the same root fact (key and database) as this request's story, whatever its story hash. The reader puts
+/// these first; the brief marks them and tells the agent to read the verdict before it starts. False for every other earlier report.</param>
 public sealed record InvestigationEarlierReport(
     Guid RequestId,
     DateTime SubmittedAtUtc,
@@ -84,7 +87,8 @@ public sealed record InvestigationEarlierReport(
     string Verdict,
     string RootCause,
     bool RootCauseFound,
-    string? Summary);
+    string? Summary,
+    bool SameRootCause = false);
 
 /// <summary>A recent change on the monitoring side: a mute rule, an analysis mute, a plan-force action.</summary>
 /// <param name="Pattern">A mute rule's query text pattern, masked as statement text; null for other kinds.</param>
@@ -136,6 +140,9 @@ public sealed record InvestigationAlertRecurrence(
 /// <see cref="PriorLinks"/> and <see cref="RequestUrl"/> (#5914) are Darling's: Lite's reader supplies neither, so a Lite
 /// brief carries neither key.
 /// </summary>
+/// <para>#6554: <see cref="QueryStoreNotCollected"/> is the one-line reason this server's Query Store reads will be empty (a readable
+/// secondary with <c>query_store_replica</c> off); set only on a Change Watch request, whose brief says so. Null on every other request,
+/// so no other brief moves a byte.</para>
 public sealed record InvestigationBriefSources(
     InvestigationBriefRequest Request,
     IReadOnlyList<InvestigationBriefAlert> Alerts,
@@ -149,7 +156,8 @@ public sealed record InvestigationBriefSources(
     bool Practice = false,
     IReadOnlyList<InvestigationAlertRecurrence>? Recurrence = null,
     IReadOnlyList<InvestigationBriefEvidence>? Evidence = null,
-    IReadOnlyList<InvestigationKnownPatternMatch>? KnownPatterns = null);
+    IReadOnlyList<InvestigationKnownPatternMatch>? KnownPatterns = null,
+    string? QueryStoreNotCollected = null);
 
 /// <summary>
 /// #6334: one operator-written known-pattern entry that describes one of the request's linked metrics at the request's first alert
