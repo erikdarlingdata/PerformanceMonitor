@@ -395,7 +395,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// and the MCP host's analysis fill — so compare_analysis' banding here reads a series the store was already asked
     /// for this analysis hour from memory. Null keeps the analysis service's baselines private to it.</para>
     /// </summary>
-    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null, PostgresConfig? postgresConfig = null, ReadLatencyAccumulator? readLatency = null, PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null, MonitoredServerRegistryState? registryState = null, SlowReadLog? slowReads = null, ReadAdmission? readAdmission = null, StoreOwnerSource? ownerSource = null, McpDataDetail dataDetail = McpDataDetail.MetadataOnly, IPseudonymKeySource? pseudonymKeys = null, InvestigationExportGate? investigationExportGate = null, IPasswordKeyRing? passwordKeys = null)
+    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null, PostgresConfig? postgresConfig = null, ReadLatencyAccumulator? readLatency = null, PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null, MonitoredServerRegistryState? registryState = null, SlowReadLog? slowReads = null, ReadAdmission? readAdmission = null, StoreOwnerSource? ownerSource = null, McpDataDetail dataDetail = McpDataDetail.MetadataOnly, IPseudonymKeySource? pseudonymKeys = null, InvestigationExportGate? investigationExportGate = null, IPasswordKeyRing? passwordKeys = null, WebAdminArm? adminArm = null)
     {
         /* #4442 scope 2, #4782: the read-latency seat THIS call's routes record into -- the accumulator and
            logger this call was given, held in a per-call object that the two record sites close over: the
@@ -704,30 +704,30 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             });
         }
 
-        MapCustomViews(app, postgres, logger, readLatencyRecorder, readAdmission, managedStore);
+        MapCustomViews(app, postgres, logger, readLatencyRecorder, readAdmission, managedStore, adminArm);
         MapCustomAlerts(app, postgres, logger, readAdmission, readLatencyRecorder);
         MapMuteRules(app, postgres, logger);
         DarlingKnownPatternRoutes.Map(app, postgres, logger);
-        MapInvestigationNotes(app, new InvestigationRequestStore(postgres, McpCommandDeadlines.ReadSeconds), logger, managedStore);
-        MapThresholdOverrides(app, postgres, logger, managedStore);
-        MapAgentSetup(app, postgres, logger, passwordKeys, managedStore);
-        MapAgentChanges(app, new AgentChangeUndo(postgres, McpCommandDeadlines.ReadSeconds), logger, ownerSource, managedStore);
+        MapInvestigationNotes(app, postgres, new InvestigationRequestStore(postgres, McpCommandDeadlines.ReadSeconds), logger, managedStore, adminArm);
+        MapThresholdOverrides(app, postgres, logger, managedStore, adminArm);
+        MapAgentSetup(app, postgres, logger, passwordKeys, managedStore, adminArm);
+        MapAgentChanges(app, postgres, new AgentChangeUndo(postgres, McpCommandDeadlines.ReadSeconds), logger, ownerSource, managedStore, adminArm);
         MapServerTags(app, postgres, logger);
-        MapServerActions(app, postgres, new AgentChangeUndo(postgres, McpCommandDeadlines.ReadSeconds), logger, ownerSource, managedStore);
+        MapServerActions(app, postgres, new AgentChangeUndo(postgres, McpCommandDeadlines.ReadSeconds), logger, ownerSource, managedStore, adminArm);
         MapAdminServers(app, postgres);
         MapQueryTags(app, postgres, logger, readAdmission, readLatencyRecorder);
         MapCollectorRuns(app, new PostgresSnapshotNowStore(postgres), logger, async (name, ct) => { var (r, err) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, name, ct, NameClash.Refuse); return (r.ServerId, err); });
         MapActiveQueriesLive(app, new PostgresActiveQueriesLiveStore(postgres), logger, async (name, ct) => { var (r, err) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, name, ct, NameClash.Refuse); return (r.ServerId, err); }, managedStore, readAdmission: readAdmission, readLatencyRecorder: readLatencyRecorder);
         MapServers(app, postgres, logger);
         MapAlertHistoryDismiss(app, postgres, logger);
-        MapInvestigationFeedback(app, postgres, logger, managedStore);
+        MapInvestigationFeedback(app, postgres, logger, managedStore, adminArm);
         MapInvestigationExport(
             app, postgres, logger, dataDetail, pseudonymKeys, readAdmission, readLatencyRecorder,
             investigationExportGate ?? new InvestigationExportGate(InvestigationExportGate.FolderFor(
                 DarlingManagedPostgres.ResolveDataDirectory(postgresConfig ?? new PostgresConfig()))),
-            managedStore: managedStore);
+            managedStore: managedStore, adminArm: adminArm);
         MapInvestigationPractice(app, postgres, logger);
-        MapInvestigationPersonWrites(app, postgres, logger, managedStore);
+        MapInvestigationPersonWrites(app, postgres, logger, managedStore, adminArm);
         MapWebhookSigningStatus(app, collector);
 
         /* The fleet sweep feed (#3466 lane 3): dedicated read routes like /api/fleet, over the same
@@ -761,7 +761,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// duplicate-name conflict detection. Error bodies are always <c>{"error": "..."}</c>, matching the read surface.
     /// </summary>
     internal static void MapCustomViews(WebApplication app, NpgsqlDataSource postgres, ILogger logger, ReadLatencyRecorder readLatencyRecorder,
-        ReadAdmission? readAdmission, bool managedStore = false)
+        ReadAdmission? readAdmission, bool managedStore = false, WebAdminArm? adminArm = null)
     {
         var store = new CustomViewStore(postgres);
 
@@ -778,7 +778,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                existed). The page decides the Personal checkbox from it, and "My views" and read-only from each view's own `mine`. Neither the
                subject nor the key is returned: a name decides nothing, and a key is never shown. */
             var seat = DarlingWebSeat.FromContext(context);
-            return JsonNodeResult(new JsonObject { ["can_edit"] = seat.CanEdit, ["can_own"] = seat.OwnerKey is not null, ["signed_in_admin"] = DarlingWebSeat.IsSignedInAdmin(context), ["managed_store"] = managedStore });
+            return JsonNodeResult(new JsonObject { ["can_edit"] = seat.CanEdit, ["can_own"] = seat.OwnerKey is not null, ["signed_in_admin"] = DarlingWebSeat.IsSignedInAdmin(context), ["managed_store"] = managedStore, ["admin_writes_off"] = DarlingWebStoreWrites.AdminWritesOff(managedStore, adminArm) });
         });
 
         /* The read catalog: input truth (read names + their WIRE query keys) the composer binds params from. */
@@ -1277,8 +1277,15 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// for any other store failure. The decision is stamped as every web write is: the seat's <see cref="DarlingWebSeat.EditorPrincipal"/>
     /// (the signed-in subject, else <c>web</c>) shaped as <c>person:&lt;name&gt;</c>, as the Viewer stamps a decision. The list body goes through the statement sweep (#4348) like every other body that carries text an agent wrote.
     /// </summary>
-    private static void MapInvestigationNotes(WebApplication app, InvestigationRequestStore notes, ILogger logger, bool managedStore = false)
+    private static void MapInvestigationNotes(WebApplication app, NpgsqlDataSource postgres, InvestigationRequestStore notes, ILogger logger, bool managedStore = false,
+        WebAdminArm? adminArm = null)
     {
+        var adminWritesOff = DarlingWebStoreWrites.AdminWritesOff(managedStore, adminArm);
+
+        /* #6600: a decision is written as the login the seat's admin writes use; the pending list stays on the web's own pool. */
+        InvestigationRequestStore DecisionStore(HttpContext context) =>
+            adminArm is null ? notes : new InvestigationRequestStore(WebAdminArm.SourceFor(adminArm, context, postgres), McpCommandDeadlines.ReadSeconds);
+
         app.MapGet("/api/investigation-notes/pending", async (HttpContext context) =>
         {
             var stopwatch = Stopwatch.StartNew();
@@ -1317,7 +1324,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             try
             {
-                if (!await notes.ApproveNoteAsync(id, decidedBy, context.RequestAborted))
+                if (!await DecisionStore(context).ApproveNoteAsync(id, decidedBy, context.RequestAborted))
                 {
                     return ErrorResult("That note is not pending: it was already decided, or it is gone.", StatusCodes.Status404NotFound);
                 }
@@ -1327,7 +1334,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
             catch (Exception ex) when (IsInsufficientPrivilege(ex))
             {
-                return NoteDecisionRefusedResult(managedStore);
+                return NoteDecisionRefusedResult(managedStore, adminWritesOff);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -1357,7 +1364,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             try
             {
-                if (!await notes.RejectNoteAsync(id, decidedBy, context.RequestAborted))
+                if (!await DecisionStore(context).RejectNoteAsync(id, decidedBy, context.RequestAborted))
                 {
                     return ErrorResult("That note is not pending: it was already decided, or it is gone.", StatusCodes.Status404NotFound);
                 }
@@ -1367,7 +1374,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
             catch (Exception ex) when (IsInsufficientPrivilege(ex))
             {
-                return NoteDecisionRefusedResult(managedStore);
+                return NoteDecisionRefusedResult(managedStore, adminWritesOff);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -1385,15 +1392,17 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// (the <c>viewer</c> role of a managed or compose store), 400 for a refused key, value or server. Every body goes through the
     /// statement sweep (#4348): <c>set_by</c> on an agent's override is text an agent named.
     /// </summary>
-    private static void MapThresholdOverrides(WebApplication app, NpgsqlDataSource postgres, ILogger logger, bool managedStore = false)
+    private static void MapThresholdOverrides(WebApplication app, NpgsqlDataSource postgres, ILogger logger, bool managedStore = false, WebAdminArm? adminArm = null)
     {
+        var adminWritesOff = DarlingWebStoreWrites.AdminWritesOff(managedStore, adminArm);
+
         app.MapGet("/api/threshold-overrides", async (HttpContext context) =>
         {
             var stopwatch = Stopwatch.StartNew();
             try
             {
                 return DarlingWebStatementSweep.JsonText(
-                    await DarlingWebThresholdOverrides.ListBodyAsync(postgres, context.RequestAborted),
+                    await DarlingWebThresholdOverrides.ListBodyAsync(postgres, context.RequestAborted, WebAdminArm.SourceFor(adminArm, context, postgres)),
                     "/api/threshold-overrides", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -1429,7 +1438,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             try
             {
                 var (status, answer) = await DarlingWebThresholdOverrides.ChangeAsync(
-                    postgres, logger, body, DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted, managedStore);
+                    WebAdminArm.SourceFor(adminArm, context, postgres), logger, body, DarlingWebSeat.FromContext(context).EditorPrincipal,
+                    context.RequestAborted, managedStore, adminWritesOff);
                 return DarlingWebStatementSweep.JsonText(
                     answer, "/api/threshold-overrides", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, status);
             }
@@ -1450,15 +1460,18 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// 403 when the store refuses for privilege (SQLSTATE 42501: the <c>viewer</c> role of a managed or compose store), 404 for a route that is
     /// gone and 400 with the shared rule's sentence for a refused value. The work is <see cref="DarlingWebAgentSetup"/>'s.
     /// </summary>
-    private static void MapAgentSetup(WebApplication app, NpgsqlDataSource postgres, ILogger logger, IPasswordKeyRing? passwordKeys, bool managedStore = false)
+    private static void MapAgentSetup(WebApplication app, NpgsqlDataSource postgres, ILogger logger, IPasswordKeyRing? passwordKeys, bool managedStore = false,
+        WebAdminArm? adminArm = null)
     {
+        var adminWritesOff = DarlingWebStoreWrites.AdminWritesOff(managedStore, adminArm);
+
         app.MapGet("/api/agent-setup/access", async (HttpContext context) =>
         {
             var stopwatch = Stopwatch.StartNew();
             try
             {
                 return Results.Json(DarlingWebAgentSetup.ForSeat(
-                    await DarlingWebAgentSetup.AccessAsync(postgres, context.RequestAborted), DarlingWebSeat.IsSignedInAdmin(context)));
+                    await DarlingWebAgentSetup.AccessAsync(WebAdminArm.SourceFor(adminArm, context, postgres), context.RequestAborted), DarlingWebSeat.IsSignedInAdmin(context)));
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -1474,7 +1487,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             {
                 return DarlingWebStatementSweep.JsonText(
                     DarlingWebAgentSetup.ForSeat(
-                        await DarlingWebAgentSetup.ProfilesBodyAsync(postgres, context.RequestAborted), DarlingWebSeat.IsSignedInAdmin(context)),
+                        await DarlingWebAgentSetup.ProfilesBodyAsync(postgres, context.RequestAborted, WebAdminArm.SourceFor(adminArm, context, postgres)),
+                        DarlingWebSeat.IsSignedInAdmin(context)),
                     "/api/environment-profiles", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -1488,7 +1502,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         {
             var stopwatch = Stopwatch.StartNew();
             var run = await AgentSetupRunAsync(context, logger, "/api/environment-profiles",
-                (body, editor, ct) => DarlingWebAgentSetup.SaveProfileAsync(postgres, body, editor, ct, managedStore));
+                (body, editor, ct) => DarlingWebAgentSetup.SaveProfileAsync(WebAdminArm.SourceFor(adminArm, context, postgres), body, editor, ct, managedStore, adminWritesOff));
             return DarlingWebStatementSweep.JsonText(
                 run.Body, "/api/environment-profiles", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, run.Status);
         });
@@ -1497,7 +1511,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         {
             var stopwatch = Stopwatch.StartNew();
             var run = await AgentSetupRunAsync(context, logger, "/api/notification-routes",
-                (body, editor, ct) => DarlingWebAgentSetup.SaveRouteAsync(postgres, logger, null, body, editor, passwordKeys ?? DarlingPasswordKey.Current, ct, managedStore));
+                (body, editor, ct) => DarlingWebAgentSetup.SaveRouteAsync(WebAdminArm.SourceFor(adminArm, context, postgres), logger, null, body, editor, passwordKeys ?? DarlingPasswordKey.Current, ct, managedStore, adminWritesOff));
             return DarlingWebStatementSweep.JsonText(
                 run.Body, "/api/notification-routes", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, run.Status);
         });
@@ -1506,7 +1520,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         {
             var stopwatch = Stopwatch.StartNew();
             var run = await AgentSetupRunAsync(context, logger, "/api/notification-routes/{id}",
-                (body, editor, ct) => DarlingWebAgentSetup.SaveRouteAsync(postgres, logger, id, body, editor, passwordKeys ?? DarlingPasswordKey.Current, ct, managedStore));
+                (body, editor, ct) => DarlingWebAgentSetup.SaveRouteAsync(WebAdminArm.SourceFor(adminArm, context, postgres), logger, id, body, editor, passwordKeys ?? DarlingPasswordKey.Current, ct, managedStore, adminWritesOff));
             return DarlingWebStatementSweep.JsonText(
                 run.Body, "/api/notification-routes/{id}", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, run.Status);
         });
@@ -1532,7 +1546,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             try
             {
                 var (status, answer) = await DarlingWebAgentSetup.DeleteRouteAsync(
-                    postgres, logger, id, DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted, managedStore);
+                    WebAdminArm.SourceFor(adminArm, context, postgres), logger, id, DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted,
+                    managedStore, adminWritesOff);
                 return DarlingWebStatementSweep.JsonText(
                     answer, "/api/notification-routes/{id}", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, status);
             }
@@ -1599,8 +1614,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
     /// <summary>The 403 sentence a note decision answers when the store refuses the write (SQLSTATE 42501): the web host runs on
     /// whatever login <c>postgres.webConnectionString</c> names, and deciding a note is an <c>admin</c> role write (#5903).</summary>
-    internal static string NoteDecisionRefusedMessage(bool managedStore) =>
-        DarlingWebStoreWrites.Refused("decide notes", managedStore, "Decide them in the Viewer app");
+    internal static string NoteDecisionRefusedMessage(bool managedStore, bool adminWritesOff = false) =>
+        DarlingWebStoreWrites.Refused("decide notes", managedStore, "Decide them in the Viewer app", adminWritesOff: adminWritesOff);
 
     /// <summary>The sentence a person-made investigation change answers with 403 when the request holds no signed-in admin seat (#6265):
     /// a dashboard with no sign-in configured has no caller to name, so the change is made in the Viewer or after signing in.</summary>
@@ -1610,8 +1625,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     private static IResult SignInRequiredResult() => ErrorResult(InvestigationWriteSignInMessage, StatusCodes.Status403Forbidden);
 
     /// <summary>The 403 a refused note decision answers: the fixed <see cref="NoteDecisionRefusedMessage"/> sentence in the mute-rule error envelope.</summary>
-    private static IResult NoteDecisionRefusedResult(bool managedStore) =>
-        ErrorResult(NoteDecisionRefusedMessage(managedStore), StatusCodes.Status403Forbidden);
+    private static IResult NoteDecisionRefusedResult(bool managedStore, bool adminWritesOff = false) =>
+        ErrorResult(NoteDecisionRefusedMessage(managedStore, adminWritesOff), StatusCodes.Status403Forbidden);
 
     /// <summary>True when the store refused the statement for privilege (SQLSTATE 42501).</summary>
     internal static bool IsInsufficientPrivilege(Exception ex) => ex is PostgresException { SqlState: "42501" };
@@ -1660,12 +1675,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
     /// <summary>The 403 sentence an undo or a switch answers when the store refuses the write for privilege (SQLSTATE 42501): the web host
     /// runs on whatever login <c>postgres.webConnectionString</c> names, the <c>viewer</c> role on a managed or compose store (#5917).</summary>
-    internal static string AgentChangeRefusedMessage(bool managedStore) =>
-        DarlingWebStoreWrites.Refused("undo or switch off agent changes", managedStore);
+    internal static string AgentChangeRefusedMessage(bool managedStore, bool adminWritesOff = false) =>
+        DarlingWebStoreWrites.Refused("undo or switch off agent changes", managedStore, adminWritesOff: adminWritesOff);
 
     /// <summary>The 403 a refused undo or switch answers: the fixed <see cref="AgentChangeRefusedMessage"/> sentence in the error envelope.</summary>
-    private static IResult AgentChangeRefusedResult(bool managedStore) =>
-        ErrorResult(AgentChangeRefusedMessage(managedStore), StatusCodes.Status403Forbidden);
+    private static IResult AgentChangeRefusedResult(bool managedStore, bool adminWritesOff = false) =>
+        ErrorResult(AgentChangeRefusedMessage(managedStore, adminWritesOff), StatusCodes.Status403Forbidden);
 
     /// <summary>
     /// The Agent changes routes (#5917): <c>GET /api/agent-changes</c> lists the calls (with their result, or "unknown"), the refusals,
@@ -1676,15 +1691,23 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// refusal ("changed since", name taken, already undone, no undo) and 400 for a bad body or login. Journal text goes through
     /// <c>InvestigationFieldMasking.JournalDetail</c> at the web's level (full, as the other web reads of the journal).
     /// </summary>
-    private static void MapAgentChanges(WebApplication app, AgentChangeUndo changes, ILogger logger, StoreOwnerSource? ownerSource = null, bool managedStore = false)
+    private static void MapAgentChanges(WebApplication app, NpgsqlDataSource postgres, AgentChangeUndo changes, ILogger logger, StoreOwnerSource? ownerSource = null,
+        bool managedStore = false, WebAdminArm? adminArm = null)
     {
+        var adminWritesOff = DarlingWebStoreWrites.AdminWritesOff(managedStore, adminArm);
+
+        /* #6600: the access check, the undo and the switch run as the login the seat's admin writes use (a plan undo journals through it too);
+           the list and the muted alerts stay on the web's own pool. */
+        AgentChangeUndo AdminChanges(HttpContext context) =>
+            adminArm is null ? changes : new AgentChangeUndo(WebAdminArm.SourceFor(adminArm, context, postgres), McpCommandDeadlines.ReadSeconds);
+
         app.MapGet("/api/agent-changes", async (HttpContext context) =>
         {
             var stopwatch = Stopwatch.StartNew();
             try
             {
                 var read = await changes.ReadAsync(AgentChangesLimit, context.RequestAborted);
-                var canDecide = await changes.CanDecideAsync(context.RequestAborted);
+                var canDecide = await AdminChanges(context).CanDecideAsync(context.RequestAborted);
                 return DarlingWebStatementSweep.JsonText(
                     AgentChangesBody(read, canDecide, DateTime.UtcNow), "/api/agent-changes", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
             }
@@ -1740,6 +1763,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             {
                 /* #5632 step 9: a plan force or unforce is undone by the service's plan force code, which reads the server first. The first request
                    (no confirm) answers the statement and the state and writes nothing; {"confirm": true, "statement": "<shown>"} writes. */
+                var writeChanges = AdminChanges(context);
                 if ((await changes.GetAsync(id, context.RequestAborted))?.IsPlanChange == true)
                 {
                     /* A plan undo writes to the monitored server, so it needs a signed-in admin, not just the web's store login (#6269). */
@@ -1748,16 +1772,16 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                         return SignInRequiredResult();
                     }
 
-                    if (!await changes.CanDecideAsync(context.RequestAborted))
+                    if (!await writeChanges.CanDecideAsync(context.RequestAborted))
                     {
-                        return AgentChangeRefusedResult(managedStore);
+                        return AgentChangeRefusedResult(managedStore, adminWritesOff);
                     }
 
-                    var (planBody, planStatus) = await UndoPlanChangeAsync(context, changes, ownerSource, logger, id, login);
+                    var (planBody, planStatus) = await UndoPlanChangeAsync(context, writeChanges, ownerSource, logger, id, login);
                     return DarlingWebStatementSweep.JsonText(planBody, "/api/agent-changes/{id}/undo", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, planStatus);
                 }
 
-                var result = await changes.UndoAsync(id, login, context.RequestAborted);
+                var result = await writeChanges.UndoAsync(id, login, context.RequestAborted);
                 if (result.Undone)
                 {
                     return DarlingWebStatementSweep.JsonText(new JsonObject { ["status"] = "undone", ["called_id"] = id, ["undone_by"] = AgentChangeUndo.PersonActor(login), ["message"] = result.Words },
@@ -1774,7 +1798,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
             catch (Exception ex) when (IsInsufficientPrivilege(ex))
             {
-                return AgentChangeRefusedResult(managedStore);
+                return AgentChangeRefusedResult(managedStore, adminWritesOff);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -1805,7 +1829,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     return ErrorResult("Send {\"enabled\": true} or {\"enabled\": false}.", StatusCodes.Status400BadRequest);
                 }
 
-                await changes.SetEnabledAsync(enabled, login, context.RequestAborted);
+                await AdminChanges(context).SetEnabledAsync(enabled, login, context.RequestAborted);
                 return DarlingWebStatementSweep.JsonText(new JsonObject { ["status"] = enabled ? "on" : "off", ["enabled"] = enabled },
                     "/api/agent-changes/switch", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
             }
@@ -1815,7 +1839,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
             catch (Exception ex) when (IsInsufficientPrivilege(ex))
             {
-                return AgentChangeRefusedResult(managedStore);
+                return AgentChangeRefusedResult(managedStore, adminWritesOff);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -2925,8 +2949,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
     /// <summary>The 403 sentence a feedback record answers when the store refuses the write (SQLSTATE 42501): the web host runs on
     /// whatever login <c>postgres.webConnectionString</c> names, and recording feedback is an <c>admin</c> role write (#5913).</summary>
-    internal static string FeedbackRefusedMessage(bool managedStore) =>
-        DarlingWebStoreWrites.Refused("record feedback", managedStore, "Give feedback in the Viewer app");
+    internal static string FeedbackRefusedMessage(bool managedStore, bool adminWritesOff = false) =>
+        DarlingWebStoreWrites.Refused("record feedback", managedStore, "Give feedback in the Viewer app", adminWritesOff: adminWritesOff);
 
     /* ─────────────────────── #5918 practice scores ─────────────────────── */
 
@@ -2969,8 +2993,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
     /// <summary>The 403 sentence these three writes answer when the store refuses them for privilege (SQLSTATE 42501): the web host runs on
     /// whatever login <c>postgres.webConnectionString</c> names, the <c>viewer</c> role on a managed or compose store (#6265).</summary>
-    internal static string InvestigationWriteRefusedMessage(bool managedStore) =>
-        DarlingWebStoreWrites.Refused("close a request, write a note or start a practice request", managedStore, "Do it in the Viewer app");
+    internal static string InvestigationWriteRefusedMessage(bool managedStore, bool adminWritesOff = false) =>
+        DarlingWebStoreWrites.Refused("close a request, write a note or start a practice request", managedStore, "Do it in the Viewer app", adminWritesOff: adminWritesOff);
 
     /// <summary>The most bytes one of these write bodies may carry (a note is at most 2,000 characters).</summary>
     internal const int MaxInvestigationWriteBodyBytes = 64 * 1024;
@@ -2990,10 +3014,17 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// 400 for a value the rules refuse (in plain words), 404 for an unknown request or case, 409 for a request that cannot be closed or a case that
     /// cannot be replayed, a fixed-sentence 500 or 503 for any other store failure.
     /// </summary>
-    internal static void MapInvestigationPersonWrites(WebApplication app, NpgsqlDataSource postgres, ILogger logger, bool managedStore = false)
+    internal static void MapInvestigationPersonWrites(WebApplication app, NpgsqlDataSource postgres, ILogger logger, bool managedStore = false,
+        WebAdminArm? adminArm = null)
     {
+        var adminWritesOff = DarlingWebStoreWrites.AdminWritesOff(managedStore, adminArm);
         var requests = new InvestigationRequestStore(postgres, McpCommandDeadlines.ReadSeconds, () => DateTime.UtcNow);
-        var practice = new InvestigationPracticeStore(postgres, McpCommandDeadlines.ReadSeconds);
+
+        /* #6600: the three writes run as the login the seat's admin writes use; the registered-server check stays on the web's own pool. */
+        InvestigationRequestStore WriteRequests(HttpContext context) =>
+            adminArm is null ? requests : new InvestigationRequestStore(WebAdminArm.SourceFor(adminArm, context, postgres), McpCommandDeadlines.ReadSeconds, () => DateTime.UtcNow);
+        InvestigationPracticeStore WritePractice(HttpContext context) =>
+            new(WebAdminArm.SourceFor(adminArm, context, postgres), McpCommandDeadlines.ReadSeconds);
 
         app.MapPut("/api/investigation-requests/{requestId}/close", async (HttpContext context, string requestId) =>
         {
@@ -3033,7 +3064,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             try
             {
-                if (!await requests.CloseRequestAsync(request, actor, reason!, context.RequestAborted))
+                if (!await WriteRequests(context).CloseRequestAsync(request, actor, reason!, context.RequestAborted))
                 {
                     return ErrorResult("That request is not open: it is already closed or expired, or it is gone.", StatusCodes.Status409Conflict);
                 }
@@ -3044,7 +3075,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
             catch (Exception ex) when (IsInsufficientPrivilege(ex))
             {
-                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = InvestigationWriteRefusedMessage(managedStore) }, route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = InvestigationWriteRefusedMessage(managedStore, adminWritesOff) }, route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -3109,14 +3140,14 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     return ErrorResult("That server is not registered.", StatusCodes.Status404NotFound);
                 }
 
-                var noteId = await requests.WriteNoteAsync(serverId, metric, text!, actor, days, context.RequestAborted);
+                var noteId = await WriteRequests(context).WriteNoteAsync(serverId, metric, text!, actor, days, context.RequestAborted);
                 return DarlingWebStatementSweep.JsonText(
                     new JsonObject { ["status"] = "approved", ["note_id"] = noteId, ["author"] = actor, ["server_id"] = serverId, ["days"] = days },
                     route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
             }
             catch (Exception ex) when (IsInsufficientPrivilege(ex))
             {
-                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = InvestigationWriteRefusedMessage(managedStore) }, route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = InvestigationWriteRefusedMessage(managedStore, adminWritesOff) }, route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -3151,7 +3182,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             try
             {
-                var (outcome, practiceId, storeSentence) = await practice.OpenAsync(source, actor, context.RequestAborted);
+                var (outcome, practiceId, storeSentence) = await WritePractice(context).OpenAsync(source, actor, context.RequestAborted);
                 if (outcome != InvestigationPracticeOutcome.Opened)
                 {
                     /* The store's own sentence says why the case was not replayed (never an exception's text). */
@@ -3167,7 +3198,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
             catch (Exception ex) when (IsInsufficientPrivilege(ex))
             {
-                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = InvestigationWriteRefusedMessage(managedStore) }, route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = InvestigationWriteRefusedMessage(managedStore, adminWritesOff) }, route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -3268,8 +3299,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// A second record by the same author replaces the first. Bodies go through the statement sweep (#4348): they carry text an agent
     /// and a person wrote.
     /// </summary>
-    internal static void MapInvestigationFeedback(WebApplication app, NpgsqlDataSource postgres, ILogger logger, bool managedStore = false)
+    internal static void MapInvestigationFeedback(WebApplication app, NpgsqlDataSource postgres, ILogger logger, bool managedStore = false,
+        WebAdminArm? adminArm = null)
     {
+        var adminWritesOff = DarlingWebStoreWrites.AdminWritesOff(managedStore, adminArm);
         var store = new InvestigationFeedbackStore(postgres, McpCommandDeadlines.ReadSeconds);
 
         app.MapGet("/api/investigation-feedback", async (HttpContext context) =>
@@ -3289,7 +3322,19 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 await using var connection = await postgres.OpenConnectionAsync(context.RequestAborted);
                 var (rows, truncated) = await store.ListReportedAsync(connection, since, null, FeedbackListLimit, context.RequestAborted);
                 var counts = await store.FamilyCountsAsync(connection, since, null, context.RequestAborted);
-                var canRecord = await store.CanRecordAsync(connection, context.RequestAborted);
+                /* #6600: the capability probe runs as the login the write would use. */
+                var recordSource = WebAdminArm.SourceFor(adminArm, context, postgres);
+                bool canRecord;
+                if (ReferenceEquals(recordSource, postgres))
+                {
+                    canRecord = await store.CanRecordAsync(connection, context.RequestAborted);
+                }
+                else
+                {
+                    await using var recordConnection = await recordSource.OpenConnectionAsync(context.RequestAborted);
+                    canRecord = await store.CanRecordAsync(recordConnection, context.RequestAborted);
+                }
+
                 return DarlingWebStatementSweep.JsonText(
                     FeedbackListBody(rows, truncated, counts, hours, canRecord), "/api/investigation-feedback", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
             }
@@ -3331,7 +3376,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             try
             {
-                var result = await store.RecordAsync(submission!, context.RequestAborted);
+                var writeStore = new InvestigationFeedbackStore(WebAdminArm.SourceFor(adminArm, context, postgres), McpCommandDeadlines.ReadSeconds);
+                var result = await writeStore.RecordAsync(submission!, context.RequestAborted);
                 /* The store's own sentence for a refused, unknown or unreported request (never an exception's text). */
                 var (outcome, sentence) = result;
                 if (outcome is not (InvestigationFeedbackOutcome.Recorded or InvestigationFeedbackOutcome.Replaced))
@@ -3346,7 +3392,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
             catch (Exception ex) when (IsFeedbackPrivilegeRefusal(ex))
             {
-                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = FeedbackRefusedMessage(managedStore) }, "/api/investigation-feedback/{requestId}",
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = FeedbackRefusedMessage(managedStore, adminWritesOff) }, "/api/investigation-feedback/{requestId}",
                     logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -3358,8 +3404,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     }
 
     /// <summary>The 403 sentence the export answers a login that may not record feedback (#6236).</summary>
-    internal static string InvestigationExportRefusedMessage(bool managedStore) =>
-        DarlingWebStoreWrites.Refused("export investigation cases", managedStore, "Run --export-investigations on the host");
+    internal static string InvestigationExportRefusedMessage(bool managedStore, bool adminWritesOff = false) =>
+        DarlingWebStoreWrites.Refused("export investigation cases", managedStore, "Run --export-investigations on the host", adminWritesOff: adminWritesOff);
 
     /// <summary>The 403 sentence the export answers a request that is not a signed-in admin session (#6236).</summary>
     internal const string InvestigationExportSeatMessage =
@@ -3386,8 +3432,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     internal static void MapInvestigationExport(
         WebApplication app, NpgsqlDataSource postgres, ILogger logger, McpDataDetail dataDetail, IPseudonymKeySource? pseudonymKeys,
         ReadAdmission? readAdmission = null, ReadLatencyRecorder? readLatencyRecorder = null, InvestigationExportGate? exportGate = null,
-        bool managedStore = false)
+        bool managedStore = false, WebAdminArm? adminArm = null)
     {
+        var adminWritesOff = DarlingWebStoreWrites.AdminWritesOff(managedStore, adminArm);
         exportGate ??= new InvestigationExportGate(InvestigationExportGate.FolderFor(DarlingManagedPostgres.ResolveDataDirectory(new PostgresConfig())));
         var feedbackStore = new InvestigationFeedbackStore(postgres, McpCommandDeadlines.ReadSeconds);
         var requestStore = new InvestigationRequestStore(postgres, McpCommandDeadlines.ReadSeconds, () => DateTime.UtcNow);
@@ -3434,12 +3481,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             using var run = new WebRouteRun(readLatencyRecorder, InvestigationExportRoute, ReadWindowBand.None, context, readScope.Scope);
             try
             {
-                await using (var connection = await postgres.OpenConnectionAsync(context.RequestAborted))
+                /* #6600: the access probe runs as the login a feedback record would use; the cases are still read on the web's own pool. */
+                await using (var connection = await WebAdminArm.SourceFor(adminArm, context, postgres).OpenConnectionAsync(context.RequestAborted))
                 {
                     if (!await feedbackStore.CanRecordAsync(connection, context.RequestAborted))
                     {
                         run.Complete(ReadOutcome.GateFailed);
-                        return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = InvestigationExportRefusedMessage(managedStore) }, "/api/investigation-export", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
+                        return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = InvestigationExportRefusedMessage(managedStore, adminWritesOff) }, "/api/investigation-export", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
                     }
                 }
 
@@ -3497,7 +3545,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             catch (Exception ex) when (IsFeedbackPrivilegeRefusal(ex))
             {
                 run.Complete(ReadOutcome.GateFailed);
-                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = InvestigationExportRefusedMessage(managedStore) }, "/api/investigation-export", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
+                return DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = InvestigationExportRefusedMessage(managedStore, adminWritesOff) }, "/api/investigation-export", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -4126,8 +4174,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     }
 
     /// <summary>The 403 a refused switch change answers when the web signs in to the store as the viewer role (#6269).</summary>
-    internal static string ServerActionRefusedMessage(bool managedStore) =>
-        DarlingWebStoreWrites.Refused("change server action switches", managedStore);
+    internal static string ServerActionRefusedMessage(bool managedStore, bool adminWritesOff = false) =>
+        DarlingWebStoreWrites.Refused("change server action switches", managedStore, adminWritesOff: adminWritesOff);
 
     /// <summary>
     /// The server action switch routes (#6269). <c>GET /api/server-actions</c> lists every server with a state for each action
@@ -4140,8 +4188,15 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// admin check is the web login's own privileges (<see cref="AgentChangeUndo.CanDecideAsync"/>) and the seat's method gate. The change is
     /// journaled by <c>person:&lt;login&gt;</c>, surface <c>web</c>.
     /// </summary>
-    internal static void MapServerActions(WebApplication app, NpgsqlDataSource postgres, AgentChangeUndo changes, ILogger logger, StoreOwnerSource? ownerSource, bool managedStore = false)
+    internal static void MapServerActions(WebApplication app, NpgsqlDataSource postgres, AgentChangeUndo changes, ILogger logger, StoreOwnerSource? ownerSource, bool managedStore = false,
+        WebAdminArm? adminArm = null)
     {
+        var adminWritesOff = DarlingWebStoreWrites.AdminWritesOff(managedStore, adminArm);
+
+        /* #6600: the access check runs as the login the switch change is allowed under; the write itself stays on the owner connection. */
+        AgentChangeUndo DecideProbe(HttpContext context) =>
+            adminArm is null ? changes : new AgentChangeUndo(WebAdminArm.SourceFor(adminArm, context, postgres), McpCommandDeadlines.ReadSeconds);
+
         app.MapGet("/api/server-actions", async (HttpContext context) =>
         {
             var stopwatch = Stopwatch.StartNew();
@@ -4149,7 +4204,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             {
                 var rows = await ServerActionSwitches.ListAsync(postgres, context.RequestAborted);
                 var body = Mcp.DarlingMcpServerActionTools.ListToJson(rows);
-                body["can_decide"] = DarlingWebSeat.IsSignedInAdmin(context) && await changes.CanDecideAsync(context.RequestAborted);
+                body["can_decide"] = DarlingWebSeat.IsSignedInAdmin(context) && await DecideProbe(context).CanDecideAsync(context.RequestAborted);
                 body["signed_in_admin"] = DarlingWebSeat.IsSignedInAdmin(context);
                 return DarlingWebStatementSweep.JsonText(body, "/api/server-actions", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
             }
@@ -4189,9 +4244,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 }
 
                 /* The admin check comes before anything is read or written. */
-                if (!await changes.CanDecideAsync(context.RequestAborted))
+                if (!await DecideProbe(context).CanDecideAsync(context.RequestAborted))
                 {
-                    return ErrorResult(ServerActionRefusedMessage(managedStore), StatusCodes.Status403Forbidden);
+                    return ErrorResult(ServerActionRefusedMessage(managedStore, adminWritesOff), StatusCodes.Status403Forbidden);
                 }
 
                 var owner = ownerSource?.Read();
