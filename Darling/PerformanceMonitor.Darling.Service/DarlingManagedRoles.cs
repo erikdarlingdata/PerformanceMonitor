@@ -58,7 +58,9 @@ namespace PerformanceMonitor.Darling.Service;
 /// persists + the mute and unmute tools need, #6383), INSERT/UPDATE/DELETE on <c>config.custom_views</c> (the
 /// custom-view tools, #1599), INSERT/UPDATE/DELETE on <c>config.database_state_expected</c> (the database-state expectation tool, #6397), the alert-tuning writes (INSERT/UPDATE/DELETE on
 /// <c>config.config_mute_rules</c> + UPDATE on the singleton <c>config.config_alert_settings</c> + UPDATE on
-/// the single non-secret <c>email_cooldown_minutes</c> column of <c>config.config_notification</c>, plus the
+/// the single non-secret <c>email_cooldown_minutes</c> column of <c>config.config_notification</c> (its secret columns are never
+/// granted to <c>mcp</c>: the default channels are written only through the SECURITY DEFINER <c>set_notification_channels</c>, #6392,
+/// served only under <c>mcp.allowWrites</c> with a token), plus the
 /// two beacon columns of <c>config.config_service</c> so the settings write's self-bump trigger can fire),
 /// and the server-onboarding writes (INSERT/UPDATE/DELETE on <c>config.config_monitored_servers</c> for the
 /// <c>add_servers</c>/<c>remove_server</c> tools — a single non-secret-KEY table; INSERT/UPDATE/DELETE on
@@ -1511,7 +1513,9 @@ GRANT INSERT, UPDATE, DELETE ON {config}.database_state_expected TO {mcp};
 --    window drives: INSERT/UPDATE/DELETE on config_mute_rules (the mute rules the delivery paths honor) and UPDATE
 --    on the SINGLETON config_alert_settings row (id=1 -- UPDATE only, never INSERT/DELETE: the row is a fixed
 --    singleton the service seeds). Still NARROW -- never the config_command service-credential pivot, a
---    schema-wide config write, or any SECRET column: the one config_notification write is a single column
+--    schema-wide config write, or any SECRET column (the default channels' secrets are written only through the SECURITY
+--    DEFINER set_notification_channels function, #6392, served only under mcp.allowWrites with a token): the one
+--    config_notification column write is a single column
 --    (see #3314 below), and the monitored-servers credential column stays SELECT-carved.
 --    The beacon caveat: a config_alert_settings write fires the existing statement-level bump trigger
 --    (trg_bump_alert_settings -> config_bump_version), which UPDATEs config_service.config_version AS THE CURRENT
@@ -1785,6 +1789,16 @@ GRANT EXECUTE ON FUNCTION {config}.request_snapshot_now(integer, text, text) TO 
 GRANT EXECUTE ON FUNCTION {config}.create_notification_route(text, boolean, integer, integer, boolean, integer) TO {mcp};
 GRANT EXECUTE ON FUNCTION {config}.update_notification_route(integer, text[], text, boolean, integer, integer, boolean, integer) TO {mcp};
 GRANT EXECUTE ON FUNCTION {config}.set_notification_route_destinations(integer, text[], text, text, text, text, text) TO {mcp};
+-- #6392: the MCP update_notification_channels tool. mcp holds no UPDATE on any secret column of {config}.config_notification (the SMTP
+--     user name and password, the Teams, Slack and generic webhook URLs, the generic headers, the PagerDuty routing key) and no SELECT
+--     on them, and gets none here: set_notification_channels is the one way it writes the default channels. The service seals each
+--     secret first (the SMTP password for its host, port, SSL flag and user name; a webhook value for its slot, proxy and, for the
+--     headers, the generic URL), and the function stores only an empty value or a sealed one, reads the row FOR UPDATE and makes the
+--     Viewer's refusals (a change to what a saved secret is tied to needs the secret again, a signing key blocks a URL or proxy change).
+--     It returns only whether each secret named in the call was saved before. The tool is served only under mcp.allowWrites with a token.
+--     Granted to mcp only.
+{BuildNotificationChannelsFunctionSql(config)}
+GRANT EXECUTE ON FUNCTION {config}.set_notification_channels(text[], text, integer, boolean, text, text, text, text, text, text, text, text, text, text, text, text, text, boolean, text, boolean) TO {mcp};
 -- #6230: the MCP incident tools (analyze now, purge now, test a connection, pause, resume) queue their command through
 --     {config}.request_mcp_command, the only way the mcp role writes a command row. It names five command types and refuses any
 --     other, builds a connection test from the stored server row (no credential or connection string is an argument), and
@@ -2848,6 +2862,188 @@ BEGIN
 END
 $fn$;
 REVOKE ALL ON FUNCTION {config}.set_notification_route_destinations(integer, text[], text, text, text, text, text) FROM PUBLIC;";
+
+    /// <summary>
+    /// The SECURITY DEFINER function (#6392) the MCP <c>update_notification_channels</c> tool writes the default notification channels through: <c>set_notification_channels</c>. The <c>mcp</c> login holds no UPDATE on a secret column of <c>config_notification</c>; the service seals each secret and this function stores only sealed text or empty, makes the Viewer's refusals on the stored row, and returns only whether each secret was saved. Created and REVOKEd from PUBLIC here; the caller adds the GRANT EXECUTE to mcp only.
+    /// </summary>
+    internal static string BuildNotificationChannelsFunctionSql(string config) => $@"
+CREATE OR REPLACE FUNCTION {config}.set_notification_channels(
+   p_columns text[],
+   p_smtp_host text,
+   p_smtp_port integer,
+   p_smtp_use_ssl boolean,
+   p_smtp_username text,
+   p_smtp_password text,
+   p_smtp_from_address text,
+   p_smtp_recipients text,
+   p_teams_url text,
+   p_teams_proxy text,
+   p_slack_url text,
+   p_slack_proxy text,
+   p_generic_url text,
+   p_generic_headers text,
+   p_generic_body_template text,
+   p_generic_proxy text,
+   p_pagerduty_routing_key text,
+   p_pagerduty_use_eu_region boolean,
+   p_pagerduty_proxy text,
+   p_pagerduty_auto_resolve boolean)
+RETURNS TABLE (prev_smtp_username_set boolean, prev_smtp_password_set boolean, prev_teams_url_set boolean, prev_slack_url_set boolean,
+               prev_generic_url_set boolean, prev_generic_headers_set boolean, prev_pagerduty_routing_key_set boolean)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+   v_row {config}.config_notification%ROWTYPE;
+   v_host text;
+   v_port integer;
+   v_ssl boolean;
+   v_user text;
+   v_password text;
+   v_from text;
+   v_recipients text;
+   v_teams text;
+   v_teams_proxy text;
+   v_slack text;
+   v_slack_proxy text;
+   v_generic text;
+   v_headers text;
+   v_body text;
+   v_generic_proxy text;
+   v_key text;
+   v_eu boolean;
+   v_pd_proxy text;
+   v_auto boolean;
+BEGIN
+   IF p_columns IS NULL OR cardinality(p_columns) = 0
+      OR EXISTS (SELECT 1 FROM unnest(p_columns) AS c(name)
+                 WHERE c.name IS NULL OR c.name NOT IN (
+                    'smtp_host', 'smtp_port', 'smtp_use_ssl', 'smtp_username', 'smtp_encrypted_password', 'smtp_from_address', 'smtp_recipients',
+                    'teams_url', 'teams_proxy', 'slack_url', 'slack_proxy', 'generic_url', 'generic_headers', 'generic_body_template',
+                    'generic_proxy', 'pagerduty_routing_key', 'pagerduty_use_eu_region', 'pagerduty_proxy', 'pagerduty_auto_resolve')) THEN
+      RAISE EXCEPTION 'The notification channel columns to change are the SMTP, Teams, Slack, generic webhook and PagerDuty settings.' USING ERRCODE = 'DL400';
+   END IF;
+   -- The row is read under its lock, so every check below is on what is stored now.
+   SELECT * INTO v_row FROM {config}.config_notification WHERE id = 1 FOR UPDATE;
+   IF NOT FOUND THEN
+      RAISE EXCEPTION 'The notification settings row does not exist yet.' USING ERRCODE = 'DL404';
+   END IF;
+   v_host := CASE WHEN 'smtp_host' = ANY (p_columns) THEN COALESCE(p_smtp_host, '') ELSE v_row.smtp_host END;
+   v_port := CASE WHEN 'smtp_port' = ANY (p_columns) THEN COALESCE(p_smtp_port, v_row.smtp_port) ELSE v_row.smtp_port END;
+   v_ssl := CASE WHEN 'smtp_use_ssl' = ANY (p_columns) THEN COALESCE(p_smtp_use_ssl, v_row.smtp_use_ssl) ELSE v_row.smtp_use_ssl END;
+   v_user := CASE WHEN 'smtp_username' = ANY (p_columns) THEN COALESCE(p_smtp_username, '') ELSE COALESCE(v_row.smtp_username, '') END;
+   v_password := CASE WHEN 'smtp_encrypted_password' = ANY (p_columns) THEN COALESCE(p_smtp_password, '') ELSE COALESCE(v_row.smtp_encrypted_password, '') END;
+   v_from := CASE WHEN 'smtp_from_address' = ANY (p_columns) THEN COALESCE(p_smtp_from_address, '') ELSE v_row.smtp_from_address END;
+   v_recipients := CASE WHEN 'smtp_recipients' = ANY (p_columns) THEN btrim(COALESCE(p_smtp_recipients, '')) ELSE v_row.smtp_recipients END;
+   v_teams := CASE WHEN 'teams_url' = ANY (p_columns) THEN COALESCE(p_teams_url, '') ELSE v_row.teams_url END;
+   v_teams_proxy := CASE WHEN 'teams_proxy' = ANY (p_columns) THEN COALESCE(p_teams_proxy, '') ELSE v_row.teams_proxy END;
+   v_slack := CASE WHEN 'slack_url' = ANY (p_columns) THEN COALESCE(p_slack_url, '') ELSE v_row.slack_url END;
+   v_slack_proxy := CASE WHEN 'slack_proxy' = ANY (p_columns) THEN COALESCE(p_slack_proxy, '') ELSE v_row.slack_proxy END;
+   v_generic := CASE WHEN 'generic_url' = ANY (p_columns) THEN COALESCE(p_generic_url, '') ELSE v_row.generic_url END;
+   v_headers := CASE WHEN 'generic_headers' = ANY (p_columns) THEN COALESCE(p_generic_headers, '') ELSE v_row.generic_headers END;
+   v_body := CASE WHEN 'generic_body_template' = ANY (p_columns) THEN COALESCE(p_generic_body_template, '') ELSE v_row.generic_body_template END;
+   v_generic_proxy := CASE WHEN 'generic_proxy' = ANY (p_columns) THEN COALESCE(p_generic_proxy, '') ELSE v_row.generic_proxy END;
+   v_key := CASE WHEN 'pagerduty_routing_key' = ANY (p_columns) THEN COALESCE(p_pagerduty_routing_key, '') ELSE v_row.pagerduty_routing_key END;
+   v_eu := CASE WHEN 'pagerduty_use_eu_region' = ANY (p_columns) THEN COALESCE(p_pagerduty_use_eu_region, v_row.pagerduty_use_eu_region) ELSE v_row.pagerduty_use_eu_region END;
+   v_pd_proxy := CASE WHEN 'pagerduty_proxy' = ANY (p_columns) THEN COALESCE(p_pagerduty_proxy, '') ELSE v_row.pagerduty_proxy END;
+   v_auto := CASE WHEN 'pagerduty_auto_resolve' = ANY (p_columns) THEN COALESCE(p_pagerduty_auto_resolve, v_row.pagerduty_auto_resolve) ELSE v_row.pagerduty_auto_resolve END;
+   IF v_port < 1 OR v_port > 65535 THEN
+      RAISE EXCEPTION 'The SMTP port is between 1 and 65535.' USING ERRCODE = 'DL400';
+   END IF;
+   IF length(v_host) > 1000 OR length(v_user) > 1000 OR length(v_from) > 1000 OR length(v_teams_proxy) > 2000 OR length(v_slack_proxy) > 2000
+      OR length(v_generic_proxy) > 2000 OR length(v_pd_proxy) > 2000 OR length(v_body) > 16384 THEN
+      RAISE EXCEPTION 'A notification channel setting is longer than can be stored.' USING ERRCODE = 'DL400';
+   END IF;
+   -- A secret is sealed by the Darling service before it gets here. This function stores only an empty value or a sealed one (the shape
+   -- of sealed:v1:, the 16 character key id, base64, at most 16384 characters), so no caller of it can store a secret as text.
+   IF EXISTS (SELECT 1
+                FROM (VALUES (v_password, COALESCE(v_row.smtp_encrypted_password, '')), (v_teams, v_row.teams_url), (v_slack, v_row.slack_url),
+                             (v_generic, v_row.generic_url), (v_headers, v_row.generic_headers), (v_key, v_row.pagerduty_routing_key))
+                     AS w(new_value, old_value)
+               WHERE w.new_value <> w.old_value AND w.new_value <> ''
+                 AND (length(w.new_value) > 16384
+                      OR w.new_value !~ '^sealed:v1:[0-9a-f]+:[A-Za-z0-9+/]+=?=?$'
+                      OR length(split_part(w.new_value, ':', 3)) <> 16)) THEN
+      RAISE EXCEPTION 'A secret is stored sealed by the Darling service, never as text.' USING ERRCODE = 'DL400';
+   END IF;
+   IF length(v_recipients) > 4000 THEN
+      RAISE EXCEPTION 'The email recipients are longer than can be stored.' USING ERRCODE = 'DL400';
+   END IF;
+   IF v_recipients <> v_row.smtp_recipients
+      AND (v_recipients ~ '[[:cntrl:]<>]' OR position(chr(34) IN v_recipients) > 0
+           OR (SELECT count(*) FROM unnest(string_to_array(v_recipients, ',')) AS e(item) WHERE btrim(e.item) <> '') > 50) THEN
+      RAISE EXCEPTION 'The email recipients are a comma separated list of at most 50 plain addresses such as name@example.com.' USING ERRCODE = 'DL400';
+   END IF;
+   -- A saved secret opens only for what it was sealed for (#5366), and this function cannot show a secret to the caller, so the same
+   -- refusals the Viewer's Settings window makes are made here, on the stored row: a change to what a saved value is tied to needs the
+   -- value given again in the same call.
+   IF COALESCE(v_row.smtp_encrypted_password, '') <> '' AND NOT ('smtp_encrypted_password' = ANY (p_columns))
+      AND (v_host IS DISTINCT FROM v_row.smtp_host OR v_port IS DISTINCT FROM v_row.smtp_port OR v_ssl IS DISTINCT FROM v_row.smtp_use_ssl
+           OR v_user IS DISTINCT FROM COALESCE(v_row.smtp_username, '')) THEN
+      RAISE EXCEPTION 'Changing how mail is sent needs the SMTP password again.' USING ERRCODE = 'DL403';
+   END IF;
+   IF v_teams_proxy IS DISTINCT FROM v_row.teams_proxy AND v_row.teams_url <> '' AND NOT ('teams_url' = ANY (p_columns)) THEN
+      RAISE EXCEPTION 'Enter the Teams webhook URL again: its proxy changed.' USING ERRCODE = 'DL403';
+   END IF;
+   IF v_slack_proxy IS DISTINCT FROM v_row.slack_proxy AND v_row.slack_url <> '' AND NOT ('slack_url' = ANY (p_columns)) THEN
+      RAISE EXCEPTION 'Enter the Slack webhook URL again: its proxy changed.' USING ERRCODE = 'DL403';
+   END IF;
+   IF v_pd_proxy IS DISTINCT FROM v_row.pagerduty_proxy AND v_row.pagerduty_routing_key <> '' AND NOT ('pagerduty_routing_key' = ANY (p_columns)) THEN
+      RAISE EXCEPTION 'Enter the PagerDuty routing key again: its proxy changed.' USING ERRCODE = 'DL403';
+   END IF;
+   IF v_generic_proxy IS DISTINCT FROM v_row.generic_proxy
+      AND ((v_row.generic_url <> '' AND NOT ('generic_url' = ANY (p_columns))) OR (v_row.generic_headers <> '' AND NOT ('generic_headers' = ANY (p_columns)))) THEN
+      RAISE EXCEPTION 'Enter the generic webhook URL and headers again: the proxy changed.' USING ERRCODE = 'DL403';
+   END IF;
+   -- The headers are sealed for the generic URL text as stored, so the two change together.
+   IF 'generic_url' = ANY (p_columns) AND v_generic <> v_row.generic_url AND v_row.generic_headers <> '' AND NOT ('generic_headers' = ANY (p_columns)) THEN
+      RAISE EXCEPTION 'Enter the generic webhook headers again: the generic webhook URL changed.' USING ERRCODE = 'DL403';
+   END IF;
+   IF 'generic_headers' = ANY (p_columns) AND v_headers <> '' AND v_headers <> v_row.generic_headers AND NOT ('generic_url' = ANY (p_columns)) THEN
+      RAISE EXCEPTION 'Type the generic webhook URL again to change its headers.' USING ERRCODE = 'DL403';
+   END IF;
+   -- A signing key is sealed for the generic URL text and proxy (#5998): a change to either needs the key removed first.
+   IF (v_generic <> v_row.generic_url AND v_row.signing_key <> '')
+      OR (v_generic_proxy IS DISTINCT FROM v_row.generic_proxy
+          AND (v_row.signing_key <> '' OR EXISTS (SELECT 1 FROM {config}.config_notification_routes WHERE signing_key <> ''))) THEN
+      RAISE EXCEPTION 'A signing key is saved for this destination, and it is tied to the generic webhook URL and proxy. Remove the key first, save the change, then generate a new key.' USING ERRCODE = 'DL403';
+   END IF;
+   UPDATE {config}.config_notification
+      SET smtp_host = v_host,
+          smtp_port = v_port,
+          smtp_use_ssl = v_ssl,
+          smtp_username = NULLIF(v_user, ''),
+          smtp_encrypted_password = NULLIF(v_password, ''),
+          smtp_from_address = v_from,
+          smtp_recipients = v_recipients,
+          teams_url = v_teams,
+          teams_proxy = v_teams_proxy,
+          slack_url = v_slack,
+          slack_proxy = v_slack_proxy,
+          generic_url = v_generic,
+          generic_headers = v_headers,
+          generic_body_template = v_body,
+          generic_proxy = v_generic_proxy,
+          pagerduty_routing_key = v_key,
+          pagerduty_use_eu_region = v_eu,
+          pagerduty_proxy = v_pd_proxy,
+          pagerduty_auto_resolve = v_auto,
+          modified_at = (now() AT TIME ZONE 'UTC')
+    WHERE id = 1;
+   -- What was stored before comes back only as a flag for whether a secret was saved, and only for the columns this call names: the
+   -- function runs with the owner's rights, so it never hands a stored secret (sealed text, or a value saved before sealing) to its caller.
+   RETURN QUERY SELECT
+      CASE WHEN 'smtp_username' = ANY (p_columns) THEN COALESCE(v_row.smtp_username, '') <> '' END,
+      CASE WHEN 'smtp_encrypted_password' = ANY (p_columns) THEN COALESCE(v_row.smtp_encrypted_password, '') <> '' END,
+      CASE WHEN 'teams_url' = ANY (p_columns) THEN v_row.teams_url <> '' END,
+      CASE WHEN 'slack_url' = ANY (p_columns) THEN v_row.slack_url <> '' END,
+      CASE WHEN 'generic_url' = ANY (p_columns) THEN v_row.generic_url <> '' END,
+      CASE WHEN 'generic_headers' = ANY (p_columns) THEN v_row.generic_headers <> '' END,
+      CASE WHEN 'pagerduty_routing_key' = ANY (p_columns) THEN v_row.pagerduty_routing_key <> '' END;
+END
+$fn$;
+REVOKE ALL ON FUNCTION {config}.set_notification_channels(text[], text, integer, boolean, text, text, text, text, text, text, text, text, text, text, text, text, text, boolean, text, boolean) FROM PUBLIC;";
 
     /// <summary>
     /// The SECURITY DEFINER read function (#6230) behind <c>get_command_result</c> and the collector-run state read: one command's

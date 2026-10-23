@@ -450,6 +450,41 @@ WHERE route_id = $1";
             ? throw new NotificationRouteRefusedException($"The {label} must be the value itself, not saved text.", NotificationRouteRefusalKind.Value)
             : ResolveValue(plaintext, null, slot, PasswordBinding.WebhookRouteRow(routeId), proxy, proxy, label, seal, refusal);
 
+    /// <summary>
+    /// Seals a new webhook value for the SETTINGS row (#6392): the Teams, Slack or generic URL, the PagerDuty routing key
+    /// (<paramref name="slot"/> teams, slack, generic or pagerduty) or the generic headers (<c>generic_headers</c>, bound to
+    /// <paramref name="boundUrl"/>, the generic URL text as stored). The shape rule and the refusal words are the ones the route values use.
+    /// Throws <see cref="NotificationRouteRefusedException"/>.
+    /// </summary>
+    public static string SealNewSettingsValue(
+        string slot, string plaintext, string? proxy, string? boundUrl, string label, Func<string, PasswordBinding, string>? seal, string? refusal)
+    {
+        var text = plaintext?.Trim() ?? "";
+        if (PasswordSeal.IsSealed(text))
+        {
+            throw new NotificationRouteRefusedException($"The {label} must be the value itself, not saved text.", NotificationRouteRefusalKind.Value);
+        }
+
+        if (slot is "teams" or "slack" or "generic" && WebhookUrlShape.Refusal(text, label) is { } shapeRefusal)
+        {
+            throw new NotificationRouteRefusedException(shapeRefusal, NotificationRouteRefusalKind.Value);
+        }
+
+        if (seal is null)
+        {
+            throw new NotificationRouteRefusedException(refusal ?? NoKeyText, NotificationRouteRefusalKind.Value);
+        }
+
+        try
+        {
+            return seal(text, PasswordBinding.ForWebhook(slot, PasswordBinding.WebhookSettingsRow, proxy, boundUrl));
+        }
+        catch (NotificationRouteRefusedException ex)
+        {
+            throw new NotificationRouteRefusedException($"The {label}: {ex.Message}", NotificationRouteRefusalKind.Value);
+        }
+    }
+
     private static string ResolveValue(
         string? value, string? stored, string slot, string row, string? proxy, string? storedProxy, string label,
         Func<string, PasswordBinding, string>? seal, string? refusal)
