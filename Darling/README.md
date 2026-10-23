@@ -20,9 +20,9 @@ A collector, alert, or analysis change lands once in the shared libraries and bo
 | Data lives | Locally per seat (DuckDB + Parquet) | Centrally (PostgreSQL / TimescaleDB) |
 | Execution plans | Not stored (fetched live when you view a query) | Captured and stored, TOAST-compressed (`capturePlans`, default on) |
 | Viewers | The app is the viewer | Any number of viewer seats read the central store |
-| Setup | Download and run | Extract the release zip and run `install-darling.ps1`. The shipped default is the bundled store (managed mode), so you provision no database. To use your own PostgreSQL, provision it and set its connection string. |
+| Setup | Download and run | On Windows, extract the release zip and run `install-darling.ps1` (on Linux, see [Run on Linux](#run-on-linux-docker-compose-or-systemd)). The shipped default is the bundled store (managed mode), so you provision no database. To use your own PostgreSQL, provision it and set its connection string. |
 | Best for | Quick triage, consultants, a handful of servers | Always-on team monitoring, larger estates, one shared store |
-| Configuration | Settings UI | `darling.json` seeds the first start. After that, the Viewer and the web dashboard's Admin page edit servers, alert settings and notification routes in the store. The web page edits fewer settings than the Viewer. |
+| Configuration | Settings UI | `darling.json` seeds the first start. After that, the Viewer edits servers, alert settings and notification routes in the store. The web dashboard's Admin page edits a server in place and the agent channel of a notification route, for a sign-in that can make changes. Its Alert Settings tab is read-only. |
 
 Nothing is installed on the monitored SQL Servers by either edition beyond two lightweight Extended Events ring-buffer sessions and, when it is unset, a one-time `blocked process threshold` bootstrap (see [What the Service Does on Monitored Servers](#what-the-service-does-on-monitored-servers)).
 
