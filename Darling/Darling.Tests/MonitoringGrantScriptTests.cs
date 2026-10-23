@@ -367,6 +367,28 @@ public sealed class MonitoringGrantScriptTests
     }
 
     [Fact]
+    public void Build_ACommentOpenerInANameOrNote_LeavesTheStatementsOutsideEveryComment()
+    {
+        var principal = new GrantPrincipal(
+            GrantPrincipalKind.SqlLogin, "pm", new[] { "Principal: svc /* still a note" });
+
+        var script = MonitoringGrantScript.Build(principal, finOps: false, azureSqlDatabase: false, serverLabel: "sql01 /* open\nnext");
+
+        // T-SQL block comments nest: an unescaped "/*" in the label or a note would leave the header comment open and swallow the statements.
+        var depth = 0;
+        var createLoginDepth = -1;
+        for (var i = 0; i < script.Length - 1; i++)
+        {
+            if (script[i] == '/' && script[i + 1] == '*') { depth++; i++; }
+            else if (script[i] == '*' && script[i + 1] == '/') { depth--; i++; }
+            else if (createLoginDepth < 0 && string.CompareOrdinal(script, i, "CREATE LOGIN", 0, 12) == 0) { createLoginDepth = depth; }
+        }
+
+        Assert.Equal(0, createLoginDepth);
+        Assert.Equal(0, depth);
+    }
+
+    [Fact]
     public async Task Verb_ForARegisteredServer_KeepsTheStoreNotesOffTheScriptStream()
     {
         var root = Directory.CreateTempSubdirectory("grant-script-");

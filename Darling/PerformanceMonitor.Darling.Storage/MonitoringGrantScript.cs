@@ -284,7 +284,7 @@ public static class MonitoringGrantScript
 
         /* Everything variable that sits inside the header comment is made inert: a comment closer in a server name or an account
            name must not end the comment and leave the rest as live T-SQL in a script the operator runs as a sysadmin. */
-        static string InComment(string t) => t.Replace("*/", "* /", StringComparison.Ordinal).Replace('\r', ' ').Replace('\n', ' ');
+        static string InComment(string t) => t.Replace("*/", "* /", StringComparison.Ordinal).Replace("/*", "/ *", StringComparison.Ordinal).Replace('\r', ' ').Replace('\n', ' ');
         Line("/* Performance Monitor Darling: the login and grants for " + (serverLabel is { Length: > 0 } label ? InComment(label) : "a monitored server") + ".");
         foreach (var note in principal.Notes)
         {
