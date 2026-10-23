@@ -167,12 +167,12 @@ FROM collect.query_store_interval_wide WHERE module_name = 'modT' GROUP BY colle
     }
 
     /// <summary>Builds every hour that is due, tick by tick, and returns how many hours were built.</summary>
-    internal static async Task<int> BuildAllAsync(NpgsqlDataSource source, CancellationToken ct)
+    internal static async Task<int> BuildAllAsync(NpgsqlDataSource source, CancellationToken ct, DateTime? nowUtc = null)
     {
         var total = 0;
         for (var guard = 0; guard < 20; guard++)
         {
-            var result = await QueryStoreComposeStamp.RunTickAsync(source, DateTime.UtcNow, RetentionDays, NullLogger.Instance, ct);
+            var result = await QueryStoreComposeStamp.RunTickAsync(source, nowUtc ?? DateTime.UtcNow, RetentionDays, NullLogger.Instance, ct);
             Assert.Equal(0, result.Failed);
             if (result.Built == 0)
             {
@@ -193,6 +193,9 @@ INSERT INTO {table}
 VALUES (TIMESTAMP '{At(collectionTime)}', {serverId}, 'dbX', 99, 99, 'Regular', TIMESTAMP '{At(collectionTime.AddMinutes(-3))}', TIMESTAMP '{At(collectionTime)}',
         'modX', 'hashX', 7, 1000, 500, 2000, 900, {interval})", ct);
 
+    /// <summary>The 'now' a builder tick is given: half past <paramref name="hourNow"/>, taken from the same clock read as the seed's hour so a run that crosses an hour boundary mid-test cannot move the builder's cut-off past the seeded data.</summary>
+    internal static DateTime ClockWithin(DateTime hourNow) => hourNow.AddMinutes(30);
+
     /// <summary>A migrated scratch store with the three servers enrolled, the 30-hour seed, and every due hour built (28).</summary>
     internal static async Task<(ScratchPostgres Scratch, NpgsqlConnection Connection, NpgsqlDataSource Source, DateTime HourNow)> ArrangeAsync(
         CancellationToken ct, int servers = 3, bool build = true)
@@ -211,7 +214,7 @@ VALUES (TIMESTAMP '{At(collectionTime)}', {serverId}, 'dbX', 99, 99, 'Regular', 
         var source = NpgsqlDataSource.Create(scratch.ConnectionString);
         if (build)
         {
-            Assert.Equal(28, await BuildAllAsync(source, ct));
+            Assert.Equal(28, await BuildAllAsync(source, ct, ClockWithin(hourNow)));
         }
 
         return (scratch, connection, source, hourNow);

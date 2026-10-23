@@ -270,6 +270,60 @@ AND   xet.target_name = N'event_file';", connection))
         Assert.Equal(Keys(expected), Keys(resumed.Rows));
     }
 
+    /// <summary>#6544: a bookmark in the file the target is writing reads that file by its exact path; a bookmark in an older file reads every rollover file, and no bookmark reads the current file alone by its exact path.</summary>
+    [Fact]
+    public async Task ABookmarkInTheCurrentFile_ReadsItByItsExactPath_AndOneInAnOlderFileReadsEveryRolloverFile()
+    {
+        var server = await OpenAsync();
+        await using var connection = server.Connection;
+        var ct = TestContext.Current.CancellationToken;
+
+        var full = await RunPassAsync(server, state: null, watermark: s_longAgo, maxEvents: Uncapped);
+        Assert.SkipWhen(full.Rows.Count < 20, "The current system_health file holds too few events to bookmark in.");
+
+        /* No bookmark: the current file alone, by its exact path. */
+        Assert.Null(Measured(full.Context, "event_file_wildcard"));
+
+        /* A bookmark in the current file: still the exact path, and the same rows as before. */
+        var middle = full.Rows[full.Rows.Count / 2];
+        var current = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [SystemHealthEventsCollector.BookmarkStateKey] =
+                SystemHealthEventsCollector.FormatBookmark(middle.EventTime!.Value, middle.SourceOffset!.Value, middle.SourceFile!),
+        };
+        var resumed = await RunPassAsync(server, current, watermark: middle.EventTime!.Value, maxEvents: Uncapped);
+        Assert.Null(Measured(resumed.Context, "event_file_wildcard"));
+        Assert.Equal(
+            Keys(full.Rows.Where(r => r.SourceOffset > middle.SourceOffset && r.EventTime >= middle.EventTime)),
+            Keys(resumed.Rows));
+
+        /* A bookmark in an older file (the file has rolled over): every rollover file is read, as it has to be to reach the
+           current one. */
+        string? older = null;
+        if (server.Major >= 14)
+        {
+            var directory = server.FilePattern[..(server.FilePattern.LastIndexOf('\\') + 1)];
+            await using var list = new SqlCommand(
+                @"SELECT TOP (1) fs.full_filesystem_path
+FROM sys.dm_os_enumerate_filesystem(@directory, N'system_health_0_*.xel') AS fs
+WHERE fs.size_in_bytes >= 1000000
+AND   fs.full_filesystem_path <> @current
+ORDER BY fs.size_in_bytes DESC;", connection);
+            list.Parameters.Add(new SqlParameter("@directory", SqlDbType.NVarChar, 260) { Value = directory });
+            list.Parameters.Add(new SqlParameter("@current", SqlDbType.NVarChar, 260) { Value = server.CurrentFile });
+            older = await list.ExecuteScalarAsync(ct) as string;
+        }
+
+        Assert.SkipWhen(older is null, "No older system_health file of 1 MB or more to put a bookmark in.");
+        var rolled = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [SystemHealthEventsCollector.BookmarkStateKey] = SystemHealthEventsCollector.FormatBookmark(s_longAgo, 98304, older!),
+        };
+        var crossed = await RunPassAsync(server, rolled, watermark: s_longAgo);
+        Assert.Equal(1, Measured(crossed.Context, "event_file_wildcard"));
+        Assert.Null(Measured(crossed.Context, "event_file_fallback"));
+    }
+
     [Fact]
     public async Task AMissingBookmarkFile_RaisesError25717_AndABadOffsetRaises25722_NeitherIsAnEmptyResult()
     {
@@ -494,7 +548,7 @@ AND   xet.target_name = N'event_file';", connection))
     }
 
     [Fact]
-    public async Task ABufferHoldingMoreEventsThanTheCap_IsReadWhole_AndOneBeyondTenTimesTheCapIsCutAndRecorded()
+    public async Task ABufferHoldingMoreEventsThanTheCap_IsReadWhole_AndOneBeyondTheReReadMultipleOfTheCapIsCutAndRecorded()
     {
         var server = await OpenAsync();
         await using var connection = server.Connection;
@@ -520,12 +574,12 @@ AND   xet.target_name = N'event_file';", connection))
         Assert.Equal(fullest.Key.File, moved.Value.File, ignoreCase: true);
         Assert.Equal(fullest.Key.Offset, moved.Value.Offset);
 
-        /* A cap whose tenfold is still under the buffer's count: the pass keeps the events it read, all from that buffer,
+        /* A cap whose re-read multiple (BufferReReadFactor) is still under the buffer's count: the pass keeps the events it read, all from that buffer,
            and records the cut. */
-        Assert.SkipWhen(fullest.Count() <= 10, "The fullest buffer holds too few events to outgrow ten times a cap of one.");
-        var cutCap = (fullest.Count() - 1) / 10;
+        Assert.SkipWhen(fullest.Count() <= SystemHealthEventsCollector.BufferReReadFactor, "The fullest buffer holds too few events to outgrow the re-read's multiple of a cap of one.");
+        var cutCap = (fullest.Count() - 1) / SystemHealthEventsCollector.BufferReReadFactor;
         var cut = await RunPassAsync(server, state, s_longAgo, maxEvents: cutCap);
-        Assert.Equal(cutCap * 10, cut.Rows.Count);
+        Assert.Equal(cutCap * SystemHealthEventsCollector.BufferReReadFactor, cut.Rows.Count);
         Assert.All(cut.Rows, row => Assert.Equal(fullest.Key.Offset, row.SourceOffset));
         Assert.Equal(1, Measured(cut.Context, "event_file_buffer_cut"));
     }

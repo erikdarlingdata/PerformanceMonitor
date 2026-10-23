@@ -502,7 +502,7 @@ Use the troubleshooting scripts:
 5. Test auto-refresh functionality
 6. If you added MCP tools, test with Claude Code:
    ```
-   claude mcp add --transport http --scope user sql-monitor http://localhost:5151/
+   claude mcp add --transport http --scope user sql-monitor http://localhost:5151/ --header "Authorization: Bearer <token>"
    ```
 
 ### Testing Darling Changes
