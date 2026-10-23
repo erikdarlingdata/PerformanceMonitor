@@ -165,6 +165,29 @@ jobs:
           $ErrorActionPreference = 'Stop'
           Set-Content -Path guard-build-origin.txt -Value @("workspace=$env:PRODUCER_WORKSPACE", "sha=$env:PRODUCER_SHA") -Encoding utf8NoBOM
 
+      # The legs run on windows-latest (win-x64), which loads only runtimes/win, runtimes/unix and runtimes/win-x64. The
+      # other platforms' native libraries (osx, linux, arm, x86: DuckDB, Skia, MSAL, HarfBuzz) were 822 of the 1,054 MB
+      # of the first artifact and what 16 legs spent minutes downloading at once (#6656). Nothing reads them: the tests
+      # that name runtimes/ plant their own tree. PDBs stay, for stack traces with line numbers.
+      - name: Leave other platforms' native libraries out of the artifact
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $keep = @('win', 'win-x64', 'unix')
+          $roots = @('Darling/Darling.Tests/bin/Release', 'Darling/PerformanceMonitor.Darling.Service/bin/Release', 'Lite.Tests/bin/Release')
+          $removed = 0
+          foreach ($root in $roots) {
+            foreach ($runtimes in @(Get-ChildItem -Path $root -Directory -Recurse -Filter runtimes)) {
+              foreach ($rid in @(Get-ChildItem -Path $runtimes.FullName -Directory)) {
+                if ($keep -notcontains $rid.Name) {
+                  Remove-Item -Recurse -Force $rid.FullName
+                  $removed++
+                }
+              }
+            }
+          }
+          Write-Host "Removed $removed runtime folder(s) for other platforms."
+
       # The same file lists the Guard build uploaded for the two projects. One day of retention: only this run's legs read it.
       - name: Upload the built test projects
         uses: actions/upload-artifact@v6
