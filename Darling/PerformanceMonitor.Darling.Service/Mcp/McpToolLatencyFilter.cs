@@ -533,7 +533,9 @@ public sealed class McpToolLatencyFilter
         {
             if (request.Services?.GetService(typeof(IHttpContextAccessor)) is IHttpContextAccessor accessor)
             {
-                return ReadCaller.OfMcpToken(DarlingMcpHostService.ExtractBearerToken(accessor.HttpContext?.Request.Headers.Authorization.ToString()));
+                return ReadCaller.OfMcpIdentity(
+                    DarlingMcpTokenSet.CallerOf(accessor)?.Name,
+                    DarlingMcpHostService.ExtractBearerToken(accessor.HttpContext?.Request.Headers.Authorization.ToString()));
             }
         }
         catch (Exception ex)

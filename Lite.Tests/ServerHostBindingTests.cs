@@ -443,8 +443,51 @@ public sealed class ServerHostBindingTests : IDisposable
             HostConfirmationGate.Question(bindings.Check(server), isEdit: true, windows, secretTypedNow: false));
 
         /* A server this user never confirmed. */
-        Assert.Equal("Connect to old-host (not confirmed from this Windows account) with your Windows sign-in?",
+        Assert.Equal("Connect to old-host and the Query Store replica old-r (not confirmed from this Windows account) with your Windows sign-in?",
             HostConfirmationGate.Question(new ServerHostBindings(null).Check(server), isEdit: true, windows, secretTypedNow: false));
+    }
+
+    [Fact]
+    public void ReplicaTest_ForAServerNeverConfirmed_AsksNothingMoreOnceTheServersOwnQuestionWasAnswered()
+    {
+        var server = Server("a", "sql01", AuthenticationTypes.Windows, replica: "replica01");
+        var windows = HostConfirmationGate.CredentialWords(AuthenticationTypes.Windows, null);
+        var never = new ServerHostBindings(null).Check(server);
+
+        /* The server's own question is the one question, and it names the replica the user typed. */
+        Assert.Equal("Connect to sql01 and the Query Store replica replica01 (not confirmed from this Windows account) with your Windows sign-in?",
+            HostConfirmationGate.Question(never, isEdit: true, windows, secretTypedNow: false));
+
+        /* Answered Yes in this dialog: the replica Test does not ask again. */
+        Assert.Null(HostConfirmationGate.Question(never, isEdit: true, windows, secretTypedNow: false, replica: true, confirmedInDialog: true));
+
+        /* Not answered: the replica is still not connected to without a question (the rule that no host is used unconfirmed holds). */
+        Assert.Equal("Connect to the Query Store replica replica01 (was none) with your Windows sign-in?",
+            HostConfirmationGate.Question(never, isEdit: true, windows, secretTypedNow: false, replica: true));
+
+        /* A server this user confirmed keeps its own confirmation: an unchanged replica is not asked about. */
+        var (bindings, _) = Confirmed(server);
+        Assert.Null(HostConfirmationGate.Question(bindings.Check(server), isEdit: true, windows, secretTypedNow: false, replica: true));
+    }
+
+    [Fact]
+    public void ReplicaTest_WithNoReplicaTyped_NeverBuildsAQuestionFromAnEmptyName()
+    {
+        var server = Server("a", "sql01", AuthenticationTypes.Windows);
+        var windows = HostConfirmationGate.CredentialWords(AuthenticationTypes.Windows, null);
+
+        var never = new ServerHostBindings(null).Check(server);
+        Assert.Null(HostConfirmationGate.Question(never, isEdit: true, windows, secretTypedNow: false, replica: true));
+        Assert.Null(HostConfirmationGate.Question(never, isEdit: true, windows, secretTypedNow: false, replica: true, confirmedInDialog: true));
+
+        /* The server's own question for a server without a replica does not mention one. */
+        Assert.Equal("Connect to sql01 (not confirmed from this Windows account) with your Windows sign-in?",
+            HostConfirmationGate.Question(never, isEdit: true, windows, secretTypedNow: false));
+
+        /* Nor for a server confirmed earlier whose host changed. */
+        var (bindings, _) = Confirmed(server);
+        server.ServerName = "sql02";
+        Assert.Null(HostConfirmationGate.Question(bindings.Check(server), isEdit: true, windows, secretTypedNow: false, replica: true));
     }
 
     private sealed class OneProfile(CredentialProfile profile) : IProfileLookup

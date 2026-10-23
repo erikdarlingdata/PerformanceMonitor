@@ -33,7 +33,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <c>mcp.dataDetail</c> filter; the brief is composed masked at that level before it is stored.
 /// </summary>
 [McpServerToolType]
-public sealed class DarlingMcpInvestigationTools
+public sealed partial class DarlingMcpInvestigationTools
 {
     /// <summary>The long-poll tool's name (#5822).</summary>
     internal const string WaitToolName = "wait_for_investigation_requests";
@@ -376,18 +376,32 @@ public sealed class DarlingMcpInvestigationTools
         [Description("Your agent name: 1-64 of A-Za-z0-9._:-")] string agent_id,
         [Description("Your claim_id, to renew. Omit to claim.")] string? claim_id = null,
         [Description("Omit, or 1.")] int? brief_format = null,
+        DarlingMcpServedPolicy? served = null,
         CancellationToken cancellationToken = default) =>
-        ClaimAsync(Store(postgres), composer, request_id, agent_id, claim_id, brief_format, cancellationToken);
+        ClaimAsync(Store(postgres), composer, request_id, agent_id, claim_id, brief_format, cancellationToken, served?.Policy.AgentTokenName);
 
-    /// <summary>The claim over a given store and composer, so a test can drive a composer that fails.</summary>
+    /// <summary>The claim over a given store and composer, so a test can drive a composer that fails. <paramref name="tokenName"/> is
+    /// the name of the named agent token the call came with (#6542), or null for the legacy token: with a name, the agent is that
+    /// name, and an <paramref name="agent_id"/> that differs from it is refused.</summary>
     internal static async Task<string> ClaimAsync(InvestigationRequestStore store, InvestigationBriefComposer composer,
-        string request_id, string agent_id, string? claim_id, int? brief_format, CancellationToken cancellationToken)
+        string request_id, string agent_id, string? claim_id, int? brief_format, CancellationToken cancellationToken, string? tokenName = null)
     {
         if (!Guid.TryParse(request_id, out var requestId))
             return InvestigationToolCore.Status("not_found", $"request_id '{request_id}' is not a request id.");
 
         try
         {
+            /* #6542: a named agent token is the agent's identity. An agent_id that names another agent is refused and journaled
+               under the token's name, so one token cannot claim as another agent. */
+            if (tokenName is not null)
+            {
+                if (!string.Equals(agent_id, tokenName, StringComparison.Ordinal))
+                {
+                    await store.RecordRefusalAsync(requestId, tokenName, "claim", AgentIdNotToken, null, cancellationToken);
+                    return McpHelpers.Refusal("agent_id", AgentIdNotTokenMessage(tokenName));
+                }
+            }
+
             /* #5632 review round 2, L4: an agent id is a name, not text, so it cannot pose as another journal line. */
             if (!InvestigationRules.IsValidAgentId(agent_id))
             {
@@ -799,3 +813,13 @@ public sealed class DarlingMcpInvestigationTools
 /// a host serving neither arm see everything. Registered by <c>ConfigureMcpServices</c> from the effective policy.
 /// </summary>
 public sealed record InvestigationReadPolicy(bool HideLivePracticeAnswers);
+
+public sealed partial class DarlingMcpInvestigationTools
+{
+    /// <summary>The refusal reason for an agent_id that is not the named token's name (#6542).</summary>
+    internal const string AgentIdNotToken = "agent_id_not_token";
+
+    /// <summary>The sentence for <see cref="AgentIdNotToken"/>. Names the token's name, never its value.</summary>
+    internal static string AgentIdNotTokenMessage(string tokenName) =>
+        $"This token is the agent {tokenName}: pass agent_id {tokenName}. An agent token claims and acts only as its own name.";
+}
