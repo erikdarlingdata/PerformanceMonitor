@@ -1087,7 +1087,7 @@ public partial class AddServerDialog : Window
             }
 
             /* #6254: the Query Store replica's own result, after the primary's. */
-            return string.Join(" — ", parts) + "." + (ViewerDataService.ProbeReplicaNote(root) is { } replicaNote ? " " + replicaNote : "");
+            return string.Join(" — ", parts) + "." + (ViewerDataService.ProbeReplicaNote(root) is { } replicaNote ? " " + replicaNote : "") + (ViewerDataService.ProbeMissingGrantsNote(root) is { } grantsNote ? " " + grantsNote : "");
         }
         catch (JsonException)
         {
@@ -1114,6 +1114,68 @@ public partial class AddServerDialog : Window
         catch (JsonException)
         {
             return null;
+        }
+    }
+
+    /// <summary>
+    /// #6472: copies the login and grant script for the server in the form. The principal follows the form's authentication: the SQL
+    /// login typed, the Entra identity placeholder, or, for Windows authentication, the service's virtual account when the host is this
+    /// machine (the viewer of a managed install runs beside the service) and the machine account placeholder otherwise. The script is
+    /// built by <see cref="MonitoringGrantScript"/>, the same list the service's <c>--grant-script</c> command and the connection test read.
+    /// </summary>
+    private void CopyGrantScriptButton_Click(object sender, RoutedEventArgs e)
+    {
+        var host = ServerNameBox.Text.Trim();
+        if (PostgresEngineRadio.IsChecked == true)
+        {
+            StatusText.Text = "The grant script is for SQL Server targets. A PostgreSQL target needs pg_monitor; see the Darling operator guide.";
+            return;
+        }
+
+        if (string.IsNullOrEmpty(host))
+        {
+            StatusText.Text = "Enter the server name first; the script depends on where the server is.";
+            return;
+        }
+
+        string? auth;
+        string? username = null;
+        if (UseProfileRadio.IsChecked == true && ProfileComboBox.SelectedItem is ViewerCredentialProfile profile)
+        {
+            auth = ServerStoreCredential.MapAuth(profile.AuthType);
+            username = profile.Username;
+        }
+        else if (SqlAuthRadio.IsChecked == true)
+        {
+            auth = ServerStoreCredential.Sql;
+            username = UsernameBox.Text.Trim();
+        }
+        else if (ServicePrincipalAuthRadio.IsChecked == true)
+        {
+            auth = ServerStoreCredential.ServicePrincipal;
+        }
+        else if (ManagedIdentityAuthRadio.IsChecked == true)
+        {
+            auth = ServerStoreCredential.ManagedIdentity;
+        }
+        else
+        {
+            auth = ServerStoreCredential.Integrated;
+        }
+
+        var principal = MonitoringGrantScript.ChoosePrincipal(new GrantPrincipalInputs(
+            auth, username, host, ServiceAccount: null, Environment.MachineName, Environment.UserDomainName));
+        var script = MonitoringGrantScript.Build(
+            principal, GrantScriptFinOpsCheck.IsChecked == true, MonitoringGrantScript.IsAzureSqlDatabaseHost(host), host);
+        try
+        {
+            Clipboard.SetText(script);
+            StatusText.Text = $"Copied the grant script for {principal.Name}. Review it, then run it on {host} as a sysadmin.";
+        }
+        catch (System.Runtime.InteropServices.ExternalException ex)
+        {
+            /* The clipboard is held by another process; the operator can click again. */
+            StatusText.Text = $"Could not reach the clipboard ({ex.Message}). Try again.";
         }
     }
 

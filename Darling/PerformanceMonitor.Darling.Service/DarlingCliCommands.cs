@@ -407,6 +407,7 @@ public static partial class DarlingCliCommands
         || IsSetCollectorFrequencyVerb(arg)
         || IsSetCollectorRetentionVerb(arg)
         || IsDropXeSessionsVerb(arg)
+        || IsGrantScriptVerb(arg)
         || IsResetPasswordKeyVerb(arg)
         || IsSelfCheckPasswordKeyVerb(arg);
 
@@ -501,6 +502,8 @@ public static partial class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --set-collector-retention <collector> <days|default> [--server <server>] [--config <path>]   Set how many days a collector's data is kept (1 to " + CollectorScheduleDefaults.MaxRetentionDays + "); default clears the row's value so the next level applies. Fleet-wide by default; --server scopes it to one server. Only the retention is written." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --drop-xe-sessions <server-name> [--dry-run] [--config <path>]   Drop the Extended Events sessions Darling created on a server this service still monitors (" + DarlingXeSessionCleanup.SessionNamesPhrase() + ", and this install's own, whichever exist). Removing a server drops only this install's own sessions, so run this just before you remove the server to drop the shared ones too. It also lists the sessions of other installs and never drops them. --dry-run lists them and drops nothing." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --drop-xe-sessions --print-sql   Print guarded DROP statements for the shared sessions, and a query that lists every install's sessions with their DROP statements, in both scopes. It connects to nothing, so use it for a server that is no longer configured or that a removal could not reach." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --grant-script <server-name> [--finops] [--azure] [--config <path>]   Print the T-SQL that creates the monitoring login and grants what Darling needs on a monitored server (the SQL login the entry uses, or the service account for Windows authentication). Safe to run twice. Connects to nothing." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --grant-script --host <host> [--auth sql|integrated|serviceprincipal|managedidentity] [--username <login>] [--finops] [--azure]   The same for a host not yet added." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --backfill-rollups --dry-run   Show the plan, the disk estimate and the time budget, and change nothing.";
 
     /// <summary>
@@ -1269,6 +1272,12 @@ public static partial class DarlingCliCommands
         var passLine = $"  [PASS] {serverName}: {DarlingServerConnector.DescribeProbeFacts(probe)}";
         /* #6254: a server with a Query Store replica is tested on both connections, and each is named. A replica that could not be
            opened is a [WARN], not a [FAIL]: the primary answered, and collection reads Query Store from it. */
+        /* #6472: a missing base grant is a [WARN] line too: the connection worked. */
+        if (!string.IsNullOrEmpty(probe.MissingGrantsNote))
+        {
+            passLine += Environment.NewLine + $"  [WARN] {serverName}: {probe.MissingGrantsNote}";
+        }
+
         if (DarlingServerConnector.DescribeQueryStoreReplica(probe) is not { } replicaLine)
         {
             return passLine;

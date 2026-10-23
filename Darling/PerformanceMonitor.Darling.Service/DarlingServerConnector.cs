@@ -757,6 +757,11 @@ FROM pg_catalog.pg_control_system() AS s";
             var replicaIgnored = ignoredReplica is not null;
             replicaHost ??= ignoredReplica;
 
+            /* #6472: the base grants the connecting login lacks, each with the statement that adds it. A warning only: the connection worked. */
+            var missingGrants = isPostgres
+                ? null
+                : await ProbeMissingGrantsAsync(runtime.ConnectionString, runtime.Target.IsAzureSqlDb, logger, cancellationToken);
+
             return new ConnectionProbeResult(
                 Success: true,
                 MajorVersion: runtime.Target.SqlMajorVersion,
@@ -780,7 +785,8 @@ FROM pg_catalog.pg_control_system() AS s";
                 HasPgWaitSamplingExtension: runtime.Target.HasPgWaitSamplingExtension,
                 QueryStoreReplica: replicaHost,
                 QueryStoreReplicaError: replicaError,
-                QueryStoreReplicaIgnoredOnAzureSqlDb: replicaIgnored);
+                QueryStoreReplicaIgnoredOnAzureSqlDb: replicaIgnored,
+                MissingGrantsNote: missingGrants);
         }
         catch (OperationCanceledException)
         {
@@ -801,6 +807,52 @@ FROM pg_catalog.pg_control_system() AS s";
                    threw an exception" and says nothing about why. One shared explanation, for every caller. */
                 Error: SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ex.Message,
                 SqlClientNativeLoadFailed: SqlClientNativeLoadFailure.IsMatch(ex));
+        }
+    }
+
+    /// <summary>
+    /// #6472: checks the required base grants of <see cref="PerformanceMonitor.Darling.Storage.MonitoringGrantScript"/> on the login the connection test connected with
+    /// (<c>HAS_PERMS_BY_NAME</c>: the server grants, or the database grants on an Azure SQL Database) and returns the sentence that
+    /// names each missing one with the statement that adds it, or null when none is missing. It never throws except for cancellation and
+    /// says nothing when it cannot read the answer (an old version that does not know a permission name answers NULL, which is no claim):
+    /// the connection worked, and a missing grant is a warning beside that result, not a failure of it.
+    /// <paramref name="createConnection"/> is a test seam; null opens a SqlConnection.
+    /// </summary>
+    internal static async Task<string?> ProbeMissingGrantsAsync(
+        string connectionString, bool isAzureSqlDatabase, ILogger? logger, CancellationToken cancellationToken,
+        Func<string, System.Data.Common.DbConnection>? createConnection = null)
+    {
+        var entries = isAzureSqlDatabase ? PerformanceMonitor.Darling.Storage.MonitoringGrantScript.RequiredAzureGrants : PerformanceMonitor.Darling.Storage.MonitoringGrantScript.RequiredServerGrants;
+        try
+        {
+            await using var connection = createConnection is null ? new SqlConnection(connectionString) : createConnection(connectionString);
+            await connection.OpenAsync(cancellationToken);
+            await using var command = connection.CreateCommand();
+            command.CommandText = PerformanceMonitor.Darling.Storage.MonitoringGrantScript.BuildPermissionCheckSql(entries);
+            command.CommandTimeout = 15;
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                return null;
+            }
+
+            var held = new List<int?>();
+            for (var i = 0; i < entries.Count; i++)
+            {
+                held.Add(reader.IsDBNull(i) ? null : Convert.ToInt32(reader.GetValue(i), System.Globalization.CultureInfo.InvariantCulture));
+            }
+
+            var who = reader.IsDBNull(entries.Count) ? PerformanceMonitor.Darling.Storage.MonitoringGrantScript.PlaceholderLogin : reader.GetString(entries.Count);
+            return PerformanceMonitor.Darling.Storage.MonitoringGrantScript.DescribeMissingGrants(PerformanceMonitor.Darling.Storage.MonitoringGrantScript.MissingGrants(entries, held, who));
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger?.LogDebug("The grant check did not run ({Message}); the connection result stands without it", ex.Message);
+            return null;
         }
     }
 
@@ -993,7 +1045,10 @@ public sealed record ConnectionProbeResult(
     string? QueryStoreReplicaError = null,
     /* #6459: the server has a Query Store replica set and is an Azure SQL Database, which has no readable-replica Query Store read:
        the setting is saved and never used, the replica was not opened, and the note says so. Trailing and defaulted. */
-    bool QueryStoreReplicaIgnoredOnAzureSqlDb = false)
+    bool QueryStoreReplicaIgnoredOnAzureSqlDb = false,
+    /* #6472: the sentence naming each missing base grant with the statement that adds it, or null when none is missing (or the check could
+       not read). A warning beside a successful connection. Trailing and defaulted, like the fields above. */
+    string? MissingGrantsNote = null)
 {
     /// <summary>
     /// Rebuilds the gate's-eye view of this target, so a caller can ask which collectors would actually

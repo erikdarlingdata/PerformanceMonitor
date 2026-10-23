@@ -1747,7 +1747,9 @@ ON CONFLICT (server_id) DO NOTHING";
     /// <c>--test-connection</c> CLI line uses (<see cref="DarlingServerConnector.DescribeProbeFacts"/>), so the
     /// two cannot drift and a PostgreSQL target reads as one here too.</summary>
     private static string DescribeProbe(ConnectionProbeResult probe, string? replicaLine = null) =>
-        $"Connected — {DarlingServerConnector.DescribeProbeFacts(probe)}." + (replicaLine is null ? "" : " " + replicaLine);
+        $"Connected — {DarlingServerConnector.DescribeProbeFacts(probe)}." + (replicaLine is null ? "" : " " + replicaLine)
+        /* #6472: the base grants the connecting login lacks, each with the statement that adds it. A note, never a refusal. */
+        + (string.IsNullOrEmpty(probe.MissingGrantsNote) ? "" : " " + probe.MissingGrantsNote);
 
     /// <summary>
     /// #6254: what an add or an edit says about the Query Store replica its connection test also opened, or null when the server has

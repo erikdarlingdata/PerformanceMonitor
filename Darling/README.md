@@ -81,7 +81,7 @@ The service reads one JSON file. It resolves the path in this order:
 2. The `DARLING_CONFIG` environment variable
 3. `darling.json` next to the service binary
 
-The Windows installer writes a minimal `darling.json` for you, and the service starts with no monitored servers (it logs one line saying so); add the first one in the Viewer (Add Server) or with `--add-server`. To write the file yourself, copy the shipped `darling.sample.json` (it lands next to the built binary) to `darling.json` and edit; an empty `servers` list is valid. Comments and trailing commas are allowed; property names are case-insensitive.
+The Windows installer writes a minimal `darling.json` for you, and the service starts with no monitored servers (it logs one line saying so); add the first one in the Viewer (Add Server) or with `--add-server`. The server's login needs grants first: `--grant-script --host <host>` prints the T-SQL for them (the Add Server dialog has a Copy grant script button). To write the file yourself, copy the shipped `darling.sample.json` (it lands next to the built binary) to `darling.json` and edit; an empty `servers` list is valid. Comments and trailing commas are allowed; property names are case-insensitive.
 
 Minimal working example — one server, integrated auth, bring-your-own PostgreSQL. (With the bundled store instead, replace the `postgres` block with `"postgres": { "managed": true }` and skip provisioning entirely — see [Managed Bundled PostgreSQL](#managed-bundled-postgresql).)
 
