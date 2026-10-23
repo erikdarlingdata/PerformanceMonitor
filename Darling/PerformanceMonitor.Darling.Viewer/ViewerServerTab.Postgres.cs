@@ -203,6 +203,7 @@ public partial class ViewerServerTab
         await LoadPgExtensionsAsync(startUtc, endUtc);
         await LoadPgConfigChangesAsync(startUtc, endUtc);
         await LoadPgServerConfigAsync();
+        await LoadPgLoggingAuditAsync();
         await LoadPgCpuUtilizationAsync(startUtc, endUtc);
     }
 
@@ -290,15 +291,26 @@ public partial class ViewerServerTab
         {
             PgConfigChangesGrid.ItemsSource = null;
             PgConfigChangesNote.Text = PanelNote("pg_server_config", 0, string.Empty);
+            PgConfigChangesDataStartBanner.Visibility = Visibility.Collapsed;
             return;
         }
 
-        var fetched = await _dataService.GetPgServerConfigChangesAsync(
+        /* #4966: where this grid's data starts. The diff compares consecutive snapshots, so a window that begins before the
+           store's coverage reads "no change" when it is "not collected yet"; the probe says which. */
+        using var readFanOut = ViewerReadFanOut.Of(2);
+        var dataStartTask = StartPgDataStartProbe("pg_server_config", startUtc, endUtc);
+        var fetchedTask = _dataService.GetPgServerConfigChangesAsync(
             _server.ServerId, startUtc, endUtc, ViewerDataService.PgConfigChangesRowCap + 1);
+        await AwaitReadWatchingProbeAsync(fetchedTask, dataStartTask, "PostgreSQL Configuration Changes");
+        var fetched = fetchedTask.Result;
+        readFanOut.Release();
+
         var truncated = fetched.Count > ViewerDataService.PgConfigChangesRowCap;
         var rows = truncated ? fetched.Take(ViewerDataService.PgConfigChangesRowCap).ToList() : fetched;
 
         PgConfigChangesGrid.ItemsSource = rows.Select(PgDisplay.ConfigChange).ToList();
+        await ShowEventDataStartAsync(PgConfigChangesDataStartBanner, dataStartTask, "PostgreSQL Configuration Changes", startUtc,
+            rows.Select(r => (DateTime?)r.ChangedAtUtc), ViewerDataService.PgConfigChangesRowCap);
 
         PgConfigChangesNote.Text = PanelNote("pg_server_config", rows.Count,
             "No configuration parameter changed value in this window. This compares consecutive snapshots, so an "
@@ -313,9 +325,9 @@ public partial class ViewerServerTab
     }
 
     /// <summary>
-    /// The logging-settings audit (#6387), under plan-capture readiness: the rest of the question whether this target is
-    /// telling us everything it could. Judged from the newest stored configuration snapshot, so, like the settings
-    /// grid on the Overview tab, it takes no window. The same snapshot read and judgment as <c>get_pg_logging_audit</c>
+    /// The logging-settings audit (#6387), under the settings grid on the Overview tab because it is judged from the same
+    /// stored configuration snapshot (the pg_server_config collector): whether this target is telling us everything it
+    /// could. Like the settings grid, it takes no window. The same snapshot read and judgment as <c>get_pg_logging_audit</c>
     /// and the web panel.
     /// </summary>
     private async Task LoadPgLoggingAuditAsync()
@@ -1026,8 +1038,6 @@ public partial class ViewerServerTab
                       + "the target writes its log messages in English, which every log read here matches, "
                       + "so an unmet one also means the Blocking sub-tab's deadlock grid cannot be trusted "
                       + "to be empty for the healthy reason.";
-
-        await LoadPgLoggingAuditAsync();
     }
 
     /// <summary>
@@ -1511,7 +1521,7 @@ public partial class ViewerServerTab
     }
 
     /// <summary>
-    /// #6133: the Vacuum tab scrolls as a page and each of its grids scrolls inside. A DataGrid marks the
+    /// #6133: the Vacuum tab (and, since #6387, the Overview tab, which reuses this handler) scrolls as a page and each of its grids scrolls inside. A DataGrid marks the
     /// mouse wheel handled even when it has nothing left to scroll, so over a grid the page would not move.
     /// Pass the wheel to the page unless the grid under the pointer can still scroll that way itself.
     /// </summary>

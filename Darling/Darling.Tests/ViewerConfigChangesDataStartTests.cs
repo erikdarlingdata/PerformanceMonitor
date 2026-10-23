@@ -30,8 +30,8 @@ namespace Darling.Tests;
 /// capture time and the notice keys on the store's COVERAGE of that table: the later of the server's first collection and the
 /// table's retention edge, never the first change. A quiet start (the store covered the range, the first change came late) says
 /// nothing. None of the three reads is capped (each reads every snapshot up to the range's end), so none passes a row cap, and a
-/// range of 90 minutes or less makes no probe call. The viewer shows no PostgreSQL configuration-changes grid, which a ratchet
-/// here pins.
+/// range of 90 minutes or less makes no probe call. The PostgreSQL Overview tab's configuration-changes grid (#6387) has its own
+/// probe over <c>pg_server_config</c>, listed in <c>ViewerPostgresDataStartTests.Grids</c>.
 /// </summary>
 /* The banner's time text reads the process-wide display mode and server clock, which the helper sets and restores; one shared
    collection serializes it with every other class that flips the viewer's time statics. */
@@ -96,18 +96,6 @@ public sealed class ViewerConfigChangesDataStartTests
         {
             Assert.True(DataWindowFloor.Source.TryForCollectorTable(table, out _), $"{table} is not a table the probe can read");
         }
-    }
-
-    /* The Configuration tab of a PostgreSQL server lists the CURRENT settings (GetPgServerConfigAsync), a snapshot with no range to
-       cut. The day a grid lists the changes (DarlingPgServerConfigReader.GetConfigChangesAsync) it needs its own note, a probe over
-       pg_server_config through ShowEventDataStartAsync, as the three SQL Server grids have: this fails until it does. */
-    [Fact]
-    public void TheViewerShowsNoPostgresConfigurationChangesGrid_YetOrItsNotesProbeIsPinned()
-    {
-        var all = string.Join("\n", Directory.GetFiles(PathTo("Darling", "PerformanceMonitor.Darling.Viewer"), "*.cs").Select(File.ReadAllText));
-
-        Assert.DoesNotContain("GetConfigChangesAsync(", all, StringComparison.Ordinal);
-        Assert.DoesNotContain("get_pg_server_config_changes", all, StringComparison.Ordinal);
     }
 
     // ── The tab: the probes beside the reads, one banner per grid from the rows shown, no cap ──

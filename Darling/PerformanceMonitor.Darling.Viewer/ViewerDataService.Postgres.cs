@@ -354,7 +354,7 @@ public sealed partial class ViewerDataService
         CancellationToken cancellationToken = default) =>
         DarlingPgServerConfigReader.GetConfigChangesAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
 
-    /// <summary>Vacuum tab - the logging-settings audit (#6387): the newest stored <c>pg_server_config</c> snapshot judged
+    /// <summary>Overview tab - the logging-settings audit (#6387): the newest stored <c>pg_server_config</c> snapshot judged
     /// setting by setting, through the SAME snapshot read and judgment <c>get_pg_logging_audit</c> and the web panel use
     /// (<see cref="DarlingPgLoggingAuditReader.GetNewestSnapshotAsync"/>, <see cref="DarlingPgLoggingAudit.Audit"/>).
     /// Null when no configuration snapshot has been collected: an audit of nothing would say "unknown" seven times and
