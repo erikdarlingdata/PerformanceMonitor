@@ -2181,14 +2181,14 @@ if ($AddOperator) {
 # $existing was resolved back at 1b, which needs to know fresh-versus-upgrade before it decides whether a
 # bad install location is a refusal or a question. Nothing between there and here creates or removes the
 # service, so it is the same answer.
-# The registered path carries its quotes, as the MSI registers it (#6597). Windows PowerShell 5.1 (and PowerShell
-# 7.0-7.2, or 7.3+ with $PSNativeCommandArgumentPassing = 'Legacy') wraps an argument that holds a space in quotes
-# but does not escape quotes inside it, so a bare " in the value is eaten and sc.exe registers the path with none:
-# the quotes have to go in as \". PowerShell 7.3+ in its Windows/Standard mode escapes inner quotes itself, and a
-# \" there would arrive as a literal backslash, so it takes the bare ".
+# The registered path carries its quotes, as the MSI registers it (#6597). sc.exe strips a plain pair of quotes as it
+# parses its command line, which is why "`"$serviceExe`"" registered the path bare. Windows PowerShell 5.1 (and
+# PowerShell 7.0-7.2, or 7.3+ with $PSNativeCommandArgumentPassing = 'Legacy') hands an argument that starts and ends
+# with a quote to the command line as it is, so the value has to be "\"path\"": the outer pair is what sc.exe strips
+# and the \" pair is what it keeps. PowerShell 7.3+ in its Windows/Standard mode escapes inner quotes itself, so the
+# plain "path" arrives as "path" with its quotes kept, and a \" there would arrive as a literal backslash.
 $nativeArgMode = Get-Variable -Name PSNativeCommandArgumentPassing -ValueOnly -ErrorAction SilentlyContinue
-$binPathQuote = if ($nativeArgMode -and $nativeArgMode -ne 'Legacy') { '"' } else { '\"' }
-$quotedServiceExe = "$binPathQuote$serviceExe$binPathQuote"
+$quotedServiceExe = if ($nativeArgMode -and $nativeArgMode -ne 'Legacy') { "`"$serviceExe`"" } else { "`"\`"$serviceExe\`"`"" }
 
 if ($existing) {
     Write-Host "Service already exists - upgrading its binPath in place (config, store data, and credentials untouched)."
