@@ -182,6 +182,14 @@ public sealed class McpNotificationChannelsLiveTests
                 Assert.DoesNotContain("169.254.169.254", refused, StringComparison.Ordinal);
             }
 
+            /* #6392: a proxy written as a link-local or cloud instance address could never be connected to, so it is refused at save with its URL given again. */
+            foreach (var badProxy in new[] { "http://169.254.169.254:8080", "169.254.169.254:3128", "http://[fe80::1]:3128", "http://168.63.129.16:3128" })
+            {
+                var refusedProxy = await DarlingMcpAlertTools.UpdateNotificationChannelsAsync(mcp, Request(teams: TeamsUrl, teamsProxy: badProxy), ring, null, ct);
+                Assert.Equal("invalid", Status(refusedProxy));
+                Assert.DoesNotContain("169.254.169.254", refusedProxy, StringComparison.Ordinal);
+            }
+
             Assert.Equal("invalid", Status(await DarlingMcpAlertTools.UpdateNotificationChannelsAsync(mcp, Request(smtpPort: 70000), ring, null, ct)));
             Assert.Equal("invalid", Status(await DarlingMcpAlertTools.UpdateNotificationChannelsAsync(mcp, Request(smtpRecipients: "not an address"), ring, null, ct)));
             Assert.Equal("invalid", Status(await DarlingMcpAlertTools.UpdateNotificationChannelsAsync(mcp, Request(generic: GenericUrl, genericHeaders: "not json"), ring, null, ct)));
@@ -234,6 +242,27 @@ public sealed class McpNotificationChannelsLiveTests
                 var refusedPlain = await Assert.ThrowsAsync<PostgresException>(() => plain.ExecuteNonQueryAsync(ct));
                 Assert.Equal("DL400", refusedPlain.SqlState);
             }
+
+            /* 8. #6392: a route's own value is sealed for its channel's proxy, so a proxy change is refused while any route holds a value for that
+                  channel, and writes nothing; a route holding only another channel's value does not block it, and a proxy change with no route value works. */
+            await using (var seed = owned.CreateCommand("INSERT INTO config.config_notification_routes (metric_match, teams_url) VALUES ('Blocking', 'https://teams.example.test/route-value')"))
+            {
+                await seed.ExecuteNonQueryAsync(ct);
+            }
+
+            var beforeRoute = await TextAsync(owned, everything, ct);
+            var blocked = await DarlingMcpAlertTools.UpdateNotificationChannelsAsync(mcp, Request(teams: TeamsUrl, teamsProxy: "http://proxy2.example.test:3128"), ring, null, ct);
+            Assert.Equal("refused", Status(blocked));
+            Assert.Contains("route holds its own value", blocked, StringComparison.Ordinal);
+            Assert.Equal(beforeRoute, await TextAsync(owned, everything, ct));
+            Assert.Equal("updated", Status(await DarlingMcpAlertTools.UpdateNotificationChannelsAsync(mcp, Request(slack: SlackUrl, slackProxy: "http://proxy2.example.test:3128"), ring, null, ct)));
+
+            await using (var clear = owned.CreateCommand("UPDATE config.config_notification_routes SET teams_url = '', slack_url = ''"))
+            {
+                await clear.ExecuteNonQueryAsync(ct);
+            }
+
+            Assert.Equal("updated", Status(await DarlingMcpAlertTools.UpdateNotificationChannelsAsync(mcp, Request(teams: TeamsUrl, teamsProxy: "http://proxy2.example.test:3128"), ring, null, ct)));
 
             bodySucceeded = true;
         }

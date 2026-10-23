@@ -1841,6 +1841,14 @@ BEGIN
           AND (v_row.signing_key <> '' OR EXISTS (SELECT 1 FROM config.config_notification_routes WHERE signing_key <> ''))) THEN
       RAISE EXCEPTION 'A signing key is saved for this destination, and it is tied to the generic webhook URL and proxy. Remove the key first, save the change, then generate a new key.' USING ERRCODE = 'DL403';
    END IF;
+   -- A route's own destination value is sealed for its channel's proxy on this row, so a proxy change would turn that route's channel off on
+   -- the next reload (and leave a value saved before sealing to go out through the new proxy): it is refused while any route holds one (#6392).
+   IF (v_teams_proxy IS DISTINCT FROM v_row.teams_proxy AND EXISTS (SELECT 1 FROM config.config_notification_routes WHERE teams_url <> ''))
+      OR (v_slack_proxy IS DISTINCT FROM v_row.slack_proxy AND EXISTS (SELECT 1 FROM config.config_notification_routes WHERE slack_url <> ''))
+      OR (v_generic_proxy IS DISTINCT FROM v_row.generic_proxy AND EXISTS (SELECT 1 FROM config.config_notification_routes WHERE generic_url <> ''))
+      OR (v_pd_proxy IS DISTINCT FROM v_row.pagerduty_proxy AND EXISTS (SELECT 1 FROM config.config_notification_routes WHERE pagerduty_routing_key <> '')) THEN
+      RAISE EXCEPTION 'A notification route holds its own value for a channel whose proxy is changing, and that value is tied to the proxy. Clear the value on each route first, change the proxy, then enter the value on the route again.' USING ERRCODE = 'DL403';
+   END IF;
    UPDATE config.config_notification
       SET smtp_host = v_host,
           smtp_port = v_port,

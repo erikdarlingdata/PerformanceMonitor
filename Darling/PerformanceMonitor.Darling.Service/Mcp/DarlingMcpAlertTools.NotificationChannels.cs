@@ -152,11 +152,14 @@ public sealed partial class DarlingMcpAlertTools
         }
     }
 
+    /// <summary>Reads the settings row under its row lock (#6392), so a save from the Viewer cannot land between this read and the store
+    /// function's own lock and leave a secret sealed for settings that have since changed. The <c>mcp</c> role's UPDATE on a column of
+    /// the row is what <c>FOR UPDATE</c> needs.</summary>
     private static async Task<ChannelSettings?> ReadChannelSettingsAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, CancellationToken cancellationToken)
     {
         const string sql =
             "SELECT smtp_host, smtp_port, smtp_use_ssl, smtp_from_address, smtp_recipients, teams_proxy, slack_proxy, generic_body_template, generic_proxy, "
-            + "pagerduty_use_eu_region, pagerduty_proxy, pagerduty_auto_resolve FROM config.config_notification WHERE id = 1";
+            + "pagerduty_use_eu_region, pagerduty_proxy, pagerduty_auto_resolve FROM config.config_notification WHERE id = 1 FOR UPDATE";
         await using var command = new NpgsqlCommand(sql, connection) { Transaction = transaction };
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -292,10 +295,21 @@ public sealed partial class DarlingMcpAlertTools
             return v[index] as string;
         }
 
-        Plain(r.TeamsProxy, "teams_proxy", 8, stored.TeamsProxy);
-        Plain(r.SlackProxy, "slack_proxy", 10, stored.SlackProxy);
-        Plain(r.GenericProxy, "generic_proxy", 14, stored.GenericProxy);
-        Plain(r.PagerDutyProxy, "pagerduty_proxy", 17, stored.PagerDutyProxy);
+        // #6392: the send connects to the proxy through the connect guard, so a proxy written as a refused IP literal is refused here.
+        void Proxy(string? typed, string column, int index, string current)
+        {
+            if (Text(typed) is { Length: > 0 } value && WebhookUrlShape.ProxyRefusal(value, column) is { } refused)
+            {
+                throw new NotificationRouteRefusedException(refused, NotificationRouteRefusalKind.Validation);
+            }
+
+            Plain(typed, column, index, current);
+        }
+
+        Proxy(r.TeamsProxy, "teams_proxy", 8, stored.TeamsProxy);
+        Proxy(r.SlackProxy, "slack_proxy", 10, stored.SlackProxy);
+        Proxy(r.GenericProxy, "generic_proxy", 14, stored.GenericProxy);
+        Proxy(r.PagerDutyProxy, "pagerduty_proxy", 17, stored.PagerDutyProxy);
         Secret(r.Teams, "teams", "teams_url", 7, "teams_webhook_url", v[8] as string ?? stored.TeamsProxy, null, "Teams webhook URL");
         Secret(r.Slack, "slack", "slack_url", 9, "slack_webhook_url", v[10] as string ?? stored.SlackProxy, null, "Slack webhook URL");
         var genericProxy = v[14] as string ?? stored.GenericProxy;
