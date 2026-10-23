@@ -851,7 +851,7 @@ public sealed class InvestigationRequestEventsLiveTests
             var rule = new CustomAlertRule(6003, "events rule", definitionJson, null, true, 1, T0, T0, null);
             var deliverer = new RecordingDeliverer();
             var evaluator = new CustomAlertEvaluator(
-                new CustomAlertRuleStore(_dataSource!), new CustomAlertStateStore(_dataSource!), _dataSource!, deliverer,
+                new CustomAlertRuleStore(_dataSource!, StorageCommandDeadlines.McpReadSeconds), new CustomAlertStateStore(_dataSource!, StorageCommandDeadlines.McpReadSeconds), _dataSource!, deliverer,
                 isAlertMuted: _ => false, alertsEnabled: static () => true, new PgAlertHistoryStore(_dataSource!, NullLogger.Instance),
                 defaultIntervalSeconds: 0, cacheTtl: TimeSpan.Zero, NullLogger.Instance);
 

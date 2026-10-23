@@ -18,6 +18,7 @@ using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -69,7 +70,7 @@ public sealed class DarlingMcpCustomAlertTools
     {
         try
         {
-            var store = new CustomAlertRuleStore(postgres);
+            var store = new CustomAlertRuleStore(postgres, McpCommandDeadlines.ReadSeconds);
             var rules = await store.ListAsync();
             return DarlingWebEndpoints.BuildRuleSummariesNode(rules).ToJsonString(McpHelpers.JsonOptions);
         }
@@ -91,7 +92,7 @@ public sealed class DarlingMcpCustomAlertTools
     {
         try
         {
-            var store = new CustomAlertRuleStore(postgres);
+            var store = new CustomAlertRuleStore(postgres, McpCommandDeadlines.ReadSeconds);
             var result = await store.GetAsync(rule_id);
             return result is CustomAlertRuleResult.Ok ok && ok.Rule is not null
                 ? DarlingWebEndpoints.BuildFullRuleNode(ok.Rule).ToJsonString(McpHelpers.JsonOptions)
@@ -188,7 +189,7 @@ public sealed class DarlingMcpCustomAlertTools
                 return Outcome("invalid", error ?? "definition is invalid.");
             }
 
-            var store = new CustomAlertRuleStore(postgres);
+            var store = new CustomAlertRuleStore(postgres, McpCommandDeadlines.ReadSeconds);
             var result = await store.CreateAsync(name, description, definition, enabled, DarlingWebEndpoints.McpEditorPrincipal, expiresAtUtc: expiry);
             return result switch
             {
@@ -269,7 +270,7 @@ public sealed class DarlingMcpCustomAlertTools
                 }
             }
 
-            var store = new CustomAlertRuleStore(postgres);
+            var store = new CustomAlertRuleStore(postgres, McpCommandDeadlines.ReadSeconds);
             var current = await store.GetAsync(rule_id);
             if (current is not CustomAlertRuleResult.Ok currentOk || currentOk.Rule is null)
             {
@@ -330,7 +331,7 @@ public sealed class DarlingMcpCustomAlertTools
             // #3305: resolve any open incident (write the recovery row) BEFORE the delete's FK cascade drops the
             // state that says which (rule, server) pairs were firing. No logger on the MCP surface — the recovery
             // row still writes; only the (optional) service-log line is skipped.
-            var before = await new CustomAlertRuleStore(postgres).GetAsync(rule_id);
+            var before = await new CustomAlertRuleStore(postgres, McpCommandDeadlines.ReadSeconds).GetAsync(rule_id);
             if (before is not CustomAlertRuleResult.Ok beforeOk || beforeOk.Rule is null)
             {
                 return Outcome("not_found", $"No custom alert rule with id {rule_id}.");
@@ -436,7 +437,7 @@ public sealed class DarlingMcpCustomAlertTools
 
             if (rule_id.HasValue)
             {
-                var store = new CustomAlertRuleStore(postgres);
+                var store = new CustomAlertRuleStore(postgres, McpCommandDeadlines.ReadSeconds);
                 var got = await store.GetAsync(rule_id.Value);
                 if (got is not CustomAlertRuleResult.Ok ok || ok.Rule is null)
                 {
@@ -474,7 +475,7 @@ public sealed class DarlingMcpCustomAlertTools
             IReadOnlySet<int>? tagServerIds = null;
             if (def.ScopeMode == CustomAlertScopeMode.Tag && def.ScopeTagId is int tagId)
             {
-                var members = await new CustomAlertRuleStore(postgres).ListTagMembersAsync(new[] { tagId });
+                var members = await new CustomAlertRuleStore(postgres, McpCommandDeadlines.ReadSeconds).ListTagMembersAsync(new[] { tagId });
                 tagServerIds = members.TryGetValue(tagId, out var ids) ? ids : null;
             }
 
@@ -607,7 +608,7 @@ public sealed class DarlingMcpCustomAlertTools
             CustomAlertRuleDefinition def;
             if (rule_id.HasValue)
             {
-                var got = await new CustomAlertRuleStore(postgres).GetAsync(rule_id.Value, cancellationToken);
+                var got = await new CustomAlertRuleStore(postgres, McpCommandDeadlines.ReadSeconds).GetAsync(rule_id.Value, cancellationToken);
                 if (got is not CustomAlertRuleResult.Ok ok || ok.Rule is null)
                 {
                     return Outcome("not_found", $"No custom alert rule with id {rule_id.Value}.");
@@ -659,7 +660,7 @@ public sealed class DarlingMcpCustomAlertTools
                 IReadOnlySet<int>? tagServerIds = null;
                 if (def.ScopeMode == CustomAlertScopeMode.Tag && def.ScopeTagId is int tagId)
                 {
-                    var members = await new CustomAlertRuleStore(postgres).ListTagMembersAsync(new[] { tagId }, cancellationToken);
+                    var members = await new CustomAlertRuleStore(postgres, McpCommandDeadlines.ReadSeconds).ListTagMembersAsync(new[] { tagId }, cancellationToken);
                     tagServerIds = members.TryGetValue(tagId, out var ids) ? ids : null;
                 }
 
@@ -853,58 +854,11 @@ public sealed class DarlingMcpCustomAlertTools
         return Task.FromResult(new JsonObject { ["templates"] = templates }.ToJsonString(McpHelpers.JsonOptions));
     }
 
-    /// <summary>
-    /// The expiry of a CREATE (#6235): omitted or empty means the rule does not expire; otherwise an ISO-8601 UTC instant that must be in
-    /// the future. Shared by the MCP create tool, its agent arm and the web create route, so the three refuse the same way.
-    /// </summary>
-    internal static (DateTime? Expiry, string? Error) ResolveCreateExpiry(string? sent)
-    {
-        if (string.IsNullOrWhiteSpace(sent))
-        {
-            return (null, null);
-        }
+    /// <summary>The expiry of a CREATE (#6235); the rule lives in <see cref="CustomAlertExpiry.ResolveCreateExpiry"/> (Storage).</summary>
+    internal static (DateTime? Expiry, string? Error) ResolveCreateExpiry(string? sent) => CustomAlertExpiry.ResolveCreateExpiry(sent);
 
-        var (parsed, parseError) = CustomAlertExpiry.Parse(sent, "expires_at_utc");
-        if (parseError is not null)
-        {
-            return (null, parseError);
-        }
-
-        var past = CustomAlertExpiry.RefusePast(parsed, DateTime.UtcNow, "expires_at_utc");
-        return past is not null ? (null, past) : (parsed, null);
-    }
-
-    /// <summary>
-    /// The expiry of an UPDATE (#6235), in the vocabulary the description uses: <c>null</c> keeps <paramref name="current"/>, empty
-    /// clears it, anything else is an ISO-8601 UTC instant. A value that is NOT a change (the rule's own stored expiry sent back) is
-    /// never refused, so re-saving an already-expired rule still works; a new value must be in the future.
-    /// </summary>
-    internal static (DateTime? Expiry, string? Error) ResolveUpdateExpiry(string? sent, DateTime? current)
-    {
-        if (sent is null)
-        {
-            return (current, null);
-        }
-
-        if (string.IsNullOrWhiteSpace(sent))
-        {
-            return (null, null);
-        }
-
-        var (parsed, parseError) = CustomAlertExpiry.Parse(sent, "expires_at_utc");
-        if (parseError is not null)
-        {
-            return (null, parseError);
-        }
-
-        if (parsed == current)
-        {
-            return (parsed, null);
-        }
-
-        var past = CustomAlertExpiry.RefusePast(parsed, DateTime.UtcNow, "expires_at_utc");
-        return past is not null ? (null, past) : (parsed, null);
-    }
+    /// <summary>The expiry of an UPDATE (#6235); the rule lives in <see cref="CustomAlertExpiry.ResolveUpdateExpiry"/> (Storage).</summary>
+    internal static (DateTime? Expiry, string? Error) ResolveUpdateExpiry(string? sent, DateTime? current) => CustomAlertExpiry.ResolveUpdateExpiry(sent, current);
 
     /// <summary>
     /// The answer to a create or an update (#6235): the stored rule, plus a note when the rule carries an expiry. A rule with a future
