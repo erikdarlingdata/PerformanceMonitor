@@ -713,7 +713,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         MapAdminServers(app, postgres);
         MapQueryTags(app, postgres, logger, readAdmission, readLatencyRecorder);
         MapCollectorRuns(app, new PostgresSnapshotNowStore(postgres), logger, async (name, ct) => { var (r, err) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, name, ct, NameClash.Refuse); return (r.ServerId, err); });
-        MapActiveQueriesLive(app, new PostgresActiveQueriesLiveStore(postgres), logger, async (name, ct) => { var (r, err) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, name, ct, NameClash.Refuse); return (r.ServerId, err); }, managedStore);
+        MapActiveQueriesLive(app, new PostgresActiveQueriesLiveStore(postgres), logger, async (name, ct) => { var (r, err) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, name, ct, NameClash.Refuse); return (r.ServerId, err); }, managedStore, readAdmission: readAdmission, readLatencyRecorder: readLatencyRecorder);
         MapServers(app, postgres, logger);
         MapAlertHistoryDismiss(app, postgres, logger);
         MapInvestigationFeedback(app, postgres, logger, managedStore);
@@ -3949,7 +3949,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// </summary>
     internal static void MapActiveQueriesLive(
         WebApplication app, IActiveQueriesLiveStore store, ILogger logger,
-        Func<string, CancellationToken, Task<(int ServerId, string? Error)>> resolveServer, bool managedStore, TimeProvider? clock = null)
+        Func<string, CancellationToken, Task<(int ServerId, string? Error)>> resolveServer, bool managedStore, TimeProvider? clock = null,
+        ReadAdmission? readAdmission = null, ReadLatencyRecorder? readLatencyRecorder = null)
     {
         app.MapGet("/api/active-queries/live/available", async (HttpContext context) =>
         {
@@ -4052,6 +4053,15 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         {
             SnapshotCommandState? state;
             var stopwatch = Stopwatch.StartNew();
+            /* The result read carries the plan XML a live read stored, so it is admitted and recorded like the other web reads. */
+            using var readScope = ReadScope.Open(logger);
+            using var ticket = await AdmitWebRouteAsync(readAdmission, ActiveQueriesLiveResultRoute, ReadWindowBand.None, context, readLatencyRecorder, readScope.Scope);
+            if (ticket.Refusal is { } refusal)
+            {
+                return BusyResult(refusal);
+            }
+
+            using var run = new WebRouteRun(readLatencyRecorder, ActiveQueriesLiveResultRoute, ReadWindowBand.None, context, readScope.Scope);
             try
             {
                 state = await store.ReadStateAsync(commandId, context.RequestAborted);
@@ -4063,6 +4073,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             if (state is null)
             {
+                run.Complete(ReadOutcome.Ok);
                 return ErrorResult("No such live read.", StatusCodes.Status404NotFound);
             }
 
@@ -4085,6 +4096,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 }
             }
 
+            run.Complete(ReadOutcome.Ok);
             return JsonNodeResult(node);
         });
     }
@@ -5362,6 +5374,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
     /// <summary>#5506 part 3 (round 2, L5): the MCP twin <c>/api/catalog</c> is admitted and recorded under.</summary>
     internal const string CatalogRoute = "describe_custom_view_catalog";
+
+    /// <summary>The route name the live Active Queries result read is admitted and recorded under (#6386).</summary>
+    internal const string ActiveQueriesLiveResultRoute = "active_queries_live_result";
 
     /// <summary>#5506 part 3 (round 1, M3): the name <c>/api/ag</c> is admitted and recorded under, its MCP twin's.</summary>
     internal const string AgHealthRoute = "get_ag_health";

@@ -2571,6 +2571,11 @@ DECLARE
    v_last_status text;
    v_last_at timestamp;
 BEGIN
+   -- The one-request-at-a-time rule below reads the newest row of its kind with a fresh snapshot per statement. A transaction that
+   -- keeps one snapshot (REPEATABLE READ and up) could miss a row another session just queued, so it is refused.
+   IF current_setting('transaction_isolation') <> 'read committed' THEN
+      RAISE EXCEPTION 'This request must run at the READ COMMITTED isolation level.' USING ERRCODE = 'DL400';
+   END IF;
    IF p_server_id IS NULL OR NOT EXISTS (SELECT 1 FROM {config}.config_monitored_servers WHERE server_id = p_server_id) THEN
       RAISE EXCEPTION 'No monitored server with that id.' USING ERRCODE = 'DL404';
    END IF;
@@ -2634,6 +2639,11 @@ DECLARE
    v_last_status text;
    v_last_at timestamp;
 BEGIN
+   -- The one-request-at-a-time rule below reads the newest row of its kind with a fresh snapshot per statement. A transaction that
+   -- keeps one snapshot (REPEATABLE READ and up) could miss a row another session just queued, so it is refused.
+   IF current_setting('transaction_isolation') <> 'read committed' THEN
+      RAISE EXCEPTION 'This request must run at the READ COMMITTED isolation level.' USING ERRCODE = 'DL400';
+   END IF;
    IF p_server_id IS NULL OR NOT EXISTS (SELECT 1 FROM {config}.config_monitored_servers WHERE server_id = p_server_id) THEN
       RAISE EXCEPTION 'No monitored server with that id.' USING ERRCODE = 'DL404';
    END IF;
@@ -2655,6 +2665,14 @@ BEGIN
          USING ERRCODE = 'DL429',
                HINT = to_char(v_last_at + interval '10 seconds', 'YYYY-MM-DD') || 'T' || to_char(v_last_at + interval '10 seconds', 'HH24:MI:SS') || 'Z';
    END IF;
+   -- Finished results do not pile up: a result carries the plan XML with no size cap and the web never deletes the row it reads, so each
+   -- request first removes this server's finished live reads that finished more than an hour ago. Only terminal rows
+   -- (succeeded or failed) with a completed_at are touched, so a pending or running row and every other command type stay. The Viewer
+   -- reads and deletes its own row within seconds, far inside the hour.
+   DELETE FROM {config}.config_command
+   WHERE command_type = 'fetch_active_queries' AND target_server_id = p_server_id
+     AND status IN ('succeeded', 'failed')
+     AND completed_at < (now() AT TIME ZONE 'UTC') - interval '1 hour';
    INSERT INTO {config}.config_command (requested_by, command_type, target_server_id, args_json, status, created_at)
    VALUES (left(COALESCE(p_requested_by, 'web'), 200), 'fetch_active_queries', p_server_id, NULL, 'pending', (now() AT TIME ZONE 'UTC'))
    RETURNING command_id INTO v_id;

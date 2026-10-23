@@ -121,14 +121,14 @@ export function activeQueriesLiveBar(server, columns) {
         const rows = liveRows(outcome.result);
         status.textContent = rows.length === 0
           ? "Nothing is running on this server right now."
-          : rows.length + (rows.length === 1 ? " running request" : " running requests") + " read live, not stored.";
+          : rows.length + (rows.length === 1 ? " running request" : " running requests") + " read live, kept on the store for about an hour.";
         if (rows.length) mount(output, [VIZ.table({ rows }, { rowsKey: "rows", columns })]);
       } finally {
         button.disabled = false;
       }
     });
     const note = el("span", { class: "muted" }, [
-      " Reads the running requests from the monitored server once, now. The result is shown here and is not stored.",
+      " Reads the running requests from the monitored server once, now. The result is shown here and also kept on the store: a newer request more than an hour later removes it, otherwise retention does.",
     ]);
     mount(slot, [el("div", {}, [button, note]), status, output]);
     slot.dataset.status = "ready";

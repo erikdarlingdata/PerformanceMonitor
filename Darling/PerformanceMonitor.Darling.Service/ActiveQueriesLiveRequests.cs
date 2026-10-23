@@ -97,6 +97,10 @@ internal static class ActiveQueriesLiveRequests
         {
             return new SnapshotRequestOutcome(false, SnapshotRequestOutcome.UnknownServerCode, "No monitored server has that id.", null, null);
         }
+        catch (PostgresException ex) when (ex.SqlState == "DL400")
+        {
+            return new SnapshotRequestOutcome(false, SnapshotRequestOutcome.BadRequestCode, ex.MessageText, null, null);
+        }
         catch (PostgresException ex) when (ex.SqlState == "DL409")
         {
             return new SnapshotRequestOutcome(

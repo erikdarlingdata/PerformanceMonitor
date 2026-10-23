@@ -54,6 +54,8 @@ public sealed class ActiveQueriesLiveWebTests
 
         public SnapshotCommandState? State { get; set; }
 
+        public int Reads { get; private set; }
+
         public Task<long> EnqueueAsync(int serverId, string requestedBy, CancellationToken cancellationToken)
         {
             if (EnqueueFails is not null)
@@ -65,13 +67,16 @@ public sealed class ActiveQueriesLiveWebTests
             return Task.FromResult(100L + Enqueued.Count);
         }
 
-        public Task<SnapshotCommandState?> ReadStateAsync(long commandId, CancellationToken cancellationToken) =>
-            Task.FromResult(commandId == 101 ? State : null);
+        public Task<SnapshotCommandState?> ReadStateAsync(long commandId, CancellationToken cancellationToken)
+        {
+            Reads++;
+            return Task.FromResult(commandId == 101 ? State : null);
+        }
 
         public Task<bool> CanQueueAsync(CancellationToken cancellationToken) => Task.FromResult(CanQueue);
     }
 
-    private static async Task<WebApplication> StartAsync(FakeStore store, bool canEdit)
+    private static async Task<WebApplication> StartAsync(FakeStore store, bool canEdit, ReadAdmission? admission = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -85,7 +90,8 @@ public sealed class ActiveQueriesLiveWebTests
         });
         DarlingWebEndpoints.MapActiveQueriesLive(
             app, store, NullLogger.Instance,
-            (name, _) => Task.FromResult(name == "known" ? (ServerId, (string?)null) : (0, "No server matches.")), managedStore: true);
+            (name, _) => Task.FromResult(name == "known" ? (ServerId, (string?)null) : (0, "No server matches.")), managedStore: true,
+            readAdmission: admission);
         await app.StartAsync(TestContext.Current.CancellationToken);
         return app;
     }
@@ -153,6 +159,7 @@ public sealed class ActiveQueriesLiveWebTests
     }
 
     [Theory]
+    [InlineData("DL400", HttpStatusCode.BadRequest)]
     [InlineData("DL409", HttpStatusCode.Conflict)]
     [InlineData("DL404", HttpStatusCode.NotFound)]
     [InlineData("42883", HttpStatusCode.Forbidden)]
@@ -268,6 +275,140 @@ public sealed class ActiveQueriesLiveWebTests
 
             Assert.False(await store.CanQueueAsync(ct));
             Assert.Equal("42883", (await Assert.ThrowsAsync<PostgresException>(() => store.EnqueueAsync(ServerId, "web", ct))).SqlState);
+        });
+    }
+
+    /// <summary>The result read is admitted like the other web reads: with the only heavy slot taken, the wait passes the cap, the
+    /// read is refused with the busy answer and its Retry-After, and the store is never asked.</summary>
+    [Fact(Timeout = 60_000)]
+    public async Task TheResultRoute_IsRefusedWithBusy_WhenAdmissionRefuses_AndDoesNotReadTheStore()
+    {
+        var route = DarlingWebEndpoints.ActiveQueriesLiveResultRoute;
+        var clock = new TimerTimeProvider();
+        var admission = new ReadAdmission(clock, ReadAdmission.DefaultWaitCap, null, 1);
+        admission.SetTable(new Dictionary<(ReadSurface, string, string), long>
+        {
+            [(ReadSurface.Web, route, ReadWindowBand.None)] = 5_000,
+        });
+        var store = new FakeStore { State = new SnapshotCommandState("succeeded", "active queries fetched", "{\"rows\":[]}") };
+        await using var app = await StartAsync(store, canEdit: true, admission);
+        using var client = app.GetTestClient();
+        var ct = TestContext.Current.CancellationToken;
+
+        var held = await Task.Run(() => admission.AdmitAsync(ReadSurface.Web, route, ReadWindowBand.None, ct), ct);
+        HttpResponseMessage response;
+        try
+        {
+            var pending = client.GetAsync("/api/active-queries/live/101", ct);
+            var deadline = DateTime.UtcNow.AddSeconds(20);
+            while (admission.Stats().Queued < 1)
+            {
+                Assert.True(DateTime.UtcNow < deadline, "the result read never queued behind the held slot");
+                await Task.Delay(10, ct);
+            }
+
+            clock.Advance(ReadAdmission.DefaultWaitCap);
+            response = await pending.WaitAsync(TimeSpan.FromSeconds(20), ct);
+        }
+        finally
+        {
+            held.Dispose();
+        }
+
+        using (response)
+        {
+            Assert.Equal((HttpStatusCode)429, response.StatusCode);
+            Assert.NotNull(response.Headers.RetryAfter);
+        }
+
+        Assert.Equal(0, store.Reads);
+    }
+
+    [Fact]
+    public async Task TheFunction_RefusesARepeatableReadTransaction_WithDL400_AndQueuesNothing()
+    {
+        await WithViewerAsync(async (owner, asRole, ct) =>
+        {
+            await using (var connection = await asRole.OpenConnectionAsync(ct))
+            {
+                await using (var begin = new NpgsqlCommand("BEGIN ISOLATION LEVEL REPEATABLE READ", connection))
+                {
+                    await begin.ExecuteNonQueryAsync(ct);
+                }
+
+                await using (var snapshot = new NpgsqlCommand("SELECT 1", connection))
+                {
+                    await snapshot.ExecuteScalarAsync(ct);
+                }
+
+                await using var call = new NpgsqlCommand($"SELECT config.request_active_queries_live({ServerId}, 'web')", connection);
+                var refused = await Assert.ThrowsAsync<PostgresException>(async () => await call.ExecuteScalarAsync(ct));
+                Assert.Equal("DL400", refused.SqlState);
+                Assert.Contains("READ COMMITTED", refused.MessageText, StringComparison.Ordinal);
+            }
+
+            await using var count = owner.CreateCommand("SELECT count(*) FROM config.config_command");
+            Assert.Equal(0L, Convert.ToInt64(await count.ExecuteScalarAsync(ct)));
+
+            /* At READ COMMITTED, the default, the same request queues. */
+            var outcome = await ActiveQueriesLiveRequests.RequestAsync(new PostgresActiveQueriesLiveStore(asRole), ServerId, "web", ct);
+            Assert.True(outcome.Accepted);
+        });
+    }
+
+    [Fact]
+    public async Task TheFunction_RemovesOnlyThisServersFinishedReadsOlderThanAnHour_AndLeavesEverythingElse()
+    {
+        await WithViewerAsync(async (owner, asRole, ct) =>
+        {
+            const int OtherServer = 62;
+            await ExecAsync(owner,
+                $"INSERT INTO config.config_monitored_servers (server_id, name, host, is_enabled) VALUES ({OtherServer}, 'aq-other', 'aq-other', TRUE)", ct);
+
+            async Task<long> SeedAsync(string type, int server, string status, string ageOfFinish)
+            {
+                await using var insert = owner.CreateCommand(
+                    "INSERT INTO config.config_command (requested_by, command_type, target_server_id, args_json, status, created_at, completed_at, result_json) " +
+                    $"VALUES ('seed', '{type}', {server}, NULL, '{status}', (now() AT TIME ZONE 'UTC') - interval '{ageOfFinish}' - interval '5 seconds', " +
+                    (status == "pending" ? "NULL" : $"(now() AT TIME ZONE 'UTC') - interval '{ageOfFinish}'") +
+                    ", '{\"rows\":[]}'::jsonb) RETURNING command_id");
+                return Convert.ToInt64(await insert.ExecuteScalarAsync(ct));
+            }
+
+            async Task<HashSet<long>> RowsAsync()
+            {
+                await using var read = owner.CreateCommand("SELECT command_id FROM config.config_command");
+                await using var reader = await read.ExecuteReaderAsync(ct);
+                var ids = new HashSet<long>();
+                while (await reader.ReadAsync(ct))
+                {
+                    ids.Add(reader.GetInt64(0));
+                }
+
+                return ids;
+            }
+
+            var oldSucceeded = await SeedAsync("fetch_active_queries", ServerId, "succeeded", "2 hours");
+            var oldFailed = await SeedAsync("fetch_active_queries", ServerId, "failed", "90 minutes");
+            var recentFinished = await SeedAsync("fetch_active_queries", ServerId, "succeeded", "30 minutes");
+            var otherServerOld = await SeedAsync("fetch_active_queries", OtherServer, "succeeded", "3 hours");
+            var otherTypeOld = await SeedAsync("snapshot_now", ServerId, "succeeded", "3 hours");
+            var oldPending = await SeedAsync("fetch_active_queries", ServerId, "pending", "2 hours");
+            var store = new PostgresActiveQueriesLiveStore(asRole);
+
+            /* A pending read refuses the request before anything is removed. */
+            Assert.Equal("DL409", (await Assert.ThrowsAsync<PostgresException>(() => store.EnqueueAsync(ServerId, "web", ct))).SqlState);
+            Assert.Contains(oldSucceeded, await RowsAsync());
+
+            /* Once that read finished a minute ago, the next request removes the two reads finished over an hour ago and nothing else. */
+            await ExecAsync(owner,
+                $"UPDATE config.config_command SET status = 'succeeded', completed_at = (now() AT TIME ZONE 'UTC') - interval '1 minute', created_at = (now() AT TIME ZONE 'UTC') - interval '2 minutes' WHERE command_id = {oldPending}", ct);
+            var queued = await store.EnqueueAsync(ServerId, "web", ct);
+
+            var left = await RowsAsync();
+            Assert.DoesNotContain(oldSucceeded, left);
+            Assert.DoesNotContain(oldFailed, left);
+            Assert.Equivalent(new[] { recentFinished, otherServerOld, otherTypeOld, oldPending, queued }, left);
         });
     }
 
