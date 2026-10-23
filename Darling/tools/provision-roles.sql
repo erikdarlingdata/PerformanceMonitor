@@ -1240,8 +1240,8 @@ REVOKE ALL ON FUNCTION config.edit_monitored_server(integer, timestamp, text[], 
 GRANT EXECUTE ON FUNCTION config.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric) TO viewer, mcp;
 
 -- #6334: the known-pattern entries' writes. The web editor (viewer) and the Viewer (admin) write config.config_known_patterns only
---     through these three functions; no role holds a direct INSERT/UPDATE/DELETE on the table, and mcp gets neither the functions nor a write
---     (no MCP tool writes an entry: they are operator-written context). Same functions, same text, as managed provisioning rebuilds on every
+--     through these three functions, and the MCP create_known_pattern / update_known_pattern / delete_known_pattern tools (#6398) call the same
+--     functions as mcp; no role holds a direct INSERT/UPDATE/DELETE on the table. Same functions, same text, as managed provisioning rebuilds on every
 --     start. The reads need no grant: the schema-wide SELECT covers the table. The table exists from V214, so re-run this script after upgrading. All three bodies are plpgsql (late-bound) so the script also runs on a store that has not reached V214 yet; a LANGUAGE sql body would fail the CREATE there.
 CREATE OR REPLACE FUNCTION config.insert_known_pattern(
    p_server_id integer,
@@ -1259,9 +1259,14 @@ SET search_path = pg_catalog, pg_temp
 AS $fn$
 DECLARE
    v_id bigint;
+   v_count bigint;
 BEGIN
    IF p_server_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM config.config_monitored_servers WHERE server_id = p_server_id) THEN
       RAISE EXCEPTION 'No monitored server with that id.' USING ERRCODE = 'DL404';
+   END IF;
+   SELECT count(*) INTO v_count FROM config.config_known_patterns;
+   IF v_count >= 500 THEN
+      RAISE EXCEPTION 'Known patterns are capped at 500 entries and % exist. Delete entries you no longer need to make room.', v_count USING ERRCODE = 'DL409';
    END IF;
    INSERT INTO config.config_known_patterns
       (server_id, metric_name, time_of_day, time_zone, window_minutes, note, created_by, expires_at_utc)
@@ -1320,8 +1325,11 @@ END;
 $fn$;
 REVOKE ALL ON FUNCTION config.delete_known_pattern(bigint) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION config.insert_known_pattern(integer, text, time, text, integer, text, text, timestamp) TO admin, viewer;
+GRANT EXECUTE ON FUNCTION config.insert_known_pattern(integer, text, time, text, integer, text, text, timestamp) TO mcp;
 GRANT EXECUTE ON FUNCTION config.update_known_pattern(bigint, integer, text, time, text, integer, text, timestamp, text) TO admin, viewer;
+GRANT EXECUTE ON FUNCTION config.update_known_pattern(bigint, integer, text, time, text, integer, text, timestamp, text) TO mcp;
 GRANT EXECUTE ON FUNCTION config.delete_known_pattern(bigint) TO admin, viewer;
+GRANT EXECUTE ON FUNCTION config.delete_known_pattern(bigint) TO mcp;
 
 -- #5941: the run-collectors-now request. The web route (viewer) and the MCP run_collectors_now tool (mcp) queue a
 --     snapshot_now command through config.request_snapshot_now, the only way those two roles write a command row.

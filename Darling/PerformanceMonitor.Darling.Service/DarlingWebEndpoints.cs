@@ -235,6 +235,10 @@ public static class DarlingWebEndpoints
         "set_collector_databases",
         "reset_collector_schedules",
         "get_collector_schedules",
+        /* #6398: the known-pattern writes are MCP-only; the web editor has its own routes (POST/PUT/DELETE /api/known-patterns, see DarlingKnownPatternRoutes). */
+        "create_known_pattern",
+        "update_known_pattern",
+        "delete_known_pattern",
         /* #6269: the server action switches have their own web routes (GET /api/server-actions and PUT /api/servers/{id}/actions/{action}, admin role); the MCP write is under mcp.allowServerAdmin. */
         "set_server_action",
         "get_server_actions",
