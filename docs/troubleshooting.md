@@ -4,7 +4,7 @@ Part of the [Performance Monitor documentation](../README.md#documentation).
 
 ### Lite
 
-Application logs are written to the `logs/` folder. Collection success/failure is also logged to the `collection_log` table in DuckDB.
+Application logs are written to `%LOCALAPPDATA%\PerformanceMonitorLite-Data\logs`, one `lite_<date>.log` file per day. Lite keeps each file for 7 days. In the sidebar, **View Log** opens today's file and **Open Log Folder** opens the folder. Collection success/failure is also logged to the `collection_log` table in DuckDB.
 
 Verbosity is the `log_minimum_level` key in `settings.json` (no UI — see `Lite/config/settings.sample.json`), one of `Trace`, `Debug`, `Information`, `Warning`, `Error`, `Critical` or `None`. It defaults to `Information` and is read at startup, so a change needs a restart.
 

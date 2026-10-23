@@ -6440,6 +6440,25 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         return watermark;
     }
 
+    /// <summary>Opens a transaction on a composed panel's own connection and makes it read only before any statement runs, the way the
+    /// hourly-edges snapshot does. The pool this reads on holds write grants, so a compiled statement that tried to change anything is
+    /// refused by the store here (SQLSTATE 25006) instead of relying on the SQL the compiler writes. The caller disposes it (a rollback).</summary>
+    internal static async Task<NpgsqlTransaction> BeginComposeReadOnlyTransactionAsync(
+        NpgsqlConnection connection, System.Threading.CancellationToken cancellationToken)
+    {
+        var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            await ExecuteSnapshotStatementAsync(connection, HourlyEdgesReadOnlySql, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            return transaction;
+        }
+        catch
+        {
+            await transaction.DisposeAsync();
+            throw;
+        }
+    }
+
     private static async Task ExecuteSnapshotStatementAsync(
         NpgsqlConnection connection, string sql, int commandSeconds, System.Threading.CancellationToken cancellationToken)
     {
@@ -6557,7 +6576,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
     /// <summary>Runs a compiled composed query on the viewer pool and serializes its rows to a JSON array of
     /// <c>{column: value}</c> objects — generic over the SELECT shape (bucket / group dims / value).</summary>
-    private static async Task<JsonArray> RunComposedQueryAsync(
+    internal static async Task<JsonArray> RunComposedQueryAsync(
         NpgsqlDataSource postgres, ComposeCompiled compiled, int clientDeadlineSeconds, System.Threading.CancellationToken cancellationToken,
         NpgsqlConnection? sharedConnection = null)
     {
@@ -6567,14 +6586,17 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            A caller that already holds the run's connection (the hourly-edges snapshot, #4605) passes it and keeps
            ownership; every other caller leaves it null and this method opens, and disposes, its own. */
         NpgsqlConnection? ownedConnection = null;
+        NpgsqlTransaction? ownedTransaction = null;
         if (sharedConnection is null)
         {
             ownedConnection = await OpenComposeConnectionAsync(postgres, cancellationToken);
+            ownedTransaction = await BeginComposeReadOnlyTransactionAsync(ownedConnection, cancellationToken);
         }
 
         await using var ownedScope = ownedConnection;
+        await using var ownedTransactionScope = ownedTransaction;
         var connection = sharedConnection ?? ownedConnection!;
-        await using var command = new NpgsqlCommand(compiled.Sql, connection);
+        await using var command = new NpgsqlCommand(compiled.Sql, connection, ownedTransaction);
         command.CommandTimeout = clientDeadlineSeconds;
         foreach (var parameter in compiled.Parameters)
         {
@@ -6635,7 +6657,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     {
         var compiled = ComposeCompiler.CompileServerClockRead(runContext);
         await using var connection = await OpenComposeConnectionAsync(postgres, cancellationToken);
-        await using var command = new NpgsqlCommand(compiled.Sql, connection);
+        await using var transaction = await BeginComposeReadOnlyTransactionAsync(connection, cancellationToken);
+        await using var command = new NpgsqlCommand(compiled.Sql, connection, transaction);
         command.CommandTimeout = clientDeadlineSeconds;
         foreach (var parameter in compiled.Parameters)
         {
