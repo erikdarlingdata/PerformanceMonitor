@@ -363,9 +363,12 @@ public sealed partial class DarlingMcpInvestigationTools
         "Pass your claim_id again to renew. status claimed, renewed, already_claimed, not_open, not_found or " +
         "unsupported_format. <<GUIDE>> " +
         "The brief says what fired, what changed, earlier reports and the next calls to make. " +
-        "A claim is one conditional update, so two agents claiming at once cannot both win; a request takes at most three " +
+        "A claim is one conditional update, so two agents with different agent_ids claiming at once cannot both win (agents that share one agent_id on a named token are one agent); a request takes at most three " +
         "claims. The lease is the route's agent_lease_minutes; a renewal moves it on by that much, never past the request's " +
         "expiry, and only while your claim still holds a live lease (otherwise the call claims afresh, with a new claim_id). " +
+        "On a named agent token, if you lost your claim_id, claim again while your lease is live: status renewed, reclaimed true, " +
+        "your existing claim_id and a renewed lease (the token's name is your agent_id; any other agent still gets already_claimed). " +
+        "On the legacy token a second claim while a lease is live answers already_claimed, even for the same agent_id. " +
         "The brief is composed at claim time, masked at mcp.dataDetail, and stored; if it cannot be composed the claim is " +
         "released (it stays counted) and the answer is status error. brief_format: omit, or 1. agent_id names your agent " +
         "in the journal: 1-64 letters, digits, '.', '_', ':' or '-'. Return your findings with submit_investigation_report under this claim_id.")]
@@ -432,7 +435,21 @@ public sealed partial class DarlingMcpInvestigationTools
                 }
             }
 
-            var claim = await store.ClaimAsync(requestId, agent_id, cancellationToken);
+            /* #6586: only a named token proves who agent_id is; on the legacy token it is free text, so no reclaim. */
+            var claim = await store.ClaimAsync(requestId, agent_id, allowReclaim: tokenName is not null, cancellationToken);
+            if (claim.Outcome == InvestigationClaimOutcome.Reclaimed)
+            {
+                /* #6576: the same agent_id already holds the live lease. Its claim_id comes back and the lease is renewed. */
+                return JsonSerializer.Serialize(new
+                {
+                    status = "renewed",
+                    reclaimed = true,
+                    request_id = requestId,
+                    claim_id = claim.ClaimId,
+                    lease_until = claim.LeaseUntilUtc,
+                }, McpHelpers.JsonOptions);
+            }
+
             if (claim.Outcome != InvestigationClaimOutcome.Claimed)
                 return InvestigationToolCore.Status(InvestigationToolCore.ClaimStatus(claim.Outcome), InvestigationToolCore.ClaimMessage(claim));
 
@@ -553,7 +570,7 @@ public sealed partial class DarlingMcpInvestigationTools
         "pull request, bug report, commit or release you opened or found. A url must be https with no user name or password; http, file and UNC " +
         "(\\\\server\\share, //server/share) links are refused (invalid). Each URL is journaled once per request as link_recorded, and " +
         "later briefs for the same server and family list it under prior_links. Darling stores the link and never calls Jira or git. " +
-        "family_of (optional) is the request_id of the first report in this family; it must name a request (else invalid). " +
+        "family_of (optional) is the request_id of an earlier request on this store, which need not have a report yet; it must name a request (else invalid). " +
         "queries_run (optional) is a JSON array of the statements you ran, " + InvestigationReportFields.QueriesRunRule + " (over a cap: refused, never cut); " +
         "it is masked as statement text. " +
         "follow_up_at (optional) asks Darling to open a new request for this case later: " + InvestigationReportFields.FollowUpRule + ". " +
@@ -571,7 +588,7 @@ public sealed partial class DarlingMcpInvestigationTools
         [Description("Optional note for a person to approve, at most 2,000 characters.")] string? proposed_note = null,
         [Description("Refused at Level 1. Omit.")] string? action_proposals = null,
         [Description("Optional JSON array of at most 10 {kind, url, key}; https only. See the guide.")] string? links = null,
-        [Description("Optional. The request_id of the first report in this family; it must exist.")] string? family_of = null,
+        [Description("Optional. The request_id of an earlier request on this store; it need not have a report yet.")] string? family_of = null,
         [Description("Optional JSON array of statements you ran, " + InvestigationReportFields.QueriesRunRule + ".")] string? queries_run = null,
         [Description("Optional. When to open a follow-up request: " + InvestigationReportFields.FollowUpRule + ".")] string? follow_up_at = null,
         [Description("Optional. Open the follow-up when a module is deployed: " + InvestigationReportFields.FollowUpConditionRule + ".")] string? follow_up_condition = null,
@@ -655,7 +672,7 @@ public sealed partial class DarlingMcpInvestigationTools
             }
 
             if (familyOf is { } family && !await store.RequestExistsAsync(family, cancellationToken))
-                problems.Add($"family_of: no investigation request has id {family}; give the request_id of the first report in this family.");
+                problems.Add($"family_of: no investigation request has id {family}; give the request_id of an earlier request on this store.");
 
             if (problems.Count > 0)
             {
