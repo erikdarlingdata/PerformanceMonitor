@@ -76,7 +76,7 @@ public sealed class DarlingMcpCustomAlertToolsSurfaceTests
         var create = ToolMethods().Single(m => m.GetCustomAttribute<McpServerToolAttribute>()!.Name == "create_custom_alert_rule");
         var description = create.GetCustomAttribute<System.ComponentModel.DescriptionAttribute>()!.Description;
 
-        Assert.Contains($"With {PerformanceMonitor.Darling.Service.CustomAlertRuleStore.EnabledRuleCap} rules already enabled fleet-wide, an enabled create is refused", description, StringComparison.Ordinal);
+        Assert.Contains($"With {PerformanceMonitor.Darling.Storage.CustomAlertRuleStore.EnabledRuleCap} rules already enabled fleet-wide, an enabled create is refused", description, StringComparison.Ordinal);
         Assert.Contains("paused rules do not count", description, StringComparison.Ordinal);
     }
 

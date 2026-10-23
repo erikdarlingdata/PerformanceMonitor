@@ -132,8 +132,8 @@ VALUES ($1, (now() AT TIME ZONE 'UTC'), $2, $3, (now() AT TIME ZONE 'UTC'), $4, 
             "\"scope\":{\"mode\":\"servers\",\"servers\":[\"" + storage + "\"]}}";
 
         var deliverer = new CapturingDeliverer();
-        var rules = new CustomAlertRuleStore(dataSource);
-        var state = new CustomAlertStateStore(dataSource);
+        var rules = new CustomAlertRuleStore(dataSource, StorageCommandDeadlines.McpReadSeconds);
+        var state = new CustomAlertStateStore(dataSource, StorageCommandDeadlines.McpReadSeconds);
         var bodySucceeded = false;
         try
         {
