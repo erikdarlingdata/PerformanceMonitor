@@ -130,7 +130,7 @@ public sealed class McpReadCommandTimeoutTests
     /// </summary>
     private static readonly Regex s_storeReceiver = new(
         @"(?<![A-Za-z0-9_])(?:postgres|_dataSource)\.CreateCommand\s*\("
-        + @"|new (?:Npgsql\.)?NpgsqlCommand\s*\([A-Za-z_][A-Za-z0-9_.]*\s*,\s*(?<![A-Za-z0-9_])connection\s*\)",
+        + @"|new (?:Npgsql\.)?NpgsqlCommand\s*\([A-Za-z_][A-Za-z0-9_.]*\s*,\s*(?<![A-Za-z0-9_])connection\s*(?:,\s*[A-Za-z_][A-Za-z0-9_]*\s*)?\)",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>
@@ -439,7 +439,7 @@ public sealed class McpReadCommandTimeoutTests
         Assert.True(runner >= 0, "RunComposedPanelAsync's declaration was not found — the shared runner has moved");
 
         var resolve = code.IndexOf("ResolveComposedQuerySecondsAsync(postgres", StringComparison.Ordinal);
-        var query = code.IndexOf("private static async Task<JsonArray> RunComposedQueryAsync", StringComparison.Ordinal);
+        var query = code.IndexOf("static async Task<JsonArray> RunComposedQueryAsync", StringComparison.Ordinal);
         Assert.True(
             resolve > runner && resolve < query,
             "the resolve does not sit inside the shared RunComposedPanelAsync body — it must happen once per "
