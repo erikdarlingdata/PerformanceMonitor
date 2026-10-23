@@ -52,7 +52,7 @@ public sealed partial class DarlingMcpAlertTools
         "The database role this tool runs as has no INSERT on the routes table and no read or write on a destination column: the route is written by the store's own " +
         "config.create_notification_route function and its destinations by config.set_notification_route_destinations, in one transaction, so a destination that is refused leaves no route behind. " +
         "A destination is sealed for this route's own row, so it cannot be copied to another route. scope_server_id and scope_tag_id are ids from get_notification_routes or the server and tag reads; an id that names nothing is invalid. " +
-        "Returns {status:\"created\", route:{...}, destinations:{changed, now}, sends_to, undo:{tool:\"delete_notification_route\", arguments:{route_id}}}; check it with get_notification_routes.")]
+        "Returns {status:\"created\", route:{...}, previous (null: there was no route before), destinations:{changed, now}, sends_to, undo:{tool:\"delete_notification_route\", arguments:{route_id}}}; check it with get_notification_routes.")]
     public static Task<string> CreateNotificationRoute(
         NpgsqlDataSource postgres,
         [Description("What the route matches: " + MatchHelp + ".")] string metric_match,
@@ -133,6 +133,7 @@ public sealed partial class DarlingMcpAlertTools
             {
                 status = "created",
                 route = RouteWritePayload(stored),
+                previous = (object?)null,
                 destinations = DestinationsPayload(change),
                 sends_to = change is { Fields.Count: > 0 }
                     ? "The route sends to the destinations set on it. A channel it sets nothing for goes where it went before: to the next matching route that sets that channel, else to the channels configured in Settings > Notifications."
@@ -162,7 +163,7 @@ public sealed partial class DarlingMcpAlertTools
         "Use set_notification_route_enabled to turn a route off and on without the rest. " +
         "The answer's previous is the route before the change and undo is the update_notification_route call that puts the match, scope, enabled flag, resolution override and fallback back. " +
         "A webhook URL or key is never shown, so to put one back pass its earlier value again in its field; destinations.previous says whether one was saved (the host for Teams and Slack). The earlier recipient list is shown, and undo.arguments carries it as email_recipients. " +
-        "Returns {status:\"updated\", route, previous, destinations:{changed, now, previous}, undo}, or {status:\"unchanged\"} when nothing differs.")]
+        "Returns {status:\"updated\", route, previous, destinations:{changed, now, previous}, undo}, or {status:\"unchanged\", route, previous, undo} when nothing differs.")]
     public static Task<string> UpdateNotificationRoute(
         NpgsqlDataSource postgres,
         [Description("The route_id to edit (from get_notification_routes).")] int route_id,
@@ -282,7 +283,13 @@ public sealed partial class DarlingMcpAlertTools
 
             if (columns.Count == 0 && !destinations.Any)
             {
-                return JsonSerializer.Serialize(new { status = "unchanged", route = RouteWritePayload(existing) }, McpHelpers.JsonOptions);
+                return JsonSerializer.Serialize(new
+                {
+                    status = "unchanged",
+                    route = RouteWritePayload(existing),
+                    previous = RouteWritePayload(existing),
+                    undo = UndoCall("update_notification_route", UndoArguments(existing, null)),
+                }, McpHelpers.JsonOptions);
             }
 
             RouteDestinationChange? change = null;
