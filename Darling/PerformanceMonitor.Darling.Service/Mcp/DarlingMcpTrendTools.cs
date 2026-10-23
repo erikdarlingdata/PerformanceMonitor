@@ -589,7 +589,7 @@ public sealed class DarlingMcpTrendTools
                    is not a server nothing was ever stored for. */
                 return await EmptyRoutedTrendAsync(
                     DarlingTrendReader.HasAnyQueryStatAsync(postgres, resolved.ServerId, cancellationToken),
-                    postgres, resolved.ServerId, resolved.DisplayName, hours_back, startUtc, now, route, "query",
+                    postgres, resolved.ServerId, resolved.DisplayName, hours_back, startUtc, now, route, "query", "query_stats",
                     "Check that collection is running and that the server is enabled; get_top_queries_by_cpu will be equally empty until it does.",
                     new BucketChoice(bucketMinutes, bucket_minutes is not null, budget.AutoPoints), databases, cancellationToken);
             }
@@ -688,7 +688,7 @@ public sealed class DarlingMcpTrendTools
 
                 return WithProcedureEcho(await EmptyRoutedTrendAsync(
                     DarlingTrendReader.HasAnyProcedureStatAsync(postgres, resolved.ServerId, cancellationToken),
-                    postgres, resolved.ServerId, resolved.DisplayName, hours_back, startUtc, now, route, "stored-procedure",
+                    postgres, resolved.ServerId, resolved.DisplayName, hours_back, startUtc, now, route, "stored-procedure", "procedure_stats",
                     "Check that collection is running and that the server is enabled. A server that genuinely runs no stored procedures also lands here, and that is a real answer rather than a fault.",
                     new BucketChoice(bucketMinutes, bucket_minutes is not null, budget.AutoPoints), databases, cancellationToken), procedureName);
             }
@@ -1170,13 +1170,22 @@ public sealed class DarlingMcpTrendTools
     private static async Task<string> EmptyRoutedTrendAsync(
         Task<bool> rawProbe, NpgsqlDataSource postgres, int serverId, string serverName, int hours_back,
         DateTime startUtc, DateTime windowEndUtc, DarlingTrendReader.DurationTrendRoute route,
-        string what, string checkThis, BucketChoice bucket, DatabaseFilter databases, CancellationToken cancellationToken = default)
+        string what, string collectorName, string checkThis, BucketChoice bucket, DatabaseFilter databases, CancellationToken cancellationToken = default)
     {
         var disclosure = DescribeEmptyRoute(route, startUtc, windowEndUtc, bucket);
         var scoped = ScopedServer(serverName, databases);
 
         if (!await DarlingTrendReader.HasAnySampleOnRouteAsync(postgres, rawProbe, route, serverId, cancellationToken))
         {
+            /* #6453: no row EVER stored is a true negative, not "unavailable", when the collector's newest run completed
+               clean: it looked and the server had nothing to report, which collection health calls HEALTHY. */
+            var healthyEmpty = await DarlingRuntimePrecondition.HealthyEmptyMessageAsync(
+                postgres, serverId, serverName, collectorName, $"{what} samples", cancellationToken);
+            if (healthyEmpty != null)
+            {
+                return EmptyStatus("empty", healthyEmpty, disclosure, databases);
+            }
+
             return EmptyStatus("unavailable", NeverSampledMessage(serverName, what, checkThis), disclosure, databases);
         }
 

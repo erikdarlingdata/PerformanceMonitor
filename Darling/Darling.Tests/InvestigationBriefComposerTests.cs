@@ -283,6 +283,36 @@ public sealed class InvestigationBriefComposerTests
             Assert.Contains(tool, PgTargetToolRecommendations.AllToolNames);
     }
 
+    /// <summary>
+    /// <c>report_contract.required</c> is exactly the required parameters of Darling's submit tool, found by reflection. It once
+    /// listed root_cause_found (the store derives it from the verdict) and left out summary.
+    /// </summary>
+    [Fact]
+    public void ReportContractRequired_IsExactlyTheSubmitToolsRequiredParameters()
+    {
+        var required = Brief(Sources())["report_contract"]!["required"]!.AsArray().Select(n => (string)n!).OrderBy(n => n, StringComparer.Ordinal).ToList();
+        var method = typeof(DarlingMcpInvestigationTools).GetMethod(nameof(DarlingMcpInvestigationTools.SubmitInvestigationReport))!;
+        var fromTool = method.GetParameters()
+            .Where(p => !p.IsOptional && p.GetCustomAttribute<System.ComponentModel.DescriptionAttribute>() is not null)
+            .Select(p => p.Name!).OrderBy(n => n, StringComparer.Ordinal).ToList();
+        Assert.Equal(fromTool, required);
+        Assert.DoesNotContain("root_cause_found", required);
+    }
+
+    /// <summary>An ANOMALY_WRITE_LATENCY story names get_file_io_trend then get_file_io_stats ahead of the family calls; a CPU anomaly names the CPU reads.</summary>
+    [Theory]
+    [InlineData("ANOMALY_WRITE_LATENCY", "get_file_io_trend", "get_file_io_stats")]
+    [InlineData("ANOMALY_READ_LATENCY", "get_file_io_trend", "get_file_io_stats")]
+    [InlineData("ANOMALY_CPU_SPIKE", "get_cpu_utilization", "get_top_queries_by_cpu")]
+    public void AnAnomalyStory_NamesItsOwnReadsFirst(string rootFactKey, string first, string second)
+    {
+        var finding = Finding() with { RootFactKey = rootFactKey, NextTools = Array.Empty<InvestigationNextCall>() };
+        var names = Brief(Sources(findings: new[] { finding }))["next_calls"]!.AsArray().Select(c => (string?)c!["tool"]).ToList();
+        Assert.Equal(first, names[0]);
+        Assert.Equal(second, names[1]);
+        Assert.Contains("get_blocking", names);
+    }
+
     [Fact]
     public void NextCalls_NameOnlyRegisteredTools_EachOnce_WithTheServer()
     {

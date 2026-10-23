@@ -178,6 +178,7 @@ public static class DarlingWebEndpoints
         "create_mute_rule",
         "update_mute_rule",
         "delete_mute_rule",
+        "purge_expired_mute_rules",
         "set_mute_rule_enabled",
         "add_servers",
         "edit_server",

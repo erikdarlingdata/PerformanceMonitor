@@ -46,7 +46,10 @@ public sealed class ThresholdOverrideViewRow
     public string GlobalValueText => Row.GlobalValue is { } g ? g.ToString("0.##", CultureInfo.CurrentCulture) : "";
     public string SetBy => Row.SetBy;
     public string RequestText => Row.RequestId is { } id ? id.ToString("N")[..8] : "";
-    public string UpdatedText => Row.UpdatedAt.ToLocalTime().ToString("g", CultureInfo.CurrentCulture);
+    /// <summary>The override's last change, as every fleet-wide window words a time (#6457): the viewer's Local or UTC
+    /// reading with the zone's name after it. It was this machine's time with no zone named, beside two windows that
+    /// read other conventions.</summary>
+    public string UpdatedText => ViewerTimeHelper.FormatFleetWide(Row.UpdatedAt, "yyyy-MM-dd HH:mm");
 }
 
 /// <summary>The outcome of Save or Remove: <see cref="Ok"/> and the sentence the status line shows.</summary>
