@@ -31,7 +31,7 @@ All editions include real-time alerts (email + webhooks), charts and graphs, dar
 | Azure SQL Database | Supported | Supported | Not supported |
 | Azure SQL MI / AWS RDS | Supported | Supported | Supported |
 | PostgreSQL (self-hosted, AWS RDS, Aurora) | Not supported | Supported | Not supported |
-| Graphical plan viewer | Built-in, 30-rule PlanAnalyzer | Built-in, 30-rule PlanAnalyzer | Built-in, 30-rule PlanAnalyzer |
+| Graphical plan viewer | Built-in, 37-rule PlanAnalyzer | Built-in, 37-rule PlanAnalyzer | Built-in, 37-rule PlanAnalyzer |
 | Standalone plan viewer | Open/paste/drag `.sqlplan` | Open/paste/drag `.sqlplan` | Open/paste/drag `.sqlplan` |
 | Alerts (tray + email + webhooks) | Yes | Email + webhooks (headless) | Yes |
 | Themes | Dark and light | Dark and light | Dark and light |
@@ -43,4 +43,4 @@ All editions include real-time alerts (email + webhooks), charts and graphs, dar
 | Agent changes on a monitored server (force or unforce a Query Store plan, evict a cached plan, kill a session) | Not available | Yes, one switch per server and action, all off until you turn them on | Not available |
 | Query tags (name a group of queries and see its resource use) | Yes | Yes | Not available |
 | Notification routes limited to a server or a tag | Yes | Yes | Not available |
-| MCP server (LLM integration) | Built-in (113 tools, 97 served by default) | On request (247 tools, 180 served by default) | Built into Dashboard (66 tools) |
+| MCP server (LLM integration) | Built-in (113 tools, 97 served by default) | On request (248 tools, 180 served by default) | Built into Dashboard (66 tools) |

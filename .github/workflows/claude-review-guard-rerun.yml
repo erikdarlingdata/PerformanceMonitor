@@ -1,0 +1,205 @@
+name: Claude review guard re-run
+
+# #6549: the Claude review guard (claude-review-guard.yml) gives its runner back when the review it
+# watches has not started after about three minutes, and FAILS its check, naming the run it waits
+# for. This workflow brings the verdict back without a human: when the review has an outcome, it
+# re-runs the newest guard run of that head, and the re-run judges the review as the guard always has.
+#
+# Why a re-run, and why a separate file. Branch protection on dev requires the check named "Claude
+# review guard". A re-run of the guard's own run keeps its check suite, its check-run name and its head
+# SHA, so the re-run's result is the one branch protection reads, exactly as a re-run by hand is.
+# A job in THIS workflow must never carry that name: it would report on the same head from another
+# check suite, and one skipped by its `if:` reports as passing (GitHub counts success, skipped and
+# neutral as passing). The guard cannot take these triggers itself for the same reason: its job would
+# be skipped, or would run, on events it has no verdict for.
+#
+# The two triggers, and when each works:
+#   - pull_request_review (submitted): runs the copy in the pull request's merge commit, so it works
+#     on dev as soon as this file merges, before any release. The bot posts with the Claude app's
+#     installation token (its reviews are authored by claude[bot]); only the GITHUB_TOKEN's events
+#     start no workflow. The job runs for the bot's VERDICT review only: the review with a body,
+#     the same rule the guard's verdict scan uses. The inline-comment tool files each comment as a
+#     bodiless review of its own, and each would otherwise take a runner.
+#   - workflow_run (Claude Auto Review completed): fires only from the default branch's copy, so it
+#     is dormant until a release ships this file. It covers the review runs that post no verdict
+#     review: a push after the follow-up (the decide job skips the review), a review the action
+#     skipped, a review that failed or timed out. Before that release those leave the guard red
+#     until a human re-runs it, and its message says so.
+#
+# What it re-runs. The newest `pull_request` run of the guard for the head whose guard JOB was not
+# skipped, and only when that run is completed with a conclusion a re-run can change (success,
+# failure, cancelled or timed_out) and its result is no newer than the review's outcome (the verdict's
+# submitted_at, or the review run's updated_at): a guard that is still running or queued judges the
+# review itself, and one that finished after the outcome has already judged it. A run whose job was
+# skipped (the guard's `if:` read a draft payload) is passed over and never re-run: a re-run reads the
+# same payload, is skipped again, and a skipped job reports as passing, so it would become the newest
+# "Claude review guard" check on the head while the real guard is red. A run waiting for approval
+# (action_required) is never re-run either. It re-runs nothing when the pull request's head has moved
+# past that SHA, because a re-run joins the guard's concurrency group and would cancel the guard of the
+# newer head. Pull requests from forks are left alone: the runs API lists no pull request for them
+# (so the head cannot be checked), their review does not run (no secret), and a re-run of a guard run
+# that waits for a maintainer's approval must not stand in for it. Whatever cannot be read or decided
+# here re-runs nothing and the guard stays red, which is fail-closed; a read or a re-run that fails
+# fails this job, which is not a required check, and a re-run of either one retries.
+on:
+  pull_request_review:
+    types: [submitted]
+  workflow_run:
+    workflows: [Claude Auto Review]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  rerun:
+    # NOT "Claude review guard" (see the header): that is the required check's name.
+    name: Re-run the Claude review guard
+    # One re-run decision at a time per head, queued rather than cancelled: the second decision then
+    # sees the guard the first one re-ran as not completed, and leaves it alone. The group is on the
+    # JOB, not the workflow: a review whose job the `if:` below skips (a bodiless inline-comment
+    # review, a human's) must not join it, because GitHub keeps one pending run per group and a newer
+    # pending one cancels the older, and that would cancel a verdict run still waiting for a runner.
+    concurrency:
+      group: claude-review-guard-rerun-${{ github.event.pull_request.head.sha || github.event.workflow_run.head_sha }}
+      cancel-in-progress: false
+    if: >-
+      (github.event_name == 'pull_request_review'
+        && github.event.review.user.login == 'claude[bot]'
+        && github.event.review.body
+        && github.event.review.commit_id == github.event.pull_request.head.sha
+        && github.event.pull_request.base.ref == 'dev'
+        && github.event.pull_request.head.repo.full_name == github.repository
+        && !github.event.pull_request.draft)
+      || (github.event_name == 'workflow_run'
+        && github.event.workflow_run.event == 'pull_request'
+        && github.event.workflow_run.head_repository.full_name == github.repository
+        && github.event.workflow_run.conclusion != 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      # Re-running a workflow run needs actions: write; the pull request read checks the head.
+      actions: write
+      pull-requests: read
+    steps:
+      - name: Re-run the guard that has not judged this review
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          R: ${{ github.repository }}
+          GUARD_WF: claude-review-guard.yml
+          # The display name of the guard's job (its check-run name), to tell a skipped run's job.
+          GUARD_JOB: Claude review guard
+          SHA: ${{ github.event.pull_request.head.sha || github.event.workflow_run.head_sha }}
+          # When the review's outcome became readable: the verdict's submission, or the run's
+          # completion. A guard whose result is newer than this has judged it.
+          OUTCOME_AT: ${{ github.event.review.submitted_at || github.event.workflow_run.updated_at }}
+          OUTCOME: ${{ github.event_name == 'pull_request_review' && format('verdict review {0}', github.event.review.html_url) || format('review run {0} ({1})', github.event.workflow_run.id, github.event.workflow_run.conclusion) }}
+        run: |
+          set -euo pipefail
+          summary() { echo "$*" >> "$GITHUB_STEP_SUMMARY"; }
+
+          # The pull_request runs of the guard for $SHA, newest first, as
+          # "id status conclusion updated_at head_repository pull_request". A failed read fails this
+          # job; it never re-runs blind.
+          if ! list=$(gh api "repos/$R/actions/workflows/$GUARD_WF/runs?head_sha=$SHA&event=pull_request&per_page=30" \
+              --jq '.workflow_runs[]
+                    | "\(.id) \(.status) \(.conclusion // "-") \(.updated_at) \(.head_repository.full_name // "-") \(.pull_requests[0].number // "-")"'); then
+            echo "::error title=Guard runs unreadable::Could not list the Claude review guard runs for $SHA."\
+              "Nothing was re-run; re-run this job, or the guard by hand."
+            exit 1
+          fi
+          if [ -z "$list" ]; then
+            echo "::notice title=No guard run::No Claude review guard run exists for $SHA (a draft, or a"\
+              "pull request into another branch). Nothing to re-run for $OUTCOME."
+            exit 0
+          fi
+
+          # The newest run whose guard JOB was not skipped. The guard's job skips while its pull request
+          # is a draft, and a re-run reads the same draft payload: it is skipped again, a skipped job
+          # reports as passing, and that report would be the newest "Claude review guard" check on the
+          # head while the real guard is red. So a skipped run is never the one to re-run, and the
+          # search goes on to the next older run. A run that is queued, running, waiting or finished
+          # in action_required is not skipped: it is the newest real run, and it is left alone below.
+          id=''; skipped=0
+          while read -r cid cstatus cconclusion cupdated chead cpr; do
+            [ -n "$cid" ] || continue
+            if [ "$cconclusion" = "skipped" ]; then skipped=$((skipped + 1)); continue; fi
+            if [ "$cstatus" = "completed" ] && [ "$cconclusion" != "action_required" ]; then
+              if ! job=$(gh api "repos/$R/actions/runs/$cid/jobs" \
+                  --jq '[.jobs[] | select(.name == env.GUARD_JOB)] | .[0].conclusion // "-"' </dev/null); then
+                echo "::error title=Guard jobs unreadable::Could not read the jobs of guard run $cid for"\
+                  "$SHA, so it cannot be told whether its job was skipped. Nothing was re-run; re-run"\
+                  "this job, or the guard by hand."
+                exit 1
+              fi
+              if [ "$job" = "skipped" ]; then skipped=$((skipped + 1)); continue; fi
+            fi
+            id=$cid; status=$cstatus; conclusion=$cconclusion; updated=$cupdated; head_repo=$chead; pr=$cpr
+            break
+          done <<<"$list"
+          if [ -z "$id" ]; then
+            echo "::notice title=No guard run to re-run::All $skipped guard run(s) for ${SHA:0:12} were"\
+              "skipped (the guard skips while a pull request is a draft), and a re-run of a skipped run"\
+              "is skipped again, which reports as passing. Nothing was re-run for $OUTCOME."
+            exit 0
+          fi
+          summary "- $OUTCOME, at $OUTCOME_AT. Newest guard run for ${SHA:0:12} that was not skipped: $id, $status/$conclusion, updated $updated."
+
+          # Fail closed: only a run from this repository, with a pull request the head check can read,
+          # is re-run. For a fork the API lists no pull request, so the head could not be checked, and
+          # a run that waits for a maintainer's approval must not be started by a re-run.
+          if [ "${head_repo,,}" != "${R,,}" ]; then
+            echo "::notice title=Guard run not from this repository::Guard run $id is from $head_repo, not"\
+              "$R. Nothing was re-run."
+            exit 0
+          fi
+          if [ "$pr" = "-" ]; then
+            echo "::warning title=Pull request unknown::The API lists no pull request for guard run $id, so"\
+              "the head of its pull request cannot be checked, and a re-run for a stale head would cancel"\
+              "the newer head's guard. Nothing was re-run; re-run the guard by hand."
+            exit 0
+          fi
+          if [ "$status" != "completed" ]; then
+            echo "::notice title=Guard not finished::Guard run $id is $status; nothing was re-run. A guard"\
+              "that is running or not yet started judges $OUTCOME itself."
+            exit 0
+          fi
+          case "$conclusion" in
+            success|failure|cancelled|timed_out) ;;
+            *)
+              echo "::notice title=Guard run not re-runnable::Guard run $id finished as $conclusion"\
+                "(action_required means it waits for a maintainer's approval). Only a success, failure,"\
+                "cancelled or timed_out run is re-run, so nothing was re-run."
+              exit 0 ;;
+          esac
+          # ISO 8601 UTC timestamps in one format compare as strings. A tie re-runs: judging again
+          # is never a wrong answer, and skipping a guard that had not judged would leave it red.
+          if [[ "$updated" > "$OUTCOME_AT" ]]; then
+            echo "::notice title=Guard already judged::Guard run $id finished at $updated, after"\
+              "$OUTCOME at $OUTCOME_AT, so it judged that outcome. Nothing to re-run."
+            exit 0
+          fi
+          if ! head=$(gh api "repos/$R/pulls/$pr" --jq '.head.sha // empty') || [ -z "$head" ]; then
+            echo "::error title=Head unreadable::Could not read the head of PR #$pr, so guard run $id"\
+              "was not re-run (a re-run for a stale head would cancel the newer head's guard)."\
+              "Re-run this job, or the guard by hand."
+            exit 1
+          fi
+          if [ "$head" != "$SHA" ]; then
+            echo "::notice title=Head moved::PR #$pr is at ${head:0:12} now, not ${SHA:0:12}; that"\
+              "head's own guard judges it. Guard run $id was not re-run."
+            exit 0
+          fi
+          if ! err=$(gh api -X POST "repos/$R/actions/runs/$id/rerun" 2>&1 >/dev/null); then
+            # Another decision may have re-run it first: then the run is no longer completed.
+            now=$(gh api "repos/$R/actions/runs/$id" --jq '.status' 2>/dev/null || echo unknown)
+            if [ "$now" != "completed" ] && [ "$now" != "unknown" ]; then
+              echo "::notice title=Guard already re-run::Guard run $id is $now; something else re-ran it."
+              exit 0
+            fi
+            echo "::error title=Guard re-run failed::Could not re-run guard run $id for $SHA: $err."\
+              "Its check stays as it is (red if it was waiting for this review). Re-run it by hand."
+            exit 1
+          fi
+          echo "::notice title=Guard re-run::Re-ran guard run $id ($conclusion, finished $updated), which"\
+            "had not judged $OUTCOME."
+          summary "- Re-ran guard run $id: https://github.com/$R/actions/runs/$id"

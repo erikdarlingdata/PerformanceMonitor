@@ -7,9 +7,12 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
+using System.Linq;
 using System.Diagnostics;
 using System.Text.Json;
+using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 using static Darling.Tests.RepoFile;
 
@@ -48,10 +51,24 @@ public sealed class WebCollectionHealthRunAtColumnTests
     [Fact]
     public void TheToolsHeaviestCollectorRows_CarryTheRunTime()
     {
-        var tools = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs");
-        var heaviest = Slice(tools, "var heaviest = SweepBodyRows(rows)", "var peakCollector");
-        Assert.Contains("frequency_minutes = r.FrequencyMinutes,", heaviest, StringComparison.Ordinal);
-        Assert.Contains("run_at = ", heaviest, StringComparison.Ordinal);
+        /* #6384: the rows the tool answers with, not the text that builds them. A collector with a run time carries it
+           as run_at, a collector without one carries the key as null, and the rows keep the cadence beside it. */
+        var rows = new[]
+        {
+            new CollectorHealth { CollectorName = "wait_stats", AvgDurationMs = 900, P95DurationMs = 1_500, EffectiveFrequencyMinutes = 1 },
+            new CollectorHealth { CollectorName = "perfmon_stats", AvgDurationMs = 300, P95DurationMs = 400, EffectiveFrequencyMinutes = 1 },
+        };
+        var runTimes = new Dictionary<string, CollectorRunTimeReading>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["wait_stats"] = new CollectorRunTimeReading("03:15", null),
+        };
+
+        var json = JsonSerializer.Serialize(DarlingMcpDataTools.HeaviestCollectorRows(rows, runTimes));
+        var heaviest = JsonDocument.Parse(json).RootElement.EnumerateArray().ToDictionary(r => r.GetProperty("collector").GetString()!);
+
+        Assert.Equal("03:15", heaviest["wait_stats"].GetProperty("run_at").GetString());
+        Assert.Equal(JsonValueKind.Null, heaviest["perfmon_stats"].GetProperty("run_at").ValueKind);
+        Assert.Equal(1, heaviest["wait_stats"].GetProperty("frequency_minutes").GetInt32());
     }
 
     [Fact]
