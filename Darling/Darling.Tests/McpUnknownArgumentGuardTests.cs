@@ -569,6 +569,54 @@ public sealed class McpUnknownArgumentGuardTests
     }
 
     /// <summary>
+    /// #6455: a call that leaves out a required argument is refused BY NAME, before the tool runs. Before, the SDK's binder threw
+    /// and the caller got "An error occurred invoking ..." with no field named. update_custom_alert_rule without version
+    /// and dismiss_alert_history with no arguments at all are the two calls the release gate reported.
+    /// </summary>
+    [Theory]
+    [InlineData("update_custom_alert_rule", "version", true)]
+    [InlineData("dismiss_alert_history", "alerts_json", false)]
+    public void ACallWithoutARequiredArgument_IsRefusedNamingIt(string toolName, string missing, bool sendOthers)
+    {
+        var tool = RegisteredTools().Single(t => t.ProtocolTool.Name == toolName);
+        var required = tool.ProtocolTool.InputSchema.GetProperty("required").EnumerateArray().Select(e => e.GetString()).ToList();
+        Assert.Contains(missing, required);
+
+        /* Every other required argument is sent, so the one left out is the only thing wrong. */
+        var arguments = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+        if (sendOthers)
+        {
+            foreach (var name in required.Where(n => n != missing))
+            {
+                arguments[name!] = JsonSerializer.SerializeToElement(name == "rule_id" ? "1" : "x");
+            }
+        }
+
+        var parameters = arguments.Count == 0 ? new CallToolRequestParams { Name = toolName } : Call(toolName, arguments);
+        var refused = McpUnknownArgumentGuard.RefuseMissingRequired(parameters, tool);
+
+        Assert.NotNull(refused);
+        Assert.True(refused!.IsError);
+        using var envelope = JsonDocument.Parse(TextOf(refused));
+        Assert.Equal("invalid", envelope.RootElement.GetProperty("status").GetString());
+        var message = envelope.RootElement.GetProperty("message").GetString()!;
+        Assert.Contains($"Missing required argument '{missing}'", message, StringComparison.Ordinal);
+        Assert.Contains($"tool '{toolName}'", message, StringComparison.Ordinal);
+        Assert.Equal(missing, envelope.RootElement.GetProperty("hints").GetProperty("parameter").GetString());
+    }
+
+    /// <summary>#6455: a tool whose parameters all have defaults still takes a call with no arguments, null or empty.</summary>
+    [Fact]
+    public void ACallWithNoArguments_IsNotRefusedWhenNothingIsRequired()
+    {
+        var tool = RegisteredTools().First(t =>
+            !t.ProtocolTool.InputSchema.TryGetProperty("required", out var required) || required.GetArrayLength() == 0);
+
+        Assert.Null(McpUnknownArgumentGuard.RefuseMissingRequired(new CallToolRequestParams { Name = tool.ProtocolTool.Name }, tool));
+        Assert.Null(McpUnknownArgumentGuard.RefuseMissingRequired(Call(tool.ProtocolTool.Name, new Dictionary<string, JsonElement>()), tool));
+    }
+
+    /// <summary>
     /// The refusal message for one JSON value sent for one parameter of <see cref="ColorCountProbeTool"/>, registered
     /// the way the host records its tools, or null when the guard lets the call through.
     /// </summary>

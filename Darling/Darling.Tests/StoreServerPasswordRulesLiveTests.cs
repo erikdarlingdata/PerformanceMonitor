@@ -31,7 +31,7 @@ namespace Darling.Tests;
 public sealed class StoreServerPasswordRulesLiveTests
 {
     private const string ReferenceSentence = "Enter the password itself. References (env: or file:) can only be set in the configuration file.";
-    private const string MoveSentence = "Changing how this server is reached needs its password again: it is stored encrypted and this surface cannot read it back.";
+    private const string MoveSentence = "Changing the host, port or any other connection setting of this server needs its password sent with the change, because a saved password is only ever sent to the server it was saved for. Send the password together with the new settings.";
     private const string RemediationSentence = "This server has a remediation or hypothetical-index login stored. Change how it is reached on the service host, in the configuration file or with --add-server.";
     private const string ReferenceState = "PW001";
     private const string MoveState = "PW002";
