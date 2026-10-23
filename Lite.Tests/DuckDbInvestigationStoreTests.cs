@@ -265,37 +265,6 @@ FROM investigation_requests WHERE request_id = '{id}'"));
         Assert.Equal(InvestigationClaimOutcome.NotFound, (await _store.ClaimAsync(Guid.NewGuid(), "agent-x", Ct)).Outcome);
     }
 
-    /// <summary>#6576: an agent that lost its claim_id claims again under the same agent_id while its lease is live and gets the
-    /// live claim_id back with a renewed lease and an unchanged claim count; another agent_id is still refused; a lapsed lease
-    /// claims afresh as before.</summary>
-    [Fact]
-    public async Task AClaimByTheLeaseHolder_ReturnsTheLiveClaimId_AndRenews_AnotherAgentIsStillRefused()
-    {
-        var id = (await _store.OpenOrJoinAsync(Alert(T0), Ct)).RequestId!.Value;
-        var first = await _store.ClaimAsync(id, "agent-a", Ct);
-        Assert.Equal(InvestigationClaimOutcome.Claimed, first.Outcome);
-
-        _now = T0.AddMinutes(5);
-        var again = await _store.ClaimAsync(id, "agent-a", Ct);
-        Assert.Equal(InvestigationClaimOutcome.Reclaimed, again.Outcome);
-        Assert.Equal(first.ClaimId, again.ClaimId);
-        Assert.Equal(1, again.ClaimCount);
-        Assert.True(again.LeaseUntilUtc > first.LeaseUntilUtc);
-        Assert.Equal(first.LeaseUntilUtc!.Value.AddMinutes(5), again.LeaseUntilUtc);
-
-        var other = await _store.ClaimAsync(id, "agent-b", Ct);
-        Assert.Equal(InvestigationClaimOutcome.AlreadyClaimed, other.Outcome);
-        Assert.Null(other.ClaimId);
-        Assert.Equal($"{first.ClaimId}|agent-a|1", Scalar(
-            $"SELECT concat_ws('|', claim_id, claimed_by, claim_count) FROM investigation_requests WHERE request_id = '{id}'"));
-
-        _now = T0.AddMinutes(30);
-        var afresh = await _store.ClaimAsync(id, "agent-a", Ct);
-        Assert.Equal(InvestigationClaimOutcome.Claimed, afresh.Outcome);
-        Assert.NotEqual(first.ClaimId, afresh.ClaimId);
-        Assert.Equal(2, afresh.ClaimCount);
-    }
-
     [Fact]
     public async Task ALateReport_UnderALapsedLease_IsAccepted_UntilANewerClaimSupersedesIt()
     {

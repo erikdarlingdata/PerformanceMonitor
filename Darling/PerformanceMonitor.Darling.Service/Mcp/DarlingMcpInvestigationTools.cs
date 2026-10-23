@@ -360,11 +360,12 @@ public sealed partial class DarlingMcpInvestigationTools
         "Pass your claim_id again to renew. status claimed, renewed, already_claimed, not_open, not_found or " +
         "unsupported_format. <<GUIDE>> " +
         "The brief says what fired, what changed, earlier reports and the next calls to make. " +
-        "A claim is one conditional update, so two agents claiming at once cannot both win; a request takes at most three " +
+        "A claim is one conditional update, so two agents with different agent_ids claiming at once cannot both win (agents that share one agent_id on a named token are one agent); a request takes at most three " +
         "claims. The lease is the route's agent_lease_minutes; a renewal moves it on by that much, never past the request's " +
         "expiry, and only while your claim still holds a live lease (otherwise the call claims afresh, with a new claim_id). " +
-        "If you lost your claim_id, claim again with the same agent_id while your lease is live: status renewed, reclaimed true, " +
-        "your existing claim_id and a renewed lease (a different agent_id still gets already_claimed). " +
+        "On a named agent token, if you lost your claim_id, claim again while your lease is live: status renewed, reclaimed true, " +
+        "your existing claim_id and a renewed lease (the token's name is your agent_id; any other agent still gets already_claimed). " +
+        "On the legacy token a second claim while a lease is live answers already_claimed, even for the same agent_id. " +
         "The brief is composed at claim time, masked at mcp.dataDetail, and stored; if it cannot be composed the claim is " +
         "released (it stays counted) and the answer is status error. brief_format: omit, or 1. agent_id names your agent " +
         "in the journal: 1-64 letters, digits, '.', '_', ':' or '-'. Return your findings with submit_investigation_report under this claim_id.")]
@@ -431,7 +432,8 @@ public sealed partial class DarlingMcpInvestigationTools
                 }
             }
 
-            var claim = await store.ClaimAsync(requestId, agent_id, cancellationToken);
+            /* #6586: only a named token proves who agent_id is; on the legacy token it is free text, so no reclaim. */
+            var claim = await store.ClaimAsync(requestId, agent_id, allowReclaim: tokenName is not null, cancellationToken);
             if (claim.Outcome == InvestigationClaimOutcome.Reclaimed)
             {
                 /* #6576: the same agent_id already holds the live lease. Its claim_id comes back and the lease is renewed. */

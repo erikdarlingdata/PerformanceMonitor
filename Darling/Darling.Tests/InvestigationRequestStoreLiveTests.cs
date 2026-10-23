@@ -241,7 +241,7 @@ FROM config.investigation_requests WHERE request_id = '{id}'", ct));
         });
     }
 
-    /// <summary>#6576: an agent that lost its claim_id claims again under the same agent_id while its lease is live and gets the
+    /// <summary>#6576, #6586: with allowReclaim (a named token), an agent that lost its claim_id claims again under the same agent_id while its lease is live and gets the
     /// live claim_id back with a renewed lease and an unchanged claim count; another agent_id is still refused; a lapsed lease
     /// claims afresh as before.</summary>
     [Fact]
@@ -254,7 +254,11 @@ FROM config.investigation_requests WHERE request_id = '{id}'", ct));
             Assert.Equal(InvestigationClaimOutcome.Claimed, first.Outcome);
 
             _now = T0.AddMinutes(5);
-            var again = await store.ClaimAsync(id, "agent-a", ct);
+            /* Without allowReclaim (the legacy token) the same call is refused and the lease does not move. */
+            var plain = await store.ClaimAsync(id, "agent-a", ct);
+            Assert.Equal(InvestigationClaimOutcome.AlreadyClaimed, plain.Outcome);
+            Assert.Null(plain.ClaimId);
+            var again = await store.ClaimAsync(id, "agent-a", allowReclaim: true, ct);
             Assert.Equal(InvestigationClaimOutcome.Reclaimed, again.Outcome);
             Assert.Equal(first.ClaimId, again.ClaimId);
             Assert.Equal(1, again.ClaimCount);

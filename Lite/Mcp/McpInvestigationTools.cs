@@ -94,8 +94,6 @@ public sealed class McpInvestigationTools
         "A claim is one conditional update, so two agents claiming at once cannot both win; a request takes at most three " +
         "claims. The lease is the route's agent_lease_minutes; a renewal moves it on by that much, never past the request's " +
         "expiry, and only while your claim still holds a live lease (otherwise the call claims afresh, with a new claim_id). " +
-        "If you lost your claim_id, claim again with the same agent_id while your lease is live: status renewed, reclaimed true, " +
-        "your existing claim_id and a renewed lease (a different agent_id still gets already_claimed). " +
         "The brief is composed at claim time, masked at mcp_data_detail, and stored; if it cannot be composed the claim is " +
         "released (it stays counted) and the answer is status error. brief_format: omit, or 1. agent_id names your agent " +
         "in the journal: 1-64 letters, digits, '.', '_', ':' or '-'. Return your findings with submit_investigation_report under this claim_id.")]
@@ -150,19 +148,6 @@ public sealed class McpInvestigationTools
             }
 
             var claim = await store.ClaimAsync(requestId, agent_id, cancellationToken);
-            if (claim.Outcome == InvestigationClaimOutcome.Reclaimed)
-            {
-                /* #6576: the same agent_id already holds the live lease. Its claim_id comes back and the lease is renewed. */
-                return JsonSerializer.Serialize(new
-                {
-                    status = "renewed",
-                    reclaimed = true,
-                    request_id = requestId,
-                    claim_id = claim.ClaimId,
-                    lease_until = claim.LeaseUntilUtc,
-                }, McpHelpers.JsonOptions);
-            }
-
             if (claim.Outcome != InvestigationClaimOutcome.Claimed)
                 return InvestigationToolCore.Status(InvestigationToolCore.ClaimStatus(claim.Outcome), InvestigationToolCore.ClaimMessage(claim));
 
